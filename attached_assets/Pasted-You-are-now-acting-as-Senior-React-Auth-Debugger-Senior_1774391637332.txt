@@ -1,0 +1,62 @@
+You are now acting as:
+Senior React Auth Debugger + Senior Firebase Auth/Firestore Engineer + Senior React Router Engineer + Senior RBAC Architect
+
+Fix the current login/redirect instability without changing the design.
+
+The issue is NOT Replit. It is app logic.
+
+Make these exact fixes:
+
+1. AccessContext tenant/platform separation
+- In AccessContext.tsx, do NOT assign a mock tenant to every authenticated user.
+- Only set realTenant for tenant users.
+- If the authenticated role is a platform role, set realTenant to null.
+- Keep platform users fully platform-scoped.
+- Ensure canAccess() does not evaluate platform users through tenant plan gating.
+
+2. Auth resolution stability
+- In AccessContext.tsx, add stable handling for these cases:
+  a) Firebase user exists and Firestore user doc exists
+  b) Firebase user exists but Firestore user doc does NOT exist
+  c) Firebase user exists but Firestore read fails
+- In cases (b) and (c), stop the redirect loop.
+- Set loading false cleanly.
+- Surface a stable “account not provisioned” or equivalent state instead of bouncing between routes.
+
+3. Login post-auth flow
+- In Login.tsx, after successful auth, if users/{uid} does not exist:
+  - do not leave the app in an unstable signed-in-but-unprovisioned state
+  - show a clean error state
+  - either sign the user out or route them to a stable “account not provisioned” page
+- Keep Google and email/password login intact.
+
+4. AccessGuard behavior
+- Keep redirect to /login only for truly unauthenticated users.
+- Prevent route churn while auth/doc state is resolving.
+- Ensure preview mode still works.
+
+5. Unauthorized route
+- If AccessGuard redirects to /unauthorized, create a real /unauthorized route/page.
+- Or change the redirect target to an existing stable route.
+- Do not leave broken navigation.
+
+6. Logging for debugging
+- Add temporary console logs for:
+  - auth state change
+  - user doc found/missing
+  - resolved session userType/role
+  - redirect target from AccessGuard
+- Keep logs concise and useful.
+
+7. Do not redesign anything
+- preserve layout
+- preserve routing structure
+- preserve visual baseline
+
+Output required:
+A. exact files modified
+B. exact root cause
+C. whether platform users no longer get tenant mock data
+D. how missing Firestore user docs are handled now
+E. whether /unauthorized was fixed
+F. confirmation that login redirect loop is resolved

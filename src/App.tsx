@@ -41,11 +41,16 @@ import ProvisioningPage from './owner/ProvisioningPage';
 import PageShell from './components/PageShell';
 
 import Login from './components/Login';
+import NotProvisioned from './components/NotProvisioned';
 // ...
 const router = createBrowserRouter([
   {
     path: '/login',
     element: <Login />,
+  },
+  {
+    path: '/not-provisioned',
+    element: <NotProvisioned />,
   },
   {
     path: '/',

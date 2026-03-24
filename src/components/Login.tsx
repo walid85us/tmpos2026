@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { signInWithPopup, GoogleAuthProvider, signInWithEmailAndPassword } from 'firebase/auth';
+import { signInWithPopup, GoogleAuthProvider, signInWithEmailAndPassword, signOut } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
 import { auth, db } from '../firebase';
 import { Role } from '../context/accessConfig';
@@ -14,25 +14,27 @@ export default function Login() {
 
   const handleAuthSuccess = async (user: any) => {
     try {
-      console.log('Auth success, fetching user doc for:', user.uid);
+      console.log('[Login] Auth success, fetching user doc for:', user.uid);
       const userDoc = await getDoc(doc(db, 'users', user.uid));
       if (userDoc.exists()) {
         const userData = userDoc.data();
-        console.log('User data found:', userData);
+        console.log('[Login] User doc found. role:', userData.role);
         const role = userData.role as Role;
-        
-        if (role === 'system_owner') {
+
+        if (role === 'system_owner' || role === 'support_admin' || role === 'billing_admin' || role === 'operations_admin' || role === 'security_admin') {
           navigate('/owner');
         } else {
           navigate('/');
         }
       } else {
-        console.error('User profile not found in Firestore for UID:', user.uid);
-        setError('User profile not found.');
+        console.warn('[Login] No Firestore user doc for uid:', user.uid, '— signing out');
+        await signOut(auth);
+        setError('Your account has not been provisioned. Please contact your administrator.');
       }
     } catch (err) {
-      console.error('Error fetching user role:', err);
-      setError('Failed to resolve user role.');
+      console.error('[Login] Error fetching user role:', err);
+      await signOut(auth);
+      setError('Failed to verify your account. Please try again.');
     }
   };
 
@@ -41,12 +43,12 @@ export default function Login() {
     setError('');
     try {
       const provider = new GoogleAuthProvider();
-      console.log('Initiating Google sign-in...');
+      console.log('[Login] Initiating Google sign-in...');
       const result = await signInWithPopup(auth, provider);
-      console.log('Google sign-in successful:', result.user.uid);
+      console.log('[Login] Google sign-in successful:', result.user.uid);
       await handleAuthSuccess(result.user);
     } catch (err: any) {
-      console.error('Google sign-in error:', err);
+      console.error('[Login] Google sign-in error:', err);
       setError(`Google sign-in failed: ${err.message}`);
     } finally {
       setLoading(false);
@@ -58,12 +60,12 @@ export default function Login() {
     setLoading(true);
     setError('');
     try {
-      console.log('Initiating email sign-in for:', email);
+      console.log('[Login] Initiating email sign-in for:', email);
       const result = await signInWithEmailAndPassword(auth, email, password);
-      console.log('Email sign-in successful:', result.user.uid);
+      console.log('[Login] Email sign-in successful:', result.user.uid);
       await handleAuthSuccess(result.user);
     } catch (err: any) {
-      console.error('Email sign-in error:', err);
+      console.error('[Login] Email sign-in error:', err);
       setError(`Invalid email or password: ${err.message}`);
     } finally {
       setLoading(false);

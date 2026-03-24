@@ -23,6 +23,7 @@ interface AccessContextType {
   session: Session | null;
   tenant: Tenant | null;
   loading: boolean;
+  authError: string | null;
   canAccess: (feature: string) => boolean;
   resolveLandingRoute: (session: Session) => string;
   isPreviewModeEnabled: boolean;
@@ -45,38 +46,65 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   const [realSession, setRealSession] = useState<Session | null>(null);
   const [realTenant, setRealTenant] = useState<Tenant | null>(null);
   const [loading, setLoading] = useState(true);
+  const [authError, setAuthError] = useState<string | null>(null);
 
-  // Dynamic roles state
   const [platformRolesState, setPlatformRolesState] = useState(initialPlatformRoles);
   const [tenantRolesState, setTenantRolesState] = useState(initialTenantRoles);
 
-  // Preview state
   const [isPreviewModeEnabled, setIsPreviewModeEnabled] = useState(false);
   const [previewSession, setPreviewSession] = useState<Session | null>(null);
   const [previewTenant, setPreviewTenant] = useState<Tenant | null>(null);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      console.log('[AccessContext] onAuthStateChanged fired, user:', user ? user.uid : 'null');
+
       if (user) {
-        const userDoc = await getDoc(doc(db, 'users', user.uid));
-        if (userDoc.exists()) {
-          const userData = userDoc.data();
-          const role = userData.role as Role;
-          const isPlatformRole = platformRolesState.some(r => r.id === role);
-          
-          setRealSession({
-            user: { id: user.uid, name: userData.name, email: user.email || '' },
-            userType: isPlatformRole ? 'platform' : 'tenant',
-            role: role,
-            status: 'active',
-          });
-          // Mock tenant data
-          setRealTenant({ id: 'tenant-1', name: 'My Store', plan: 'growth', status: 'active' });
+        try {
+          const userDoc = await getDoc(doc(db, 'users', user.uid));
+
+          if (userDoc.exists()) {
+            const userData = userDoc.data();
+            const role = userData.role as Role;
+            const isPlatformRole = platformRolesState.some(r => r.id === role);
+
+            console.log('[AccessContext] User doc found. role:', role, 'isPlatformRole:', isPlatformRole);
+
+            setRealSession({
+              user: { id: user.uid, name: userData.name, email: user.email || '' },
+              userType: isPlatformRole ? 'platform' : 'tenant',
+              role: role,
+              status: 'active',
+            });
+
+            if (isPlatformRole) {
+              console.log('[AccessContext] Platform user — tenant set to null');
+              setRealTenant(null);
+            } else {
+              console.log('[AccessContext] Tenant user — setting mock tenant');
+              setRealTenant({ id: 'tenant-1', name: 'My Store', plan: 'growth', status: 'active' });
+            }
+
+            setAuthError(null);
+          } else {
+            console.warn('[AccessContext] No Firestore user doc for uid:', user.uid);
+            setRealSession(null);
+            setRealTenant(null);
+            setAuthError('account_not_provisioned');
+          }
+        } catch (err) {
+          console.error('[AccessContext] Firestore read failed:', err);
+          setRealSession(null);
+          setRealTenant(null);
+          setAuthError('firestore_error');
         }
       } else {
+        console.log('[AccessContext] No Firebase user — clearing session');
         setRealSession(null);
         setRealTenant(null);
+        setAuthError(null);
       }
+
       setLoading(false);
     });
     return unsubscribe;
@@ -87,44 +115,39 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
 
   const canAccess = (feature: string) => {
     if (!session) return false;
-    
-    // System Owner has access to everything
+
     if (session.role === 'system_owner') return true;
 
-    // Tenant-level checks
-    if (tenant) {
-      // Check plan features
-      const features = planFeatures[tenant.plan];
-      if (!features.includes(feature)) return false;
-      
-      // Store Owner has access to everything in tenant
-      if (session.role === 'store_owner') return true;
-      
-      // Role-based permission check from dynamic state
-      const roleConfig = tenantRolesState.find(r => r.id === session.role);
-      if (!roleConfig) return false;
-      
-      const hasPermission = Array.isArray(roleConfig.permissions) 
-        ? roleConfig.permissions.includes(feature) || roleConfig.permissions.includes(`${feature}_read`) || roleConfig.permissions.includes('all')
-        : roleConfig.permissions[feature] && roleConfig.permissions[feature] !== 'none' || roleConfig.permissions['all'] === 'full';
-      return hasPermission;
-    } else if (session.userType === 'platform') {
-      // Platform-level checks
+    if (session.userType === 'platform') {
       const roleConfig = platformRolesState.find(r => r.id === session.role);
       if (!roleConfig) return false;
-      
+
       const hasPermission = Array.isArray(roleConfig.permissions)
         ? roleConfig.permissions.includes(feature) || roleConfig.permissions.includes(`${feature}_read`) || roleConfig.permissions.includes('all')
         : roleConfig.permissions[feature] && roleConfig.permissions[feature] !== 'none' || roleConfig.permissions['all'] === 'full';
       return hasPermission;
     }
-    
+
+    if (tenant) {
+      const features = planFeatures[tenant.plan];
+      if (!features.includes(feature)) return false;
+
+      if (session.role === 'store_owner') return true;
+
+      const roleConfig = tenantRolesState.find(r => r.id === session.role);
+      if (!roleConfig) return false;
+
+      const hasPermission = Array.isArray(roleConfig.permissions)
+        ? roleConfig.permissions.includes(feature) || roleConfig.permissions.includes(`${feature}_read`) || roleConfig.permissions.includes('all')
+        : roleConfig.permissions[feature] && roleConfig.permissions[feature] !== 'none' || roleConfig.permissions['all'] === 'full';
+      return hasPermission;
+    }
+
     return false;
   };
 
   const resolveLandingRoute = (session: Session) => {
     if (session.userType === 'platform') return '/owner';
-    // Default tenant route
     return '/';
   };
 
@@ -147,10 +170,11 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   };
 
   return (
-    <AccessContext.Provider value={{ 
-      session, 
-      tenant, 
-      loading, 
+    <AccessContext.Provider value={{
+      session,
+      tenant,
+      loading,
+      authError,
       canAccess,
       resolveLandingRoute,
       isPreviewModeEnabled,
@@ -176,4 +200,3 @@ export const useAccess = () => {
   if (!context) throw new Error('useAccess must be used within an AccessProvider');
   return context;
 };
-
