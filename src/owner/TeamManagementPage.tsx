@@ -8,7 +8,10 @@ export default function TeamManagementPage() {
   const [activeTab, setActiveTab] = useState<'team' | 'roles' | 'permissions' | 'activity'>('team');
   const [searchQuery, setSearchQuery] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showCreateRoleModal, setShowCreateRoleModal] = useState(false);
   const [editingMember, setEditingMember] = useState<{ id: string, name: string, email: string, role: string } | null>(null);
+
+  const [newRole, setNewRole] = useState({ name: '', description: '', status: 'active' as string, permissions: [] as string[] });
 
   const [team, setTeam] = useState([
     { id: 'u1', name: 'Admin User', email: 'admin@platform.com', role: 'System Owner', status: 'Active' },
@@ -20,6 +23,18 @@ export default function TeamManagementPage() {
     { id: 'a2', user: 'Support Rep', action: 'Reset Password', details: 'Reset password for store tenant-1', time: '2024-03-20 11:30' },
   ]);
 
+  const platformFeatures = [
+    { id: 'tenants', name: 'Manage Tenants' },
+    { id: 'billing', name: 'Billing & Subscriptions' },
+    { id: 'platform_settings', name: 'Platform Settings' },
+    { id: 'audit_security', name: 'Audit Logs' },
+    { id: 'support_tools', name: 'Support Tools' },
+    { id: 'team_management', name: 'Team Management' },
+    { id: 'provisioning', name: 'Provisioning' },
+    { id: 'domains', name: 'Domains' },
+    { id: 'feature_matrix', name: 'Feature Matrix' },
+  ];
+
   const logActivity = (action: string, details: string) => {
     setActivityLogs(prev => [{
       id: `a${Date.now()}`,
@@ -28,6 +43,29 @@ export default function TeamManagementPage() {
       details,
       time: new Date().toLocaleString()
     }, ...prev]);
+  };
+
+  const handleCreateRole = () => {
+    if (!newRole.name.trim()) return;
+    const roleId = newRole.name.toLowerCase().replace(/\s+/g, '_');
+    addPlatformRole({
+      id: roleId,
+      name: newRole.name,
+      permissions: newRole.permissions,
+      description: newRole.description || 'Custom platform role'
+    });
+    logActivity('Created Role', `Created new platform role: ${newRole.name} with permissions: ${newRole.permissions.length > 0 ? newRole.permissions.join(', ') : 'none assigned'}`);
+    setNewRole({ name: '', description: '', status: 'active', permissions: [] });
+    setShowCreateRoleModal(false);
+  };
+
+  const togglePermission = (permId: string) => {
+    setNewRole(prev => ({
+      ...prev,
+      permissions: prev.permissions.includes(permId)
+        ? prev.permissions.filter(p => p !== permId)
+        : [...prev.permissions, permId]
+    }));
   };
 
   const renderTeam = () => (
@@ -105,16 +143,8 @@ export default function TeamManagementPage() {
         {session?.role === 'system_owner' && (
           <button 
             onClick={() => {
-              const newRoleName = prompt('Enter new role name:');
-              if (newRoleName) {
-                addPlatformRole({ 
-                  id: newRoleName.toLowerCase().replace(/\s+/g, '_'), 
-                  name: newRoleName,
-                  permissions: [],
-                  description: 'Custom platform role'
-                });
-                logActivity('Created Role', `Created new platform role: ${newRoleName}`);
-              }
+              setNewRole({ name: '', description: '', status: 'active', permissions: [] });
+              setShowCreateRoleModal(true);
             }}
             className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2"
           >
@@ -171,75 +201,61 @@ export default function TeamManagementPage() {
     return role.permissions?.[featureId] || 'none';
   };
 
-  const renderPermissions = () => {
-    const features = [
-      { id: 'tenants', name: 'Manage Tenants' },
-      { id: 'billing', name: 'Billing & Subscriptions' },
-      { id: 'platform_settings', name: 'Platform Settings' },
-      { id: 'audit_security', name: 'Audit Logs' },
-      { id: 'support_tools', name: 'Support Tools' },
-      { id: 'team_management', name: 'Team Management' },
-      { id: 'provisioning', name: 'Provisioning' },
-      { id: 'domains', name: 'Domains' },
-      { id: 'feature_matrix', name: 'Feature Matrix' },
-    ];
-
-    return (
-      <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm">
-        <h2 className="text-2xl font-black text-primary tracking-tight mb-6">Global Permissions Matrix</h2>
-        <p className="text-slate-500 text-sm font-medium mb-8">Configure which roles have access to specific platform features.</p>
-        
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
-            <thead>
-              <tr className="border-b border-slate-100">
-                <th className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Feature</th>
-                {platformRolesState.map(role => (
-                  <th key={role.id} className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">{role.name}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {features.map(feature => (
-                <tr key={feature.id} className="border-b border-slate-50">
-                  <td className="px-4 py-4 text-sm font-bold text-slate-700">{feature.name}</td>
-                  {platformRolesState.map(role => {
-                    const currentLevel = getPermissionLevel(role, feature.id);
-                    return (
-                      <td key={role.id} className="px-4 py-4 text-center">
-                        <select
-                          disabled={session?.role !== 'system_owner' || role.id === 'system_owner'}
-                          value={currentLevel}
-                          onChange={(e) => {
-                            if (session?.role !== 'system_owner' || role.id === 'system_owner') return;
-                            const newLevel = e.target.value;
-                            const newPermissions = Array.isArray(role.permissions) 
-                              ? { ...role.permissions.reduce((acc, p) => ({ ...acc, [p]: 'full' }), {}), [feature.id]: newLevel }
-                              : { ...role.permissions, [feature.id]: newLevel };
-                            updatePlatformRole(role.id, newPermissions as any);
-                            logActivity('Updated Permissions', `Set ${feature.name} to ${newLevel} for ${role.name}`);
-                          }}
-                          className="text-xs font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 focus:ring-2 focus:ring-primary/20 focus:outline-none disabled:opacity-50"
-                        >
-                          <option value="none">None</option>
-                          <option value="view">View Only</option>
-                          <option value="create">Create</option>
-                          <option value="edit">Edit</option>
-                          <option value="approve">Approve</option>
-                          <option value="manage">Manage</option>
-                          <option value="full">Full Access</option>
-                        </select>
-                      </td>
-                    );
-                  })}
-                </tr>
+  const renderPermissions = () => (
+    <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm">
+      <h2 className="text-2xl font-black text-primary tracking-tight mb-6">Global Permissions Matrix</h2>
+      <p className="text-slate-500 text-sm font-medium mb-8">Configure which roles have access to specific platform features.</p>
+      
+      <div className="overflow-x-auto">
+        <table className="w-full text-left border-collapse">
+          <thead>
+            <tr className="border-b border-slate-100">
+              <th className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Feature</th>
+              {platformRolesState.map(role => (
+                <th key={role.id} className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">{role.name}</th>
               ))}
-            </tbody>
-          </table>
-        </div>
+            </tr>
+          </thead>
+          <tbody>
+            {platformFeatures.map(feature => (
+              <tr key={feature.id} className="border-b border-slate-50">
+                <td className="px-4 py-4 text-sm font-bold text-slate-700">{feature.name}</td>
+                {platformRolesState.map(role => {
+                  const currentLevel = getPermissionLevel(role, feature.id);
+                  return (
+                    <td key={role.id} className="px-4 py-4 text-center">
+                      <select
+                        disabled={session?.role !== 'system_owner' || role.id === 'system_owner'}
+                        value={currentLevel}
+                        onChange={(e) => {
+                          if (session?.role !== 'system_owner' || role.id === 'system_owner') return;
+                          const newLevel = e.target.value;
+                          const newPermissions = Array.isArray(role.permissions) 
+                            ? { ...role.permissions.reduce((acc: any, p: string) => ({ ...acc, [p]: 'full' }), {}), [feature.id]: newLevel }
+                            : { ...role.permissions, [feature.id]: newLevel };
+                          updatePlatformRole(role.id, newPermissions as any);
+                          logActivity('Updated Permissions', `Set ${feature.name} to ${newLevel} for ${role.name}`);
+                        }}
+                        className="text-xs font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 focus:ring-2 focus:ring-primary/20 focus:outline-none disabled:opacity-50"
+                      >
+                        <option value="none">None</option>
+                        <option value="view">View Only</option>
+                        <option value="create">Create</option>
+                        <option value="edit">Edit</option>
+                        <option value="approve">Approve</option>
+                        <option value="manage">Manage</option>
+                        <option value="full">Full Access</option>
+                      </select>
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
-    );
-  };
+    </div>
+  );
 
   const renderActivity = () => (
     <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
@@ -386,8 +402,108 @@ export default function TeamManagementPage() {
             </div>
           )}
         </AnimatePresence>
+
+        <AnimatePresence>
+          {showCreateRoleModal && (
+            <div key="create-role-modal" className="fixed inset-0 z-50 flex items-center justify-center p-6">
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setShowCreateRoleModal(false)}
+                className="absolute inset-0 bg-slate-900/40 backdrop-blur-md"
+              />
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.9, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.9, y: 20 }}
+                className="relative w-full max-w-xl bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[90vh]"
+              >
+                <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                  <div>
+                    <h3 className="text-2xl font-black text-primary tracking-tight">Create Platform Role</h3>
+                    <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Define a new role for the platform</p>
+                  </div>
+                  <button onClick={() => setShowCreateRoleModal(false)} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                    <span className="material-symbols-outlined text-slate-400">close</span>
+                  </button>
+                </div>
+                
+                <div className="p-8 overflow-y-auto flex-1 space-y-6">
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Role Name</label>
+                    <input 
+                      value={newRole.name}
+                      onChange={(e) => setNewRole(prev => ({ ...prev, name: e.target.value }))}
+                      className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" 
+                      placeholder="e.g. Content Manager"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Description</label>
+                    <textarea 
+                      value={newRole.description}
+                      onChange={(e) => setNewRole(prev => ({ ...prev, description: e.target.value }))}
+                      className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700 resize-none h-20" 
+                      placeholder="Describe what this role does..."
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Status</label>
+                    <select 
+                      value={newRole.status}
+                      onChange={(e) => setNewRole(prev => ({ ...prev, status: e.target.value }))}
+                      className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700"
+                    >
+                      <option value="active">Active</option>
+                      <option value="inactive">Inactive</option>
+                    </select>
+                  </div>
+                  <div className="space-y-3">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Permission Assignments</label>
+                    <div className="grid grid-cols-2 gap-3">
+                      {platformFeatures.map(feature => (
+                        <label 
+                          key={feature.id}
+                          className={`flex items-center gap-3 p-4 rounded-2xl border cursor-pointer transition-all ${
+                            newRole.permissions.includes(feature.id)
+                              ? 'bg-primary/5 border-primary/20'
+                              : 'bg-slate-50 border-slate-200 hover:border-slate-300'
+                          }`}
+                        >
+                          <input 
+                            type="checkbox"
+                            checked={newRole.permissions.includes(feature.id)}
+                            onChange={() => togglePermission(feature.id)}
+                            className="w-4 h-4 text-primary rounded border-slate-300 focus:ring-primary"
+                          />
+                          <span className="text-xs font-bold text-slate-700">{feature.name}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-4">
+                  <button 
+                    onClick={() => setShowCreateRoleModal(false)}
+                    className="flex-1 py-4 bg-white text-slate-600 font-black text-sm rounded-2xl border border-slate-200 hover:bg-slate-50 transition-all uppercase tracking-widest"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    onClick={handleCreateRole}
+                    disabled={!newRole.name.trim()}
+                    className="flex-1 py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Create Role
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
       </div>
     </PageShell>
   );
 }
-

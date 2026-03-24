@@ -56,17 +56,49 @@ const MOCK_ACTIVITY_LOGS: EmployeeActivityLog[] = [
   { id: 'al2', employeeId: 'e2', employeeName: 'Sarah Jenkins', action: 'Update Ticket', details: 'Updated status of Ticket #1001 to Completed', timestamp: '2024-03-20 10:15' }
 ];
 
+const storeFeatures = [
+  { id: 'pos', name: 'Point of Sale' },
+  { id: 'inventory', name: 'Inventory Management' },
+  { id: 'customers', name: 'Customer Directory' },
+  { id: 'reports', name: 'Reporting & Analytics' },
+  { id: 'employees', name: 'Employee Management' },
+  { id: 'settings', name: 'Store Settings' },
+  { id: 'marketing', name: 'Marketing Tools' },
+];
+
 export default function Employees() {
   const { session, tenantRolesState = [], addTenantRole, updateTenantRole } = useAccess();
   const [activeTab, setActiveTab] = useState<'list' | 'time' | 'roles' | 'activity' | 'payroll'>('list');
   const [employees, setEmployees] = useState<Employee[]>(MOCK_EMPLOYEES);
-  const [timeLogs] = useState<EmployeeTimeLog[]>(MOCK_TIME_LOGS);
-  const [activityLogs] = useState<EmployeeActivityLog[]>(MOCK_ACTIVITY_LOGS);
+  const [timeLogs, setTimeLogs] = useState<EmployeeTimeLog[]>(MOCK_TIME_LOGS);
+  const [activityLogs, setActivityLogs] = useState<EmployeeActivityLog[]>(MOCK_ACTIVITY_LOGS);
   const [searchQuery, setSearchQuery] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
   const [showPayrollWizard, setShowPayrollWizard] = useState(false);
+  const [showCreateRoleModal, setShowCreateRoleModal] = useState(false);
+  const [showTimeEditModal, setShowTimeEditModal] = useState(false);
   const [editingEmployee, setEditingEmployee] = useState<Employee | null>(null);
+  const [editingTimeLog, setEditingTimeLog] = useState<EmployeeTimeLog | null>(null);
   const [pendingRequests, setPendingRequests] = useState<any[]>([]);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+
+  const [newRole, setNewRole] = useState({ name: '', description: '', status: 'active' as string, permissions: [] as string[] });
+
+  const showToast = (message: string, type: 'success' | 'error' | 'info' = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 3000);
+  };
+
+  const logActivity = (employeeId: string, employeeName: string, action: string, details: string) => {
+    setActivityLogs(prev => [{
+      id: `al${Date.now()}`,
+      employeeId,
+      employeeName,
+      action,
+      details,
+      timestamp: new Date().toLocaleString()
+    }, ...prev]);
+  };
 
   const handleApprove = (id: number) => {
     const request = pendingRequests.find(req => req.id === id);
@@ -76,8 +108,8 @@ export default function Employees() {
       addTenantRole({ 
         id: request.details.name.toLowerCase().replace(/\s+/g, '_'), 
         name: request.details.name, 
-        permissions: [], 
-        description: 'Custom role' 
+        permissions: request.details.permissions || [], 
+        description: request.details.description || 'Custom role' 
       });
     } else if (request.type === 'add_employee') {
       const newEmployee: Employee = {
@@ -115,26 +147,26 @@ export default function Employees() {
     }
 
     setPendingRequests(prev => prev.filter(req => req.id !== id));
-    alert('Request approved and applied.');
+    showToast('Request approved and applied.');
   };
 
   const handleReject = (id: number) => {
     setPendingRequests(prev => prev.filter(req => req.id !== id));
-    alert('Request rejected.');
+    showToast('Request rejected.', 'error');
   };
 
   const handleReturn = (id: number, comment: string) => {
     setPendingRequests(prev => prev.map(req => 
       req.id === id ? { ...req, status: 'returned', comment } : req
     ));
-    alert('Request returned for changes.');
+    showToast('Request returned for changes.', 'info');
   };
 
   const handleResubmit = (id: number, updatedDetails: any) => {
     setPendingRequests(prev => prev.map(req => 
       req.id === id ? { ...req, status: 'pending', details: updatedDetails, comment: undefined } : req
     ));
-    alert('Request resubmitted for approval.');
+    showToast('Request resubmitted for approval.', 'info');
   };
 
   const filteredEmployees = employees.filter(e => 
@@ -165,7 +197,7 @@ export default function Employees() {
         status: 'pending',
         details: { id: editingEmployee?.id, firstName, lastName, email, roleId, status, payRate, payType, commissionEnabled, commissionType, commissionRate }
       }]);
-      alert('Request submitted for approval.');
+      showToast('Request submitted for approval.', 'info');
     } else {
       if (editingEmployee) {
         setEmployees(prev => prev.map(emp => emp.id === editingEmployee.id ? {
@@ -182,7 +214,8 @@ export default function Employees() {
           commissionType,
           commissionRate
         } : emp));
-        alert('Employee updated directly.');
+        logActivity(editingEmployee.id, `${firstName} ${lastName}`, 'Profile Updated', `Updated employee profile`);
+        showToast('Employee updated successfully.');
       } else {
         const newEmployee: Employee = {
           id: `emp-${Date.now()}`,
@@ -201,7 +234,8 @@ export default function Employees() {
           createdAt: new Date().toISOString()
         };
         setEmployees(prev => [...prev, newEmployee]);
-        alert('Employee added directly.');
+        logActivity(newEmployee.id, `${firstName} ${lastName}`, 'Employee Added', `New employee added with role ${roleId}`);
+        showToast('Employee added successfully.');
       }
     }
     setShowAddModal(false);
@@ -209,22 +243,103 @@ export default function Employees() {
   };
 
   const handleCreateRole = () => {
-    const newRoleName = prompt('Enter new role name:');
-    if (newRoleName) {
-      if (session?.role === 'manager') {
-        setPendingRequests(prev => [...prev, { 
-          id: Date.now(), 
-          employee: 'System', 
-          action: `Create Role: ${newRoleName}`,
-          type: 'create_role',
-          status: 'pending',
-          details: { name: newRoleName }
-        }]);
-        alert('Role creation request submitted for approval.');
-      } else {
-        addTenantRole({ id: newRoleName.toLowerCase().replace(/\s+/g, '_'), name: newRoleName, permissions: [], description: 'Custom role' });
+    if (!newRole.name.trim()) return;
+    const roleId = newRole.name.toLowerCase().replace(/\s+/g, '_');
+
+    if (session?.role === 'manager') {
+      setPendingRequests(prev => [...prev, { 
+        id: Date.now(), 
+        employee: 'System', 
+        action: `Create Role: ${newRole.name}`,
+        type: 'create_role',
+        status: 'pending',
+        details: { name: newRole.name, description: newRole.description, permissions: newRole.permissions }
+      }]);
+      showToast('Role creation request submitted for approval.', 'info');
+    } else {
+      addTenantRole({ id: roleId, name: newRole.name, permissions: newRole.permissions, description: newRole.description || 'Custom role' });
+      logActivity('system', session?.user?.name || 'Store Owner', 'Created Role', `Created new store role: ${newRole.name}`);
+      showToast(`Role "${newRole.name}" created successfully.`);
+    }
+    setNewRole({ name: '', description: '', status: 'active', permissions: [] });
+    setShowCreateRoleModal(false);
+  };
+
+  const togglePermission = (permId: string) => {
+    setNewRole(prev => ({
+      ...prev,
+      permissions: prev.permissions.includes(permId)
+        ? prev.permissions.filter(p => p !== permId)
+        : [...prev.permissions, permId]
+    }));
+  };
+
+  const handleClockIn = () => {
+    const currentUser = employees.find(e => e.id === 'e1') || employees[0];
+    if (!currentUser) return;
+    const existingLog = timeLogs.find(tl => tl.employeeId === currentUser.id && tl.status === 'Clocked In');
+    if (existingLog) {
+      showToast(`${currentUser.firstName} is already clocked in.`, 'info');
+      return;
+    }
+    const newLog: EmployeeTimeLog = {
+      id: `tl${Date.now()}`,
+      employeeId: currentUser.id,
+      employeeName: `${currentUser.firstName} ${currentUser.lastName}`,
+      clockIn: new Date().toLocaleString(),
+      status: 'Clocked In'
+    };
+    setTimeLogs(prev => [newLog, ...prev]);
+    logActivity(currentUser.id, `${currentUser.firstName} ${currentUser.lastName}`, 'Clock In', `Clocked in at ${newLog.clockIn}`);
+    showToast(`${currentUser.firstName} ${currentUser.lastName} clocked in.`);
+  };
+
+  const handleClockOut = () => {
+    const currentUser = employees.find(e => e.id === 'e1') || employees[0];
+    if (!currentUser) return;
+    const activeLog = timeLogs.find(tl => tl.employeeId === currentUser.id && tl.status === 'Clocked In');
+    if (!activeLog) {
+      showToast(`${currentUser.firstName} is not currently clocked in.`, 'error');
+      return;
+    }
+    const clockOutTime = new Date();
+    const clockInTime = new Date(activeLog.clockIn);
+    const diffMs = clockOutTime.getTime() - clockInTime.getTime();
+    const totalHours = Math.round((diffMs / (1000 * 60 * 60)) * 100) / 100;
+
+    setTimeLogs(prev => prev.map(tl => 
+      tl.id === activeLog.id 
+        ? { ...tl, clockOut: clockOutTime.toLocaleString(), totalHours: totalHours > 0 ? totalHours : 0.01, status: 'Clocked Out' as const }
+        : tl
+    ));
+    logActivity(currentUser.id, `${currentUser.firstName} ${currentUser.lastName}`, 'Clock Out', `Clocked out. Total hours: ${totalHours > 0 ? totalHours : '< 0.01'}`);
+    showToast(`${currentUser.firstName} ${currentUser.lastName} clocked out. Hours: ${totalHours > 0 ? totalHours : '< 0.01'}`);
+  };
+
+  const handleEditTimeLog = (log: EmployeeTimeLog) => {
+    setEditingTimeLog({ ...log });
+    setShowTimeEditModal(true);
+  };
+
+  const handleSaveTimeLog = () => {
+    if (!editingTimeLog) return;
+    let totalHours = editingTimeLog.totalHours;
+    if (editingTimeLog.clockIn && editingTimeLog.clockOut) {
+      const inTime = new Date(editingTimeLog.clockIn);
+      const outTime = new Date(editingTimeLog.clockOut);
+      if (!isNaN(inTime.getTime()) && !isNaN(outTime.getTime())) {
+        totalHours = Math.round(((outTime.getTime() - inTime.getTime()) / (1000 * 60 * 60)) * 100) / 100;
       }
     }
+    setTimeLogs(prev => prev.map(tl => 
+      tl.id === editingTimeLog.id 
+        ? { ...editingTimeLog, totalHours }
+        : tl
+    ));
+    logActivity(editingTimeLog.employeeId, editingTimeLog.employeeName, 'Time Log Edited', `Time log updated for ${editingTimeLog.employeeName}`);
+    showToast('Time log updated successfully.');
+    setShowTimeEditModal(false);
+    setEditingTimeLog(null);
   };
 
   const renderEmployeeList = () => (
@@ -337,11 +452,17 @@ export default function Employees() {
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-black text-primary tracking-tight">Time Tracking</h2>
         <div className="flex gap-4">
-          <button className="px-6 py-3 bg-emerald-500 text-white font-black text-xs rounded-2xl shadow-lg shadow-emerald-500/20 uppercase tracking-widest flex items-center gap-2">
+          <button 
+            onClick={handleClockIn}
+            className="px-6 py-3 bg-emerald-500 text-white font-black text-xs rounded-2xl shadow-lg shadow-emerald-500/20 uppercase tracking-widest flex items-center gap-2 hover:bg-emerald-600 transition-colors"
+          >
             <span className="material-symbols-outlined text-sm">login</span>
             Clock In
           </button>
-          <button className="px-6 py-3 bg-rose-500 text-white font-black text-xs rounded-2xl shadow-lg shadow-rose-500/20 uppercase tracking-widest flex items-center gap-2">
+          <button 
+            onClick={handleClockOut}
+            className="px-6 py-3 bg-rose-500 text-white font-black text-xs rounded-2xl shadow-lg shadow-rose-500/20 uppercase tracking-widest flex items-center gap-2 hover:bg-rose-600 transition-colors"
+          >
             <span className="material-symbols-outlined text-sm">logout</span>
             Clock Out
           </button>
@@ -377,7 +498,10 @@ export default function Employees() {
                   </span>
                 </td>
                 <td className="px-8 py-6 text-right">
-                  <button className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl transition-colors">
+                  <button 
+                    onClick={() => handleEditTimeLog(log)}
+                    className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl transition-colors"
+                  >
                     <span className="material-symbols-outlined text-sm">edit</span>
                   </button>
                 </td>
@@ -400,81 +524,72 @@ export default function Employees() {
     return role.permissions?.[featureId] || 'none';
   };
 
-  const renderPermissions = () => {
-    const features = [
-      { id: 'pos', name: 'Point of Sale' },
-      { id: 'inventory', name: 'Inventory Management' },
-      { id: 'customers', name: 'Customer Directory' },
-      { id: 'reports', name: 'Reporting & Analytics' },
-      { id: 'employees', name: 'Employee Management' },
-      { id: 'settings', name: 'Store Settings' },
-      { id: 'marketing', name: 'Marketing Tools' },
-    ];
-
-    return (
-      <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm mt-8">
-        <h2 className="text-2xl font-black text-primary tracking-tight mb-6">Store Permissions Matrix</h2>
-        <p className="text-slate-500 text-sm font-medium mb-8">Configure which roles have access to specific store features.</p>
-        
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
-            <thead>
-              <tr className="border-b border-slate-100">
-                <th className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Feature</th>
-                {tenantRolesState.map(role => (
-                  <th key={role.id} className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">{role.name}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {features.map(feature => (
-                <tr key={feature.id} className="border-b border-slate-50">
-                  <td className="px-4 py-4 text-sm font-bold text-slate-700">{feature.name}</td>
-                  {tenantRolesState.map(role => {
-                    const currentLevel = getPermissionLevel(role, feature.id);
-                    const isLocked = role.id === 'store_owner' || (session?.role === 'manager' && role.id === 'manager');
-                    return (
-                      <td key={role.id} className="px-4 py-4 text-center">
-                        <select
-                          disabled={isLocked}
-                          value={currentLevel}
-                          onChange={(e) => {
-                            if (isLocked) return;
-                            const newLevel = e.target.value;
-                            const newPermissions = Array.isArray(role.permissions) 
-                              ? { ...role.permissions.reduce((acc, p) => ({ ...acc, [p]: 'full' }), {}), [feature.id]: newLevel }
-                              : { ...role.permissions, [feature.id]: newLevel };
-                            
-                            updateTenantRole(role.id, newPermissions as any);
-                          }}
-                          className="text-xs font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 focus:ring-2 focus:ring-primary/20 focus:outline-none disabled:opacity-50"
-                        >
-                          <option value="none">None</option>
-                          <option value="view">View Only</option>
-                          <option value="create">Create</option>
-                          <option value="edit">Edit</option>
-                          <option value="approve">Approve</option>
-                          <option value="manage">Manage</option>
-                          <option value="full">Full Access</option>
-                        </select>
-                      </td>
-                    );
-                  })}
-                </tr>
+  const renderPermissions = () => (
+    <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm mt-8">
+      <h2 className="text-2xl font-black text-primary tracking-tight mb-6">Store Permissions Matrix</h2>
+      <p className="text-slate-500 text-sm font-medium mb-8">Configure which roles have access to specific store features.</p>
+      
+      <div className="overflow-x-auto">
+        <table className="w-full text-left border-collapse">
+          <thead>
+            <tr className="border-b border-slate-100">
+              <th className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Feature</th>
+              {tenantRolesState.map(role => (
+                <th key={role.id} className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">{role.name}</th>
               ))}
-            </tbody>
-          </table>
-        </div>
+            </tr>
+          </thead>
+          <tbody>
+            {storeFeatures.map(feature => (
+              <tr key={feature.id} className="border-b border-slate-50">
+                <td className="px-4 py-4 text-sm font-bold text-slate-700">{feature.name}</td>
+                {tenantRolesState.map(role => {
+                  const currentLevel = getPermissionLevel(role, feature.id);
+                  const isLocked = role.id === 'store_owner' || (session?.role === 'manager' && role.id === 'manager');
+                  return (
+                    <td key={role.id} className="px-4 py-4 text-center">
+                      <select
+                        disabled={isLocked}
+                        value={currentLevel}
+                        onChange={(e) => {
+                          if (isLocked) return;
+                          const newLevel = e.target.value;
+                          const newPermissions = Array.isArray(role.permissions) 
+                            ? { ...role.permissions.reduce((acc: any, p: string) => ({ ...acc, [p]: 'full' }), {}), [feature.id]: newLevel }
+                            : { ...role.permissions, [feature.id]: newLevel };
+                          
+                          updateTenantRole(role.id, newPermissions as any);
+                        }}
+                        className="text-xs font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 focus:ring-2 focus:ring-primary/20 focus:outline-none disabled:opacity-50"
+                      >
+                        <option value="none">None</option>
+                        <option value="view">View Only</option>
+                        <option value="create">Create</option>
+                        <option value="edit">Edit</option>
+                        <option value="approve">Approve</option>
+                        <option value="manage">Manage</option>
+                        <option value="full">Full Access</option>
+                      </select>
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
-    );
-  };
+    </div>
+  );
 
   const renderRoles = () => (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-black text-primary tracking-tight">Roles & Permissions</h2>
         <button 
-          onClick={handleCreateRole}
+          onClick={() => {
+            setNewRole({ name: '', description: '', status: 'active', permissions: [] });
+            setShowCreateRoleModal(true);
+          }}
           className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2"
         >
           <span className="material-symbols-outlined text-sm">add</span>
@@ -617,7 +732,6 @@ export default function Employees() {
         </motion.div>
       </AnimatePresence>
 
-      {/* Add Employee Modal */}
       <AnimatePresence>
         {showAddModal && (
           <div key="add-modal" className="fixed inset-0 z-50 flex items-center justify-center p-6">
@@ -662,7 +776,7 @@ export default function Employees() {
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Role</label>
                     <select name="role" defaultValue={editingEmployee?.roleId} required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700">
                       {tenantRolesState.filter(r => {
-                        return r.id !== 'store_owner'; // No one can assign Store Owner from store side
+                        return r.id !== 'store_owner';
                       }).map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
                     </select>
                   </div>
@@ -734,7 +848,189 @@ export default function Employees() {
           </div>
         )}
       </AnimatePresence>
-      {/* Payroll Wizard Modal */}
+
+      <AnimatePresence>
+        {showCreateRoleModal && (
+          <div key="create-role-modal" className="fixed inset-0 z-50 flex items-center justify-center p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowCreateRoleModal(false)}
+              className="absolute inset-0 bg-slate-900/40 backdrop-blur-md"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-xl bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[90vh]"
+            >
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                <div>
+                  <h3 className="text-2xl font-black text-primary tracking-tight">Create Store Role</h3>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Define a new subordinate store role</p>
+                </div>
+                <button onClick={() => setShowCreateRoleModal(false)} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-slate-400">close</span>
+                </button>
+              </div>
+              
+              <div className="p-8 overflow-y-auto flex-1 space-y-6">
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Role Name</label>
+                  <input 
+                    value={newRole.name}
+                    onChange={(e) => setNewRole(prev => ({ ...prev, name: e.target.value }))}
+                    className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" 
+                    placeholder="e.g. Senior Technician"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Description</label>
+                  <textarea 
+                    value={newRole.description}
+                    onChange={(e) => setNewRole(prev => ({ ...prev, description: e.target.value }))}
+                    className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700 resize-none h-20" 
+                    placeholder="Describe what this role does..."
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Status</label>
+                  <select 
+                    value={newRole.status}
+                    onChange={(e) => setNewRole(prev => ({ ...prev, status: e.target.value }))}
+                    className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700"
+                  >
+                    <option value="active">Active</option>
+                    <option value="inactive">Inactive</option>
+                  </select>
+                </div>
+                <div className="space-y-3">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Permission Assignments</label>
+                  <div className="grid grid-cols-2 gap-3">
+                    {storeFeatures.map(feature => (
+                      <label 
+                        key={feature.id}
+                        className={`flex items-center gap-3 p-4 rounded-2xl border cursor-pointer transition-all ${
+                          newRole.permissions.includes(feature.id)
+                            ? 'bg-primary/5 border-primary/20'
+                            : 'bg-slate-50 border-slate-200 hover:border-slate-300'
+                        }`}
+                      >
+                        <input 
+                          type="checkbox"
+                          checked={newRole.permissions.includes(feature.id)}
+                          onChange={() => togglePermission(feature.id)}
+                          className="w-4 h-4 text-primary rounded border-slate-300 focus:ring-primary"
+                        />
+                        <span className="text-xs font-bold text-slate-700">{feature.name}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="bg-amber-50 p-4 rounded-2xl border border-amber-200">
+                  <p className="text-[10px] font-black text-amber-800 uppercase tracking-widest">
+                    Store Owner role cannot be created here. Only subordinate roles can be defined.
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-4">
+                <button 
+                  onClick={() => setShowCreateRoleModal(false)}
+                  className="flex-1 py-4 bg-white text-slate-600 font-black text-sm rounded-2xl border border-slate-200 hover:bg-slate-50 transition-all uppercase tracking-widest"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={handleCreateRole}
+                  disabled={!newRole.name.trim()}
+                  className="flex-1 py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Create Role
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showTimeEditModal && editingTimeLog && (
+          <div key="time-edit-modal" className="fixed inset-0 z-50 flex items-center justify-center p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => { setShowTimeEditModal(false); setEditingTimeLog(null); }}
+              className="absolute inset-0 bg-slate-900/40 backdrop-blur-md"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-md bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden"
+            >
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                <div>
+                  <h3 className="text-2xl font-black text-primary tracking-tight">Edit Time Log</h3>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">{editingTimeLog.employeeName}</p>
+                </div>
+                <button onClick={() => { setShowTimeEditModal(false); setEditingTimeLog(null); }} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-slate-400">close</span>
+                </button>
+              </div>
+              
+              <div className="p-8 space-y-6">
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Employee</label>
+                  <input 
+                    disabled
+                    value={editingTimeLog.employeeName}
+                    className="w-full px-6 py-4 bg-slate-100 rounded-2xl border border-slate-200 font-bold text-slate-500"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Clock In</label>
+                  <input 
+                    value={editingTimeLog.clockIn}
+                    onChange={(e) => setEditingTimeLog({ ...editingTimeLog, clockIn: e.target.value })}
+                    className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Clock Out</label>
+                  <input 
+                    value={editingTimeLog.clockOut || ''}
+                    onChange={(e) => setEditingTimeLog({ ...editingTimeLog, clockOut: e.target.value })}
+                    className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700"
+                    placeholder="Not clocked out yet"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Status</label>
+                  <select 
+                    value={editingTimeLog.status}
+                    onChange={(e) => setEditingTimeLog({ ...editingTimeLog, status: e.target.value as any })}
+                    className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700"
+                  >
+                    <option value="Clocked In">Clocked In</option>
+                    <option value="Clocked Out">Clocked Out</option>
+                  </select>
+                </div>
+                <button 
+                  onClick={handleSaveTimeLog}
+                  className="w-full py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 transition-all"
+                >
+                  Save Changes
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       <AnimatePresence>
         {showPayrollWizard && (
           <div key="payroll-modal" className="fixed inset-0 z-50 flex items-center justify-center p-6">
@@ -773,7 +1069,7 @@ export default function Employees() {
                   </thead>
                   <tbody>
                     {employees.map((emp) => {
-                      const basePay = emp.payType === 'Salary' ? emp.payRate : emp.payRate * 40; // Mock 40 hours
+                      const basePay = emp.payType === 'Salary' ? emp.payRate : emp.payRate * 40;
                       const commissions = emp.commissionEnabled ? (emp.commissionType === 'flat' ? emp.commissionRate : basePay * (emp.commissionRate / 100)) : 0;
                       const totalPay = basePay + commissions;
                       return (
@@ -796,12 +1092,29 @@ export default function Employees() {
                 <button onClick={() => setShowPayrollWizard(false)} className="px-8 py-4 bg-white text-slate-600 font-black text-sm rounded-2xl border border-slate-200 hover:bg-slate-50 transition-all uppercase tracking-widest">
                   Cancel
                 </button>
-                <button onClick={() => { console.log('Payroll processed successfully!'); setShowPayrollWizard(false); }} className="px-8 py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 hover:bg-primary/90 transition-all uppercase tracking-widest">
+                <button onClick={() => { showToast('Payroll processed successfully!'); setShowPayrollWizard(false); }} className="px-8 py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 hover:bg-primary/90 transition-all uppercase tracking-widest">
                   Process Payroll
                 </button>
               </div>
             </motion.div>
           </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {toast && (
+          <motion.div
+            initial={{ opacity: 0, y: 50, x: '-50%' }}
+            animate={{ opacity: 1, y: 0, x: '-50%' }}
+            exit={{ opacity: 0, y: 50, x: '-50%' }}
+            className={`fixed bottom-8 left-1/2 z-[60] px-8 py-4 rounded-2xl shadow-2xl border font-black text-sm uppercase tracking-widest ${
+              toast.type === 'success' ? 'bg-emerald-500 text-white border-emerald-600' :
+              toast.type === 'error' ? 'bg-rose-500 text-white border-rose-600' :
+              'bg-primary text-white border-primary/80'
+            }`}
+          >
+            {toast.message}
+          </motion.div>
         )}
       </AnimatePresence>
     </div>

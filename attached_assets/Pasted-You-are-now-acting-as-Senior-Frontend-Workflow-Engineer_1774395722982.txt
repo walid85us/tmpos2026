@@ -1,0 +1,157 @@
+You are now acting as:
+Senior Frontend Workflow Engineer + Senior RBAC UX Engineer + Senior React State Engineer + Senior Product QA Auditor
+
+IMPORTANT:
+Do not touch the auth flow again unless absolutely necessary.
+The login loop is now resolved.
+Preserve the current design baseline exactly.
+
+Focus ONLY on these 5 remaining verified failures:
+
+1. Platform Create Role = FAIL
+2. Store Owner approval actions = FAIL
+3. Request detail view is not human-readable
+4. Store Owner Create Role = FAIL
+5. Time Tracking actions = FAIL
+
+Do not work on unrelated architecture, Firestore expansion, or redesigns in this pass.
+
+==================================================
+1. PLATFORM TEAM MANAGEMENT — FIX CREATE ROLE
+==================================================
+
+Current state:
+- Platform Team Management page loads
+- Add/Edit Member works
+- Manage Permissions works
+- Activity Log works
+- BUT Platform Create Role does not work
+
+Fix:
+- “Create Role” must open a real working modal/drawer/page
+- System Owner can create a platform role
+- fields should include:
+  - role name
+  - description
+  - status
+  - permission assignments
+- saving must create the role visibly
+- new platform role must appear in:
+  - Platform Roles tab
+  - platform member role dropdown
+  - Platform Preview Mode
+- Activity Log must record the new role creation
+
+==================================================
+2. STORE OWNER APPROVAL ACTIONS — MAKE THEM REAL
+==================================================
+
+Current state:
+- Store Owner can see approval queue
+- but approval actions do not work properly
+
+Fix:
+- clicking a pending approval must open a proper business-style detail modal / drawer / page
+- Approve must work
+- Reject must work
+- Return for Changes must work
+- resulting request status must update visibly in the UI
+
+==================================================
+3. REQUEST DETAIL VIEW — REMOVE RAW CODE / JSON
+==================================================
+
+Current state:
+- request detail is shown as raw payload / code-style block
+- this is not accepted
+
+Replace it with a structured readable view using labeled fields such as:
+- Request Type
+- Requested By
+- Employee Name
+- Email
+- Requested Role
+- Status
+- Pay Rate
+- Pay Type
+- Commission Enabled
+- Commission Type
+- Commission Rate
+- Created At
+- Notes / Comments
+
+No raw JSON blob should be shown to business users.
+
+==================================================
+4. STORE OWNER ROLES TAB — FIX CREATE ROLE
+==================================================
+
+Current state:
+- Store Owner Create Role does not work
+
+Fix:
+- Create Role must open a working modal/drawer/page
+- Store Owner can create subordinate store roles directly
+- saved role must appear in:
+  - Roles tab
+  - Add Employee role dropdown
+  - Store Preview Mode
+- Activity Log should record the action if the page supports it
+
+Keep Store Owner platform-protected:
+- Store Owner role itself must NOT be creatable here
+- only subordinate store roles can be created store-side
+
+==================================================
+5. TIME TRACKING ACTIONS — MAKE THEM WORK
+==================================================
+
+Current state:
+- Time Tracking tab exists
+- but Clock In / Clock Out and action pencil icons do not work
+
+Fix:
+- Clock In must work
+- Clock Out must work
+- employee status must update visibly
+- total hours must update visibly
+- pencil/action icon must open a real edit/detail modal
+- keep the same design system and page layout
+
+==================================================
+6. DO NOT CHANGE THESE
+==================================================
+
+Do NOT break:
+- fixed auth flow
+- preview mode
+- current design baseline
+- current route structure
+
+==================================================
+7. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether Platform Create Role now works
+C. whether new platform roles appear in Roles tab, member dropdown, and Preview Mode
+D. whether Store Owner approval actions now work
+E. whether request detail view is now human-readable
+F. whether Store Owner Create Role now works
+G. whether Time Tracking actions now work
+H. confirmation that auth flow was not broken
+I. confirmation that no visual drift was introduced
+
+==================================================
+8. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- Platform Create Role works
+- Store Owner approval actions work
+- Request detail view is human-readable
+- Store Owner Create Role works
+- Time Tracking actions work
+- auth flow still works
+- no visual drift was introduced
