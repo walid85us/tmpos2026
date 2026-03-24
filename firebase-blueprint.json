@@ -1,0 +1,70 @@
+{
+  "entities": {
+    "PlatformUser": {
+      "title": "PlatformUser",
+      "description": "A user of the platform (can be platform owner, support admin, or tenant user).",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "email": { "type": "string", "format": "email" },
+        "name": { "type": "string" },
+        "role": { "type": "string", "enum": ["system_owner", "support_admin", "tenant_user"] }
+      },
+      "required": ["uid", "email", "name", "role"]
+    },
+    "Tenant": {
+      "title": "Tenant",
+      "description": "A tenant/store on the platform.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "plan": { "type": "string", "enum": ["starter", "growth", "advanced"] },
+        "status": { "type": "string", "enum": ["active", "trialing", "overdue", "suspended", "read_only", "pending_activation"] }
+      },
+      "required": ["name", "plan", "status"]
+    },
+    "TenantMembership": {
+      "title": "TenantMembership",
+      "description": "Links a user to a tenant with a specific role.",
+      "type": "object",
+      "properties": {
+        "tenantId": { "type": "string" },
+        "userId": { "type": "string" },
+        "role": { "type": "string", "enum": ["store_owner", "manager", "technician", "sales_staff"] },
+        "status": { "type": "string", "enum": ["invited", "active", "suspended", "deactivated"] }
+      },
+      "required": ["tenantId", "userId", "role", "status"]
+    },
+    "Invitation": {
+      "title": "Invitation",
+      "description": "An invitation to join a tenant.",
+      "type": "object",
+      "properties": {
+        "tenantId": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "role": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "expired"] }
+      },
+      "required": ["tenantId", "email", "role", "status"]
+    },
+    "AuditEvent": {
+      "title": "AuditEvent",
+      "description": "A log of important platform/tenant actions.",
+      "type": "object",
+      "properties": {
+        "tenantId": { "type": "string" },
+        "userId": { "type": "string" },
+        "action": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["tenantId", "userId", "action", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": { "schema": { "$ref": "PlatformUser" }, "description": "Platform users." },
+    "/tenants/{tenantId}": { "schema": { "$ref": "Tenant" }, "description": "Tenants." },
+    "/tenants/{tenantId}/memberships/{membershipId}": { "schema": { "$ref": "TenantMembership" }, "description": "Tenant memberships." },
+    "/tenants/{tenantId}/invitations/{invitationId}": { "schema": { "$ref": "Invitation" }, "description": "Tenant invitations." },
+    "/auditEvents/{eventId}": { "schema": { "$ref": "AuditEvent" }, "description": "Audit events." }
+  }
+}

@@ -1,0 +1,809 @@
+import React, { useState } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
+import { 
+  Employee, EmployeeTimeLog, EmployeeActivityLog, 
+  EmployeeCommission, EmployeePayroll 
+} from '../types';
+import { useAccess } from '../context/AccessContext';
+import PendingApproval from './PendingApproval';
+
+const MOCK_EMPLOYEES: Employee[] = [
+  {
+    id: 'e1',
+    firstName: 'John',
+    lastName: 'Doe',
+    email: 'john@example.com',
+    phone: '555-0101',
+    roleId: 'store_owner',
+    roleName: 'Store Owner',
+    pin: '1234',
+    avatar: 'https://i.pravatar.cc/150?img=11',
+    status: 'Active',
+    payRate: 50,
+    payType: 'Salary',
+    commissionRate: 5,
+    is2FAEnabled: true,
+    createdAt: '2023-01-01',
+    lastLogin: '2024-03-20 09:00'
+  },
+  {
+    id: 'e2',
+    firstName: 'Sarah',
+    lastName: 'Jenkins',
+    email: 'sarah@example.com',
+    phone: '555-0102',
+    roleId: 'technician',
+    roleName: 'Technician',
+    pin: '2222',
+    avatar: 'https://i.pravatar.cc/150?img=5',
+    status: 'Active',
+    payRate: 25,
+    payType: 'Hourly',
+    commissionRate: 10,
+    is2FAEnabled: false,
+    createdAt: '2023-06-15',
+    lastLogin: '2024-03-20 08:30'
+  }
+];
+
+const MOCK_TIME_LOGS: EmployeeTimeLog[] = [
+  { id: 'tl1', employeeId: 'e1', employeeName: 'John Doe', clockIn: '2024-03-20 09:00', status: 'Clocked In' },
+  { id: 'tl2', employeeId: 'e2', employeeName: 'Sarah Jenkins', clockIn: '2024-03-20 08:30', clockOut: '2024-03-20 12:30', totalHours: 4, status: 'Clocked Out' }
+];
+
+const MOCK_ACTIVITY_LOGS: EmployeeActivityLog[] = [
+  { id: 'al1', employeeId: 'e1', employeeName: 'John Doe', action: 'Login', details: 'Successful login from 192.168.1.1', timestamp: '2024-03-20 09:00' },
+  { id: 'al2', employeeId: 'e2', employeeName: 'Sarah Jenkins', action: 'Update Ticket', details: 'Updated status of Ticket #1001 to Completed', timestamp: '2024-03-20 10:15' }
+];
+
+export default function Employees() {
+  const { session, tenantRolesState = [], addTenantRole, updateTenantRole } = useAccess();
+  const [activeTab, setActiveTab] = useState<'list' | 'time' | 'roles' | 'activity' | 'payroll'>('list');
+  const [employees, setEmployees] = useState<Employee[]>(MOCK_EMPLOYEES);
+  const [timeLogs] = useState<EmployeeTimeLog[]>(MOCK_TIME_LOGS);
+  const [activityLogs] = useState<EmployeeActivityLog[]>(MOCK_ACTIVITY_LOGS);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [showPayrollWizard, setShowPayrollWizard] = useState(false);
+  const [editingEmployee, setEditingEmployee] = useState<Employee | null>(null);
+  const [pendingRequests, setPendingRequests] = useState<any[]>([]);
+
+  const handleApprove = (id: number) => {
+    const request = pendingRequests.find(req => req.id === id);
+    if (!request) return;
+
+    if (request.type === 'create_role') {
+      addTenantRole({ 
+        id: request.details.name.toLowerCase().replace(/\s+/g, '_'), 
+        name: request.details.name, 
+        permissions: [], 
+        description: 'Custom role' 
+      });
+    } else if (request.type === 'add_employee') {
+      const newEmployee: Employee = {
+        id: `emp-${Date.now()}`,
+        firstName: request.details.firstName,
+        lastName: request.details.lastName,
+        email: request.details.email,
+        roleId: request.details.roleId,
+        roleName: request.details.roleId,
+        pin: '0000',
+        payRate: request.details.payRate || 0,
+        payType: request.details.payType || 'Hourly',
+        status: request.details.status || 'Active',
+        commissionEnabled: request.details.commissionEnabled,
+        commissionType: request.details.commissionType,
+        commissionRate: request.details.commissionRate,
+        createdAt: new Date().toISOString()
+      };
+      setEmployees(prev => [...prev, newEmployee]);
+    } else if (request.type === 'update_employee') {
+      setEmployees(prev => prev.map(emp => emp.id === request.details.id ? {
+        ...emp,
+        firstName: request.details.firstName,
+        lastName: request.details.lastName,
+        email: request.details.email,
+        roleId: request.details.roleId,
+        roleName: request.details.roleId,
+        status: request.details.status,
+        payRate: request.details.payRate,
+        payType: request.details.payType,
+        commissionEnabled: request.details.commissionEnabled,
+        commissionType: request.details.commissionType,
+        commissionRate: request.details.commissionRate
+      } : emp));
+    }
+
+    setPendingRequests(prev => prev.filter(req => req.id !== id));
+    alert('Request approved and applied.');
+  };
+
+  const handleReject = (id: number) => {
+    setPendingRequests(prev => prev.filter(req => req.id !== id));
+    alert('Request rejected.');
+  };
+
+  const handleReturn = (id: number, comment: string) => {
+    setPendingRequests(prev => prev.map(req => 
+      req.id === id ? { ...req, status: 'returned', comment } : req
+    ));
+    alert('Request returned for changes.');
+  };
+
+  const handleResubmit = (id: number, updatedDetails: any) => {
+    setPendingRequests(prev => prev.map(req => 
+      req.id === id ? { ...req, status: 'pending', details: updatedDetails, comment: undefined } : req
+    ));
+    alert('Request resubmitted for approval.');
+  };
+
+  const filteredEmployees = employees.filter(e => 
+    `${e.firstName} ${e.lastName}`.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    e.email.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+
+  const handleAddEmployee = (e: React.FormEvent) => {
+    e.preventDefault();
+    const formData = new FormData(e.target as HTMLFormElement);
+    const roleId = formData.get('role') as string;
+    const firstName = formData.get('firstName') as string;
+    const lastName = formData.get('lastName') as string;
+    const email = formData.get('email') as string;
+    const status = formData.get('status') as Employee['status'];
+    const payRate = Number(formData.get('payRate')) || 0;
+    const payType = formData.get('payType') as 'Hourly' | 'Salary';
+    const commissionEnabled = formData.get('commissionEnabled') === 'on';
+    const commissionType = formData.get('commissionType') as 'flat' | 'percentage';
+    const commissionRate = Number(formData.get('commissionRate')) || 0;
+
+    if (session?.role === 'manager' && (roleId === 'manager' || roleId === 'store_owner')) {
+      setPendingRequests(prev => [...prev, { 
+        id: Date.now(), 
+        employee: `${firstName} ${lastName}`, 
+        action: editingEmployee ? `Update ${roleId}` : `Create New ${roleId}`,
+        type: editingEmployee ? 'update_employee' : 'add_employee',
+        status: 'pending',
+        details: { id: editingEmployee?.id, firstName, lastName, email, roleId, status, payRate, payType, commissionEnabled, commissionType, commissionRate }
+      }]);
+      alert('Request submitted for approval.');
+    } else {
+      if (editingEmployee) {
+        setEmployees(prev => prev.map(emp => emp.id === editingEmployee.id ? {
+          ...emp,
+          firstName,
+          lastName,
+          email,
+          roleId,
+          roleName: roleId,
+          status,
+          payRate,
+          payType,
+          commissionEnabled,
+          commissionType,
+          commissionRate
+        } : emp));
+        alert('Employee updated directly.');
+      } else {
+        const newEmployee: Employee = {
+          id: `emp-${Date.now()}`,
+          firstName,
+          lastName,
+          email,
+          roleId,
+          roleName: roleId,
+          pin: '0000',
+          payRate,
+          payType,
+          status: status || 'Active',
+          commissionEnabled,
+          commissionType,
+          commissionRate,
+          createdAt: new Date().toISOString()
+        };
+        setEmployees(prev => [...prev, newEmployee]);
+        alert('Employee added directly.');
+      }
+    }
+    setShowAddModal(false);
+    setEditingEmployee(null);
+  };
+
+  const handleCreateRole = () => {
+    const newRoleName = prompt('Enter new role name:');
+    if (newRoleName) {
+      if (session?.role === 'manager') {
+        setPendingRequests(prev => [...prev, { 
+          id: Date.now(), 
+          employee: 'System', 
+          action: `Create Role: ${newRoleName}`,
+          type: 'create_role',
+          status: 'pending',
+          details: { name: newRoleName }
+        }]);
+        alert('Role creation request submitted for approval.');
+      } else {
+        addTenantRole({ id: newRoleName.toLowerCase().replace(/\s+/g, '_'), name: newRoleName, permissions: [], description: 'Custom role' });
+      }
+    }
+  };
+
+  const renderEmployeeList = () => (
+    <div className="space-y-6">
+      {(session?.role === 'manager' || session?.role === 'store_owner' || session?.role === 'system_owner') && (
+        <PendingApproval 
+          requests={pendingRequests} 
+          onApprove={handleApprove} 
+          onReject={handleReject}
+          onReturn={handleReturn}
+          onResubmit={handleResubmit}
+        />
+      )}
+      <div className="flex justify-between items-center">
+        <div className="relative">
+          <span className="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 text-sm">search</span>
+          <input 
+            type="text" 
+            placeholder="Search employees..."
+            className="pl-11 pr-6 py-3 bg-white/80 backdrop-blur-xl rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 text-sm font-bold text-slate-900 w-64 shadow-sm"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
+        </div>
+        <button 
+          onClick={() => setShowAddModal(true)}
+          className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2"
+        >
+          <span className="material-symbols-outlined text-sm">person_add</span>
+          Add Employee
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {filteredEmployees.map((emp) => {
+          const isStoreOwner = emp.roleId === 'store_owner';
+          const canManage = session?.role === 'system_owner' || session?.role === 'store_owner' || (session?.role === 'manager' && !isStoreOwner && emp.roleId !== 'manager');
+
+          return (
+            <motion.div 
+              key={emp.id}
+              whileHover={{ y: -4 }}
+              className={`bg-white/80 backdrop-blur-xl p-8 rounded-[2.5rem] border border-slate-200 shadow-sm transition-all group relative overflow-hidden ${!canManage ? 'opacity-75' : 'hover:shadow-md'}`}
+            >
+              <div className="absolute top-0 right-0 p-6">
+                <span className={`px-3 py-1 text-[8px] font-black uppercase tracking-widest rounded-lg border ${
+                  emp.status === 'Active' ? 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20' : 'bg-slate-500/10 text-slate-600 border-slate-500/20'
+                }`}>
+                  {emp.status}
+                </span>
+              </div>
+
+              <div className="flex flex-col items-center text-center">
+                <div className="relative mb-6">
+                  <img src={emp.avatar} alt={emp.firstName} className="w-24 h-24 rounded-3xl object-cover border-4 border-white shadow-xl" />
+                  {emp.is2FAEnabled && (
+                    <div className="absolute -bottom-2 -right-2 w-8 h-8 bg-emerald-500 text-white rounded-full flex items-center justify-center border-4 border-white shadow-lg" title="2FA Enabled">
+                      <span className="material-symbols-outlined text-xs">verified_user</span>
+                    </div>
+                  )}
+                </div>
+                
+                <h3 className="text-xl font-black text-primary mb-1">{emp.firstName} {emp.lastName}</h3>
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] mb-4">{emp.roleName}</p>
+                
+                <div className="grid grid-cols-2 gap-4 w-full mb-6">
+                  <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100">
+                    <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-1">Pay Rate</p>
+                    <p className="text-sm font-black text-primary">${emp.payRate}/{emp.payType === 'Hourly' ? 'hr' : 'mo'}</p>
+                  </div>
+                  <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100">
+                    <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-1">Commission</p>
+                    <p className="text-sm font-black text-primary">{emp.commissionRate}%</p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 w-full">
+                  {canManage ? (
+                    <>
+                      <button 
+                        onClick={() => {
+                          setEditingEmployee(emp);
+                          setShowAddModal(true);
+                        }}
+                        className="flex-1 py-3 bg-slate-100 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-slate-200 transition-colors"
+                      >
+                        Edit Profile
+                      </button>
+                      <button className="p-3 bg-slate-100 text-slate-600 rounded-xl hover:bg-slate-200 transition-colors">
+                        <span className="material-symbols-outlined text-sm">history</span>
+                      </button>
+                    </>
+                  ) : (
+                    <div className="flex-1 py-3 bg-slate-50 text-slate-400 text-[10px] font-black uppercase tracking-widest rounded-xl flex items-center justify-center gap-2">
+                      <span className="material-symbols-outlined text-sm">lock</span>
+                      Locked
+                    </div>
+                  )}
+                </div>
+              </div>
+            </motion.div>
+          );
+        })}
+      </div>
+    </div>
+  );
+
+  const renderTimeLogs = () => (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-black text-primary tracking-tight">Time Tracking</h2>
+        <div className="flex gap-4">
+          <button className="px-6 py-3 bg-emerald-500 text-white font-black text-xs rounded-2xl shadow-lg shadow-emerald-500/20 uppercase tracking-widest flex items-center gap-2">
+            <span className="material-symbols-outlined text-sm">login</span>
+            Clock In
+          </button>
+          <button className="px-6 py-3 bg-rose-500 text-white font-black text-xs rounded-2xl shadow-lg shadow-rose-500/20 uppercase tracking-widest flex items-center gap-2">
+            <span className="material-symbols-outlined text-sm">logout</span>
+            Clock Out
+          </button>
+        </div>
+      </div>
+
+      <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
+        <table className="w-full text-left border-collapse">
+          <thead>
+            <tr className="border-b border-slate-100 bg-slate-50/50">
+              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Employee</th>
+              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Clock In</th>
+              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Clock Out</th>
+              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Total Hours</th>
+              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Status</th>
+              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {timeLogs.map((log) => (
+              <tr key={log.id} className="hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0">
+                <td className="px-8 py-6">
+                  <p className="text-sm font-black text-primary">{log.employeeName}</p>
+                </td>
+                <td className="px-8 py-6 text-sm font-bold text-slate-600">{log.clockIn}</td>
+                <td className="px-8 py-6 text-sm font-bold text-slate-600">{log.clockOut || '--'}</td>
+                <td className="px-8 py-6 text-center text-sm font-black text-slate-900">{log.totalHours || '--'}</td>
+                <td className="px-8 py-6">
+                  <span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${
+                    log.status === 'Clocked In' ? 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20' : 'bg-slate-500/10 text-slate-600 border-slate-500/20'
+                  }`}>
+                    {log.status}
+                  </span>
+                </td>
+                <td className="px-8 py-6 text-right">
+                  <button className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl transition-colors">
+                    <span className="material-symbols-outlined text-sm">edit</span>
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+
+  const getPermissionLevel = (role: any, featureId: string): string => {
+    if (Array.isArray(role.permissions)) {
+      if (role.permissions.includes('all')) return 'full';
+      if (role.permissions.includes(featureId)) return 'full';
+      if (role.permissions.includes(`${featureId}_read`)) return 'view';
+      return 'none';
+    }
+    if (role.permissions?.['all'] === 'full') return 'full';
+    return role.permissions?.[featureId] || 'none';
+  };
+
+  const renderPermissions = () => {
+    const features = [
+      { id: 'pos', name: 'Point of Sale' },
+      { id: 'inventory', name: 'Inventory Management' },
+      { id: 'customers', name: 'Customer Directory' },
+      { id: 'reports', name: 'Reporting & Analytics' },
+      { id: 'employees', name: 'Employee Management' },
+      { id: 'settings', name: 'Store Settings' },
+      { id: 'marketing', name: 'Marketing Tools' },
+    ];
+
+    return (
+      <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm mt-8">
+        <h2 className="text-2xl font-black text-primary tracking-tight mb-6">Store Permissions Matrix</h2>
+        <p className="text-slate-500 text-sm font-medium mb-8">Configure which roles have access to specific store features.</p>
+        
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="border-b border-slate-100">
+                <th className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Feature</th>
+                {tenantRolesState.map(role => (
+                  <th key={role.id} className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">{role.name}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {features.map(feature => (
+                <tr key={feature.id} className="border-b border-slate-50">
+                  <td className="px-4 py-4 text-sm font-bold text-slate-700">{feature.name}</td>
+                  {tenantRolesState.map(role => {
+                    const currentLevel = getPermissionLevel(role, feature.id);
+                    const isLocked = role.id === 'store_owner' || (session?.role === 'manager' && role.id === 'manager');
+                    return (
+                      <td key={role.id} className="px-4 py-4 text-center">
+                        <select
+                          disabled={isLocked}
+                          value={currentLevel}
+                          onChange={(e) => {
+                            if (isLocked) return;
+                            const newLevel = e.target.value;
+                            const newPermissions = Array.isArray(role.permissions) 
+                              ? { ...role.permissions.reduce((acc, p) => ({ ...acc, [p]: 'full' }), {}), [feature.id]: newLevel }
+                              : { ...role.permissions, [feature.id]: newLevel };
+                            
+                            updateTenantRole(role.id, newPermissions as any);
+                          }}
+                          className="text-xs font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 focus:ring-2 focus:ring-primary/20 focus:outline-none disabled:opacity-50"
+                        >
+                          <option value="none">None</option>
+                          <option value="view">View Only</option>
+                          <option value="create">Create</option>
+                          <option value="edit">Edit</option>
+                          <option value="approve">Approve</option>
+                          <option value="manage">Manage</option>
+                          <option value="full">Full Access</option>
+                        </select>
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  };
+
+  const renderRoles = () => (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-black text-primary tracking-tight">Roles & Permissions</h2>
+        <button 
+          onClick={handleCreateRole}
+          className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2"
+        >
+          <span className="material-symbols-outlined text-sm">add</span>
+          Create Role
+        </button>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        {tenantRolesState.map(role => {
+          const isStoreOwnerRole = role.id === 'store_owner';
+          const isLocked = isStoreOwnerRole;
+
+          return (
+            <div key={role.id} className={`bg-white/80 backdrop-blur-xl p-8 rounded-[2.5rem] border border-slate-200 shadow-sm transition-all group ${isLocked ? 'opacity-75' : 'hover:shadow-md'}`}>
+              <div className="flex justify-between items-start mb-6">
+                <div className="w-12 h-12 rounded-2xl bg-primary/5 flex items-center justify-center">
+                  <span className="material-symbols-outlined text-2xl text-primary">security</span>
+                </div>
+                {isLocked && (
+                  <span className="material-symbols-outlined text-slate-400">lock</span>
+                )}
+              </div>
+              <h3 className="text-xl font-black text-primary mb-2">{role.name}</h3>
+              <p className="text-xs font-medium text-slate-500 mb-6">{role.description}</p>
+              <div className="flex flex-wrap gap-2 mb-8">
+                {Array.isArray(role.permissions) 
+                  ? role.permissions.map(p => (
+                      <span key={p} className="px-2 py-1 bg-slate-100 text-slate-500 text-[8px] font-black uppercase tracking-widest rounded-md">
+                        {p}
+                      </span>
+                    ))
+                  : Object.entries(role.permissions).map(([k, v]) => (
+                      v !== 'none' && (
+                        <span key={k} className="px-2 py-1 bg-slate-100 text-slate-500 text-[8px] font-black uppercase tracking-widest rounded-md">
+                          {k}: {v}
+                        </span>
+                      )
+                    ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {renderPermissions()}
+    </div>
+  );
+
+  const renderActivityLog = () => (
+    <div className="space-y-6">
+      <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
+        <table className="w-full text-left border-collapse">
+          <thead>
+            <tr className="border-b border-slate-100 bg-slate-50/50">
+              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Employee</th>
+              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Action</th>
+              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Details</th>
+              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Timestamp</th>
+            </tr>
+          </thead>
+          <tbody>
+            {activityLogs.map((log) => (
+              <tr key={log.id} className="hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0">
+                <td className="px-8 py-6">
+                  <p className="text-sm font-black text-primary">{log.employeeName}</p>
+                </td>
+                <td className="px-8 py-6">
+                  <span className="px-3 py-1 bg-primary/5 text-primary text-[10px] font-black uppercase tracking-widest rounded-lg border border-primary/10">
+                    {log.action}
+                  </span>
+                </td>
+                <td className="px-8 py-6 text-sm font-medium text-slate-600">{log.details}</td>
+                <td className="px-8 py-6 text-sm font-bold text-slate-400">{log.timestamp}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="space-y-8">
+      <header className="flex items-end justify-between">
+        <div>
+          <span className="text-[10px] uppercase tracking-[0.2em] text-secondary font-extrabold mb-1 block">Workforce Management</span>
+          <h2 className="text-3xl font-extrabold text-primary tracking-tight font-headline">Manage Employees</h2>
+        </div>
+        <div className="flex items-center gap-2 bg-white/80 backdrop-blur-xl p-1.5 rounded-2xl border border-slate-200 shadow-sm">
+          {[
+            { id: 'list', label: 'Employees', icon: 'group' },
+            { id: 'time', label: 'Time Tracking', icon: 'schedule' },
+            { id: 'roles', label: 'Roles', icon: 'security' },
+            { id: 'activity', label: 'Activity Log', icon: 'history' },
+            { id: 'payroll', label: 'Payroll', icon: 'payments' }
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id as any)}
+              className={`flex items-center gap-2 px-6 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${
+                activeTab === tab.id 
+                  ? 'bg-primary text-white shadow-lg shadow-primary/20' 
+                  : 'text-slate-400 hover:text-primary hover:bg-slate-50'
+              }`}
+            >
+              <span className="material-symbols-outlined text-sm">{tab.icon}</span>
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      </header>
+
+      <AnimatePresence mode="wait">
+        <motion.div
+          key={activeTab}
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -10 }}
+          transition={{ duration: 0.2 }}
+        >
+          {activeTab === 'list' && renderEmployeeList()}
+          {activeTab === 'time' && renderTimeLogs()}
+          {activeTab === 'roles' && renderRoles()}
+          {activeTab === 'activity' && renderActivityLog()}
+          {activeTab === 'payroll' && (
+            <div className="bg-white/80 backdrop-blur-xl p-12 rounded-[3rem] border border-slate-200 flex flex-col items-center justify-center text-center">
+              <div className="w-20 h-20 bg-primary/5 rounded-full flex items-center justify-center mb-6">
+                <span className="material-symbols-outlined text-4xl text-primary">payments</span>
+              </div>
+              <h3 className="text-2xl font-black text-primary tracking-tight mb-2">Payroll & Commissions</h3>
+              <p className="text-sm font-bold text-slate-400 max-w-md mb-8">
+                Manage employee pay rates, calculate commissions, and process payroll payments.
+              </p>
+              <button 
+                onClick={() => setShowPayrollWizard(true)}
+                className="px-12 py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-xl shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 transition-all"
+              >
+                Run Payroll Wizard
+              </button>
+            </div>
+          )}
+        </motion.div>
+      </AnimatePresence>
+
+      {/* Add Employee Modal */}
+      <AnimatePresence>
+        {showAddModal && (
+          <div key="add-modal" className="fixed inset-0 z-50 flex items-center justify-center p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowAddModal(false)}
+              className="absolute inset-0 bg-slate-900/40 backdrop-blur-md"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-2xl bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden"
+            >
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                <div>
+                  <h3 className="text-2xl font-black text-primary tracking-tight">{editingEmployee ? 'Edit Employee' : 'Add New Employee'}</h3>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Set up profile and permissions</p>
+                </div>
+                <button onClick={() => { setShowAddModal(false); setEditingEmployee(null); }} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-slate-400">close</span>
+                </button>
+              </div>
+              
+              <form onSubmit={handleAddEmployee} className="p-8 space-y-6 max-h-[70vh] overflow-y-auto">
+                <div className="grid grid-cols-2 gap-6">
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">First Name</label>
+                    <input name="firstName" defaultValue={editingEmployee?.firstName} required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="John" />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Last Name</label>
+                    <input name="lastName" defaultValue={editingEmployee?.lastName} required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="Doe" />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Email Address</label>
+                    <input name="email" type="email" defaultValue={editingEmployee?.email} required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="john@example.com" />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Role</label>
+                    <select name="role" defaultValue={editingEmployee?.roleId} required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700">
+                      {tenantRolesState.filter(r => {
+                        return r.id !== 'store_owner'; // No one can assign Store Owner from store side
+                      }).map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+                    </select>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Status</label>
+                    <select name="status" defaultValue={editingEmployee?.status || 'Active'} required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700">
+                      <option value="Active">Active</option>
+                      <option value="Inactive">Inactive</option>
+                      <option value="Suspended">Suspended</option>
+                      <option value="Pending Invite">Pending Invite</option>
+                    </select>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Access PIN</label>
+                    <input name="pin" type="password" maxLength={4} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="****" />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Pay Rate</label>
+                    <input name="payRate" type="number" defaultValue={editingEmployee?.payRate} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="20.00" />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Pay Type</label>
+                    <select name="payType" defaultValue={editingEmployee?.payType || 'Hourly'} required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700">
+                      <option value="Hourly">Hourly</option>
+                      <option value="Salary">Salary</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="space-y-4 pt-4 border-t border-slate-100">
+                  <h4 className="text-sm font-black text-primary tracking-tight">Commissions</h4>
+                  <div className="flex items-center gap-4">
+                    <input type="checkbox" name="commissionEnabled" defaultChecked={editingEmployee?.commissionEnabled} id="commissionEnabled" className="w-4 h-4 text-primary rounded border-slate-300 focus:ring-primary" />
+                    <label htmlFor="commissionEnabled" className="text-xs font-bold text-slate-700">Enable Commissions</label>
+                  </div>
+                  <div className="grid grid-cols-2 gap-6">
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Commission Type</label>
+                      <select name="commissionType" defaultValue={editingEmployee?.commissionType || 'percentage'} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700">
+                        <option value="percentage">Percentage (%)</option>
+                        <option value="flat">Flat Amount ($)</option>
+                      </select>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Commission Rate/Amount</label>
+                      <input name="commissionRate" type="number" defaultValue={editingEmployee?.commissionRate} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="5.00" />
+                    </div>
+                  </div>
+                </div>
+                
+                <div className="flex items-center gap-4 p-6 bg-emerald-50 rounded-3xl border border-emerald-100">
+                  <div className="w-10 h-10 bg-emerald-500 text-white rounded-full flex items-center justify-center">
+                    <span className="material-symbols-outlined text-sm">verified_user</span>
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-xs font-black text-emerald-900 uppercase tracking-widest">Enable 2FA</p>
+                    <p className="text-[10px] font-medium text-emerald-600">Require two-factor authentication for this employee.</p>
+                  </div>
+                  <div className="w-12 h-6 bg-emerald-500 rounded-full relative">
+                    <div className="absolute right-1 top-1 w-4 h-4 bg-white rounded-full shadow-sm"></div>
+                  </div>
+                </div>
+
+                <button type="submit" className="w-full py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 transition-all">
+                  {editingEmployee ? 'Update Employee Profile' : 'Create Employee Profile'}
+                </button>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+      {/* Payroll Wizard Modal */}
+      <AnimatePresence>
+        {showPayrollWizard && (
+          <div key="payroll-modal" className="fixed inset-0 z-50 flex items-center justify-center p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowPayrollWizard(false)}
+              className="absolute inset-0 bg-slate-900/40 backdrop-blur-md"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-4xl bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[90vh]"
+            >
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                <div>
+                  <h3 className="text-2xl font-black text-primary tracking-tight">Payroll Wizard</h3>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Review and process employee payments</p>
+                </div>
+                <button onClick={() => setShowPayrollWizard(false)} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-slate-400">close</span>
+                </button>
+              </div>
+              
+              <div className="p-8 overflow-y-auto flex-1">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-slate-100 bg-slate-50/50">
+                      <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Employee</th>
+                      <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Base Pay</th>
+                      <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Commissions</th>
+                      <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Total Pay</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {employees.map((emp) => {
+                      const basePay = emp.payType === 'Salary' ? emp.payRate : emp.payRate * 40; // Mock 40 hours
+                      const commissions = emp.commissionEnabled ? (emp.commissionType === 'flat' ? emp.commissionRate : basePay * (emp.commissionRate / 100)) : 0;
+                      const totalPay = basePay + commissions;
+                      return (
+                        <tr key={emp.id} className="border-b border-slate-50">
+                          <td className="px-6 py-4">
+                            <p className="text-sm font-black text-primary">{emp.firstName} {emp.lastName}</p>
+                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{emp.roleName}</p>
+                          </td>
+                          <td className="px-6 py-4 text-right text-sm font-bold text-slate-600">${basePay.toFixed(2)}</td>
+                          <td className="px-6 py-4 text-right text-sm font-bold text-emerald-600">${commissions.toFixed(2)}</td>
+                          <td className="px-6 py-4 text-right text-sm font-black text-primary">${totalPay.toFixed(2)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              
+              <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex justify-end gap-4">
+                <button onClick={() => setShowPayrollWizard(false)} className="px-8 py-4 bg-white text-slate-600 font-black text-sm rounded-2xl border border-slate-200 hover:bg-slate-50 transition-all uppercase tracking-widest">
+                  Cancel
+                </button>
+                <button onClick={() => { console.log('Payroll processed successfully!'); setShowPayrollWizard(false); }} className="px-8 py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 hover:bg-primary/90 transition-all uppercase tracking-widest">
+                  Process Payroll
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}

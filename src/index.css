@@ -1,0 +1,42 @@
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@200;300;400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Manrope", ui-sans-serif, system-ui, sans-serif;
+  --font-headline: "Manrope", sans-serif;
+  
+  --color-primary: #003633;
+  --color-secondary: #506600;
+  --color-accent: #b4d25c;
+  --color-surface: #fbf9f8;
+  --color-teal-950: #00201e;
+  --color-teal-900: #003633;
+  --color-teal-800: #134e4a;
+  --color-lime-400: #b4d25c;
+  --color-lime-500: #506600;
+}
+
+@layer base {
+  body {
+    @apply bg-surface text-slate-900 antialiased;
+  }
+}
+
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  vertical-align: middle;
+}
+
+.glass-panel {
+  background: rgba(251, 249, 248, 0.7);
+  backdrop-filter: blur(16px);
+}
+
+.signature-gradient {
+  background: linear-gradient(135deg, #003633 0%, #134E4A 100%);
+}
+
+.ghost-border {
+  border: 1px solid rgba(191, 200, 198, 0.15);
+}
