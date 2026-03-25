@@ -18,7 +18,7 @@ A multi-tenant SaaS platform frontend built with React, TypeScript, Vite, Tailwi
 - `src/firebase.ts` - Firebase initialization
 - `src/types.ts` - TypeScript type definitions
 - `src/context/AccessContext.tsx` - Auth session, tenant resolution, role management, preview mode
-- `src/context/accessConfig.ts` - Platform/tenant roles, plan features, permissions
+- `src/context/accessConfig.ts` - Platform/tenant roles, plan features, permissions, adminPermissions
 - `src/components/TenantHeader.tsx` - Top header with notification bell, check-in, avatar, quick menu
 - `src/components/Employees.tsx` - Employee management with roles, time tracking, payroll, activity
 - `src/components/PendingApproval.tsx` - Approval workflow with labeled field detail view
@@ -54,6 +54,10 @@ A multi-tenant SaaS platform frontend built with React, TypeScript, Vite, Tailwi
 - **Attendance lifecycle**: Full Check In → Start Break → Back from Break → Clock Out workflow
 - **Time tracking**: Owner/manager get employee selector picker for all attendance actions; other roles self-clock only
 - **Manager restrictions**: Cannot manage Store Owner attendance, cannot edit Store Owner role/status
+- **Store Permissions Matrix**: Module access (sales, repairs, inventory, customers, employees, invoices, services, reports, prospects, marketing, integrations, widgets, settings, support) + Admin permissions (manage_employees, create_roles, edit_roles, manage_role_permissions, assign_roles, assign_same_role, assign_manager_role, manage_attendance, manage_compensation, approve_requests)
+- **Manager delegation**: Manager cannot assign Manager role by default; requires explicit `assign_manager_role` permission from Store Owner
+- **Admin permissions**: Not plan-gated; enforced by role only (via adminPermissions array in accessConfig)
+- **UI enforcement**: Add Employee (manage_employees), Create Role (create_roles), Manage Permissions (manage_role_permissions), role dropdown (assign_manager_role), PendingApproval (approve_requests)
 - **Preview mode**: DevSessionSwitcher enables role/tenant switching for development
 
 ## Data Model

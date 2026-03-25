@@ -4,6 +4,19 @@ export type Role = 'system_owner' | 'support_admin' | 'billing_admin' | 'operati
 export type Plan = 'starter' | 'growth' | 'advanced';
 export type AccountStatus = 'active' | 'trialing' | 'overdue' | 'suspended' | 'read_only' | 'pending_activation';
 
+export const adminPermissions = [
+  'manage_employees',
+  'create_roles',
+  'edit_roles',
+  'manage_role_permissions',
+  'assign_roles',
+  'assign_same_role',
+  'assign_manager_role',
+  'manage_attendance',
+  'manage_compensation',
+  'approve_requests',
+];
+
 export const platformRoles = [
   { id: 'system_owner', name: 'System Owner', permissions: ['all'], description: 'Full platform access' },
   { id: 'support_admin', name: 'Support Admin', permissions: ['tenants', 'support_tools'], description: 'Customer support and troubleshooting' },
@@ -14,7 +27,10 @@ export const platformRoles = [
 
 export const tenantRoles: EmployeeRole[] = [
   { id: 'store_owner', name: 'Store Owner', permissions: ['all'], description: 'Full system access' },
-  { id: 'manager', name: 'Manager', permissions: ['dashboard', 'sales', 'repairs', 'inventory', 'customers', 'employees', 'invoices', 'services', 'support', 'reports', 'prospects'], description: 'Store management access (limited)' },
+  { id: 'manager', name: 'Manager', permissions: [
+    'dashboard', 'sales', 'repairs', 'inventory', 'customers', 'employees', 'invoices', 'services', 'support', 'reports', 'prospects',
+    'manage_employees', 'assign_roles', 'manage_attendance', 'manage_compensation', 'approve_requests'
+  ], description: 'Store management access (limited)' },
   { id: 'technician', name: 'Technician', permissions: ['dashboard', 'repairs', 'inventory', 'services', 'support', 'customers_read', 'invoices_read'], description: 'Repair and parts access' },
   { id: 'sales_staff', name: 'Sales Associate', permissions: ['dashboard', 'sales', 'customers', 'invoices', 'support', 'prospects', 'inventory_read'], description: 'Sales and customer access' },
 ];

@@ -1,0 +1,149 @@
+You are now acting as:
+Principal RBAC Architect + Principal Store Permissions Systems Designer + Principal React State Engineer + Principal Frontend Workflow Engineer + Principal Product QA Auditor
+
+IMPORTANT:
+Do not touch auth flow.
+Do not redesign the UI.
+Preserve the current design baseline exactly.
+
+This is the final store-side RBAC normalization pass before Firestore persistence.
+
+==================================================
+1. GOAL
+==================================================
+
+Normalize and complete the Store Permissions Matrix and delegated role-assignment model so store-side permissions are explicit, extensible, and professionally controlled.
+
+==================================================
+2. EXPAND STORE PERMISSIONS MATRIX
+==================================================
+
+Add these modules/features to the Store Permissions Matrix so Store Owner can explicitly grant/revoke them:
+
+- Reports
+- Prospects
+- Marketing
+- Integrations
+- Widgets
+
+These must behave like the rest of the store-side permissioned modules:
+- visible in permissions UI
+- respected by sidebar/navigation
+- respected by route/page access
+- respected by action/button visibility where applicable
+
+==================================================
+3. ADD EXPLICIT ROLE-MANAGEMENT PERMISSIONS
+==================================================
+
+The Store Permissions Matrix must support role/employee authority permissions, not only page/module permissions.
+
+Add explicit store-side permissions such as:
+
+- manage_employees
+- create_roles
+- edit_roles
+- manage_role_permissions
+- assign_roles
+- assign_same_role
+- assign_manager_role
+- manage_attendance
+- manage_compensation
+- approve_requests
+
+Use clear user-facing labels in the UI, but keep internal logic structured and explicit.
+
+==================================================
+4. MANAGER DELEGATION RULES
+==================================================
+
+Implement this rule correctly:
+
+A Manager must NOT automatically be able to assign the Manager role just because they are a Manager.
+
+Instead:
+- by default, Manager can assign only subordinate roles that the Store Owner allows
+- Manager can assign/create another Manager ONLY if Store Owner explicitly grants the dedicated permission
+- Manager must never manage Store Owner role
+- Store Owner role remains platform-protected
+
+Recommended implementation:
+- `assign_manager_role` controls whether Manager may assign the Manager role
+- `assign_same_role` may optionally control whether a role can assign its own level
+- keep this logic explicit and auditable
+
+==================================================
+5. APPLY PERMISSIONS TO REAL UI BEHAVIOR
+==================================================
+
+The new permissions must actively affect:
+- role dropdowns in Add/Edit Employee
+- Create Role availability
+- Manage Permissions availability
+- employee/role actions visibility
+- route access where relevant
+- manager approval/request behavior if manager lacks direct authority
+
+Examples:
+- If manager lacks `assign_manager_role`, Manager role should not be assignable in employee creation/edit flows
+- If manager lacks `create_roles`, Create Role should be hidden/disabled
+- If manager lacks `manage_role_permissions`, Manage Permissions should be hidden/disabled
+- If manager lacks Reports/Marketing/etc permissions, those modules should not appear in sidebar or should remain inaccessible
+
+==================================================
+6. OPTIONAL UX POLISH IN THIS SAME PASS
+==================================================
+
+If easy and low-risk, also improve these without redesign:
+
+A. New Customer shortcut:
+- allow New Customer flow to open directly as modal/drawer from quick actions, not only by routing to Customers page first
+
+B. Hold Sale:
+- instead of just resuming by route context, open a Held Sales list/modal when useful so user can resume an existing held transaction intentionally
+
+Do not overbuild these if they risk breaking working flows.
+
+==================================================
+7. DO NOT BREAK THESE
+==================================================
+
+Do NOT break:
+- auth flow
+- preview mode
+- approval workflow
+- attendance workflow
+- restored Reports/Prospects/Marketing/Integrations/Widgets pages
+- POS flow
+- current design baseline
+
+==================================================
+8. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether Reports/Prospects/Marketing/Integrations/Widgets were added to Store Permissions Matrix
+C. exact new store-side role/employee permissions added
+D. whether Manager can assign Manager only when explicitly granted permission
+E. whether role dropdowns now respect delegated permissions
+F. whether Create Role / Manage Permissions visibility now respects delegated permissions
+G. whether sidebar/module visibility respects the expanded permissions matrix
+H. whether optional New Customer direct modal flow was improved
+I. whether optional Hold Sale held-sales modal/list was improved
+J. confirmation that auth flow was not touched/broken
+K. confirmation that no visual drift was introduced
+
+==================================================
+9. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- Reports/Prospects/Marketing/Integrations/Widgets are in Store Permissions Matrix
+- Manager cannot assign Manager by default
+- Manager can assign Manager only when explicitly granted permission
+- role dropdowns respect delegated permissions
+- Create Role / Manage Permissions visibility respects delegated permissions
+- sidebar/module access respects expanded permissions
+- auth flow still works
+- no visual drift was introduced

@@ -56,18 +56,40 @@ const MOCK_ACTIVITY_LOGS: EmployeeActivityLog[] = [
   { id: 'al2', employeeId: 'e2', employeeName: 'Sarah Jenkins', action: 'Update Ticket', details: 'Updated status of Ticket #1001 to Completed', timestamp: '2024-03-20 10:15' }
 ];
 
-const storeFeatures = [
-  { id: 'pos', name: 'Point of Sale' },
+const storeModuleFeatures = [
+  { id: 'sales', name: 'Point of Sale' },
+  { id: 'repairs', name: 'Repairs & Tickets' },
   { id: 'inventory', name: 'Inventory Management' },
   { id: 'customers', name: 'Customer Directory' },
-  { id: 'reports', name: 'Reporting & Analytics' },
   { id: 'employees', name: 'Employee Management' },
-  { id: 'settings', name: 'Store Settings' },
+  { id: 'invoices', name: 'Invoices & Billing' },
+  { id: 'services', name: 'Services Catalog' },
+  { id: 'reports', name: 'Reporting & Analytics' },
+  { id: 'prospects', name: 'Prospects & Leads' },
   { id: 'marketing', name: 'Marketing Tools' },
+  { id: 'integrations', name: 'Integrations' },
+  { id: 'widgets', name: 'Widgets' },
+  { id: 'settings', name: 'Store Settings' },
+  { id: 'support', name: 'Support Center' },
 ];
 
+const storeAdminFeatures = [
+  { id: 'manage_employees', name: 'Manage Employees' },
+  { id: 'create_roles', name: 'Create Roles' },
+  { id: 'edit_roles', name: 'Edit Roles' },
+  { id: 'manage_role_permissions', name: 'Manage Role Permissions' },
+  { id: 'assign_roles', name: 'Assign Roles' },
+  { id: 'assign_same_role', name: 'Assign Same-Level Role' },
+  { id: 'assign_manager_role', name: 'Assign Manager Role' },
+  { id: 'manage_attendance', name: 'Manage Attendance' },
+  { id: 'manage_compensation', name: 'Manage Compensation' },
+  { id: 'approve_requests', name: 'Approve Requests' },
+];
+
+const storeFeatures = [...storeModuleFeatures, ...storeAdminFeatures];
+
 export default function Employees() {
-  const { session, tenantRolesState = [], addTenantRole, updateTenantRole } = useAccess();
+  const { session, tenantRolesState = [], addTenantRole, updateTenantRole, canAccess } = useAccess();
   const [activeTab, setActiveTab] = useState<'list' | 'time' | 'roles' | 'activity' | 'payroll'>('list');
   const [employees, setEmployees] = useState<Employee[]>(MOCK_EMPLOYEES);
   const [timeLogs, setTimeLogs] = useState<EmployeeTimeLog[]>(MOCK_TIME_LOGS);
@@ -215,7 +237,11 @@ export default function Employees() {
     const commissionType = formData.get('commissionType') as 'flat' | 'percentage';
     const commissionRate = Number(formData.get('commissionRate')) || 0;
 
-    if (session?.role === 'manager' && (roleId === 'manager' || roleId === 'store_owner')) {
+    const needsApproval = roleId === 'store_owner' || 
+      (roleId === 'manager' && !canAccess('assign_manager_role')) ||
+      (!canAccess('assign_roles'));
+
+    if (needsApproval && session?.role !== 'store_owner' && session?.role !== 'system_owner') {
       setPendingRequests(prev => [...prev, { 
         id: Date.now(), 
         employee: `${firstName} ${lastName}`, 
@@ -273,7 +299,7 @@ export default function Employees() {
     if (!newRole.name.trim()) return;
     const roleId = newRole.name.toLowerCase().replace(/\s+/g, '_');
 
-    if (session?.role === 'manager') {
+    if (!canAccess('create_roles') && session?.role !== 'store_owner' && session?.role !== 'system_owner') {
       setPendingRequests(prev => [...prev, { 
         id: Date.now(), 
         employee: 'System', 
@@ -377,8 +403,10 @@ export default function Employees() {
   const [showBreakPicker, setShowBreakPicker] = useState(false);
   const [showEndBreakPicker, setShowEndBreakPicker] = useState(false);
 
+  const canManageAttendance = isOwner || canAccess('manage_attendance');
+
   const handleStartBreak = () => {
-    if (isOwnerOrManager) {
+    if (canManageAttendance) {
       setShowBreakPicker(true);
       return;
     }
@@ -388,7 +416,7 @@ export default function Employees() {
   };
 
   const handleEndBreak = () => {
-    if (isOwnerOrManager) {
+    if (canManageAttendance) {
       setShowEndBreakPicker(true);
       return;
     }
@@ -398,7 +426,7 @@ export default function Employees() {
   };
 
   const handleClockIn = () => {
-    if (isOwnerOrManager) {
+    if (canManageAttendance) {
       setShowClockInPicker(true);
       return;
     }
@@ -408,7 +436,7 @@ export default function Employees() {
   };
 
   const handleClockOut = () => {
-    if (isOwnerOrManager) {
+    if (canManageAttendance) {
       setShowClockOutPicker(true);
       return;
     }
@@ -445,7 +473,7 @@ export default function Employees() {
 
   const renderEmployeeList = () => (
     <div className="space-y-6">
-      {(session?.role === 'manager' || session?.role === 'store_owner' || session?.role === 'system_owner') && (
+      {(isOwner || canAccess('approve_requests')) && (
         <PendingApproval 
           requests={pendingRequests} 
           onApprove={handleApprove} 
@@ -465,19 +493,21 @@ export default function Employees() {
             onChange={(e) => setSearchQuery(e.target.value)}
           />
         </div>
-        <button 
-          onClick={() => setShowAddModal(true)}
-          className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2"
-        >
-          <span className="material-symbols-outlined text-sm">person_add</span>
-          Add Employee
-        </button>
+        {(isOwner || canAccess('manage_employees')) && (
+          <button 
+            onClick={() => setShowAddModal(true)}
+            className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2"
+          >
+            <span className="material-symbols-outlined text-sm">person_add</span>
+            Add Employee
+          </button>
+        )}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {filteredEmployees.map((emp) => {
           const isStoreOwner = emp.roleId === 'store_owner';
-          const canManage = session?.role === 'system_owner' || session?.role === 'store_owner' || (session?.role === 'manager' && !isStoreOwner && emp.roleId !== 'manager');
+          const canManage = session?.role === 'system_owner' || session?.role === 'store_owner' || (canAccess('manage_employees') && !isStoreOwner && emp.roleId !== 'manager');
 
           return (
             <motion.div 
@@ -632,7 +662,7 @@ export default function Employees() {
                 </td>
                 <td className="px-8 py-6 text-right">
                   <div className="flex items-center justify-end gap-1">
-                    {isOwnerOrManager && log.status === 'Clocked Out' && (
+                    {canManageAttendance && log.status === 'Clocked Out' && (
                       <button 
                         onClick={() => {
                           const emp = employees.find(e => e.id === log.employeeId);
@@ -655,7 +685,7 @@ export default function Employees() {
                         <span className="material-symbols-outlined text-sm">login</span>
                       </button>
                     )}
-                    {isOwnerOrManager && log.status === 'Clocked In' && (
+                    {canManageAttendance && log.status === 'Clocked In' && (
                       <button 
                         onClick={() => {
                           const emp = employees.find(e => e.id === log.employeeId);
@@ -673,7 +703,7 @@ export default function Employees() {
                         <span className="material-symbols-outlined text-sm">free_breakfast</span>
                       </button>
                     )}
-                    {isOwnerOrManager && log.status === 'Clocked In' && (
+                    {canManageAttendance && log.status === 'Clocked In' && (
                       <button 
                         onClick={() => {
                           const emp = employees.find(e => e.id === log.employeeId);
@@ -691,7 +721,7 @@ export default function Employees() {
                         <span className="material-symbols-outlined text-sm">logout</span>
                       </button>
                     )}
-                    {isOwnerOrManager && log.status === 'On Break' && (
+                    {canManageAttendance && log.status === 'On Break' && (
                       <button 
                         onClick={() => {
                           const emp = employees.find(e => e.id === log.employeeId);
@@ -737,10 +767,66 @@ export default function Employees() {
     return role.permissions?.[featureId] || 'none';
   };
 
+  const renderPermissionRow = (feature: { id: string; name: string }, isAdminPerm: boolean) => (
+    <tr key={feature.id} className="border-b border-slate-50">
+      <td className="px-4 py-4 text-sm font-bold text-slate-700">{feature.name}</td>
+      {tenantRolesState.map(role => {
+        const currentLevel = getPermissionLevel(role, feature.id);
+        const isLocked = role.id === 'store_owner' || (session?.role === 'manager' && (role.id === 'manager' || !canAccess('edit_roles')));
+        return (
+          <td key={role.id} className="px-4 py-4 text-center">
+            {isAdminPerm ? (
+              <select
+                disabled={isLocked}
+                value={currentLevel === 'none' ? 'off' : 'on'}
+                onChange={(e) => {
+                  if (isLocked) return;
+                  const newVal = e.target.value === 'on' ? 'full' : 'none';
+                  const newPermissions = Array.isArray(role.permissions) 
+                    ? (newVal === 'full' 
+                        ? [...role.permissions.filter(p => p !== feature.id), feature.id]
+                        : role.permissions.filter(p => p !== feature.id))
+                    : { ...role.permissions, [feature.id]: newVal };
+                  updateTenantRole(role.id, newPermissions as any);
+                }}
+                className="text-xs font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 focus:ring-2 focus:ring-primary/20 focus:outline-none disabled:opacity-50"
+              >
+                <option value="off">Denied</option>
+                <option value="on">Granted</option>
+              </select>
+            ) : (
+              <select
+                disabled={isLocked}
+                value={currentLevel}
+                onChange={(e) => {
+                  if (isLocked) return;
+                  const newLevel = e.target.value;
+                  const newPermissions = Array.isArray(role.permissions) 
+                    ? { ...role.permissions.reduce((acc: any, p: string) => ({ ...acc, [p]: 'full' }), {}), [feature.id]: newLevel }
+                    : { ...role.permissions, [feature.id]: newLevel };
+                  updateTenantRole(role.id, newPermissions as any);
+                }}
+                className="text-xs font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 focus:ring-2 focus:ring-primary/20 focus:outline-none disabled:opacity-50"
+              >
+                <option value="none">None</option>
+                <option value="view">View Only</option>
+                <option value="create">Create</option>
+                <option value="edit">Edit</option>
+                <option value="approve">Approve</option>
+                <option value="manage">Manage</option>
+                <option value="full">Full Access</option>
+              </select>
+            )}
+          </td>
+        );
+      })}
+    </tr>
+  );
+
   const renderPermissions = () => (
     <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm mt-8">
       <h2 className="text-2xl font-black text-primary tracking-tight mb-6">Store Permissions Matrix</h2>
-      <p className="text-slate-500 text-sm font-medium mb-8">Configure which roles have access to specific store features.</p>
+      <p className="text-slate-500 text-sm font-medium mb-8">Configure which roles have access to specific store features and administrative actions.</p>
       
       <div className="overflow-x-auto">
         <table className="w-full text-left border-collapse">
@@ -753,41 +839,14 @@ export default function Employees() {
             </tr>
           </thead>
           <tbody>
-            {storeFeatures.map(feature => (
-              <tr key={feature.id} className="border-b border-slate-50">
-                <td className="px-4 py-4 text-sm font-bold text-slate-700">{feature.name}</td>
-                {tenantRolesState.map(role => {
-                  const currentLevel = getPermissionLevel(role, feature.id);
-                  const isLocked = role.id === 'store_owner' || (session?.role === 'manager' && role.id === 'manager');
-                  return (
-                    <td key={role.id} className="px-4 py-4 text-center">
-                      <select
-                        disabled={isLocked}
-                        value={currentLevel}
-                        onChange={(e) => {
-                          if (isLocked) return;
-                          const newLevel = e.target.value;
-                          const newPermissions = Array.isArray(role.permissions) 
-                            ? { ...role.permissions.reduce((acc: any, p: string) => ({ ...acc, [p]: 'full' }), {}), [feature.id]: newLevel }
-                            : { ...role.permissions, [feature.id]: newLevel };
-                          
-                          updateTenantRole(role.id, newPermissions as any);
-                        }}
-                        className="text-xs font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 focus:ring-2 focus:ring-primary/20 focus:outline-none disabled:opacity-50"
-                      >
-                        <option value="none">None</option>
-                        <option value="view">View Only</option>
-                        <option value="create">Create</option>
-                        <option value="edit">Edit</option>
-                        <option value="approve">Approve</option>
-                        <option value="manage">Manage</option>
-                        <option value="full">Full Access</option>
-                      </select>
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
+            <tr className="bg-slate-50/80">
+              <td colSpan={tenantRolesState.length + 1} className="px-4 py-3 text-[10px] font-black text-primary uppercase tracking-widest">Module Access</td>
+            </tr>
+            {storeModuleFeatures.map(feature => renderPermissionRow(feature, false))}
+            <tr className="bg-slate-50/80">
+              <td colSpan={tenantRolesState.length + 1} className="px-4 py-3 text-[10px] font-black text-primary uppercase tracking-widest">Administrative Permissions</td>
+            </tr>
+            {storeAdminFeatures.map(feature => renderPermissionRow(feature, true))}
           </tbody>
         </table>
       </div>
@@ -798,16 +857,18 @@ export default function Employees() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-black text-primary tracking-tight">Roles & Permissions</h2>
-        <button 
-          onClick={() => {
-            setNewRole({ name: '', description: '', status: 'active', permissions: [] });
-            setShowCreateRoleModal(true);
-          }}
-          className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2"
-        >
-          <span className="material-symbols-outlined text-sm">add</span>
-          Create Role
-        </button>
+        {(isOwner || canAccess('create_roles')) && (
+          <button 
+            onClick={() => {
+              setNewRole({ name: '', description: '', status: 'active', permissions: [] });
+              setShowCreateRoleModal(true);
+            }}
+            className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2"
+          >
+            <span className="material-symbols-outlined text-sm">add</span>
+            Create Role
+          </button>
+        )}
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         {tenantRolesState.map(role => {
@@ -851,7 +912,7 @@ export default function Employees() {
           );
         })}
       </div>
-      {renderPermissions()}
+      {(isOwner || canAccess('manage_role_permissions')) && renderPermissions()}
     </div>
   );
 
@@ -1002,7 +1063,11 @@ export default function Employees() {
                       </div>
                     ) : (
                       <select name="role" defaultValue={editingEmployee?.roleId} required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700">
-                        {tenantRolesState.filter(r => r.id !== 'store_owner').map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+                        {tenantRolesState.filter(r => {
+                          if (r.id === 'store_owner') return false;
+                          if (r.id === 'manager' && !canAccess('assign_manager_role') && !isOwner) return false;
+                          return true;
+                        }).map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
                       </select>
                     )}
                   </div>
@@ -1141,9 +1206,9 @@ export default function Employees() {
                   </select>
                 </div>
                 <div className="space-y-3">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Permission Assignments</label>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Module Access</label>
                   <div className="grid grid-cols-2 gap-3">
-                    {storeFeatures.map(feature => (
+                    {storeModuleFeatures.map(feature => (
                       <label 
                         key={feature.id}
                         className={`flex items-center gap-3 p-4 rounded-2xl border cursor-pointer transition-all ${
@@ -1157,6 +1222,29 @@ export default function Employees() {
                           checked={newRole.permissions.includes(feature.id)}
                           onChange={() => togglePermission(feature.id)}
                           className="w-4 h-4 text-primary rounded border-slate-300 focus:ring-primary"
+                        />
+                        <span className="text-xs font-bold text-slate-700">{feature.name}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <div className="space-y-3">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Administrative Permissions</label>
+                  <div className="grid grid-cols-2 gap-3">
+                    {storeAdminFeatures.map(feature => (
+                      <label 
+                        key={feature.id}
+                        className={`flex items-center gap-3 p-4 rounded-2xl border cursor-pointer transition-all ${
+                          newRole.permissions.includes(feature.id)
+                            ? 'bg-indigo-50 border-indigo-200'
+                            : 'bg-slate-50 border-slate-200 hover:border-slate-300'
+                        }`}
+                      >
+                        <input 
+                          type="checkbox"
+                          checked={newRole.permissions.includes(feature.id)}
+                          onChange={() => togglePermission(feature.id)}
+                          className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
                         />
                         <span className="text-xs font-bold text-slate-700">{feature.name}</span>
                       </label>

@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useEffect, ReactNode } from
 import { onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
 import { auth, db } from '../firebase';
-import { Role, Plan, AccountStatus, platformRoles as initialPlatformRoles, tenantRoles as initialTenantRoles, planFeatures } from './accessConfig';
+import { Role, Plan, AccountStatus, platformRoles as initialPlatformRoles, tenantRoles as initialTenantRoles, planFeatures, adminPermissions } from './accessConfig';
 import { EmployeeRole, PermissionLevel } from '../types';
 
 interface Session {
@@ -129,8 +129,12 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     }
 
     if (tenant) {
-      const features = planFeatures[tenant.plan];
-      if (!features.includes(feature)) return false;
+      const isAdminPerm = adminPermissions.includes(feature);
+
+      if (!isAdminPerm) {
+        const features = planFeatures[tenant.plan];
+        if (!features.includes(feature)) return false;
+      }
 
       if (session.role === 'store_owner') return true;
 
