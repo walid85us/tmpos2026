@@ -1,0 +1,227 @@
+You are now acting as:
+Principal POS Workflow Architect + Principal Frontend Workflow Engineer + Principal Employee Attendance Systems Designer + Principal CRM UX Engineer + Principal Reporting/Integrations Restoration Engineer + Principal Product QA Auditor
+
+IMPORTANT:
+Do not touch auth flow.
+Do not redesign the UI.
+Preserve the current design baseline exactly.
+
+Focus ONLY on the remaining verified workflow and page restoration issues below.
+
+==================================================
+1. VERIFIED CURRENT STATUS
+==================================================
+
+PASS:
+- Dashboard Review opens approval directly
+- Store Owner role fully locked in own view
+- Manager pending shows only Pending
+- Check In green / Clock Out red
+- Print Label opens
+- Hold Sale opens
+- Scan QR opens
+- Quick menu shortcuts mostly work
+
+REMAINING ISSUES / REFINEMENTS:
+- employee attendance flow needs Break / Back from Break / Full Clock Out
+- attendance actions should be recorded in employee log for Store Owner and Manager review
+- Hold Sale should behave like a real suspended sale, not just route to New Sale
+- Print Label should support useful label flows
+- Add New Customer path is broken from Customers page
+- Reports page is placeholder
+- Prospects page linkage/integration is incomplete
+- Marketing page linkage/integration is incomplete
+- Integrations page linkage/integration is incomplete
+- Widgets page linkage/integration is incomplete
+- these pages/components already exist in /src/components and should be reconnected properly where possible
+
+==================================================
+2. EMPLOYEE ATTENDANCE FLOW — COMPLETE IT
+==================================================
+
+Required behavior for self-service employee clock flow:
+- If not checked in → show Check In
+- If checked in and not on break → show Start Break and Clock Out
+- If on break → show Back from Break
+- Full Clock Out must remain available when appropriate
+
+Required behavior for Store Owner / Manager:
+- can perform attendance actions for selected subordinate employees
+- can set:
+  - Check In
+  - Start Break
+  - Back from Break
+  - Clock Out
+- Manager cannot perform these actions on Store Owner
+- Store Owner can manage subordinate employees
+
+UI requirements:
+- keep existing top-right utility area and time tracking page design
+- no redesign
+- use current premium design language
+
+==================================================
+3. ATTENDANCE / EMPLOYEE LOGGING
+==================================================
+
+Every attendance action must be logged visibly.
+
+Record at minimum:
+- actor user
+- target employee
+- action type
+  - check_in
+  - start_break
+  - end_break
+  - clock_out
+- timestamp
+- optional note/source if appropriate
+
+These logs must be visible to:
+- Store Owner
+- Manager (for permitted subordinate employees)
+
+Use the existing employee activity log style if available.
+Do not create raw JSON displays.
+
+==================================================
+4. HOLD SALE — MAKE IT A REAL SUSPENDED SALE FLOW
+==================================================
+
+Current issue:
+- Hold Sale works only superficially / routes like a sales reset
+- this is not enough
+
+Implement real intended behavior:
+- Hold Sale stores the current cart/transaction as a suspended sale
+- Suspended sale can be resumed later
+- Held order should appear in a Held Orders / suspended transactions list or panel
+- restoring a held sale should bring back current sale context
+- keep current design language
+- do not redesign the sales page
+
+If there is already a held-orders structure in the codebase, reconnect it instead of creating a weak workaround.
+
+==================================================
+5. PRINT LABEL — MAKE IT USEFUL
+==================================================
+
+Current issue:
+- Print Label opens, but product usefulness should be improved
+
+Implement a useful label workflow for a repair/POS/store system.
+
+At minimum support label context choices such as:
+- Inventory Label
+- Repair Ticket Label
+- Customer Claim Tag
+- Shelf / Bin Label
+- Barcode / QR Label
+
+Behavior:
+- open a proper label action flow
+- let the user choose label type or inherit current context when possible
+- keep the UI consistent with the existing system
+
+Do not overbuild printing infrastructure in this pass.
+Focus on functional workflow and correct user experience.
+
+==================================================
+6. CUSTOMERS PAGE — FIX NEW CUSTOMER ENTRY
+==================================================
+
+Current issue:
+- Quick menu/Add Customer routes to Customers page
+- but clicking + New Customer does not work
+
+Fix:
+- + New Customer on Customers page must open a real create-customer modal/drawer/page
+- customer details entry must work
+- do not leave dead buttons
+- preserve design baseline
+
+==================================================
+7. RESTORE / RECONNECT REAL PAGES FROM /src/components
+==================================================
+
+The following sections should no longer remain placeholder-only if real components already exist in /src/components:
+
+- Reports
+- Prospects
+- Marketing
+- Integrations
+- Widgets
+
+Required behavior:
+- reconnect these sections to their real intended pages/components from the codebase
+- wire sidebar/routes/buttons properly
+- remove placeholder-only behavior where existing UI already exists
+- if any section has multiple subviews/tabs, reconnect them cleanly
+- do not redesign the screens
+
+If a page truly cannot be fully restored from existing components, explicitly complete a functional shell with working actions instead of a dead placeholder.
+
+==================================================
+8. QUICK MENU — KEEP ALL SHORTCUTS CORRECT
+==================================================
+
+Quick menu items must route/open correctly:
+- New Sale
+- New Repair
+- Add Customer
+- Inventory
+- Reports
+- Settings
+
+Make sure Add Customer now opens a real customer creation flow via its correct destination.
+
+==================================================
+9. DO NOT BREAK THESE
+==================================================
+
+Do NOT break:
+- auth flow
+- preview mode
+- approval workflow
+- role lock behavior
+- current POS page
+- current design baseline
+
+==================================================
+10. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether attendance now supports Check In / Start Break / Back from Break / Clock Out
+C. whether Store Owner/Manager can apply attendance actions to selected subordinate employees
+D. whether attendance actions are now logged visibly
+E. whether Hold Sale now behaves as a real suspended sale flow
+F. whether Print Label now supports useful label contexts
+G. whether + New Customer on Customers page now works
+H. whether Reports is restored/reconnected
+I. whether Prospects is restored/reconnected
+J. whether Marketing is restored/reconnected
+K. whether Integrations is restored/reconnected
+L. whether Widgets is restored/reconnected
+M. confirmation that auth flow was not touched/broken
+N. confirmation that no visual drift was introduced
+
+==================================================
+11. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- attendance supports Check In / Start Break / Back from Break / Clock Out
+- Store Owner/Manager can apply attendance actions to selected subordinate employees
+- attendance actions are logged visibly
+- Hold Sale behaves as a real suspended sale flow
+- Print Label supports useful label contexts
+- + New Customer works from Customers page
+- Reports is no longer placeholder-only
+- Prospects is no longer placeholder-only
+- Marketing is no longer placeholder-only
+- Integrations is no longer placeholder-only
+- Widgets is no longer placeholder-only
+- auth flow still works
+- no visual drift was introduced
