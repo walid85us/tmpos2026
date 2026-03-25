@@ -6,7 +6,7 @@ import { accountStatusConfig } from '../context/accessConfig';
 const TenantHeader: React.FC = () => {
   const { tenant, session, loading } = useAccess();
   const navigate = useNavigate();
-  const [checkedIn, setCheckedIn] = useState(false);
+  const [attendanceStatus, setAttendanceStatus] = useState<'out' | 'in' | 'break'>('out');
   const [showQuickMenu, setShowQuickMenu] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
 
@@ -33,8 +33,18 @@ const TenantHeader: React.FC = () => {
   const userName = session?.user?.name || 'User';
   const userInitials = userName.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
 
-  const handleCheckIn = () => {
-    setCheckedIn(!checkedIn);
+  const handleAttendanceAction = () => {
+    if (attendanceStatus === 'out') {
+      setAttendanceStatus('in');
+    } else if (attendanceStatus === 'in') {
+      setAttendanceStatus('break');
+    } else {
+      setAttendanceStatus('in');
+    }
+  };
+
+  const handleClockOut = () => {
+    setAttendanceStatus('out');
   };
 
   return (
@@ -49,17 +59,32 @@ const TenantHeader: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-3">
-          <button
-            onClick={handleCheckIn}
-            className={`flex items-center gap-2 px-5 py-2.5 rounded-2xl font-black text-xs uppercase tracking-widest transition-all shadow-sm ${
-              checkedIn
-                ? 'bg-rose-500 text-white shadow-rose-500/20 hover:bg-rose-600'
-                : 'bg-emerald-500 text-white shadow-emerald-500/20 hover:bg-emerald-600'
-            }`}
-          >
-            <span className="material-symbols-outlined text-sm">{checkedIn ? 'logout' : 'login'}</span>
-            {checkedIn ? 'Clock Out' : 'Check In'}
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={handleAttendanceAction}
+              className={`flex items-center gap-2 px-5 py-2.5 rounded-2xl font-black text-xs uppercase tracking-widest transition-all shadow-sm ${
+                attendanceStatus === 'out'
+                  ? 'bg-emerald-500 text-white shadow-emerald-500/20 hover:bg-emerald-600'
+                  : attendanceStatus === 'in'
+                  ? 'bg-amber-500 text-white shadow-amber-500/20 hover:bg-amber-600'
+                  : 'bg-blue-500 text-white shadow-blue-500/20 hover:bg-blue-600'
+              }`}
+            >
+              <span className="material-symbols-outlined text-sm">
+                {attendanceStatus === 'out' ? 'login' : attendanceStatus === 'in' ? 'free_breakfast' : 'arrow_back'}
+              </span>
+              {attendanceStatus === 'out' ? 'Check In' : attendanceStatus === 'in' ? 'Start Break' : 'Back from Break'}
+            </button>
+            {attendanceStatus !== 'out' && (
+              <button
+                onClick={handleClockOut}
+                className="flex items-center gap-2 px-4 py-2.5 rounded-2xl font-black text-xs uppercase tracking-widest transition-all shadow-sm bg-rose-500 text-white shadow-rose-500/20 hover:bg-rose-600"
+              >
+                <span className="material-symbols-outlined text-sm">logout</span>
+                Clock Out
+              </button>
+            )}
+          </div>
 
           <div className="relative">
             <button

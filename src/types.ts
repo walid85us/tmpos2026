@@ -417,7 +417,10 @@ export interface EmployeeTimeLog {
   clockIn: string;
   clockOut?: string;
   totalHours?: number;
-  status: 'Clocked In' | 'Clocked Out';
+  breakStart?: string;
+  breakEnd?: string;
+  totalBreakMinutes?: number;
+  status: 'Clocked In' | 'Clocked Out' | 'On Break';
 }
 
 export interface EmployeeActivityLog {

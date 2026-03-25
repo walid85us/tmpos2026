@@ -77,6 +77,35 @@ export default function Customers() {
   const [view, setView] = useState<CustomerView>('list');
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [showNewCustomerModal, setShowNewCustomerModal] = useState(false);
+  const [customers, setCustomers] = useState<Customer[]>(mockCustomers);
+  const [newCustomerForm, setNewCustomerForm] = useState({ firstName: '', lastName: '', email: '', phone: '', phoneLabel: 'Mobile', group: 'Retail' });
+
+  const handleCreateCustomer = () => {
+    if (!newCustomerForm.firstName.trim() || !newCustomerForm.lastName.trim()) return;
+    const newCustomer: Customer = {
+      id: `CUST-${String(customers.length + 1).padStart(3, '0')}`,
+      name: `${newCustomerForm.firstName} ${newCustomerForm.lastName}`,
+      email: newCustomerForm.email,
+      phone: newCustomerForm.phone,
+      phoneLabel: newCustomerForm.phoneLabel,
+      tier: 'Bronze',
+      points: 0,
+      repairs: 0,
+      lastVisit: 'Just now',
+      avatar: `https://i.pravatar.cc/100?img=${Math.floor(Math.random() * 70)}`,
+      group: newCustomerForm.group,
+      notes: [],
+      assets: [],
+      customFields: [],
+      gdprCompliant: true,
+      campaignerStatus: 'Pending',
+      thirdPartyBilling: false
+    };
+    setCustomers(prev => [...prev, newCustomer]);
+    setNewCustomerForm({ firstName: '', lastName: '', email: '', phone: '', phoneLabel: 'Mobile', group: 'Retail' });
+    setShowNewCustomerModal(false);
+  };
 
   const handleCustomerClick = (customer: Customer) => {
     setSelectedCustomer(customer);
@@ -112,7 +141,10 @@ export default function Customers() {
               type="text"
             />
           </div>
-          <button className="bg-primary text-white px-8 py-2.5 rounded-xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 active:scale-95 transition-all">
+          <button 
+            onClick={() => setShowNewCustomerModal(true)}
+            className="bg-primary text-white px-8 py-2.5 rounded-xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 active:scale-95 transition-all"
+          >
             + New Customer
           </button>
         </div>
@@ -150,7 +182,7 @@ export default function Customers() {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-50">
-            {mockCustomers.map((customer) => (
+            {customers.filter(c => c.name.toLowerCase().includes(searchQuery.toLowerCase()) || c.email.toLowerCase().includes(searchQuery.toLowerCase())).map((customer) => (
               <tr 
                 key={customer.id} 
                 onClick={() => handleCustomerClick(customer)}
@@ -414,6 +446,99 @@ export default function Customers() {
         >
           {view === 'list' ? renderListView() : renderProfileView()}
         </motion.div>
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showNewCustomerModal && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[110] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-lg w-full p-8 ghost-border">
+              <div className="flex justify-between items-center mb-8">
+                <h3 className="text-2xl font-black text-primary tracking-tight">New Customer</h3>
+                <button onClick={() => setShowNewCustomerModal(false)} className="text-slate-400 hover:text-primary transition-colors">
+                  <span className="material-symbols-outlined">close</span>
+                </button>
+              </div>
+              <div className="space-y-5">
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">First Name *</label>
+                    <input 
+                      value={newCustomerForm.firstName}
+                      onChange={(e) => setNewCustomerForm(prev => ({ ...prev, firstName: e.target.value }))}
+                      className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20" 
+                      placeholder="First name" 
+                      type="text" 
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Last Name *</label>
+                    <input 
+                      value={newCustomerForm.lastName}
+                      onChange={(e) => setNewCustomerForm(prev => ({ ...prev, lastName: e.target.value }))}
+                      className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20" 
+                      placeholder="Last name" 
+                      type="text" 
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Email Address</label>
+                  <input 
+                    value={newCustomerForm.email}
+                    onChange={(e) => setNewCustomerForm(prev => ({ ...prev, email: e.target.value }))}
+                    className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20" 
+                    placeholder="email@example.com" 
+                    type="email" 
+                  />
+                </div>
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="col-span-2">
+                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Phone Number</label>
+                    <input 
+                      value={newCustomerForm.phone}
+                      onChange={(e) => setNewCustomerForm(prev => ({ ...prev, phone: e.target.value }))}
+                      className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20" 
+                      placeholder="555-0000" 
+                      type="tel" 
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Type</label>
+                    <select 
+                      value={newCustomerForm.phoneLabel}
+                      onChange={(e) => setNewCustomerForm(prev => ({ ...prev, phoneLabel: e.target.value }))}
+                      className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20"
+                    >
+                      <option>Mobile</option>
+                      <option>Home</option>
+                      <option>Work</option>
+                    </select>
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Customer Group</label>
+                  <select 
+                    value={newCustomerForm.group}
+                    onChange={(e) => setNewCustomerForm(prev => ({ ...prev, group: e.target.value }))}
+                    className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20"
+                  >
+                    <option>Retail</option>
+                    <option>VIP Corporate</option>
+                    <option>Wholesale</option>
+                    <option>Walk-in</option>
+                  </select>
+                </div>
+                <button 
+                  onClick={handleCreateCustomer}
+                  disabled={!newCustomerForm.firstName.trim() || !newCustomerForm.lastName.trim()}
+                  className="w-full py-4 bg-primary text-white rounded-2xl font-black uppercase tracking-widest shadow-lg shadow-primary/20 active:scale-95 transition-all disabled:bg-slate-300 disabled:cursor-not-allowed disabled:shadow-none"
+                >
+                  Create Customer
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
       </AnimatePresence>
     </div>
   );

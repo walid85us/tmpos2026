@@ -21,6 +21,11 @@ import Services from './components/Services';
 import SupplyChain from './components/SupplyChain';
 import Settings from './components/Settings';
 import Support from './components/Support';
+import Reports from './components/Reports';
+import Prospects from './components/Prospects';
+import Marketing from './components/Marketing';
+import Integrations from './components/Integrations';
+import Widgets from './components/Widgets';
 import TenantsPage from './owner/TenantsPage';
 import TenantDetailPage from './owner/TenantDetailPage';
 import DomainsPage from './owner/DomainsPage';
@@ -83,14 +88,14 @@ const router = createBrowserRouter([
       { path: '/supply-chain', element: <AccessGuard feature="supply-chain"><SupplyChain /></AccessGuard> },
       { path: '/supply-chain/po/new', element: <AccessGuard feature="supply-chain"><PageShell title="Create PO"><div /></PageShell></AccessGuard> },
       { path: '/supply-chain/po/:id', element: <AccessGuard feature="supply-chain"><PageShell title="PO Detail"><div /></PageShell></AccessGuard> },
-      { path: '/integrations', element: <AccessGuard feature="integrations"><PageShell title="Integrations"><div /></PageShell></AccessGuard> },
-      { path: '/widgets', element: <AccessGuard feature="widgets"><PageShell title="Widgets"><div /></PageShell></AccessGuard> },
-      { path: '/prospects', element: <AccessGuard feature="prospects"><PageShell title="Prospects"><div /></PageShell></AccessGuard> },
+      { path: '/integrations', element: <AccessGuard feature="integrations"><Integrations /></AccessGuard> },
+      { path: '/widgets', element: <AccessGuard feature="widgets"><Widgets /></AccessGuard> },
+      { path: '/prospects', element: <AccessGuard feature="prospects"><Prospects /></AccessGuard> },
       { path: '/app-store', element: <AccessGuard feature="app-store"><PageShell title="App Store"><div /></PageShell></AccessGuard> },
       { path: '/mail-in', element: <AccessGuard feature="mail-in"><PageShell title="Mail-In"><div /></PageShell></AccessGuard> },
       { path: '/ledger', element: <AccessGuard feature="ledger"><PageShell title="Ledger"><div /></PageShell></AccessGuard> },
-      { path: '/marketing', element: <AccessGuard feature="marketing"><PageShell title="Marketing"><div /></PageShell></AccessGuard> },
-      { path: '/reports', element: <AccessGuard feature="reports"><PageShell title="Reports"><div /></PageShell></AccessGuard> },
+      { path: '/marketing', element: <AccessGuard feature="marketing"><Marketing /></AccessGuard> },
+      { path: '/reports', element: <AccessGuard feature="reports"><Reports /></AccessGuard> },
       { path: '/settings', element: <AccessGuard feature="settings"><Settings /></AccessGuard> },
       { path: '/settings/configurations', element: <AccessGuard feature="settings"><PageShell title="Configurations"><div /></PageShell></AccessGuard> },
       { path: '/support', element: <AccessGuard feature="support"><Support /></AccessGuard> },

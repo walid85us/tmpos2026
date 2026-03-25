@@ -302,9 +302,9 @@ export default function Employees() {
   };
 
   const clockInEmployee = (emp: Employee) => {
-    const existingLog = timeLogs.find(tl => tl.employeeId === emp.id && tl.status === 'Clocked In');
+    const existingLog = timeLogs.find(tl => tl.employeeId === emp.id && (tl.status === 'Clocked In' || tl.status === 'On Break'));
     if (existingLog) {
-      showToast(`${emp.firstName} is already clocked in.`, 'info');
+      showToast(`${emp.firstName} already has an active session.`, 'info');
       return;
     }
     const newLog: EmployeeTimeLog = {
@@ -320,7 +320,7 @@ export default function Employees() {
   };
 
   const clockOutEmployee = (emp: Employee) => {
-    const activeLog = timeLogs.find(tl => tl.employeeId === emp.id && tl.status === 'Clocked In');
+    const activeLog = timeLogs.find(tl => tl.employeeId === emp.id && (tl.status === 'Clocked In' || tl.status === 'On Break'));
     if (!activeLog) {
       showToast(`${emp.firstName} is not currently clocked in.`, 'error');
       return;
@@ -337,6 +337,64 @@ export default function Employees() {
     ));
     logActivity(emp.id, `${emp.firstName} ${emp.lastName}`, 'Clock Out', `Clocked out. Total hours: ${totalHours > 0 ? totalHours : '< 0.01'}`);
     showToast(`${emp.firstName} ${emp.lastName} clocked out. Hours: ${totalHours > 0 ? totalHours : '< 0.01'}`);
+  };
+
+  const startBreakEmployee = (emp: Employee) => {
+    const activeLog = timeLogs.find(tl => tl.employeeId === emp.id && tl.status === 'Clocked In');
+    if (!activeLog) {
+      showToast(`${emp.firstName} is not currently clocked in.`, 'error');
+      return;
+    }
+    setTimeLogs(prev => prev.map(tl =>
+      tl.id === activeLog.id
+        ? { ...tl, status: 'On Break' as const, breakStart: new Date().toLocaleString() }
+        : tl
+    ));
+    logActivity(emp.id, `${emp.firstName} ${emp.lastName}`, 'Start Break', `Started break at ${new Date().toLocaleString()}. Actor: ${session?.user?.name || 'System'}`);
+    showToast(`${emp.firstName} ${emp.lastName} is now on break.`);
+  };
+
+  const endBreakEmployee = (emp: Employee) => {
+    const breakLog = timeLogs.find(tl => tl.employeeId === emp.id && tl.status === 'On Break');
+    if (!breakLog) {
+      showToast(`${emp.firstName} is not currently on break.`, 'error');
+      return;
+    }
+    const breakEnd = new Date();
+    const breakStart = new Date(breakLog.breakStart || breakLog.clockIn);
+    const breakMinutes = Math.round((breakEnd.getTime() - breakStart.getTime()) / (1000 * 60));
+    const totalBreakMinutes = (breakLog.totalBreakMinutes || 0) + breakMinutes;
+
+    setTimeLogs(prev => prev.map(tl =>
+      tl.id === breakLog.id
+        ? { ...tl, status: 'Clocked In' as const, breakEnd: breakEnd.toLocaleString(), totalBreakMinutes }
+        : tl
+    ));
+    logActivity(emp.id, `${emp.firstName} ${emp.lastName}`, 'End Break', `Returned from break (${breakMinutes} min). Actor: ${session?.user?.name || 'System'}`);
+    showToast(`${emp.firstName} ${emp.lastName} is back from break. (${breakMinutes} min)`);
+  };
+
+  const [showBreakPicker, setShowBreakPicker] = useState(false);
+  const [showEndBreakPicker, setShowEndBreakPicker] = useState(false);
+
+  const handleStartBreak = () => {
+    if (isOwnerOrManager) {
+      setShowBreakPicker(true);
+      return;
+    }
+    const currentUser = employees.find(e => e.id === 'e1') || employees[0];
+    if (!currentUser) return;
+    startBreakEmployee(currentUser);
+  };
+
+  const handleEndBreak = () => {
+    if (isOwnerOrManager) {
+      setShowEndBreakPicker(true);
+      return;
+    }
+    const currentUser = employees.find(e => e.id === 'e1') || employees[0];
+    if (!currentUser) return;
+    endBreakEmployee(currentUser);
   };
 
   const handleClockIn = () => {
@@ -507,17 +565,31 @@ export default function Employees() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-black text-primary tracking-tight">Time Tracking</h2>
-        <div className="flex gap-4">
+        <div className="flex gap-3">
           <button 
             onClick={handleClockIn}
-            className="px-6 py-3 bg-emerald-500 text-white font-black text-xs rounded-2xl shadow-lg shadow-emerald-500/20 uppercase tracking-widest flex items-center gap-2 hover:bg-emerald-600 transition-colors"
+            className="px-5 py-3 bg-emerald-500 text-white font-black text-xs rounded-2xl shadow-lg shadow-emerald-500/20 uppercase tracking-widest flex items-center gap-2 hover:bg-emerald-600 transition-colors"
           >
             <span className="material-symbols-outlined text-sm">login</span>
             Clock In
           </button>
           <button 
+            onClick={handleStartBreak}
+            className="px-5 py-3 bg-amber-500 text-white font-black text-xs rounded-2xl shadow-lg shadow-amber-500/20 uppercase tracking-widest flex items-center gap-2 hover:bg-amber-600 transition-colors"
+          >
+            <span className="material-symbols-outlined text-sm">free_breakfast</span>
+            Start Break
+          </button>
+          <button 
+            onClick={handleEndBreak}
+            className="px-5 py-3 bg-blue-500 text-white font-black text-xs rounded-2xl shadow-lg shadow-blue-500/20 uppercase tracking-widest flex items-center gap-2 hover:bg-blue-600 transition-colors"
+          >
+            <span className="material-symbols-outlined text-sm">arrow_back</span>
+            Back from Break
+          </button>
+          <button 
             onClick={handleClockOut}
-            className="px-6 py-3 bg-rose-500 text-white font-black text-xs rounded-2xl shadow-lg shadow-rose-500/20 uppercase tracking-widest flex items-center gap-2 hover:bg-rose-600 transition-colors"
+            className="px-5 py-3 bg-rose-500 text-white font-black text-xs rounded-2xl shadow-lg shadow-rose-500/20 uppercase tracking-widest flex items-center gap-2 hover:bg-rose-600 transition-colors"
           >
             <span className="material-symbols-outlined text-sm">logout</span>
             Clock Out
@@ -548,10 +620,15 @@ export default function Employees() {
                 <td className="px-8 py-6 text-center text-sm font-black text-slate-900">{log.totalHours || '--'}</td>
                 <td className="px-8 py-6">
                   <span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${
-                    log.status === 'Clocked In' ? 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20' : 'bg-slate-500/10 text-slate-600 border-slate-500/20'
+                    log.status === 'Clocked In' ? 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20' : 
+                    log.status === 'On Break' ? 'bg-amber-500/10 text-amber-600 border-amber-500/20' :
+                    'bg-slate-500/10 text-slate-600 border-slate-500/20'
                   }`}>
                     {log.status}
                   </span>
+                  {log.totalBreakMinutes ? (
+                    <span className="ml-2 text-[9px] font-bold text-amber-500">{log.totalBreakMinutes}m break</span>
+                  ) : null}
                 </td>
                 <td className="px-8 py-6 text-right">
                   <div className="flex items-center justify-end gap-1">
@@ -564,9 +641,9 @@ export default function Employees() {
                               showToast('Managers cannot clock in the Store Owner.', 'error');
                               return;
                             }
-                            const alreadyClockedIn = timeLogs.some(tl => tl.employeeId === emp.id && tl.status === 'Clocked In');
-                            if (alreadyClockedIn) {
-                              showToast(`${emp.firstName} is already clocked in.`, 'error');
+                            const alreadyActive = timeLogs.some(tl => tl.employeeId === emp.id && (tl.status === 'Clocked In' || tl.status === 'On Break'));
+                            if (alreadyActive) {
+                              showToast(`${emp.firstName} already has an active session.`, 'error');
                               return;
                             }
                             clockInEmployee(emp);
@@ -576,6 +653,24 @@ export default function Employees() {
                         title="Clock In"
                       >
                         <span className="material-symbols-outlined text-sm">login</span>
+                      </button>
+                    )}
+                    {isOwnerOrManager && log.status === 'Clocked In' && (
+                      <button 
+                        onClick={() => {
+                          const emp = employees.find(e => e.id === log.employeeId);
+                          if (emp) {
+                            if (isManager && emp.roleId === 'store_owner') {
+                              showToast('Managers cannot manage Store Owner attendance.', 'error');
+                              return;
+                            }
+                            startBreakEmployee(emp);
+                          }
+                        }}
+                        className="p-2 hover:bg-amber-50 text-amber-400 hover:text-amber-600 rounded-xl transition-colors"
+                        title="Start Break"
+                      >
+                        <span className="material-symbols-outlined text-sm">free_breakfast</span>
                       </button>
                     )}
                     {isOwnerOrManager && log.status === 'Clocked In' && (
@@ -594,6 +689,24 @@ export default function Employees() {
                         title="Clock Out"
                       >
                         <span className="material-symbols-outlined text-sm">logout</span>
+                      </button>
+                    )}
+                    {isOwnerOrManager && log.status === 'On Break' && (
+                      <button 
+                        onClick={() => {
+                          const emp = employees.find(e => e.id === log.employeeId);
+                          if (emp) {
+                            if (isManager && emp.roleId === 'store_owner') {
+                              showToast('Managers cannot manage Store Owner attendance.', 'error');
+                              return;
+                            }
+                            endBreakEmployee(emp);
+                          }
+                        }}
+                        className="p-2 hover:bg-blue-50 text-blue-400 hover:text-blue-600 rounded-xl transition-colors"
+                        title="Back from Break"
+                      >
+                        <span className="material-symbols-outlined text-sm">arrow_back</span>
                       </button>
                     )}
                     <button 
@@ -1281,7 +1394,61 @@ export default function Employees() {
                   <span className="material-symbols-outlined">close</span>
                 </button>
               </div>
-              <p className="text-xs font-medium text-slate-500 mb-4">Select a clocked-in employee to clock out:</p>
+              <p className="text-xs font-medium text-slate-500 mb-4">Select an active employee to clock out:</p>
+              <div className="space-y-2 max-h-64 overflow-y-auto">
+                {employees.filter(e => {
+                  const isActive = timeLogs.some(tl => tl.employeeId === e.id && (tl.status === 'Clocked In' || tl.status === 'On Break'));
+                  if (!isActive) return false;
+                  if (isManager && e.roleId === 'store_owner') return false;
+                  return true;
+                }).length === 0 ? (
+                  <div className="text-center py-8">
+                    <span className="material-symbols-outlined text-4xl text-slate-300 mb-2 block">schedule</span>
+                    <p className="text-sm font-bold text-slate-400">No employees currently clocked in</p>
+                  </div>
+                ) : (
+                  employees.filter(e => {
+                    const isActive = timeLogs.some(tl => tl.employeeId === e.id && (tl.status === 'Clocked In' || tl.status === 'On Break'));
+                    if (!isActive) return false;
+                    if (isManager && e.roleId === 'store_owner') return false;
+                    return true;
+                  }).map(emp => {
+                    const empLog = timeLogs.find(tl => tl.employeeId === emp.id && (tl.status === 'Clocked In' || tl.status === 'On Break'));
+                    return (
+                      <button
+                        key={emp.id}
+                        onClick={() => { clockOutEmployee(emp); setShowClockOutPicker(false); }}
+                        className="w-full flex items-center gap-4 p-4 rounded-2xl border border-slate-200 bg-white hover:border-rose-400 hover:shadow-md transition-all cursor-pointer"
+                      >
+                        <img src={emp.avatar} alt={emp.firstName} className="w-10 h-10 rounded-xl object-cover" />
+                        <div className="text-left flex-1">
+                          <p className="text-sm font-black text-primary">{emp.firstName} {emp.lastName}</p>
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{emp.roleName}</p>
+                        </div>
+                        <span className={`px-2 py-1 text-[9px] font-black uppercase tracking-widest rounded-lg ${
+                          empLog?.status === 'On Break' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'
+                        }`}>{empLog?.status}</span>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showBreakPicker && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[70] flex items-center justify-center bg-primary/30 backdrop-blur-md p-4">
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-md w-full p-8 ghost-border">
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="text-xl font-black text-primary">Start Break</h3>
+                <button onClick={() => setShowBreakPicker(false)} className="text-slate-400 hover:text-primary transition-colors">
+                  <span className="material-symbols-outlined">close</span>
+                </button>
+              </div>
+              <p className="text-xs font-medium text-slate-500 mb-4">Select a clocked-in employee to put on break:</p>
               <div className="space-y-2 max-h-64 overflow-y-auto">
                 {employees.filter(e => {
                   const isClockedIn = timeLogs.some(tl => tl.employeeId === e.id && tl.status === 'Clocked In');
@@ -1290,8 +1457,8 @@ export default function Employees() {
                   return true;
                 }).length === 0 ? (
                   <div className="text-center py-8">
-                    <span className="material-symbols-outlined text-4xl text-slate-300 mb-2">schedule</span>
-                    <p className="text-sm font-bold text-slate-400">No employees currently clocked in</p>
+                    <span className="material-symbols-outlined text-4xl text-slate-300 mb-2 block">free_breakfast</span>
+                    <p className="text-sm font-bold text-slate-400">No clocked-in employees available</p>
                   </div>
                 ) : (
                   employees.filter(e => {
@@ -1302,8 +1469,8 @@ export default function Employees() {
                   }).map(emp => (
                     <button
                       key={emp.id}
-                      onClick={() => { clockOutEmployee(emp); setShowClockOutPicker(false); }}
-                      className="w-full flex items-center gap-4 p-4 rounded-2xl border border-slate-200 bg-white hover:border-rose-400 hover:shadow-md transition-all cursor-pointer"
+                      onClick={() => { startBreakEmployee(emp); setShowBreakPicker(false); }}
+                      className="w-full flex items-center gap-4 p-4 rounded-2xl border border-slate-200 bg-white hover:border-amber-400 hover:shadow-md transition-all cursor-pointer"
                     >
                       <img src={emp.avatar} alt={emp.firstName} className="w-10 h-10 rounded-xl object-cover" />
                       <div className="text-left flex-1">
@@ -1311,6 +1478,55 @@ export default function Employees() {
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{emp.roleName}</p>
                       </div>
                       <span className="px-2 py-1 bg-emerald-100 text-emerald-700 text-[9px] font-black uppercase tracking-widest rounded-lg">Clocked In</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showEndBreakPicker && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[70] flex items-center justify-center bg-primary/30 backdrop-blur-md p-4">
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-md w-full p-8 ghost-border">
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="text-xl font-black text-primary">Back from Break</h3>
+                <button onClick={() => setShowEndBreakPicker(false)} className="text-slate-400 hover:text-primary transition-colors">
+                  <span className="material-symbols-outlined">close</span>
+                </button>
+              </div>
+              <p className="text-xs font-medium text-slate-500 mb-4">Select an employee to return from break:</p>
+              <div className="space-y-2 max-h-64 overflow-y-auto">
+                {employees.filter(e => {
+                  const isOnBreak = timeLogs.some(tl => tl.employeeId === e.id && tl.status === 'On Break');
+                  if (!isOnBreak) return false;
+                  if (isManager && e.roleId === 'store_owner') return false;
+                  return true;
+                }).length === 0 ? (
+                  <div className="text-center py-8">
+                    <span className="material-symbols-outlined text-4xl text-slate-300 mb-2 block">arrow_back</span>
+                    <p className="text-sm font-bold text-slate-400">No employees currently on break</p>
+                  </div>
+                ) : (
+                  employees.filter(e => {
+                    const isOnBreak = timeLogs.some(tl => tl.employeeId === e.id && tl.status === 'On Break');
+                    if (!isOnBreak) return false;
+                    if (isManager && e.roleId === 'store_owner') return false;
+                    return true;
+                  }).map(emp => (
+                    <button
+                      key={emp.id}
+                      onClick={() => { endBreakEmployee(emp); setShowEndBreakPicker(false); }}
+                      className="w-full flex items-center gap-4 p-4 rounded-2xl border border-slate-200 bg-white hover:border-blue-400 hover:shadow-md transition-all cursor-pointer"
+                    >
+                      <img src={emp.avatar} alt={emp.firstName} className="w-10 h-10 rounded-xl object-cover" />
+                      <div className="text-left flex-1">
+                        <p className="text-sm font-black text-primary">{emp.firstName} {emp.lastName}</p>
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{emp.roleName}</p>
+                      </div>
+                      <span className="px-2 py-1 bg-amber-100 text-amber-700 text-[9px] font-black uppercase tracking-widest rounded-lg">On Break</span>
                     </button>
                   ))
                 )}

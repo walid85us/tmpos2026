@@ -1,0 +1,174 @@
+You are now acting as:
+Principal POS Workflow Architect + Principal Employee Attendance Systems Engineer + Principal CRM Workflow Engineer + Principal React Route Restoration Engineer + Principal Frontend QA Auditor
+
+IMPORTANT:
+Do not touch auth flow.
+Do not redesign the UI.
+Preserve the current design baseline exactly.
+
+Focus ONLY on the remaining verified failures below.
+
+==================================================
+1. VERIFIED SOURCE OF TRUTH
+==================================================
+
+PASS:
+- Dashboard Review opens approval directly
+- Store Owner role fully locked in own view
+- Manager pending shows only Pending
+- Check In green / Clock Out red
+- Print Label supports useful label contexts
+- Sales opens restored POS page
+- Quick menu mostly works
+- Attendance actions are logged visibly
+
+FAIL:
+- Attendance does NOT yet support full Break / Back from Break / Full Clock Out workflow
+- Owner/Manager selected-employee attendance control is incomplete or missing
+- Hold Sale still routes to New Sale instead of behaving as a real suspended sale
+- + New Customer is still broken from Customers page
+- Reports is still placeholder
+- Prospects is still placeholder
+- Marketing is still placeholder
+- Integrations is still placeholder
+- Widgets is still placeholder
+
+Existing component targets to reconnect/restore:
+- /src/components/Reports.tsx
+- /src/components/Prospects.tsx
+- /src/components/Marketing.tsx
+- /src/components/Integrations.tsx
+- /src/components/Widgets.tsx
+
+==================================================
+2. ATTENDANCE FLOW — COMPLETE IT
+==================================================
+
+Implement the full attendance lifecycle.
+
+For self-service employee flow:
+- if not checked in → show Check In
+- if checked in and not on break → show Start Break and Clock Out
+- if on break → show Back from Break
+- after returning from break → go back to checked-in state
+- full Clock Out must remain available when appropriate
+
+For Store Owner / Manager in Employees > Time Tracking:
+- allow selecting a target employee via row action, checkbox, or employee selector
+- selected subordinate employee can be:
+  - checked in
+  - put on break
+  - returned from break
+  - clocked out
+- Manager cannot do this for Store Owner
+- Store Owner can do this for subordinate employees
+
+Requirements:
+- status updates visibly
+- total hours update visibly
+- activity log records:
+  - actor
+  - target employee
+  - action type
+  - timestamp
+
+Do not redesign the page.
+
+==================================================
+3. HOLD SALE — MAKE IT A REAL SUSPENDED SALE
+==================================================
+
+Current issue:
+- Hold Sale still behaves like a redirect to New Sale
+
+Required behavior:
+- Hold Sale stores current cart/transaction as a suspended/held sale
+- held sale appears in Held Orders / suspended transactions area
+- user can later resume a held sale
+- resuming restores current cart/sale context
+- do not leave Hold Sale as a route-only shortcut
+
+If a held-orders structure already exists in the codebase, reconnect and use it.
+
+==================================================
+4. CUSTOMERS PAGE — FIX + NEW CUSTOMER
+==================================================
+
+Current issue:
+- route to Customers works
+- + New Customer button does not work
+
+Fix:
+- + New Customer must open a working create-customer modal/drawer/page
+- entry form must allow customer details to be entered
+- do not leave a dead button
+- preserve design baseline
+
+==================================================
+5. RESTORE REAL PAGES FROM EXISTING COMPONENTS
+==================================================
+
+Restore/reconnect these pages from the existing codebase components:
+
+- Reports → /src/components/Reports.tsx
+- Prospects → /src/components/Prospects.tsx
+- Marketing → /src/components/Marketing.tsx
+- Integrations → /src/components/Integrations.tsx
+- Widgets → /src/components/Widgets.tsx
+
+Required behavior:
+- sidebar links route to real pages/components
+- quick menu/entry points route correctly where applicable
+- remove placeholder-only behavior
+- if these components already contain real UI, reconnect them instead of rebuilding weak shells
+- if there are broken imports/props/state assumptions, repair them
+- do not redesign the screens
+
+==================================================
+6. DO NOT BREAK THESE
+==================================================
+
+Do NOT break:
+- auth flow
+- preview mode
+- approval workflow
+- role lock behavior
+- current POS page
+- current design baseline
+- working quick menu items
+- working print label flow
+
+==================================================
+7. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether attendance now supports Check In / Start Break / Back from Break / Clock Out
+C. whether Store Owner/Manager can now apply attendance actions to selected subordinate employees
+D. whether Hold Sale now behaves as a real suspended sale
+E. whether + New Customer now works from Customers page
+F. whether Reports is restored from /src/components/Reports.tsx
+G. whether Prospects is restored from /src/components/Prospects.tsx
+H. whether Marketing is restored from /src/components/Marketing.tsx
+I. whether Integrations is restored from /src/components/Integrations.tsx
+J. whether Widgets is restored from /src/components/Widgets.tsx
+K. confirmation that auth flow was not touched/broken
+L. confirmation that no visual drift was introduced
+
+==================================================
+8. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- attendance supports Check In / Start Break / Back from Break / Clock Out
+- Store Owner/Manager can apply attendance actions to selected subordinate employees
+- Hold Sale behaves as a real suspended sale
+- + New Customer works from Customers page
+- Reports is no longer placeholder-only
+- Prospects is no longer placeholder-only
+- Marketing is no longer placeholder-only
+- Integrations is no longer placeholder-only
+- Widgets is no longer placeholder-only
+- auth flow still works
+- no visual drift was introduced

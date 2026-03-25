@@ -674,6 +674,57 @@ export const POS: React.FC = () => {
           </motion.div>
         )}
 
+        {isHeldOrdersOpen && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[110] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-2xl w-full p-8 ghost-border">
+              <div className="flex justify-between items-center mb-8">
+                <h3 className="text-2xl font-black text-primary tracking-tight">Held Orders</h3>
+                <button onClick={() => setIsHeldOrdersOpen(false)} className="text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+              </div>
+              {heldOrders.length === 0 ? (
+                <div className="py-12 text-center">
+                  <div className="w-16 h-16 bg-slate-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                    <span className="material-symbols-outlined text-3xl text-slate-300">pause_circle</span>
+                  </div>
+                  <p className="text-sm font-bold text-slate-400">No held orders</p>
+                  <p className="text-xs text-slate-300 mt-1">Hold a sale to suspend it for later</p>
+                </div>
+              ) : (
+                <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-2">
+                  {heldOrders.map(order => (
+                    <div key={order.id} className="p-6 bg-slate-50 rounded-3xl border border-slate-100 hover:bg-white hover:shadow-lg transition-all">
+                      <div className="flex items-center justify-between mb-3">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <p className="font-bold text-slate-900">{order.id}</p>
+                            <span className="text-[9px] font-black px-2 py-0.5 rounded uppercase bg-amber-100 text-amber-700">Held</span>
+                          </div>
+                          <p className="text-xs text-slate-500 mt-0.5">{order.customerName} &bull; {new Date(order.createdAt).toLocaleString()}</p>
+                        </div>
+                        <p className="text-lg font-black text-primary">${order.total.toFixed(2)}</p>
+                      </div>
+                      <div className="flex flex-wrap gap-2 mb-4">
+                        {order.items.map((item, idx) => (
+                          <span key={idx} className="text-[10px] font-bold bg-white px-2 py-1 rounded-lg border border-slate-100 text-slate-600">{item.name}</span>
+                        ))}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => resumeOrder(order)} className="flex-1 py-3 bg-primary text-white rounded-xl font-black text-xs uppercase tracking-widest shadow-lg active:scale-95 transition-all flex items-center justify-center gap-2">
+                          <span className="material-symbols-outlined text-sm">play_arrow</span>
+                          Resume Sale
+                        </button>
+                        <button onClick={() => setHeldOrders(heldOrders.filter(o => o.id !== order.id))} className="py-3 px-4 bg-slate-100 text-slate-500 rounded-xl hover:bg-red-50 hover:text-red-500 transition-all">
+                          <span className="material-symbols-outlined text-sm">delete</span>
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </motion.div>
+          </motion.div>
+        )}
+
         {isPreviousOrdersOpen && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[110] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
             <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-4xl w-full p-8 ghost-border">
