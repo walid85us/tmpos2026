@@ -79,7 +79,27 @@ export default function Employees() {
   const [showTimeEditModal, setShowTimeEditModal] = useState(false);
   const [editingEmployee, setEditingEmployee] = useState<Employee | null>(null);
   const [editingTimeLog, setEditingTimeLog] = useState<EmployeeTimeLog | null>(null);
-  const [pendingRequests, setPendingRequests] = useState<any[]>([]);
+  const [pendingRequests, setPendingRequests] = useState<any[]>([
+    {
+      id: Date.now() - 100000,
+      employee: 'Sarah Jenkins',
+      action: 'Create New Manager',
+      type: 'add_employee',
+      status: 'pending',
+      details: {
+        firstName: 'Mike',
+        lastName: 'Rodriguez',
+        email: 'mike@example.com',
+        roleId: 'manager',
+        status: 'Active',
+        payRate: 30,
+        payType: 'Hourly',
+        commissionEnabled: true,
+        commissionType: 'percentage',
+        commissionRate: 8
+      }
+    }
+  ]);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
   const [selectedTimeEmployee, setSelectedTimeEmployee] = useState<string>('');
   const [showClockInPicker, setShowClockInPicker] = useState(false);
@@ -528,12 +548,56 @@ export default function Employees() {
                   </span>
                 </td>
                 <td className="px-8 py-6 text-right">
-                  <button 
-                    onClick={() => handleEditTimeLog(log)}
-                    className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl transition-colors"
-                  >
-                    <span className="material-symbols-outlined text-sm">edit</span>
-                  </button>
+                  <div className="flex items-center justify-end gap-1">
+                    {isOwnerOrManager && log.status === 'Clocked Out' && (
+                      <button 
+                        onClick={() => {
+                          const emp = employees.find(e => e.id === log.employeeId);
+                          if (emp) {
+                            if (isManager && emp.roleId === 'store_owner') {
+                              showToast('Managers cannot clock in the Store Owner.', 'error');
+                              return;
+                            }
+                            const alreadyClockedIn = timeLogs.some(tl => tl.employeeId === emp.id && tl.status === 'Clocked In');
+                            if (alreadyClockedIn) {
+                              showToast(`${emp.firstName} is already clocked in.`, 'error');
+                              return;
+                            }
+                            clockInEmployee(emp);
+                          }
+                        }}
+                        className="p-2 hover:bg-emerald-50 text-emerald-400 hover:text-emerald-600 rounded-xl transition-colors"
+                        title="Clock In"
+                      >
+                        <span className="material-symbols-outlined text-sm">login</span>
+                      </button>
+                    )}
+                    {isOwnerOrManager && log.status === 'Clocked In' && (
+                      <button 
+                        onClick={() => {
+                          const emp = employees.find(e => e.id === log.employeeId);
+                          if (emp) {
+                            if (isManager && emp.roleId === 'store_owner') {
+                              showToast('Managers cannot clock out the Store Owner.', 'error');
+                              return;
+                            }
+                            clockOutEmployee(emp);
+                          }
+                        }}
+                        className="p-2 hover:bg-rose-50 text-rose-400 hover:text-rose-600 rounded-xl transition-colors"
+                        title="Clock Out"
+                      >
+                        <span className="material-symbols-outlined text-sm">logout</span>
+                      </button>
+                    )}
+                    <button 
+                      onClick={() => handleEditTimeLog(log)}
+                      className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl transition-colors"
+                      title="Edit"
+                    >
+                      <span className="material-symbols-outlined text-sm">edit</span>
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -1151,7 +1215,11 @@ export default function Employees() {
               </div>
               <p className="text-xs font-medium text-slate-500 mb-4">Select an employee to clock in:</p>
               <div className="space-y-2 max-h-64 overflow-y-auto">
-                {employees.filter(e => e.status === 'Active').map(emp => {
+                {employees.filter(e => {
+                  if (e.status !== 'Active') return false;
+                  if (isManager && e.roleId === 'store_owner') return false;
+                  return true;
+                }).map(emp => {
                   const isClockedIn = timeLogs.some(tl => tl.employeeId === emp.id && tl.status === 'Clocked In');
                   return (
                     <button
@@ -1193,13 +1261,23 @@ export default function Employees() {
               </div>
               <p className="text-xs font-medium text-slate-500 mb-4">Select a clocked-in employee to clock out:</p>
               <div className="space-y-2 max-h-64 overflow-y-auto">
-                {employees.filter(e => timeLogs.some(tl => tl.employeeId === e.id && tl.status === 'Clocked In')).length === 0 ? (
+                {employees.filter(e => {
+                  const isClockedIn = timeLogs.some(tl => tl.employeeId === e.id && tl.status === 'Clocked In');
+                  if (!isClockedIn) return false;
+                  if (isManager && e.roleId === 'store_owner') return false;
+                  return true;
+                }).length === 0 ? (
                   <div className="text-center py-8">
                     <span className="material-symbols-outlined text-4xl text-slate-300 mb-2">schedule</span>
                     <p className="text-sm font-bold text-slate-400">No employees currently clocked in</p>
                   </div>
                 ) : (
-                  employees.filter(e => timeLogs.some(tl => tl.employeeId === e.id && tl.status === 'Clocked In')).map(emp => (
+                  employees.filter(e => {
+                    const isClockedIn = timeLogs.some(tl => tl.employeeId === e.id && tl.status === 'Clocked In');
+                    if (!isClockedIn) return false;
+                    if (isManager && e.roleId === 'store_owner') return false;
+                    return true;
+                  }).map(emp => (
                     <button
                       key={emp.id}
                       onClick={() => { clockOutEmployee(emp); setShowClockOutPicker(false); }}

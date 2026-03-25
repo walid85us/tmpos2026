@@ -8,7 +8,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
 
   return (
     <div className="space-y-8">
-      {session?.role === 'store_owner' && <ApprovalQueue />}
+      {(session?.role === 'store_owner' || session?.role === 'system_owner' || session?.role === 'manager') && <ApprovalQueue />}
       <header className="flex items-end justify-between">
         <div>
           <span className="text-[10px] uppercase tracking-[0.2em] text-secondary font-extrabold mb-1 block">Operational Overview</span>
@@ -32,12 +32,12 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
       {/* Quick Actions */}
       <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
         {[
-          { label: 'New Sale', icon: 'shopping_cart', color: 'bg-primary', path: '/pos' },
-          { label: 'Add Stock', icon: 'inventory_2', color: 'bg-teal-800', path: '/inventory/new' },
-          { label: 'New Customer', icon: 'person_add', color: 'bg-secondary', path: '/customers/new' },
-          { label: 'Print Label', icon: 'print', color: 'bg-slate-800', path: '/settings/hardware-print' },
-          { label: 'Hold Sale', icon: 'pause_circle', color: 'bg-slate-600', path: '/pos' },
-          { label: 'Scan QR', icon: 'qr_code_scanner', color: 'bg-lime-600', path: '/sales/scan' },
+          { label: 'New Sale', icon: 'shopping_cart', color: 'bg-primary', path: '/sales' },
+          { label: 'Add Stock', icon: 'inventory_2', color: 'bg-teal-800', path: '/inventory' },
+          { label: 'New Customer', icon: 'person_add', color: 'bg-secondary', path: '/customers' },
+          { label: 'Print Label', icon: 'print', color: 'bg-slate-800', path: '/settings' },
+          { label: 'Hold Sale', icon: 'pause_circle', color: 'bg-slate-600', path: '/sales' },
+          { label: 'Scan QR', icon: 'qr_code_scanner', color: 'bg-lime-600', path: '/sales' },
         ].map((action, i) => (
           <Link key={i} to={action.path} className="flex flex-col items-center justify-center p-4 bg-white rounded-2xl ghost-border shadow-sm hover:shadow-md transition-all group active:scale-95">
             <div className={`w-10 h-10 ${action.color} text-white rounded-xl flex items-center justify-center mb-2 group-hover:scale-110 transition-transform`}>

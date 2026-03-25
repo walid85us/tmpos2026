@@ -1,0 +1,208 @@
+You are now acting as:
+Senior Frontend Workflow Engineer + Senior RBAC UX Engineer + Senior Approval Workflow Architect + Senior Time Tracking UX Engineer + Senior POS Workflow Engineer + Senior Product QA Auditor
+
+IMPORTANT:
+Do not touch auth flow.
+Do not redesign the UI.
+Preserve the current design baseline exactly.
+
+Focus ONLY on the remaining verified issues below.
+
+==================================================
+1. VERIFIED CURRENT STATUS
+==================================================
+
+PASS:
+- Platform Create Role works
+- Request detail is readable
+- Store Owner Create Role works
+- Sales opens restored POS page
+- Manager cannot see Store Owner rate/commission
+
+FAIL / INCOMPLETE:
+- Store Owner approval actions are incomplete
+- Return for Changes with comments does not work
+- Store Owner role lock is incomplete on Store Owner’s own preview/view
+- Owner/Manager cannot clock in/out selected employees
+- employee self Check In is partial; after check-in it should switch to Clock Out state
+- Sales quick-action buttons are not linked/working properly
+
+==================================================
+2. STORE OWNER APPROVAL WORKFLOW — COMPLETE IT
+==================================================
+
+Current behavior:
+- approval card appears on dashboard
+- “Review” routes to Employees page
+- but no real approval action flow is presented there
+
+Required behavior:
+A. Dashboard card:
+- clicking Review opens a real approval modal/drawer/detail view directly
+OR
+- View All routes to Employees page and auto-focuses/filter-opens the pending approval queue
+
+B. Employees page:
+- pending approval items must be visible and selectable
+- selecting one opens the readable detail view
+- Store Owner can:
+  - Approve
+  - Reject
+  - Return for Changes
+
+C. Actions must work:
+- Approve updates status visibly
+- Reject updates status visibly
+- Return for Changes opens comment entry and saves owner comments
+- Manager can later revise/resubmit
+
+Do not leave Review as a dead route without a selected approval context.
+
+==================================================
+3. RETURN FOR CHANGES WITH COMMENTS — MAKE IT REAL
+==================================================
+
+Current issue:
+- not working
+
+Required behavior:
+- Store Owner chooses Return for Changes
+- comment box appears
+- owner enters notes/instructions
+- request status becomes Returned for Changes
+- request stores comments visibly
+- Manager can see returned status and comments
+- Manager can revise and resubmit
+- resubmitted request returns to pending state
+
+==================================================
+4. STORE OWNER ROLE — LOCK IT CONSISTENTLY
+==================================================
+
+Current issue:
+- Store Owner role is locked in Manager view
+- but locking/protection is not fully consistent in Store Owner’s own role view
+
+Required behavior:
+- Store Owner role remains visible for context
+- Store Owner role is always platform-protected
+- store-side role editing must be disabled for Store Owner role
+- if Store Owner is viewing their own role card/page, controls must be disabled/locked
+- show protected/locked state clearly
+- Store Owner role can only be changed platform-side
+
+==================================================
+5. TIME TRACKING — COMPLETE OWNER/MANAGER EMPLOYEE CONTROL
+==================================================
+
+Current issue:
+- Time Tracking works partially
+- Owner/Manager cannot clock in/out selected employees
+
+Required behavior:
+A. Store Owner and Manager:
+- can select an employee from Time Tracking
+- can clock selected employee in
+- can clock selected employee out
+- selection can be checkbox rows, row action, or employee picker
+- keep UI consistent with current design
+
+B. Role restrictions:
+- Manager can only control permitted subordinate employees
+- Manager cannot control Store Owner
+- Store Owner can control subordinate employees
+
+C. Action details:
+- status updates visibly
+- total hours update visibly
+- selected employee context is clear
+
+==================================================
+6. SELF CHECK IN / CLOCK OUT — COMPLETE THE TOP-RIGHT FLOW
+==================================================
+
+Current issue:
+- self Check In partially works
+- after check-in, it should switch to Clock Out
+
+Required behavior:
+- top-right Check In button restores real employee self-service flow
+- when user is not clocked in, show Check In
+- when user is clocked in, show Clock Out
+- clicking it updates current user time status
+- reflect the state consistently in dashboard/top-right utility area
+- keep bell, quick menu, avatar behavior intact
+
+==================================================
+7. SALES PAGE QUICK ACTION BUTTONS — LINK THEM PROPERLY
+==================================================
+
+Current issue:
+On Sales / POS page, these top quick-action buttons are not linked or not working properly:
+- New Sale
+- Add Stock
+- New Customer
+- Print Label
+- Hold Sale
+- Scan QR
+
+Required behavior:
+- each button must perform a real action, open a modal, or route correctly
+- do not leave any dead buttons
+
+Minimum expected handling:
+- New Sale → starts/clears current sale flow
+- Add Stock → routes to or opens inventory add-stock flow
+- New Customer → opens customer create flow
+- Print Label → opens print/label flow
+- Hold Sale → stores/holds current sale state
+- Scan QR → opens scan flow or scan placeholder modal with proper interaction shell
+
+If any backend logic is not ready, provide proper interactive UI behavior instead of dead buttons.
+
+==================================================
+8. DO NOT BREAK THESE
+==================================================
+
+Do NOT break:
+- auth flow
+- preview mode
+- platform create role
+- request readable detail
+- restored sales page
+- current design baseline
+
+==================================================
+9. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether Store Owner approval Review now opens a real actionable flow
+C. whether View All now correctly routes to/selects pending approvals
+D. whether Approve works
+E. whether Reject works
+F. whether Return for Changes with comments works
+G. whether Store Owner role is now consistently locked store-side
+H. whether Owner/Manager can now clock selected employees in/out
+I. whether self Check In now toggles to Clock Out correctly
+J. whether Sales quick-action buttons now work
+K. confirmation that auth flow was not touched/broken
+L. confirmation that no visual drift was introduced
+
+==================================================
+10. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- Store Owner approval Review is actionable
+- View All leads to usable pending approval workflow
+- Approve works
+- Reject works
+- Return for Changes with comments works
+- Store Owner role is consistently locked store-side
+- Owner/Manager can clock selected employees in/out
+- self Check In toggles correctly to Clock Out
+- Sales quick-action buttons work
+- auth flow still works
+- no visual drift was introduced

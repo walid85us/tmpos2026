@@ -51,12 +51,12 @@ const TenantHeader: React.FC = () => {
             onClick={handleCheckIn}
             className={`flex items-center gap-2 px-5 py-2.5 rounded-2xl font-black text-xs uppercase tracking-widest transition-all shadow-sm ${
               checkedIn
-                ? 'bg-emerald-500 text-white shadow-emerald-500/20 hover:bg-emerald-600'
+                ? 'bg-rose-500 text-white shadow-rose-500/20 hover:bg-rose-600'
                 : 'bg-primary text-white shadow-primary/20 hover:bg-primary/90'
             }`}
           >
-            <span className="material-symbols-outlined text-sm">{checkedIn ? 'check_circle' : 'login'}</span>
-            {checkedIn ? 'Checked In' : 'Check In'}
+            <span className="material-symbols-outlined text-sm">{checkedIn ? 'logout' : 'login'}</span>
+            {checkedIn ? 'Clock Out' : 'Check In'}
           </button>
 
           <div className="relative">

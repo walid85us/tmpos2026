@@ -201,7 +201,7 @@ export default function PendingApproval({ requests, onApprove, onReject, onRetur
                   </div>
                 )}
 
-                {isStoreOwner && selectedRequest.status !== 'returned' && (
+                {isStoreOwner && (selectedRequest.status === 'pending' || selectedRequest.status === 'returned') && (
                   <div className="space-y-4 pt-4 border-t border-slate-100">
                     <div className="flex gap-4">
                       <button 
@@ -225,28 +225,30 @@ export default function PendingApproval({ requests, onApprove, onReject, onRetur
                         Reject
                       </button>
                     </div>
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">Return for Changes</label>
-                      <textarea 
-                        value={returnComment}
-                        onChange={(e) => setReturnComment(e.target.value)}
-                        className="w-full px-4 py-3 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-medium text-slate-700 text-sm resize-none h-20"
-                        placeholder="Explain what needs to be changed..."
-                      />
-                      <button 
-                        onClick={() => {
-                          if (returnComment.trim()) {
-                            onReturn?.(selectedRequest.id, returnComment);
-                            setSelectedRequest(null);
-                          }
-                        }}
-                        disabled={!returnComment.trim()}
-                        className="w-full py-3 bg-amber-500 text-white font-black text-xs rounded-xl shadow-lg shadow-amber-500/20 uppercase tracking-widest hover:bg-amber-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                      >
-                        <span className="material-symbols-outlined text-sm">undo</span>
-                        Return for Changes
-                      </button>
-                    </div>
+                    {selectedRequest.status !== 'returned' && (
+                      <div className="space-y-2">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">Return for Changes</label>
+                        <textarea 
+                          value={returnComment}
+                          onChange={(e) => setReturnComment(e.target.value)}
+                          className="w-full px-4 py-3 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-medium text-slate-700 text-sm resize-none h-20"
+                          placeholder="Explain what needs to be changed..."
+                        />
+                        <button 
+                          onClick={() => {
+                            if (returnComment.trim()) {
+                              onReturn?.(selectedRequest.id, returnComment);
+                              setSelectedRequest(null);
+                            }
+                          }}
+                          disabled={!returnComment.trim()}
+                          className="w-full py-3 bg-amber-500 text-white font-black text-xs rounded-xl shadow-lg shadow-amber-500/20 uppercase tracking-widest hover:bg-amber-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                        >
+                          <span className="material-symbols-outlined text-sm">undo</span>
+                          Return for Changes
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
