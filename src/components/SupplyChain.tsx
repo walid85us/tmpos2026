@@ -61,6 +61,8 @@ export default function SupplyChain() {
   const [grns, setGrns] = useState<GoodsReceivedNote[]>(MOCK_GRNS);
   const [rmas, setRmas] = useState<RMA[]>(MOCK_RMAS);
   const [searchQuery, setSearchQuery] = useState('');
+  const [showCreatePO, setShowCreatePO] = useState(false);
+  const [showCreateRMA, setShowCreateRMA] = useState(false);
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -94,7 +96,7 @@ export default function SupplyChain() {
             onChange={(e) => setSearchQuery(e.target.value)}
           />
         </div>
-        <button className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2">
+        <button onClick={() => setShowCreatePO(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2">
           <span className="material-symbols-outlined text-sm">add</span>
           Create Purchase Order
         </button>
@@ -189,7 +191,7 @@ export default function SupplyChain() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-black text-primary tracking-tight">RMA Management</h2>
-        <button className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2">
+        <button onClick={() => setShowCreateRMA(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2">
           <span className="material-symbols-outlined text-sm">add</span>
           Create RMA
         </button>
@@ -279,6 +281,82 @@ export default function SupplyChain() {
           {activeTab === 'grn' && renderGRN()}
           {activeTab === 'rma' && renderRMA()}
         </motion.div>
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showCreatePO && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" onClick={() => setShowCreatePO(false)} />
+            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative w-full max-w-lg bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden">
+              <div className="p-8 border-b border-slate-100 bg-slate-50/50">
+                <h3 className="text-2xl font-black text-primary tracking-tight">Create Purchase Order</h3>
+                <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Supply Chain Management</p>
+              </div>
+              <div className="p-8 space-y-6">
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Supplier</label>
+                  <select className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700">
+                    <option>Select Supplier...</option>
+                    <option>Global Parts Inc.</option>
+                    <option>Tech Sourcing Co.</option>
+                    <option>Premium Displays Ltd.</option>
+                  </select>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Expected Delivery</label>
+                  <input type="date" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700" />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Notes</label>
+                  <textarea className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 h-24" placeholder="Order notes..." />
+                </div>
+                <div className="flex gap-4 pt-4">
+                  <button onClick={() => setShowCreatePO(false)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-all">Cancel</button>
+                  <button onClick={() => setShowCreatePO(false)} className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 active:scale-95 transition-all">Create PO</button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {showCreateRMA && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" onClick={() => setShowCreateRMA(false)} />
+            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative w-full max-w-lg bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden">
+              <div className="p-8 border-b border-slate-100 bg-slate-50/50">
+                <h3 className="text-2xl font-black text-primary tracking-tight">Create RMA</h3>
+                <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Return Merchandise Authorization</p>
+              </div>
+              <div className="p-8 space-y-6">
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Supplier</label>
+                  <select className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700">
+                    <option>Select Supplier...</option>
+                    <option>Global Parts Inc.</option>
+                    <option>Tech Sourcing Co.</option>
+                  </select>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Item to Return</label>
+                  <input className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700" placeholder="Product name or SKU..." />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Reason for Return</label>
+                  <select className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700">
+                    <option>Defective</option>
+                    <option>Wrong Item</option>
+                    <option>Quality Issue</option>
+                    <option>Damaged in Transit</option>
+                  </select>
+                </div>
+                <div className="flex gap-4 pt-4">
+                  <button onClick={() => setShowCreateRMA(false)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-all">Cancel</button>
+                  <button onClick={() => setShowCreateRMA(false)} className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 active:scale-95 transition-all">Submit RMA</button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
       </AnimatePresence>
     </div>
   );

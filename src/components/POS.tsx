@@ -51,6 +51,11 @@ export const POS: React.FC = () => {
   const [isEditItemModalOpen, setIsEditItemModalOpen] = useState(false);
   const [isCashDrawerOpen, setIsCashDrawerOpen] = useState(false);
   const [isScheduleModalOpen, setIsScheduleModalOpen] = useState(false);
+  const [isDiscountModalOpen, setIsDiscountModalOpen] = useState(false);
+  const [isRedeemPointsOpen, setIsRedeemPointsOpen] = useState(false);
+  const [discountCode, setDiscountCode] = useState('');
+  const [storeCreditId, setStoreCreditId] = useState('');
+  const [storeCreditVerified, setStoreCreditVerified] = useState(false);
 
   // Advanced Search & Filter
   const [searchCategory, setSearchCategory] = useState('All');
@@ -216,6 +221,60 @@ export const POS: React.FC = () => {
       setIsPinModalOpen(false);
       setCurrentUserPin('');
     }
+  };
+
+  const handleApplyDiscount = () => {
+    setIsDiscountModalOpen(true);
+  };
+
+  const handleRedeemPoints = () => {
+    setIsRedeemPointsOpen(true);
+  };
+
+  const handleAddPaymentMethod = () => {
+    const newMethod: PaymentMethod = {
+      id: `p${Date.now()}`,
+      method: 'Store Credit',
+      amount: 0,
+      icon: 'account_balance_wallet'
+    };
+    setPayments([...payments, newMethod]);
+  };
+
+  const handleVerifyStoreCredit = () => {
+    if (storeCreditId.trim()) {
+      setStoreCreditVerified(true);
+      const creditMethod: PaymentMethod = {
+        id: `sc-${Date.now()}`,
+        method: 'Store Credit',
+        amount: 0,
+        icon: 'account_balance_wallet',
+        detail: `Credit #${storeCreditId}`
+      };
+      setPayments([...payments, creditMethod]);
+      setStoreCreditId('');
+      setTimeout(() => setStoreCreditVerified(false), 2000);
+    }
+  };
+
+  const handleAddSuggestiveItem = (name: string, price: number) => {
+    const item: CartItem = {
+      id: `SUG-${Date.now()}`,
+      name,
+      description: 'Suggestive sale item',
+      price,
+      icon: 'add_shopping_cart',
+      type: 'product'
+    };
+    setCart([...cart, item]);
+  };
+
+  const handleAddTaskType = () => {
+    // placeholder - shows confirmation visual
+  };
+
+  const handleAddCategory = () => {
+    // placeholder - shows confirmation visual
   };
 
   return (
@@ -397,8 +456,8 @@ export const POS: React.FC = () => {
                 <input className="w-full bg-white/5 border-white/10 rounded-2xl pl-12 pr-4 py-4 text-sm font-bold focus:ring-secondary focus:bg-white/10 transition-all placeholder:text-white/20" placeholder="Enter Promo Code..." type="text" />
               </div>
               <div className="grid grid-cols-2 gap-3">
-                <button className="py-3 bg-white/5 hover:bg-white/10 rounded-xl text-[10px] font-black uppercase tracking-widest border border-white/10 transition-all">Apply Discount</button>
-                <button className="py-3 bg-teal-500 text-teal-950 rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg shadow-teal-500/20 transition-all active:scale-95">Redeem Points</button>
+                <button onClick={handleApplyDiscount} className="py-3 bg-white/5 hover:bg-white/10 rounded-xl text-[10px] font-black uppercase tracking-widest border border-white/10 transition-all">Apply Discount</button>
+                <button onClick={handleRedeemPoints} className="py-3 bg-teal-500 text-teal-950 rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg shadow-teal-500/20 transition-all active:scale-95">Redeem Points</button>
               </div>
             </div>
           </section>
@@ -408,7 +467,7 @@ export const POS: React.FC = () => {
           <section className="bg-white rounded-[2rem] p-8 ghost-border shadow-sm flex flex-col h-full">
             <div className="flex justify-between items-center mb-8">
               <h3 className="text-sm font-extrabold uppercase tracking-widest text-slate-400">Payment Allocation</h3>
-              <button className="text-[10px] font-black text-secondary uppercase tracking-widest flex items-center gap-1 hover:bg-secondary/10 px-2 py-1 rounded-lg transition-colors">
+              <button onClick={handleAddPaymentMethod} className="text-[10px] font-black text-secondary uppercase tracking-widest flex items-center gap-1 hover:bg-secondary/10 px-2 py-1 rounded-lg transition-colors">
                 <span className="material-symbols-outlined text-xs">add_card</span>
                 Add Method
               </button>
@@ -449,8 +508,8 @@ export const POS: React.FC = () => {
                   </label>
                 </div>
                 <div className="flex gap-4">
-                  <input className="flex-1 bg-slate-50 border-none rounded-xl px-4 py-3 text-sm focus:ring-secondary shadow-inner" placeholder="Credit ID" type="text" />
-                  <button className="bg-primary text-white px-6 py-3 rounded-xl text-sm font-bold flex items-center gap-2 shadow-lg shadow-teal-900/20">Verify</button>
+                  <input value={storeCreditId} onChange={(e) => setStoreCreditId(e.target.value)} className="flex-1 bg-slate-50 border-none rounded-xl px-4 py-3 text-sm focus:ring-secondary shadow-inner" placeholder="Credit ID" type="text" />
+                  <button onClick={handleVerifyStoreCredit} className={`px-6 py-3 rounded-xl text-sm font-bold flex items-center gap-2 shadow-lg shadow-teal-900/20 transition-all ${storeCreditVerified ? 'bg-emerald-500 text-white' : 'bg-primary text-white'}`}>{storeCreditVerified ? 'Verified!' : 'Verify'}</button>
                 </div>
               </div>
             </div>
@@ -809,7 +868,7 @@ export const POS: React.FC = () => {
                     { name: 'Tempered Glass', price: 9.99 },
                     { name: 'Protective Case', price: 24.99 }
                   ].map((s, i) => (
-                    <button key={i} className="flex items-center gap-3 px-4 py-2 bg-lime-50 rounded-xl border border-lime-100 hover:bg-lime-100 transition-all">
+                    <button key={i} onClick={() => handleAddSuggestiveItem(s.name, s.price)} className="flex items-center gap-3 px-4 py-2 bg-lime-50 rounded-xl border border-lime-100 hover:bg-lime-100 transition-all active:scale-95">
                       <span className="material-symbols-outlined text-lime-600 text-sm">add_shopping_cart</span>
                       <span className="text-xs font-bold text-lime-700">{s.name} - ${s.price}</span>
                     </button>
@@ -965,6 +1024,52 @@ export const POS: React.FC = () => {
                     <p className="text-xs opacity-60">{c.phone}</p>
                   </button>
                 ))}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {isDiscountModalOpen && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[150] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-md w-full p-8 ghost-border">
+              <div className="flex justify-between items-center mb-8">
+                <h3 className="text-2xl font-black text-primary tracking-tight">Apply Discount</h3>
+                <button onClick={() => setIsDiscountModalOpen(false)} className="text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+              </div>
+              <div className="space-y-6">
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Discount Code</label>
+                  <input value={discountCode} onChange={(e) => setDiscountCode(e.target.value)} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="Enter discount code..." />
+                </div>
+                <div className="grid grid-cols-3 gap-3">
+                  {[5, 10, 15].map(pct => (
+                    <button key={pct} onClick={() => { setIsDiscountModalOpen(false); setDiscountCode(''); }} className="py-3 bg-slate-50 text-primary text-[10px] font-black uppercase tracking-widest rounded-xl border border-slate-200 hover:bg-primary hover:text-white transition-all">{pct}% Off</button>
+                  ))}
+                </div>
+                <button onClick={() => { setIsDiscountModalOpen(false); setDiscountCode(''); }} disabled={!discountCode.trim()} className="w-full py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed">Apply Code</button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {isRedeemPointsOpen && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[150] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-md w-full p-8 ghost-border">
+              <div className="flex justify-between items-center mb-8">
+                <h3 className="text-2xl font-black text-primary tracking-tight">Redeem Points</h3>
+                <button onClick={() => setIsRedeemPointsOpen(false)} className="text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+              </div>
+              <div className="space-y-6">
+                <div className="p-6 bg-teal-50 rounded-2xl border border-teal-100 text-center">
+                  <span className="text-[10px] font-black text-teal-600 uppercase tracking-widest block mb-2">Available Points</span>
+                  <span className="text-4xl font-black text-teal-700">2,450</span>
+                  <p className="text-xs text-teal-500 mt-1">= $24.50 credit value</p>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Points to Redeem</label>
+                  <input type="number" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="Enter points amount..." />
+                </div>
+                <button onClick={() => setIsRedeemPointsOpen(false)} className="w-full py-4 bg-teal-600 text-white font-black text-sm rounded-2xl shadow-lg shadow-teal-600/20 uppercase tracking-widest hover:bg-teal-700">Apply Points</button>
               </div>
             </motion.div>
           </motion.div>

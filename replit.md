@@ -83,3 +83,25 @@ A multi-tenant SaaS platform frontend built with React, TypeScript, Vite, Tailwi
 - Target: Static site
 - Build command: `npm run build`
 - Public directory: `dist`
+
+## QA Audit Summary (Completed)
+
+### Fixed Issues
+- **Dead Routes**: 20+ PageShell placeholder routes converted to Navigate redirects (App.tsx)
+- **POS Dead Buttons**: Apply Discount, Redeem Points, Add Payment Method, Verify Credit, Suggestive Sales, POS Config — all wired with modals/state
+- **TenantHeader**: Profile menu, notification click handlers, mark-all-read — all wired
+- **Dashboard Cards**: Stat cards made clickable, navigate to relevant pages
+- **Store Components** (12 components fixed): Marketing (campaign+tool modals), SupplyChain (PO+RMA modals), Reports (PDF export via window.print), Prospects (dynamic create modal), Integrations (detail modal for all buttons), Widgets (save+add handlers), Inventory (all tab action buttons), Invoices (print/PDF/SMS/email/duplicate/apply payment), Services (CRUD+category+upload), Settings (save with feedback)
+- **Owner Pages** (8 pages fixed): TenantsPage (navigate provisioning/detail), TenantDetailPage (tab management), ProvisioningPage (animated feedback), PlansPage (create/edit/archive), DomainsPage/SubscriptionsPage/AddOnsPage/SupportToolsPage/PlatformSettingsPage (manage/save buttons)
+
+### RBAC Validation
+- Route-level: AccessGuard wraps all routes with allowedUserTypes + feature checks
+- Nav filtering: TenantLayout filters by canAccess(item.id), OwnerLayout filters by canAccess(item.feature)
+- canAccess() layers: system_owner bypass → platform role permissions → plan-gating → tenant role permissions
+- Admin permissions bypass plan-gating correctly
+- Employee component enforces granular permissions (manage_employees, create_roles, edit_roles, manage_role_permissions, assign_roles, assign_manager_role, manage_attendance, manage_compensation, approve_requests)
+
+### Patterns Established
+- Save feedback: button text swap + bg-emerald-500 class for 2s (no toast library)
+- Modal pattern: AnimatePresence + fixed overlay + backdrop-blur-md + motion.div scale/y + rounded-[3rem]
+- Integration buttons: setSelectedIntegration(name) → detail modal with dismiss

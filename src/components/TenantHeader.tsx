@@ -9,12 +9,12 @@ const TenantHeader: React.FC = () => {
   const [attendanceStatus, setAttendanceStatus] = useState<'out' | 'in' | 'break'>('out');
   const [showQuickMenu, setShowQuickMenu] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
-
-  const notifications = [
-    { id: 1, text: 'Repair #1042 is ready for pickup', time: '5 min ago', icon: 'build', unread: true },
-    { id: 2, text: 'Low stock alert: iPhone 13 Screens', time: '1 hr ago', icon: 'inventory_2', unread: true },
-    { id: 3, text: 'New customer registration', time: '2 hrs ago', icon: 'person_add', unread: false },
-  ];
+  const [showProfileMenu, setShowProfileMenu] = useState(false);
+  const [notifications, setNotifications] = useState([
+    { id: 1, text: 'Repair #1042 is ready for pickup', time: '5 min ago', icon: 'build', unread: true, path: '/repairs' },
+    { id: 2, text: 'Low stock alert: iPhone 13 Screens', time: '1 hr ago', icon: 'inventory_2', unread: true, path: '/inventory' },
+    { id: 3, text: 'New customer registration', time: '2 hrs ago', icon: 'person_add', unread: false, path: '/customers' },
+  ]);
 
   const quickActions = [
     { label: 'New Sale', icon: 'shopping_cart', path: '/sales' },
@@ -45,6 +45,22 @@ const TenantHeader: React.FC = () => {
 
   const handleClockOut = () => {
     setAttendanceStatus('out');
+  };
+
+  const handleMarkAllRead = () => {
+    setNotifications(prev => prev.map(n => ({ ...n, unread: false })));
+  };
+
+  const handleNotificationClick = (notification: typeof notifications[0]) => {
+    setNotifications(prev => prev.map(n => n.id === notification.id ? { ...n, unread: false } : n));
+    setShowNotifications(false);
+    navigate(notification.path);
+  };
+
+  const closeAllDropdowns = () => {
+    setShowNotifications(false);
+    setShowQuickMenu(false);
+    setShowProfileMenu(false);
   };
 
   return (
@@ -88,7 +104,7 @@ const TenantHeader: React.FC = () => {
 
           <div className="relative">
             <button
-              onClick={() => { setShowNotifications(!showNotifications); setShowQuickMenu(false); }}
+              onClick={() => { setShowNotifications(!showNotifications); setShowQuickMenu(false); setShowProfileMenu(false); }}
               className="relative p-2.5 bg-slate-100 rounded-xl hover:bg-slate-200 transition-colors"
             >
               <span className="material-symbols-outlined text-slate-600 text-xl">notifications</span>
@@ -101,15 +117,19 @@ const TenantHeader: React.FC = () => {
 
             {showNotifications && (
               <>
-                <div className="fixed inset-0 z-40" onClick={() => setShowNotifications(false)} />
+                <div className="fixed inset-0 z-40" onClick={closeAllDropdowns} />
                 <div className="absolute right-0 top-full mt-2 w-80 bg-white rounded-2xl shadow-2xl border border-slate-200 z-50 overflow-hidden">
                   <div className="p-4 border-b border-slate-100 flex justify-between items-center">
                     <h4 className="text-xs font-black text-slate-900 uppercase tracking-widest">Notifications</h4>
-                    <span className="text-[10px] font-bold text-primary cursor-pointer hover:underline">Mark all read</span>
+                    <button onClick={handleMarkAllRead} className="text-[10px] font-bold text-primary cursor-pointer hover:underline">Mark all read</button>
                   </div>
                   <div className="max-h-64 overflow-y-auto">
                     {notifications.map(n => (
-                      <div key={n.id} className={`flex items-start gap-3 p-4 hover:bg-slate-50 transition-colors cursor-pointer ${n.unread ? 'bg-primary/[0.02]' : ''}`}>
+                      <div
+                        key={n.id}
+                        onClick={() => handleNotificationClick(n)}
+                        className={`flex items-start gap-3 p-4 hover:bg-slate-50 transition-colors cursor-pointer ${n.unread ? 'bg-primary/[0.02]' : ''}`}
+                      >
                         <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${n.unread ? 'bg-primary/10 text-primary' : 'bg-slate-100 text-slate-400'}`}>
                           <span className="material-symbols-outlined text-sm">{n.icon}</span>
                         </div>
@@ -128,7 +148,7 @@ const TenantHeader: React.FC = () => {
 
           <div className="relative">
             <button
-              onClick={() => { setShowQuickMenu(!showQuickMenu); setShowNotifications(false); }}
+              onClick={() => { setShowQuickMenu(!showQuickMenu); setShowNotifications(false); setShowProfileMenu(false); }}
               className="p-2.5 bg-slate-100 rounded-xl hover:bg-slate-200 transition-colors"
             >
               <span className="material-symbols-outlined text-slate-600 text-xl">apps</span>
@@ -136,14 +156,14 @@ const TenantHeader: React.FC = () => {
 
             {showQuickMenu && (
               <>
-                <div className="fixed inset-0 z-40" onClick={() => setShowQuickMenu(false)} />
+                <div className="fixed inset-0 z-40" onClick={closeAllDropdowns} />
                 <div className="absolute right-0 top-full mt-2 w-64 bg-white rounded-2xl shadow-2xl border border-slate-200 z-50 overflow-hidden p-4">
                   <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3 ml-1">Quick Actions</h4>
                   <div className="grid grid-cols-3 gap-2">
                     {quickActions.map(action => (
                       <button
                         key={action.label}
-                        onClick={() => { setShowQuickMenu(false); navigate(action.path); }}
+                        onClick={() => { closeAllDropdowns(); navigate(action.path); }}
                         className="flex flex-col items-center gap-1.5 p-3 rounded-xl hover:bg-slate-50 transition-colors group"
                       >
                         <div className="w-10 h-10 bg-slate-100 rounded-xl flex items-center justify-center group-hover:bg-primary group-hover:text-white text-slate-600 transition-all">
@@ -160,15 +180,48 @@ const TenantHeader: React.FC = () => {
 
           <div className="w-px h-8 bg-slate-200 mx-1" />
 
-          <button className="flex items-center gap-3 pl-2 pr-4 py-1.5 rounded-2xl hover:bg-slate-50 transition-colors">
-            <div className="w-9 h-9 bg-primary rounded-xl flex items-center justify-center text-white text-xs font-black shadow-sm">
-              {userInitials}
-            </div>
-            <div className="text-left hidden lg:block">
-              <p className="text-xs font-bold text-slate-900 leading-none">{userName}</p>
-              <p className="text-[10px] font-medium text-slate-400 capitalize">{session?.role?.replace('_', ' ')}</p>
-            </div>
-          </button>
+          <div className="relative">
+            <button
+              onClick={() => { setShowProfileMenu(!showProfileMenu); setShowNotifications(false); setShowQuickMenu(false); }}
+              className="flex items-center gap-3 pl-2 pr-4 py-1.5 rounded-2xl hover:bg-slate-50 transition-colors"
+            >
+              <div className="w-9 h-9 bg-primary rounded-xl flex items-center justify-center text-white text-xs font-black shadow-sm">
+                {userInitials}
+              </div>
+              <div className="text-left hidden lg:block">
+                <p className="text-xs font-bold text-slate-900 leading-none">{userName}</p>
+                <p className="text-[10px] font-medium text-slate-400 capitalize">{session?.role?.replace('_', ' ')}</p>
+              </div>
+            </button>
+
+            {showProfileMenu && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={closeAllDropdowns} />
+                <div className="absolute right-0 top-full mt-2 w-56 bg-white rounded-2xl shadow-2xl border border-slate-200 z-50 overflow-hidden">
+                  <div className="p-4 border-b border-slate-100">
+                    <p className="text-sm font-black text-slate-900">{userName}</p>
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest capitalize">{session?.role?.replace('_', ' ')}</p>
+                  </div>
+                  <div className="py-2">
+                    {[
+                      { label: 'My Profile', icon: 'person', path: '/settings' },
+                      { label: 'Store Settings', icon: 'settings', path: '/settings' },
+                      { label: 'Activity Log', icon: 'history', path: '/employees' },
+                    ].map(item => (
+                      <button
+                        key={item.label}
+                        onClick={() => { closeAllDropdowns(); navigate(item.path); }}
+                        className="w-full flex items-center gap-3 px-4 py-2.5 text-left hover:bg-slate-50 transition-colors"
+                      >
+                        <span className="material-symbols-outlined text-slate-400 text-lg">{item.icon}</span>
+                        <span className="text-xs font-bold text-slate-600">{item.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </div>
     </>

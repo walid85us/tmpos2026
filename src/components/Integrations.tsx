@@ -14,6 +14,7 @@ type IntegrationTab =
 
 export default function Integrations() {
   const [activeTab, setActiveTab] = useState<IntegrationTab>('accounting');
+  const [selectedIntegration, setSelectedIntegration] = useState<string | null>(null);
 
   const renderAccounting = () => (
     <div className="space-y-8">
@@ -34,8 +35,8 @@ export default function Integrations() {
             </div>
             <p className="text-sm font-medium text-slate-500 mb-8">{item.desc}</p>
             <div className="flex gap-4">
-              <button className="flex-1 py-4 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-2xl shadow-lg shadow-primary/20">Connect Account</button>
-              <button className="px-6 py-4 bg-slate-50 text-slate-400 rounded-2xl border border-slate-100"><span className="material-symbols-outlined text-sm">settings</span></button>
+              <button onClick={() => setSelectedIntegration(item.name)} className="flex-1 py-4 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-2xl shadow-lg shadow-primary/20 hover:bg-primary/90 active:scale-95 transition-all">Connect Account</button>
+              <button onClick={() => setSelectedIntegration(item.name + ' Settings')} className="px-6 py-4 bg-slate-50 text-slate-400 rounded-2xl border border-slate-100 hover:bg-slate-100 transition-all"><span className="material-symbols-outlined text-sm">settings</span></button>
             </div>
           </div>
         ))}
@@ -57,7 +58,7 @@ export default function Integrations() {
             </div>
             <h4 className="text-lg font-black text-primary mb-2">{item.name}</h4>
             <p className="text-xs font-medium text-slate-500 mb-8">{item.desc}</p>
-            <button className="w-full py-3 bg-slate-50 text-primary text-[10px] font-black uppercase tracking-widest rounded-xl border border-slate-200 hover:bg-primary hover:text-white transition-all">Setup Integration</button>
+            <button onClick={() => setSelectedIntegration(item.name)} className="w-full py-3 bg-slate-50 text-primary text-[10px] font-black uppercase tracking-widest rounded-xl border border-slate-200 hover:bg-primary hover:text-white transition-all">Setup Integration</button>
           </div>
         ))}
       </div>
@@ -72,7 +73,7 @@ export default function Integrations() {
             <h3 className="text-2xl font-black text-primary tracking-tight">Membership Plans</h3>
             <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Loyalty & Retention Management</p>
           </div>
-          <button className="px-8 py-3 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl shadow-lg shadow-primary/20">+ Create New Plan</button>
+          <button onClick={() => setSelectedIntegration('Create Membership Plan')} className="px-8 py-3 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl shadow-lg shadow-primary/20 hover:bg-primary/90 active:scale-95 transition-all">+ Create New Plan</button>
         </div>
         
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
@@ -101,7 +102,7 @@ export default function Integrations() {
                   <div className="absolute right-1 top-1 w-3 h-3 bg-white rounded-full shadow-sm"></div>
                 </div>
               </div>
-              <button className="w-full py-3 bg-white text-primary text-[10px] font-black uppercase tracking-widest rounded-xl border border-slate-200">Manage Membership Invoices</button>
+              <button onClick={() => setSelectedIntegration('Membership Invoices')} className="w-full py-3 bg-white text-primary text-[10px] font-black uppercase tracking-widest rounded-xl border border-slate-200 hover:bg-slate-50 transition-all">Manage Membership Invoices</button>
             </div>
           </div>
         </div>
@@ -129,7 +130,7 @@ export default function Integrations() {
             <h4 className="text-lg font-black text-primary mb-1">{item.name}</h4>
             <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest mb-4">Payment Processor</p>
             <p className="text-[10px] font-medium text-slate-500 mb-6 leading-relaxed">{item.desc}</p>
-            <button className="w-full py-3 bg-slate-50 text-primary text-[10px] font-black uppercase tracking-widest rounded-xl border border-slate-200 hover:bg-primary hover:text-white transition-all">Configure</button>
+            <button onClick={() => setSelectedIntegration(item.name)} className="w-full py-3 bg-slate-50 text-primary text-[10px] font-black uppercase tracking-widest rounded-xl border border-slate-200 hover:bg-primary hover:text-white transition-all">Configure</button>
           </div>
         ))}
       </div>
@@ -156,7 +157,7 @@ export default function Integrations() {
             <div className="space-y-3">
               <div className="flex items-center justify-between p-3 bg-white rounded-xl border border-slate-100">
                 <span className="text-[10px] font-bold text-slate-600 uppercase tracking-widest">Device Pairing Mode</span>
-                <button className="text-[10px] font-black text-primary uppercase tracking-widest">Start Pairing</button>
+                <button onClick={() => setSelectedIntegration('Phone Pairing')} className="text-[10px] font-black text-primary uppercase tracking-widest hover:text-primary/70 transition-colors">Start Pairing</button>
               </div>
               <div className="flex items-center justify-between p-3 bg-white rounded-xl border border-slate-100">
                 <span className="text-[10px] font-bold text-slate-600 uppercase tracking-widest">Terminal Firmware</span>
@@ -177,7 +178,7 @@ export default function Integrations() {
                 <span className="text-[10px] font-bold text-slate-600 uppercase tracking-widest">Merchant ID Sync</span>
                 <span className="material-symbols-outlined text-emerald-500 text-sm">check_circle</span>
               </div>
-              <button className="w-full py-3 bg-white text-primary text-[10px] font-black uppercase tracking-widest rounded-xl border border-slate-200">View Integration Guide</button>
+              <button onClick={() => setSelectedIntegration('Phone Integration Guide')} className="w-full py-3 bg-white text-primary text-[10px] font-black uppercase tracking-widest rounded-xl border border-slate-200 hover:bg-slate-50 transition-all">View Integration Guide</button>
             </div>
           </div>
         </div>
@@ -284,7 +285,7 @@ export default function Integrations() {
           <div className="p-6 bg-slate-50 rounded-[2rem] border border-slate-100">
             <h4 className="text-sm font-black text-primary mb-4">Phone System Quotes</h4>
             <p className="text-xs font-medium text-slate-500 mb-6">Generate and manage quotes for phone system hardware and services directly from RepairDesk.</p>
-            <button className="w-full py-3 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl shadow-lg shadow-primary/20">Manage Quotes</button>
+            <button onClick={() => setSelectedIntegration('Quote Management')} className="w-full py-3 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl shadow-lg shadow-primary/20 hover:bg-primary/90 active:scale-95 transition-all">Manage Quotes</button>
           </div>
         </div>
       </section>
@@ -309,7 +310,7 @@ export default function Integrations() {
             </div>
             <h4 className="text-lg font-black text-primary mb-2">{item.name}</h4>
             <p className="text-[10px] font-medium text-slate-500 mb-8">{item.desc}</p>
-            <button className="w-full py-3 bg-slate-50 text-primary text-[10px] font-black uppercase tracking-widest rounded-xl border border-slate-200 hover:bg-primary hover:text-white transition-all">Setup</button>
+            <button onClick={() => setSelectedIntegration(item.name)} className="w-full py-3 bg-slate-50 text-primary text-[10px] font-black uppercase tracking-widest rounded-xl border border-slate-200 hover:bg-primary hover:text-white transition-all">Setup</button>
           </div>
         ))}
       </div>
@@ -340,7 +341,7 @@ export default function Integrations() {
             <div key={gw.name} className="p-6 bg-slate-50 rounded-[2rem] border border-slate-100 group hover:bg-white hover:shadow-md transition-all">
               <h4 className="text-sm font-black text-primary mb-2">{gw.name}</h4>
               <p className="text-[10px] font-medium text-slate-500 mb-6">{gw.desc}</p>
-              <button className="w-full py-3 bg-white text-primary text-[10px] font-black uppercase tracking-widest rounded-xl border border-slate-200 group-hover:bg-primary group-hover:text-white transition-all">Configure API</button>
+              <button onClick={() => setSelectedIntegration(gw.name)} className="w-full py-3 bg-white text-primary text-[10px] font-black uppercase tracking-widest rounded-xl border border-slate-200 group-hover:bg-primary group-hover:text-white transition-all">Configure API</button>
             </div>
           ))}
         </div>
@@ -373,7 +374,7 @@ export default function Integrations() {
             </div>
             <h4 className="text-lg font-black text-primary mb-1">{vendor.name}</h4>
             <p className="text-xs font-medium text-slate-500 mb-8">{vendor.desc}</p>
-            <button className="w-full py-3 bg-slate-50 text-primary text-[10px] font-black uppercase tracking-widest rounded-xl border border-slate-200 hover:bg-primary hover:text-white transition-all">Connect Vendor</button>
+            <button onClick={() => setSelectedIntegration(vendor.name)} className="w-full py-3 bg-slate-50 text-primary text-[10px] font-black uppercase tracking-widest rounded-xl border border-slate-200 hover:bg-primary hover:text-white transition-all">Connect Vendor</button>
           </div>
         ))}
       </div>
@@ -429,7 +430,7 @@ export default function Integrations() {
                       value="rd_live_51PjK2..." 
                       className="w-full px-6 py-4 bg-white rounded-2xl border border-slate-200 font-mono text-xs text-slate-600 pr-16"
                     />
-                    <button className="absolute right-4 top-1/2 -translate-y-1/2 text-primary font-black text-[10px] uppercase tracking-widest">Copy</button>
+                    <button onClick={(e) => { navigator.clipboard.writeText('rd_live_51PjK2...'); const btn = e.currentTarget; btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = 'Copy'; }, 1500); }} className="absolute right-4 top-1/2 -translate-y-1/2 text-primary font-black text-[10px] uppercase tracking-widest hover:text-primary/70 transition-colors">Copy</button>
                   </div>
                 </div>
                 <div className="space-y-2">
@@ -440,10 +441,10 @@ export default function Integrations() {
                       value="88231-992-x-112" 
                       className="w-full px-6 py-4 bg-white rounded-2xl border border-slate-200 font-mono text-xs text-slate-600 pr-16"
                     />
-                    <button className="absolute right-4 top-1/2 -translate-y-1/2 text-primary font-black text-[10px] uppercase tracking-widest">Copy</button>
+                    <button onClick={(e) => { navigator.clipboard.writeText('88231-992-x-112'); const btn = e.currentTarget; btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = 'Copy'; }, 1500); }} className="absolute right-4 top-1/2 -translate-y-1/2 text-primary font-black text-[10px] uppercase tracking-widest hover:text-primary/70 transition-colors">Copy</button>
                   </div>
                 </div>
-                <button className="w-full py-4 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-2xl shadow-xl shadow-primary/20">Generate New Credentials</button>
+                <button onClick={() => setSelectedIntegration('API Credentials')} className="w-full py-4 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-2xl shadow-xl shadow-primary/20 hover:bg-primary/90 active:scale-95 transition-all">Generate New Credentials</button>
               </div>
             </div>
           </div>
@@ -459,7 +460,7 @@ export default function Integrations() {
               <p className="text-white/60 text-xs font-medium">Test your API calls in a safe, isolated environment before going live.</p>
             </div>
           </div>
-          <button className="px-8 py-4 bg-white text-primary text-[10px] font-black uppercase tracking-widest rounded-2xl shadow-xl active:scale-95 transition-all">
+          <button onClick={() => setSelectedIntegration('Developer Sandbox')} className="px-8 py-4 bg-white text-primary text-[10px] font-black uppercase tracking-widest rounded-2xl shadow-xl active:scale-95 transition-all hover:bg-slate-50">
             Access Sandbox
           </button>
         </div>
@@ -534,6 +535,33 @@ export default function Integrations() {
           </AnimatePresence>
         </div>
       </div>
+
+      <AnimatePresence>
+        {selectedIntegration && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" onClick={() => setSelectedIntegration(null)} />
+            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative w-full max-w-md bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden">
+              <div className="p-8 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
+                <div>
+                  <h3 className="text-2xl font-black text-primary tracking-tight">{selectedIntegration}</h3>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Integration Setup</p>
+                </div>
+                <button onClick={() => setSelectedIntegration(null)} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-slate-400">close</span>
+                </button>
+              </div>
+              <div className="p-8 flex flex-col items-center text-center">
+                <div className="w-20 h-20 bg-primary/5 rounded-full flex items-center justify-center mb-6">
+                  <span className="material-symbols-outlined text-4xl text-primary">extension</span>
+                </div>
+                <p className="text-sm text-slate-500 mb-2">This integration will be activated once backend services are configured.</p>
+                <p className="text-xs text-slate-400 mb-6">Connect your account credentials to enable real-time data sync.</p>
+                <button onClick={() => setSelectedIntegration(null)} className="px-8 py-3 bg-primary text-white font-black text-xs rounded-2xl uppercase tracking-widest shadow-lg shadow-primary/20 active:scale-95 transition-all">Got It</button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

@@ -142,10 +142,10 @@ export default function Services() {
                 </td>
                 <td className="px-8 py-6 text-right">
                   <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl transition-colors">
+                    <button onClick={() => setShowAddServiceModal(true)} className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl transition-colors" title="Edit Service">
                       <span className="material-symbols-outlined text-sm">edit</span>
                     </button>
-                    <button className="p-2 hover:bg-rose-50 text-rose-400 rounded-xl transition-colors">
+                    <button onClick={() => { if (confirm('Delete this service?')) setServices(prev => prev.filter(svc => svc.id !== s.id)); }} className="p-2 hover:bg-rose-50 text-rose-400 rounded-xl transition-colors" title="Delete Service">
                       <span className="material-symbols-outlined text-sm">delete</span>
                     </button>
                   </div>
@@ -162,7 +162,7 @@ export default function Services() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-black text-primary tracking-tight">Repair Categories</h2>
-        <button className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2">
+        <button onClick={() => setShowAddServiceModal(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
           <span className="material-symbols-outlined text-sm">add</span>
           New Category
         </button>
@@ -176,8 +176,8 @@ export default function Services() {
             <h3 className="text-xl font-black text-primary mb-2">{cat.name}</h3>
             <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">12 Active Services</p>
             <div className="mt-6 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-              <button className="flex-1 py-2 bg-slate-50 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-slate-100">Edit</button>
-              <button className="flex-1 py-2 bg-rose-50 text-rose-600 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-rose-100">Delete</button>
+              <button onClick={() => setShowAddServiceModal(true)} className="flex-1 py-2 bg-slate-50 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-slate-100">Edit</button>
+              <button onClick={() => { if (confirm('Delete this category?')) setCategories(prev => prev.filter(c => c.id !== cat.id)); }} className="flex-1 py-2 bg-rose-50 text-rose-600 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-rose-100">Delete</button>
             </div>
           </div>
         ))}
@@ -193,7 +193,7 @@ export default function Services() {
             <h2 className="text-2xl font-black text-primary tracking-tight">Bulk Price Editor</h2>
             <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Update multiple service prices at once</p>
           </div>
-          <button className="px-8 py-3 bg-emerald-500 text-white font-black text-xs rounded-2xl shadow-lg shadow-emerald-500/20 uppercase tracking-widest">
+          <button onClick={() => { const el = document.querySelector('.save-feedback'); if (el) { el.textContent = 'Saved!'; setTimeout(() => { el.textContent = 'Save All Changes'; }, 2000); }}} className="save-feedback px-8 py-3 bg-emerald-500 text-white font-black text-xs rounded-2xl shadow-lg shadow-emerald-500/20 uppercase tracking-widest hover:bg-emerald-600 active:scale-95 transition-all">
             Save All Changes
           </button>
         </div>
@@ -235,7 +235,7 @@ export default function Services() {
         <p className="text-sm font-bold text-slate-400 max-w-md mb-8">
           Upload a ZIP file containing images named by SKU or Service ID to automatically update your service catalog.
         </p>
-        <button className="px-12 py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-xl shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 transition-all">
+        <button onClick={() => { const input = document.createElement('input'); input.type = 'file'; input.accept = '.zip'; input.click(); }} className="px-12 py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-xl shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all">
           Upload ZIP Archive
         </button>
       </div>
@@ -353,7 +353,7 @@ export default function Services() {
                     placeholder="Special instructions for technicians..."
                   />
                 </div>
-                <button className="w-full py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 transition-all">
+                <button onClick={() => setShowAddServiceModal(false)} className="w-full py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all">
                   Create Service
                 </button>
               </div>

@@ -1,0 +1,377 @@
+You are now acting as:
+Principal System QA Auditor + Principal E2E Product Tester + Principal React Router Engineer + Principal RBAC Architect + Principal UX Design Manager + Principal Product Strategist + Principal Competitive Intelligence Analyst + Principal SaaS Platform Architect + Principal Repair/POS Domain Expert
+
+IMPORTANT:
+This is a coordinated full-system audit and improvement pass.
+
+Your mission is to:
+1. audit the entire application from System Owner down to the lowest active store role
+2. test every page, section, module, route, button, tab, dropdown, card action, quick action, icon action, modal trigger, drawer trigger, and any clickable element
+3. verify each item routes/opens/behaves correctly
+4. fix dead links, broken routes, missing handlers, empty shells, and non-functional UI actions
+5. deeply research competitor patterns and future-fit product requirements
+6. improve the system safely without introducing visual drift or breaking working flows
+
+DO NOT:
+- break auth flow
+- break preview mode
+- redesign the visual system
+- remove working RBAC logic
+- replace current design baseline
+- add random features without grounding them in product logic and current system architecture
+
+PRESERVE:
+- current design baseline exactly
+- current auth stability
+- current preview mode behavior
+- current store/platform role hierarchy
+- current route structure unless a repair is necessary
+- current working modules and workflows
+
+==================================================
+PHASE 1 — FULL SYSTEM CLICKABLE AUDIT
+==================================================
+
+Audit the entire application across all roles:
+
+PLATFORM SIDE:
+- System Owner
+- every active platform role available in preview mode / platform roles
+
+STORE SIDE:
+- Store Owner
+- Manager
+- Technician
+- Sales Associate
+- and any other currently active/created store roles
+
+For EACH role, test ALL of the following:
+
+A. Navigation
+- sidebar items
+- tab bars
+- nested tabs
+- quick menu shortcuts
+- top-right utility actions
+- dashboard cards
+- “view all” links
+- row actions
+- card buttons
+- icon-only buttons
+- action menus
+- profile/avatar actions
+
+B. Pages / Sections / Modules
+Test every current module/page/route including but not limited to:
+- Dashboard
+- Sales
+- Repairs
+- Inventory
+- Customers
+- Employees
+- Invoices
+- Services
+- Supply Chain
+- Reports
+- Prospects
+- Marketing
+- Integrations
+- Widgets
+- Settings
+- Support
+- platform owner pages
+- Team Management
+- Plans
+- Feature Matrix
+- Add-ons
+- Billing
+- Domains
+- Usage
+- Audit & Security
+- any additional routed pages in App.tsx / layouts / components
+
+C. Functional UI Elements
+Test every clickable element:
+- buttons
+- links
+- tabs
+- cards
+- dropdown actions
+- action icons
+- modal openers
+- drawers
+- “create” buttons
+- “edit” buttons
+- “manage permissions”
+- “review”
+- “approve/reject/return”
+- “clock in / start break / back from break / clock out”
+- POS actions
+- held sale actions
+- print label actions
+- customer create actions
+- report actions
+- integration/widget actions
+- settings save/apply actions
+
+For each clickable element verify:
+- it opens the correct destination
+- it has the correct route
+- it has the correct handler
+- it shows the correct page/modal/drawer
+- it respects role permissions
+- it does not silently fail
+- it does not misroute to a generic placeholder page unless intentionally designed
+
+==================================================
+PHASE 2 — FIX ALL DEAD/BROKEN UI AND ROUTING
+==================================================
+
+Repair every broken case found during the audit.
+
+Fix categories:
+- dead buttons
+- dead tabs
+- broken route targets
+- placeholder-only routes where real component exists
+- incorrect route redirects
+- missing modal open handlers
+- missing state handlers
+- wrong page opened from shortcut
+- buttons routing to generic shell instead of specific workflow
+- clickable items visible to roles that should not have them
+- expected actions hidden from roles that should have them
+
+If a real component already exists in /src/components or elsewhere:
+- reconnect it
+- do not create weak replacements
+
+If a full real component does not exist:
+- create a functional, intentional shell with working actions
+- do not leave dead placeholders
+
+==================================================
+PHASE 3 — ROLE-BY-ROLE BEHAVIOR VALIDATION
+==================================================
+
+Validate the system role-by-role.
+
+A. Platform / System Owner side
+Ensure:
+- all platform pages work
+- Team Management works fully
+- platform roles/permissions are enforced
+- delegated platform authority works correctly
+- platform-only routes remain platform-only
+
+B. Store Owner side
+Ensure:
+- full store access according to subscription/permissions
+- protected store-owner identity remains platform-controlled
+- store-owner operational flows all work
+
+C. Manager side
+Ensure:
+- only delegated permissions are available
+- cannot manage platform-controlled store-owner identity
+- role delegation rules still work
+- subordinate employee management works correctly
+
+D. Technician side
+Ensure:
+- read/write access is limited correctly
+- repair and service flows work in-context
+- read-only areas remain read-only where intended
+
+E. Sales Associate side
+Ensure:
+- sales, customer, invoice, prospect, inventory-read flows work correctly
+- restricted areas remain hidden/inaccessible
+- POS shortcuts/actions work correctly for sales context
+
+F. Any dynamically created/custom roles
+Ensure:
+- preview mode includes them where expected
+- permissions really affect visible UI
+- route access and action visibility reflect their permissions
+
+==================================================
+PHASE 4 — PRODUCT / DESIGN / UX AUDIT
+==================================================
+
+Act as Design Manager + Product Thinker.
+
+Review the full system for:
+- consistency
+- UX clarity
+- operational friction
+- missing “resume workflow” actions
+- unnecessary click depth
+- duplicated paths
+- weak empty states
+- weak activity feedback
+- missing confirmation states
+- weak auditability surfaces
+- missing management controls
+- poor discoverability of important actions
+
+Important:
+Do NOT redesign the visual baseline.
+Improve within the current design system only.
+
+Safe improvement areas allowed:
+- workflow clarity
+- contextual actions
+- missing state indicators
+- approval visibility
+- resume/recover flows
+- modal/drawer selection improvements
+- label/hold-sale/customer creation convenience
+- role-aware action visibility
+- better empty state utility
+- better operational shortcuts
+- better guardrails
+
+==================================================
+PHASE 5 — DEEP COMPETITIVE RESEARCH
+==================================================
+
+Research the market deeply before making product recommendations.
+
+Research official websites, product pages, help docs, and pricing/features pages for relevant competitors and adjacent leaders, including categories such as:
+- repair shop systems
+- retail POS systems
+- multi-store retail SaaS
+- service/repair workflow software
+- CRM/ticket/invoice/inventory platforms
+- loyalty and customer retention platforms
+- integrations/app ecosystem platforms
+
+At minimum, study competitors/pattern sources similar to:
+- repair/POS management platforms
+- repair ticketing/ticket workflow products
+- retail POS systems
+- loyalty/customer experience systems
+- app/integration ecosystems
+
+Research goals:
+- identify features competitors already use well
+- identify workflows expected by modern repair/POS/store operators
+- identify important missing features for future scale
+- identify multi-tenant SaaS capabilities needed for long-term success
+- identify owner/platform controls needed for commercial productization
+- identify customer-facing/self-service opportunities
+- identify reporting/marketing/loyalty/integration gaps
+
+Do not blindly copy competitors.
+Use research to improve product strategy.
+
+==================================================
+PHASE 6 — IMPLEMENT LOW-RISK HIGH-VALUE IMPROVEMENTS
+==================================================
+
+After the audit and research:
+- implement low-risk, high-value improvements that fit the current architecture and UI baseline
+- do NOT start massive new subsystems unless required to fix an obviously broken workflow
+- for larger future features, prepare a roadmap instead of overbuilding now
+
+Examples of acceptable immediate improvements:
+- reconnecting dead feature flows
+- improving hold/resume workflows
+- strengthening label workflows
+- improving approval visibility/actions
+- fixing broken report/prospect/marketing/integrations/widget routing
+- improving role-aware surfaces
+- improving shortcut behavior
+- improving route targeting
+- adding missing but obvious operational affordances within current modules
+
+Examples of future-roadmap items instead of immediate heavy build:
+- full omnichannel commerce
+- advanced BI warehouse
+- franchise master controls beyond current scope
+- customer portal expansion
+- AI automation suites
+- external marketplace ecosystems
+- advanced subscription metering
+- cross-tenant analytics warehouse
+- enterprise compliance packages
+
+==================================================
+PHASE 7 — DELIVERABLES
+==================================================
+
+Return ALL of the following:
+
+A. SYSTEM AUDIT MATRIX
+Provide a structured matrix or categorized report of:
+- role tested
+- page/module
+- clickable element
+- expected behavior
+- actual behavior before fix
+- action taken
+- final status (pass/fail)
+
+B. FILES MODIFIED
+List exact files changed.
+
+C. ROUTE / PAGE / ACTION FIX SUMMARY
+Summarize all repaired:
+- routes
+- buttons
+- tabs
+- card actions
+- modals
+- drawers
+- quick actions
+- icon actions
+- role visibility issues
+
+D. COMPETITIVE RESEARCH SUMMARY
+Summarize:
+- major competitor feature patterns found
+- which ones your system already covers
+- which ones are missing
+- which ones should be added now
+- which ones belong to later phases
+
+E. FUTURE-READY PRODUCT RECOMMENDATIONS
+Create a prioritized backlog with:
+- P0 = fix now / core operational
+- P1 = near-term advantage
+- P2 = strategic commercial differentiation
+- P3 = later enterprise/scale roadmap
+
+F. DESIGN / UX IMPROVEMENT SUMMARY
+List UX improvements made without visual drift.
+
+G. RISK REPORT
+Flag anything still incomplete, risky, or requiring backend/database phase.
+
+H. STRICT FINAL CONFIRMATIONS
+Confirm explicitly:
+- auth flow was not broken
+- preview mode was not broken
+- design baseline was preserved
+- RBAC visibility still works
+- every tested clickable element now works or is explicitly flagged with reason if not
+
+==================================================
+PHASE 8 — STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say complete unless you have:
+- tested the system role-by-role
+- audited every major page/module
+- checked all significant clickable UI elements
+- fixed broken routing/handlers where possible
+- reconnected real components where they already exist
+- performed external competitor/product research
+- implemented safe high-value improvements
+- produced the audit matrix and prioritized roadmap
+- preserved auth, preview mode, RBAC, and visual baseline
+
+-------------------------------------------------
+
+focus on audit + fixes + roadmap, but not to start huge new builds from competitor research in the same pass unless they are clearly low-risk and aligned with my current architecture

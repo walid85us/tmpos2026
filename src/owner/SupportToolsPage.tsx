@@ -1,7 +1,14 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { tenants } from './mockData';
 
 const SupportToolsPage: React.FC = () => {
+  const [impersonating, setImpersonating] = useState<string | null>(null);
+
+  const handleImpersonate = (tenantId: string) => {
+    setImpersonating(tenantId);
+    setTimeout(() => setImpersonating(null), 2000);
+  };
+
   return (
     <div className="space-y-8">
       <div>
@@ -32,8 +39,15 @@ const SupportToolsPage: React.FC = () => {
                 <td className="px-8 py-4 font-bold text-slate-900">{tenant.name}</td>
                 <td className="px-8 py-4 text-sm font-bold text-red-600">{tenant.flags.join(', ')}</td>
                 <td className="px-8 py-4 text-right">
-                  <button className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all">
-                    Impersonate
+                  <button
+                    onClick={() => handleImpersonate(tenant.id)}
+                    className={`px-4 py-2 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95 ${
+                      impersonating === tenant.id
+                        ? 'bg-emerald-500 text-white'
+                        : 'bg-slate-100 hover:bg-slate-200 text-slate-600'
+                    }`}
+                  >
+                    {impersonating === tenant.id ? 'Session Started' : 'Impersonate'}
                   </button>
                 </td>
               </tr>

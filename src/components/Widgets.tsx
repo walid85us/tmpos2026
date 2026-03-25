@@ -12,6 +12,9 @@ type WidgetType =
 
 export default function Widgets() {
   const [activeWidget, setActiveWidget] = useState<WidgetType>('appointments');
+  const [intakeQuestions, setIntakeQuestions] = useState(['Power On?', 'Cracked Screen?', 'Water Damage?', 'iCloud Locked?']);
+  const [showAddQuestion, setShowAddQuestion] = useState(false);
+  const [newQuestion, setNewQuestion] = useState('');
 
   const renderAppointments = () => (
     <div className="space-y-8">
@@ -151,12 +154,47 @@ export default function Widgets() {
             <div className="p-6 bg-slate-50 rounded-[2rem] border border-slate-100">
               <h4 className="text-sm font-black text-primary mb-4">Intake Questions</h4>
               <div className="space-y-2">
-                {['Power On?', 'Cracked Screen?', 'Water Damage?', 'iCloud Locked?'].map(q => (
-                  <div key={q} className="p-3 bg-white rounded-xl border border-slate-100 text-[10px] font-bold text-slate-600">
-                    {q}
+                {intakeQuestions.map(q => (
+                  <div key={q} className="p-3 bg-white rounded-xl border border-slate-100 text-[10px] font-bold text-slate-600 flex justify-between items-center">
+                    <span>{q}</span>
+                    <button onClick={() => setIntakeQuestions(prev => prev.filter(x => x !== q))} className="text-slate-300 hover:text-red-400 transition-colors">
+                      <span className="material-symbols-outlined text-xs">close</span>
+                    </button>
                   </div>
                 ))}
-                <button className="w-full py-2 border-2 border-dashed border-slate-200 text-slate-400 text-[8px] font-black uppercase tracking-widest rounded-xl">+ Add Question</button>
+                {showAddQuestion ? (
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={newQuestion}
+                      onChange={e => setNewQuestion(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' && newQuestion.trim()) {
+                          setIntakeQuestions(prev => [...prev, newQuestion.trim()]);
+                          setNewQuestion('');
+                          setShowAddQuestion(false);
+                        }
+                      }}
+                      placeholder="Enter question..."
+                      className="flex-1 px-3 py-2 bg-white border border-slate-200 rounded-xl text-[10px] font-bold focus:outline-none focus:ring-2 focus:ring-primary/20"
+                      autoFocus
+                    />
+                    <button
+                      onClick={() => {
+                        if (newQuestion.trim()) {
+                          setIntakeQuestions(prev => [...prev, newQuestion.trim()]);
+                          setNewQuestion('');
+                        }
+                        setShowAddQuestion(false);
+                      }}
+                      className="px-3 py-2 bg-primary text-white text-[8px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 transition-all"
+                    >
+                      Add
+                    </button>
+                  </div>
+                ) : (
+                  <button onClick={() => setShowAddQuestion(true)} className="w-full py-2 border-2 border-dashed border-slate-200 text-slate-400 text-[8px] font-black uppercase tracking-widest rounded-xl hover:border-primary/40 hover:text-primary active:scale-95 transition-all">+ Add Question</button>
+                )}
               </div>
             </div>
           </div>
@@ -348,7 +386,7 @@ export default function Widgets() {
           <span className="text-[10px] uppercase tracking-[0.2em] text-secondary font-extrabold mb-1 block">Customer Experience</span>
           <h2 className="text-3xl font-extrabold text-primary tracking-tight font-headline">Embeddable Widgets</h2>
         </div>
-        <button className="bg-primary text-white px-8 py-3 rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 hover:bg-primary/90 transition-all">
+        <button onClick={(e) => { const btn = e.currentTarget; btn.textContent = 'Saved!'; btn.classList.add('bg-emerald-500'); setTimeout(() => { btn.textContent = 'Save Widget Config'; btn.classList.remove('bg-emerald-500'); }, 2000); }} className="bg-primary text-white px-8 py-3 rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 hover:bg-primary/90 active:scale-95 transition-all">
           Save Widget Config
         </button>
       </header>

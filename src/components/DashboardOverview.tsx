@@ -78,7 +78,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="signature-gradient p-8 rounded-[2rem] shadow-xl text-white relative overflow-hidden flex flex-col justify-between h-52">
+        <div onClick={() => navigate('/reports')} className="signature-gradient p-8 rounded-[2rem] shadow-xl text-white relative overflow-hidden flex flex-col justify-between h-52 cursor-pointer hover:shadow-2xl transition-shadow">
           <div className="z-10">
             <span className="text-teal-100/60 uppercase text-[10px] font-bold tracking-widest">Today's Revenue</span>
             <div className="text-5xl font-black mt-2 tracking-tighter">$4,285.50</div>
@@ -90,7 +90,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
           <span className="material-symbols-outlined absolute -right-4 -bottom-4 text-9xl opacity-10">payments</span>
         </div>
 
-        <div className="bg-white p-8 rounded-[2rem] shadow-sm border border-outline-variant/10 flex flex-col justify-between h-52">
+        <div onClick={() => navigate('/repairs')} className="bg-white p-8 rounded-[2rem] shadow-sm border border-outline-variant/10 flex flex-col justify-between h-52 cursor-pointer hover:shadow-md transition-shadow">
           <div>
             <span className="text-slate-500 uppercase text-[10px] font-bold tracking-widest">Active Repairs</span>
             <div className="text-5xl font-black text-primary mt-2 tracking-tighter">18</div>
@@ -105,7 +105,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
           </div>
         </div>
 
-        <div className="bg-red-50 p-8 rounded-[2rem] border border-red-100 flex flex-col justify-between h-52">
+        <div onClick={() => navigate('/inventory')} className="bg-red-50 p-8 rounded-[2rem] border border-red-100 flex flex-col justify-between h-52 cursor-pointer hover:shadow-md transition-shadow">
           <div>
             <span className="text-red-800 uppercase text-[10px] font-bold tracking-widest">Critical Stock</span>
             <div className="text-5xl font-black text-red-700 mt-2 tracking-tighter">04</div>

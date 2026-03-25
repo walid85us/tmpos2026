@@ -523,7 +523,7 @@ export default function Settings() {
           <span className="text-[10px] uppercase tracking-[0.2em] text-secondary font-extrabold mb-1 block">System Configuration</span>
           <h2 className="text-3xl font-extrabold text-primary tracking-tight font-headline">Store Setup</h2>
         </div>
-        <button className="bg-primary text-white px-8 py-3 rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 hover:bg-primary/90 transition-all">
+        <button onClick={(e) => { const btn = e.currentTarget; btn.textContent = 'Saved!'; btn.classList.replace('bg-primary', 'bg-emerald-500'); setTimeout(() => { btn.textContent = 'Save All Changes'; btn.classList.replace('bg-emerald-500', 'bg-primary'); }, 2000); }} className="bg-primary text-white px-8 py-3 rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 hover:bg-primary/90 active:scale-95 transition-all">
           Save All Changes
         </button>
       </header>

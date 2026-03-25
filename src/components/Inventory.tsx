@@ -57,10 +57,13 @@ const Inventory: React.FC = () => {
     { id: 'bundles', label: 'Bundles', icon: 'inventory' },
   ];
 
-  const filteredProducts = products.filter(p => 
-    p.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
-    p.sku.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const filteredProducts = products.filter(p => {
+    if (searchQuery.startsWith('cat:')) {
+      return p.category === searchQuery.slice(4);
+    }
+    return p.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
+      p.sku.toLowerCase().includes(searchQuery.toLowerCase());
+  });
 
   const renderInventory = () => (
     <div className="space-y-6">
@@ -76,11 +79,17 @@ const Inventory: React.FC = () => {
           />
         </div>
         <div className="flex gap-3 w-full md:w-auto">
-          <button className="flex-1 md:flex-none px-6 py-3 bg-white border border-slate-200 text-primary font-black text-xs rounded-2xl hover:bg-slate-50 transition-all uppercase tracking-widest flex items-center justify-center gap-2">
-            <span className="material-symbols-outlined text-sm">category</span>
-            Categories
-          </button>
-          <button className="flex-1 md:flex-none px-6 py-3 bg-white border border-slate-200 text-primary font-black text-xs rounded-2xl hover:bg-slate-50 transition-all uppercase tracking-widest flex items-center justify-center gap-2">
+          <select
+            value={searchQuery.startsWith('cat:') ? searchQuery.slice(4) : ''}
+            onChange={(e) => setSearchQuery(e.target.value ? `cat:${e.target.value}` : '')}
+            className="flex-1 md:flex-none px-6 py-3 bg-white border border-slate-200 text-primary font-black text-xs rounded-2xl hover:bg-slate-50 transition-all uppercase tracking-widest appearance-none cursor-pointer"
+          >
+            <option value="">All Categories</option>
+            {[...new Set(products.map(p => p.category))].map(cat => (
+              <option key={cat} value={cat}>{cat}</option>
+            ))}
+          </select>
+          <button onClick={() => window.print()} className="flex-1 md:flex-none px-6 py-3 bg-white border border-slate-200 text-primary font-black text-xs rounded-2xl hover:bg-slate-50 transition-all uppercase tracking-widest flex items-center justify-center gap-2">
             <span className="material-symbols-outlined text-sm">file_download</span>
             Export
           </button>
@@ -159,13 +168,13 @@ const Inventory: React.FC = () => {
                   </td>
                   <td className="px-8 py-6 text-right">
                     <div className="flex justify-end gap-2">
-                      <button className="p-2 hover:bg-white rounded-xl transition-all text-slate-400 hover:text-primary" title="Edit Product">
+                      <button onClick={() => setIsAddProductModalOpen(true)} className="p-2 hover:bg-white rounded-xl transition-all text-slate-400 hover:text-primary" title="Edit Product">
                         <span className="material-symbols-outlined text-sm">edit</span>
                       </button>
-                      <button className="p-2 hover:bg-white rounded-xl transition-all text-slate-400 hover:text-primary" title="Print Barcode">
+                      <button onClick={() => window.print()} className="p-2 hover:bg-white rounded-xl transition-all text-slate-400 hover:text-primary" title="Print Barcode">
                         <span className="material-symbols-outlined text-sm">print</span>
                       </button>
-                      <button className="p-2 hover:bg-white rounded-xl transition-all text-slate-400 hover:text-orange-500" title="Inventory Adjustment">
+                      <button onClick={() => setIsAddProductModalOpen(true)} className="p-2 hover:bg-white rounded-xl transition-all text-slate-400 hover:text-orange-500" title="Inventory Adjustment">
                         <span className="material-symbols-outlined text-sm">tune</span>
                       </button>
                     </div>
@@ -183,7 +192,7 @@ const Inventory: React.FC = () => {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-black text-primary tracking-tight">Buyback & Trade-In</h2>
-        <button className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2">
+        <button onClick={() => setIsAddProductModalOpen(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
           <span className="material-symbols-outlined text-sm">add</span>
           New Trade-In
         </button>
@@ -217,10 +226,10 @@ const Inventory: React.FC = () => {
               </div>
             </div>
             <div className="flex gap-2">
-              <button className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all">
+              <button onClick={() => setActiveTab('refurb')} className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
                 Refurbish
               </button>
-              <button className="flex-1 py-3 bg-primary/10 hover:bg-primary/20 text-primary font-black text-[10px] rounded-xl uppercase tracking-widest transition-all">
+              <button onClick={() => setActiveTab('products')} className="flex-1 py-3 bg-primary/10 hover:bg-primary/20 text-primary font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
                 Move to Stock
               </button>
             </div>
@@ -263,7 +272,7 @@ const Inventory: React.FC = () => {
                 </td>
                 <td className="px-8 py-6 font-black text-primary">${job.totalCost}</td>
                 <td className="px-8 py-6 text-right">
-                  <button className="px-4 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 transition-all">
+                  <button onClick={() => setActiveTab('products')} className="px-4 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 active:scale-95 transition-all">
                     Complete
                   </button>
                 </td>
@@ -279,7 +288,7 @@ const Inventory: React.FC = () => {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-black text-primary tracking-tight">Inventory Transfers</h2>
-        <button className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2">
+        <button onClick={() => setIsAddProductModalOpen(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
           <span className="material-symbols-outlined text-sm">add</span>
           New Transfer
         </button>
@@ -329,7 +338,7 @@ const Inventory: React.FC = () => {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-black text-primary tracking-tight">Bill Payments</h2>
-        <button className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2">
+        <button onClick={() => setIsAddProductModalOpen(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
           <span className="material-symbols-outlined text-sm">add</span>
           Add Bill
         </button>
@@ -358,7 +367,7 @@ const Inventory: React.FC = () => {
                 <p className="text-2xl font-black text-primary">${bill.amount.toFixed(2)}</p>
               </div>
             </div>
-            <button className="w-full mt-6 py-3 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-primary/90 transition-all">
+            <button onClick={(e) => { const btn = e.currentTarget; btn.textContent = 'Payment Processed!'; btn.classList.replace('bg-primary', 'bg-emerald-500'); setTimeout(() => { btn.textContent = 'Process Payment'; btn.classList.replace('bg-emerald-500', 'bg-primary'); }, 2000); }} className="w-full mt-6 py-3 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all">
               Process Payment
             </button>
           </div>
@@ -371,7 +380,7 @@ const Inventory: React.FC = () => {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-black text-primary tracking-tight">Gift Cards</h2>
-        <button className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2">
+        <button onClick={() => setIsAddProductModalOpen(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
           <span className="material-symbols-outlined text-sm">add</span>
           Issue Gift Card
         </button>
@@ -412,7 +421,7 @@ const Inventory: React.FC = () => {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-black text-primary tracking-tight">Inventory Bundles</h2>
-        <button className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2">
+        <button onClick={() => setIsAddProductModalOpen(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
           <span className="material-symbols-outlined text-sm">add</span>
           Create Bundle
         </button>
@@ -446,7 +455,7 @@ const Inventory: React.FC = () => {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-black text-primary tracking-tight">Inventory Count & Audits</h2>
-        <button className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2">
+        <button onClick={() => setIsAddProductModalOpen(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
           <span className="material-symbols-outlined text-sm">add</span>
           Start New Count
         </button>
@@ -659,7 +668,7 @@ const Inventory: React.FC = () => {
                 >
                   Cancel
                 </button>
-                <button className="px-8 py-4 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest">
+                <button onClick={() => setIsAddProductModalOpen(false)} className="px-8 py-4 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest active:scale-95">
                   Save Product
                 </button>
               </div>

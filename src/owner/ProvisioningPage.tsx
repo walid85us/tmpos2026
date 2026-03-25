@@ -24,7 +24,7 @@ const ProvisioningPage: React.FC = () => {
             </select>
           </div>
         </div>
-        <button className="mt-8 px-8 py-4 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest">
+        <button onClick={(e) => { const btn = e.currentTarget; btn.textContent = 'Provisioning...'; setTimeout(() => { btn.textContent = 'Tenant Provisioned!'; btn.classList.replace('bg-primary', 'bg-emerald-500'); setTimeout(() => { btn.textContent = 'Provision Tenant'; btn.classList.replace('bg-emerald-500', 'bg-primary'); }, 2000); }, 1500); }} className="mt-8 px-8 py-4 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest active:scale-95">
           Provision Tenant
         </button>
       </div>

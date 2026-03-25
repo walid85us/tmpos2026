@@ -5,6 +5,7 @@ type ProspectTab = 'estimates' | 'leads' | 'inquiries';
 
 export default function Prospects() {
   const [activeTab, setActiveTab] = useState<ProspectTab>('estimates');
+  const [showCreateModal, setShowCreateModal] = useState<string | null>(null);
 
   const renderEstimates = () => (
     <div className="space-y-8">
@@ -28,7 +29,7 @@ export default function Prospects() {
       <section className="bg-white/80 backdrop-blur-xl p-8 rounded-[2.5rem] border border-slate-200 shadow-sm overflow-hidden">
         <div className="flex items-center justify-between mb-8">
           <h3 className="text-xl font-black text-primary tracking-tight">Recent Estimates</h3>
-          <button className="px-6 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl shadow-lg shadow-primary/20">+ Create Estimate</button>
+          <button onClick={() => setShowCreateModal('estimate')} className="px-6 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl shadow-lg shadow-primary/20">+ Create Estimate</button>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-left">
@@ -128,7 +129,7 @@ export default function Prospects() {
           <h3 className="text-xl font-black text-primary tracking-tight">Lead Pipeline</h3>
           <div className="flex gap-2">
             <button className="px-4 py-2 bg-slate-50 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-xl border border-slate-200">Filter</button>
-            <button className="px-6 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl shadow-lg shadow-primary/20">+ Add Lead</button>
+            <button onClick={() => setShowCreateModal('lead')} className="px-6 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl shadow-lg shadow-primary/20">+ Add Lead</button>
           </div>
         </div>
         <div className="space-y-4">
@@ -178,7 +179,7 @@ export default function Prospects() {
             <h3 className="text-xl font-black text-primary tracking-tight">Customer Inquiries</h3>
             <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Service Requests & Communication</p>
           </div>
-          <button className="px-6 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl shadow-lg shadow-primary/20">+ New Inquiry</button>
+          <button onClick={() => setShowCreateModal('inquiry')} className="px-6 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl shadow-lg shadow-primary/20">+ New Inquiry</button>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -307,6 +308,68 @@ export default function Prospects() {
           {activeTab === 'leads' && renderLeads()}
           {activeTab === 'inquiries' && renderInquiries()}
         </motion.div>
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showCreateModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" onClick={() => setShowCreateModal(null)} />
+            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative w-full max-w-lg bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden">
+              <div className="p-8 border-b border-slate-100 bg-slate-50/50">
+                <h3 className="text-2xl font-black text-primary tracking-tight">
+                  {showCreateModal === 'estimate' ? 'Create Estimate' : showCreateModal === 'lead' ? 'Add New Lead' : 'New Inquiry'}
+                </h3>
+                <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Prospects Management</p>
+              </div>
+              <div className="p-8 space-y-6">
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Customer Name</label>
+                  <input className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="Enter customer name..." />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Phone</label>
+                    <input className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="(555) 000-0000" />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Email</label>
+                    <input className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="email@example.com" />
+                  </div>
+                </div>
+                {showCreateModal === 'estimate' && (
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Device & Service</label>
+                    <input className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="e.g. iPhone 15 Pro - Screen Replacement" />
+                  </div>
+                )}
+                {showCreateModal === 'lead' && (
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Lead Source</label>
+                    <select className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700">
+                      <option>Walk-in</option>
+                      <option>Website</option>
+                      <option>Referral</option>
+                      <option>Social Media</option>
+                      <option>Google Ads</option>
+                    </select>
+                  </div>
+                )}
+                {showCreateModal === 'inquiry' && (
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Inquiry Details</label>
+                    <textarea className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700 h-24" placeholder="Describe the inquiry..." />
+                  </div>
+                )}
+                <div className="flex gap-4 pt-4">
+                  <button onClick={() => setShowCreateModal(null)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-all">Cancel</button>
+                  <button onClick={() => setShowCreateModal(null)} className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 active:scale-95 transition-all">
+                    {showCreateModal === 'estimate' ? 'Create Estimate' : showCreateModal === 'lead' ? 'Add Lead' : 'Submit Inquiry'}
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
       </AnimatePresence>
     </div>
   );

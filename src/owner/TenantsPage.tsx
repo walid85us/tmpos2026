@@ -1,7 +1,9 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 import { tenants } from './mockData';
 
 const TenantsPage: React.FC = () => {
+  const navigate = useNavigate();
   return (
     <div className="space-y-8">
       <div className="flex justify-between items-center">
@@ -9,7 +11,7 @@ const TenantsPage: React.FC = () => {
           <h2 className="text-2xl font-black text-primary tracking-tight">Tenants</h2>
           <p className="text-slate-500 font-medium">Manage and provision platform tenants.</p>
         </div>
-        <button className="px-6 py-3 bg-primary text-white font-black text-[10px] rounded-xl hover:bg-primary/90 transition-all uppercase tracking-widest">
+        <button onClick={() => navigate('/owner/provisioning')} className="px-6 py-3 bg-primary text-white font-black text-[10px] rounded-xl hover:bg-primary/90 active:scale-95 transition-all uppercase tracking-widest">
           Provision Tenant
         </button>
       </div>
@@ -37,7 +39,7 @@ const TenantsPage: React.FC = () => {
                 </td>
                 <td className="px-8 py-4 text-sm font-bold text-slate-600">{tenant.subdomain}.repairplatform.com</td>
                 <td className="px-8 py-4 text-right">
-                  <button className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all">
+                  <button onClick={() => navigate(`/owner/tenants/${tenant.id}`)} className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all">
                     Manage
                   </button>
                 </td>

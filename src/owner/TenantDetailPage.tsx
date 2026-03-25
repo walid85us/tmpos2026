@@ -60,7 +60,7 @@ const TenantDetailPage: React.FC = () => {
                       </span>
                     </td>
                     <td className="py-4 text-right">
-                      <button className="text-[10px] font-black text-primary uppercase tracking-widest">Manage</button>
+                      <button onClick={() => setActiveTab('Overview')} className="text-[10px] font-black text-primary uppercase tracking-widest hover:text-primary/70 transition-colors">Manage</button>
                     </td>
                   </tr>
                 ))}
@@ -84,7 +84,7 @@ const TenantDetailPage: React.FC = () => {
           <div className="space-y-4">
             <p><span className="font-bold text-slate-900">Current Plan:</span> {tenant.plan.toUpperCase()}</p>
             <p><span className="font-bold text-slate-900">Renewal Date:</span> {tenant.renewal}</p>
-            <button className="px-6 py-3 bg-primary text-white font-black text-[10px] rounded-xl hover:bg-primary/90 transition-all uppercase tracking-widest">
+            <button onClick={() => setActiveTab('Billing')} className="px-6 py-3 bg-primary text-white font-black text-[10px] rounded-xl hover:bg-primary/90 active:scale-95 transition-all uppercase tracking-widest">
               Manage Subscription
             </button>
           </div>

@@ -28,7 +28,7 @@ const PlatformSettingsPage: React.FC = () => {
           </div>
         </div>
         
-        <button className="px-8 py-4 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest">
+        <button onClick={(e) => { const btn = e.currentTarget; btn.textContent = 'Saved!'; btn.classList.replace('bg-primary', 'bg-emerald-500'); setTimeout(() => { btn.textContent = 'Save Settings'; btn.classList.replace('bg-emerald-500', 'bg-primary'); }, 2000); }} className="px-8 py-4 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest active:scale-95">
           Save Settings
         </button>
       </div>

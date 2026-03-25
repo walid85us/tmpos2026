@@ -366,10 +366,10 @@ export default function RepairTickets() {
                   </div>
                 </div>
                 <div className="flex gap-3">
-                  <button className="w-12 h-12 bg-white/10 hover:bg-white/20 rounded-2xl flex items-center justify-center transition-all">
+                  <button onClick={() => window.print()} className="w-12 h-12 bg-white/10 hover:bg-white/20 rounded-2xl flex items-center justify-center transition-all" title="Print Ticket">
                     <span className="material-symbols-outlined">print</span>
                   </button>
-                  <button className="w-12 h-12 bg-white/10 hover:bg-white/20 rounded-2xl flex items-center justify-center transition-all">
+                  <button onClick={() => { if (navigator.clipboard && selectedTicket) { navigator.clipboard.writeText(`Repair Ticket: ${selectedTicket.ticketNumber} - ${selectedTicket.device} - ${selectedTicket.status}`); } }} className="w-12 h-12 bg-white/10 hover:bg-white/20 rounded-2xl flex items-center justify-center transition-all" title="Copy to Clipboard">
                     <span className="material-symbols-outlined">share</span>
                   </button>
                   <button 
@@ -789,10 +789,7 @@ export default function RepairTickets() {
                     Cancel
                   </button>
                   <button 
-                    onClick={() => {
-                      alert('Ticket created successfully!');
-                      setIsNewTicketModalOpen(false);
-                    }}
+                    onClick={() => setIsNewTicketModalOpen(false)}
                     className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-teal-900/20 active:scale-95 transition-all"
                   >
                     Generate Ticket

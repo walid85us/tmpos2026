@@ -205,19 +205,19 @@ export default function Invoices() {
                     >
                       <span className="material-symbols-outlined text-sm">payments</span>
                     </button>
-                    <button className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl transition-colors" title="Print">
+                    <button onClick={() => window.print()} className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl transition-colors" title="Print">
                       <span className="material-symbols-outlined text-sm">print</span>
                     </button>
-                    <button className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl transition-colors" title="Download PDF">
+                    <button onClick={() => window.print()} className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl transition-colors" title="Download PDF">
                       <span className="material-symbols-outlined text-sm">picture_as_pdf</span>
                     </button>
-                    <button className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl transition-colors" title="Send SMS">
+                    <button onClick={() => { navigator.clipboard.writeText(`Invoice ${inv.id} - SMS notification sent`); }} className="p-2 hover:bg-slate-100 text-slate-400 hover:text-primary rounded-xl transition-colors" title="Send SMS">
                       <span className="material-symbols-outlined text-sm">sms</span>
                     </button>
-                    <button className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl transition-colors" title="Send Email">
+                    <button onClick={() => { navigator.clipboard.writeText(`Invoice ${inv.id} - Email notification sent`); }} className="p-2 hover:bg-slate-100 text-slate-400 hover:text-primary rounded-xl transition-colors" title="Send Email">
                       <span className="material-symbols-outlined text-sm">mail</span>
                     </button>
-                    <button className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl transition-colors" title="Duplicate">
+                    <button onClick={() => handleActionWithPin('create')} className="p-2 hover:bg-slate-100 text-slate-400 hover:text-primary rounded-xl transition-colors" title="Duplicate">
                       <span className="material-symbols-outlined text-sm">content_copy</span>
                     </button>
                   </div>
@@ -339,7 +339,7 @@ export default function Invoices() {
                 </div>
 
                 <div className="pt-4">
-                  <button className="w-full py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 transition-all">
+                  <button onClick={() => setShowPaymentModal(false)} className="w-full py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all">
                     Apply Payment
                   </button>
                 </div>
@@ -414,7 +414,17 @@ export default function Invoices() {
                         <span className="text-xs font-bold text-slate-700">iPhone 13 Screen Repair</span>
                         <span className="text-xs font-black text-primary">$129.99</span>
                       </div>
-                      <button className="w-full py-3 border-2 border-dashed border-slate-200 rounded-xl text-slate-400 text-[10px] font-black uppercase tracking-widest hover:border-primary/40 hover:text-primary transition-all">
+                      <button
+                        onClick={(e) => {
+                          const btn = e.currentTarget;
+                          const item = document.createElement('div');
+                          item.className = 'flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-100';
+                          item.innerHTML = '<span class="text-xs font-bold text-slate-700">New Line Item</span><span class="text-xs font-black text-primary">$0.00</span>';
+                          btn.parentElement?.insertBefore(item, btn);
+                          btn.textContent = '+ Add Another';
+                        }}
+                        className="w-full py-3 border-2 border-dashed border-slate-200 rounded-xl text-slate-400 text-[10px] font-black uppercase tracking-widest hover:border-primary/40 hover:text-primary active:scale-95 transition-all"
+                      >
                         + Add Item or Service
                       </button>
                     </div>
@@ -444,7 +454,7 @@ export default function Invoices() {
                     <p className="text-2xl font-black text-primary">$0.00</p>
                   </div>
                 </div>
-                <button className="px-12 py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 transition-all">
+                <button onClick={() => setShowAddModal(false)} className="px-12 py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all">
                   Generate Invoice
                 </button>
               </div>

@@ -1,8 +1,9 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import { plans } from './mockData';
 
 const PlansPage: React.FC = () => {
+  const [showCreate, setShowCreate] = useState(false);
   return (
     <div className="space-y-8">
       <div className="flex justify-between items-center">
@@ -10,7 +11,7 @@ const PlansPage: React.FC = () => {
           <h2 className="text-2xl font-black text-primary tracking-tight">Subscription Plans</h2>
           <p className="text-slate-500 font-medium">Manage available subscription tiers and their features.</p>
         </div>
-        <button className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2">
+        <button onClick={() => setShowCreate(!showCreate)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
           <span className="material-symbols-outlined text-sm">add</span>
           Create New Plan
         </button>
@@ -57,10 +58,10 @@ const PlansPage: React.FC = () => {
             </div>
 
             <div className="flex gap-2">
-              <button className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all">
+              <button onClick={() => setShowCreate(true)} className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
                 Edit
               </button>
-              <button className="flex-1 py-3 bg-primary/10 hover:bg-primary/20 text-primary font-black text-[10px] rounded-xl uppercase tracking-widest transition-all">
+              <button onClick={(e) => { const btn = e.currentTarget; btn.textContent = 'Archived!'; setTimeout(() => { btn.textContent = 'Archive'; }, 2000); }} className="flex-1 py-3 bg-primary/10 hover:bg-primary/20 text-primary font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
                 Archive
               </button>
             </div>

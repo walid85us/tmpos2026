@@ -240,7 +240,7 @@ export default function Reports() {
             <span className="material-symbols-outlined text-sm">calendar_month</span>
             <span className="text-sm font-semibold">Last 30 Days</span>
           </div>
-          <button className="bg-primary text-white px-6 py-2 rounded-xl font-bold text-sm shadow-lg shadow-primary/20 flex items-center gap-2">
+          <button onClick={() => window.print()} className="bg-primary text-white px-6 py-2 rounded-xl font-bold text-sm shadow-lg shadow-primary/20 flex items-center gap-2">
             <span className="material-symbols-outlined text-sm">download</span>
             Export PDF
           </button>
