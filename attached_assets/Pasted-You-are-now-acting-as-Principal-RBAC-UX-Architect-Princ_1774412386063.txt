@@ -1,0 +1,159 @@
+You are now acting as:
+Principal RBAC UX Architect + Principal React State Engineer + Principal Store Permissions Systems Designer + Principal Frontend Workflow Engineer + Principal Product QA Auditor
+
+IMPORTANT:
+Do not touch auth flow.
+Do not redesign the UI.
+Preserve the current design baseline exactly.
+
+We need to add a dedicated Permissions tab under the Store-side Employees section, next to Roles, using the same design language and interaction pattern as the System Owner Team Management page.
+
+==================================================
+1. GOAL
+==================================================
+
+Create a new store-side Employees tab:
+- Permissions
+
+Place it next to:
+- Employees
+- Time Tracking
+- Roles
+- Activity Log
+- Payroll
+
+This new Permissions tab should mirror the concept/design pattern of the platform-side Team Management > Permissions tab, but for store-side role permissions.
+
+==================================================
+2. NEW EMPLOYEES TAB: PERMISSIONS
+==================================================
+
+Add a new tab under the Employees page:
+- Permissions
+
+Requirements:
+- visually consistent with the existing Employees tab bar
+- same premium style as the rest of the app
+- no visual drift
+
+This tab should open a store-side permissions matrix page/panel for managing role permissions.
+
+==================================================
+3. STORE-SIDE PERMISSIONS MATRIX
+==================================================
+
+The new Employees > Permissions tab must display the Store Permissions Matrix in a clear management view.
+
+Include at minimum the permissions already normalized in the store-side system, including:
+- dashboard
+- sales
+- repairs
+- inventory
+- customers
+- employees
+- invoices
+- services
+- supply-chain
+- reports
+- prospects
+- marketing
+- integrations
+- widgets
+- support
+- settings
+
+And role/authority permissions such as:
+- manage_employees
+- create_roles
+- edit_roles
+- manage_role_permissions
+- assign_roles
+- assign_same_role
+- assign_manager_role
+- manage_attendance
+- manage_compensation
+- approve_requests
+
+Use user-friendly labels in the UI.
+
+==================================================
+4. VISIBILITY RULE
+==================================================
+
+The Permissions tab itself must only appear if the current role has permission to edit/manage permissions.
+
+Examples:
+- Store Owner should see it
+- Manager should see it only if explicitly granted permission to manage role permissions
+- Technician / Sales Associate should not see it unless explicitly granted
+- if the role lacks permission, hide the Permissions tab entirely
+
+Do not show the tab in read-only mode unless current logic explicitly supports that.
+Default behavior: hidden when unauthorized.
+
+==================================================
+5. BEHAVIOR RULES
+==================================================
+
+The Permissions tab must respect delegated permissions logic already implemented.
+
+Examples:
+- if a role cannot manage role permissions, controls must be hidden/disabled
+- if a role can view but not edit, support that only if such distinction already exists; otherwise hide access
+- changing permissions should visibly update role behavior as already implemented in sidebar/module access, dropdowns, and role actions
+
+Do not break the existing delegated-permission system.
+
+==================================================
+6. DESIGN REFERENCE
+==================================================
+
+Use the existing platform-side Team Management > Permissions tab as the design/interaction reference:
+- same tab logic concept
+- same clarity
+- same matrix management style
+- adapted for store-side employees/roles
+
+Do not copy platform wording blindly.
+Adapt it properly to store-side role/employee permissions.
+
+==================================================
+7. DO NOT BREAK THESE
+==================================================
+
+Do NOT break:
+- auth flow
+- preview mode
+- store permissions matrix logic already working
+- manager delegation rules
+- role dropdown restrictions
+- sidebar/module permission behavior
+- current design baseline
+
+==================================================
+8. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether Employees now includes a Permissions tab
+C. whether the Permissions tab matches the intended system-owner/team-management pattern
+D. exact visibility rule used for showing/hiding the Permissions tab
+E. whether store-side permission editing still updates real UI behavior
+F. confirmation that delegated permission logic still works
+G. confirmation that auth flow was not touched/broken
+H. confirmation that no visual drift was introduced
+
+==================================================
+9. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- Employees page has a new Permissions tab
+- Permissions tab is placed next to Roles in the Employees section
+- tab only appears for roles allowed to manage/edit permissions
+- matrix shows store-side module and authority permissions
+- permission changes still affect real UI behavior
+- delegated permission logic still works
+- auth flow still works
+- no visual drift was introduced

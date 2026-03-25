@@ -90,7 +90,7 @@ const storeFeatures = [...storeModuleFeatures, ...storeAdminFeatures];
 
 export default function Employees() {
   const { session, tenantRolesState = [], addTenantRole, updateTenantRole, canAccess } = useAccess();
-  const [activeTab, setActiveTab] = useState<'list' | 'time' | 'roles' | 'activity' | 'payroll'>('list');
+  const [activeTab, setActiveTab] = useState<'list' | 'time' | 'roles' | 'permissions' | 'activity' | 'payroll'>('list');
   const [employees, setEmployees] = useState<Employee[]>(MOCK_EMPLOYEES);
   const [timeLogs, setTimeLogs] = useState<EmployeeTimeLog[]>(MOCK_TIME_LOGS);
   const [activityLogs, setActivityLogs] = useState<EmployeeActivityLog[]>(MOCK_ACTIVITY_LOGS);
@@ -908,11 +908,18 @@ export default function Employees() {
                       )
                     ))}
               </div>
+              {(isOwner || canAccess('manage_role_permissions')) && !isLocked && (
+                <button 
+                  onClick={() => setActiveTab('permissions')}
+                  className="w-full py-3 bg-slate-50 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-slate-100 transition-colors"
+                >
+                  Manage Permissions
+                </button>
+              )}
             </div>
           );
         })}
       </div>
-      {(isOwner || canAccess('manage_role_permissions')) && renderPermissions()}
     </div>
   );
 
@@ -961,6 +968,7 @@ export default function Employees() {
             { id: 'list', label: 'Employees', icon: 'group' },
             { id: 'time', label: 'Time Tracking', icon: 'schedule' },
             { id: 'roles', label: 'Roles', icon: 'security' },
+            ...((isOwner || canAccess('manage_role_permissions')) ? [{ id: 'permissions', label: 'Permissions', icon: 'key' }] : []),
             { id: 'activity', label: 'Activity Log', icon: 'history' },
             { id: 'payroll', label: 'Payroll', icon: 'payments' }
           ].map((tab) => (
@@ -991,6 +999,7 @@ export default function Employees() {
           {activeTab === 'list' && renderEmployeeList()}
           {activeTab === 'time' && renderTimeLogs()}
           {activeTab === 'roles' && renderRoles()}
+          {activeTab === 'permissions' && (isOwner || canAccess('manage_role_permissions')) && renderPermissions()}
           {activeTab === 'activity' && renderActivityLog()}
           {activeTab === 'payroll' && (
             <div className="bg-white/80 backdrop-blur-xl p-12 rounded-[3rem] border border-slate-200 flex flex-col items-center justify-center text-center">
