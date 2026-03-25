@@ -81,8 +81,15 @@ export default function Employees() {
   const [editingTimeLog, setEditingTimeLog] = useState<EmployeeTimeLog | null>(null);
   const [pendingRequests, setPendingRequests] = useState<any[]>([]);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+  const [selectedTimeEmployee, setSelectedTimeEmployee] = useState<string>('');
+  const [showClockInPicker, setShowClockInPicker] = useState(false);
+  const [showClockOutPicker, setShowClockOutPicker] = useState(false);
 
   const [newRole, setNewRole] = useState({ name: '', description: '', status: 'active' as string, permissions: [] as string[] });
+
+  const isOwnerOrManager = session?.role === 'store_owner' || session?.role === 'system_owner' || session?.role === 'manager';
+  const isManager = session?.role === 'manager';
+  const isOwner = session?.role === 'store_owner' || session?.role === 'system_owner';
 
   const showToast = (message: string, type: 'success' | 'error' | 'info' = 'success') => {
     setToast({ message, type });
@@ -274,32 +281,28 @@ export default function Employees() {
     }));
   };
 
-  const handleClockIn = () => {
-    const currentUser = employees.find(e => e.id === 'e1') || employees[0];
-    if (!currentUser) return;
-    const existingLog = timeLogs.find(tl => tl.employeeId === currentUser.id && tl.status === 'Clocked In');
+  const clockInEmployee = (emp: Employee) => {
+    const existingLog = timeLogs.find(tl => tl.employeeId === emp.id && tl.status === 'Clocked In');
     if (existingLog) {
-      showToast(`${currentUser.firstName} is already clocked in.`, 'info');
+      showToast(`${emp.firstName} is already clocked in.`, 'info');
       return;
     }
     const newLog: EmployeeTimeLog = {
       id: `tl${Date.now()}`,
-      employeeId: currentUser.id,
-      employeeName: `${currentUser.firstName} ${currentUser.lastName}`,
+      employeeId: emp.id,
+      employeeName: `${emp.firstName} ${emp.lastName}`,
       clockIn: new Date().toLocaleString(),
       status: 'Clocked In'
     };
     setTimeLogs(prev => [newLog, ...prev]);
-    logActivity(currentUser.id, `${currentUser.firstName} ${currentUser.lastName}`, 'Clock In', `Clocked in at ${newLog.clockIn}`);
-    showToast(`${currentUser.firstName} ${currentUser.lastName} clocked in.`);
+    logActivity(emp.id, `${emp.firstName} ${emp.lastName}`, 'Clock In', `Clocked in at ${newLog.clockIn}`);
+    showToast(`${emp.firstName} ${emp.lastName} clocked in.`);
   };
 
-  const handleClockOut = () => {
-    const currentUser = employees.find(e => e.id === 'e1') || employees[0];
-    if (!currentUser) return;
-    const activeLog = timeLogs.find(tl => tl.employeeId === currentUser.id && tl.status === 'Clocked In');
+  const clockOutEmployee = (emp: Employee) => {
+    const activeLog = timeLogs.find(tl => tl.employeeId === emp.id && tl.status === 'Clocked In');
     if (!activeLog) {
-      showToast(`${currentUser.firstName} is not currently clocked in.`, 'error');
+      showToast(`${emp.firstName} is not currently clocked in.`, 'error');
       return;
     }
     const clockOutTime = new Date();
@@ -307,13 +310,33 @@ export default function Employees() {
     const diffMs = clockOutTime.getTime() - clockInTime.getTime();
     const totalHours = Math.round((diffMs / (1000 * 60 * 60)) * 100) / 100;
 
-    setTimeLogs(prev => prev.map(tl => 
-      tl.id === activeLog.id 
+    setTimeLogs(prev => prev.map(tl =>
+      tl.id === activeLog.id
         ? { ...tl, clockOut: clockOutTime.toLocaleString(), totalHours: totalHours > 0 ? totalHours : 0.01, status: 'Clocked Out' as const }
         : tl
     ));
-    logActivity(currentUser.id, `${currentUser.firstName} ${currentUser.lastName}`, 'Clock Out', `Clocked out. Total hours: ${totalHours > 0 ? totalHours : '< 0.01'}`);
-    showToast(`${currentUser.firstName} ${currentUser.lastName} clocked out. Hours: ${totalHours > 0 ? totalHours : '< 0.01'}`);
+    logActivity(emp.id, `${emp.firstName} ${emp.lastName}`, 'Clock Out', `Clocked out. Total hours: ${totalHours > 0 ? totalHours : '< 0.01'}`);
+    showToast(`${emp.firstName} ${emp.lastName} clocked out. Hours: ${totalHours > 0 ? totalHours : '< 0.01'}`);
+  };
+
+  const handleClockIn = () => {
+    if (isOwnerOrManager) {
+      setShowClockInPicker(true);
+      return;
+    }
+    const currentUser = employees.find(e => e.id === 'e1') || employees[0];
+    if (!currentUser) return;
+    clockInEmployee(currentUser);
+  };
+
+  const handleClockOut = () => {
+    if (isOwnerOrManager) {
+      setShowClockOutPicker(true);
+      return;
+    }
+    const currentUser = employees.find(e => e.id === 'e1') || employees[0];
+    if (!currentUser) return;
+    clockOutEmployee(currentUser);
   };
 
   const handleEditTimeLog = (log: EmployeeTimeLog) => {
@@ -405,16 +428,23 @@ export default function Employees() {
                 <h3 className="text-xl font-black text-primary mb-1">{emp.firstName} {emp.lastName}</h3>
                 <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] mb-4">{emp.roleName}</p>
                 
-                <div className="grid grid-cols-2 gap-4 w-full mb-6">
-                  <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100">
-                    <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-1">Pay Rate</p>
-                    <p className="text-sm font-black text-primary">${emp.payRate}/{emp.payType === 'Hourly' ? 'hr' : 'mo'}</p>
+                {(isManager && isStoreOwner) ? (
+                  <div className="w-full mb-6 bg-slate-50 p-3 rounded-2xl border border-slate-100 flex items-center justify-center gap-2">
+                    <span className="material-symbols-outlined text-slate-400 text-sm">lock</span>
+                    <p className="text-[10px] font-bold text-slate-400">Pay details restricted</p>
                   </div>
-                  <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100">
-                    <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-1">Commission</p>
-                    <p className="text-sm font-black text-primary">{emp.commissionRate}%</p>
+                ) : (
+                  <div className="grid grid-cols-2 gap-4 w-full mb-6">
+                    <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100">
+                      <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-1">Pay Rate</p>
+                      <p className="text-sm font-black text-primary">${emp.payRate}/{emp.payType === 'Hourly' ? 'hr' : 'mo'}</p>
+                    </div>
+                    <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100">
+                      <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-1">Commission</p>
+                      <p className="text-sm font-black text-primary">{emp.commissionRate}%</p>
+                    </div>
                   </div>
-                </div>
+                )}
 
                 <div className="flex items-center gap-2 w-full">
                   {canManage ? (
@@ -602,17 +632,23 @@ export default function Employees() {
           const isLocked = isStoreOwnerRole;
 
           return (
-            <div key={role.id} className={`bg-white/80 backdrop-blur-xl p-8 rounded-[2.5rem] border border-slate-200 shadow-sm transition-all group ${isLocked ? 'opacity-75' : 'hover:shadow-md'}`}>
+            <div key={role.id} className={`bg-white/80 backdrop-blur-xl p-8 rounded-[2.5rem] border shadow-sm transition-all group ${isLocked ? 'border-amber-200 bg-amber-50/30' : 'border-slate-200 hover:shadow-md'}`}>
               <div className="flex justify-between items-start mb-6">
-                <div className="w-12 h-12 rounded-2xl bg-primary/5 flex items-center justify-center">
-                  <span className="material-symbols-outlined text-2xl text-primary">security</span>
+                <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${isLocked ? 'bg-amber-100' : 'bg-primary/5'}`}>
+                  <span className={`material-symbols-outlined text-2xl ${isLocked ? 'text-amber-600' : 'text-primary'}`}>security</span>
                 </div>
                 {isLocked && (
-                  <span className="material-symbols-outlined text-slate-400">lock</span>
+                  <span className="flex items-center gap-1 px-2 py-1 bg-amber-100 text-amber-700 text-[8px] font-black uppercase tracking-widest rounded-lg border border-amber-200">
+                    <span className="material-symbols-outlined text-xs">lock</span>
+                    System Protected
+                  </span>
                 )}
               </div>
               <h3 className="text-xl font-black text-primary mb-2">{role.name}</h3>
-              <p className="text-xs font-medium text-slate-500 mb-6">{role.description}</p>
+              <p className="text-xs font-medium text-slate-500 mb-2">{role.description}</p>
+              {isLocked && (
+                <p className="text-[10px] font-bold text-amber-600 mb-4">This role cannot be edited or deleted. It has full system access.</p>
+              )}
               <div className="flex flex-wrap gap-2 mb-8">
                 {Array.isArray(role.permissions) 
                   ? role.permissions.map(p => (
@@ -1069,6 +1105,8 @@ export default function Employees() {
                   </thead>
                   <tbody>
                     {employees.map((emp) => {
+                      const isEmpOwner = emp.roleId === 'store_owner';
+                      const hidePayData = isManager && isEmpOwner;
                       const basePay = emp.payType === 'Salary' ? emp.payRate : emp.payRate * 40;
                       const commissions = emp.commissionEnabled ? (emp.commissionType === 'flat' ? emp.commissionRate : basePay * (emp.commissionRate / 100)) : 0;
                       const totalPay = basePay + commissions;
@@ -1078,9 +1116,9 @@ export default function Employees() {
                             <p className="text-sm font-black text-primary">{emp.firstName} {emp.lastName}</p>
                             <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{emp.roleName}</p>
                           </td>
-                          <td className="px-6 py-4 text-right text-sm font-bold text-slate-600">${basePay.toFixed(2)}</td>
-                          <td className="px-6 py-4 text-right text-sm font-bold text-emerald-600">${commissions.toFixed(2)}</td>
-                          <td className="px-6 py-4 text-right text-sm font-black text-primary">${totalPay.toFixed(2)}</td>
+                          <td className="px-6 py-4 text-right text-sm font-bold text-slate-600">{hidePayData ? '—' : `$${basePay.toFixed(2)}`}</td>
+                          <td className="px-6 py-4 text-right text-sm font-bold text-emerald-600">{hidePayData ? '—' : `$${commissions.toFixed(2)}`}</td>
+                          <td className="px-6 py-4 text-right text-sm font-black text-primary">{hidePayData ? <span className="text-slate-400 text-xs font-bold">Restricted</span> : `$${totalPay.toFixed(2)}`}</td>
                         </tr>
                       );
                     })}
@@ -1098,6 +1136,87 @@ export default function Employees() {
               </div>
             </motion.div>
           </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showClockInPicker && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[70] flex items-center justify-center bg-primary/30 backdrop-blur-md p-4">
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-md w-full p-8 ghost-border">
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="text-xl font-black text-primary">Clock In Employee</h3>
+                <button onClick={() => setShowClockInPicker(false)} className="text-slate-400 hover:text-primary transition-colors">
+                  <span className="material-symbols-outlined">close</span>
+                </button>
+              </div>
+              <p className="text-xs font-medium text-slate-500 mb-4">Select an employee to clock in:</p>
+              <div className="space-y-2 max-h-64 overflow-y-auto">
+                {employees.filter(e => e.status === 'Active').map(emp => {
+                  const isClockedIn = timeLogs.some(tl => tl.employeeId === emp.id && tl.status === 'Clocked In');
+                  return (
+                    <button
+                      key={emp.id}
+                      disabled={isClockedIn}
+                      onClick={() => { clockInEmployee(emp); setShowClockInPicker(false); }}
+                      className={`w-full flex items-center gap-4 p-4 rounded-2xl border transition-all ${
+                        isClockedIn
+                          ? 'bg-slate-50 border-slate-100 opacity-50 cursor-not-allowed'
+                          : 'bg-white border-slate-200 hover:border-primary hover:shadow-md cursor-pointer'
+                      }`}
+                    >
+                      <img src={emp.avatar} alt={emp.firstName} className="w-10 h-10 rounded-xl object-cover" />
+                      <div className="text-left flex-1">
+                        <p className="text-sm font-black text-primary">{emp.firstName} {emp.lastName}</p>
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{emp.roleName}</p>
+                      </div>
+                      {isClockedIn && (
+                        <span className="px-2 py-1 bg-emerald-100 text-emerald-700 text-[9px] font-black uppercase tracking-widest rounded-lg">Active</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showClockOutPicker && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[70] flex items-center justify-center bg-primary/30 backdrop-blur-md p-4">
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-md w-full p-8 ghost-border">
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="text-xl font-black text-primary">Clock Out Employee</h3>
+                <button onClick={() => setShowClockOutPicker(false)} className="text-slate-400 hover:text-primary transition-colors">
+                  <span className="material-symbols-outlined">close</span>
+                </button>
+              </div>
+              <p className="text-xs font-medium text-slate-500 mb-4">Select a clocked-in employee to clock out:</p>
+              <div className="space-y-2 max-h-64 overflow-y-auto">
+                {employees.filter(e => timeLogs.some(tl => tl.employeeId === e.id && tl.status === 'Clocked In')).length === 0 ? (
+                  <div className="text-center py-8">
+                    <span className="material-symbols-outlined text-4xl text-slate-300 mb-2">schedule</span>
+                    <p className="text-sm font-bold text-slate-400">No employees currently clocked in</p>
+                  </div>
+                ) : (
+                  employees.filter(e => timeLogs.some(tl => tl.employeeId === e.id && tl.status === 'Clocked In')).map(emp => (
+                    <button
+                      key={emp.id}
+                      onClick={() => { clockOutEmployee(emp); setShowClockOutPicker(false); }}
+                      className="w-full flex items-center gap-4 p-4 rounded-2xl border border-slate-200 bg-white hover:border-rose-400 hover:shadow-md transition-all cursor-pointer"
+                    >
+                      <img src={emp.avatar} alt={emp.firstName} className="w-10 h-10 rounded-xl object-cover" />
+                      <div className="text-left flex-1">
+                        <p className="text-sm font-black text-primary">{emp.firstName} {emp.lastName}</p>
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{emp.roleName}</p>
+                      </div>
+                      <span className="px-2 py-1 bg-emerald-100 text-emerald-700 text-[9px] font-black uppercase tracking-widest rounded-lg">Clocked In</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
         )}
       </AnimatePresence>
 

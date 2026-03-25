@@ -58,8 +58,8 @@ const router = createBrowserRouter([
     errorElement: <ErrorBoundary />,
     children: [
       { path: '/', element: <DashboardOverview onNewRepair={() => {}} /> },
-      { path: '/sales', element: <AccessGuard feature="sales"><PageShell title="Sales"><POS /></PageShell></AccessGuard> },
-      { path: '/sales/new', element: <AccessGuard feature="sales"><PageShell title="New Sale"><POS /></PageShell></AccessGuard> },
+      { path: '/sales', element: <AccessGuard feature="sales"><POS /></AccessGuard> },
+      { path: '/sales/new', element: <AccessGuard feature="sales"><POS /></AccessGuard> },
       { path: '/sales/scan', element: <AccessGuard feature="sales"><PageShell title="Scan QR"><div /></PageShell></AccessGuard> },
       { path: '/sales/quick-intake', element: <AccessGuard feature="sales"><PageShell title="Quick Intake"><div /></PageShell></AccessGuard> },
       { path: '/repairs', element: <AccessGuard feature="repairs"><RepairTickets /></AccessGuard> },

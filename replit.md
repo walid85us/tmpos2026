@@ -17,10 +17,36 @@ A multi-tenant SaaS platform frontend built with React, TypeScript, Vite, Tailwi
 - `src/App.tsx` - Main app component and routing
 - `src/firebase.ts` - Firebase initialization
 - `src/types.ts` - TypeScript type definitions
+- `src/context/AccessContext.tsx` - Auth session, tenant resolution, role management, preview mode
+- `src/context/accessConfig.ts` - Platform/tenant roles, plan features, permissions
+- `src/components/TenantHeader.tsx` - Top header with notification bell, check-in, avatar, quick menu
+- `src/components/Employees.tsx` - Employee management with roles, time tracking, payroll, activity
+- `src/components/PendingApproval.tsx` - Approval workflow with labeled field detail view
+- `src/components/ApprovalQueue.tsx` - Dashboard approval widget (links to Employees for actions)
+- `src/components/POS.tsx` - Full point-of-sale with cart, payments, modals, repair intake
+- `src/owner/TeamManagementPage.tsx` - Platform team/role management
 - `firebase-applet-config.json` - Firebase project config (projectId, apiKey, etc.)
 - `firebase-blueprint.json` - Firestore data model schema
 - `firestore.rules` - Firestore security rules
-- `vite.config.ts` - Vite build configuration
+- `vite.config.ts` - Vite build configuration (CRITICAL: watch.ignored config prevents reload loop)
+
+## Design System
+
+- Rounded cards: `rounded-[2.5rem]` / `rounded-[3rem]`
+- Glass effect: `bg-white/80 backdrop-blur-xl`
+- Primary color theme with `ghost-border` utility
+- Typography: `font-black uppercase tracking-widest` for labels
+- Animations: `motion/react` (AnimatePresence, motion.div)
+- Toast notifications instead of `alert()` calls
+
+## Auth & Access Control
+
+- **Platform roles**: system_owner, support_admin, billing_admin, operations_admin, security_admin (tenant: null)
+- **Tenant roles**: store_owner, manager, technician, sales_staff
+- **Manager privacy**: Managers cannot see Store Owner pay/commission data on employee cards or payroll
+- **Store Owner role**: System-protected, cannot be edited or deleted
+- **Time tracking**: Owner/manager get employee selector picker; other roles self-clock only
+- **Preview mode**: DevSessionSwitcher enables role/tenant switching for development
 
 ## Data Model
 
@@ -38,6 +64,7 @@ A multi-tenant SaaS platform frontend built with React, TypeScript, Vite, Tailwi
 
 - Run: `npm run dev` (port 5000)
 - Build: `npm run build`
+- CRITICAL: `vite.config.ts` must keep `server.watch.ignored` to prevent Replit log writes from causing page reloads
 
 ## Deployment
 

@@ -27,6 +27,8 @@ export const POS: React.FC = () => {
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [currentUserPin, setCurrentUserPin] = useState('');
+  const [repairValidationError, setRepairValidationError] = useState('');
+  const [customerValidationError, setCustomerValidationError] = useState('');
 
   // Modal States
   const [isShiftModalOpen, setIsShiftModalOpen] = useState(false);
@@ -96,9 +98,10 @@ export const POS: React.FC = () => {
   const finalizeRepairDetails = () => {
     if (pendingRepairItem) {
       if (!repairDetails.imei || !repairDetails.passcode || !repairDetails.network) {
-        alert("IMEI, Passcode, and Network are mandatory for repair tickets.");
+        setRepairValidationError('IMEI, Passcode, and Network are mandatory for repair tickets.');
         return;
       }
+      setRepairValidationError('');
       setCart([...cart, { 
         ...pendingRepairItem, 
         id: `${pendingRepairItem.id}-${Date.now()}`,
@@ -157,10 +160,11 @@ export const POS: React.FC = () => {
 
   const handleFinalize = async () => {
     if (!selectedCustomer) {
-      alert("Customer information is mandatory for this transaction.");
+      setCustomerValidationError('Customer information is mandatory for this transaction.');
       setIsCustomerModalOpen(true);
       return;
     }
+    setCustomerValidationError('');
     setIsProcessing(true);
     await new Promise(resolve => setTimeout(resolve, 2000));
     setIsProcessing(false);
@@ -803,6 +807,12 @@ export const POS: React.FC = () => {
                   </div>
                 </div>
               </div>
+              {repairValidationError && (
+                <div className="flex items-center gap-2 p-3 bg-rose-50 border border-rose-200 rounded-xl mb-4">
+                  <span className="material-symbols-outlined text-rose-500 text-sm">error</span>
+                  <p className="text-xs font-bold text-rose-600">{repairValidationError}</p>
+                </div>
+              )}
               <button onClick={finalizeRepairDetails} className="w-full py-5 bg-secondary text-white rounded-2xl font-black uppercase tracking-[0.2em] shadow-lg shadow-secondary/20 active:scale-95 transition-all">Finalize Intake</button>
             </motion.div>
           </motion.div>
@@ -888,12 +898,18 @@ export const POS: React.FC = () => {
                 <h3 className="text-2xl font-black text-primary tracking-tight">Customer Management</h3>
                 <button onClick={() => setIsCustomerModalOpen(false)} className="text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
               </div>
+              {customerValidationError && (
+                <div className="flex items-center gap-2 p-3 bg-rose-50 border border-rose-200 rounded-xl mb-4">
+                  <span className="material-symbols-outlined text-rose-500 text-sm">error</span>
+                  <p className="text-xs font-bold text-rose-600">{customerValidationError}</p>
+                </div>
+              )}
               <div className="space-y-4">
                 {[
                   { id: 'c1', name: 'Alexander Wright', phone: '555-0123' },
                   { id: 'c2', name: 'Sarah Jenkins', phone: '555-0456' },
                 ].map((c) => (
-                  <button key={c.id} onClick={() => { setSelectedCustomer(c as any); setIsCustomerModalOpen(false); }} className="w-full p-4 bg-slate-50 hover:bg-secondary hover:text-white rounded-2xl text-left transition-all">
+                  <button key={c.id} onClick={() => { setSelectedCustomer(c as any); setCustomerValidationError(''); setIsCustomerModalOpen(false); }} className="w-full p-4 bg-slate-50 hover:bg-secondary hover:text-white rounded-2xl text-left transition-all">
                     <p className="font-bold">{c.name}</p>
                     <p className="text-xs opacity-60">{c.phone}</p>
                   </button>

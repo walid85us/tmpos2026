@@ -1,0 +1,185 @@
+You are now acting as:
+Senior Frontend Workflow Engineer + Senior RBAC UX Engineer + Senior POS Workflow Architect + Senior Time Tracking UX Engineer + Senior React State Engineer + Senior Product QA Auditor
+
+IMPORTANT:
+Do not change the auth flow.
+Do not redesign the app.
+Preserve the current design baseline exactly.
+
+Focus ONLY on the remaining verified issues and refinements below.
+
+==================================================
+1. VERIFIED CURRENT STATUS
+==================================================
+
+These are the current verified outcomes and must be treated as source of truth:
+
+PASS:
+- Platform Create Role works
+- Request detail is now readable
+- Store Owner Create Role works
+- Time Tracking actions partially work
+
+FAIL / INCOMPLETE:
+- Store Owner approval actions still do not work properly
+- Time Tracking is incomplete
+- role/privacy rules around Store Owner compensation visibility are incomplete
+- top-right Check In / profile / quick menu flow from previous version is missing
+- Sales page from previous version needs to be restored as the real POS flow
+
+==================================================
+2. STORE OWNER APPROVAL WORKFLOW — COMPLETE IT
+==================================================
+
+Current issue:
+- approval queue exists
+- request details are readable
+- but approval actions still fail or are incomplete
+
+Fix this fully.
+
+Required behavior:
+- Store Owner can open pending request
+- Store Owner can:
+  - Approve
+  - Reject
+  - Return for Changes
+- each action must visibly update request state in UI
+- Return for Changes must support owner comments
+- Manager must later be able to revise and resubmit
+- resulting state changes must be reflected cleanly
+
+Do not leave actions as dead buttons or partial handlers.
+
+==================================================
+3. STORE OWNER ROLE — VISIBLE BUT PLATFORM-PROTECTED
+==================================================
+
+Requirements:
+- Store Owner role may remain visible in Employees / Roles for context
+- but Store Owner role must remain platform-protected
+- Store Owner role must not be editable from store-side role management
+- disable editing of Store Owner role
+- clearly show locked / protected state where appropriate
+- Store Owner identity can only be provisioned/managed by platform side
+
+==================================================
+4. MANAGER PRIVACY / COMPENSATION RESTRICTIONS
+==================================================
+
+Current refinement needed:
+- Manager should not see Store Owner pay rate
+- Manager should not see Store Owner commission
+- Manager should not manage Store Owner profile like a normal employee
+
+Implement:
+- hide or mask Store Owner rate and commission from Manager
+- do not expose Store Owner compensation details to Manager
+- if Store Owner appears in employee list, it must remain protected/non-manageable
+- Manager should only manage permitted subordinate employees
+
+==================================================
+5. TIME TRACKING — COMPLETE THE FEATURE
+==================================================
+
+Current state:
+- Time Tracking actions partially work
+- but workflow is incomplete
+
+Required behavior:
+A. Store Owner and Manager:
+- can clock in / clock out other employees from Time Tracking
+- provide a clear employee selector (checkbox list, row selection, or employee picker)
+- owner/manager can apply clock in / clock out action to selected employee(s)
+- keep UI consistent with existing design
+
+B. Other employees:
+- should be able to clock in / clock out themselves from their own dashboard or top-right quick action area
+- they should not clock in/out other employees unless explicitly permitted
+
+C. Time Tracking page:
+- retain existing design
+- action pencil icon should open proper detail/edit modal
+- current status and total hours should update visibly
+
+==================================================
+6. RESTORE TOP-RIGHT CHECK IN / PROFILE / QUICK MENU FLOW
+==================================================
+
+Restore the previous version’s top-right employee utility behavior.
+
+Required elements:
+- notification bell
+- quick menu / app grid icon
+- Check In button
+- user avatar / profile access
+
+Behavior:
+- Check In button should connect to the user’s own time tracking state
+- once checked in, reflect current status appropriately
+- quick menu can include shortcuts relevant to current role
+- keep the same premium UI language already used in the app
+
+Do not redesign. Restore the intended previous behavior in the current shell.
+
+==================================================
+7. RESTORE REAL SALES PAGE / POS FLOW
+==================================================
+
+Current requirement:
+The Sales section should restore the real POS / Checkout & Tender style screen from the previous version, not a reduced placeholder experience.
+
+Requirements:
+- restore the real Sales page layout/flow consistent with the previous version
+- include order summary / checkout/tender style structure
+- preserve current design language
+- wire the route so Sales opens the intended operational POS page
+- do not convert it into a generic shell
+
+Use the previous version behavior/design as reference from the imported codebase if available.
+If pieces still exist in current files, reconnect them instead of recreating poorly.
+
+==================================================
+8. DO NOT BREAK THESE
+==================================================
+
+Do NOT break:
+- fixed auth flow
+- preview mode
+- platform create role
+- readable request detail
+- existing role restrictions that already work
+- current design baseline
+
+==================================================
+9. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether Store Owner approval actions now fully work
+C. whether Return for Changes with comments now works
+D. whether Store Owner role is now visibly locked/non-editable store-side
+E. whether Manager can no longer see Store Owner rate/commission
+F. whether Store Owner/Manager can now clock in/out selected employees
+G. whether non-owner employees can now clock themselves in/out
+H. whether top-right Check In / bell / quick menu / avatar flow is restored
+I. whether Sales page now restores the intended POS / Checkout & Tender experience
+J. confirmation that auth flow was not touched/broken
+K. confirmation that no visual drift was introduced
+
+==================================================
+10. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- Store Owner approval actions work
+- Return for Changes with comments works
+- Store Owner role is locked/non-editable store-side
+- Manager cannot see Store Owner rate/commission
+- Store Owner and Manager can clock in/out selected employees
+- other employees can clock themselves in/out
+- top-right Check In flow is restored
+- Sales route restores the real POS experience
+- auth flow still works
+- no visual drift was introduced
