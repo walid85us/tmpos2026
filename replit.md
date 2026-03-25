@@ -22,7 +22,7 @@ A multi-tenant SaaS platform frontend built with React, TypeScript, Vite, Tailwi
 - `src/components/TenantHeader.tsx` - Top header with notification bell, check-in, avatar, quick menu
 - `src/components/Employees.tsx` - Employee management with roles, time tracking, payroll, activity
 - `src/components/PendingApproval.tsx` - Approval workflow with labeled field detail view
-- `src/components/ApprovalQueue.tsx` - Dashboard approval widget (links to Employees for actions)
+- `src/components/ApprovalQueue.tsx` - Dashboard approval widget with inline review modal for approvers
 - `src/components/POS.tsx` - Full point-of-sale with cart, payments, modals, repair intake
 - `src/owner/TeamManagementPage.tsx` - Platform team/role management
 - `firebase-applet-config.json` - Firebase project config (projectId, apiKey, etc.)

@@ -1,0 +1,174 @@
+You are now acting as:
+Senior Frontend Workflow Engineer + Senior RBAC UX Engineer + Senior POS Workflow Engineer + Senior Time Tracking UX Engineer + Senior Product QA Auditor
+
+IMPORTANT:
+Do not touch auth flow.
+Do not redesign the UI.
+Preserve the current design baseline exactly.
+
+Focus ONLY on the remaining verified cleanup issues below.
+
+==================================================
+1. VERIFIED CURRENT STATUS
+==================================================
+
+PASS:
+- Store Owner approval actions work
+- View All pending approvals works
+- Approve works
+- Reject works
+- Return for Changes with comments works
+- Store Owner role is mostly locked
+- Owner/Manager can clock selected employees
+- Self Check In works
+- Sales opens restored POS page
+
+REMAINING ISSUES:
+- Store Owner review flow should open the approval modal directly from dashboard review, not just route without context
+- Store Owner role is still not fully locked in Store Owner’s own store-side role/profile view
+- self Check In / Clock Out visual state needs polish:
+  - Check In should be green
+  - Clock Out should be red
+- on manager side, pending request card should show only Pending, not Review
+- Sales page quick-action buttons still have 3 wrong routes/behaviors:
+  - Print Label
+  - Hold Sale
+  - Scan QR
+- Top-right quick menu shortcuts must route correctly
+
+==================================================
+2. STORE OWNER DASHBOARD REVIEW BUTTON
+==================================================
+
+Current issue:
+- dashboard pending approval card shows Review
+- routing/context is not ideal
+
+Fix:
+- clicking Review on dashboard must open the actionable approval modal/drawer directly
+OR route to Employees with the exact pending request preselected and opened
+- do not send the user to a generic Employees page without focus/context
+
+==================================================
+3. STORE OWNER ROLE — FULLY LOCK IT STORE-SIDE
+==================================================
+
+Current issue:
+- from manager view it is fully locked
+- from store owner’s own preview/view, store owner can still edit profile/role in ways that should be platform-protected
+
+Fix:
+- Store Owner role remains visible for context
+- Store Owner role is always platform-protected
+- store-side role editing must be disabled for Store Owner role
+- in Store Owner’s own store-side view, the Role field must be locked / read-only
+- clearly indicate protected state
+- Store Owner role can only be changed platform-side
+
+==================================================
+4. MANAGER PENDING REQUEST CARD
+==================================================
+
+Current issue:
+- manager sees Pending with Review
+- manager should only see Pending status for submitted restricted requests
+
+Fix:
+- for manager-side submitted requests, remove Review action
+- manager should see status only, plus returned comments/history if applicable
+- only approver-side roles should get review/action controls
+
+==================================================
+5. SELF CHECK IN / CLOCK OUT VISUAL STATE
+==================================================
+
+Current issue:
+- self Check In now works
+- but visual state should be clearer
+
+Fix:
+- when user is not clocked in:
+  - show green Check In
+- when user is clocked in:
+  - show red Clock Out
+- preserve current layout and style language
+- do not redesign top-right utility area
+
+==================================================
+6. SALES PAGE QUICK ACTION BUTTONS — FIX THE LAST 3
+==================================================
+
+Current issue:
+these still route incorrectly or behave like Sales home:
+- Print Label
+- Hold Sale
+- Scan QR
+
+Fix:
+- Print Label must open/route to the print-label flow
+- Hold Sale must open/route to hold-sale flow or save the current sale into held orders
+- Scan QR must open/route to scan flow or scan interaction shell
+- do not let any of these route back to the generic Sales page without their own context
+
+==================================================
+7. TOP-RIGHT QUICK MENU SHORTCUTS
+==================================================
+
+Current issue:
+- the quick menu exists
+- but it must take to the correct pages/actions
+
+Fix the quick menu so each shortcut routes or opens the correct target:
+- New Sale
+- New Repair
+- Add Customer
+- Inventory
+- Reports
+- Settings
+
+Do not leave any dead or wrong links.
+
+==================================================
+8. DO NOT BREAK THESE
+==================================================
+
+Do NOT break:
+- auth flow
+- preview mode
+- working approval actions
+- working owner/manager employee clock actions
+- restored sales page
+- current design baseline
+
+==================================================
+9. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether dashboard Review now opens actionable pending approval context directly
+C. whether Store Owner role is now fully locked in Store Owner’s own store-side view
+D. whether manager pending request now shows only Pending (no Review action)
+E. whether self Check In is green and Clock Out is red
+F. whether Print Label now routes/opens correctly
+G. whether Hold Sale now routes/opens correctly
+H. whether Scan QR now routes/opens correctly
+I. whether quick menu shortcuts now go to correct pages/actions
+J. confirmation that auth flow was not touched/broken
+K. confirmation that no visual drift was introduced
+
+==================================================
+10. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- dashboard Review opens actionable approval context directly
+- Store Owner role is fully locked store-side
+- manager submitted requests show only Pending
+- Check In is green and Clock Out is red
+- Print Label works
+- Hold Sale works
+- Scan QR works
+- quick menu shortcuts work correctly
+- auth flow still works
+- no visual drift was introduced

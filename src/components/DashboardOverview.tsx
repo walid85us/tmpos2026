@@ -1,10 +1,40 @@
-import React from 'react';
-import { Link } from 'react-router-dom';
+import React, { useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { motion, AnimatePresence } from 'motion/react';
 import { useAccess } from '../context/AccessContext';
 import ApprovalQueue from './ApprovalQueue';
 
 export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => void }) {
   const { session } = useAccess();
+  const navigate = useNavigate();
+  const [showPrintLabelModal, setShowPrintLabelModal] = useState(false);
+  const [showScanQRModal, setShowScanQRModal] = useState(false);
+  const [printLabelText, setPrintLabelText] = useState('');
+  const [printLabelQty, setPrintLabelQty] = useState(1);
+  const [scanResult, setScanResult] = useState('');
+
+  const handleQuickAction = (label: string) => {
+    switch (label) {
+      case 'New Sale':
+        navigate('/sales');
+        break;
+      case 'Add Stock':
+        navigate('/inventory');
+        break;
+      case 'New Customer':
+        navigate('/customers');
+        break;
+      case 'Print Label':
+        setShowPrintLabelModal(true);
+        break;
+      case 'Hold Sale':
+        navigate('/sales');
+        break;
+      case 'Scan QR':
+        setShowScanQRModal(true);
+        break;
+    }
+  };
 
   return (
     <div className="space-y-8">
@@ -29,27 +59,24 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
         </div>
       </header>
 
-      {/* Quick Actions */}
       <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
         {[
-          { label: 'New Sale', icon: 'shopping_cart', color: 'bg-primary', path: '/sales' },
-          { label: 'Add Stock', icon: 'inventory_2', color: 'bg-teal-800', path: '/inventory' },
-          { label: 'New Customer', icon: 'person_add', color: 'bg-secondary', path: '/customers' },
-          { label: 'Print Label', icon: 'print', color: 'bg-slate-800', path: '/settings' },
-          { label: 'Hold Sale', icon: 'pause_circle', color: 'bg-slate-600', path: '/sales' },
-          { label: 'Scan QR', icon: 'qr_code_scanner', color: 'bg-lime-600', path: '/sales' },
+          { label: 'New Sale', icon: 'shopping_cart', color: 'bg-primary' },
+          { label: 'Add Stock', icon: 'inventory_2', color: 'bg-teal-800' },
+          { label: 'New Customer', icon: 'person_add', color: 'bg-secondary' },
+          { label: 'Print Label', icon: 'print', color: 'bg-slate-800' },
+          { label: 'Hold Sale', icon: 'pause_circle', color: 'bg-slate-600' },
+          { label: 'Scan QR', icon: 'qr_code_scanner', color: 'bg-lime-600' },
         ].map((action, i) => (
-          <Link key={i} to={action.path} className="flex flex-col items-center justify-center p-4 bg-white rounded-2xl ghost-border shadow-sm hover:shadow-md transition-all group active:scale-95">
+          <button key={i} onClick={() => handleQuickAction(action.label)} className="flex flex-col items-center justify-center p-4 bg-white rounded-2xl ghost-border shadow-sm hover:shadow-md transition-all group active:scale-95">
             <div className={`w-10 h-10 ${action.color} text-white rounded-xl flex items-center justify-center mb-2 group-hover:scale-110 transition-transform`}>
               <span className="material-symbols-outlined text-xl">{action.icon}</span>
             </div>
             <span className="text-[10px] font-black uppercase tracking-widest text-slate-600">{action.label}</span>
-          </Link>
+          </button>
         ))}
       </div>
-...
 
-      {/* Bento Grid Metrics */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div className="signature-gradient p-8 rounded-[2rem] shadow-xl text-white relative overflow-hidden flex flex-col justify-between h-52">
           <div className="z-10">
@@ -89,6 +116,126 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
           </div>
         </div>
       </div>
+
+      <AnimatePresence>
+        {showPrintLabelModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-slate-900/40 backdrop-blur-md"
+              onClick={() => setShowPrintLabelModal(false)}
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-md bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden"
+            >
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                <div>
+                  <h3 className="text-2xl font-black text-primary tracking-tight">Print Label</h3>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Generate barcode / price labels</p>
+                </div>
+                <button onClick={() => setShowPrintLabelModal(false)} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-slate-400">close</span>
+                </button>
+              </div>
+              <div className="p-8 space-y-6">
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Label Text / SKU</label>
+                  <input
+                    value={printLabelText}
+                    onChange={(e) => setPrintLabelText(e.target.value)}
+                    className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700"
+                    placeholder="Enter SKU or product name..."
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Quantity</label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={printLabelQty}
+                    onChange={(e) => setPrintLabelQty(Number(e.target.value))}
+                    className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700"
+                  />
+                </div>
+                <div className="bg-slate-50 p-6 rounded-2xl border border-slate-100 flex items-center justify-center">
+                  <div className="text-center">
+                    <span className="material-symbols-outlined text-5xl text-slate-300 mb-2">qr_code_2</span>
+                    <p className="text-xs font-bold text-slate-400">Label preview will appear here</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => { setShowPrintLabelModal(false); setPrintLabelText(''); setPrintLabelQty(1); }}
+                  disabled={!printLabelText.trim()}
+                  className="w-full py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                >
+                  <span className="material-symbols-outlined text-sm">print</span>
+                  Print {printLabelQty} Label{printLabelQty > 1 ? 's' : ''}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showScanQRModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-slate-900/40 backdrop-blur-md"
+              onClick={() => setShowScanQRModal(false)}
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-md bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden"
+            >
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                <div>
+                  <h3 className="text-2xl font-black text-primary tracking-tight">Scan QR / Barcode</h3>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Look up products or tickets</p>
+                </div>
+                <button onClick={() => { setShowScanQRModal(false); setScanResult(''); }} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-slate-400">close</span>
+                </button>
+              </div>
+              <div className="p-8 space-y-6">
+                <div className="bg-slate-900 rounded-2xl p-12 flex flex-col items-center justify-center">
+                  <span className="material-symbols-outlined text-6xl text-teal-400 mb-4">qr_code_scanner</span>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Camera scanner ready</p>
+                  <p className="text-[10px] text-slate-500 mt-1">Point camera at barcode or QR code</p>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Or enter code manually</label>
+                  <div className="flex gap-3">
+                    <input
+                      value={scanResult}
+                      onChange={(e) => setScanResult(e.target.value)}
+                      className="flex-1 px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700"
+                      placeholder="Enter barcode or QR value..."
+                    />
+                    <button
+                      onClick={() => { if (scanResult.trim()) { setShowScanQRModal(false); navigate('/sales'); setScanResult(''); } }}
+                      disabled={!scanResult.trim()}
+                      className="px-6 py-4 bg-primary text-white font-black text-xs rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Look Up
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

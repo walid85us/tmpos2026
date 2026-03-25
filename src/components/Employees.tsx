@@ -446,7 +446,13 @@ export default function Employees() {
                 </div>
                 
                 <h3 className="text-xl font-black text-primary mb-1">{emp.firstName} {emp.lastName}</h3>
-                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] mb-4">{emp.roleName}</p>
+                <p className={`text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] ${isStoreOwner ? 'mb-1' : 'mb-4'}`}>{emp.roleName}</p>
+                {isStoreOwner && (
+                  <div className="flex items-center gap-1 mb-3">
+                    <span className="material-symbols-outlined text-[10px] text-amber-500">lock</span>
+                    <span className="text-[9px] font-black text-amber-600 uppercase tracking-widest">Platform Protected Role</span>
+                  </div>
+                )}
                 
                 {(isManager && isStoreOwner) ? (
                   <div className="w-full mb-6 bg-slate-50 p-3 rounded-2xl border border-slate-100 flex items-center justify-center gap-2">
@@ -874,20 +880,36 @@ export default function Employees() {
                   </div>
                   <div className="space-y-2">
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Role</label>
-                    <select name="role" defaultValue={editingEmployee?.roleId} required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700">
-                      {tenantRolesState.filter(r => {
-                        return r.id !== 'store_owner';
-                      }).map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
-                    </select>
+                    {editingEmployee?.roleId === 'store_owner' ? (
+                      <div className="w-full px-6 py-4 bg-amber-50 rounded-2xl border border-amber-200 font-bold text-amber-800 flex items-center gap-2">
+                        <span className="material-symbols-outlined text-sm text-amber-600">lock</span>
+                        Store Owner
+                        <span className="text-[9px] font-black text-amber-600 uppercase tracking-widest ml-auto">Platform Protected</span>
+                        <input type="hidden" name="role" value="store_owner" />
+                      </div>
+                    ) : (
+                      <select name="role" defaultValue={editingEmployee?.roleId} required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700">
+                        {tenantRolesState.filter(r => r.id !== 'store_owner').map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+                      </select>
+                    )}
                   </div>
                   <div className="space-y-2">
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Status</label>
-                    <select name="status" defaultValue={editingEmployee?.status || 'Active'} required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700">
-                      <option value="Active">Active</option>
-                      <option value="Inactive">Inactive</option>
-                      <option value="Suspended">Suspended</option>
-                      <option value="Pending Invite">Pending Invite</option>
-                    </select>
+                    {editingEmployee?.roleId === 'store_owner' ? (
+                      <div className="w-full px-6 py-4 bg-amber-50 rounded-2xl border border-amber-200 font-bold text-amber-800 flex items-center gap-2">
+                        <span className="material-symbols-outlined text-sm text-amber-600">lock</span>
+                        {editingEmployee.status}
+                        <span className="text-[9px] font-black text-amber-600 uppercase tracking-widest ml-auto">Protected</span>
+                        <input type="hidden" name="status" value={editingEmployee.status} />
+                      </div>
+                    ) : (
+                      <select name="status" defaultValue={editingEmployee?.status || 'Active'} required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700">
+                        <option value="Active">Active</option>
+                        <option value="Inactive">Inactive</option>
+                        <option value="Suspended">Suspended</option>
+                        <option value="Pending Invite">Pending Invite</option>
+                      </select>
+                    )}
                   </div>
                   <div className="space-y-2">
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Access PIN</label>

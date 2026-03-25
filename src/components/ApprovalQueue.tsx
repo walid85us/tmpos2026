@@ -38,7 +38,8 @@ function formatValue(key: string, value: any): string {
 
 export default function ApprovalQueue() {
   const { session } = useAccess();
-  const isStoreOwner = session?.role === 'store_owner' || session?.role === 'system_owner';
+  const isApprover = session?.role === 'store_owner' || session?.role === 'system_owner';
+  const isManager = session?.role === 'manager';
 
   const [requests, setRequests] = useState<ApprovalRequest[]>([
     {
@@ -109,8 +110,10 @@ export default function ApprovalQueue() {
           {requests.filter(r => r.status === 'pending' || r.status === 'returned').map(req => (
             <div
               key={req.id}
-              onClick={() => { setSelectedRequest(req); setReturnComment(''); }}
-              className="flex justify-between items-center p-4 bg-white rounded-xl border border-amber-100 cursor-pointer hover:bg-amber-50/50 hover:shadow-sm transition-all"
+              onClick={() => { if (isApprover) { setSelectedRequest(req); setReturnComment(''); } }}
+              className={`flex justify-between items-center p-4 bg-white rounded-xl border border-amber-100 transition-all ${
+                isApprover ? 'cursor-pointer hover:bg-amber-50/50 hover:shadow-sm' : ''
+              }`}
             >
               <div>
                 <p className="font-bold text-slate-900 text-sm">{req.employee}</p>
@@ -125,7 +128,9 @@ export default function ApprovalQueue() {
                 }`}>
                   {req.status === 'returned' ? 'Returned' : 'Pending'}
                 </span>
-                <span className="text-[10px] font-black text-primary uppercase tracking-widest hover:underline">Review</span>
+                {isApprover && (
+                  <span className="text-[10px] font-black text-primary uppercase tracking-widest hover:underline">Review</span>
+                )}
               </div>
             </div>
           ))}
@@ -151,7 +156,7 @@ export default function ApprovalQueue() {
       </div>
 
       <AnimatePresence>
-        {selectedRequest && isStoreOwner && (
+        {selectedRequest && isApprover && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
             <motion.div
               initial={{ opacity: 0 }}
@@ -230,27 +235,29 @@ export default function ApprovalQueue() {
                       Reject
                     </button>
                   </div>
-                  <div className="space-y-2">
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">Return for Changes</label>
-                    <textarea
-                      value={returnComment}
-                      onChange={(e) => setReturnComment(e.target.value)}
-                      className="w-full px-4 py-3 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-medium text-slate-700 text-sm resize-none h-20"
-                      placeholder="Explain what needs to be changed..."
-                    />
-                    <button
-                      onClick={() => {
-                        if (returnComment.trim()) {
-                          handleReturn(selectedRequest.id, returnComment);
-                        }
-                      }}
-                      disabled={!returnComment.trim()}
-                      className="w-full py-3 bg-amber-500 text-white font-black text-xs rounded-xl shadow-lg shadow-amber-500/20 uppercase tracking-widest hover:bg-amber-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                    >
-                      <span className="material-symbols-outlined text-sm">undo</span>
-                      Return for Changes
-                    </button>
-                  </div>
+                  {selectedRequest.status !== 'returned' && (
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">Return for Changes</label>
+                      <textarea
+                        value={returnComment}
+                        onChange={(e) => setReturnComment(e.target.value)}
+                        className="w-full px-4 py-3 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-medium text-slate-700 text-sm resize-none h-20"
+                        placeholder="Explain what needs to be changed..."
+                      />
+                      <button
+                        onClick={() => {
+                          if (returnComment.trim()) {
+                            handleReturn(selectedRequest.id, returnComment);
+                          }
+                        }}
+                        disabled={!returnComment.trim()}
+                        className="w-full py-3 bg-amber-500 text-white font-black text-xs rounded-xl shadow-lg shadow-amber-500/20 uppercase tracking-widest hover:bg-amber-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                      >
+                        <span className="material-symbols-outlined text-sm">undo</span>
+                        Return for Changes
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             </motion.div>

@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAccess } from '../context/AccessContext';
 import { accountStatusConfig } from '../context/accessConfig';
 
 const TenantHeader: React.FC = () => {
   const { tenant, session, loading } = useAccess();
+  const navigate = useNavigate();
   const [checkedIn, setCheckedIn] = useState(false);
   const [showQuickMenu, setShowQuickMenu] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
@@ -52,7 +54,7 @@ const TenantHeader: React.FC = () => {
             className={`flex items-center gap-2 px-5 py-2.5 rounded-2xl font-black text-xs uppercase tracking-widest transition-all shadow-sm ${
               checkedIn
                 ? 'bg-rose-500 text-white shadow-rose-500/20 hover:bg-rose-600'
-                : 'bg-primary text-white shadow-primary/20 hover:bg-primary/90'
+                : 'bg-emerald-500 text-white shadow-emerald-500/20 hover:bg-emerald-600'
             }`}
           >
             <span className="material-symbols-outlined text-sm">{checkedIn ? 'logout' : 'login'}</span>
@@ -114,17 +116,16 @@ const TenantHeader: React.FC = () => {
                   <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3 ml-1">Quick Actions</h4>
                   <div className="grid grid-cols-3 gap-2">
                     {quickActions.map(action => (
-                      <a
+                      <button
                         key={action.label}
-                        href={action.path}
-                        onClick={() => setShowQuickMenu(false)}
+                        onClick={() => { setShowQuickMenu(false); navigate(action.path); }}
                         className="flex flex-col items-center gap-1.5 p-3 rounded-xl hover:bg-slate-50 transition-colors group"
                       >
                         <div className="w-10 h-10 bg-slate-100 rounded-xl flex items-center justify-center group-hover:bg-primary group-hover:text-white text-slate-600 transition-all">
                           <span className="material-symbols-outlined text-lg">{action.icon}</span>
                         </div>
                         <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wider text-center leading-tight">{action.label}</span>
-                      </a>
+                      </button>
                     ))}
                   </div>
                 </div>
