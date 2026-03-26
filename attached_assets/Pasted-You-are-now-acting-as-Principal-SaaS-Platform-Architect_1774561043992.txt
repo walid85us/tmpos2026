@@ -1,0 +1,308 @@
+You are now acting as:
+Principal SaaS Platform Architect + Principal Tenant Lifecycle Designer + Principal Subscription Systems Architect + Principal Billing/Finance Workflow Architect + Principal Domain Management Architect + Principal Platform Analytics Designer + Principal Support Operations Architect + Principal Audit/Security Architect + Principal React/TypeScript Engineer + Principal UX Workflow Designer + Principal QA Auditor
+
+IMPORTANT:
+This is a correction/elevation pass ONLY for the completed workstream:
+Tenant Management & Provisioning
+
+Do not touch unrelated modules.
+Do not redesign the UI.
+Preserve the current design baseline exactly.
+
+GOAL:
+Elevate Tenant Management & Provisioning from “working” to “commercial-grade and system-owner ready,” including all important improvements, including the ones that were previously considered non-urgent/later.
+
+==================================================
+1. TENANTS PAGE / PLAN PRICING DISPLAY
+==================================================
+
+The annual plan savings label (example: “Save 17%”) must be data-driven from plan configuration.
+
+Required:
+- plans must support:
+  - monthly price
+  - annual price
+  - annual discount type
+  - annual discount value
+  - displayed savings label
+- Tenants page and Provisioning page must read this from plan data
+- avoid weak/hardcoded savings logic
+
+Also improve Tenants page as needed so it remains operationally useful:
+- strong search
+- strong filtering
+- sortable columns
+- visible status/health cues
+- useful summary cards
+
+==================================================
+2. PROVISIONING FLOW
+==================================================
+
+Provisioning already works, but improve it into a stronger onboarding/admin flow.
+
+Add or refine:
+- provisioning templates
+- default feature bundle assignment
+- default store settings profile
+- default tax/currency/location package
+- clearer “what happens next” flow
+- optional onboarding checklist after provisioning
+- stronger visible result in tenant list after provisioning
+
+Keep the current successful 3-step flow, but make it more professional and operational.
+
+==================================================
+3. TENANT OVERVIEW TAB — UPGRADE TO TENANT ACCOUNT COMMAND CENTER
+==================================================
+
+Current status:
+The tab passes, but it is still too basic.
+
+Make Tenant Overview much more dynamic and interactive.
+
+Required improvements:
+- tenant health score/summary
+- billing health
+- renewal countdown
+- usage summary
+- domain health
+- support/escalation summary
+- feature override summary
+- owner/store summary
+- recent activity timeline
+- stronger quick actions
+- account flags / warnings / risks
+- stronger summary cards that lead to useful drill-down actions
+
+Goal:
+Tenant Overview should feel like a true tenant account command center for the platform owner/team.
+
+==================================================
+4. OWNER & USERS TAB
+==================================================
+
+Improve this significantly.
+
+Required:
+- allow clicking Store Owner or team members to open a detailed profile modal/drawer/page
+- show meaningful details:
+  - name
+  - email
+  - role
+  - status
+  - invite state
+  - last active
+  - tenant relationship
+  - notes or security info if relevant
+- include useful management actions:
+  - invite
+  - edit
+  - deactivate/suspend
+  - resend invite
+  - reset access / similar safe admin flow if appropriate
+
+Platform-only Store Owner governance:
+- allow Platform Owner / authorized platform team to create another Store Owner
+- this ability must remain platform-only
+- do not expose it to tenant-side roles
+- Store Owner identity remains platform-managed
+
+==================================================
+5. SUBSCRIPTION TAB
+==================================================
+
+Current issue:
+It passes, but upgrade buttons and subscription operations are still not strong enough.
+
+Required:
+- make upgrade buttons work properly
+- improve upgrade/downgrade/change-plan flow
+- support:
+  - current plan
+  - next renewal
+  - billing cycle
+  - add-ons
+  - limits
+  - trial status
+  - trial extension
+  - trial conversion
+  - cancellation/suspension/reactivation readiness
+  - confirmation flows
+  - effective-date implications
+  - subscription history / plan change history if practical
+
+Goal:
+This tab should feel like a real SaaS subscription management surface.
+
+==================================================
+6. FEATURES TAB
+==================================================
+
+Improve this into a powerful tenant feature-governance surface.
+
+Required:
+- allow System Owner to enable/override features even if they are not included in the subscribed plan
+- support tenant-level feature override behavior
+- support feature trial enablement for Store Owner/team
+- allow setting a feature as:
+  - inherited
+  - overridden
+  - trial
+  - disabled
+  - add-on enabled
+- show clear badges/states for the above
+- support start/end or duration logic for feature trial where appropriate
+
+Goal:
+This tab should allow flexible commercial control of tenant features.
+
+==================================================
+7. BILLING TAB
+==================================================
+
+Billing tab passes, but it should be improved into a stronger tenant finance surface.
+
+Required improvements:
+- tenant billing ledger / account balance
+- unapplied credit balance
+- subscription timeline
+- renewal timeline
+- failed-payment recovery flow
+- billing notes / internal finance notes
+- stronger tenant-scoped invoice / transaction / credit note context
+- preserve existing working finance flows
+
+Goal:
+The Billing tab should support real tenant financial operations, not just a limited summary.
+
+==================================================
+8. DOMAINS TAB
+==================================================
+
+Current status:
+It passes, but needs major improvement.
+
+Upgrade it into a more modern and operational domain-management surface.
+
+Required improvements:
+- subdomain state
+- custom domain onboarding
+- SSL status
+- DNS verification / propagation status
+- verification checklist
+- copy DNS records
+- primary/default domain selection
+- domain action controls
+- domain history / changes if practical
+- route/login preview if practical
+- more professional domain management UX
+
+Goal:
+This should feel like a serious multitenant domain-management tab.
+
+==================================================
+9. USAGE TAB
+==================================================
+
+Usage passes, but improve it further now instead of deferring.
+
+Add or refine:
+- usage trends over time
+- plan limit vs actual usage
+- per-module or per-capability usage where practical
+- active users / seats
+- storage / attachments / transactions indicators if relevant in current architecture
+- warning thresholds
+- compare to prior period
+- tenant drill-down improvements where useful
+- export improvements
+
+Do not redesign the tab; make it more operationally useful.
+
+==================================================
+10. ACTIVITY / AUDIT TAB
+==================================================
+
+Activity/Audit passes, but improve it now.
+
+Add/refine:
+- filter by actor
+- filter by action type
+- filter by date
+- tenant-specific sensitive actions visibility
+- export audit capability if practical
+- clearer action history
+- stronger traceability for important tenant management actions
+
+Goal:
+This tab should feel more like a real audit/compliance operations surface.
+
+==================================================
+11. SUPPORT NOTES TAB
+==================================================
+
+Support Notes passes, but improve it now.
+
+Add/refine:
+- note categories
+- internal vs escalated notes
+- pinned issues
+- follow-up dates
+- support owner assignment
+- stronger note organization and support workflow cues
+
+Goal:
+This should be more useful for the platform support team managing tenant accounts.
+
+==================================================
+12. DO NOT BREAK THESE
+==================================================
+
+Do NOT break:
+- auth flow
+- preview mode
+- current platform/store role hierarchy
+- current RBAC logic
+- current design baseline
+- existing working routes/pages outside this workstream
+
+==================================================
+13. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether annual savings label is now data-driven from plan configuration
+C. whether Provisioning was further strengthened with templates/defaults/checklist logic
+D. whether Tenant Overview is now more dynamic and interactive
+E. whether Owner & Users now supports clicking into user details
+F. whether platform-only additional Store Owner creation now exists
+G. whether Subscription upgrade/downgrade flows now work properly
+H. whether Features tab now supports tenant-level overrides and trial feature enablement
+I. whether Billing tab now includes stronger tenant finance/accounting concepts
+J. whether Domains tab is now more operational and interactive
+K. whether Usage tab now includes stronger usage/limits/trend insights
+L. whether Activity/Audit tab now includes stronger filtering/traceability
+M. whether Support Notes tab now includes stronger support workflow management
+N. confirmation that no visual drift was introduced
+
+==================================================
+14. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- annual savings label is data-driven
+- provisioning flow is stronger and more operational
+- Tenant Overview feels like a real tenant account command center
+- Owner & Users supports detail management
+- platform-only additional Store Owner creation exists
+- Subscription flows work properly
+- Features supports overrides and trials
+- Billing tab is more professional and finance-capable
+- Domains tab is more operational
+- Usage tab is more useful and insight-oriented
+- Activity/Audit is more filterable and traceable
+- Support Notes is more workflow-ready
+- auth flow still works
+- no visual drift was introduced

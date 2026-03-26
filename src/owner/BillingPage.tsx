@@ -68,9 +68,9 @@ const BillingPage: React.FC = () => {
 
   const tenantLedger = useMemo(() => {
     return tenants.map(t => {
-      const tenantTx = billingTransactions.filter(tx => tx.tenant === t.name);
-      const tenantInv = invoiceHistory.filter(i => i.tenant === t.name);
-      const tenantCredits = creditNotes.filter(c => c.tenant === t.name);
+      const tenantTx = billingTransactions.filter(tx => tx.tenantId === t.id);
+      const tenantInv = invoiceHistory.filter(i => i.tenantId === t.id);
+      const tenantCredits = creditNotes.filter(c => c.tenantId === t.id);
       const totalBilled = tenantInv.reduce((s, i) => s + i.total, 0);
       const totalPaid = tenantTx.filter(tx => tx.status === 'paid').reduce((s, tx) => s + tx.amount, 0);
       const totalCredits = tenantCredits.reduce((s, c) => s + c.amount, 0);

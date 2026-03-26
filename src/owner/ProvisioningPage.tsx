@@ -1,9 +1,18 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
-import { plans } from './mockData';
+import { plans, provisioningTemplates } from './mockData';
 
 type Step = 'form' | 'confirm' | 'success';
+
+const onboardingChecklist = [
+  { id: 'workspace', label: 'Tenant workspace created', icon: 'home' },
+  { id: 'subdomain', label: 'Subdomain provisioned', icon: 'language' },
+  { id: 'ssl', label: 'SSL certificate queued', icon: 'lock' },
+  { id: 'invite', label: 'Owner invitation sent', icon: 'mail' },
+  { id: 'trial', label: '14-day trial activated', icon: 'event' },
+  { id: 'defaults', label: 'Default settings applied', icon: 'settings' },
+];
 
 const ProvisioningPage: React.FC = () => {
   const navigate = useNavigate();
@@ -15,20 +24,48 @@ const ProvisioningPage: React.FC = () => {
   const [selectedPlan, setSelectedPlan] = useState('essential');
   const [billingCycle, setBillingCycle] = useState<'monthly' | 'annual'>('monthly');
   const [provisioning, setProvisioning] = useState(false);
+  const [selectedTemplate, setSelectedTemplate] = useState<string | null>(null);
+  const [checklistProgress, setChecklistProgress] = useState<string[]>([]);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, []);
 
   const plan = plans.find(p => p.id === selectedPlan);
-  const price = plan ? (billingCycle === 'annual' ? Math.round(plan.price * 10) : plan.price) : 0;
+  const price = plan ? (billingCycle === 'annual' ? plan.annualPrice : plan.price) : 0;
+  const savingsLabel = plan?.savingsLabel || '';
   const subdomainSlug = subdomain || name.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20);
   const effectiveSubdomain = subdomain || subdomainSlug;
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
   const isValid = name.trim().length >= 2 && effectiveSubdomain.length >= 2 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(effectiveSubdomain) && ownerName.trim().length >= 2 && emailRegex.test(ownerEmail);
 
+  const applyTemplate = (templateId: string) => {
+    const tpl = provisioningTemplates.find(t => t.id === templateId);
+    if (!tpl) return;
+    setSelectedTemplate(templateId);
+    setSelectedPlan(tpl.plan);
+  };
+
   const handleConfirm = () => {
     setProvisioning(true);
-    setTimeout(() => {
-      setProvisioning(false);
-      setStep('success');
-    }, 2000);
+    setChecklistProgress([]);
+    let i = 0;
+    if (intervalRef.current) clearInterval(intervalRef.current);
+    intervalRef.current = setInterval(() => {
+      if (i < onboardingChecklist.length) {
+        const itemId = onboardingChecklist[i].id;
+        i++;
+        setChecklistProgress(prev => [...prev, itemId]);
+      } else {
+        if (intervalRef.current) clearInterval(intervalRef.current);
+        intervalRef.current = null;
+        setProvisioning(false);
+        setStep('success');
+      }
+    }, 350);
   };
 
   const inputClass = "w-full px-4 py-3.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary";
@@ -59,6 +96,22 @@ const ProvisioningPage: React.FC = () => {
               <h3 className="text-sm font-black text-primary uppercase tracking-widest">Tenant Details</h3>
             </div>
             <div className="p-8 space-y-6">
+              <div>
+                <label className={labelClass}>Quick Start Template</label>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  {provisioningTemplates.map(tpl => (
+                    <button key={tpl.id} onClick={() => applyTemplate(tpl.id)} className={`p-4 rounded-2xl border text-left transition-all ${selectedTemplate === tpl.id ? 'bg-primary/5 border-primary/30 ring-2 ring-primary/20' : 'bg-slate-50 border-slate-200 hover:border-primary/20'}`}>
+                      <p className="font-black text-slate-900 text-sm">{tpl.name}</p>
+                      <p className="text-[10px] text-slate-400 mt-1">{tpl.description}</p>
+                      <p className="text-[10px] font-bold text-primary mt-1 capitalize">{tpl.plan} plan</p>
+                    </button>
+                  ))}
+                </div>
+                <button onClick={() => setSelectedTemplate(null)} className={`mt-2 text-[10px] font-black uppercase tracking-widest transition-colors ${selectedTemplate ? 'text-primary hover:text-primary/80' : 'text-slate-300 cursor-default'}`}>
+                  {selectedTemplate ? 'Clear Template' : 'Or configure manually below'}
+                </button>
+              </div>
+
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
                   <label htmlFor="prov-name" className={labelClass}>Business Name *</label>
@@ -90,7 +143,10 @@ const ProvisioningPage: React.FC = () => {
                   {plans.map(p => (
                     <button key={p.id} onClick={() => setSelectedPlan(p.id)} className={`p-5 rounded-2xl border text-left transition-all ${selectedPlan === p.id ? 'bg-primary/5 border-primary/30 ring-2 ring-primary/20' : 'bg-slate-50 border-slate-200 hover:border-primary/20'}`}>
                       <p className="font-black text-slate-900">{p.name}</p>
-                      <p className="text-lg font-black text-primary mt-1">${p.price}<span className="text-[10px] text-slate-400 font-bold">/mo</span></p>
+                      <div className="mt-1">
+                        <p className="text-lg font-black text-primary">${billingCycle === 'annual' ? p.annualPrice : p.price}<span className="text-[10px] text-slate-400 font-bold">/{billingCycle === 'annual' ? 'yr' : 'mo'}</span></p>
+                        {billingCycle === 'annual' && <p className="text-[10px] font-bold text-lime-600">{p.savingsLabel} vs monthly</p>}
+                      </div>
                       <p className="text-[10px] text-slate-400 mt-1">{p.limits.seats} seats · {p.limits.locations} location{p.limits.locations !== 1 ? 's' : ''}</p>
                       <div className="flex flex-wrap gap-1 mt-2">
                         {p.features.slice(0, 3).map(f => <span key={f} className="text-[8px] font-black text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded uppercase tracking-widest">{f}</span>)}
@@ -105,7 +161,7 @@ const ProvisioningPage: React.FC = () => {
                 <div className="flex gap-3">
                   <button onClick={() => setBillingCycle('monthly')} className={`px-6 py-3 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${billingCycle === 'monthly' ? 'bg-primary text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>Monthly</button>
                   <button onClick={() => setBillingCycle('annual')} className={`px-6 py-3 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${billingCycle === 'annual' ? 'bg-primary text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
-                    Annual <span className="text-lime-300 ml-1">Save 17%</span>
+                    Annual {savingsLabel && <span className="text-lime-300 ml-1">{savingsLabel}</span>}
                   </button>
                 </div>
               </div>
@@ -145,17 +201,32 @@ const ProvisioningPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="p-4 bg-amber-50 rounded-xl border border-amber-100">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="material-symbols-outlined text-amber-600 text-sm">info</span>
-                  <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest">What happens next</p>
+              {selectedTemplate && (
+                <div className="p-4 bg-primary/5 rounded-xl border border-primary/10">
+                  <p className="text-[10px] font-black text-primary uppercase tracking-widest mb-1">Template Applied</p>
+                  <p className="font-bold text-slate-900">{provisioningTemplates.find(t => t.id === selectedTemplate)?.name}</p>
+                  <p className="text-[10px] text-slate-400">{provisioningTemplates.find(t => t.id === selectedTemplate)?.description}</p>
                 </div>
-                <ul className="text-sm text-amber-700 space-y-1 ml-6">
-                  <li>Tenant workspace will be created</li>
-                  <li>Subdomain will be provisioned</li>
-                  <li>Owner will receive an invitation email</li>
-                  <li>14-day trial period begins</li>
-                </ul>
+              )}
+
+              <div className="p-4 bg-amber-50 rounded-xl border border-amber-100">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="material-symbols-outlined text-amber-600 text-sm">info</span>
+                  <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest">Onboarding Checklist</p>
+                </div>
+                <div className="space-y-2">
+                  {onboardingChecklist.map(item => {
+                    const done = checklistProgress.includes(item.id);
+                    return (
+                      <div key={item.id} className="flex items-center gap-2">
+                        <span className={`material-symbols-outlined text-sm ${done ? 'text-lime-600' : provisioning ? 'text-slate-300' : 'text-amber-500'}`}>
+                          {done ? 'check_circle' : provisioning ? 'radio_button_unchecked' : item.icon}
+                        </span>
+                        <span className={`text-sm font-bold ${done ? 'text-lime-700' : 'text-amber-700'}`}>{item.label}</span>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             </div>
 
@@ -198,28 +269,18 @@ const ProvisioningPage: React.FC = () => {
                   <p className="font-bold text-slate-900">{plan?.name} — ${price}/{billingCycle === 'annual' ? 'yr' : 'mo'}</p>
                 </div>
               </div>
-              <div className="mt-4 grid grid-cols-4 gap-3">
-                <div className="p-3 bg-lime-50 rounded-xl border border-lime-100 text-center">
-                  <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Status</p>
-                  <p className="text-[10px] font-black text-lime-600 uppercase">Trialing</p>
-                </div>
-                <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 text-center">
-                  <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">SSL</p>
-                  <p className="text-[10px] font-black text-amber-600 uppercase">Pending</p>
-                </div>
-                <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 text-center">
-                  <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">DNS</p>
-                  <p className="text-[10px] font-black text-amber-600 uppercase">Pending</p>
-                </div>
-                <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 text-center">
-                  <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Invite</p>
-                  <p className="text-[10px] font-black text-blue-600 uppercase">Sent</p>
-                </div>
+              <div className="mt-4 grid grid-cols-3 md:grid-cols-6 gap-3">
+                {onboardingChecklist.map(item => (
+                  <div key={item.id} className="p-3 bg-lime-50 rounded-xl border border-lime-100 text-center">
+                    <span className="material-symbols-outlined text-lime-600 text-sm">{item.icon}</span>
+                    <p className="text-[8px] font-black text-lime-700 uppercase tracking-widest mt-1">{item.label.split(' ').slice(0, 2).join(' ')}</p>
+                  </div>
+                ))}
               </div>
             </div>
             <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex justify-between items-center">
               <button onClick={() => navigate('/owner/tenants')} className="px-6 py-3.5 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all">Back to Tenants</button>
-              <button onClick={() => { setStep('form'); setName(''); setSubdomain(''); setOwnerName(''); setOwnerEmail(''); setSelectedPlan('essential'); setBillingCycle('monthly'); }} className="px-6 py-3.5 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest shadow-lg shadow-primary/20 hover:bg-primary/90 transition-all active:scale-95">Provision Another</button>
+              <button onClick={() => { setStep('form'); setName(''); setSubdomain(''); setOwnerName(''); setOwnerEmail(''); setSelectedPlan('essential'); setBillingCycle('monthly'); setSelectedTemplate(null); setChecklistProgress([]); }} className="px-6 py-3.5 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest shadow-lg shadow-primary/20 hover:bg-primary/90 transition-all active:scale-95">Provision Another</button>
             </div>
           </motion.div>
         )}

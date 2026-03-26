@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { tenants, plans } from './mockData';
+import { tenants, plans, tenantUsage, billingTransactions } from './mockData';
 
 type StatusFilter = 'all' | 'active' | 'trialing' | 'overdue' | 'suspended';
 type SortKey = 'name' | 'plan' | 'status' | 'mrr' | 'renewal';
@@ -16,6 +16,22 @@ const TenantsPage: React.FC = () => {
   const toggleSort = (key: SortKey) => {
     if (sortBy === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
     else { setSortBy(key); setSortDir('asc'); }
+  };
+
+  const computeHealth = (tenantId: string, status: string, seatsUsed: number, seatsAllowed: number) => {
+    let score = 100;
+    if (status === 'overdue') score -= 40;
+    if (status === 'suspended') score -= 60;
+    const usage = tenantUsage.find(u => u.tenantId === tenantId);
+    if (usage) {
+      if (usage.seatsAllowed > 0 && usage.seatsUsed / usage.seatsAllowed >= 0.9) score -= 10;
+      if (usage.apiLimit > 0 && usage.apiCalls / usage.apiLimit >= 0.9) score -= 10;
+      if (usage.smsLimit > 0 && usage.smsUsed / usage.smsLimit >= 0.9) score -= 10;
+    }
+    if (seatsUsed >= seatsAllowed) score -= 5;
+    const failedTx = billingTransactions.filter(tx => tx.tenantId === tenantId && tx.status === 'failed');
+    if (failedTx.length > 0) score -= 15;
+    return Math.max(0, Math.min(100, score));
   };
 
   const filtered = useMemo(() => {
@@ -50,10 +66,21 @@ const TenantsPage: React.FC = () => {
     return sortDir === 'asc' ? 'expand_less' : 'expand_more';
   };
 
+  const healthDot = (score: number) => {
+    const color = score >= 80 ? 'bg-lime-500' : score >= 50 ? 'bg-amber-500' : 'bg-red-500';
+    return (
+      <div className="flex items-center gap-1.5">
+        <div className={`w-2 h-2 rounded-full ${color}`} />
+        <span className="text-[10px] font-black text-slate-500">{score}</span>
+      </div>
+    );
+  };
+
   const activeCt = tenants.filter(t => t.status === 'active').length;
   const trialCt = tenants.filter(t => t.status === 'trialing').length;
   const overdueCt = tenants.filter(t => t.status === 'overdue').length;
   const suspendedCt = tenants.filter(t => t.status === 'suspended').length;
+  const totalMrr = tenants.reduce((s, t) => s + t.mrr, 0);
 
   return (
     <div className="space-y-8">
@@ -68,7 +95,7 @@ const TenantsPage: React.FC = () => {
         </button>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
         <button onClick={() => setStatusFilter(statusFilter === 'active' ? 'all' : 'active')} className={`p-4 rounded-2xl border text-left transition-all ${statusFilter === 'active' ? 'bg-lime-50 border-lime-200' : 'bg-white/80 backdrop-blur-xl border-slate-200 hover:border-lime-200'}`}>
           <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Active</p>
           <p className="text-2xl font-black text-lime-600">{activeCt}</p>
@@ -85,6 +112,11 @@ const TenantsPage: React.FC = () => {
           <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Suspended</p>
           <p className="text-2xl font-black text-slate-500">{suspendedCt}</p>
         </button>
+        <div className="p-4 rounded-2xl border bg-primary/5 border-primary/10 text-left">
+          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Total MRR</p>
+          <p className="text-2xl font-black text-primary">${totalMrr}</p>
+          <p className="text-[10px] text-slate-400 font-bold">{tenants.length} tenants</p>
+        </div>
       </div>
 
       <div className="flex gap-3 flex-wrap items-center">
@@ -108,35 +140,38 @@ const TenantsPage: React.FC = () => {
               <th className="px-6 py-4"><button onClick={() => toggleSort('name')} className="flex items-center gap-1 text-[10px] font-black text-slate-400 uppercase tracking-widest hover:text-primary transition-colors">Tenant <span className="material-symbols-outlined text-xs">{sortIcon('name')}</span></button></th>
               <th className="px-6 py-4"><button onClick={() => toggleSort('plan')} className="flex items-center gap-1 text-[10px] font-black text-slate-400 uppercase tracking-widest hover:text-primary transition-colors">Plan <span className="material-symbols-outlined text-xs">{sortIcon('plan')}</span></button></th>
               <th className="px-6 py-4"><button onClick={() => toggleSort('status')} className="flex items-center gap-1 text-[10px] font-black text-slate-400 uppercase tracking-widest hover:text-primary transition-colors">Status <span className="material-symbols-outlined text-xs">{sortIcon('status')}</span></button></th>
+              <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Health</th>
               <th className="px-6 py-4"><button onClick={() => toggleSort('mrr')} className="flex items-center gap-1 text-[10px] font-black text-slate-400 uppercase tracking-widest hover:text-primary transition-colors">MRR <span className="material-symbols-outlined text-xs">{sortIcon('mrr')}</span></button></th>
               <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Seats</th>
               <th className="px-6 py-4"><button onClick={() => toggleSort('renewal')} className="flex items-center gap-1 text-[10px] font-black text-slate-400 uppercase tracking-widest hover:text-primary transition-colors">Renewal <span className="material-symbols-outlined text-xs">{sortIcon('renewal')}</span></button></th>
-              <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Domain</th>
               <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
-            {filtered.map(tenant => (
-              <tr key={tenant.id} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/50 transition-colors cursor-pointer focus-within:bg-slate-50/80" tabIndex={0} role="link" onClick={() => navigate(`/owner/tenants/${tenant.id}`)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate(`/owner/tenants/${tenant.id}`); } }}>
-                <td className="px-6 py-4">
-                  <p className="font-bold text-slate-900">{tenant.name}</p>
-                  <p className="text-[10px] text-slate-400">{tenant.owner.email}</p>
-                </td>
-                <td className="px-6 py-4 text-sm font-bold text-slate-600 capitalize">{tenant.plan}</td>
-                <td className="px-6 py-4">{statusBadge(tenant.status)}</td>
-                <td className="px-6 py-4 font-black text-primary">${tenant.mrr}</td>
-                <td className="px-6 py-4">
-                  <span className={`text-sm font-bold ${tenant.seatsUsed >= tenant.seatsAllowed ? 'text-red-500' : 'text-slate-600'}`}>{tenant.seatsUsed}/{tenant.seatsAllowed}</span>
-                </td>
-                <td className="px-6 py-4 text-sm text-slate-500">{tenant.renewal}</td>
-                <td className="px-6 py-4 text-sm font-bold text-slate-600">{tenant.customDomain || `${tenant.subdomain}.repairplatform.com`}</td>
-                <td className="px-6 py-4 text-right" onClick={e => e.stopPropagation()}>
-                  <button onClick={() => navigate(`/owner/tenants/${tenant.id}`)} className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all">
-                    Manage
-                  </button>
-                </td>
-              </tr>
-            ))}
+            {filtered.map(tenant => {
+              const health = computeHealth(tenant.id, tenant.status, tenant.seatsUsed, tenant.seatsAllowed);
+              return (
+                <tr key={tenant.id} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/50 transition-colors cursor-pointer focus-within:bg-slate-50/80" tabIndex={0} role="link" onClick={() => navigate(`/owner/tenants/${tenant.id}`)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate(`/owner/tenants/${tenant.id}`); } }}>
+                  <td className="px-6 py-4">
+                    <p className="font-bold text-slate-900">{tenant.name}</p>
+                    <p className="text-[10px] text-slate-400">{tenant.owner.email}</p>
+                  </td>
+                  <td className="px-6 py-4 text-sm font-bold text-slate-600 capitalize">{tenant.plan}</td>
+                  <td className="px-6 py-4">{statusBadge(tenant.status)}</td>
+                  <td className="px-6 py-4">{healthDot(health)}</td>
+                  <td className="px-6 py-4 font-black text-primary">${tenant.mrr}</td>
+                  <td className="px-6 py-4">
+                    <span className={`text-sm font-bold ${tenant.seatsUsed >= tenant.seatsAllowed ? 'text-red-500' : 'text-slate-600'}`}>{tenant.seatsUsed}/{tenant.seatsAllowed}</span>
+                  </td>
+                  <td className="px-6 py-4 text-sm text-slate-500">{tenant.renewal}</td>
+                  <td className="px-6 py-4 text-right" onClick={e => e.stopPropagation()}>
+                    <button onClick={() => navigate(`/owner/tenants/${tenant.id}`)} className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all">
+                      Manage
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
             {filtered.length === 0 && (
               <tr><td colSpan={8} className="px-6 py-12 text-center text-slate-400 font-bold">No tenants match your filters.</td></tr>
             )}
