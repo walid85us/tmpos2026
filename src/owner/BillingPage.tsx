@@ -905,6 +905,7 @@ const BillingPage: React.FC = () => {
                       : [];
                     const noBalance = selectedCredit && creditRemaining <= 0;
                     const noEligible = selectedCredit && !noBalance && eligibleInvoices.length === 0;
+                    const eligibilityLabel = 'overdue or paid';
                     return (
                       <>
                         <div>
@@ -940,7 +941,7 @@ const BillingPage: React.FC = () => {
                             className={`${inputClass} ${(!formCreditId || noBalance || noEligible) ? 'opacity-50 cursor-not-allowed' : ''}`}
                             disabled={!formCreditId || !!noBalance || !!noEligible}
                           >
-                            <option value="">{!formCreditId ? 'Select a credit note first...' : noBalance ? 'No balance available' : noEligible ? `No eligible invoices for ${creditTenant}` : 'Select invoice...'}</option>
+                            <option value="">{!formCreditId ? 'Select a credit note first...' : noBalance ? 'No balance available' : noEligible ? `No eligible invoices for ${creditTenant}` : `Select invoice (${eligibilityLabel})...`}</option>
                             {eligibleInvoices.map(i => (
                               <option key={i.id} value={i.invoiceNo}>{i.invoiceNo} — {i.tenant} — ${i.total.toFixed(2)} ({i.status})</option>
                             ))}
@@ -948,7 +949,7 @@ const BillingPage: React.FC = () => {
                           {noEligible && (
                             <p className="text-[10px] font-black text-amber-600 mt-2 flex items-center gap-1">
                               <span className="material-symbols-outlined text-sm">info</span>
-                              No overdue or paid invoices found for {creditTenant}.
+                              No {eligibilityLabel} invoices found for {creditTenant}. Only {eligibilityLabel} invoices are eligible for credit application.
                             </p>
                           )}
                         </div>
