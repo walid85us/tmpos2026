@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -36,6 +36,33 @@ const TenantDetailPage: React.FC = () => {
   const [copiedDns, setCopiedDns] = useState<string | null>(null);
   const [domainInput, setDomainInput] = useState('');
 
+  const [currentPlan, setCurrentPlan] = useState(tenant?.plan || 'essential');
+  const [localOverrides, setLocalOverrides] = useState(tenantFeatureOverrides.filter(o => o.tenantId === id));
+  const [invoiceDetailId, setInvoiceDetailId] = useState<string | null>(null);
+  const [auditDetailId, setAuditDetailId] = useState<string | null>(null);
+  const [customDomainLocal, setCustomDomainLocal] = useState<string | null>(tenant?.customDomain || null);
+  const [domainVerification, setDomainVerification] = useState(tenant?.verification || 'pending');
+  const [domainSsl, setDomainSsl] = useState(tenant?.ssl || 'pending');
+  const [createOwnerModal, setCreateOwnerModal] = useState(false);
+  const [createOwnerName, setCreateOwnerName] = useState('');
+  const [createOwnerEmail, setCreateOwnerEmail] = useState('');
+  const [featureTrialModal, setFeatureTrialModal] = useState<string | null>(null);
+  const [featureTrialDays, setFeatureTrialDays] = useState('14');
+  const [featurePaidModal, setFeaturePaidModal] = useState<string | null>(null);
+
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showToast = useCallback((msg: string, durationMs = 3000) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setInviteSuccess(msg);
+    toastTimerRef.current = setTimeout(() => { setInviteSuccess(null); toastTimerRef.current = null; }, durationMs);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    };
+  }, []);
+
   if (!tenant) return (
     <div className="text-center py-20">
       <p className="text-xl font-black text-slate-400">Tenant not found</p>
@@ -43,7 +70,8 @@ const TenantDetailPage: React.FC = () => {
     </div>
   );
 
-  const plan = plans.find(p => p.id === tenant.plan);
+  const plan = plans.find(p => p.id === currentPlan);
+  const currentPlanObj = plans.find(p => p.id === currentPlan);
   const usage = tenantUsage.find(u => u.tenantId === tenant.id);
   const priorUsage = tenantUsagePrior.find(u => u.tenantId === tenant.id);
   const scopedUsers = tenantUsers.filter(u => u.tenantId === tenant.id);
@@ -51,8 +79,7 @@ const TenantDetailPage: React.FC = () => {
   const tenantInv = invoiceHistory.filter(i => i.tenantId === tenant.id);
   const tenantCredits = creditNotes.filter(c => c.tenantId === tenant.id);
   const tenantLogs = auditLogs.filter(l => l.tenantId === tenant.id);
-  const tenantAddOns = addOns.filter(a => a.lifecycle === 'active' && a.compatiblePlans.includes(tenant.plan));
-  const tenantOverrides = tenantFeatureOverrides.filter(o => o.tenantId === tenant.id);
+  const tenantAddOns = addOns.filter(a => a.lifecycle === 'active' && a.compatiblePlans.includes(currentPlan));
   const supportNotes = [...tenantSupportNotes.filter(n => n.tenantId === tenant.id), ...localNotes];
   const domainHistory = tenantDomainHistory.filter(d => d.tenantId === tenant.id);
   const tenantPlanHistory = planHistory.filter(ph => ph.tenantId === tenant.id);
@@ -109,6 +136,7 @@ const TenantDetailPage: React.FC = () => {
       trial: 'bg-indigo-400/10 text-indigo-700 border-indigo-200',
       disabled: 'bg-red-400/10 text-red-700 border-red-400/20',
       addon: 'bg-amber-400/10 text-amber-700 border-amber-400/20',
+      'paid_override': 'bg-emerald-400/10 text-emerald-700 border-emerald-400/20',
       upgrade: 'bg-lime-400/10 text-lime-700 border-lime-400/20',
       new: 'bg-blue-400/10 text-blue-700 border-blue-400/20',
       trial_start: 'bg-indigo-400/10 text-indigo-700 border-indigo-200',
@@ -121,7 +149,7 @@ const TenantDetailPage: React.FC = () => {
       escalation: 'bg-red-400/10 text-red-700 border-red-400/20',
       onboarding: 'bg-blue-400/10 text-blue-700 border-blue-400/20',
     };
-    return <span className={`px-2.5 py-1 text-[9px] font-black uppercase tracking-widest rounded-lg border ${styles[status] || 'bg-slate-100 text-slate-600 border-slate-200'}`}>{status}</span>;
+    return <span className={`px-2.5 py-1 text-[9px] font-black uppercase tracking-widest rounded-lg border ${styles[status] || 'bg-slate-100 text-slate-600 border-slate-200'}`}>{status.replace('_', ' ')}</span>;
   };
 
   const usageBar = (used: number, limit: number) => {
@@ -157,25 +185,77 @@ const TenantDetailPage: React.FC = () => {
   const inputClass = "w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary";
   const labelClass = "text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2";
 
-  const dnsRecords = tenant.customDomain ? [
-    { type: 'CNAME', name: tenant.customDomain, value: `${tenant.subdomain}.repairplatform.com`, ttl: '3600' },
-    { type: 'TXT', name: `_verify.${tenant.customDomain}`, value: `rp-verify=${tenant.id}`, ttl: '3600' },
+  const effectiveDomain = customDomainLocal;
+  const dnsRecords = effectiveDomain ? [
+    { type: 'CNAME', name: effectiveDomain, value: `${tenant.subdomain}.repairplatform.com`, ttl: '3600' },
+    { type: 'TXT', name: `_verify.${effectiveDomain}`, value: `rp-verify=${tenant.id}`, ttl: '3600' },
   ] : [];
 
-  const copyToClipboard = (text: string, id: string) => {
+  const copyToClipboard = (text: string, cid: string) => {
     if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
       navigator.clipboard.writeText(text).catch(() => {});
     }
-    setCopiedDns(id);
+    setCopiedDns(cid);
     setTimeout(() => setCopiedDns(null), 2000);
   };
 
   const getFeatureState = (featureId: string): { type: FeatureOverrideType; trialEnd?: string } => {
-    const override = tenantOverrides.find(o => o.featureId === featureId);
+    const override = localOverrides.find(o => o.featureId === featureId);
     if (override) return { type: override.type, trialEnd: override.trialEnd };
     const feature = featureMatrix.find(f => f.id === featureId);
-    if (feature && feature.planAvailability[tenant.plan]) return { type: 'inherited' };
+    if (feature && feature.planAvailability[currentPlan]) return { type: 'inherited' };
     return { type: 'disabled' };
+  };
+
+  const handleEnableTrial = (featureId: string) => {
+    const days = parseInt(featureTrialDays) || 14;
+    const trialEnd = new Date('2026-03-26');
+    trialEnd.setDate(trialEnd.getDate() + days);
+    const endStr = trialEnd.toISOString().split('T')[0];
+    setLocalOverrides(prev => {
+      const filtered = prev.filter(o => o.featureId !== featureId);
+      return [...filtered, { tenantId: tenant.id, featureId, type: 'trial' as FeatureOverrideType, trialEnd: endStr, addedBy: 'You', addedDate: '2026-03-26' }];
+    });
+    setFeatureTrialModal(null);
+    setFeatureTrialDays('14');
+    showToast(`Trial enabled for ${featureMatrix.find(f => f.id === featureId)?.name || featureId}`);
+  };
+
+  const handleEnablePaidOverride = (featureId: string) => {
+    setLocalOverrides(prev => {
+      const filtered = prev.filter(o => o.featureId !== featureId);
+      return [...filtered, { tenantId: tenant.id, featureId, type: 'paid_override' as FeatureOverrideType, addedBy: 'You', addedDate: '2026-03-26' }];
+    });
+    setFeaturePaidModal(null);
+    showToast(`Paid override enabled for ${featureMatrix.find(f => f.id === featureId)?.name || featureId}`);
+  };
+
+  const handleRevokeFeature = (featureId: string) => {
+    setLocalOverrides(prev => prev.filter(o => o.featureId !== featureId));
+    showToast(`Override revoked for ${featureMatrix.find(f => f.id === featureId)?.name || featureId}`);
+  };
+
+  const handleAddDomain = () => {
+    if (domainInput.includes('.')) {
+      setCustomDomainLocal(domainInput);
+      setDomainVerification('pending');
+      setDomainSsl('pending');
+      setDomainInput('');
+      showToast(`Custom domain ${domainInput} added. Configure DNS records below.`, 4000);
+    }
+  };
+
+  const handleRemoveDomain = () => {
+    setCustomDomainLocal(null);
+    setDomainVerification('pending');
+    setDomainSsl('pending');
+    showToast('Custom domain removed.');
+  };
+
+  const handleVerifyDomain = () => {
+    setDomainVerification('verified');
+    setDomainSsl('active');
+    showToast('Domain verified and SSL provisioned!');
   };
 
   const pinnedNotes = supportNotes.filter(n => n.pinned);
@@ -193,6 +273,8 @@ const TenantDetailPage: React.FC = () => {
   const auditActors = [...new Set(tenantLogs.map(l => l.actor))];
 
   const selectedUserDetail = userDetailId ? tenantUsers.find(u => u.id === userDetailId) : null;
+  const selectedInvoice = invoiceDetailId ? tenantInv.find(i => i.id === invoiceDetailId) : null;
+  const selectedAuditLog = auditDetailId ? tenantLogs.find(l => l.id === auditDetailId) : null;
 
   return (
     <div className="space-y-6">
@@ -210,7 +292,7 @@ const TenantDetailPage: React.FC = () => {
                 <span className={`text-[9px] font-black ${healthColor}`}>{healthScore}</span>
               </div>
             </div>
-            <p className="text-slate-500 font-medium text-sm">{tenant.id} · {tenant.owner.email} · {tenant.plan} plan</p>
+            <p className="text-slate-500 font-medium text-sm">{tenant.id} · {tenant.owner.email} · {currentPlan} plan</p>
           </div>
         </div>
         <div className="flex gap-2">
@@ -219,6 +301,15 @@ const TenantDetailPage: React.FC = () => {
           {tenant.status === 'trialing' && <button className="px-4 py-2.5 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-primary/90 transition-all active:scale-95">Convert to Paid</button>}
         </div>
       </div>
+
+      <AnimatePresence>
+        {inviteSuccess && (
+          <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="p-4 bg-lime-50 rounded-xl border border-lime-200 flex items-center gap-2">
+            <span className="material-symbols-outlined text-lime-600 text-sm">check_circle</span>
+            <p className="text-sm font-bold text-lime-700">{inviteSuccess}</p>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <div className="flex gap-2 overflow-x-auto pb-1">
         {tabs.map(tab => (
@@ -243,8 +334,8 @@ const TenantDetailPage: React.FC = () => {
               </div>
               <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Plan</p>
-                <p className="font-black text-primary capitalize">{tenant.plan}</p>
-                <p className="text-[10px] text-slate-400">{plan ? `$${plan.price}/mo` : ''}</p>
+                <p className="font-black text-primary capitalize">{currentPlan}</p>
+                <p className="text-[10px] text-slate-400">{currentPlanObj ? `$${currentPlanObj.price}/mo` : ''}</p>
               </div>
               <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">MRR</p>
@@ -277,10 +368,10 @@ const TenantDetailPage: React.FC = () => {
               </div>
               <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Domain</p>
-                <p className="font-bold text-slate-900 text-sm">{tenant.customDomain || `${tenant.subdomain}.repairplatform.com`}</p>
+                <p className="font-bold text-slate-900 text-sm">{effectiveDomain || `${tenant.subdomain}.repairplatform.com`}</p>
                 <div className="flex gap-1 mt-1">
-                  {statusBadge(tenant.ssl === 'active' ? 'active' : tenant.ssl)}
-                  {statusBadge(tenant.verification === 'verified' ? 'verified' : tenant.verification)}
+                  {statusBadge(domainSsl === 'active' ? 'active' : domainSsl)}
+                  {statusBadge(domainVerification === 'verified' ? 'verified' : domainVerification)}
                 </div>
               </div>
               <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
@@ -349,11 +440,23 @@ const TenantDetailPage: React.FC = () => {
               </div>
             </button>
 
-            <div className="flex justify-between items-center">
+            <div className="flex justify-between items-center flex-wrap gap-2">
               <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Team Members ({scopedUsers.length})</p>
-              <button onClick={() => setInviteModal(true)} className="px-4 py-2 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-primary/90 transition-all active:scale-95 flex items-center gap-1">
-                <span className="material-symbols-outlined text-sm">person_add</span> Invite User
-              </button>
+              <div className="flex gap-2">
+                <button onClick={() => setCreateOwnerModal(true)} className="px-4 py-2 bg-violet-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-violet-600 transition-all active:scale-95 flex items-center gap-1">
+                  <span className="material-symbols-outlined text-sm">shield_person</span> Create Store Owner
+                </button>
+                <button onClick={() => setInviteModal(true)} className="px-4 py-2 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-primary/90 transition-all active:scale-95 flex items-center gap-1">
+                  <span className="material-symbols-outlined text-sm">person_add</span> Invite User
+                </button>
+              </div>
+            </div>
+
+            <div className="p-3 bg-violet-50 rounded-xl border border-violet-100">
+              <p className="text-[10px] text-violet-700 font-bold flex items-center gap-1">
+                <span className="material-symbols-outlined text-xs">info</span>
+                Store Owner creation is a platform-only action. Only System Owners can create additional Store Owner accounts.
+              </p>
             </div>
 
             <div className="space-y-2">
@@ -423,6 +526,39 @@ const TenantDetailPage: React.FC = () => {
             </AnimatePresence>
 
             <AnimatePresence>
+              {createOwnerModal && (
+                <div role="dialog" aria-modal="true" aria-label="Create Store Owner" className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setCreateOwnerModal(false)} onKeyDown={e => { if (e.key === 'Escape') setCreateOwnerModal(false); }}>
+                  <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} onClick={e => e.stopPropagation()} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
+                    <div className="p-8 border-b border-slate-100">
+                      <h3 className="text-xl font-black text-primary tracking-tight">Create Store Owner</h3>
+                      <p className="text-sm text-slate-500 mt-1">Platform-controlled action. Creates a new Store Owner account for {tenant.name}.</p>
+                    </div>
+                    <div className="p-8 space-y-5">
+                      <div className="p-3 bg-violet-50 rounded-xl border border-violet-100">
+                        <p className="text-[10px] font-bold text-violet-700 flex items-center gap-1">
+                          <span className="material-symbols-outlined text-xs">shield</span>
+                          This action is only available to System Owners. The new Store Owner will have full tenant admin access.
+                        </p>
+                      </div>
+                      <div>
+                        <label htmlFor="create-owner-name" className={labelClass}>Full Name</label>
+                        <input id="create-owner-name" value={createOwnerName} onChange={e => setCreateOwnerName(e.target.value)} className={inputClass} placeholder="Full name" />
+                      </div>
+                      <div>
+                        <label htmlFor="create-owner-email" className={labelClass}>Email</label>
+                        <input id="create-owner-email" value={createOwnerEmail} onChange={e => setCreateOwnerEmail(e.target.value)} className={inputClass} placeholder="owner@business.com" type="email" />
+                      </div>
+                    </div>
+                    <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3">
+                      <button onClick={() => { setCreateOwnerModal(false); setCreateOwnerName(''); setCreateOwnerEmail(''); }} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
+                      <button disabled={!createOwnerName || !createOwnerEmail.includes('@')} onClick={() => { setCreateOwnerModal(false); showToast(`Store Owner account created for ${createOwnerEmail}`); setCreateOwnerName(''); setCreateOwnerEmail(''); }} className="flex-1 py-4 bg-violet-500 text-white font-black text-sm rounded-2xl shadow-lg shadow-violet-500/20 uppercase tracking-widest transition-all disabled:opacity-40 disabled:cursor-not-allowed hover:bg-violet-600">Create Owner</button>
+                    </div>
+                  </motion.div>
+                </div>
+              )}
+            </AnimatePresence>
+
+            <AnimatePresence>
               {inviteModal && (
                 <div role="dialog" aria-modal="true" aria-label="Invite User" className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setInviteModal(false)} onKeyDown={e => { if (e.key === 'Escape') setInviteModal(false); }}>
                   <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} onClick={e => e.stopPropagation()} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
@@ -450,7 +586,7 @@ const TenantDetailPage: React.FC = () => {
                     </div>
                     <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3">
                       <button onClick={() => { setInviteModal(false); setInviteName(''); setInviteEmail(''); }} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
-                      <button disabled={!inviteName || !inviteEmail.includes('@')} onClick={() => { setInviteModal(false); setInviteSuccess(`Invitation sent to ${inviteEmail}`); setInviteName(''); setInviteEmail(''); setTimeout(() => setInviteSuccess(null), 3000); }} className="flex-1 py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest transition-all disabled:opacity-40 disabled:cursor-not-allowed hover:bg-primary/90">Send Invite</button>
+                      <button disabled={!inviteName || !inviteEmail.includes('@')} onClick={() => { setInviteModal(false); showToast(`Invitation sent to ${inviteEmail}`); setInviteName(''); setInviteEmail(''); }} className="flex-1 py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest transition-all disabled:opacity-40 disabled:cursor-not-allowed hover:bg-primary/90">Send Invite</button>
                     </div>
                   </motion.div>
                 </div>
@@ -464,8 +600,8 @@ const TenantDetailPage: React.FC = () => {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <div className="p-4 bg-primary/5 rounded-xl border border-primary/10">
                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Current Plan</p>
-                <p className="font-black text-primary text-lg capitalize">{tenant.plan}</p>
-                <p className="text-[10px] text-slate-400">${tenant.mrr}/mo</p>
+                <p className="font-black text-primary text-lg capitalize">{currentPlan}</p>
+                <p className="text-[10px] text-slate-400">${currentPlanObj?.price || tenant.mrr}/mo</p>
               </div>
               <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Billing Cycle</p>
@@ -488,13 +624,13 @@ const TenantDetailPage: React.FC = () => {
                 <div className="flex justify-between items-center p-3 bg-slate-50 rounded-xl border border-slate-100">
                   <span className="text-sm font-bold text-slate-600">Seats</span>
                   <div className="flex items-center gap-2">
-                    <span className={`font-black ${tenant.seatsUsed >= tenant.seatsAllowed ? 'text-red-500' : 'text-slate-900'}`}>{tenant.seatsUsed} / {tenant.seatsAllowed}</span>
-                    {tenant.seatsUsed >= tenant.seatsAllowed && <span className="text-[8px] font-black text-red-500 bg-red-50 px-1.5 py-0.5 rounded uppercase">At Limit</span>}
+                    <span className={`font-black ${tenant.seatsUsed >= (currentPlanObj?.limits.seats || tenant.seatsAllowed) ? 'text-red-500' : 'text-slate-900'}`}>{tenant.seatsUsed} / {currentPlanObj?.limits.seats || tenant.seatsAllowed}</span>
+                    {tenant.seatsUsed >= (currentPlanObj?.limits.seats || tenant.seatsAllowed) && <span className="text-[8px] font-black text-red-500 bg-red-50 px-1.5 py-0.5 rounded uppercase">At Limit</span>}
                   </div>
                 </div>
                 <div className="flex justify-between items-center p-3 bg-slate-50 rounded-xl border border-slate-100">
                   <span className="text-sm font-bold text-slate-600">Locations</span>
-                  <span className="font-black text-slate-900">{tenant.locationsUsed} / {tenant.locationsAllowed}</span>
+                  <span className="font-black text-slate-900">{tenant.locationsUsed} / {currentPlanObj?.limits.locations || tenant.locationsAllowed}</span>
                 </div>
               </div>
             </div>
@@ -534,8 +670,8 @@ const TenantDetailPage: React.FC = () => {
             <div>
               <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Change Plan</p>
               <div className="flex gap-2 flex-wrap">
-                {plans.filter(p => p.id !== tenant.plan).map(p => {
-                  const isUpgrade = plans.findIndex(pl => pl.id === p.id) > plans.findIndex(pl => pl.id === tenant.plan);
+                {plans.filter(p => p.id !== currentPlan).map(p => {
+                  const isUpgrade = plans.findIndex(pl => pl.id === p.id) > plans.findIndex(pl => pl.id === currentPlan);
                   return (
                     <button key={p.id} onClick={() => setPlanChangeModal(p.id)} className={`px-4 py-2.5 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all ${isUpgrade ? 'bg-lime-500 hover:bg-lime-600 text-white' : 'bg-slate-100 hover:bg-slate-200 text-slate-700'}`}>
                       {isUpgrade ? 'Upgrade' : 'Downgrade'} to {p.name}
@@ -568,20 +704,20 @@ const TenantDetailPage: React.FC = () => {
             <AnimatePresence>
               {planChangeModal && (() => {
                 const targetPlan = plans.find(p => p.id === planChangeModal);
-                const isUp = plans.findIndex(pl => pl.id === planChangeModal) > plans.findIndex(pl => pl.id === tenant.plan);
+                const isUp = plans.findIndex(pl => pl.id === planChangeModal) > plans.findIndex(pl => pl.id === currentPlan);
                 return (
                   <div role="dialog" aria-modal="true" aria-label="Plan Change" className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setPlanChangeModal(null)} onKeyDown={e => { if (e.key === 'Escape') setPlanChangeModal(null); }}>
                     <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} onClick={e => e.stopPropagation()} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
                       <div className="p-8 border-b border-slate-100">
                         <h3 className="text-xl font-black text-primary tracking-tight">{isUp ? 'Upgrade' : 'Downgrade'} Plan</h3>
-                        <p className="text-sm text-slate-500 mt-1">{tenant.name}: {tenant.plan} → {targetPlan?.name}</p>
+                        <p className="text-sm text-slate-500 mt-1">{tenant.name}: {currentPlan} → {targetPlan?.name}</p>
                       </div>
                       <div className="p-8 space-y-4">
                         <div className="grid grid-cols-2 gap-4">
                           <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
                             <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Current</p>
-                            <p className="font-black text-slate-900 capitalize">{tenant.plan}</p>
-                            <p className="text-sm text-slate-500">${tenant.mrr}/mo</p>
+                            <p className="font-black text-slate-900 capitalize">{currentPlan}</p>
+                            <p className="text-sm text-slate-500">${currentPlanObj?.price || tenant.mrr}/mo</p>
                           </div>
                           <div className={`p-4 rounded-xl border ${isUp ? 'bg-lime-50 border-lime-100' : 'bg-amber-50 border-amber-100'}`}>
                             <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">New</p>
@@ -597,7 +733,7 @@ const TenantDetailPage: React.FC = () => {
                       </div>
                       <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3">
                         <button onClick={() => setPlanChangeModal(null)} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
-                        <button onClick={() => { setPlanChangeModal(null); setInviteSuccess(`Plan ${isUp ? 'upgraded' : 'downgraded'} to ${targetPlan?.name}`); setTimeout(() => setInviteSuccess(null), 3000); }} className={`flex-1 py-4 text-white font-black text-sm rounded-2xl shadow-lg uppercase tracking-widest transition-all ${isUp ? 'bg-lime-600 hover:bg-lime-700 shadow-lime-600/20' : 'bg-amber-500 hover:bg-amber-600 shadow-amber-500/20'}`}>Confirm {isUp ? 'Upgrade' : 'Downgrade'}</button>
+                        <button onClick={() => { setCurrentPlan(planChangeModal); setPlanChangeModal(null); showToast(`Plan ${isUp ? 'upgraded' : 'downgraded'} to ${targetPlan?.name}`); }} className={`flex-1 py-4 text-white font-black text-sm rounded-2xl shadow-lg uppercase tracking-widest transition-all ${isUp ? 'bg-lime-600 hover:bg-lime-700 shadow-lime-600/20' : 'bg-amber-500 hover:bg-amber-600 shadow-amber-500/20'}`}>Confirm {isUp ? 'Upgrade' : 'Downgrade'}</button>
                       </div>
                     </motion.div>
                   </div>
@@ -625,7 +761,7 @@ const TenantDetailPage: React.FC = () => {
                     </div>
                     <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3">
                       <button onClick={() => setTrialExtendModal(false)} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
-                      <button onClick={() => { setTrialExtendModal(false); setInviteSuccess(`Trial extended by ${trialDays} days`); setTimeout(() => setInviteSuccess(null), 3000); }} className="flex-1 py-4 bg-indigo-500 text-white font-black text-sm rounded-2xl shadow-lg shadow-indigo-500/20 uppercase tracking-widest transition-all hover:bg-indigo-600">Extend</button>
+                      <button onClick={() => { setTrialExtendModal(false); showToast(`Trial extended by ${trialDays} days`); }} className="flex-1 py-4 bg-indigo-500 text-white font-black text-sm rounded-2xl shadow-lg shadow-indigo-500/20 uppercase tracking-widest transition-all hover:bg-indigo-600">Extend</button>
                     </div>
                   </motion.div>
                 </div>
@@ -636,8 +772,8 @@ const TenantDetailPage: React.FC = () => {
 
         {activeTab === 'Features' && (
           <div className="space-y-4">
-            <div className="flex justify-between items-center">
-              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Features for <span className="text-primary capitalize">{tenant.plan}</span> plan</p>
+            <div className="flex justify-between items-center flex-wrap gap-2">
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Features for <span className="text-primary capitalize">{currentPlan}</span> plan</p>
               <div className="flex gap-1.5 flex-wrap">
                 {statusBadge('inherited')}
                 {statusBadge('overridden')}
@@ -665,14 +801,20 @@ const TenantDetailPage: React.FC = () => {
                       </div>
                       <div className="flex items-center gap-2">
                         {statusBadge(state.type)}
-                        {state.type === 'inherited' && !enabled && (
-                          <button className="text-[8px] font-black text-primary bg-primary/5 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-primary/10 transition-colors">Enable</button>
+                        {state.type === 'disabled' && feature.lifecycle === 'implemented' && (
+                          <div className="flex gap-1">
+                            <button onClick={() => setFeatureTrialModal(feature.id)} className="text-[8px] font-black text-indigo-600 bg-indigo-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-indigo-100 transition-colors">Trial</button>
+                            <button onClick={() => setFeaturePaidModal(feature.id)} className="text-[8px] font-black text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-emerald-100 transition-colors">Paid Override</button>
+                          </div>
                         )}
-                        {state.type === 'disabled' && (
-                          <button className="text-[8px] font-black text-indigo-600 bg-indigo-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-indigo-100 transition-colors">Trial</button>
+                        {state.type === 'trial' && (
+                          <button onClick={() => handleRevokeFeature(feature.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">End Trial</button>
                         )}
-                        {state.type === 'overridden' && (
-                          <button className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">Revoke</button>
+                        {(state.type === 'overridden' || state.type === 'paid_override') && (
+                          <button onClick={() => handleRevokeFeature(feature.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">Revoke</button>
+                        )}
+                        {state.type === 'addon' && (
+                          <button onClick={() => handleRevokeFeature(feature.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">Remove</button>
                         )}
                       </div>
                     </div>
@@ -680,11 +822,11 @@ const TenantDetailPage: React.FC = () => {
                 );
               })}
             </div>
-            {tenantOverrides.length > 0 && (
+            {localOverrides.length > 0 && (
               <div>
                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3 mt-4">Override History</p>
                 <div className="space-y-2">
-                  {tenantOverrides.map((o, i) => {
+                  {localOverrides.map((o, i) => {
                     const f = featureMatrix.find(ft => ft.id === o.featureId);
                     return (
                       <div key={i} className="flex justify-between items-center p-3 bg-slate-50 rounded-xl border border-slate-100">
@@ -699,6 +841,59 @@ const TenantDetailPage: React.FC = () => {
                 </div>
               </div>
             )}
+
+            <AnimatePresence>
+              {featureTrialModal && (
+                <div role="dialog" aria-modal="true" aria-label="Enable Feature Trial" className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setFeatureTrialModal(null)} onKeyDown={e => { if (e.key === 'Escape') setFeatureTrialModal(null); }}>
+                  <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} onClick={e => e.stopPropagation()} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
+                    <div className="p-8 border-b border-slate-100">
+                      <h3 className="text-xl font-black text-primary tracking-tight">Enable Feature Trial</h3>
+                      <p className="text-sm text-slate-500 mt-1">Grant {tenant.name} trial access to {featureMatrix.find(f => f.id === featureTrialModal)?.name}.</p>
+                    </div>
+                    <div className="p-8 space-y-4">
+                      <div>
+                        <label htmlFor="feature-trial-days" className={labelClass}>Trial Duration</label>
+                        <select id="feature-trial-days" value={featureTrialDays} onChange={e => setFeatureTrialDays(e.target.value)} className={inputClass}>
+                          <option value="7">7 days</option>
+                          <option value="14">14 days</option>
+                          <option value="30">30 days</option>
+                          <option value="60">60 days</option>
+                        </select>
+                      </div>
+                      <div className="p-3 bg-indigo-50 rounded-xl border border-indigo-100">
+                        <p className="text-sm text-indigo-700 font-bold">The tenant will have full access to this feature for the trial period. No charges will apply during the trial.</p>
+                      </div>
+                    </div>
+                    <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3">
+                      <button onClick={() => setFeatureTrialModal(null)} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
+                      <button onClick={() => handleEnableTrial(featureTrialModal)} className="flex-1 py-4 bg-indigo-500 text-white font-black text-sm rounded-2xl shadow-lg shadow-indigo-500/20 uppercase tracking-widest transition-all hover:bg-indigo-600">Start Trial</button>
+                    </div>
+                  </motion.div>
+                </div>
+              )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+              {featurePaidModal && (
+                <div role="dialog" aria-modal="true" aria-label="Enable Paid Override" className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setFeaturePaidModal(null)} onKeyDown={e => { if (e.key === 'Escape') setFeaturePaidModal(null); }}>
+                  <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} onClick={e => e.stopPropagation()} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
+                    <div className="p-8 border-b border-slate-100">
+                      <h3 className="text-xl font-black text-primary tracking-tight">Enable Paid Override</h3>
+                      <p className="text-sm text-slate-500 mt-1">Enable {featureMatrix.find(f => f.id === featurePaidModal)?.name} for {tenant.name} as a paid feature override.</p>
+                    </div>
+                    <div className="p-8 space-y-4">
+                      <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-100">
+                        <p className="text-sm text-emerald-700 font-bold">This overrides the plan-level feature availability. The tenant will be billed for this feature as an add-on or custom agreement. Override remains active until manually revoked.</p>
+                      </div>
+                    </div>
+                    <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3">
+                      <button onClick={() => setFeaturePaidModal(null)} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
+                      <button onClick={() => handleEnablePaidOverride(featurePaidModal)} className="flex-1 py-4 bg-emerald-500 text-white font-black text-sm rounded-2xl shadow-lg shadow-emerald-500/20 uppercase tracking-widest transition-all hover:bg-emerald-600">Enable Override</button>
+                    </div>
+                  </motion.div>
+                </div>
+              )}
+            </AnimatePresence>
           </div>
         )}
 
@@ -726,14 +921,13 @@ const TenantDetailPage: React.FC = () => {
             {tenantTx.some(tx => tx.status === 'failed') && (
               <div className="p-4 bg-red-50 rounded-xl border border-red-100">
                 <div className="flex justify-between items-center">
-                  <div className="flex items-center gap-2">
-                    <span className="material-symbols-outlined text-red-500 text-sm">error</span>
-                    <div>
-                      <p className="text-[10px] font-black text-red-700 uppercase tracking-widest">Failed Payments</p>
-                      <p className="text-sm font-bold text-red-600">{tenantTx.filter(tx => tx.status === 'failed').length} failed transaction(s)</p>
-                    </div>
+                  <div>
+                    <p className="text-[10px] font-black text-red-700 uppercase tracking-widest mb-1 flex items-center gap-1">
+                      <span className="material-symbols-outlined text-sm">credit_card_off</span> Failed Payments
+                    </p>
+                    <p className="text-sm font-bold text-red-700">{tenantTx.filter(tx => tx.status === 'failed').length} failed payment(s) require attention</p>
                   </div>
-                  <button className="px-4 py-2 bg-red-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-red-600 transition-all">Retry Payment</button>
+                  <button onClick={() => { showToast('Payment retry initiated'); }} className="px-4 py-2 bg-red-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-red-600 transition-all">Retry Payment</button>
                 </div>
               </div>
             )}
@@ -741,38 +935,21 @@ const TenantDetailPage: React.FC = () => {
             <div>
               <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Invoices</p>
               <div className="space-y-2">
-                {tenantInv.length === 0 && <p className="text-sm text-slate-400 font-bold">No invoices.</p>}
                 {tenantInv.map(inv => (
-                  <div key={inv.id} className="flex justify-between items-center p-3 bg-slate-50 rounded-xl border border-slate-100">
-                    <div>
-                      <p className="font-bold text-slate-900 text-sm">{inv.invoiceNo}</p>
-                      <p className="text-[10px] text-slate-400">{inv.date} · {inv.plan} · Due {inv.dueDate}</p>
-                      {inv.items.map((item, idx) => <p key={idx} className="text-[10px] text-slate-400">{item.description} × {item.qty}</p>)}
+                  <button type="button" key={inv.id} onClick={() => setInvoiceDetailId(inv.id)} className="w-full flex justify-between items-center p-3 bg-slate-50 rounded-xl border border-slate-100 hover:bg-slate-100 transition-colors text-left cursor-pointer">
+                    <div className="flex items-center gap-3">
+                      <span className="material-symbols-outlined text-sm text-slate-400">receipt</span>
+                      <div>
+                        <p className="font-bold text-slate-900 text-sm">{inv.invoiceNo}</p>
+                        <p className="text-[10px] text-slate-400">{inv.date} · {inv.plan}</p>
+                      </div>
                     </div>
                     <div className="flex items-center gap-3">
                       <span className="font-black text-primary">${inv.total.toFixed(2)}</span>
                       {statusBadge(inv.status)}
+                      <span className="material-symbols-outlined text-slate-400 text-sm">chevron_right</span>
                     </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Transactions</p>
-              <div className="space-y-2">
-                {tenantTx.length === 0 && <p className="text-sm text-slate-400 font-bold">No transactions.</p>}
-                {tenantTx.map(tx => (
-                  <div key={tx.id} className="flex justify-between items-center p-3 bg-slate-50 rounded-xl border border-slate-100">
-                    <div>
-                      <p className="font-bold text-slate-900 text-sm">{tx.invoiceNo}</p>
-                      <p className="text-[10px] text-slate-400">{tx.date} · {tx.method} · {tx.type}</p>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <span className="font-black text-slate-900">${tx.amount}</span>
-                      {statusBadge(tx.status)}
-                    </div>
-                  </div>
+                  </button>
                 ))}
               </div>
             </div>
@@ -801,6 +978,90 @@ const TenantDetailPage: React.FC = () => {
             <button onClick={() => navigate('/owner/billing')} className="px-4 py-2.5 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-primary/90 transition-all active:scale-95 flex items-center gap-1.5">
               <span className="material-symbols-outlined text-sm">open_in_new</span> Open Platform Billing
             </button>
+
+            <AnimatePresence>
+              {selectedInvoice && (
+                <div role="dialog" aria-modal="true" aria-label="Invoice Detail" className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setInvoiceDetailId(null)} onKeyDown={e => { if (e.key === 'Escape') setInvoiceDetailId(null); }}>
+                  <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} onClick={e => e.stopPropagation()} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg overflow-hidden">
+                    <div className="p-8 border-b border-slate-100 flex justify-between items-start">
+                      <div>
+                        <h3 className="text-xl font-black text-primary tracking-tight">{selectedInvoice.invoiceNo}</h3>
+                        <p className="text-sm text-slate-500 mt-1">{selectedInvoice.tenant}</p>
+                      </div>
+                      {statusBadge(selectedInvoice.status)}
+                    </div>
+                    <div className="p-8 space-y-5">
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <p className={labelClass}>Issue Date</p>
+                          <p className="font-bold text-slate-900">{selectedInvoice.date}</p>
+                        </div>
+                        <div>
+                          <p className={labelClass}>Due Date</p>
+                          <p className="font-bold text-slate-900">{selectedInvoice.dueDate}</p>
+                        </div>
+                        <div>
+                          <p className={labelClass}>Plan</p>
+                          <p className="font-bold text-slate-900">{selectedInvoice.plan}</p>
+                        </div>
+                        <div>
+                          <p className={labelClass}>Paid Date</p>
+                          <p className="font-bold text-slate-900">{selectedInvoice.paidDate || '—'}</p>
+                        </div>
+                      </div>
+
+                      <div>
+                        <p className={labelClass}>Line Items</p>
+                        <div className="bg-slate-50 rounded-xl border border-slate-100 overflow-hidden">
+                          <table className="w-full">
+                            <thead>
+                              <tr className="border-b border-slate-100">
+                                <th className="px-4 py-2 text-[10px] font-black text-slate-400 uppercase tracking-widest text-left">Description</th>
+                                <th className="px-4 py-2 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Qty</th>
+                                <th className="px-4 py-2 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Amount</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {selectedInvoice.items.map((item, idx) => (
+                                <tr key={idx} className="border-b border-slate-100 last:border-0">
+                                  <td className="px-4 py-3 text-sm font-bold text-slate-700">{item.description}</td>
+                                  <td className="px-4 py-3 text-sm text-slate-500 text-center">{item.qty}</td>
+                                  <td className="px-4 py-3 text-sm font-black text-slate-900 text-right">${item.amount.toFixed(2)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      <div className="space-y-2 pt-3 border-t border-slate-100">
+                        <div className="flex justify-between">
+                          <span className="text-sm text-slate-500">Subtotal</span>
+                          <span className="text-sm font-bold text-slate-900">${selectedInvoice.amount.toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-sm text-slate-500">Tax</span>
+                          <span className="text-sm font-bold text-slate-900">${selectedInvoice.tax.toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between pt-2 border-t border-slate-100">
+                          <span className="text-sm font-black text-slate-900">Total</span>
+                          <span className="text-lg font-black text-primary">${selectedInvoice.total.toFixed(2)}</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3 flex-wrap">
+                      {selectedInvoice.status === 'overdue' && (
+                        <button onClick={() => { setInvoiceDetailId(null); showToast('Payment reminder sent'); }} className="px-4 py-2.5 bg-red-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-red-600 transition-all">Send Reminder</button>
+                      )}
+                      <button onClick={() => { setInvoiceDetailId(null); showToast('Invoice PDF downloaded'); }} className="px-4 py-2.5 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-primary/90 transition-all flex items-center gap-1">
+                        <span className="material-symbols-outlined text-xs">download</span> Download PDF
+                      </button>
+                      <button onClick={() => setInvoiceDetailId(null)} className="px-4 py-2.5 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all ml-auto">Close</button>
+                    </div>
+                  </motion.div>
+                </div>
+              )}
+            </AnimatePresence>
           </div>
         )}
 
@@ -808,23 +1069,41 @@ const TenantDetailPage: React.FC = () => {
           <div className="space-y-6">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="p-5 bg-slate-50 rounded-2xl border border-slate-100">
-                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Subdomain</p>
+                <div className="flex justify-between items-center mb-2">
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Subdomain</p>
+                  {statusBadge('active')}
+                </div>
                 <p className="font-black text-primary text-lg">{tenant.subdomain}.repairplatform.com</p>
-                <p className="text-[10px] text-slate-400 mt-1">Platform-managed subdomain</p>
+                <p className="text-[10px] text-slate-400 mt-1">Platform-managed · Always active</p>
+                <button onClick={() => copyToClipboard(`${tenant.subdomain}.repairplatform.com`, 'subdomain')} className="mt-2 px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-600 font-black text-[10px] rounded-lg uppercase tracking-widest transition-all flex items-center gap-1">
+                  <span className="material-symbols-outlined text-xs">{copiedDns === 'subdomain' ? 'check' : 'content_copy'}</span>
+                  {copiedDns === 'subdomain' ? 'Copied' : 'Copy URL'}
+                </button>
               </div>
               <div className="p-5 bg-slate-50 rounded-2xl border border-slate-100">
                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Custom Domain</p>
-                {tenant.customDomain ? (
-                  <>
-                    <p className="font-black text-primary text-lg">{tenant.customDomain}</p>
-                    <p className="text-[10px] text-slate-400 mt-1">Tenant-owned domain</p>
-                  </>
+                {effectiveDomain ? (
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <p className="font-black text-primary text-lg">{effectiveDomain}</p>
+                      {statusBadge(domainVerification)}
+                    </div>
+                    <p className="text-[10px] text-slate-400">Tenant-owned domain</p>
+                    <div className="flex gap-2 mt-2">
+                      {domainVerification !== 'verified' && (
+                        <button onClick={handleVerifyDomain} className="px-3 py-1.5 bg-lime-500 hover:bg-lime-600 text-white font-black text-[10px] rounded-lg uppercase tracking-widest transition-all flex items-center gap-1">
+                          <span className="material-symbols-outlined text-xs">verified</span> Verify Now
+                        </button>
+                      )}
+                      <button onClick={handleRemoveDomain} className="px-3 py-1.5 bg-red-100 hover:bg-red-200 text-red-600 font-black text-[10px] rounded-lg uppercase tracking-widest transition-all">Remove</button>
+                    </div>
+                  </div>
                 ) : (
                   <div className="space-y-2">
                     <p className="text-sm text-slate-400 font-bold">No custom domain configured</p>
                     <div className="flex gap-2">
                       <input value={domainInput} onChange={e => setDomainInput(e.target.value)} className="flex-1 px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary/20" placeholder="example.com" />
-                      <button disabled={!domainInput.includes('.')} className="px-3 py-2 bg-primary text-white font-black text-[10px] rounded-lg uppercase tracking-widest disabled:opacity-40">Add</button>
+                      <button onClick={handleAddDomain} disabled={!domainInput.includes('.')} className="px-3 py-2 bg-primary text-white font-black text-[10px] rounded-lg uppercase tracking-widest disabled:opacity-40 hover:bg-primary/90 transition-all">Add Domain</button>
                     </div>
                   </div>
                 )}
@@ -835,42 +1114,48 @@ const TenantDetailPage: React.FC = () => {
               <div className="p-5 bg-slate-50 rounded-2xl border border-slate-100">
                 <div className="flex justify-between items-center mb-2">
                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">SSL Certificate</p>
-                  {statusBadge(tenant.ssl)}
+                  {statusBadge(domainSsl)}
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className={`material-symbols-outlined text-sm ${tenant.ssl === 'active' ? 'text-lime-600' : tenant.ssl === 'pending' ? 'text-amber-500' : 'text-red-500'}`}>
-                    {tenant.ssl === 'active' ? 'verified_user' : tenant.ssl === 'pending' ? 'hourglass_top' : 'gpp_bad'}
+                  <span className={`material-symbols-outlined text-sm ${domainSsl === 'active' ? 'text-lime-600' : domainSsl === 'pending' ? 'text-amber-500' : 'text-red-500'}`}>
+                    {domainSsl === 'active' ? 'verified_user' : domainSsl === 'pending' ? 'hourglass_top' : 'gpp_bad'}
                   </span>
                   <p className="text-sm font-bold text-slate-600">
-                    {tenant.ssl === 'active' ? 'SSL is active and valid' : tenant.ssl === 'pending' ? 'SSL certificate is being provisioned' : 'SSL certificate is inactive'}
+                    {domainSsl === 'active' ? 'SSL is active and valid' : domainSsl === 'pending' ? 'SSL certificate is being provisioned' : 'SSL certificate is inactive'}
                   </p>
                 </div>
+                {domainSsl !== 'active' && effectiveDomain && (
+                  <button onClick={() => { setDomainSsl('active'); showToast('SSL certificate provisioned'); }} className="mt-2 px-3 py-1.5 bg-lime-500 hover:bg-lime-600 text-white font-black text-[10px] rounded-lg uppercase tracking-widest transition-all">Provision SSL</button>
+                )}
               </div>
               <div className="p-5 bg-slate-50 rounded-2xl border border-slate-100">
                 <div className="flex justify-between items-center mb-2">
                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">DNS Verification</p>
-                  {statusBadge(tenant.verification)}
+                  {statusBadge(domainVerification)}
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className={`material-symbols-outlined text-sm ${tenant.verification === 'verified' ? 'text-lime-600' : tenant.verification === 'pending' ? 'text-amber-500' : 'text-red-500'}`}>
-                    {tenant.verification === 'verified' ? 'check_circle' : tenant.verification === 'pending' ? 'pending' : 'cancel'}
+                  <span className={`material-symbols-outlined text-sm ${domainVerification === 'verified' ? 'text-lime-600' : domainVerification === 'pending' ? 'text-amber-500' : 'text-red-500'}`}>
+                    {domainVerification === 'verified' ? 'check_circle' : domainVerification === 'pending' ? 'pending' : 'cancel'}
                   </span>
                   <p className="text-sm font-bold text-slate-600">
-                    {tenant.verification === 'verified' ? 'DNS records verified' : tenant.verification === 'pending' ? 'Awaiting DNS propagation' : 'DNS verification failed'}
+                    {domainVerification === 'verified' ? 'DNS records verified' : domainVerification === 'pending' ? 'Awaiting DNS propagation' : 'DNS verification failed'}
                   </p>
                 </div>
+                {domainVerification !== 'verified' && effectiveDomain && (
+                  <button onClick={handleVerifyDomain} className="mt-2 px-3 py-1.5 bg-blue-500 hover:bg-blue-600 text-white font-black text-[10px] rounded-lg uppercase tracking-widest transition-all">Check DNS</button>
+                )}
               </div>
             </div>
 
-            {tenant.customDomain && (
+            {effectiveDomain && (
               <div>
                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Verification Checklist</p>
                 <div className="space-y-2">
                   {[
-                    { label: 'CNAME record points to platform', done: tenant.verification === 'verified' },
-                    { label: 'TXT verification record added', done: tenant.verification === 'verified' },
-                    { label: 'DNS propagation complete', done: tenant.verification === 'verified' },
-                    { label: 'SSL certificate provisioned', done: tenant.ssl === 'active' },
+                    { label: 'CNAME record points to platform', done: domainVerification === 'verified' },
+                    { label: 'TXT verification record added', done: domainVerification === 'verified' },
+                    { label: 'DNS propagation complete', done: domainVerification === 'verified' },
+                    { label: 'SSL certificate provisioned', done: domainSsl === 'active' },
                   ].map((item, i) => (
                     <div key={i} className="flex items-center gap-3 p-3 bg-slate-50 rounded-xl border border-slate-100">
                       <span className={`material-symbols-outlined text-sm ${item.done ? 'text-lime-600' : 'text-slate-300'}`}>{item.done ? 'check_circle' : 'radio_button_unchecked'}</span>
@@ -1033,7 +1318,7 @@ const TenantDetailPage: React.FC = () => {
                   <option value="all">All Actors</option>
                   {auditActors.map(a => <option key={a} value={a}>{a}</option>)}
                 </select>
-                <button className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-lg uppercase tracking-widest transition-all flex items-center gap-1">
+                <button onClick={() => { showToast('Audit log exported'); }} className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-lg uppercase tracking-widest transition-all flex items-center gap-1">
                   <span className="material-symbols-outlined text-xs">download</span> Export
                 </button>
               </div>
@@ -1041,7 +1326,7 @@ const TenantDetailPage: React.FC = () => {
             {filteredLogs.length === 0 && <p className="text-sm text-slate-400 font-bold py-4">No activity matches your filters.</p>}
             <div className="space-y-2">
               {filteredLogs.map(log => (
-                <div key={log.id} className="flex justify-between items-center p-3 bg-slate-50 rounded-xl border border-slate-100">
+                <button type="button" key={log.id} onClick={() => setAuditDetailId(log.id)} className="w-full flex justify-between items-center p-3 bg-slate-50 rounded-xl border border-slate-100 hover:bg-slate-100 transition-colors text-left cursor-pointer">
                   <div className="flex items-center gap-3">
                     <span className={`material-symbols-outlined text-sm ${log.severity === 'warning' ? 'text-amber-500' : 'text-blue-400'}`}>
                       {log.severity === 'warning' ? 'warning' : 'info'}
@@ -1054,13 +1339,62 @@ const TenantDetailPage: React.FC = () => {
                   <div className="flex items-center gap-2">
                     {statusBadge(log.category)}
                     {statusBadge(log.severity === 'warning' ? 'warning' : 'info')}
+                    <span className="material-symbols-outlined text-slate-400 text-sm">chevron_right</span>
                   </div>
-                </div>
+                </button>
               ))}
             </div>
             <button onClick={() => navigate('/owner/audit-security')} className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all flex items-center gap-1.5">
               <span className="material-symbols-outlined text-sm">open_in_new</span> Full Audit Log
             </button>
+
+            <AnimatePresence>
+              {selectedAuditLog && (
+                <div role="dialog" aria-modal="true" aria-label="Audit Log Detail" className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setAuditDetailId(null)} onKeyDown={e => { if (e.key === 'Escape') setAuditDetailId(null); }}>
+                  <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} onClick={e => e.stopPropagation()} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
+                    <div className="p-8 border-b border-slate-100">
+                      <h3 className="text-xl font-black text-primary tracking-tight">Audit Log Detail</h3>
+                      <p className="text-sm text-slate-500 mt-1">{selectedAuditLog.id}</p>
+                    </div>
+                    <div className="p-8 space-y-4">
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <p className={labelClass}>Action</p>
+                          <p className="font-bold text-slate-900">{selectedAuditLog.action}</p>
+                        </div>
+                        <div>
+                          <p className={labelClass}>Target</p>
+                          <p className="font-bold text-slate-900">{selectedAuditLog.target}</p>
+                        </div>
+                        <div>
+                          <p className={labelClass}>Actor</p>
+                          <p className="font-bold text-slate-900">{selectedAuditLog.actor}</p>
+                        </div>
+                        <div>
+                          <p className={labelClass}>Date</p>
+                          <p className="font-bold text-slate-900">{selectedAuditLog.date}</p>
+                        </div>
+                        <div>
+                          <p className={labelClass}>Category</p>
+                          {statusBadge(selectedAuditLog.category)}
+                        </div>
+                        <div>
+                          <p className={labelClass}>Severity</p>
+                          {statusBadge(selectedAuditLog.severity === 'warning' ? 'warning' : 'info')}
+                        </div>
+                      </div>
+                      <div>
+                        <p className={labelClass}>Tenant</p>
+                        <p className="font-bold text-slate-900">{tenant.name} ({tenant.id})</p>
+                      </div>
+                    </div>
+                    <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3">
+                      <button onClick={() => setAuditDetailId(null)} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">Close</button>
+                    </div>
+                  </motion.div>
+                </div>
+              )}
+            </AnimatePresence>
           </div>
         )}
 
@@ -1152,33 +1486,18 @@ const TenantDetailPage: React.FC = () => {
                     assignedTo: noteAssignee || null,
                     createdBy: 'You',
                     createdDate: '2026-03-26',
-                    isEscalated: noteCategory === 'escalation',
+                    isEscalated: false,
                   }]);
                   setNoteInput('');
                   setNoteAssignee('');
                   setNoteFollowUp('');
-                  setNoteCategory('general');
+                  showToast('Support note added');
                 }
-              }} disabled={!noteInput.trim()} className="px-5 py-2.5 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-primary/90 transition-all disabled:opacity-40 disabled:cursor-not-allowed active:scale-95">
-                Save Note
-              </button>
+              }} disabled={!noteInput.trim()} className="px-6 py-3.5 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest shadow-lg shadow-primary/20 hover:bg-primary/90 transition-all disabled:opacity-40 disabled:cursor-not-allowed active:scale-95">Add Note</button>
             </div>
           </div>
         )}
       </div>
-
-      <AnimatePresence>
-        {inviteSuccess && (
-          <motion.div initial={{ opacity: 0, y: 50 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 50 }} className="fixed bottom-8 left-1/2 -translate-x-1/2 z-50">
-            <div className="bg-white rounded-2xl shadow-2xl border border-lime-200 px-6 py-4 flex items-center gap-3">
-              <div className="w-8 h-8 bg-lime-100 rounded-full flex items-center justify-center">
-                <span className="material-symbols-outlined text-lime-600 text-sm">check_circle</span>
-              </div>
-              <p className="font-bold text-slate-900 text-sm">{inviteSuccess}</p>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
     </div>
   );
 };

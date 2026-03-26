@@ -66,12 +66,20 @@ const TenantsPage: React.FC = () => {
     return sortDir === 'asc' ? 'expand_less' : 'expand_more';
   };
 
-  const healthDot = (score: number) => {
+  const healthIndicator = (score: number) => {
     const color = score >= 80 ? 'bg-lime-500' : score >= 50 ? 'bg-amber-500' : 'bg-red-500';
+    const textColor = score >= 80 ? 'text-lime-700' : score >= 50 ? 'text-amber-700' : 'text-red-700';
+    const bgColor = score >= 80 ? 'bg-lime-50' : score >= 50 ? 'bg-amber-50' : 'bg-red-50';
+    const label = score >= 80 ? 'Healthy' : score >= 50 ? 'Warning' : 'Critical';
     return (
-      <div className="flex items-center gap-1.5">
-        <div className={`w-2 h-2 rounded-full ${color}`} />
-        <span className="text-[10px] font-black text-slate-500">{score}</span>
+      <div className="flex flex-col gap-1">
+        <div className="flex items-center gap-2">
+          <div className="w-16 h-1.5 bg-slate-200 rounded-full overflow-hidden">
+            <div className={`h-full rounded-full transition-all ${color}`} style={{ width: `${score}%` }} />
+          </div>
+          <span className="text-[10px] font-black text-slate-600">{score}</span>
+        </div>
+        <span className={`text-[8px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded ${bgColor} ${textColor} w-fit`}>{label}</span>
       </div>
     );
   };
@@ -81,6 +89,13 @@ const TenantsPage: React.FC = () => {
   const overdueCt = tenants.filter(t => t.status === 'overdue').length;
   const suspendedCt = tenants.filter(t => t.status === 'suspended').length;
   const totalMrr = tenants.reduce((s, t) => s + t.mrr, 0);
+  const avgHealth = Math.round(tenants.reduce((s, t) => s + computeHealth(t.id, t.status, t.seatsUsed, t.seatsAllowed), 0) / tenants.length);
+
+  const daysUntilRenewal = (renewal: string) => {
+    const today = new Date('2026-03-26');
+    const d = new Date(renewal);
+    return Math.ceil((d.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+  };
 
   return (
     <div className="space-y-8">
@@ -95,20 +110,20 @@ const TenantsPage: React.FC = () => {
         </button>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-        <button onClick={() => setStatusFilter(statusFilter === 'active' ? 'all' : 'active')} className={`p-4 rounded-2xl border text-left transition-all ${statusFilter === 'active' ? 'bg-lime-50 border-lime-200' : 'bg-white/80 backdrop-blur-xl border-slate-200 hover:border-lime-200'}`}>
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        <button onClick={() => setStatusFilter(statusFilter === 'active' ? 'all' : 'active')} className={`p-4 rounded-2xl border text-left transition-all ${statusFilter === 'active' ? 'bg-lime-50 border-lime-200 ring-2 ring-lime-200' : 'bg-white/80 backdrop-blur-xl border-slate-200 hover:border-lime-200'}`}>
           <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Active</p>
           <p className="text-2xl font-black text-lime-600">{activeCt}</p>
         </button>
-        <button onClick={() => setStatusFilter(statusFilter === 'trialing' ? 'all' : 'trialing')} className={`p-4 rounded-2xl border text-left transition-all ${statusFilter === 'trialing' ? 'bg-indigo-50 border-indigo-200' : 'bg-white/80 backdrop-blur-xl border-slate-200 hover:border-indigo-200'}`}>
+        <button onClick={() => setStatusFilter(statusFilter === 'trialing' ? 'all' : 'trialing')} className={`p-4 rounded-2xl border text-left transition-all ${statusFilter === 'trialing' ? 'bg-indigo-50 border-indigo-200 ring-2 ring-indigo-200' : 'bg-white/80 backdrop-blur-xl border-slate-200 hover:border-indigo-200'}`}>
           <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Trialing</p>
           <p className="text-2xl font-black text-indigo-600">{trialCt}</p>
         </button>
-        <button onClick={() => setStatusFilter(statusFilter === 'overdue' ? 'all' : 'overdue')} className={`p-4 rounded-2xl border text-left transition-all ${statusFilter === 'overdue' ? 'bg-red-50 border-red-200' : 'bg-white/80 backdrop-blur-xl border-slate-200 hover:border-red-200'}`}>
+        <button onClick={() => setStatusFilter(statusFilter === 'overdue' ? 'all' : 'overdue')} className={`p-4 rounded-2xl border text-left transition-all ${statusFilter === 'overdue' ? 'bg-red-50 border-red-200 ring-2 ring-red-200' : 'bg-white/80 backdrop-blur-xl border-slate-200 hover:border-red-200'}`}>
           <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Overdue</p>
           <p className="text-2xl font-black text-red-500">{overdueCt}</p>
         </button>
-        <button onClick={() => setStatusFilter(statusFilter === 'suspended' ? 'all' : 'suspended')} className={`p-4 rounded-2xl border text-left transition-all ${statusFilter === 'suspended' ? 'bg-slate-100 border-slate-300' : 'bg-white/80 backdrop-blur-xl border-slate-200 hover:border-slate-300'}`}>
+        <button onClick={() => setStatusFilter(statusFilter === 'suspended' ? 'all' : 'suspended')} className={`p-4 rounded-2xl border text-left transition-all ${statusFilter === 'suspended' ? 'bg-slate-100 border-slate-300 ring-2 ring-slate-300' : 'bg-white/80 backdrop-blur-xl border-slate-200 hover:border-slate-300'}`}>
           <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Suspended</p>
           <p className="text-2xl font-black text-slate-500">{suspendedCt}</p>
         </button>
@@ -117,19 +132,26 @@ const TenantsPage: React.FC = () => {
           <p className="text-2xl font-black text-primary">${totalMrr}</p>
           <p className="text-[10px] text-slate-400 font-bold">{tenants.length} tenants</p>
         </div>
+        <div className={`p-4 rounded-2xl border text-left ${avgHealth >= 80 ? 'bg-lime-50 border-lime-100' : avgHealth >= 50 ? 'bg-amber-50 border-amber-100' : 'bg-red-50 border-red-100'}`}>
+          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Avg Health</p>
+          <p className={`text-2xl font-black ${avgHealth >= 80 ? 'text-lime-600' : avgHealth >= 50 ? 'text-amber-600' : 'text-red-600'}`}>{avgHealth}</p>
+          <p className="text-[10px] text-slate-400 font-bold">{avgHealth >= 80 ? 'Fleet healthy' : 'Needs attention'}</p>
+        </div>
       </div>
 
       <div className="flex gap-3 flex-wrap items-center">
         <div className="relative flex-1 min-w-[200px]">
           <span className="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 text-sm">search</span>
-          <input value={search} onChange={e => setSearch(e.target.value)} className="w-full pl-10 pr-4 py-3 bg-white/80 backdrop-blur-xl border border-slate-200 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary text-sm" placeholder="Search tenants..." />
+          <input value={search} onChange={e => setSearch(e.target.value)} className="w-full pl-10 pr-4 py-3 bg-white/80 backdrop-blur-xl border border-slate-200 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary text-sm" placeholder="Search tenants, emails, subdomains..." />
         </div>
         <select value={planFilter} onChange={e => setPlanFilter(e.target.value)} className="px-4 py-3 bg-white/80 backdrop-blur-xl border border-slate-200 rounded-xl font-bold text-slate-700 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20">
           <option value="all">All Plans</option>
           {plans.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
         </select>
         {(search || statusFilter !== 'all' || planFilter !== 'all') && (
-          <button onClick={() => { setSearch(''); setStatusFilter('all'); setPlanFilter('all'); }} className="px-4 py-3 text-[10px] font-black text-slate-500 uppercase tracking-widest hover:text-primary transition-colors">Clear Filters</button>
+          <button onClick={() => { setSearch(''); setStatusFilter('all'); setPlanFilter('all'); }} className="px-4 py-3 text-[10px] font-black text-slate-500 uppercase tracking-widest hover:text-primary transition-colors flex items-center gap-1">
+            <span className="material-symbols-outlined text-xs">close</span> Clear Filters
+          </button>
         )}
       </div>
 
@@ -150,20 +172,33 @@ const TenantsPage: React.FC = () => {
           <tbody>
             {filtered.map(tenant => {
               const health = computeHealth(tenant.id, tenant.status, tenant.seatsUsed, tenant.seatsAllowed);
+              const renewDays = daysUntilRenewal(tenant.renewal);
               return (
                 <tr key={tenant.id} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/50 transition-colors cursor-pointer focus-within:bg-slate-50/80" tabIndex={0} role="link" onClick={() => navigate(`/owner/tenants/${tenant.id}`)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate(`/owner/tenants/${tenant.id}`); } }}>
                   <td className="px-6 py-4">
                     <p className="font-bold text-slate-900">{tenant.name}</p>
+                    <p className="text-[10px] text-slate-400">{tenant.subdomain}.repairplatform.com</p>
                     <p className="text-[10px] text-slate-400">{tenant.owner.email}</p>
                   </td>
-                  <td className="px-6 py-4 text-sm font-bold text-slate-600 capitalize">{tenant.plan}</td>
+                  <td className="px-6 py-4">
+                    <span className="text-sm font-bold text-slate-600 capitalize">{tenant.plan}</span>
+                    <p className="text-[10px] text-slate-400 capitalize">{tenant.billingCycle}</p>
+                  </td>
                   <td className="px-6 py-4">{statusBadge(tenant.status)}</td>
-                  <td className="px-6 py-4">{healthDot(health)}</td>
+                  <td className="px-6 py-4">{healthIndicator(health)}</td>
                   <td className="px-6 py-4 font-black text-primary">${tenant.mrr}</td>
                   <td className="px-6 py-4">
                     <span className={`text-sm font-bold ${tenant.seatsUsed >= tenant.seatsAllowed ? 'text-red-500' : 'text-slate-600'}`}>{tenant.seatsUsed}/{tenant.seatsAllowed}</span>
+                    <div className="w-12 h-1 bg-slate-200 rounded-full overflow-hidden mt-1">
+                      <div className={`h-full rounded-full ${tenant.seatsUsed >= tenant.seatsAllowed ? 'bg-red-500' : tenant.seatsUsed / tenant.seatsAllowed >= 0.7 ? 'bg-amber-500' : 'bg-lime-500'}`} style={{ width: `${Math.min(100, Math.round((tenant.seatsUsed / tenant.seatsAllowed) * 100))}%` }} />
+                    </div>
                   </td>
-                  <td className="px-6 py-4 text-sm text-slate-500">{tenant.renewal}</td>
+                  <td className="px-6 py-4">
+                    <p className="text-sm text-slate-600">{tenant.renewal}</p>
+                    <p className={`text-[10px] font-bold ${renewDays <= 7 ? 'text-red-500' : renewDays <= 30 ? 'text-amber-600' : 'text-slate-400'}`}>
+                      {renewDays > 0 ? `${renewDays}d` : renewDays === 0 ? 'Today' : `${Math.abs(renewDays)}d overdue`}
+                    </p>
+                  </td>
                   <td className="px-6 py-4 text-right" onClick={e => e.stopPropagation()}>
                     <button onClick={() => navigate(`/owner/tenants/${tenant.id}`)} className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all">
                       Manage

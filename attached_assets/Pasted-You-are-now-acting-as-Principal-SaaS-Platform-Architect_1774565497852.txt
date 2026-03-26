@@ -1,0 +1,176 @@
+You are now acting as:
+Principal SaaS Platform Architect + Principal Tenant Lifecycle Designer + Principal Subscription Systems Architect + Principal Domain Management Architect + Principal Billing Workflow Designer + Principal Feature Governance Architect + Principal React/TypeScript Engineer + Principal UX Workflow Designer + Principal QA Auditor
+
+IMPORTANT:
+This is a correction pass ONLY for the completed workstream:
+Tenant Management & Provisioning
+
+Do not touch unrelated modules.
+Do not redesign the UI.
+Preserve the current design baseline exactly.
+
+Fix the following verified issues from QA:
+
+==================================================
+1. TENANTS PAGE
+==================================================
+
+Current issue:
+The page is technically working, but the improvements are not visible/meaningful enough in the live UI.
+
+Required:
+- make the Tenants page visibly stronger and more useful
+- ensure any new health score / MRR / filtering / summary improvements are actually surfaced clearly in the UI
+- make the page feel operationally upgraded, not just internally refactored
+
+==================================================
+2. PROVISIONING PAGE
+==================================================
+
+Current issue:
+Provisioning feels mostly the same, with Quick Start Template behaving too similarly to Select Plan.
+
+Required:
+- make provisioning templates meaningfully different from simple plan selection
+- templates should represent pre-configured onboarding presets or starting configurations, not just duplicate plan choice
+- strengthen the provisioning success/result experience so the new tenant setup feels more operationally complete
+
+==================================================
+3. OWNER & USERS TAB
+==================================================
+
+Current issue:
+User detail flow is partial, and Store Owner creation is missing where it should be platform-controlled.
+
+Required:
+- keep clickable user/store-owner details
+- add platform-only ability to create another Store Owner
+- this must be visible only to System Owner / authorized platform team
+- Store Owner role must remain platform-controlled
+- do not expose this to tenant-side users
+
+==================================================
+4. SUBSCRIPTION TAB
+==================================================
+
+Current issues:
+- upgrade buttons work, but Current Plan at the top is not updating correctly after plan change
+
+Required:
+- fix current plan summary so it updates correctly after upgrade/downgrade/change
+- preserve working plan-change flow
+- keep confirmation logic and visible state updates consistent
+
+==================================================
+5. FEATURES TAB
+==================================================
+
+Current issues:
+- trial state is visible but the trial flow does not actually work
+- need stronger commercial control
+- need support for paid feature access
+
+Required:
+- make feature trial enablement actually work
+- allow System Owner to activate a feature as a trial for a tenant with visible state and trial logic
+- allow System Owner to enable features outside subscribed plan as paid/override options
+- support clearer feature commercial states such as:
+  - inherited
+  - overridden
+  - trial
+  - disabled
+  - paid override / add-on enabled
+- keep this operationally useful and commercially flexible
+
+==================================================
+6. BILLING TAB
+==================================================
+
+Current issue:
+Billing is better, but clicking an invoice should open a proper invoice details window.
+
+Required:
+- clicking invoice must open invoice detail modal/drawer/page
+- include invoice details and actions in that view
+- preserve tenant-scoped billing behavior
+
+==================================================
+7. DOMAINS TAB
+==================================================
+
+Current issues:
+- custom domain flow is not working
+- domain tooling is still too weak
+
+Required:
+- fix custom domain workflow
+- improve Domains tab significantly using best-practice ideas for SaaS tenant domain management
+- make it more modern, interactive, and operational
+- include stronger domain-management behavior such as:
+  - subdomain state
+  - custom domain onboarding
+  - SSL status
+  - DNS verification / propagation state
+  - domain action controls
+  - verification guidance/checklist
+  - copy DNS values if useful
+- use internet research to understand what a serious multitenant SaaS domain-management surface should support, but preserve the current design system
+
+==================================================
+8. ACTIVITY / AUDIT TAB
+==================================================
+
+Current issue:
+The info button is not working.
+
+Required:
+- fix the info button/action
+- make sure any detail/audit info action opens a meaningful detail view
+
+==================================================
+9. DO NOT BREAK THESE
+==================================================
+
+Do NOT break:
+- auth flow
+- preview mode
+- current platform/store hierarchy
+- RBAC logic
+- current design baseline
+- existing working routes/pages outside this workstream
+
+==================================================
+10. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether Tenants page is now visibly improved
+C. whether Provisioning templates are now meaningfully different from simple plan selection
+D. whether platform-only additional Store Owner creation now exists
+E. whether Subscription current plan now updates correctly
+F. whether Features trial flow now actually works
+G. whether paid/override feature control now exists
+H. whether Billing invoice detail window now works
+I. whether Domains custom-domain workflow now works
+J. whether Domains tab is now more operational
+K. whether Activity/Audit info button now works
+L. confirmation that no visual drift was introduced
+
+==================================================
+11. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- Tenants page is visibly improved
+- Provisioning templates are meaningfully different
+- platform-only additional Store Owner creation exists
+- Subscription current plan updates correctly
+- Features trial flow works
+- paid/override feature control exists
+- Billing invoice detail opens correctly
+- Domains custom-domain workflow works
+- Domains tab is more operational
+- Activity/Audit info button works
+- auth flow still works
+- no visual drift was introduced

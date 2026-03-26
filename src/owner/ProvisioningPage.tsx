@@ -12,6 +12,8 @@ const onboardingChecklist = [
   { id: 'invite', label: 'Owner invitation sent', icon: 'mail' },
   { id: 'trial', label: '14-day trial activated', icon: 'event' },
   { id: 'defaults', label: 'Default settings applied', icon: 'settings' },
+  { id: 'features', label: 'Feature modules enabled', icon: 'toggle_on' },
+  { id: 'branding', label: 'Branding defaults configured', icon: 'palette' },
 ];
 
 const ProvisioningPage: React.FC = () => {
@@ -42,11 +44,20 @@ const ProvisioningPage: React.FC = () => {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
   const isValid = name.trim().length >= 2 && effectiveSubdomain.length >= 2 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(effectiveSubdomain) && ownerName.trim().length >= 2 && emailRegex.test(ownerEmail);
 
+  const activeTemplate = selectedTemplate ? provisioningTemplates.find(t => t.id === selectedTemplate) : null;
+
   const applyTemplate = (templateId: string) => {
     const tpl = provisioningTemplates.find(t => t.id === templateId);
     if (!tpl) return;
+    if (selectedTemplate === templateId) {
+      setSelectedTemplate(null);
+      return;
+    }
     setSelectedTemplate(templateId);
     setSelectedPlan(tpl.plan);
+    if (!subdomain && name) {
+      setSubdomain(name.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20));
+    }
   };
 
   const handleConfirm = () => {
@@ -91,85 +102,170 @@ const ProvisioningPage: React.FC = () => {
 
       <AnimatePresence mode="wait">
         {step === 'form' && (
-          <motion.div key="form" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 shadow-sm overflow-hidden">
-            <div className="px-8 py-5 border-b border-slate-100">
-              <h3 className="text-sm font-black text-primary uppercase tracking-widest">Tenant Details</h3>
-            </div>
-            <div className="p-8 space-y-6">
-              <div>
-                <label className={labelClass}>Quick Start Template</label>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  {provisioningTemplates.map(tpl => (
-                    <button key={tpl.id} onClick={() => applyTemplate(tpl.id)} className={`p-4 rounded-2xl border text-left transition-all ${selectedTemplate === tpl.id ? 'bg-primary/5 border-primary/30 ring-2 ring-primary/20' : 'bg-slate-50 border-slate-200 hover:border-primary/20'}`}>
-                      <p className="font-black text-slate-900 text-sm">{tpl.name}</p>
-                      <p className="text-[10px] text-slate-400 mt-1">{tpl.description}</p>
-                      <p className="text-[10px] font-bold text-primary mt-1 capitalize">{tpl.plan} plan</p>
-                    </button>
-                  ))}
-                </div>
-                <button onClick={() => setSelectedTemplate(null)} className={`mt-2 text-[10px] font-black uppercase tracking-widest transition-colors ${selectedTemplate ? 'text-primary hover:text-primary/80' : 'text-slate-300 cursor-default'}`}>
-                  {selectedTemplate ? 'Clear Template' : 'Or configure manually below'}
-                </button>
-              </div>
+          <motion.div key="form" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} className="space-y-6">
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 shadow-sm overflow-hidden">
+              <div className="px-8 py-5 border-b border-slate-100 flex justify-between items-center">
                 <div>
-                  <label htmlFor="prov-name" className={labelClass}>Business Name *</label>
-                  <input id="prov-name" value={name} onChange={e => setName(e.target.value)} className={inputClass} placeholder="e.g. Downtown Phone Repair" />
+                  <h3 className="text-sm font-black text-primary uppercase tracking-widest">Onboarding Presets</h3>
+                  <p className="text-[10px] text-slate-400 mt-0.5">Pre-configured starting configurations for common shop types</p>
                 </div>
-                <div>
-                  <label htmlFor="prov-subdomain" className={labelClass}>Subdomain</label>
-                  <div className="flex items-center gap-0">
-                    <input id="prov-subdomain" value={subdomain} onChange={e => setSubdomain(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))} className={`${inputClass} rounded-r-none border-r-0`} placeholder={subdomainSlug || 'subdomain'} />
-                    <span className="px-3 py-3.5 bg-slate-100 border border-slate-200 rounded-r-xl text-[10px] font-black text-slate-400 whitespace-nowrap">.repairplatform.com</span>
+                {selectedTemplate && (
+                  <button onClick={() => { setSelectedTemplate(null); }} className="text-[10px] font-black text-primary uppercase tracking-widest hover:text-primary/80 transition-colors flex items-center gap-1">
+                    <span className="material-symbols-outlined text-xs">close</span> Clear Preset
+                  </button>
+                )}
+              </div>
+              <div className="p-6">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {provisioningTemplates.map(tpl => {
+                    const tplPlan = plans.find(p => p.id === tpl.plan);
+                    const isSelected = selectedTemplate === tpl.id;
+                    return (
+                      <button key={tpl.id} onClick={() => applyTemplate(tpl.id)} className={`p-5 rounded-2xl border text-left transition-all ${isSelected ? 'bg-primary/5 border-primary/30 ring-2 ring-primary/20' : 'bg-slate-50 border-slate-200 hover:border-primary/20'}`}>
+                        <div className="flex items-center gap-2 mb-2">
+                          <span className={`material-symbols-outlined text-lg ${isSelected ? 'text-primary' : 'text-slate-400'}`}>
+                            {tpl.id === 'standard' ? 'storefront' : tpl.id === 'multi_location' ? 'location_city' : 'rocket_launch'}
+                          </span>
+                          <p className="font-black text-slate-900 text-sm">{tpl.name}</p>
+                        </div>
+                        <p className="text-[10px] text-slate-500 mb-3">{tpl.description}</p>
+
+                        <div className="space-y-2 pt-3 border-t border-slate-100">
+                          <div className="flex justify-between items-center">
+                            <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Plan</span>
+                            <span className="text-[10px] font-black text-primary capitalize">{tpl.plan}</span>
+                          </div>
+                          <div className="flex justify-between items-center">
+                            <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Seats</span>
+                            <span className="text-[10px] font-bold text-slate-600">{tplPlan?.limits.seats}</span>
+                          </div>
+                          <div className="flex justify-between items-center">
+                            <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Locations</span>
+                            <span className="text-[10px] font-bold text-slate-600">{tplPlan?.limits.locations}</span>
+                          </div>
+                          <div className="flex justify-between items-center">
+                            <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Timezone</span>
+                            <span className="text-[10px] font-bold text-slate-600">{(tpl.settings.timezone.split('/')[1] || tpl.settings.timezone).replace('_', ' ')}</span>
+                          </div>
+                          <div className="flex justify-between items-center">
+                            <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Tax Rate</span>
+                            <span className="text-[10px] font-bold text-slate-600">{tpl.settings.taxRate}%</span>
+                          </div>
+                          <div>
+                            <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Modules</span>
+                            <div className="flex flex-wrap gap-1 mt-1">
+                              {tpl.features.slice(0, 5).map(f => (
+                                <span key={f} className="text-[7px] font-black text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded uppercase tracking-widest">{f}</span>
+                              ))}
+                              {tpl.features.length > 5 && <span className="text-[7px] font-black text-primary bg-primary/5 px-1.5 py-0.5 rounded uppercase tracking-widest">+{tpl.features.length - 5}</span>}
+                            </div>
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 shadow-sm overflow-hidden">
+              <div className="px-8 py-5 border-b border-slate-100">
+                <h3 className="text-sm font-black text-primary uppercase tracking-widest">Tenant Details</h3>
+                <p className="text-[10px] text-slate-400 mt-0.5">{selectedTemplate ? `Preset applied: ${activeTemplate?.name}. Customize below.` : 'Enter details manually or select a preset above.'}</p>
+              </div>
+              <div className="p-8 space-y-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div>
+                    <label htmlFor="prov-name" className={labelClass}>Business Name *</label>
+                    <input id="prov-name" value={name} onChange={e => setName(e.target.value)} className={inputClass} placeholder="e.g. Downtown Phone Repair" />
+                  </div>
+                  <div>
+                    <label htmlFor="prov-subdomain" className={labelClass}>Subdomain</label>
+                    <div className="flex items-center gap-0">
+                      <input id="prov-subdomain" value={subdomain} onChange={e => setSubdomain(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))} className={`${inputClass} rounded-r-none border-r-0`} placeholder={subdomainSlug || 'subdomain'} />
+                      <span className="px-3 py-3.5 bg-slate-100 border border-slate-200 rounded-r-xl text-[10px] font-black text-slate-400 whitespace-nowrap">.repairplatform.com</span>
+                    </div>
                   </div>
                 </div>
-              </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div>
-                  <label htmlFor="prov-owner" className={labelClass}>Owner Name *</label>
-                  <input id="prov-owner" value={ownerName} onChange={e => setOwnerName(e.target.value)} className={inputClass} placeholder="Full name" />
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div>
+                    <label htmlFor="prov-owner" className={labelClass}>Owner Name *</label>
+                    <input id="prov-owner" value={ownerName} onChange={e => setOwnerName(e.target.value)} className={inputClass} placeholder="Full name" />
+                  </div>
+                  <div>
+                    <label htmlFor="prov-email" className={labelClass}>Owner Email *</label>
+                    <input id="prov-email" value={ownerEmail} onChange={e => setOwnerEmail(e.target.value)} className={inputClass} placeholder="owner@business.com" type="email" />
+                  </div>
                 </div>
-                <div>
-                  <label htmlFor="prov-email" className={labelClass}>Owner Email *</label>
-                  <input id="prov-email" value={ownerEmail} onChange={e => setOwnerEmail(e.target.value)} className={inputClass} placeholder="owner@business.com" type="email" />
-                </div>
-              </div>
 
-              <div>
-                <label className={labelClass}>Select Plan *</label>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  {plans.map(p => (
-                    <button key={p.id} onClick={() => setSelectedPlan(p.id)} className={`p-5 rounded-2xl border text-left transition-all ${selectedPlan === p.id ? 'bg-primary/5 border-primary/30 ring-2 ring-primary/20' : 'bg-slate-50 border-slate-200 hover:border-primary/20'}`}>
-                      <p className="font-black text-slate-900">{p.name}</p>
-                      <div className="mt-1">
-                        <p className="text-lg font-black text-primary">${billingCycle === 'annual' ? p.annualPrice : p.price}<span className="text-[10px] text-slate-400 font-bold">/{billingCycle === 'annual' ? 'yr' : 'mo'}</span></p>
-                        {billingCycle === 'annual' && <p className="text-[10px] font-bold text-lime-600">{p.savingsLabel} vs monthly</p>}
-                      </div>
-                      <p className="text-[10px] text-slate-400 mt-1">{p.limits.seats} seats · {p.limits.locations} location{p.limits.locations !== 1 ? 's' : ''}</p>
-                      <div className="flex flex-wrap gap-1 mt-2">
-                        {p.features.slice(0, 3).map(f => <span key={f} className="text-[8px] font-black text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded uppercase tracking-widest">{f}</span>)}
-                      </div>
+                <div>
+                  <label className={labelClass}>Select Plan *</label>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    {plans.map(p => (
+                      <button key={p.id} onClick={() => setSelectedPlan(p.id)} className={`p-5 rounded-2xl border text-left transition-all ${selectedPlan === p.id ? 'bg-primary/5 border-primary/30 ring-2 ring-primary/20' : 'bg-slate-50 border-slate-200 hover:border-primary/20'}`}>
+                        <p className="font-black text-slate-900">{p.name}</p>
+                        <div className="mt-1">
+                          <p className="text-lg font-black text-primary">${billingCycle === 'annual' ? p.annualPrice : p.price}<span className="text-[10px] text-slate-400 font-bold">/{billingCycle === 'annual' ? 'yr' : 'mo'}</span></p>
+                          {billingCycle === 'annual' && <p className="text-[10px] font-bold text-lime-600">{p.savingsLabel} vs monthly</p>}
+                        </div>
+                        <p className="text-[10px] text-slate-400 mt-1">{p.limits.seats} seats · {p.limits.locations} location{p.limits.locations !== 1 ? 's' : ''}</p>
+                        <div className="flex flex-wrap gap-1 mt-2">
+                          {p.features.slice(0, 3).map(f => <span key={f} className="text-[8px] font-black text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded uppercase tracking-widest">{f}</span>)}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className={labelClass}>Billing Cycle</label>
+                  <div className="flex gap-3">
+                    <button onClick={() => setBillingCycle('monthly')} className={`px-6 py-3 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${billingCycle === 'monthly' ? 'bg-primary text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>Monthly</button>
+                    <button onClick={() => setBillingCycle('annual')} className={`px-6 py-3 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${billingCycle === 'annual' ? 'bg-primary text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+                      Annual {savingsLabel && <span className="text-lime-300 ml-1">{savingsLabel}</span>}
                     </button>
-                  ))}
+                  </div>
                 </div>
+
+                {activeTemplate && (
+                  <div className="p-4 bg-primary/5 rounded-xl border border-primary/10">
+                    <p className="text-[10px] font-black text-primary uppercase tracking-widest mb-2">Pre-configured Settings from Preset</p>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      <div>
+                        <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Currency</p>
+                        <p className="text-sm font-bold text-slate-700">{activeTemplate.settings.currency}</p>
+                      </div>
+                      <div>
+                        <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Timezone</p>
+                        <p className="text-sm font-bold text-slate-700">{activeTemplate.settings.timezone}</p>
+                      </div>
+                      <div>
+                        <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Tax Rate</p>
+                        <p className="text-sm font-bold text-slate-700">{activeTemplate.settings.taxRate}%</p>
+                      </div>
+                      <div>
+                        <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Locale</p>
+                        <p className="text-sm font-bold text-slate-700">{activeTemplate.settings.locale}</p>
+                      </div>
+                    </div>
+                    <div className="mt-3 pt-3 border-t border-primary/10">
+                      <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1">Enabled Modules ({activeTemplate.features.length})</p>
+                      <div className="flex flex-wrap gap-1">
+                        {activeTemplate.features.map(f => (
+                          <span key={f} className="text-[8px] font-black text-primary bg-primary/10 px-2 py-0.5 rounded-lg uppercase tracking-widest">{f}</span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
-              <div>
-                <label className={labelClass}>Billing Cycle</label>
-                <div className="flex gap-3">
-                  <button onClick={() => setBillingCycle('monthly')} className={`px-6 py-3 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${billingCycle === 'monthly' ? 'bg-primary text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>Monthly</button>
-                  <button onClick={() => setBillingCycle('annual')} className={`px-6 py-3 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${billingCycle === 'annual' ? 'bg-primary text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
-                    Annual {savingsLabel && <span className="text-lime-300 ml-1">{savingsLabel}</span>}
-                  </button>
-                </div>
+              <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex justify-between items-center">
+                <button onClick={() => navigate('/owner/tenants')} className="px-6 py-3.5 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all">Cancel</button>
+                <button onClick={() => setStep('confirm')} disabled={!isValid} className="px-8 py-3.5 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest shadow-lg shadow-primary/20 hover:bg-primary/90 transition-all disabled:opacity-40 disabled:cursor-not-allowed active:scale-95">Review & Confirm</button>
               </div>
-            </div>
-
-            <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex justify-between items-center">
-              <button onClick={() => navigate('/owner/tenants')} className="px-6 py-3.5 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all">Cancel</button>
-              <button onClick={() => setStep('confirm')} disabled={!isValid} className="px-8 py-3.5 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest shadow-lg shadow-primary/20 hover:bg-primary/90 transition-all disabled:opacity-40 disabled:cursor-not-allowed active:scale-95">Review & Confirm</button>
             </div>
           </motion.div>
         )}
@@ -201,11 +297,17 @@ const ProvisioningPage: React.FC = () => {
                 </div>
               </div>
 
-              {selectedTemplate && (
+              {activeTemplate && (
                 <div className="p-4 bg-primary/5 rounded-xl border border-primary/10">
-                  <p className="text-[10px] font-black text-primary uppercase tracking-widest mb-1">Template Applied</p>
-                  <p className="font-bold text-slate-900">{provisioningTemplates.find(t => t.id === selectedTemplate)?.name}</p>
-                  <p className="text-[10px] text-slate-400">{provisioningTemplates.find(t => t.id === selectedTemplate)?.description}</p>
+                  <p className="text-[10px] font-black text-primary uppercase tracking-widest mb-2">Preset Configuration</p>
+                  <p className="font-bold text-slate-900">{activeTemplate.name}</p>
+                  <p className="text-[10px] text-slate-500 mb-2">{activeTemplate.description}</p>
+                  <div className="grid grid-cols-4 gap-2 mt-2 pt-2 border-t border-primary/10">
+                    <div><p className="text-[8px] font-black text-slate-400 uppercase">Currency</p><p className="text-[10px] font-bold text-slate-700">{activeTemplate.settings.currency}</p></div>
+                    <div><p className="text-[8px] font-black text-slate-400 uppercase">Timezone</p><p className="text-[10px] font-bold text-slate-700">{(activeTemplate.settings.timezone.split('/')[1] || activeTemplate.settings.timezone).replace('_', ' ')}</p></div>
+                    <div><p className="text-[8px] font-black text-slate-400 uppercase">Tax</p><p className="text-[10px] font-bold text-slate-700">{activeTemplate.settings.taxRate}%</p></div>
+                    <div><p className="text-[8px] font-black text-slate-400 uppercase">Modules</p><p className="text-[10px] font-bold text-slate-700">{activeTemplate.features.length}</p></div>
+                  </div>
                 </div>
               )}
 
@@ -247,9 +349,9 @@ const ProvisioningPage: React.FC = () => {
                 <span className="material-symbols-outlined text-lime-600 text-3xl">check_circle</span>
               </div>
               <h3 className="text-xl font-black text-primary tracking-tight">Tenant Provisioned Successfully</h3>
-              <p className="text-slate-500 font-medium">The tenant workspace has been created and is ready.</p>
+              <p className="text-slate-500 font-medium">The tenant workspace has been created and is ready for use.</p>
             </div>
-            <div className="px-8 pb-4">
+            <div className="px-8 pb-4 space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Business</p>
@@ -269,13 +371,36 @@ const ProvisioningPage: React.FC = () => {
                   <p className="font-bold text-slate-900">{plan?.name} — ${price}/{billingCycle === 'annual' ? 'yr' : 'mo'}</p>
                 </div>
               </div>
-              <div className="mt-4 grid grid-cols-3 md:grid-cols-6 gap-3">
+
+              {activeTemplate && (
+                <div className="p-4 bg-primary/5 rounded-xl border border-primary/10">
+                  <p className="text-[10px] font-black text-primary uppercase tracking-widest mb-1">Preset Applied</p>
+                  <p className="font-bold text-slate-900">{activeTemplate.name}</p>
+                  <div className="flex flex-wrap gap-1 mt-2">
+                    {activeTemplate.features.map(f => (
+                      <span key={f} className="text-[8px] font-black text-primary bg-primary/10 px-1.5 py-0.5 rounded uppercase tracking-widest">{f}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-4 md:grid-cols-8 gap-2">
                 {onboardingChecklist.map(item => (
-                  <div key={item.id} className="p-3 bg-lime-50 rounded-xl border border-lime-100 text-center">
+                  <div key={item.id} className="p-2 bg-lime-50 rounded-xl border border-lime-100 text-center">
                     <span className="material-symbols-outlined text-lime-600 text-sm">{item.icon}</span>
-                    <p className="text-[8px] font-black text-lime-700 uppercase tracking-widest mt-1">{item.label.split(' ').slice(0, 2).join(' ')}</p>
+                    <p className="text-[7px] font-black text-lime-700 uppercase tracking-widest mt-1">{item.label.split(' ').slice(0, 2).join(' ')}</p>
                   </div>
                 ))}
+              </div>
+
+              <div className="p-4 bg-blue-50 rounded-xl border border-blue-100">
+                <p className="text-[10px] font-black text-blue-700 uppercase tracking-widest mb-2">Next Steps</p>
+                <div className="space-y-1">
+                  <p className="text-sm text-blue-700 font-bold flex items-center gap-2"><span className="material-symbols-outlined text-xs">mail</span> Owner invitation sent to {ownerEmail}</p>
+                  <p className="text-sm text-blue-700 font-bold flex items-center gap-2"><span className="material-symbols-outlined text-xs">language</span> Subdomain active at {subdomain || subdomainSlug}.repairplatform.com</p>
+                  <p className="text-sm text-blue-700 font-bold flex items-center gap-2"><span className="material-symbols-outlined text-xs">event</span> 14-day trial period started</p>
+                  <p className="text-sm text-blue-700 font-bold flex items-center gap-2"><span className="material-symbols-outlined text-xs">lock</span> SSL certificate provisioning in progress</p>
+                </div>
               </div>
             </div>
             <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex justify-between items-center">

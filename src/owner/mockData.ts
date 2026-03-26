@@ -156,7 +156,7 @@ export const featureMatrix = [
   { id: 'voice_assistant', name: 'Voice Assistant', planAvailability: { essential: false, growth: false, advanced: false } as Record<string, boolean>, source: 'custom' as const, lifecycle: 'draft' as FeatureLifecycle },
 ];
 
-export type FeatureOverrideType = 'inherited' | 'overridden' | 'trial' | 'disabled' | 'addon';
+export type FeatureOverrideType = 'inherited' | 'overridden' | 'paid_override' | 'trial' | 'disabled' | 'addon';
 
 export const tenantFeatureOverrides: { tenantId: string; featureId: string; type: FeatureOverrideType; trialEnd?: string; addedBy?: string; addedDate?: string; }[] = [
   { tenantId: 't1', featureId: 'api', type: 'overridden', addedBy: 'Admin Alice', addedDate: '2026-01-15' },

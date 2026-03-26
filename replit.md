@@ -62,19 +62,20 @@ A multi-tenant SaaS platform frontend built with React, TypeScript, Vite, Tailwi
 
 ## Tenant Management & Provisioning (Workstream 2)
 
-- **TenantsPage**: Full tenant list with search, status/plan filtering, sortable columns (name/plan/status/MRR/renewal), status-aware badges, summary cards with filter toggle
-- **ProvisioningPage**: 3-step flow (form → confirm → success) with validated inputs (business name, subdomain regex, owner name, email regex, plan cards, billing cycle)
+- **TenantsPage**: 6-card summary row (Active, Trialing, Overdue, Suspended, Total MRR, Avg Health), richer health indicator with bar+label+color, subdomain+billingCycle shown in table rows, renewal countdown in days, seats progress bar
+- **ProvisioningPage**: 3-step flow with onboarding presets showing full pre-configured settings (currency/timezone/tax/modules grid), preset details shown on confirm screen, "Next Steps" section on success page, 8-item onboarding checklist
 - **TenantDetailPage**: 9 fully-built tabs:
   - Overview: summary cards (plan, MRR, renewal, onboarded, seats, locations, domain, SSL/DNS), flags, quick actions
-  - Owner & Users: tenant-scoped users via `tenantId` filter, invite user modal (accessible: role/aria-modal/ESC handler)
-  - Subscription: current plan details, limits, compatible add-ons, upgrade/downgrade actions
-  - Features: featureMatrix filtered by tenant plan, lifecycle badges, enabled/disabled per feature
-  - Billing: tenant-scoped invoices + transactions + credits from mock data, summary cards
-  - Domains: subdomain, custom domain, SSL certificate status, DNS verification status
-  - Usage: seats, locations, API, storage, SMS, tickets/invoices with progress bars
-  - Activity/Audit: tenant-scoped audit logs with severity badges
+  - Owner & Users: tenant-scoped users, invite user modal, violet "Create Store Owner" button + platform-only modal
+  - Subscription: `currentPlan` local state that updates on plan change confirmation, limits adjust to new plan
+  - Features: `localOverrides` state with working Trial (modal with duration picker), Paid Override (confirmation modal), End Trial/Revoke/Remove buttons; `paid_override` type distinction
+  - Billing: invoices are clickable, opening invoice detail modal with line items table, subtotal/tax/total breakdown, Download PDF and Send Reminder actions
+  - Domains: local state (customDomainLocal, domainVerification, domainSsl) with working Add/Remove/Verify Now/Check DNS/Provision SSL buttons
+  - Usage: seats, locations, API, storage, SMS, tickets/invoices with progress bars and trend arrows
+  - Activity/Audit: audit entries are clickable, opening audit log detail modal with all fields (action, target, actor, date, category, severity, tenant)
   - Support Notes: existing notes, flags, add note with local state persistence
-- **Mock data**: `accessMockData.ts` tenantUsers now have `tenantId` field for proper tenant-scoped filtering
+- **Toast system**: Centralized `showToast()` with useRef cleanup on unmount (no stale setTimeout leaks)
+- **Mock data**: `accessMockData.ts` tenantUsers with `tenantId`, `billingTransactions` with `tenantId`, `tenantFeatureOverrides`, `provisioningTemplates` with settings/features
 - **Accessibility**: label/id pairs on form inputs, keyboard-navigable table rows, modal dialog semantics
 
 ## Data Model
