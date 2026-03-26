@@ -2,10 +2,37 @@ import React, { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { plans as initialPlans, featureMatrix as initialFeatures, addOns as initialAddOns } from './mockData';
+import type { FeatureLifecycle } from './mockData';
 
 type PlanData = typeof initialPlans[0];
-type FeatureData = { id: string; name: string; planAvailability: Record<string, boolean>; source: 'inherited' | 'custom' };
+type FeatureData = { id: string; name: string; planAvailability: Record<string, boolean>; source: 'inherited' | 'custom'; lifecycle: FeatureLifecycle };
 type AddOnData = typeof initialAddOns[0];
+
+const LIFECYCLE_ORDER: FeatureLifecycle[] = ['draft', 'planned', 'in_development', 'implemented', 'deprecated', 'archived'];
+
+const lifecycleBadge = (lifecycle: FeatureLifecycle) => {
+  const styles: Record<FeatureLifecycle, string> = {
+    draft: 'bg-slate-400/10 text-slate-500 border-slate-200',
+    planned: 'bg-blue-400/10 text-blue-600 border-blue-400/20',
+    in_development: 'bg-amber-400/10 text-amber-700 border-amber-400/20',
+    implemented: 'bg-lime-400/10 text-lime-700 border-lime-400/20',
+    deprecated: 'bg-red-400/10 text-red-600 border-red-400/20',
+    archived: 'bg-slate-400/10 text-slate-400 border-slate-200',
+  };
+  const labels: Record<FeatureLifecycle, string> = {
+    draft: 'Draft',
+    planned: 'Planned',
+    in_development: 'In Dev',
+    implemented: 'Live',
+    deprecated: 'Deprecated',
+    archived: 'Archived',
+  };
+  return (
+    <span className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md border ${styles[lifecycle]}`}>
+      {labels[lifecycle]}
+    </span>
+  );
+};
 
 const PlansPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -24,7 +51,7 @@ const PlansPage: React.FC = () => {
     setSearchParams({ tab });
   };
   const [plansData, setPlansData] = useState([...initialPlans]);
-  const [featuresData, setFeaturesData] = useState([...initialFeatures]);
+  const [featuresData, setFeaturesData] = useState<FeatureData[]>([...initialFeatures]);
   const [addOnsData, setAddOnsData] = useState([...initialAddOns]);
   const [showPlanModal, setShowPlanModal] = useState(false);
   const [editingPlan, setEditingPlan] = useState<PlanData | null>(null);
@@ -33,10 +60,12 @@ const PlansPage: React.FC = () => {
   const [editingAddOn, setEditingAddOn] = useState<AddOnData | null>(null);
   const [showAddOnArchive, setShowAddOnArchive] = useState<string | null>(null);
   const [showFeatureModal, setShowFeatureModal] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
 
   const [planForm, setPlanForm] = useState({ name: '', price: '', seats: '', locations: '', features: '' as string, billingCycle: 'monthly' as 'monthly' | 'annual' });
   const [addOnForm, setAddOnForm] = useState({ name: '', price: '', description: '', compatiblePlans: [] as string[] });
   const [newFeatureName, setNewFeatureName] = useState('');
+  const [newFeatureLifecycle, setNewFeatureLifecycle] = useState<FeatureLifecycle>('draft');
 
   const openCreatePlan = () => {
     setPlanForm({ name: '', price: '', seats: '', locations: '', features: '', billingCycle: 'monthly' });
@@ -88,7 +117,21 @@ const PlansPage: React.FC = () => {
   const activePlans = plansData.filter(p => p.status === 'active');
 
   const toggleFeature = (featureId: string, planId: string) => {
+    const feature = featuresData.find(f => f.id === featureId);
+    if (!feature || feature.lifecycle !== 'implemented') return;
     setFeaturesData(prev => prev.map(f => f.id === featureId ? { ...f, planAvailability: { ...f.planAvailability, [planId]: !f.planAvailability[planId] } } : f));
+  };
+
+  const changeLifecycle = (featureId: string, newLifecycle: FeatureLifecycle) => {
+    setFeaturesData(prev => prev.map(f => {
+      if (f.id !== featureId) return f;
+      if (newLifecycle !== 'implemented') {
+        const cleared: Record<string, boolean> = {};
+        Object.keys(f.planAvailability).forEach(k => { cleared[k] = false; });
+        return { ...f, lifecycle: newLifecycle, planAvailability: cleared };
+      }
+      return { ...f, lifecycle: newLifecycle };
+    }));
   };
 
   const addFeature = () => {
@@ -96,13 +139,21 @@ const PlansPage: React.FC = () => {
     const id = newFeatureName.toLowerCase().replace(/\s+/g, '_');
     const defaultAvailability: Record<string, boolean> = {};
     plansData.forEach(p => { defaultAvailability[p.id] = false; });
-    setFeaturesData(prev => [...prev, { id, name: newFeatureName.trim(), planAvailability: defaultAvailability, source: 'custom' as const }]);
+    setFeaturesData(prev => [...prev, { id, name: newFeatureName.trim(), planAvailability: defaultAvailability, source: 'custom' as const, lifecycle: newFeatureLifecycle }]);
     setNewFeatureName('');
+    setNewFeatureLifecycle('draft');
     setShowFeatureModal(false);
+  };
+
+  const getFeatureDependencies = (featureId: string) => {
+    const feature = featuresData.find(f => f.id === featureId);
+    if (!feature) return [];
+    return activePlans.filter(p => feature.planAvailability[p.id]);
   };
 
   const removeFeature = (featureId: string) => {
     setFeaturesData(prev => prev.filter(f => f.id !== featureId));
+    setShowDeleteConfirm(null);
   };
 
   const openCreateAddOn = () => {
@@ -275,6 +326,7 @@ const PlansPage: React.FC = () => {
               <thead>
                 <tr className="border-b border-slate-100 bg-slate-50/50">
                   <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Feature</th>
+                  <th className="px-4 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Status</th>
                   {activePlans.map(plan => (
                     <th key={plan.id} className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">{plan.name}</th>
                   ))}
@@ -282,43 +334,69 @@ const PlansPage: React.FC = () => {
                 </tr>
               </thead>
               <tbody>
-                {featuresData.map((feature) => (
-                  <tr key={feature.id} className="hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0">
-                    <td className="px-8 py-4">
-                      <span className="font-bold text-slate-900">{feature.name}</span>
-                      <span className={`ml-2 px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md border ${
-                        feature.source === 'inherited'
-                          ? 'bg-blue-400/10 text-blue-600 border-blue-400/20'
-                          : 'bg-violet-400/10 text-violet-600 border-violet-400/20'
-                      }`}>{feature.source}</span>
-                    </td>
-                    {activePlans.map(plan => (
-                      <td key={plan.id} className="px-6 py-4 text-center">
-                        <button
-                          onClick={() => toggleFeature(feature.id, plan.id)}
-                          className="transition-all hover:scale-110 active:scale-95"
-                        >
-                          {feature.planAvailability[plan.id] ? (
-                            <span className="material-symbols-outlined text-lime-500">toggle_on</span>
-                          ) : (
-                            <span className="material-symbols-outlined text-slate-300">toggle_off</span>
-                          )}
-                        </button>
+                {featuresData.map((feature) => {
+                  const isAssignable = feature.lifecycle === 'implemented';
+                  return (
+                    <tr key={feature.id} className={`hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0 ${feature.lifecycle === 'archived' || feature.lifecycle === 'deprecated' ? 'opacity-60' : ''}`}>
+                      <td className="px-8 py-4">
+                        <span className="font-bold text-slate-900">{feature.name}</span>
+                        <span className={`ml-2 px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md border ${
+                          feature.source === 'inherited'
+                            ? 'bg-blue-400/10 text-blue-600 border-blue-400/20'
+                            : 'bg-violet-400/10 text-violet-600 border-violet-400/20'
+                        }`}>{feature.source}</span>
                       </td>
-                    ))}
-                    <td className="px-8 py-4 text-center">
-                      {feature.source === 'custom' ? (
-                        <button onClick={() => removeFeature(feature.id)} className="text-slate-400 hover:text-red-500 transition-colors">
-                          <span className="material-symbols-outlined text-sm">delete</span>
-                        </button>
-                      ) : (
-                        <span className="text-[9px] text-slate-300 font-bold uppercase tracking-widest">locked</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                      <td className="px-4 py-4">
+                        <select
+                          value={feature.lifecycle}
+                          onChange={e => changeLifecycle(feature.id, e.target.value as FeatureLifecycle)}
+                          className="text-[9px] font-black uppercase tracking-widest bg-transparent border border-slate-200 rounded-lg px-2 py-1.5 cursor-pointer focus:outline-none focus:ring-1 focus:ring-primary/20"
+                        >
+                          {LIFECYCLE_ORDER.map(lc => (
+                            <option key={lc} value={lc}>{lc === 'in_development' ? 'In Dev' : lc.charAt(0).toUpperCase() + lc.slice(1)}</option>
+                          ))}
+                        </select>
+                      </td>
+                      {activePlans.map(plan => (
+                        <td key={plan.id} className="px-6 py-4 text-center">
+                          {isAssignable ? (
+                            <button
+                              onClick={() => toggleFeature(feature.id, plan.id)}
+                              className="transition-all hover:scale-110 active:scale-95"
+                            >
+                              {feature.planAvailability[plan.id] ? (
+                                <span className="material-symbols-outlined text-lime-500">toggle_on</span>
+                              ) : (
+                                <span className="material-symbols-outlined text-slate-300">toggle_off</span>
+                              )}
+                            </button>
+                          ) : (
+                            <span className="material-symbols-outlined text-slate-200 text-sm" title="Only implemented features can be assigned">lock</span>
+                          )}
+                        </td>
+                      ))}
+                      <td className="px-8 py-4 text-center">
+                        {feature.source === 'custom' ? (
+                          <button onClick={() => setShowDeleteConfirm(feature.id)} className="text-slate-400 hover:text-red-500 transition-colors">
+                            <span className="material-symbols-outlined text-sm">delete</span>
+                          </button>
+                        ) : (
+                          <span className="text-[9px] text-slate-300 font-bold uppercase tracking-widest">locked</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
+          </div>
+          <div className="px-8 py-4 border-t border-slate-100 bg-slate-50/30">
+            <div className="flex gap-3 flex-wrap items-center">
+              <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Legend:</span>
+              {LIFECYCLE_ORDER.map(lc => (
+                <span key={lc}>{lifecycleBadge(lc)}</span>
+              ))}
+            </div>
           </div>
         </div>
       )}
@@ -477,9 +555,22 @@ const PlansPage: React.FC = () => {
                   <span className="material-symbols-outlined text-lg">close</span>
                 </button>
               </div>
-              <div className="p-8">
-                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">Feature Name</label>
-                <input value={newFeatureName} onChange={e => setNewFeatureName(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary" placeholder="e.g., Advanced Analytics" />
+              <div className="p-8 space-y-5">
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">Feature Name</label>
+                  <input value={newFeatureName} onChange={e => setNewFeatureName(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary" placeholder="e.g., Advanced Analytics" />
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">Initial Status</label>
+                  <select value={newFeatureLifecycle} onChange={e => setNewFeatureLifecycle(e.target.value as FeatureLifecycle)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary">
+                    {LIFECYCLE_ORDER.map(lc => (
+                      <option key={lc} value={lc}>{lc === 'in_development' ? 'In Development' : lc.charAt(0).toUpperCase() + lc.slice(1).replace('_', ' ')}</option>
+                    ))}
+                  </select>
+                  {newFeatureLifecycle !== 'implemented' && (
+                    <p className="text-[10px] text-amber-600 font-bold mt-2">Only &quot;Implemented&quot; features can be assigned to plans.</p>
+                  )}
+                </div>
               </div>
               <div className="p-8 pt-0 flex gap-3">
                 <button onClick={() => setShowFeatureModal(false)} className="flex-1 py-3.5 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-xs rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
@@ -488,6 +579,54 @@ const PlansPage: React.FC = () => {
             </motion.div>
           </div>
         )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showDeleteConfirm && (() => {
+          const feature = featuresData.find(f => f.id === showDeleteConfirm);
+          const deps = feature ? getFeatureDependencies(showDeleteConfirm) : [];
+          return (
+            <div className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setShowDeleteConfirm(null)}>
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 20 }}
+                onClick={e => e.stopPropagation()}
+                className="bg-white rounded-[3rem] shadow-2xl w-full max-w-sm overflow-hidden"
+              >
+                <div className="p-8 text-center">
+                  <div className="w-14 h-14 bg-red-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                    <span className="material-symbols-outlined text-red-600 text-2xl">delete_forever</span>
+                  </div>
+                  <h3 className="text-lg font-black text-primary tracking-tight mb-2">Delete Feature?</h3>
+                  <p className="text-sm text-slate-500 mb-3">
+                    Remove &quot;{feature?.name}&quot; from the feature matrix. This action cannot be undone.
+                  </p>
+                  {deps.length > 0 && (
+                    <div className="bg-amber-50 rounded-xl border border-amber-200 p-3 text-left">
+                      <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest mb-2 flex items-center gap-1">
+                        <span className="material-symbols-outlined text-xs">warning</span>
+                        Active in {deps.length} plan{deps.length !== 1 ? 's' : ''}
+                      </p>
+                      <div className="flex gap-1.5 flex-wrap">
+                        {deps.map(p => (
+                          <span key={p.id} className="px-2 py-0.5 bg-amber-100 text-amber-800 text-[9px] font-black uppercase tracking-widest rounded-md">{p.name}</span>
+                        ))}
+                      </div>
+                      <p className="text-[10px] text-amber-600 font-bold mt-2">This feature will be removed from these plans.</p>
+                    </div>
+                  )}
+                </div>
+                <div className="p-8 pt-0 flex gap-3">
+                  <button onClick={() => setShowDeleteConfirm(null)} className="flex-1 py-3.5 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-xs rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
+                  <button onClick={() => removeFeature(showDeleteConfirm)} disabled={deps.length > 0} className="flex-1 py-3.5 bg-red-500 text-white font-black text-xs rounded-2xl uppercase tracking-widest hover:bg-red-600 transition-all shadow-lg shadow-red-500/20 disabled:opacity-40 disabled:cursor-not-allowed">
+                    {deps.length > 0 ? 'Remove from Plans First' : 'Delete'}
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          );
+        })()}
       </AnimatePresence>
 
       <AnimatePresence>

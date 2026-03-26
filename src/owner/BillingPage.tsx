@@ -5,6 +5,9 @@ import { motion, AnimatePresence } from 'motion/react';
 type BillingTab = 'transactions' | 'invoices' | 'credits';
 type TxFilter = 'all' | 'paid' | 'failed' | 'refunded';
 type InvFilter = 'all' | 'paid' | 'overdue' | 'void';
+type ConfirmAction = { type: 'retry' | 'refund'; tenant: string; amount: number; invoiceNo: string } | null;
+type DetailModal = { type: 'invoice'; data: typeof invoiceHistory[0] } | { type: 'credit'; data: typeof creditNotes[0] } | null;
+type FormModal = 'invoice' | 'refund' | 'credit' | null;
 
 const BillingPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<BillingTab>('transactions');
@@ -13,7 +16,14 @@ const BillingPage: React.FC = () => {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [tenantFilter, setTenantFilter] = useState('all');
-  const [showRetryModal, setShowRetryModal] = useState<string | null>(null);
+  const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
+  const [actionSuccess, setActionSuccess] = useState<string | null>(null);
+  const [detailModal, setDetailModal] = useState<DetailModal>(null);
+  const [formModal, setFormModal] = useState<FormModal>(null);
+  const [formTenant, setFormTenant] = useState('');
+  const [formAmount, setFormAmount] = useState('');
+  const [formReason, setFormReason] = useState('');
+  const [formPlan, setFormPlan] = useState('');
 
   const totalRevenue = billingTransactions.filter(t => t.status === 'paid').reduce((s, t) => s + t.amount, 0);
   const failedTotal = billingTransactions.filter(t => t.status === 'failed').reduce((s, t) => s + t.amount, 0);
@@ -87,9 +97,37 @@ const BillingPage: React.FC = () => {
     { id: 'credits', label: 'Refunds / Credits', count: creditNotes.length },
   ];
 
-  const handleRetry = (tenantName: string) => {
-    setShowRetryModal(tenantName);
-    setTimeout(() => setShowRetryModal(null), 2000);
+  const executeConfirmedAction = () => {
+    if (!confirmAction) return;
+    const label = confirmAction.type === 'retry'
+      ? `Payment retry queued for ${confirmAction.tenant}`
+      : `Refund of $${confirmAction.amount} initiated for ${confirmAction.tenant}`;
+    setConfirmAction(null);
+    setActionSuccess(label);
+    setTimeout(() => setActionSuccess(null), 3000);
+  };
+
+  const [formConfirmStep, setFormConfirmStep] = useState(false);
+
+  const submitForm = () => {
+    if (!formModal) return;
+    if (!formConfirmStep) {
+      setFormConfirmStep(true);
+      return;
+    }
+    const label = formModal === 'invoice'
+      ? `Invoice issued to ${formTenant} for $${formAmount}`
+      : formModal === 'refund'
+      ? `Refund of $${formAmount} issued to ${formTenant}`
+      : `Credit note of $${formAmount} created for ${formTenant}`;
+    setFormModal(null);
+    setFormConfirmStep(false);
+    setFormTenant('');
+    setFormAmount('');
+    setFormReason('');
+    setFormPlan('');
+    setActionSuccess(label);
+    setTimeout(() => setActionSuccess(null), 3000);
   };
 
   const clearDateFilters = () => {
@@ -98,11 +136,26 @@ const BillingPage: React.FC = () => {
     setTenantFilter('all');
   };
 
+  const inputClass = "w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary";
+  const labelClass = "text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2";
+
   return (
     <div className="space-y-8">
-      <div>
-        <h2 className="text-2xl font-black text-primary tracking-tight">Billing & Revenue</h2>
-        <p className="text-slate-500 font-medium">Platform billing health, invoices, charges, and credit management.</p>
+      <div className="flex justify-between items-start flex-wrap gap-4">
+        <div>
+          <h2 className="text-2xl font-black text-primary tracking-tight">Billing & Revenue</h2>
+          <p className="text-slate-500 font-medium">Platform billing health, invoices, charges, and credit management.</p>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={() => { setFormModal('invoice'); setFormTenant(''); setFormAmount(''); setFormPlan(''); setFormReason(''); }} className="px-4 py-2.5 bg-primary text-white font-black text-[10px] rounded-xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest active:scale-95 flex items-center gap-1.5">
+            <span className="material-symbols-outlined text-sm">receipt</span>
+            Issue Invoice
+          </button>
+          <button onClick={() => { setFormModal('credit'); setFormTenant(''); setFormAmount(''); setFormReason(''); }} className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95 flex items-center gap-1.5">
+            <span className="material-symbols-outlined text-sm">note_add</span>
+            Issue Credit
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
@@ -203,7 +256,15 @@ const BillingPage: React.FC = () => {
                   <tbody>
                     {filteredTx.map(tx => (
                       <tr key={tx.id} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/50 transition-colors">
-                        <td className="px-6 py-3 text-xs font-bold text-slate-500">{tx.invoiceNo}</td>
+                        <td className="px-6 py-3">
+                          <button
+                            onClick={() => {
+                              const inv = invoiceHistory.find(i => i.invoiceNo === tx.invoiceNo);
+                              if (inv) setDetailModal({ type: 'invoice', data: inv });
+                            }}
+                            className="text-xs font-bold text-blue-600 hover:text-blue-800 hover:underline transition-colors"
+                          >{tx.invoiceNo}</button>
+                        </td>
                         <td className="px-6 py-3 font-bold text-slate-900 text-sm">{tx.tenant}</td>
                         <td className="px-6 py-3 text-sm text-slate-500">{tx.date}</td>
                         <td className="px-6 py-3">{typeBadge(tx.type)}</td>
@@ -211,12 +272,14 @@ const BillingPage: React.FC = () => {
                         <td className="px-6 py-3 text-xs text-slate-500">{tx.method}</td>
                         <td className="px-6 py-3">{statusBadge(tx.status)}</td>
                         <td className="px-6 py-3">
-                          {tx.status === 'failed' && (
-                            <button onClick={() => handleRetry(tx.tenant)} className="text-[9px] font-black text-blue-600 uppercase tracking-widest hover:text-blue-800">Retry</button>
-                          )}
-                          {tx.status === 'paid' && (
-                            <button className="text-[9px] font-black text-slate-400 uppercase tracking-widest hover:text-slate-600">Refund</button>
-                          )}
+                          <div className="flex gap-2">
+                            {tx.status === 'failed' && (
+                              <button onClick={() => setConfirmAction({ type: 'retry', tenant: tx.tenant, amount: tx.amount, invoiceNo: tx.invoiceNo })} className="text-[9px] font-black text-blue-600 uppercase tracking-widest hover:text-blue-800">Retry</button>
+                            )}
+                            {tx.status === 'paid' && tx.amount > 0 && (
+                              <button onClick={() => setConfirmAction({ type: 'refund', tenant: tx.tenant, amount: tx.amount, invoiceNo: tx.invoiceNo })} className="text-[9px] font-black text-slate-400 uppercase tracking-widest hover:text-slate-600">Refund</button>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -263,7 +326,9 @@ const BillingPage: React.FC = () => {
                   <tbody>
                     {filteredInv.map(inv => (
                       <tr key={inv.id} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/50 transition-colors">
-                        <td className="px-6 py-3 text-xs font-bold text-blue-600">{inv.invoiceNo}</td>
+                        <td className="px-6 py-3">
+                          <button onClick={() => setDetailModal({ type: 'invoice', data: inv })} className="text-xs font-bold text-blue-600 hover:text-blue-800 hover:underline transition-colors">{inv.invoiceNo}</button>
+                        </td>
                         <td className="px-6 py-3 font-bold text-slate-900 text-sm">{inv.tenant}</td>
                         <td className="px-6 py-3 text-xs text-slate-500">{inv.plan}</td>
                         <td className="px-6 py-3 text-sm text-slate-500">{inv.date}</td>
@@ -304,12 +369,24 @@ const BillingPage: React.FC = () => {
                   <tbody>
                     {filteredCredits.map(cr => (
                       <tr key={cr.id} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/50 transition-colors">
-                        <td className="px-6 py-3 text-xs font-bold text-violet-600">{cr.creditNo}</td>
+                        <td className="px-6 py-3">
+                          <button onClick={() => setDetailModal({ type: 'credit', data: cr })} className="text-xs font-bold text-violet-600 hover:text-violet-800 hover:underline transition-colors">{cr.creditNo}</button>
+                        </td>
                         <td className="px-6 py-3 font-bold text-slate-900 text-sm">{cr.tenant}</td>
                         <td className="px-6 py-3 text-sm text-slate-500">{cr.date}</td>
                         <td className="px-6 py-3 font-black text-amber-600 text-sm">${cr.amount}</td>
                         <td className="px-6 py-3 text-xs text-slate-500 max-w-48 truncate">{cr.reason}</td>
-                        <td className="px-6 py-3 text-xs font-bold text-blue-600">{cr.relatedInvoice || '—'}</td>
+                        <td className="px-6 py-3">
+                          {cr.relatedInvoice ? (
+                            <button
+                              onClick={() => {
+                                const inv = invoiceHistory.find(i => i.invoiceNo === cr.relatedInvoice);
+                                if (inv) setDetailModal({ type: 'invoice', data: inv });
+                              }}
+                              className="text-xs font-bold text-blue-600 hover:text-blue-800 hover:underline transition-colors"
+                            >{cr.relatedInvoice}</button>
+                          ) : '—'}
+                        </td>
                         <td className="px-6 py-3">{statusBadge(cr.status)}</td>
                       </tr>
                     ))}
@@ -359,7 +436,7 @@ const BillingPage: React.FC = () => {
                     </div>
                     <div className="flex items-center gap-2">
                       <span className="font-black text-red-600 text-sm">${tx.amount}</span>
-                      <button onClick={() => handleRetry(tx.tenant)} className="text-[9px] font-black text-blue-600 uppercase hover:text-blue-800">Retry</button>
+                      <button onClick={() => setConfirmAction({ type: 'retry', tenant: tx.tenant, amount: tx.amount, invoiceNo: tx.invoiceNo })} className="text-[9px] font-black text-blue-600 uppercase hover:text-blue-800">Retry</button>
                     </div>
                   </div>
                 ))}
@@ -377,8 +454,8 @@ const BillingPage: React.FC = () => {
                     <p className="text-[10px] text-slate-400">${t.mrr}/mo · {t.plan}</p>
                   </div>
                   <div className="flex gap-1">
-                    <button className="text-[9px] font-black text-blue-600 uppercase tracking-widest hover:text-blue-800 px-2 py-1">Invoice</button>
-                    <button className="text-[9px] font-black text-amber-600 uppercase tracking-widest hover:text-amber-800 px-2 py-1">Credit</button>
+                    <button onClick={() => { setFormModal('invoice'); setFormTenant(t.name); setFormAmount(String(t.mrr)); setFormPlan(t.plan); setFormReason(''); }} className="text-[9px] font-black text-blue-600 uppercase tracking-widest hover:text-blue-800 px-2 py-1">Invoice</button>
+                    <button onClick={() => { setFormModal('credit'); setFormTenant(t.name); setFormAmount(''); setFormReason(''); }} className="text-[9px] font-black text-amber-600 uppercase tracking-widest hover:text-amber-800 px-2 py-1">Credit</button>
                   </div>
                 </div>
               ))}
@@ -388,25 +465,260 @@ const BillingPage: React.FC = () => {
       </div>
 
       <AnimatePresence>
-        {showRetryModal && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/30 backdrop-blur-md flex items-center justify-center z-50"
-          >
+        {confirmAction && (
+          <div className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setConfirmAction(null)}>
             <motion.div
-              initial={{ scale: 0.95 }}
-              animate={{ scale: 1 }}
-              exit={{ scale: 0.95 }}
-              className="bg-white rounded-[3rem] p-8 max-w-sm w-full mx-4 shadow-2xl text-center"
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              onClick={e => e.stopPropagation()}
+              className="bg-white rounded-[3rem] shadow-2xl w-full max-w-sm overflow-hidden"
             >
-              <div className="w-12 h-12 bg-lime-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                <span className="material-symbols-outlined text-lime-600">check_circle</span>
+              <div className="p-8 text-center">
+                <div className={`w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-4 ${confirmAction.type === 'retry' ? 'bg-blue-100' : 'bg-amber-100'}`}>
+                  <span className={`material-symbols-outlined text-2xl ${confirmAction.type === 'retry' ? 'text-blue-600' : 'text-amber-600'}`}>
+                    {confirmAction.type === 'retry' ? 'refresh' : 'undo'}
+                  </span>
+                </div>
+                <h3 className="text-lg font-black text-primary tracking-tight mb-2">
+                  {confirmAction.type === 'retry' ? 'Retry Payment?' : 'Issue Refund?'}
+                </h3>
+                <p className="text-sm text-slate-500">
+                  {confirmAction.type === 'retry'
+                    ? `Re-attempt payment of $${confirmAction.amount} for ${confirmAction.tenant} (${confirmAction.invoiceNo}).`
+                    : `Refund $${confirmAction.amount} to ${confirmAction.tenant} for ${confirmAction.invoiceNo}. This action cannot be undone.`}
+                </p>
               </div>
-              <p className="font-black text-primary text-lg">Payment Retry Queued</p>
-              <p className="text-slate-500 text-sm mt-2">Retry initiated for {showRetryModal}. Status will update shortly.</p>
+              <div className="p-8 pt-0 flex gap-3">
+                <button onClick={() => setConfirmAction(null)} className="flex-1 py-3.5 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-xs rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
+                <button onClick={executeConfirmedAction} className={`flex-1 py-3.5 text-white font-black text-xs rounded-2xl uppercase tracking-widest transition-all shadow-lg ${
+                  confirmAction.type === 'retry' ? 'bg-blue-600 hover:bg-blue-700 shadow-blue-600/20' : 'bg-amber-500 hover:bg-amber-600 shadow-amber-500/20'
+                }`}>
+                  {confirmAction.type === 'retry' ? 'Retry Now' : 'Confirm Refund'}
+                </button>
+              </div>
             </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {detailModal && (
+          <div className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setDetailModal(null)}>
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              onClick={e => e.stopPropagation()}
+              className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg overflow-hidden"
+            >
+              {detailModal.type === 'invoice' && (() => {
+                const inv = detailModal.data;
+                return (
+                  <>
+                    <div className="p-8 border-b border-slate-100 flex justify-between items-center">
+                      <div>
+                        <h3 className="text-xl font-black text-primary tracking-tight">{inv.invoiceNo}</h3>
+                        <p className="text-sm text-slate-500 mt-1">{inv.tenant} · {inv.plan}</p>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        {statusBadge(inv.status)}
+                        <button onClick={() => setDetailModal(null)} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-all">
+                          <span className="material-symbols-outlined text-lg">close</span>
+                        </button>
+                      </div>
+                    </div>
+                    <div className="p-8 space-y-6">
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <p className={labelClass}>Issue Date</p>
+                          <p className="font-bold text-slate-900">{inv.date}</p>
+                        </div>
+                        <div>
+                          <p className={labelClass}>Due Date</p>
+                          <p className="font-bold text-slate-900">{inv.dueDate}</p>
+                        </div>
+                        {inv.paidDate && (
+                          <div>
+                            <p className={labelClass}>Paid Date</p>
+                            <p className="font-bold text-lime-700">{inv.paidDate}</p>
+                          </div>
+                        )}
+                      </div>
+                      <div>
+                        <p className={labelClass}>Line Items</p>
+                        <div className="bg-slate-50 rounded-xl border border-slate-100 overflow-hidden">
+                          {inv.items.map((item, i) => (
+                            <div key={i} className="flex justify-between items-center px-4 py-3 border-b border-slate-100 last:border-0">
+                              <div>
+                                <p className="text-sm font-bold text-slate-900">{item.description}</p>
+                                <p className="text-[10px] text-slate-400">Qty: {item.qty}</p>
+                              </div>
+                              <span className="font-black text-primary">${item.amount}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="bg-primary/5 rounded-xl p-4 border border-primary/10">
+                        <div className="flex justify-between text-sm mb-1">
+                          <span className="text-slate-500">Subtotal</span>
+                          <span className="font-bold text-slate-900">${inv.amount}</span>
+                        </div>
+                        <div className="flex justify-between text-sm mb-1">
+                          <span className="text-slate-500">Tax</span>
+                          <span className="font-bold text-slate-900">${inv.tax.toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between text-sm pt-2 border-t border-primary/10">
+                          <span className="font-black text-primary">Total</span>
+                          <span className="font-black text-primary text-lg">${inv.total.toFixed(2)}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                );
+              })()}
+
+              {detailModal.type === 'credit' && (() => {
+                const cr = detailModal.data;
+                return (
+                  <>
+                    <div className="p-8 border-b border-slate-100 flex justify-between items-center">
+                      <div>
+                        <h3 className="text-xl font-black text-primary tracking-tight">{cr.creditNo}</h3>
+                        <p className="text-sm text-slate-500 mt-1">{cr.tenant}</p>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        {statusBadge(cr.status)}
+                        <button onClick={() => setDetailModal(null)} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-all">
+                          <span className="material-symbols-outlined text-lg">close</span>
+                        </button>
+                      </div>
+                    </div>
+                    <div className="p-8 space-y-6">
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <p className={labelClass}>Date</p>
+                          <p className="font-bold text-slate-900">{cr.date}</p>
+                        </div>
+                        <div>
+                          <p className={labelClass}>Amount</p>
+                          <p className="font-black text-amber-600 text-xl">${cr.amount}</p>
+                        </div>
+                      </div>
+                      <div>
+                        <p className={labelClass}>Reason</p>
+                        <p className="text-sm text-slate-700 leading-relaxed bg-slate-50 p-4 rounded-xl border border-slate-100">{cr.reason}</p>
+                      </div>
+                      {cr.relatedInvoice && (
+                        <div>
+                          <p className={labelClass}>Related Invoice</p>
+                          <button
+                            onClick={() => {
+                              const inv = invoiceHistory.find(i => i.invoiceNo === cr.relatedInvoice);
+                              if (inv) setDetailModal({ type: 'invoice', data: inv });
+                            }}
+                            className="text-sm font-bold text-blue-600 hover:text-blue-800 hover:underline"
+                          >{cr.relatedInvoice}</button>
+                        </div>
+                      )}
+                    </div>
+                  </>
+                );
+              })()}
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {formModal && (
+          <div className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setFormModal(null)}>
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              onClick={e => e.stopPropagation()}
+              className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg overflow-hidden"
+            >
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center">
+                <div>
+                  <h3 className="text-xl font-black text-primary tracking-tight">
+                    {formModal === 'invoice' ? 'Issue Invoice' : formModal === 'refund' ? 'Issue Refund' : 'Issue Credit Note'}
+                  </h3>
+                  <p className="text-sm text-slate-500 mt-1">
+                    {formModal === 'invoice' ? 'Create a new invoice for a tenant.' : formModal === 'refund' ? 'Process a refund to a tenant.' : 'Create a credit note for a tenant.'}
+                  </p>
+                </div>
+                <button onClick={() => setFormModal(null)} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-all">
+                  <span className="material-symbols-outlined text-lg">close</span>
+                </button>
+              </div>
+              <div className="p-8 space-y-5">
+                <div>
+                  <label className={labelClass}>Tenant</label>
+                  <select value={formTenant} onChange={e => setFormTenant(e.target.value)} className={inputClass}>
+                    <option value="">Select tenant...</option>
+                    {tenants.map(t => <option key={t.id} value={t.name}>{t.name}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className={labelClass}>Amount (USD)</label>
+                  <input type="number" value={formAmount} onChange={e => setFormAmount(e.target.value)} className={inputClass} placeholder="0.00" />
+                </div>
+                {formModal === 'invoice' && (
+                  <div>
+                    <label className={labelClass}>Plan / Description</label>
+                    <input value={formPlan} onChange={e => setFormPlan(e.target.value)} className={inputClass} placeholder="e.g., Growth Plan - Monthly" />
+                  </div>
+                )}
+                {(formModal === 'refund' || formModal === 'credit') && (
+                  <div>
+                    <label className={labelClass}>Reason</label>
+                    <textarea value={formReason} onChange={e => setFormReason(e.target.value)} className={`${inputClass} resize-none`} rows={3} placeholder="Reason for this credit/refund..." />
+                  </div>
+                )}
+              </div>
+              {formConfirmStep && (
+                <div className="px-8 py-4 bg-amber-50 border-t border-amber-100">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="material-symbols-outlined text-amber-600 text-sm">warning</span>
+                    <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest">Confirm Action</p>
+                  </div>
+                  <p className="text-sm text-amber-700">
+                    {formModal === 'invoice' ? `Issue invoice of $${formAmount} to ${formTenant}?` : formModal === 'refund' ? `Refund $${formAmount} to ${formTenant}? This cannot be undone.` : `Create credit note of $${formAmount} for ${formTenant}?`}
+                  </p>
+                </div>
+              )}
+              <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3">
+                <button onClick={() => { if (formConfirmStep) { setFormConfirmStep(false); } else { setFormModal(null); setFormConfirmStep(false); } }} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">
+                  {formConfirmStep ? 'Go Back' : 'Cancel'}
+                </button>
+                <button onClick={submitForm} disabled={!formTenant || !formAmount} className={`flex-1 py-4 font-black text-sm rounded-2xl shadow-lg uppercase tracking-widest transition-all disabled:opacity-40 disabled:cursor-not-allowed ${formConfirmStep ? 'bg-amber-500 text-white shadow-amber-500/20 hover:bg-amber-600' : 'bg-primary text-white shadow-primary/20 hover:bg-primary/90'}`}>
+                  {formConfirmStep
+                    ? (formModal === 'invoice' ? 'Confirm & Issue' : formModal === 'refund' ? 'Confirm Refund' : 'Confirm Credit')
+                    : (formModal === 'invoice' ? 'Issue Invoice' : formModal === 'refund' ? 'Process Refund' : 'Create Credit')
+                  }
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {actionSuccess && (
+          <motion.div
+            initial={{ opacity: 0, y: 50 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 50 }}
+            className="fixed bottom-8 left-1/2 -translate-x-1/2 z-50"
+          >
+            <div className="bg-white rounded-2xl shadow-2xl border border-lime-200 px-6 py-4 flex items-center gap-3">
+              <div className="w-8 h-8 bg-lime-100 rounded-full flex items-center justify-center">
+                <span className="material-symbols-outlined text-lime-600 text-sm">check_circle</span>
+              </div>
+              <p className="font-bold text-slate-900 text-sm">{actionSuccess}</p>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>

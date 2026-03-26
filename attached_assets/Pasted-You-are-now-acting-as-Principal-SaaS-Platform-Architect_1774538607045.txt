@@ -1,0 +1,177 @@
+You are now acting as:
+Principal SaaS Platform Architect + Principal Billing Systems Designer + Principal Commercial Plans Architect + Principal Platform Analytics Designer + Principal UX Workflow Designer + Principal React/TypeScript Engineer + Principal QA Auditor
+
+IMPORTANT:
+This is a correction/polish pass ONLY for the already-built workstream:
+Platform Command Center & Commercial Plan System
+
+Do not touch unrelated modules.
+Do not redesign the UI.
+Preserve the current design baseline exactly.
+
+Fix and refine the following:
+
+==================================================
+1. OVERVIEW PAGE
+==================================================
+
+Make the Overview page more dynamic and operationally useful.
+Improve functionality, not visual redesign.
+
+Required improvements:
+- stronger command-center behavior
+- subscription health summary
+- failed payment summary
+- upcoming renewals
+- provisioning / onboarding summary
+- recent platform activity feed
+- drill-down actions from KPI cards
+- clearer operational summary for:
+  - active tenants
+  - trial tenants
+  - suspended tenants
+  - overdue accounts
+  - billing alerts
+  - support/escalation items
+
+The page should feel like a real system-owner command center, not just a static stats dashboard.
+
+==================================================
+2. BILLING PAGE
+==================================================
+
+All billing actions must use confirmation modals before proceeding.
+
+Apply this to:
+- Retry
+- Refund
+- Invoice
+- Credit
+
+Rules:
+- the user must first see a clear confirmation modal
+- the success popup/message (like “Payment Retry Queued”) should happen only AFTER confirmation
+- do not execute actions immediately without confirmation
+
+Invoice detail behavior:
+- clicking an invoice number must open a real invoice detail modal/drawer/page
+- include:
+  - invoice details
+  - print invoice
+  - send to customer
+  - related actions
+  - relevant status/history context
+
+Refund / Credit detail behavior:
+- clicking a refund or credit number must open a real refund/credit detail modal/drawer/page
+- include:
+  - detail view
+  - print
+  - send to customer
+  - related actions
+  - relevant history context
+
+Missing workflow coverage:
+- if issue invoice / issue refund / issue credit note flows are missing, create proper in-app workflow surfaces for them
+- do not leave those concepts as invisible or assumed
+
+==================================================
+3. PLANS & FEATURES
+==================================================
+
+Keep core built-in modules locked.
+
+Feature lifecycle:
+Add an intelligent lifecycle/status for newly created features and add-ons.
+
+Use statuses such as:
+- Draft
+- Planned
+- In Development
+- Implemented
+- Deprecated
+- Archived
+
+Rules:
+- newly created features should NOT become plan-assignable unless they are in an Implemented / ready state
+- newly created add-ons should follow the same logic where appropriate
+
+Deletion safety:
+- deleting a feature or add-on must use a confirmation modal
+- if a feature/add-on is currently used by one or more plans:
+  - block deletion
+  - show exactly which plans are using it
+  - require removal from those plans before deletion can proceed
+
+Make this behavior professional and commercial-platform appropriate.
+
+==================================================
+4. USAGE PAGE
+==================================================
+
+Preserve the current working Usage page, but improve it now with the following useful operational enhancements:
+
+Required improvements:
+- export capability
+- tenant drill-down behavior
+- date filters / time range filtering
+- subscription / plan usage comparisons
+- alert thresholds or usage warning indicators where appropriate
+
+Guidelines:
+- do not redesign the page
+- improve it as a more useful operational usage-monitoring page
+- keep it aligned with platform analytics/admin workflow
+- if there are linked tenant usage details, support clear drill-down or deep-link behavior
+
+==================================================
+5. DO NOT BREAK THESE
+==================================================
+
+Do NOT break:
+- auth flow
+- preview mode
+- current platform/store role hierarchy
+- current RBAC logic
+- current design baseline
+- existing working routes/pages outside this workstream
+
+==================================================
+6. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether Overview page is now more dynamic and command-center oriented
+C. whether billing actions now use confirmation flows
+D. whether invoice number opens real detail view
+E. whether refund/credit number opens real detail view
+F. whether issue invoice / refund / credit flows now exist
+G. whether feature lifecycle/status was added
+H. whether feature/add-on deletion now checks dependencies and blocks unsafe deletion
+I. whether Usage page now supports export
+J. whether Usage page now supports tenant drill-down
+K. whether Usage page now supports date/time filtering
+L. whether Usage page now supports subscription/plan usage comparisons
+M. whether Usage page now supports alert thresholds or warning indicators
+N. confirmation that no visual drift was introduced
+
+==================================================
+7. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- Overview is more dynamic and operationally useful
+- billing actions use confirmation flows
+- invoice number opens real detail view
+- refund/credit number opens real detail view
+- issue invoice/refund/credit flows exist
+- feature lifecycle/status exists
+- feature/add-on deletion checks dependencies
+- Usage supports export
+- Usage supports tenant drill-down
+- Usage supports date/time filtering
+- Usage supports subscription/plan comparison
+- Usage supports alert thresholds/warnings
+- auth flow still works
+- no visual drift was introduced

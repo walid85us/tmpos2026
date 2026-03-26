@@ -1,0 +1,73 @@
+You are now acting as:
+Principal SaaS Platform Architect + Principal Billing Systems Designer + Principal Commercial Plans Architect + Principal UX Workflow Designer + Principal React/TypeScript Engineer + Principal QA Auditor
+
+IMPORTANT:
+This is a correction/polish pass ONLY for the already-built workstream:
+Platform Command Center & Commercial Plan System
+
+Do not touch unrelated modules.
+Do not redesign the UI.
+Preserve the current design baseline exactly.
+
+Fix and refine the following:
+
+1. OVERVIEW PAGE
+- Make the Overview page more dynamic and operationally useful
+- Add stronger command-center behavior such as:
+  - subscription health summary
+  - failed payment summary
+  - upcoming renewals
+  - provisioning/onboarding summary
+  - recent activity feed
+  - drill-down actions from KPI cards
+- Improve functionality, not visual redesign
+
+2. BILLING PAGE
+- All billing actions must use confirmation modals before proceeding:
+  - Retry
+  - Refund
+  - Invoice
+  - Credit
+- Current success popup (like Payment Retry Queued) should happen only after confirmation
+- Clicking invoice number must open invoice detail modal/drawer/page with:
+  - invoice details
+  - print
+  - send to customer
+  - related actions
+- Clicking refund/credit number must open refund/credit detail modal/drawer/page with:
+  - detail view
+  - print
+  - send to customer
+  - related actions
+- If invoice/refund/credit issue flows are missing, create proper in-app workflow surfaces for:
+  - issue invoice
+  - issue refund
+  - issue credit note
+
+3. PLANS & FEATURES
+- Keep core built-in modules locked
+- Add an intelligent lifecycle/status for newly created features and add-ons:
+  - Draft
+  - Planned
+  - In Development
+  - Implemented
+  - Deprecated
+  - Archived
+- Newly created features should not become plan-assignable unless status is Implemented (or equivalent enabled-ready state)
+- Deleting a feature or add-on must use confirmation modal
+- If a feature/add-on is used by any plan, block deletion and show exactly which plans are using it
+- Require removal from those plans before deletion can proceed
+
+4. USAGE PAGE
+- Preserve current working state
+- only refine if needed, no major redesign
+
+Return:
+A. exact files modified
+B. whether billing actions now use confirmation flows
+C. whether invoice number opens real detail view
+D. whether refund/credit number opens real detail view
+E. whether issue invoice/refund/credit flows now exist
+F. whether new feature lifecycle/status was added
+G. whether feature/add-on deletion now checks dependencies
+H. confirmation that no visual drift was introduced
