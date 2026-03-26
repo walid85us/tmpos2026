@@ -1,0 +1,572 @@
+Point of Sale
+https://help.repairdesk.co/portal/en/kb/articles/how-does-the-pos-section-work
+https://help.repairdesk.co/portal/en/kb/articles/how-to-create-a-ticket-from-point-of-sale
+https://help.repairdesk.co/portal/en/kb/articles/closing-a-repair-ticket-in-pos
+https://help.repairdesk.co/portal/en/kb/articles/quick-check-in
+https://help.repairdesk.co/portal/en/kb/articles/selling-a-product
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-process-refund-exchange-in-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/how-to-process-the-warranty-claim-for-a-repair-part
+https://help.repairdesk.co/portal/en/kb/articles/cash-drawer
+https://help.repairdesk.co/portal/en/kb/articles/opening-closing-register-shifts
+https://help.repairdesk.co/portal/en/kb/articles/shift-schedules
+https://help.repairdesk.co/portal/en/kb/articles/split-payment-between-multiple-tender-types
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-add-or-update-customer-information-from-pos
+https://help.repairdesk.co/portal/en/kb/articles/how-to-make-it-mandatory-to-take-customer-information
+https://help.repairdesk.co/portal/en/kb/articles/advanced-search-option-in-repairdesk-pos
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-add-items-to-pos-basket
+https://help.repairdesk.co/portal/en/kb/articles/can-i-add-new-inventory-items-from-pos
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-update-item-from-the-list-on-pos
+https://help.repairdesk.co/portal/en/kb/articles/how-to-apply-a-discount-in-repairdesk-pos
+https://help.repairdesk.co/portal/en/kb/articles/suggestive-sale-alert
+https://help.repairdesk.co/portal/en/kb/articles/how-to-print-mini-receipt-ticket-label-or-full-invoice
+https://help.repairdesk.co/portal/en/kb/articles/what-is-cash-in-out-28-1-2025
+https://help.repairdesk.co/portal/en/kb/articles/switch-user-profile-pin-login-28-1-2025
+https://help.repairdesk.co/portal/en/kb/articles/access-pin
+https://help.repairdesk.co/portal/en/kb/articles/can-i-pause-hold-a-customer-order-and-reopen-it-later-28-1-2025
+https://help.repairdesk.co/portal/en/kb/articles/how-to-enable-repair-categories-on-pos
+https://help.repairdesk.co/portal/en/kb/articles/how-to-add-new-manufacturer-28-1-2025
+https://help.repairdesk.co/portal/en/kb/articles/e2-9a-a1-how-to-create-a-special-parts-order-for-a-non-catalogued-part
+https://help.repairdesk.co/portal/en/kb/articles/custom-fields-28-1-2025
+https://help.repairdesk.co/portal/en/kb/articles/how-to-make-it-mandatory-to-enter-imei-serial-number-on-pos-tickets-28-1-2025
+https://help.repairdesk.co/portal/en/kb/articles/how-to-make-it-compulsory-to-add-network-device-location-and-passcode-while-making-repair-ticket-28-1-2025
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-save-an-android-phone-pattern-lock-28-1-2025
+https://help.repairdesk.co/portal/en/kb/articles/how-to-use-store-credits-in-repairdesk-25-3-2025
+https://help.repairdesk.co/portal/en/kb/articles/how-to-use-the-repairdesk-loyalty-program
+https://help.repairdesk.co/portal/en/kb/articles/how-to-use-the-repairdesk-loyalty-program
+https://help.repairdesk.co/portal/en/kb/articles/deposits-bench-fees
+https://help.repairdesk.co/portal/en/kb/articles/how-to-create-a-new-task-type-28-1-2025
+https://help.repairdesk.co/portal/en/kb/articles/manage-expenses
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-view-all-the-previous-orders-from-pos-28-1-2025
+https://help.repairdesk.co/portal/en/kb/articles/repair-module-configuration-28-1-2025
+
+------------
+
+Manage Tickets
+https://help.repairdesk.co/portal/en/kb/articles/how-does-ticket-section-works
+https://help.repairdesk.co/portal/en/kb/articles/how-to-create-a-repair-ticket
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-view-all-the-tickets
+https://help.repairdesk.co/portal/en/kb/articles/can-i-search-any-specific-ticket
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-export-repair-tickets-to-excel-format-30-4-2025
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-view-complete-ticket-details
+https://help.repairdesk.co/portal/en/kb/articles/can-i-update-edit-an-existing-ticket-s-details
+https://help.repairdesk.co/portal/en/kb/articles/how-to-delete-a-repair-ticket
+https://help.repairdesk.co/portal/en/kb/articles/how-do-i-change-ticket-numbers
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-add-customer-information-on-new-ticket
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-add-repair-device-details-on-new-ticket
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-link-inventory-parts-with-ticket-repair-item
+https://help.repairdesk.co/portal/en/kb/articles/how-to-add-diagnostic-notes-to-tickets-and-invoices
+https://help.repairdesk.co/portal/en/kb/articles/how-to-make-it-compulsory-to-add-pre-post-repair-device-conditions
+https://help.repairdesk.co/portal/en/kb/articles/upload-pre-post-images
+https://help.repairdesk.co/portal/en/kb/articles/how-to-upload-attachments-on-repair-ticket
+https://help.repairdesk.co/portal/en/kb/articles/how-to-add-staff-comments
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-set-serial-as-the-default-input-field-when-creating-a-ticket
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-add-device-location
+https://help.repairdesk.co/portal/en/kb/articles/how-to-re-assign-repair-ticket-to-a-technician
+https://help.repairdesk.co/portal/en/kb/articles/enter-pin-before-an-employee-can-create-repair-ticket
+https://help.repairdesk.co/portal/en/kb/articles/can-i-get-notifications-when-a-ticket-is-assigned-to-me
+https://help.repairdesk.co/portal/en/kb/articles/is-there-a-way-to-show-tickets-to-all-employees
+https://help.repairdesk.co/portal/en/kb/articles/how-to-manage-ticket-status
+https://help.repairdesk.co/portal/en/kb/articles/can-i-send-ticket-updates-to-the-customer
+https://help.repairdesk.co/portal/en/kb/articles/how-does-repairdesk-calculate-profit-on-a-repair
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-process-warranty-claim-for-repair-parts
+https://help.repairdesk.co/portal/en/kb/articles/how-to-copy-the-original-ticket-notes-into-the-warranty-repair-ticket
+https://help.repairdesk.co/portal/en/kb/articles/how-to-transfer-ticket-from-one-store-to-another-location
+https://help.repairdesk.co/portal/en/kb/articles/how-to-create-rma-for-tickets-from-the-tickets-screen
+https://help.repairdesk.co/portal/en/kb/articles/can-i-change-service-receipt-layout
+https://help.repairdesk.co/portal/en/kb/articles/ticket-settings
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-add-unlocking-device-details-on-new-ticket
+https://help.repairdesk.co/portal/en/kb/articles/billable-hours
+https://help.repairdesk.co/portal/en/kb/articles/how-to-polish-your-notes-using-ai
+https://help.repairdesk.co/portal/en/kb/articles/ticket-management
+https://help.repairdesk.co/portal/en/kb/articles/new-ticket-listing
+https://help.repairdesk.co/portal/en/kb/articles/how-to-create-a-new-ticket-from-manage-tickets-28-1-2025
+https://help.repairdesk.co/portal/en/kb/articles/workflows
+https://help.repairdesk.co/portal/en/kb/articles/itemize-each-service-as-a-separate-line-item
+https://help.repairdesk.co/portal/en/kb/articles/rush-jobs
+https://help.repairdesk.co/portal/en/kb/articles/how-to-add-or-update-customer-details-within-a-ticket
+https://help.repairdesk.co/portal/en/kb/articles/how-to-add-a-new-repair-line-item-to-an-existing-ticket
+https://help.repairdesk.co/portal/en/kb/articles/how-to-add-a-new-special-part-to-a-ticket
+https://help.repairdesk.co/portal/en/kb/articles/how-to-add-a-new-repair-part-process-a-warranty-claim-for-a-repair-part
+https://help.repairdesk.co/portal/en/kb/articles/how-to-add-an-inventory-item-to-a-ticket
+https://help.repairdesk.co/portal/en/kb/articles/how-to-create-an-estimate-for-a-product-or-a-service-within-a-ticket
+https://help.repairdesk.co/portal/en/kb/articles/ticket-history
+https://help.repairdesk.co/portal/en/kb/articles/how-to-add-device-pre-post-repair-condition-12-8-2025
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-export-repair-tickets-to-excel-format
+
+------
+
+Manage Inventory
+https://help.repairdesk.co/portal/en/kb/articles/product-attributes-and-variants
+https://help.repairdesk.co/portal/en/kb/articles/inventory-management-revamped
+https://help.repairdesk.co/portal/en/kb/articles/manage-serialized-inventory-revamped
+https://help.repairdesk.co/portal/en/kb/articles/rd-product-category-tree
+https://help.repairdesk.co/portal/en/kb/articles/adding-a-new-item-to-inventory
+https://help.repairdesk.co/portal/en/kb/articles/managing-new-handsets-in-inventory
+https://help.repairdesk.co/portal/en/kb/articles/importing-multiple-inventory-items
+https://help.repairdesk.co/portal/en/kb/articles/bulk-serialized-importing-exporting
+https://help.repairdesk.co/portal/en/kb/articles/exporting-inventory
+https://help.repairdesk.co/portal/en/kb/articles/updating-or-deleting-an-inventory-item
+https://help.repairdesk.co/portal/en/kb/articles/searching-for-any-specific-inventory-item
+https://help.repairdesk.co/portal/en/kb/articles/inventory-valuation
+https://help.repairdesk.co/portal/en/kb/articles/inventory-adjustment
+https://help.repairdesk.co/portal/en/kb/articles/adding-multiple-sku-s
+https://help.repairdesk.co/portal/en/kb/articles/auto-generating-sku-upc-code
+https://help.repairdesk.co/portal/en/kb/articles/updating-individual-item-price-across-multiple-stores
+https://help.repairdesk.co/portal/en/kb/articles/disabling-auto-create-inventory-across-multi-store
+https://help.repairdesk.co/portal/en/kb/articles/generating-and-printing-barcode-for-tangible-inventory-items
+https://help.repairdesk.co/portal/en/kb/articles/editing-inventory-label-template
+https://help.repairdesk.co/portal/en/kb/articles/uploading-pictures-for-inventory-items
+https://help.repairdesk.co/portal/en/kb/articles/assigning-tax-to-an-inventory-item
+https://help.repairdesk.co/portal/en/kb/articles/hiding-specific-products-on-point-of-sale
+
+
+Manage Trade-In : Buy, sell, and track trade-in devices with ease. Evaluate conditions, set resale prices, and manage trade-in inventory efficiently.
+https://help.repairdesk.co/portal/en/kb/articles/buyback-trade-in
+https://help.repairdesk.co/portal/en/kb/articles/how-to-move-trade-in-items-to-inventory
+https://help.repairdesk.co/portal/en/kb/articles/how-to-convert-move-trade-in-item-to-serialized-inventory
+https://help.repairdesk.co/portal/en/kb/articles/how-to-process-exchange-against-trade-in-item
+
+Manage Refurbishment : Track refurbishment processes, assign technicians, and monitor the status of repaired or refurbished items.
+https://help.repairdesk.co/portal/en/kb/articles/refurbishment-module
+
+
+Transfer Inventory : Seamlessly move parts and stock between stores to ensure inventory is always accessible, preventing repair delays and improving...
+https://help.repairdesk.co/portal/en/kb/articles/inventory-transfer
+https://help.repairdesk.co/portal/en/kb/articles/how-to-transfer-stock-from-one-store-location-to-another
+https://help.repairdesk.co/portal/en/kb/articles/inventory-transfer-and-inter-company-invoicing
+https://help.repairdesk.co/portal/en/kb/articles/how-to-create-a-transfer-order-using-low-stock-report
+https://help.repairdesk.co/portal/en/kb/articles/e2-9a-a1-how-to-add-a-serialized-inventory-item-to-transfer-order
+
+Inventory Count : Perform stock audits, adjust discrepancies, and update inventory records to maintain accurate stock levels
+https://help.repairdesk.co/portal/en/kb/articles/inventory-count
+https://help.repairdesk.co/portal/en/kb/articles/how-to-count-trade-in-items-under-inventory-count-modul
+
+Manage Miscellaneous Items : Easily order and track non-catalog items like rare repair parts, tools, and accessories for older devices—ensuring repairs aren’t...
+https://help.repairdesk.co/portal/en/kb/articles/how-to-use-the-handling-and-convenience-fee-feature
+
+
+Manage Bill Payments : Seamlessly move parts and stock between stores to ensure inventory is always accessible, preventing repair delays and improving...
+https://help.repairdesk.co/portal/en/kb/articles/how-to-get-started-with-bill-payments-16-6-2025
+https://help.repairdesk.co/portal/en/kb/articles/how-to-process-bill-payment
+https://help.repairdesk.co/portal/en/kb/articles/how-to-send-reminders-using-the-campaigner-module
+https://help.repairdesk.co/portal/en/kb/articles/how-to-view-payment-history-of-bill-payments-24-6-2025
+
+Manage Gift Cards : Issue, track, and redeem gift cards as part of your sales strategy to increase customer retention.
+https://help.repairdesk.co/portal/en/kb/articles/how-to-use-gift-cards-in-repairdesk
+
+Manage Bundles : Record and track bill payments add as many network carriers as you want and send recharge to multiple mobile networks in just a few...
+https://help.repairdesk.co/portal/en/kb/articles/how-to-use-inventory-service-bundles
+
+
+-------------
+
+Manage Invoices : Create, edit, and send invoices for sales, and services. Apply payments, issue refunds, and track balances.
+
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-send-an-invoice-via-sms
+https://help.repairdesk.co/portal/en/kb/articles/manage-invoices
+https://help.repairdesk.co/portal/en/kb/articles/invoice-listing-page
+https://help.repairdesk.co/portal/en/kb/articles/recurring-billing-in-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/how-do-i-add-a-payment
+https://help.repairdesk.co/portal/en/kb/articles/how-to-view-payment-history-for-invoices-in-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/sending-multiple-invoice-reminders
+https://help.repairdesk.co/portal/en/kb/articles/single-payment-for-multiple-invoices
+https://help.repairdesk.co/portal/en/kb/articles/can-i-change-edit-invoice-number
+https://help.repairdesk.co/portal/en/kb/articles/how-do-i-print-an-invoice
+https://help.repairdesk.co/portal/en/kb/articles/how-do-i-download-an-invoice-in-pdf-format
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-send-invoice-via-email-28-1-2025
+https://help.repairdesk.co/portal/en/kb/articles/can-i-create-a-duplicate-invoice
+https://help.repairdesk.co/portal/en/kb/articles/how-to-update-multiple-invoices-at-a-time
+https://help.repairdesk.co/portal/en/kb/articles/enter-access-pin-before-creating-an-invoice-or-adding-a-payment
+https://help.repairdesk.co/portal/en/kb/articles/how-do-i-add-a-new-product-on-invoice
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-add-edit-customer-to-an-invoice
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-add-terms-conditions-on-receipts-invoices-and-signatures
+
+---------
+
+Manage Services that Streamline repair workflows, manage technician assignments, and update customers on job progress.
+https://help.repairdesk.co/portal/en/kb/articles/manage-repair-categories
+https://help.repairdesk.co/portal/en/kb/articles/repair-services
+https://help.repairdesk.co/portal/en/kb/articles/bulk-repair-services-price-editor
+https://help.repairdesk.co/portal/en/kb/articles/how-to-set-flag-notes-for-the-services
+https://help.repairdesk.co/portal/en/kb/articles/bulk-image-update-tool
+
+
+-----
+
+
+Manage Supply Chain Oversee supplier relationships, purchase orders, and sourcing to ensure an optimized supply chain for your business.
+
+
+Manage Purchase Orders
+https://help.repairdesk.co/portal/en/kb/articles/purchase-orders
+https://help.repairdesk.co/portal/en/kb/articles/purchase-order-listing-new
+https://help.repairdesk.co/portal/en/kb/articles/where-can-i-view-and-manage-all-of-my-purchase-orders
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-edit-an-existing-purchase-order
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-change-the-default-view-of-the-purchase-order-listing
+
+
+Manage Good Received Notes
+https://help.repairdesk.co/portal/en/kb/articles/goods-received-notes
+
+Manage Return Merchandiser Authorization
+https://help.repairdesk.co/portal/en/kb/articles/how-does-rma-work
+
+
+------
+
+Reports 
+under reports there are 4 sections as follow :
+
+Sales Reports
+https://help.repairdesk.co/portal/en/kb/articles/custom-sales-report-builder
+https://help.repairdesk.co/portal/en/kb/articles/multi-store-report
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-bookmark-a-report
+https://help.repairdesk.co/portal/en/kb/articles/sales-reports
+https://help.repairdesk.co/portal/en/kb/articles/difference-in-sales-reports-28-1-2025-1
+https://help.repairdesk.co/portal/en/kb/articles/register-sales-28-1-2025-1
+https://help.repairdesk.co/portal/en/kb/articles/sales-by-item-type-report-28-1-2025-1
+https://help.repairdesk.co/portal/en/kb/articles/cash-in-out-history-report-28-1-2025-1
+https://help.repairdesk.co/portal/en/kb/articles/tax-report-28-1-2025-1
+https://help.repairdesk.co/portal/en/kb/articles/total-revenue-by-sales-report-28-1-2025-1
+https://help.repairdesk.co/portal/en/kb/articles/item-wise-sales-report-28-1-2025-1
+https://help.repairdesk.co/portal/en/kb/articles/z-report-28-1-2025-1
+https://help.repairdesk.co/portal/en/kb/articles/sales-summary-report-28-1-2025-1
+https://help.repairdesk.co/portal/en/kb/articles/transaction-log-report-28-1-2025-1
+https://help.repairdesk.co/portal/en/kb/articles/how-did-you-hear-about-us-report-28-1-2025-1
+https://help.repairdesk.co/portal/en/kb/articles/trade-in-report-28-1-2025-1
+https://help.repairdesk.co/portal/en/kb/articles/total-amount-by-payment-type-report-28-1-2025-1
+https://help.repairdesk.co/portal/en/kb/articles/profit-and-loss-report-28-1-2025-1
+https://help.repairdesk.co/portal/en/kb/articles/total-revenue-by-customer-report-28-1-2025-1
+https://help.repairdesk.co/portal/en/kb/articles/business-kpis-28-1-2025-1
+
+
+Employee Reports
+https://help.repairdesk.co/portal/en/kb/articles/employee-reports
+https://help.repairdesk.co/portal/en/kb/articles/employee-and-store-kpis
+https://help.repairdesk.co/portal/en/kb/articles/employee-dashboard
+https://help.repairdesk.co/portal/en/kb/articles/store-progress-tracker
+https://help.repairdesk.co/portal/en/kb/articles/employee-activity-log
+https://help.repairdesk.co/portal/en/kb/articles/employee-productivity-report
+https://help.repairdesk.co/portal/en/kb/articles/employee-payroll-report
+https://help.repairdesk.co/portal/en/kb/articles/payroll-payments-report
+https://help.repairdesk.co/portal/en/kb/articles/my-commission-report
+https://help.repairdesk.co/portal/en/kb/articles/employee-commission-breakdown-report
+https://help.repairdesk.co/portal/en/kb/articles/gratuity-report
+
+Inventory Reports
+https://help.repairdesk.co/portal/en/kb/articles/report-inventory-summary
+https://help.repairdesk.co/portal/en/kb/articles/inventory-reports
+https://help.repairdesk.co/portal/en/kb/articles/inventory-adjustment-report
+https://help.repairdesk.co/portal/en/kb/articles/part-consumption-report
+https://help.repairdesk.co/portal/en/kb/articles/low-stock-report
+https://help.repairdesk.co/portal/en/kb/articles/in-transit-inventory-report
+https://help.repairdesk.co/portal/en/kb/articles/damage-part-report
+https://help.repairdesk.co/portal/en/kb/articles/ticket-items-report
+
+Insights
+https://help.repairdesk.co/portal/en/kb/articles/how-to-use-the-insights-module
+https://help.repairdesk.co/portal/en/kb/articles/sales-insights-overview
+https://help.repairdesk.co/portal/en/kb/articles/tickets-insights-overview
+
+----
+
+Manage Employees : that Set up roles, manage permissions, track work hours, and performance to maintain an organized workforce.
+
+https://help.repairdesk.co/portal/en/kb/articles/managing-employee-profiles
+https://help.repairdesk.co/portal/en/kb/articles/how-to-update-personal-profile-or-change-access-pin
+https://help.repairdesk.co/portal/en/kb/articles/employee-clock-in-and-clock-out
+https://help.repairdesk.co/portal/en/kb/articles/what-is-employee-activity-log
+https://help.repairdesk.co/portal/en/kb/articles/employee-roles-and-permissions
+https://help.repairdesk.co/portal/en/kb/articles/employee-pay-rates-payroll
+https://help.repairdesk.co/portal/en/kb/articles/employee-commissions
+https://help.repairdesk.co/portal/en/kb/articles/how-to-enable-two-factor-authentication-2fa-on-your-repairdesk-profile
+
+
+-----
+
+Store Setup : that Customize store settings, templates, and payment methods to align RepairDesk with your business needs.
+
+
+under Store Setup there are 3 sections as follow :
+
+
+Settings and Configurations : Customize system settings to optimize RepairDesk for your business, including POS configurations, invoice templates, repair workflows, and user access controls.
+https://help.repairdesk.co/portal/en/kb/articles/label-template
+https://help.repairdesk.co/portal/en/kb/articles/what-is-store-type-and-how-it-woks
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-update-store-profile
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-update-account-password
+https://help.repairdesk.co/portal/en/kb/articles/two-factor-authentication-process-in-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/how-to-create-or-add-new-store-location
+https://help.repairdesk.co/portal/en/kb/articles/how-to-use-the-cash-register-module-in-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-add-company-registration-number-abn-acn-or-vat-on-an-invoice
+https://help.repairdesk.co/portal/en/kb/articles/how-to-set-up-global-tax
+https://help.repairdesk.co/portal/en/kb/articles/how-to-add-a-currency
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-add-and-manage-network-carriers
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-change-decimal-separator-in-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/how-to-setup-use-vat-margin-scheme-using-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/how-to-display-time-in-12-or-24-hour-format-in-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/enabling-desktop-notification
+https://help.repairdesk.co/portal/en/kb/articles/send-job-notifications-with-repairdesk-2-way-emails
+https://help.repairdesk.co/portal/en/kb/articles/how-to-setup-automatic-emails-against-linked-statuses
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-add-a-device-location
+https://help.repairdesk.co/portal/en/kb/articles/how-to-manage-additional-items-in-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/how-to-update-invoice-settings
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-manage-my-purchase-order-statuses
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-manage-order-status
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-manage-my-suppliers
+https://help.repairdesk.co/portal/en/kb/articles/how-to-charge-tax-on-part-cost-or-retail-price-only
+https://help.repairdesk.co/portal/en/kb/articles/dual-tax-rate-support-for-canada-peru
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-change-what-is-displayed-on-purchase-orders
+https://help.repairdesk.co/portal/en/kb/articles/repairdesk-franchise-management-and-inter-company-invoicing
+
+
+Hardware & Cloud Print : Set up and troubleshoot hardware integrations such as receipt printers, barcode scanners, cash drawers, and cloud-based printing solutions for seamless transactions.
+https://help.repairdesk.co/portal/en/kb/articles/printnode-complete-guide
+https://help.repairdesk.co/portal/en/kb/articles/how-to-set-up-qz-tray
+https://help.repairdesk.co/portal/en/kb/articles/rd-recommended-hardware-for-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/direct-print-integration-repairdesk-printer-for-windows
+https://help.repairdesk.co/portal/en/kb/articles/direct-print-integration-repairdesk-printer-for-macos
+https://help.repairdesk.co/portal/en/kb/articles/manual-printing-via-print-node
+https://help.repairdesk.co/portal/en/kb/articles/how-to-setup-cash-drawers-if-i-am-using-mac
+https://help.repairdesk.co/portal/en/kb/articles/how-to-setup-printer-to-open-cash-drawer-automatically
+https://help.repairdesk.co/portal/en/kb/articles/epson-printer-direct-integration
+https://help.repairdesk.co/portal/en/kb/articles/how-to-setup-rongta-thermal-printer
+https://help.repairdesk.co/portal/en/kb/articles/dymo-labelwriter-450-setup
+https://help.repairdesk.co/portal/en/kb/articles/how-to-setup-star-tsp-143-thermal-printer
+
+
+Supported Language : Explore language options available in RepairDesk and configure your preferred language settings to enhance usability for your team and customers.
+https://help.repairdesk.co/portal/en/kb/articles/language-editor-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-customize-my-invoice-ticket-label-receipt-and-estimate-templates
+
+
+*********************Also the below are additional concepts FAQs that might help :*******************************
+
+Concepts : Understand key concepts and fundamental workflows in RepairDesk to get the most out of your POS system. Learn about core functionalities and best practices to streamline repair shop operations.
+https://help.repairdesk.co/portal/en/kb/articles/difference-warranty-claim-for-a-service-and-warranty-claim-for-a-part
+https://help.repairdesk.co/portal/en/kb/articles/how-to-set-warranty-for-a-repair-service
+https://help.repairdesk.co/portal/en/kb/articles/how-to-set-warranty-for-a-repair-part
+https://help.repairdesk.co/portal/en/kb/articles/difference-inventory-item-and-service-item
+https://help.repairdesk.co/portal/en/kb/articles/serialized-inventory-item
+https://help.repairdesk.co/portal/en/kb/articles/inventory-item
+https://help.repairdesk.co/portal/en/kb/articles/device
+https://help.repairdesk.co/portal/en/kb/articles/repair
+https://help.repairdesk.co/portal/en/kb/articles/how-to-process-an-exchange-in-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/lock-screen
+
+FAQs : Find quick answers to common questions about RepairDesk features to resolve queries efficiently.
+https://help.repairdesk.co/portal/en/kb/articles/special-part-and-special-part-order-1-5-2025
+https://help.repairdesk.co/portal/en/kb/articles/rd-billing
+https://help.repairdesk.co/portal/en/kb/articles/transfer-inventory
+https://help.repairdesk.co/portal/en/kb/articles/refund-exchange
+https://help.repairdesk.co/portal/en/kb/articles/warranty
+https://help.repairdesk.co/portal/en/kb/articles/special-part-order
+
+*****************************************************************************************
+
+Manage Integrations : that Connect with third-party apps like QuickBooks, Shopify, Square, and more to enhance functionality and workflow.
+
+under Manage Integrations there are 8 sections as follow :
+
+Accounting : Track business finances with accurate accounting features. Manage invoices, expenses, revenue reports, and integrate with platforms like QuickBooks and Xero for seamless bookkeeping.
+https://help.repairdesk.co/portal/en/kb/articles/integrating-xero
+https://help.repairdesk.co/portal/en/kb/articles/integrating-quickbooks
+
+E Commerce : Integrate your RepairDesk store with your online sales platforms to sell repair services, devices, and accessories through a fully functional e-commerce setup.
+https://help.repairdesk.co/portal/en/kb/articles/mailchimp
+https://help.repairdesk.co/portal/en/kb/articles/integrating-shopify
+https://help.repairdesk.co/portal/en/kb/articles/integrating-woocommerce
+
+Membership Plans : Create and manage membership plans that offer exclusive discounts, priority service, and loyalty rewards to enhance customer retention.
+https://help.repairdesk.co/portal/en/kb/articles/how-to-create-and-manage-membership-plans
+https://help.repairdesk.co/portal/en/kb/articles/how-to-offer-and-sell-membership-plans-at-pos
+https://help.repairdesk.co/portal/en/kb/articles/how-to-manage-membership-invoices-and-subscriptions
+
+Payment Integrations: Integrate with leading payment processors like Square, PayPal, and Stripe to accept credit/debit card payments, manage transactions, and streamline billing.
+https://help.repairdesk.co/portal/en/kb/articles/payfacto
+https://help.repairdesk.co/portal/en/kb/articles/how-to-setup-payfacto-with-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/how-to-use-payfacto-with-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/how-to-process-payments-using-payfacto
+https://help.repairdesk.co/portal/en/kb/articles/how-to-offer-refunds-using-payfacto
+https://help.repairdesk.co/portal/en/kb/articles/repairdesk-integration-with-square-terminal
+https://help.repairdesk.co/portal/en/kb/articles/how-to-enable-safeware-integration-in-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/how-to-process-payments-through-paymentsense-in-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/avalara-integration
+https://help.repairdesk.co/portal/en/kb/articles/how-to-start-accepting-credit-card-payments-with-stripe
+https://help.repairdesk.co/portal/en/kb/articles/how-to-setup-paypal-payment-integration
+
+Phone System : Optimize customer communication with Phone System, enabling call tracking, automated responses, and seamless customer engagement directly from RepairDesk.
+https://help.repairdesk.co/portal/en/kb/articles/how-to-setup-phone-system-in-repair-desk
+https://help.repairdesk.co/portal/en/kb/articles/how-to-view-call-logs-in-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/configuration
+https://help.repairdesk.co/portal/en/kb/articles/faq-s
+https://help.repairdesk.co/portal/en/kb/articles/ip-phones
+https://help.repairdesk.co/portal/en/kb/articles/sms-and-mms-using-the-3cx-mobile-app
+https://help.repairdesk.co/portal/en/kb/articles/how-to-set-office-hours-in-3cx-version-20
+https://help.repairdesk.co/portal/en/kb/articles/can-i-track-call-logs-in-ticket-view
+https://help.repairdesk.co/portal/en/kb/articles/automated-sms-with-store-directions
+https://help.repairdesk.co/portal/en/kb/articles/how-to-add-customer-info-if-i-receive-unknown-call
+https://help.repairdesk.co/portal/en/kb/articles/how-to-set-office-hours-in-3cx-version-20-1-5-2025
+https://help.repairdesk.co/portal/en/kb/articles/how-to-implement-digital-receptionist-in-3cx-version-20
+https://help.repairdesk.co/portal/en/kb/articles/how-to-fetch-the-voicemail-from-the-ip-phone-configured-with-3cx
+https://help.repairdesk.co/portal/en/kb/articles/how-to-add-a-voicemail-greeting-message-using-the-3cx-management-console
+https://help.repairdesk.co/portal/en/kb/articles/how-to-create-a-ring-group
+https://help.repairdesk.co/portal/en/kb/articles/how-to-create-a-queue
+https://help.repairdesk.co/portal/en/kb/articles/how-to-add-a-new-user-or-extension-in-3cx
+https://help.repairdesk.co/portal/en/kb/articles/how-to-add-greeting-message
+https://help.repairdesk.co/portal/en/kb/articles/using-phone-system-quotes-in-repairdesk
+
+Productivity : Utilize productivity tools to streamline task management, automate workflows, and enhance team collaboration for improved business efficiency.
+https://help.repairdesk.co/portal/en/kb/articles/akko-integration
+https://help.repairdesk.co/portal/en/kb/articles/m360-integration
+https://help.repairdesk.co/portal/en/kb/articles/e2-9a-a1-how-to-connect-repairdesk-with-zapier-and-automate-legwork
+https://help.repairdesk.co/portal/en/kb/articles/integrate-google-calendar-with-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/how-to-integrate-slack-with-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/how-to-setup-internal-wiki-in-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/zapier
+https://help.repairdesk.co/portal/en/kb/articles/microsoft-secure-sign-in
+
+SMS : Send SMS for repair updates, appointment reminders, promotional campaigns, and customer interactions to improve communication and engagement.
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-enable-textlocal-sms-api
+https://help.repairdesk.co/portal/en/kb/articles/10dlc-compliance-repairdesk-sms-everything-you-need-to-know
+https://help.repairdesk.co/portal/en/kb/articles/repairdesk-sms
+https://help.repairdesk.co/portal/en/kb/articles/how-do-i-enable-2-way-sms-at-clickatell-sms-gateway
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-enable-textlocal-sms-api-28-1-2025
+https://help.repairdesk.co/portal/en/kb/articles/how-do-i-enable-clickatell-sms-gateway
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-setup-sms-broadcast-api
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-send-job-alerts-via-sms-using-sms-global
+
+Vendor Integrations : Connect with suppliers and vendors through direct integrations to streamline inventory sourcing, purchase order management, and supplier coordination.
+https://help.repairdesk.co/portal/en/kb/articles/mobilesentrix-integration-for-us-canada-7-7-2025
+https://help.repairdesk.co/portal/en/kb/articles/reusely-integration-with-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/phone-lcd-parts-integration
+https://help.repairdesk.co/portal/en/kb/articles/parts4cells-integration
+https://help.repairdesk.co/portal/en/kb/articles/nexus-cellular-integration
+https://help.repairdesk.co/portal/en/kb/articles/onesource-supplier-integration
+https://help.repairdesk.co/portal/en/kb/articles/balaji-wireless-integration
+https://help.repairdesk.co/portal/en/kb/articles/injured-gadgets-integration
+https://help.repairdesk.co/portal/en/kb/articles/wholesale-gadget-parts-integration
+
+
+-----------------------
+
+Do the same for the below 7 links related to Widgets that Embed widgets on your website to enable online booking, inquiries, and tracking for a better user experience
+https://help.repairdesk.co/portal/en/kb/articles/customer-facing-display
+https://help.repairdesk.co/portal/en/kb/articles/self-checkin-for-customers
+https://help.repairdesk.co/portal/en/kb/articles/ticket-counter-display-tcd
+https://help.repairdesk.co/portal/en/kb/articles/repair-tracker-widget
+https://help.repairdesk.co/portal/en/kb/articles/repairdesk-appointments-booking-widget
+https://help.repairdesk.co/portal/en/kb/articles/buy-and-sell-pre-owned-devices-using-buyback-widget
+https://help.repairdesk.co/portal/en/kb/articles/customer-portal
+
+----------------------
+
+Manage Prospects : that Convert potential leads into customers by tracking inquiries, follow-ups, and engagement with prospective clients.
+
+under Manage Prospects there are 3 sections as follow :
+
+Manage Estimates : Generate and send estimates for repairs or orders before finalizing transactions with customers.
+https://help.repairdesk.co/portal/en/kb/articles/manage-estimates-new
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-create-and-manage-an-estimate
+
+
+Manage Leads : Track potential customers and convert leads into sales.
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-track-auto-generated-email-from-manage-tickets-and-lead-section
+
+Manage Inquiries : Organize customer inquiries, respond to service requests, and maintain effective communication with clients.
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-create-and-manage-inquiries-in-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/how-to-manage-leads
+
+------------------
+
+Manage Customers : Keep a detailed customer database, track their history and manage customer interactions effectively.
+https://help.repairdesk.co/portal/en/kb/articles/manage-customers-new
+https://help.repairdesk.co/portal/en/kb/articles/how-do-i-manage-customers
+https://help.repairdesk.co/portal/en/kb/articles/adding-new-customers
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-edit-customer-details
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-add-labels-against-customer-phone-mobile-numbers
+https://help.repairdesk.co/portal/en/kb/articles/can-i-search-any-particular-customer-from-the-list
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-view-all-the-order-details-of-any-customer
+https://help.repairdesk.co/portal/en/kb/articles/importing-and-exporting-customer-lists
+https://help.repairdesk.co/portal/en/kb/articles/merge-customers-in-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/customer-groups-and-third-party-billing
+https://help.repairdesk.co/portal/en/kb/articles/how-to-add-notes-against-customers
+https://help.repairdesk.co/portal/en/kb/articles/how-to-add-notes-to-customer-profile
+https://help.repairdesk.co/portal/en/kb/articles/flag-notes-against-customers
+https://help.repairdesk.co/portal/en/kb/articles/custom-fields-against-customers
+https://help.repairdesk.co/portal/en/kb/articles/follow-up-using-campaigner
+https://help.repairdesk.co/portal/en/kb/articles/asset-management
+https://help.repairdesk.co/portal/en/kb/articles/stop-your-emails-from-going-into-the-customer-spam-folder
+https://help.repairdesk.co/portal/en/kb/articles/how-you-can-make-your-customer-compliant-with-GDPR
+
+
+--------------
+
+Payments
+https://help.repairdesk.co/portal/en/kb/articles/rd-pay-powered-by-tsys-integration-guide
+https://help.repairdesk.co/portal/en/kb/articles/repairdesk-payments-nexgo-terminal
+
+-----
+
+App Store : In-App integrations to enhance the experience!
+
+under App Store there are 5 sections as follow :
+
+Connect : Engage with your audience, convert more customers and provide multi-channel support from within RepairDesk.
+https://help.repairdesk.co/portal/en/kb/articles/getting-started-to-repairdesk-connect
+https://help.repairdesk.co/portal/en/kb/articles/pre-requisites-of-connect
+https://help.repairdesk.co/portal/en/kb/articles/how-to-connect-google-business-profile-to-repairdesk-connect
+https://help.repairdesk.co/portal/en/kb/articles/how-to-link-customer-tickets-in-repair-desk-connect
+https://help.repairdesk.co/portal/en/kb/articles/how-to-link-facebook-page-to-connect
+https://help.repairdesk.co/portal/en/kb/articles/step-by-step-guide-to-embedding-html-code-in-a-website
+https://help.repairdesk.co/portal/en/kb/articles/how-to-embed-an-iframe-code-in-wordpress
+https://help.repairdesk.co/portal/en/kb/articles/how-to-manage-reviews-on-repairdesk-connect
+https://help.repairdesk.co/portal/en/kb/articles/feedback-module
+https://help.repairdesk.co/portal/en/kb/articles/how-to-generate-a-review-link-for-your-google-profile
+https://help.repairdesk.co/portal/en/kb/articles/how-to-navigate-the-reviews-dashboard
+https://help.repairdesk.co/portal/en/kb/articles/how-to-reply-to-reviews-using-ai
+https://help.repairdesk.co/portal/en/kb/articles/how-to-set-up-review-automation-by-sms
+https://help.repairdesk.co/portal/en/kb/articles/how-to-send-mms-using-connect
+https://help.repairdesk.co/portal/en/kb/articles/how-to-filter-or-search-conversations-in-repairdesk-connect
+https://help.repairdesk.co/portal/en/kb/articles/how-to-setup-canned-responses
+https://help.repairdesk.co/portal/en/kb/articles/how-to-setup-inquiry-widget
+https://help.repairdesk.co/portal/en/kb/articles/how-to-setup-email-forwarder-in-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/how-to-merge-customers-in-repairdesk-connect
+https://help.repairdesk.co/portal/en/kb/articles/how-to-add-internal-notes
+
+Appointments Pro : Schedule and manage customer appointments effortlessly. Enable online booking, send automated reminders, and streamline repair scheduling to enhance customer service.
+https://help.repairdesk.co/portal/en/kb/articles/customize-color-widget
+https://help.repairdesk.co/portal/en/kb/articles/getting-started-with-appointments-pro
+https://help.repairdesk.co/portal/en/kb/articles/managing-appointments-and-quotes
+https://help.repairdesk.co/portal/en/kb/articles/editing-and-adding-a-repair-service
+https://help.repairdesk.co/portal/en/kb/articles/module-configurations-setup-for-repair-categories-brands-models-and-issues
+https://help.repairdesk.co/portal/en/kb/articles/configure-online-price-in-appointments-pro
+https://help.repairdesk.co/portal/en/kb/articles/notifications-configurations
+
+OrderSync : Streamline purchase process by entering an order ID from integrated vendors and automatically create a purchase order!
+https://help.repairdesk.co/portal/en/kb/articles/ordersync
+
+ScanPro : Scan a barcode or enter the product's SKU from your vendor websites to automatically populate item attributes using AI!
+https://help.repairdesk.co/portal/en/kb/articles/scanpro
+
+Repair Price Calculator
+https://help.repairdesk.co/portal/en/kb/articles/rd-repair-price-calculator
+
+---------------------
+
+Mail-In Repairs : Offer mail-in repair services by tracking shipments, updating customers on repair status, and ensuring smooth processing of remote repair requests.
+https://help.repairdesk.co/portal/en/kb/articles/mail-in-repair-suite
+https://help.repairdesk.co/portal/en/kb/articles/mail-in-repair-tracker
+https://help.repairdesk.co/portal/en/kb/articles/shipstation-integration
+https://help.repairdesk.co/portal/en/kb/articles/repairdesk-forms
+https://help.repairdesk.co/portal/en/kb/articles/online-payments
+https://help.repairdesk.co/portal/en/kb/articles/estimate-module
+https://help.repairdesk.co/portal/en/kb/articles/b2b-mail-in-customer-portal
+
+
+--------
+
+Public API : Seamlessly connect RepairDesk with third-party apps and services for enhanced functionality.
+https://help.repairdesk.co/portal/en/kb/articles/oauth-2-0-api-documentation
+https://help.repairdesk.co/portal/en/kb/articles/public-api-documentation
+https://help.repairdesk.co/portal/en/kb/articles/api

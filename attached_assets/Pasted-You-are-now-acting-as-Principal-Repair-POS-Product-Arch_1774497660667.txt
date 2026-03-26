@@ -1,0 +1,847 @@
+You are now acting as:
+Principal Repair/POS Product Architect + Principal SaaS Platform Architect + Principal React/TypeScript Engineer + Principal RBAC Architect + Principal Firestore/Multitenant Architect + Principal Workflow Systems Designer + Principal POS/Payments Architect + Principal Inventory & Supply Chain Architect + Principal CRM/Marketing Architect + Principal Reporting Architect + Principal QA Auditor + Principal UX Design Manager + Principal Competitive Product Researcher
+
+IMPORTANT:
+The PRIMARY source of truth is my detailed product notes and review comments in this prompt.
+The file `Ref.txt` is SECONDARY and should be used only as additional domain/reference knowledge to read, research, and understand expected workflow depth, competitor capability patterns, and best-practice concepts before implementing and refining the system.
+
+CRITICAL DESIGN RULE:
+Treat the CURRENT app design as the final design baseline.
+Do NOT redesign:
+- layout
+- spacing
+- styling
+- component appearance
+- modal style
+- table density
+- navigation structure
+- visual hierarchy
+
+You may improve:
+- workflow depth
+- routing correctness
+- functionality
+- business logic surfaces
+- action visibility
+- modal/drawer/page behavior
+- management tools
+- operational UX
+- empty states
+- contextual actions
+- tab/page quality
+- enterprise/commercial readiness
+
+CRITICAL EXECUTION RULE:
+Do not respond with a generic summary.
+Do not claim something is implemented unless it is visible and functional in the running UI.
+Use the current codebase and live app behavior as source of truth.
+If a page/section/button exists but is shallow, broken, placeholder-only, or routes incorrectly, fix it professionally.
+
+CRITICAL RESEARCH RULE:
+Use `Ref.txt` and the linked knowledge resources only as domain and workflow references.
+Do NOT blindly copy competitor UI.
+Read, understand, and translate the best workflow concepts into this product while preserving the current design baseline.
+
+CRITICAL SCOPE RULE:
+This is a coordinated architecture and product refinement pass.
+You must:
+1. audit the current implementation
+2. compare it against my requirements below
+3. use `Ref.txt` for additional deep knowledge
+4. repair and improve missing/weak functionality
+5. produce a prioritized roadmap for anything too large to fully build in this pass
+
+Do NOT break:
+- auth flow
+- preview mode
+- current RBAC/role model
+- current role hierarchy
+- current route structure unless a repair is needed
+- current working modules
+- current design baseline
+
+==================================================
+PHASE 1 — READ, AUDIT, MAP
+==================================================
+
+Before implementing:
+- read my detailed requirements below carefully
+- read `Ref.txt`
+- audit the current app module by module
+- compare the current implementation to my requirements
+- identify:
+  A. already working
+  B. partially working
+  C. placeholder/shallow
+  D. missing
+  E. future-roadmap items that are too large for this pass
+
+Use that analysis to guide implementation.
+
+==================================================
+PHASE 2 — SYSTEM OWNER / PLATFORM OWNER
+==================================================
+
+The System Owner side must be significantly improved and fully commercial-grade.
+
+----------------------------------
+A. OVERVIEW PAGE
+----------------------------------
+The System Owner overview screen is currently too simple.
+
+Improve it so it becomes a powerful command-center style overview page that provides:
+- total tenants / active tenants / trial / suspended / overdue
+- active subscriptions / expiring subscriptions
+- key system KPIs
+- recent platform activity
+- support alerts / escalation items
+- billing/payment issues summary
+- provisioning queue / onboarding status
+- domain/SSL status summary
+- platform team activity summary
+- quick actions for the most important platform operations
+
+Do NOT redesign the visual language, but make the page much more useful and modern in functionality.
+
+----------------------------------
+B. TENANTS PAGE
+----------------------------------
+Fix and improve all tenant-management flows.
+
+Requirements:
+1. Provision Tenant
+- when clicking Provision Tenant from Tenants page and then using the Provisioning flow, the result must clearly create/list/show the provisioned tenant in the Tenants list
+- no silent “Tenant Provisioned” without visible outcome
+
+2. Tenant Overview tab
+- make this a comprehensive modern tenant account overview
+- not simple/basic text only
+- include account summary, health, plan, usage, status, users summary, support summary, activity, and key operational data
+
+3. Owner & Users tab
+- platform should primarily see and manage the Store Owner profile
+- store staff under Store Owner should be managed by Store Owner/team inside tenant app
+- clicking Manage on Store Owner should open a dedicated management modal/drawer/page for Store Owner profile, not route back to generic Overview
+
+4. Subscription tab
+- “Manage Subscription” must become a real subscription management flow
+- do not just redirect weakly to Billing tab
+- create a modern subscription management experience with:
+  - current plan
+  - billing cycle
+  - next renewal
+  - subscription status
+  - add-ons
+  - upgrade/downgrade
+  - cancellation/suspension/reactivation
+  - trial handling
+  - plan history
+  - notes/actions
+
+5. Features tab
+- this must become a strong tenant feature control page
+- current “Enabled” labels are not enough
+- allow System Owner to:
+  - enable/disable features
+  - manage paid add-on features
+  - override plan-based feature access for a tenant
+  - see inherited vs overridden states
+  - manage future custom plan scenarios
+
+6. Billing / Domains / Usage / Activity-Audit / Support Notes tabs
+- these must be real, functional pages
+- not placeholder text
+- each should provide modern, operationally useful tenant management tools
+
+----------------------------------
+C. TEAM MANAGEMENT PAGE
+----------------------------------
+The Team Management page is improved but still needs to be elevated to a stronger platform-operations module.
+
+Requirements:
+1. Team tab
+- Add/Edit Platform Member modal must include strong status options such as:
+  - Active
+  - Inactive
+  - Suspended
+  - Pending Invite
+  - On Leave / Restricted if useful
+- make status control professional and meaningful
+
+2. Roles tab
+- when clicking Manage Permissions for a specific role, do NOT just route to generic Permissions tab
+- open a role-specific permissions modal/drawer/page focused only on that role
+- changes must sync with the main Permissions screen and role data
+
+3. Permissions tab
+- keep and refine as needed
+- support a more powerful permission system where useful:
+  - None
+  - View Only
+  - Create
+  - Edit
+  - Approve
+  - Manage
+  - Full Access
+
+4. Activity Log
+- keep and refine as needed
+
+----------------------------------
+D. PLANS / FEATURE MATRIX / ADD-ONS
+----------------------------------
+These areas must be normalized into a professional commercial plan-management system.
+
+Requirements:
+1. Plans page
+- + Create New Plan must work
+- build a dedicated modal/page/workflow for plan creation
+- Edit per plan must work
+- Archive must behave professionally (real archive status / confirmation / disabled/archive state), not flash to “Archived!” and revert badly
+
+2. Feature Matrix
+- merge conceptually into Plans as a tabbed or nested management experience
+- allow feature management per plan
+- allow creating new features
+- allow enable/disable/add/remove feature per plan
+- support custom plan scenarios
+
+3. Add-ons
+- merge conceptually into Plans as a tabbed or nested management experience
+- allow create/edit/archive add-ons
+- propose meaningful market-fit add-ons for this type of system
+- support linking add-ons to plans and tenants
+
+4. Usage
+- decide whether Usage belongs under Plans or Tenants
+- implement the cleaner product structure and move or cross-link appropriately
+
+----------------------------------
+E. BILLING PAGE
+----------------------------------
+Billing must become a real modern billing management page, not a shallow overview.
+Include:
+- billing health
+- current charges
+- invoices
+- failed payments
+- refunds/credits notes
+- subscription billing context
+- transaction history
+- upcoming renewals
+- tenant-level billing actions
+
+----------------------------------
+F. PROVISIONING PAGE
+----------------------------------
+Improve tenant provisioning so it behaves like a real platform onboarding flow:
+- visible steps
+- proper results
+- created tenant visibility
+- linkage to Store Owner creation
+- domain/subdomain setup
+- plan assignment
+- onboarding status
+
+----------------------------------
+G. DOMAINS PAGE
+----------------------------------
+This is mission-critical.
+
+The platform will host store tenants under the main system domain, such as:
+- storename.mysystem.com
+
+The Domains module must become a serious domain and tenant routing management system.
+
+Requirements:
+- create domain
+- configure domain
+- manage subdomain
+- custom domain support
+- SSL status
+- verification status
+- DNS/routing state
+- domain actions
+- domain detail management page/modal
+- strong domain configuration tools
+- explain or scaffold how hosted tenant routing should work for store login pages
+
+Use `Ref.txt` and best modern SaaS domain-management patterns as knowledge reference.
+Do not leave weak placeholders.
+
+----------------------------------
+H. SUPPORT TOOLS
+----------------------------------
+This is very important.
+Build a stronger comprehensive support tools module for System Owner/team to support Store Owners and tenants.
+Make it modern, operational, and useful:
+- tenant support surface
+- issue tracking / flags
+- internal notes
+- account health
+- support actions
+- escalation
+- operational tooling
+- controlled internal support workflows
+
+----------------------------------
+I. PLATFORM SETTINGS
+----------------------------------
+Current state is not acceptable.
+
+Build a strong comprehensive Platform Settings page that controls/configures the system globally.
+Include all platform settings relevant to:
+- branding/platform identity
+- billing/subscription defaults
+- tenant provisioning defaults
+- global permissions/configuration
+- communication settings
+- security settings
+- templates/global templates
+- global labels/print defaults if useful
+- any platform-level system behavior controls
+
+Use `Ref.txt` and domain knowledge to make this a real control center, not a weak placeholder.
+
+----------------------------------
+J. AUDIT & SECURITY
+----------------------------------
+Do the same for Audit & Security as Platform Settings:
+- make it comprehensive
+- useful
+- modern
+- not placeholder-like
+- include audit logs, platform activity, security posture, permission changes, sensitive actions, and role authority traceability
+
+----------------------------------
+K. ANY MISSING PLATFORM MODULES
+----------------------------------
+Based on my requirements, `Ref.txt`, and competitive SaaS patterns, identify if any critical platform/system-owner module is missing.
+If so:
+- design and implement it cleanly within the current design system
+- or add it to the roadmap if too large for this pass
+
+==================================================
+PHASE 3 — STORE OWNER / STORE-SIDE SYSTEM
+==================================================
+
+----------------------------------
+A. DASHBOARD
+----------------------------------
+Improve the Store Owner dashboard into a powerful daily operations screen.
+
+Requirements:
+- + Quick Intake must function correctly and open the intended quick intake modal/workflow
+- Add Stock should open the same Add Product workflow/modal as inventory add-product
+- New Customer should open only the New Customer modal/workflow
+- Print Label should support repair labels using Ticket #
+- Hold Sale should show the held-orders modal/list directly
+- dashboard should be comprehensive and role-aware
+- different roles should see the right dashboard information, widgets, and actions based on permissions
+
+----------------------------------
+B. SALES PAGE / POS
+----------------------------------
+This page is extremely important.
+
+1. Register Shift / Cash Register
+- improve shift/register flow
+- define who can open/close shift
+- define process and controls
+- make it more professional and complete
+- integrate with store settings / permissions
+
+2. Special Part
+- search inventory for available parts
+- include close X on modal
+- if part not found in inventory, allow non-catalogued item entry
+- show it as Non-catalogued item
+- allow custom price
+- make workflow clear and usable
+
+3. Add Item
+- search inventory by part name / SKU / barcode / scanning device
+- ensure Add Item action exists and works
+
+4. Quick Check-in
+- ensure quick intake/repair intake behavior is correct
+- repair intake form must support:
+  - price
+  - quantity
+  - full editability later, not just price
+  - X close in modal
+
+5. Deposit / Bench Fee
+- clicking deposit line item should open context-specific edit window
+- allow unit price + description
+- description should appear under bench fee/deposit in order summary
+
+6. Payment Allocation
+This is critical.
+- + Add Methods should open a payment method modal, not just add Store Credit blindly
+- support mixed payment types
+- tender remaining logic must work
+- integrate conceptually with card terminals/payment providers
+- card/debit/credit methods must be provider-configurable in store settings/integrations
+- tax must be store-configurable and calculated based on store zip/tax settings
+- support removing tax only if role/permission allows it
+- X/remove payment method must work
+- total and tax calculations must remain consistent
+
+7. Payment Integrations
+Use the provided payment references and `Ref.txt` as base knowledge.
+Prepare a professional architecture and workflow for:
+- Stripe
+- Square
+- other supported payment integrations where relevant
+- payment terminal/device configuration
+- backend readiness for go-live
+- refund protocol
+- payment provider configuration in settings/integrations
+
+8. Finalize Sale section buttons
+Review and fix:
+- Switch User
+- Refund
+- Add Stock
+- Warranty
+- Orders
+- Hold Sale
+- Drawer
+
+Requirements:
+- Refund must be modern and professionally designed
+- Add Stock from POS should support quick-sell/non-inventory flow and optional send-to-manager/inventory follow-up
+- Warranty flow should be upgraded based on provided references
+- Orders view action and print action should work correctly
+- Drawer should be configured through store settings/hardware setup, not weak messages
+
+9. Sales page overall
+At the end, improve the Sales page holistically so it best fits this system and real store operations.
+
+----------------------------------
+C. REPAIRS PAGE
+----------------------------------
+This is one of the most important modules in the app.
+
+Build and refine the Repairs module using my requirements and the provided knowledge references.
+It should support real-world repair workflows including:
+- repair ticket creation
+- ticket detail
+- device details
+- network / device location / passcode requirements
+- pre/post repair conditions
+- attachments
+- technician assignment/reassignment
+- repair categories
+- services
+- parts linked to ticket
+- add repair line item
+- repair notes/history
+- warranty repair claims
+- close ticket in POS
+- export/reporting readiness
+- mail-in repair / tracking readiness
+- repair price calculator readiness
+- technician workflows
+- customer-facing tracking readiness
+
+Do not overbuild beyond the current architecture, but make this module as strong and operational as possible.
+
+----------------------------------
+D. INVENTORY PAGE
+----------------------------------
+Under Inventory tab:
+- action buttons must behave correctly
+- do not use Add New Product modal incorrectly for inventory adjustment vs edit product
+- keep one professional edit/manage inventory workflow
+- stock adjustment should be part of editing/managing inventory properly
+- remove unnecessary print icon if not needed
+- Export should generate Excel, not PDF
+- add Import from Excel with a clean safe workflow
+- preserve inventory integrity
+
+Implement and strengthen all inventory-related concepts from my requirements and knowledge references, including:
+- manage inventory
+- variants / attributes
+- serialized inventory
+- category tree
+- import/export
+- valuations
+- adjustments
+- SKU/UPC generation
+- pricing updates
+- labels/barcodes
+- pictures
+- tax assignment
+- hide specific products on POS
+- trade-in
+- refurbishment
+- transfer inventory
+- inventory count
+- miscellaneous items
+- bill payments
+- gift cards
+- bundles
+
+Use the provided links as knowledge references.
+Make the Inventory module operational and well-structured without changing design baseline.
+
+----------------------------------
+E. CUSTOMERS PAGE
+----------------------------------
+Fix and complete:
+- Edit Profile
+- Create Ticket
+- Internal Notes → Add Note
+- Asset Management → Add Asset
+- Interaction History → Invoices
+- Interaction History → Estimates
+
+These must all function and use clean in-app flows.
+
+----------------------------------
+F. EMPLOYEES PAGE
+----------------------------------
+Most of it looks good right now.
+Preserve what works.
+Refine only where necessary.
+We may revisit later before go-live.
+
+----------------------------------
+G. INVOICES PAGE
+----------------------------------
+Fix and improve:
+- + Create Invoice:
+  - customer field searchable by name/phone
+  - items/services searchable from inventory and services
+- Duplicate:
+  - must duplicate invoice details, not just open generic create window
+- Send Email / SMS:
+  - should send invoice link to customer email/phone profile
+  - prepare backend/go-live architecture for this
+- PDF icon:
+  - should generate/print invoice properly, not print webpage
+- Add Payment:
+  - should route to checkout/tender with invoice details fully loaded
+
+----------------------------------
+H. SERVICES PAGE
+----------------------------------
+Fix and improve:
+- Add New Service creation
+- Edit Service should open existing service data for edit
+- Delete must use in-app confirmation modal, not browser alert
+- Categories:
+  - New Category should use category-specific modal, not Add New Service
+  - Edit category must open proper category editor
+  - Delete category must use in-app confirmation modal
+- Price Editor:
+  - current price should be locked/read-only
+  - only new price editable
+  - save all changes should update actual service prices correctly
+- Image Tool:
+  - improve instructions and functionality around SKU/barcode reading
+
+----------------------------------
+I. SUPPLY CHAIN PAGE
+----------------------------------
+This is very important.
+
+Improve:
+1. Purchase Orders
+- Create Purchase Order should include price and supplier PO number
+- support uploading Excel/PDF supplier invoice/PO and parsing it into PO item lines if feasible in current architecture
+- strong PO detail management
+- print should print actual PO
+- received should open proper status update flow:
+  - Pending
+  - Delivered
+  - Partially Received
+  - Damaged
+  - Missing / Not Delivered
+- delivered should move to Received Notes logically
+- edit should work
+- delete should be available where allowed
+
+2. Received Notes
+- show received PO with status
+- view icon should open real detail view
+- allow confirming delivery discrepancies, missing items, damaged items, etc.
+- support notes
+- support sending note to:
+  - PO creator
+  - relevant manager/authorized user
+  - supplier contact if appropriate
+
+3. RMA
+- improve based on the provided RMA knowledge references
+
+----------------------------------
+J. PROSPECTS PAGE
+----------------------------------
+Fix and improve:
+- Create Estimate should add to Recent Estimates
+- action buttons in estimates should work
+- Leads:
+  - email tracking toggle must work
+  - pipeline filter must work
+  - Add Lead must add to pipeline
+- Inquiries:
+  - New Inquiry must add correctly
+  - selecting/listing inquiries must work correctly
+
+----------------------------------
+K. MARKETING PAGE
+----------------------------------
+Fix and improve:
+- Create Campaign must add to Active Campaigns
+- clicking active campaign and marketing tools should not just show shallow “backend later” messages unless absolutely unavoidable
+- where backend is not yet live, create a better in-app ready state and configuration flow instead of weak placeholder messaging
+- keep page commercially useful
+
+----------------------------------
+L. REPORTS PAGE
+----------------------------------
+There are multiple report tabs.
+Use the provided knowledge references and `Ref.txt` to improve the report system with stronger concepts such as:
+- custom sales report builder readiness
+- multi-store reports
+- bookmark report behavior
+- sales reports
+- employee reports
+- inventory reports
+- insights
+
+Do not overbuild an enterprise BI warehouse in this pass, but make Reports professionally useful and aligned with your references.
+
+----------------------------------
+M. INTEGRATIONS PAGE
+----------------------------------
+This module must be significantly improved.
+
+Improve and structure the tabs and integration categories such as:
+- Accounting
+- E-commerce
+- Membership Plans
+- Payment Integrations
+- Phone System
+- Productivity
+- SMS
+- Vendor Integrations
+
+Use the provided references and `Ref.txt` as knowledge bases.
+Implement a modern, useful integrations module and make it go-live ready in architecture terms, without pretending backend connections already exist if they do not.
+
+----------------------------------
+N. WIDGETS PAGE
+----------------------------------
+Fix the toggles and overall workflow.
+Use the provided widget references and `Ref.txt` to improve and implement concepts like:
+- customer-facing display
+- self-checkin
+- ticket counter display
+- repair tracker widget
+- appointments booking widget
+- buyback widget
+- customer portal
+
+Make the Widgets page functional and meaningful.
+
+----------------------------------
+O. STORE SETUP / SETTINGS
+----------------------------------
+This is core to the store owner experience and must be strong.
+
+The three main sections must be improved comprehensively:
+
+1. Settings and Configurations
+- global/store-level settings
+- POS configurations
+- invoice templates
+- repair workflows
+- store profile
+- password/2FA
+- multiple locations
+- cash register module
+- tax/currency
+- network carriers
+- decimal separator
+- VAT/tax schemes
+- time format
+- notifications
+- auto emails
+- device locations
+- additional items
+- invoice settings
+- PO statuses
+- order statuses
+- suppliers
+- display settings on PO
+- franchise/inter-company readiness
+
+2. Hardware & Cloud Print
+- print node
+- QZ tray
+- recommended hardware
+- direct printing
+- cash drawer
+- printer/cash drawer auto-open
+- barcode scanners / thermal printers / label printers
+- cloud print readiness
+
+3. Supported Language
+- language editor
+- template localization
+- ticket/invoice/label/receipt/estimate template customization
+
+Use the provided references as knowledge base.
+Make these settings strong and operational.
+
+----------------------------------
+P. SUPPORT PAGE
+----------------------------------
+Review the Support page and make everything functioning and working.
+Anything in this page should be maintained, managed, and controlled by System Owner and the platform team within Support Tools.
+
+==================================================
+PHASE 4 — CROSS-CUTTING PRODUCT IMPROVEMENTS
+==================================================
+
+Based on all of the above, and using `Ref.txt` as additional domain knowledge:
+- identify missing modules this system still needs
+- identify missing management tools
+- identify missing future-proof workflows
+- implement low-risk high-value improvements now
+- create a roadmap for heavy future items
+
+Examples of future-fit concepts to think about:
+- better refunds/exchanges
+- warranty workflows
+- customer portal improvements
+- mail-in operations
+- appointment scheduling
+- store credits / gift cards / memberships
+- advanced report builders
+- supplier integrations
+- device intake standardization
+- franchise/multi-store controls
+- payment terminal integration readiness
+- support/escalation tooling
+- auditability
+
+==================================================
+PHASE 5 — RBAC + ROLE ENFORCEMENT
+==================================================
+
+Ensure all new/reconnected workflows respect:
+PLATFORM
+- System Owner
+- delegated platform roles
+
+STORE
+- Store Owner
+- Manager
+- Technician
+- Sales Associate
+- approved custom roles
+
+Requirements:
+- route visibility
+- module visibility
+- action visibility
+- role dropdown behavior
+- approval workflow behavior
+- compensation visibility
+- store-owner platform-protection
+- preview mode consistency
+
+==================================================
+PHASE 6 — FIRESTORE READINESS (NOT FULL GIANT REFACTOR YET)
+==================================================
+
+For the workflows improved in this pass, prepare them for tenant-scoped Firestore persistence.
+
+Use:
+- one Firestore database
+- tenantId-scoped tenant/store documents
+- separate logical platform-side and tenant-side data
+- permission-aware writes
+- approval-driven restricted writes
+
+Do NOT start a giant uncontrolled persistence refactor in this pass unless a small prep is required.
+Instead:
+- make workflows persistence-ready
+- note the target collections
+- note permission/write dependencies
+- note approval dependencies
+- note backend-go-live requirements
+
+==================================================
+PHASE 7 — REQUIRED DELIVERABLES
+==================================================
+
+Return all of the following:
+
+A. CURRENT GAP ANALYSIS
+For each major domain/module, list:
+- already working
+- partially working
+- placeholder/shallow
+- missing
+- action taken in this pass
+
+B. IMPLEMENTED IMPROVEMENTS
+List the exact improvements actually implemented.
+List exact files modified.
+
+C. ROLE / WORKFLOW IMPACT
+Explain how the changes affect:
+- System Owner
+- delegated platform roles
+- Store Owner
+- Manager
+- Technician
+- Sales Associate
+- custom roles if relevant
+
+D. GO-LIVE READINESS NOTES
+For payment terminals, email/SMS sending, invoices, integrations, widgets, printing, domain routing, support tools, etc. explain:
+- what is now working
+- what is scaffolded but backend-dependent
+- what must be finished before go-live
+
+E. FIRESTORE READINESS MAP
+For each improved workflow, note:
+- intended collection(s)
+- tenant scoping needs
+- permission/write requirements
+- approval workflow needs
+
+F. FUTURE ROADMAP
+Prioritize:
+- P0 = must finish soon
+- P1 = near-term commercial parity
+- P2 = strategic differentiation
+- P3 = later enterprise scale
+
+G. STRICT FINAL CONFIRMATIONS
+Confirm explicitly:
+- auth flow not broken
+- preview mode not broken
+- design baseline preserved
+- RBAC preserved
+- all new/repaired actions tested or clearly flagged if not fully testable
+
+==================================================
+PHASE 8 — STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say complete unless you have:
+- read and used my detailed requirements in this prompt
+- read and used `Ref.txt` as secondary domain/reference knowledge
+- audited the current implementation against my requirements
+- repaired and improved the highest-value missing/weak workflows
+- preserved the design baseline
+- preserved auth, preview mode, and RBAC
+- produced the gap analysis, implementation summary, roadmap, and Firestore readiness map
