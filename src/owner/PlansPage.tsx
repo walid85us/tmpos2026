@@ -307,9 +307,13 @@ const PlansPage: React.FC = () => {
                       </td>
                     ))}
                     <td className="px-8 py-4 text-center">
-                      <button onClick={() => removeFeature(feature.id)} className="text-slate-400 hover:text-red-500 transition-colors">
-                        <span className="material-symbols-outlined text-sm">delete</span>
-                      </button>
+                      {feature.source === 'custom' ? (
+                        <button onClick={() => removeFeature(feature.id)} className="text-slate-400 hover:text-red-500 transition-colors">
+                          <span className="material-symbols-outlined text-sm">delete</span>
+                        </button>
+                      ) : (
+                        <span className="text-[9px] text-slate-300 font-bold uppercase tracking-widest">locked</span>
+                      )}
                     </td>
                   </tr>
                 ))}
