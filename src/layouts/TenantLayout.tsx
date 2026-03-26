@@ -72,7 +72,7 @@ export default function TenantLayout() {
           <Outlet />
         </div>
       </main>
-      <DevSessionSwitcher />
+      {import.meta.env.DEV && <DevSessionSwitcher />}
     </div>
   );
 }

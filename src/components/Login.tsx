@@ -4,6 +4,7 @@ import { signInWithPopup, GoogleAuthProvider, signInWithEmailAndPassword, signOu
 import { doc, getDoc } from 'firebase/firestore';
 import { auth, db } from '../firebase';
 import { Role } from '../context/accessConfig';
+import DevSessionSwitcher from './DevSessionSwitcher';
 
 export default function Login() {
   const navigate = useNavigate();
@@ -110,6 +111,7 @@ export default function Login() {
           Sign in with Google
         </button>
       </div>
+      {import.meta.env.DEV && <DevSessionSwitcher />}
     </div>
   );
 }

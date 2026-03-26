@@ -63,7 +63,7 @@ export default function OwnerLayout() {
           <Outlet />
         </div>
       </main>
-      <DevSessionSwitcher />
+      {import.meta.env.DEV && <DevSessionSwitcher />}
     </div>
   );
 }
