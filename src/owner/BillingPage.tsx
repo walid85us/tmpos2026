@@ -884,32 +884,66 @@ const BillingPage: React.FC = () => {
               </div>
               <div className="p-8 space-y-5">
                 {formModal === 'apply_credit' ? (
-                  <>
-                    <div>
-                      <label className={labelClass}>Credit Note</label>
-                      <select value={formCreditId} onChange={e => setFormCreditId(e.target.value)} className={inputClass}>
-                        <option value="">Select credit note...</option>
-                        {creditNotes.filter(c => c.amount - c.appliedAmount > 0).map(c => (
-                          <option key={c.id} value={c.creditNo}>{c.creditNo} — {c.tenant} — ${c.amount - c.appliedAmount} remaining</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <label className={labelClass}>Apply to Invoice</label>
-                      <select value={formInvoiceId} onChange={e => setFormInvoiceId(e.target.value)} className={inputClass}>
-                        <option value="">Select invoice...</option>
-                        {invoiceHistory.filter(i => i.status === 'overdue' || i.status === 'paid').map(i => (
-                          <option key={i.id} value={i.invoiceNo}>{i.invoiceNo} — {i.tenant} — ${i.total.toFixed(2)} ({i.status})</option>
-                        ))}
-                      </select>
-                    </div>
-                    {formCreditId && formInvoiceId && (
-                      <div className="bg-violet-50 rounded-xl p-4 border border-violet-100">
-                        <p className="text-[10px] font-black text-violet-700 uppercase tracking-widest mb-1">Preview</p>
-                        <p className="text-sm text-slate-700">{formCreditId} will be applied to {formInvoiceId}.</p>
-                      </div>
-                    )}
-                  </>
+                  (() => {
+                    const selectedCredit = formCreditId ? creditNotes.find(c => c.creditNo === formCreditId) : null;
+                    const creditRemaining = selectedCredit ? selectedCredit.amount - selectedCredit.appliedAmount : 0;
+                    const creditTenant = selectedCredit?.tenant || '';
+                    const eligibleInvoices = creditTenant
+                      ? invoiceHistory.filter(i => i.tenant === creditTenant && (i.status === 'overdue' || i.status === 'paid'))
+                      : [];
+                    const noBalance = selectedCredit && creditRemaining <= 0;
+                    const noEligible = selectedCredit && !noBalance && eligibleInvoices.length === 0;
+                    return (
+                      <>
+                        <div>
+                          <label className={labelClass}>Credit Note</label>
+                          <select value={formCreditId} onChange={e => { setFormCreditId(e.target.value); setFormInvoiceId(''); }} className={inputClass}>
+                            <option value="">Select credit note...</option>
+                            {creditNotes.filter(c => c.amount - c.appliedAmount > 0).map(c => (
+                              <option key={c.id} value={c.creditNo}>{c.creditNo} — {c.tenant} — ${(c.amount - c.appliedAmount).toFixed(2)} remaining</option>
+                            ))}
+                          </select>
+                        </div>
+                        {selectedCredit && (
+                          <div className={`rounded-xl p-4 border ${noBalance ? 'bg-red-50 border-red-100' : 'bg-slate-50 border-slate-100'}`}>
+                            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Selected Credit</p>
+                            <p className="text-sm font-bold text-slate-900">{selectedCredit.creditNo} · {creditTenant}</p>
+                            <p className="text-[10px] text-slate-500 mt-0.5">{selectedCredit.reason} · Total: ${selectedCredit.amount.toFixed(2)}</p>
+                            {noBalance
+                              ? <p className="text-[10px] font-black text-red-600 mt-1 uppercase tracking-widest">No available balance — fully applied</p>
+                              : <p className="text-[10px] font-black text-violet-600 mt-1">${creditRemaining.toFixed(2)} available to apply</p>
+                            }
+                          </div>
+                        )}
+                        <div>
+                          <label className={labelClass}>Apply to Invoice</label>
+                          <select
+                            value={formInvoiceId}
+                            onChange={e => setFormInvoiceId(e.target.value)}
+                            className={`${inputClass} ${(!formCreditId || noBalance || noEligible) ? 'opacity-50 cursor-not-allowed' : ''}`}
+                            disabled={!formCreditId || !!noBalance || !!noEligible}
+                          >
+                            <option value="">{!formCreditId ? 'Select a credit note first...' : noBalance ? 'No balance available' : noEligible ? `No eligible invoices for ${creditTenant}` : 'Select invoice...'}</option>
+                            {eligibleInvoices.map(i => (
+                              <option key={i.id} value={i.invoiceNo}>{i.invoiceNo} — {i.tenant} — ${i.total.toFixed(2)} ({i.status})</option>
+                            ))}
+                          </select>
+                          {noEligible && (
+                            <p className="text-[10px] font-black text-amber-600 mt-2 flex items-center gap-1">
+                              <span className="material-symbols-outlined text-sm">info</span>
+                              No overdue or paid invoices found for {creditTenant}.
+                            </p>
+                          )}
+                        </div>
+                        {formCreditId && formInvoiceId && !noBalance && (
+                          <div className="bg-violet-50 rounded-xl p-4 border border-violet-100">
+                            <p className="text-[10px] font-black text-violet-700 uppercase tracking-widest mb-1">Preview</p>
+                            <p className="text-sm text-slate-700">{formCreditId} (${creditRemaining.toFixed(2)} available) will be applied to {formInvoiceId}.</p>
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()
                 ) : (
                   <>
                     <div>

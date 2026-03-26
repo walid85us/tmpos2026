@@ -1,0 +1,104 @@
+You are now acting as:
+Principal SaaS Platform Architect + Principal Finance/Billing Workflow Architect + Principal Operations Dashboard Designer + Principal UX Design Thinker + Principal React/TypeScript Engineer + Principal QA Auditor
+
+IMPORTANT:
+This is a final correction pass ONLY for the current platform workstream:
+Platform Command Center & Commercial Plan System
+
+Do not touch unrelated modules.
+Do not redesign the UI.
+Preserve the current design baseline exactly.
+
+Fix and refine the following:
+
+==================================================
+1. OVERVIEW PAGE — FINAL ELEVATION
+==================================================
+
+The Overview page is improved, but it still may not yet feel like a truly powerful modern system-owner command center.
+
+Act as a creative product thinker and operations dashboard designer.
+Without changing the design system, make the page more powerful, interactive, and decision-oriented.
+
+Goal:
+The System Owner should be able to understand the platform’s most important operational health from this one screen.
+
+Improve/refine as needed:
+- stronger KPI hierarchy
+- more actionable operational widgets
+- clearer tenant status breakdown
+- clearer billing health visibility
+- clearer provisioning/onboarding queue
+- clearer support/escalation visibility
+- stronger recent activity usefulness
+- stronger drill-down actions
+- better prioritization of urgent items
+
+Do not just add more cards.
+Make the page feel more intentionally useful.
+
+==================================================
+2. BILLING CREDIT APPLICATION LOGIC
+==================================================
+
+Current issue:
+The billing credit workflow mostly works, but the Apply Credit flow still needs dependency-safe behavior.
+
+Fix this exactly:
+
+A. Credit-note dependency logic
+- when opening Apply Credit, the user must first select a credit note
+- until a credit note is selected, the “Apply to Invoice” control must remain disabled
+
+B. Tenant-specific invoice filtering
+- once a credit note is selected for a specific tenant/account, the “Apply to Invoice” dropdown must show ONLY invoices belonging to that same tenant/account
+- do not show invoices from any other tenant
+
+C. Better guardrails
+- if there are no eligible invoices for that tenant, show a clear message and keep the invoice selector disabled or empty
+- if the credit note has no available balance, prevent application
+- keep the workflow clear and safe
+
+D. Preserve existing working billing flows
+- do not break invoice detail
+- do not break refund/credit detail
+- do not break billing confirmations
+- do not break history/timeline visibility
+
+==================================================
+3. DO NOT BREAK THESE
+==================================================
+
+Do NOT break:
+- auth flow
+- preview mode
+- current role hierarchy
+- RBAC logic
+- current design baseline
+- working billing detail views
+- Usage page improvements
+- add-ons lifecycle/deletion behavior
+
+==================================================
+4. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether Overview was further elevated into a stronger command center
+C. whether Apply to Invoice stays disabled until credit note is selected
+D. whether invoice dropdown now filters only invoices belonging to the selected credit note’s tenant
+E. whether guardrails for no eligible invoices / no available balance were added
+F. confirmation that no visual drift was introduced
+
+==================================================
+5. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- Overview is further improved as a system-owner command center
+- Apply to Invoice is disabled until a credit note is selected
+- invoice dropdown filters to the selected tenant only
+- ineligible/no-balance cases are handled safely
+- auth flow still works
+- no visual drift was introduced
