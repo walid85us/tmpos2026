@@ -107,14 +107,16 @@ export const tenants = [
   },
 ];
 
+export type AddOnLifecycle = 'draft' | 'planned' | 'in_development' | 'active' | 'deprecated' | 'archived';
+
 export const addOns = [
-  { id: 'sms', name: 'SMS Credits', price: 10, compatiblePlans: ['growth', 'advanced'], status: 'active' as const, description: 'Bulk SMS credits for customer notifications, marketing campaigns, and ticket updates.' },
-  { id: 'loyalty', name: 'Loyalty Program', price: 20, compatiblePlans: ['advanced'], status: 'active' as const, description: 'Customer loyalty points, rewards tiers, and automated engagement campaigns.' },
-  { id: 'reporting', name: 'Advanced Reporting', price: 15, compatiblePlans: ['growth', 'advanced'], status: 'active' as const, description: 'Custom report builder, scheduled reports, and advanced analytics dashboards.' },
-  { id: 'multistore', name: 'Multi-Store Pack', price: 30, compatiblePlans: ['growth', 'advanced'], status: 'active' as const, description: 'Extra store locations, inter-store inventory transfers, and consolidated reporting.' },
-  { id: 'api', name: 'API Access', price: 25, compatiblePlans: ['advanced'], status: 'active' as const, description: 'REST API access for custom integrations, webhooks, and third-party app connectivity.' },
-  { id: 'whitelabel', name: 'White-Label', price: 50, compatiblePlans: ['advanced'], status: 'active' as const, description: 'Remove platform branding, custom domain, and branded customer-facing portal.' },
-  { id: 'priority', name: 'Priority Support', price: 35, compatiblePlans: ['growth', 'advanced'], status: 'active' as const, description: 'Dedicated support agent, 1-hour response SLA, and priority issue resolution.' },
+  { id: 'sms', name: 'SMS Credits', price: 10, compatiblePlans: ['growth', 'advanced'], status: 'active' as const, lifecycle: 'active' as AddOnLifecycle, description: 'Bulk SMS credits for customer notifications, marketing campaigns, and ticket updates.' },
+  { id: 'loyalty', name: 'Loyalty Program', price: 20, compatiblePlans: ['advanced'], status: 'active' as const, lifecycle: 'active' as AddOnLifecycle, description: 'Customer loyalty points, rewards tiers, and automated engagement campaigns.' },
+  { id: 'reporting', name: 'Advanced Reporting', price: 15, compatiblePlans: ['growth', 'advanced'], status: 'active' as const, lifecycle: 'active' as AddOnLifecycle, description: 'Custom report builder, scheduled reports, and advanced analytics dashboards.' },
+  { id: 'multistore', name: 'Multi-Store Pack', price: 30, compatiblePlans: ['growth', 'advanced'], status: 'active' as const, lifecycle: 'active' as AddOnLifecycle, description: 'Extra store locations, inter-store inventory transfers, and consolidated reporting.' },
+  { id: 'api', name: 'API Access', price: 25, compatiblePlans: ['advanced'], status: 'active' as const, lifecycle: 'active' as AddOnLifecycle, description: 'REST API access for custom integrations, webhooks, and third-party app connectivity.' },
+  { id: 'whitelabel', name: 'White-Label', price: 50, compatiblePlans: ['advanced'], status: 'active' as const, lifecycle: 'deprecated' as AddOnLifecycle, description: 'Remove platform branding, custom domain, and branded customer-facing portal.' },
+  { id: 'priority', name: 'Priority Support', price: 35, compatiblePlans: ['growth', 'advanced'], status: 'active' as const, lifecycle: 'active' as AddOnLifecycle, description: 'Dedicated support agent, 1-hour response SLA, and priority issue resolution.' },
 ];
 
 export type FeatureLifecycle = 'draft' | 'planned' | 'in_development' | 'implemented' | 'deprecated' | 'archived';
@@ -183,9 +185,9 @@ export const invoiceHistory = [
 ];
 
 export const creditNotes = [
-  { id: 'cr1', creditNo: 'CR-2026-0003', tenant: 'Tech Repair Pro', tenantId: 't1', date: '2026-02-05', amount: 35, reason: 'API Access Add-on refund — billing error', relatedInvoice: 'INV-2026-0042', status: 'applied' as const },
-  { id: 'cr2', creditNo: 'CR-2026-0002', tenant: 'QuickFix Electronics', tenantId: 't4', date: '2026-01-28', amount: 10, reason: 'Goodwill credit — service downtime Jan 25', relatedInvoice: null, status: 'applied' as const },
-  { id: 'cr3', creditNo: 'CR-2026-0001', tenant: 'Old Parts Shop', tenantId: 't5', date: '2026-01-15', amount: 49, reason: 'Subscription cancellation pro-rata refund', relatedInvoice: 'INV-2026-0029', status: 'pending' as const },
+  { id: 'cr1', creditNo: 'CR-2026-0003', tenant: 'Tech Repair Pro', tenantId: 't1', date: '2026-02-05', amount: 35, appliedAmount: 35, reason: 'API Access Add-on refund — billing error', relatedInvoice: 'INV-2026-0042', appliedToInvoice: 'INV-2026-0047', appliedDate: '2026-03-20', status: 'applied' as const, type: 'refund' as const },
+  { id: 'cr2', creditNo: 'CR-2026-0002', tenant: 'QuickFix Electronics', tenantId: 't4', date: '2026-01-28', amount: 10, appliedAmount: 10, reason: 'Goodwill credit — service downtime Jan 25', relatedInvoice: null, appliedToInvoice: 'INV-2026-0046', appliedDate: '2026-03-18', status: 'applied' as const, type: 'goodwill' as const },
+  { id: 'cr3', creditNo: 'CR-2026-0001', tenant: 'Old Parts Shop', tenantId: 't5', date: '2026-01-15', amount: 49, appliedAmount: 0, reason: 'Subscription cancellation pro-rata refund', relatedInvoice: 'INV-2026-0029', appliedToInvoice: null, appliedDate: null, status: 'pending' as const, type: 'cancellation' as const },
 ];
 
 export const planHistory = [

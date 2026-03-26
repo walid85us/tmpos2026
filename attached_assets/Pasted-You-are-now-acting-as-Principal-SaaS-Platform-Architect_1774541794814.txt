@@ -1,0 +1,120 @@
+You are now acting as:
+Principal SaaS Platform Architect + Principal Billing Systems Designer + Principal Commercial Plans Architect + Principal Platform Analytics Designer + Principal UX Workflow Designer + Principal React/TypeScript Engineer + Principal QA Auditor
+
+IMPORTANT:
+This is a correction/polish pass ONLY for the already-built workstream:
+Platform Command Center & Commercial Plan System
+
+Do not touch unrelated modules.
+Do not redesign the UI.
+Preserve the current design baseline exactly.
+
+Fix and refine the following:
+
+==================================================
+1. OVERVIEW PAGE
+==================================================
+
+The Overview page passes, but it is still not dynamic enough.
+Upgrade it into a more powerful and interactive command-center style dashboard for the System Owner.
+
+Required improvements:
+- date range selector/filter
+- stronger operational widgets
+- tenant status breakdown
+- billing alerts
+- upcoming renewals
+- provisioning/onboarding queue
+- support/escalation summary
+- recent platform activity
+- drill-down actions from major KPI cards
+
+Goal:
+The System Owner should be able to see the most important platform information from this one screen.
+
+==================================================
+2. BILLING PAGE
+==================================================
+
+The billing page mostly works, but the credit workflow is still unclear.
+
+Required improvements:
+- make the credit workflow understandable and operational
+- clearly show:
+  - how a credit is created
+  - how it is tied to a tenant/account/invoice
+  - how it is applied
+  - how partial/full application is tracked
+  - how it appears in history
+- keep confirmation flows for billing actions
+- preserve invoice detail and refund/credit detail views
+
+If needed, improve the detail modals/drawers so the workflow is obvious to the System Owner.
+
+==================================================
+3. PLANS & FEATURES — ADD-ONS
+==================================================
+
+Features now have lifecycle/status and safe deletion.
+Apply the SAME professional behavior to Add-ons.
+
+Required improvements:
+- add lifecycle/status to add-ons
+- add safe deletion confirmation to add-ons
+- if an add-on is used by one or more plans, block deletion
+- show exactly which plans are using that add-on
+- require removal from those plans before deletion can proceed
+
+==================================================
+4. USAGE PAGE
+==================================================
+
+Current issues:
+- Usage date filters are missing
+- tenant drill-down currently routes to tenant management instead of staying in Usage context
+
+Required improvements:
+- add date/time filters to Usage
+- clicking a tenant in Usage should open a usage detail modal/drawer/panel while staying on the Usage page
+- the usage detail view should still include an optional action/button to visit the full tenant management page
+- preserve current export, comparison, and warning behavior
+
+==================================================
+5. DO NOT BREAK THESE
+==================================================
+
+Do NOT break:
+- auth flow
+- preview mode
+- current role hierarchy
+- current RBAC logic
+- existing working pages outside this workstream
+- current design baseline
+
+==================================================
+6. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether Overview is now more interactive/dynamic
+C. whether billing credit workflow is now clearer and more operational
+D. whether add-ons now have lifecycle/status
+E. whether add-on deletion now checks dependencies
+F. whether Usage now supports date filters
+G. whether Usage tenant drill-down now stays on Usage page and opens modal/drawer detail
+H. confirmation that no visual drift was introduced
+
+==================================================
+7. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- Overview is more dynamic and command-center oriented
+- billing credit workflow is clearer
+- add-ons have lifecycle/status
+- add-on deletion checks dependencies
+- Usage supports date filters
+- Usage drill-down stays in Usage context
+- auth flow still works
+- no visual drift was introduced
