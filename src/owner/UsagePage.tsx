@@ -1,9 +1,12 @@
 import React, { useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { tenantUsage, tenants } from './mockData';
 
 type SortKey = 'tenant' | 'seatsUsed' | 'apiCalls' | 'storageMb' | 'smsUsed' | 'ticketsThisMonth' | 'invoicesThisMonth';
 
 const UsagePage: React.FC = () => {
+  const [searchParams] = useSearchParams();
+  const focusTenantId = searchParams.get('tenant');
   const [sortBy, setSortBy] = useState<SortKey>('tenant');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
 
@@ -65,7 +68,10 @@ const UsagePage: React.FC = () => {
     <div className="space-y-8">
       <div>
         <h2 className="text-2xl font-black text-primary tracking-tight">Platform Usage</h2>
-        <p className="text-slate-500 font-medium">Monitor tenant resource utilization, limits, and activity.</p>
+        <p className="text-slate-500 font-medium">
+          Monitor tenant resource utilization, limits, and activity.
+          {focusTenantId && (() => { const t = tenants.find(x => x.id === focusTenantId); return t ? <span className="ml-2 text-blue-600 font-bold">Viewing: {t.name}</span> : null; })()}
+        </p>
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -126,7 +132,7 @@ const UsagePage: React.FC = () => {
               {sorted.map(usage => {
                 const tenant = tenants.find(t => t.id === usage.tenantId);
                 return (
-                  <tr key={usage.tenantId} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/50 transition-colors">
+                  <tr key={usage.tenantId} className={`border-b border-slate-50 last:border-0 hover:bg-slate-50/50 transition-colors ${focusTenantId === usage.tenantId ? 'bg-blue-50/80 ring-2 ring-blue-200' : ''}`}>
                     <td className="px-6 py-4">
                       <span className="font-bold text-slate-900 text-sm">{usage.tenant}</span>
                       {tenant?.status === 'suspended' && <span className="ml-2 px-1.5 py-0.5 bg-slate-200 text-slate-500 text-[8px] font-black uppercase rounded">Suspended</span>}

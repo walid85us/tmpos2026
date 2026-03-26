@@ -342,11 +342,14 @@ const PlansPage: React.FC = () => {
               <p className="text-sm text-slate-500 mb-4 leading-relaxed">{addon.description}</p>
               <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Compatible Plans</p>
               <div className="flex gap-2 flex-wrap mb-4">
-                {addon.compatiblePlans.map((plan, i) => (
-                  <span key={i} className="px-3 py-1 bg-slate-100 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-lg">
-                    {plan}
-                  </span>
-                ))}
+                {addon.compatiblePlans.map((planId, i) => {
+                  const planObj = plansData.find(p => p.id === planId);
+                  return (
+                    <span key={i} className="px-3 py-1 bg-slate-100 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-lg">
+                      {planObj?.name || planId}
+                    </span>
+                  );
+                })}
               </div>
               <div className="flex gap-2">
                 <button onClick={() => openEditAddOn(addon)} className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
