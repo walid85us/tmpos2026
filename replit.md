@@ -60,6 +60,23 @@ A multi-tenant SaaS platform frontend built with React, TypeScript, Vite, Tailwi
 - **UI enforcement**: Add Employee (manage_employees), Create Role (create_roles), Manage Permissions (manage_role_permissions), role dropdown (assign_manager_role), PendingApproval (approve_requests)
 - **Preview mode**: DevSessionSwitcher enables role/tenant switching for development
 
+## Tenant Management & Provisioning (Workstream 2)
+
+- **TenantsPage**: Full tenant list with search, status/plan filtering, sortable columns (name/plan/status/MRR/renewal), status-aware badges, summary cards with filter toggle
+- **ProvisioningPage**: 3-step flow (form → confirm → success) with validated inputs (business name, subdomain regex, owner name, email regex, plan cards, billing cycle)
+- **TenantDetailPage**: 9 fully-built tabs:
+  - Overview: summary cards (plan, MRR, renewal, onboarded, seats, locations, domain, SSL/DNS), flags, quick actions
+  - Owner & Users: tenant-scoped users via `tenantId` filter, invite user modal (accessible: role/aria-modal/ESC handler)
+  - Subscription: current plan details, limits, compatible add-ons, upgrade/downgrade actions
+  - Features: featureMatrix filtered by tenant plan, lifecycle badges, enabled/disabled per feature
+  - Billing: tenant-scoped invoices + transactions + credits from mock data, summary cards
+  - Domains: subdomain, custom domain, SSL certificate status, DNS verification status
+  - Usage: seats, locations, API, storage, SMS, tickets/invoices with progress bars
+  - Activity/Audit: tenant-scoped audit logs with severity badges
+  - Support Notes: existing notes, flags, add note with local state persistence
+- **Mock data**: `accessMockData.ts` tenantUsers now have `tenantId` field for proper tenant-scoped filtering
+- **Accessibility**: label/id pairs on form inputs, keyboard-navigable table rows, modal dialog semantics
+
 ## Data Model
 
 - **PlatformUser** - Users (system_owner, support_admin, tenant_user roles)
