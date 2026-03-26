@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { useParams } from 'react-router-dom';
-import { tenants } from './mockData';
+import { useParams, Link } from 'react-router-dom';
+import { tenants, tenantUsage } from './mockData';
 import { tenantUsers } from './accessMockData';
 
 const TenantDetailPage: React.FC = () => {
@@ -97,7 +97,63 @@ const TenantDetailPage: React.FC = () => {
             <p><span className="font-bold text-slate-900">Renewal:</span> {tenant.renewal}</p>
           </div>
         )}
-        {activeTab !== 'Overview' && activeTab !== 'Owner & Users' && activeTab !== 'Features' && activeTab !== 'Subscription' && <p>Content for {activeTab} tab goes here.</p>}
+        {activeTab === 'Usage' && (() => {
+          const usage = tenantUsage.find(u => u.tenantId === tenant.id);
+          if (!usage) return <p className="text-slate-400">No usage data available for this tenant.</p>;
+          const usageBar = (used: number, limit: number) => {
+            if (limit === 0) return <span className="text-[10px] text-slate-400">N/A</span>;
+            const pct = Math.round((used / limit) * 100);
+            const color = pct >= 90 ? 'bg-red-500' : pct >= 70 ? 'bg-amber-500' : 'bg-lime-500';
+            return (
+              <div className="flex items-center gap-2">
+                <div className="w-24 h-2 bg-slate-200 rounded-full overflow-hidden">
+                  <div className={`h-full rounded-full ${color}`} style={{ width: `${Math.min(pct, 100)}%` }} />
+                </div>
+                <span className="text-[10px] font-bold text-slate-500">{pct}%</span>
+              </div>
+            );
+          };
+          return (
+            <div className="space-y-6">
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Seats</p>
+                  <p className="font-black text-primary">{usage.seatsUsed}/{usage.seatsAllowed}</p>
+                  {usageBar(usage.seatsUsed, usage.seatsAllowed)}
+                </div>
+                <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">API Calls</p>
+                  <p className="font-black text-primary">{usage.apiCalls.toLocaleString()}/{usage.apiLimit.toLocaleString()}</p>
+                  {usageBar(usage.apiCalls, usage.apiLimit)}
+                </div>
+                <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Storage</p>
+                  <p className="font-black text-primary">{usage.storageMb}MB/{usage.storageLimitMb}MB</p>
+                  {usageBar(usage.storageMb, usage.storageLimitMb)}
+                </div>
+                <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">SMS</p>
+                  <p className="font-black text-primary">{usage.smsUsed}/{usage.smsLimit}</p>
+                  {usageBar(usage.smsUsed, usage.smsLimit)}
+                </div>
+                <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Tickets This Month</p>
+                  <p className="font-black text-primary">{usage.ticketsThisMonth}</p>
+                </div>
+                <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Invoices This Month</p>
+                  <p className="font-black text-primary">{usage.invoicesThisMonth}</p>
+                </div>
+              </div>
+              <Link to={`/owner/usage?tenant=${tenant.id}`} className="inline-flex items-center gap-2 px-5 py-3 bg-primary text-white font-black text-[10px] rounded-xl hover:bg-primary/90 active:scale-95 transition-all uppercase tracking-widest">
+                <span className="material-symbols-outlined text-sm">open_in_new</span>
+                View Platform Usage
+              </Link>
+            </div>
+          );
+        })()}
+
+        {activeTab !== 'Overview' && activeTab !== 'Owner & Users' && activeTab !== 'Features' && activeTab !== 'Subscription' && activeTab !== 'Usage' && <p>Content for {activeTab} tab goes here.</p>}
       </div>
     </div>
   );
