@@ -118,20 +118,20 @@ export const addOns = [
 ];
 
 export const featureMatrix = [
-  { id: 'sales', name: 'Sales Module', essential: true, growth: true, advanced: true },
-  { id: 'repairs', name: 'Repair Tickets', essential: true, growth: true, advanced: true },
-  { id: 'inventory', name: 'Inventory Management', essential: true, growth: true, advanced: true },
-  { id: 'customers', name: 'Customer CRM', essential: false, growth: true, advanced: true },
-  { id: 'marketing', name: 'Marketing Automation', essential: false, growth: true, advanced: true },
-  { id: 'supply_chain', name: 'Supply Chain', essential: false, growth: true, advanced: true },
-  { id: 'reports', name: 'Reports & Analytics', essential: false, growth: true, advanced: true },
-  { id: 'employees', name: 'Employee Management', essential: false, growth: true, advanced: true },
-  { id: 'prospects', name: 'Prospects & Leads', essential: false, growth: true, advanced: true },
-  { id: 'widgets', name: 'Customer Widgets', essential: false, growth: true, advanced: true },
-  { id: 'integrations', name: 'Integrations', essential: false, growth: true, advanced: true },
-  { id: 'api', name: 'API Access', essential: false, growth: false, advanced: true },
-  { id: 'domains', name: 'Custom Domains', essential: false, growth: false, advanced: true },
-  { id: 'whitelabel', name: 'White-Label Branding', essential: false, growth: false, advanced: true },
+  { id: 'sales', name: 'Sales Module', essential: true, growth: true, advanced: true, source: 'inherited' as const },
+  { id: 'repairs', name: 'Repair Tickets', essential: true, growth: true, advanced: true, source: 'inherited' as const },
+  { id: 'inventory', name: 'Inventory Management', essential: true, growth: true, advanced: true, source: 'inherited' as const },
+  { id: 'customers', name: 'Customer CRM', essential: false, growth: true, advanced: true, source: 'inherited' as const },
+  { id: 'marketing', name: 'Marketing Automation', essential: false, growth: true, advanced: true, source: 'custom' as const },
+  { id: 'supply_chain', name: 'Supply Chain', essential: false, growth: true, advanced: true, source: 'inherited' as const },
+  { id: 'reports', name: 'Reports & Analytics', essential: false, growth: true, advanced: true, source: 'inherited' as const },
+  { id: 'employees', name: 'Employee Management', essential: false, growth: true, advanced: true, source: 'inherited' as const },
+  { id: 'prospects', name: 'Prospects & Leads', essential: false, growth: true, advanced: true, source: 'custom' as const },
+  { id: 'widgets', name: 'Customer Widgets', essential: false, growth: true, advanced: true, source: 'inherited' as const },
+  { id: 'integrations', name: 'Integrations', essential: false, growth: true, advanced: true, source: 'inherited' as const },
+  { id: 'api', name: 'API Access', essential: false, growth: false, advanced: true, source: 'inherited' as const },
+  { id: 'domains', name: 'Custom Domains', essential: false, growth: false, advanced: true, source: 'custom' as const },
+  { id: 'whitelabel', name: 'White-Label Branding', essential: false, growth: false, advanced: true, source: 'custom' as const },
 ];
 
 export const auditLogs = [
@@ -163,6 +163,33 @@ export const billingTransactions = [
   { id: 'bt10', tenant: 'Tech Repair Pro', date: '2026-03-05', amount: 25, type: 'addon' as const, status: 'paid' as const, method: 'Visa •••• 4242', invoiceNo: 'INV-2026-0042' },
   { id: 'bt11', tenant: 'Old Parts Shop', date: '2026-02-01', amount: 49, type: 'subscription' as const, status: 'failed' as const, method: 'ACH •••• 9012', invoiceNo: 'INV-2026-0029' },
   { id: 'bt12', tenant: 'Tech Repair Pro', date: '2026-02-05', amount: 35, type: 'addon' as const, status: 'refunded' as const, method: 'Visa •••• 4242', invoiceNo: 'CR-2026-0003' },
+];
+
+export const invoiceHistory = [
+  { id: 'inv1', invoiceNo: 'INV-2026-0047', tenant: 'Tech Repair Pro', tenantId: 't1', date: '2026-03-20', dueDate: '2026-04-20', amount: 99, tax: 9.90, total: 108.90, status: 'paid' as const, plan: 'Growth', items: [{ description: 'Growth Plan - Monthly', qty: 1, amount: 99 }], paidDate: '2026-03-20' },
+  { id: 'inv2', invoiceNo: 'INV-2026-0046', tenant: 'QuickFix Electronics', tenantId: 't4', date: '2026-03-18', dueDate: '2026-04-18', amount: 99, tax: 9.90, total: 108.90, status: 'overdue' as const, plan: 'Growth', items: [{ description: 'Growth Plan - Monthly', qty: 1, amount: 99 }], paidDate: null },
+  { id: 'inv3', invoiceNo: 'INV-2026-0045', tenant: 'Gadget Fixers', tenantId: 't2', date: '2026-03-15', dueDate: '2026-04-15', amount: 49, tax: 4.90, total: 53.90, status: 'paid' as const, plan: 'Essential', items: [{ description: 'Essential Plan - Monthly', qty: 1, amount: 49 }], paidDate: '2026-03-15' },
+  { id: 'inv4', invoiceNo: 'INV-2026-0044', tenant: 'Tech Repair Pro', tenantId: 't1', date: '2026-03-12', dueDate: '2026-04-12', amount: 15, tax: 1.50, total: 16.50, status: 'paid' as const, plan: 'Growth', items: [{ description: 'Advanced Reporting Add-on', qty: 1, amount: 15 }], paidDate: '2026-03-12' },
+  { id: 'inv5', invoiceNo: 'INV-2026-0043', tenant: 'Mobile Fix Hub', tenantId: 't3', date: '2026-03-14', dueDate: '2026-04-14', amount: 0, tax: 0, total: 0, status: 'paid' as const, plan: 'Advanced (Trial)', items: [{ description: 'Advanced Plan - Trial Period', qty: 1, amount: 0 }], paidDate: '2026-03-14' },
+  { id: 'inv6', invoiceNo: 'INV-2026-0042', tenant: 'Tech Repair Pro', tenantId: 't1', date: '2026-03-05', dueDate: '2026-04-05', amount: 25, tax: 2.50, total: 27.50, status: 'paid' as const, plan: 'Growth', items: [{ description: 'API Access Add-on', qty: 1, amount: 25 }], paidDate: '2026-03-05' },
+  { id: 'inv7', invoiceNo: 'INV-2026-0041', tenant: 'Old Parts Shop', tenantId: 't5', date: '2026-03-01', dueDate: '2026-04-01', amount: 49, tax: 4.90, total: 53.90, status: 'void' as const, plan: 'Essential', items: [{ description: 'Essential Plan - Monthly', qty: 1, amount: 49 }], paidDate: null },
+  { id: 'inv8', invoiceNo: 'INV-2026-0038', tenant: 'QuickFix Electronics', tenantId: 't4', date: '2026-02-18', dueDate: '2026-03-18', amount: 99, tax: 9.90, total: 108.90, status: 'paid' as const, plan: 'Growth', items: [{ description: 'Growth Plan - Monthly', qty: 1, amount: 99 }], paidDate: '2026-02-18' },
+  { id: 'inv9', invoiceNo: 'INV-2026-0035', tenant: 'Tech Repair Pro', tenantId: 't1', date: '2026-02-20', dueDate: '2026-03-20', amount: 99, tax: 9.90, total: 108.90, status: 'paid' as const, plan: 'Growth', items: [{ description: 'Growth Plan - Monthly', qty: 1, amount: 99 }], paidDate: '2026-02-20' },
+  { id: 'inv10', invoiceNo: 'INV-2026-0032', tenant: 'Gadget Fixers', tenantId: 't2', date: '2026-02-15', dueDate: '2026-03-15', amount: 49, tax: 4.90, total: 53.90, status: 'paid' as const, plan: 'Essential', items: [{ description: 'Essential Plan - Monthly', qty: 1, amount: 49 }], paidDate: '2026-02-15' },
+];
+
+export const creditNotes = [
+  { id: 'cr1', creditNo: 'CR-2026-0003', tenant: 'Tech Repair Pro', tenantId: 't1', date: '2026-02-05', amount: 35, reason: 'API Access Add-on refund — billing error', relatedInvoice: 'INV-2026-0042', status: 'applied' as const },
+  { id: 'cr2', creditNo: 'CR-2026-0002', tenant: 'QuickFix Electronics', tenantId: 't4', date: '2026-01-28', amount: 10, reason: 'Goodwill credit — service downtime Jan 25', relatedInvoice: null, status: 'applied' as const },
+  { id: 'cr3', creditNo: 'CR-2026-0001', tenant: 'Old Parts Shop', tenantId: 't5', date: '2026-01-15', amount: 49, reason: 'Subscription cancellation pro-rata refund', relatedInvoice: 'INV-2026-0029', status: 'pending' as const },
+];
+
+export const planHistory = [
+  { id: 'ph1', tenant: 'Tech Repair Pro', tenantId: 't1', fromPlan: 'Essential', toPlan: 'Growth', date: '2025-12-01', type: 'upgrade' as const },
+  { id: 'ph2', tenant: 'QuickFix Electronics', tenantId: 't4', fromPlan: 'Essential', toPlan: 'Growth', date: '2025-10-15', type: 'upgrade' as const },
+  { id: 'ph3', tenant: 'Mobile Fix Hub', tenantId: 't3', fromPlan: null, toPlan: 'Advanced (Trial)', date: '2026-03-14', type: 'trial_start' as const },
+  { id: 'ph4', tenant: 'Old Parts Shop', tenantId: 't5', fromPlan: 'Essential', toPlan: 'Suspended', date: '2026-02-15', type: 'suspension' as const },
+  { id: 'ph5', tenant: 'Gadget Fixers', tenantId: 't2', fromPlan: null, toPlan: 'Essential', date: '2026-02-18', type: 'new' as const },
 ];
 
 export const tenantUsage = [

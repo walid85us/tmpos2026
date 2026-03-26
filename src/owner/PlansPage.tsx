@@ -92,7 +92,7 @@ const PlansPage: React.FC = () => {
   const addFeature = () => {
     if (!newFeatureName.trim()) return;
     const id = newFeatureName.toLowerCase().replace(/\s+/g, '_');
-    setFeaturesData(prev => [...prev, { id, name: newFeatureName.trim(), essential: false, growth: false, advanced: false }]);
+    setFeaturesData(prev => [...prev, { id, name: newFeatureName.trim(), essential: false, growth: false, advanced: false, source: 'custom' as const }]);
     setNewFeatureName('');
     setShowFeatureModal(false);
   };
@@ -279,7 +279,14 @@ const PlansPage: React.FC = () => {
             <tbody>
               {featuresData.map((feature) => (
                 <tr key={feature.id} className="hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0">
-                  <td className="px-8 py-4 font-bold text-slate-900">{feature.name}</td>
+                  <td className="px-8 py-4">
+                    <span className="font-bold text-slate-900">{feature.name}</span>
+                    <span className={`ml-2 px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md border ${
+                      feature.source === 'inherited'
+                        ? 'bg-blue-400/10 text-blue-600 border-blue-400/20'
+                        : 'bg-violet-400/10 text-violet-600 border-violet-400/20'
+                    }`}>{feature.source}</span>
+                  </td>
                   {(['essential', 'growth', 'advanced'] as const).map(planKey => (
                     <td key={planKey} className="px-8 py-4 text-center">
                       <button
