@@ -118,20 +118,20 @@ export const addOns = [
 ];
 
 export const featureMatrix = [
-  { id: 'sales', name: 'Sales Module', essential: true, growth: true, advanced: true, source: 'inherited' as const },
-  { id: 'repairs', name: 'Repair Tickets', essential: true, growth: true, advanced: true, source: 'inherited' as const },
-  { id: 'inventory', name: 'Inventory Management', essential: true, growth: true, advanced: true, source: 'inherited' as const },
-  { id: 'customers', name: 'Customer CRM', essential: false, growth: true, advanced: true, source: 'inherited' as const },
-  { id: 'marketing', name: 'Marketing Automation', essential: false, growth: true, advanced: true, source: 'custom' as const },
-  { id: 'supply_chain', name: 'Supply Chain', essential: false, growth: true, advanced: true, source: 'inherited' as const },
-  { id: 'reports', name: 'Reports & Analytics', essential: false, growth: true, advanced: true, source: 'inherited' as const },
-  { id: 'employees', name: 'Employee Management', essential: false, growth: true, advanced: true, source: 'inherited' as const },
-  { id: 'prospects', name: 'Prospects & Leads', essential: false, growth: true, advanced: true, source: 'custom' as const },
-  { id: 'widgets', name: 'Customer Widgets', essential: false, growth: true, advanced: true, source: 'inherited' as const },
-  { id: 'integrations', name: 'Integrations', essential: false, growth: true, advanced: true, source: 'inherited' as const },
-  { id: 'api', name: 'API Access', essential: false, growth: false, advanced: true, source: 'inherited' as const },
-  { id: 'domains', name: 'Custom Domains', essential: false, growth: false, advanced: true, source: 'custom' as const },
-  { id: 'whitelabel', name: 'White-Label Branding', essential: false, growth: false, advanced: true, source: 'custom' as const },
+  { id: 'sales', name: 'Sales Module', planAvailability: { essential: true, growth: true, advanced: true } as Record<string, boolean>, source: 'inherited' as const },
+  { id: 'repairs', name: 'Repair Tickets', planAvailability: { essential: true, growth: true, advanced: true } as Record<string, boolean>, source: 'inherited' as const },
+  { id: 'inventory', name: 'Inventory Management', planAvailability: { essential: true, growth: true, advanced: true } as Record<string, boolean>, source: 'inherited' as const },
+  { id: 'customers', name: 'Customer CRM', planAvailability: { essential: false, growth: true, advanced: true } as Record<string, boolean>, source: 'inherited' as const },
+  { id: 'marketing', name: 'Marketing Automation', planAvailability: { essential: false, growth: true, advanced: true } as Record<string, boolean>, source: 'custom' as const },
+  { id: 'supply_chain', name: 'Supply Chain', planAvailability: { essential: false, growth: true, advanced: true } as Record<string, boolean>, source: 'inherited' as const },
+  { id: 'reports', name: 'Reports & Analytics', planAvailability: { essential: false, growth: true, advanced: true } as Record<string, boolean>, source: 'inherited' as const },
+  { id: 'employees', name: 'Employee Management', planAvailability: { essential: false, growth: true, advanced: true } as Record<string, boolean>, source: 'inherited' as const },
+  { id: 'prospects', name: 'Prospects & Leads', planAvailability: { essential: false, growth: true, advanced: true } as Record<string, boolean>, source: 'custom' as const },
+  { id: 'widgets', name: 'Customer Widgets', planAvailability: { essential: false, growth: true, advanced: true } as Record<string, boolean>, source: 'inherited' as const },
+  { id: 'integrations', name: 'Integrations', planAvailability: { essential: false, growth: true, advanced: true } as Record<string, boolean>, source: 'inherited' as const },
+  { id: 'api', name: 'API Access', planAvailability: { essential: false, growth: false, advanced: true } as Record<string, boolean>, source: 'inherited' as const },
+  { id: 'domains', name: 'Custom Domains', planAvailability: { essential: false, growth: false, advanced: true } as Record<string, boolean>, source: 'custom' as const },
+  { id: 'whitelabel', name: 'White-Label Branding', planAvailability: { essential: false, growth: false, advanced: true } as Record<string, boolean>, source: 'custom' as const },
 ];
 
 export const auditLogs = [

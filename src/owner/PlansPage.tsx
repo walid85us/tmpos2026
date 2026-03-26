@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { plans as initialPlans, featureMatrix as initialFeatures, addOns as initialAddOns } from './mockData';
 
 type PlanData = typeof initialPlans[0];
-type FeatureData = typeof initialFeatures[0];
+type FeatureData = { id: string; name: string; planAvailability: Record<string, boolean>; source: 'inherited' | 'custom' };
 type AddOnData = typeof initialAddOns[0];
 
 const PlansPage: React.FC = () => {
@@ -85,14 +85,18 @@ const PlansPage: React.FC = () => {
     setPlansData(prev => prev.map(p => p.id === planId ? { ...p, status: 'active' as const } : p));
   };
 
-  const toggleFeature = (featureId: string, planKey: 'essential' | 'growth' | 'advanced') => {
-    setFeaturesData(prev => prev.map(f => f.id === featureId ? { ...f, [planKey]: !f[planKey] } : f));
+  const activePlans = plansData.filter(p => p.status === 'active');
+
+  const toggleFeature = (featureId: string, planId: string) => {
+    setFeaturesData(prev => prev.map(f => f.id === featureId ? { ...f, planAvailability: { ...f.planAvailability, [planId]: !f.planAvailability[planId] } } : f));
   };
 
   const addFeature = () => {
     if (!newFeatureName.trim()) return;
     const id = newFeatureName.toLowerCase().replace(/\s+/g, '_');
-    setFeaturesData(prev => [...prev, { id, name: newFeatureName.trim(), essential: false, growth: false, advanced: false, source: 'custom' as const }]);
+    const defaultAvailability: Record<string, boolean> = {};
+    plansData.forEach(p => { defaultAvailability[p.id] = false; });
+    setFeaturesData(prev => [...prev, { id, name: newFeatureName.trim(), planAvailability: defaultAvailability, source: 'custom' as const }]);
     setNewFeatureName('');
     setShowFeatureModal(false);
   };
@@ -266,50 +270,52 @@ const PlansPage: React.FC = () => {
 
       {activeTab === 'features' && (
         <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
-          <table className="w-full text-left border-collapse">
-            <thead>
-              <tr className="border-b border-slate-100 bg-slate-50/50">
-                <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Feature</th>
-                <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Essential</th>
-                <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Growth</th>
-                <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Advanced</th>
-                <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {featuresData.map((feature) => (
-                <tr key={feature.id} className="hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0">
-                  <td className="px-8 py-4">
-                    <span className="font-bold text-slate-900">{feature.name}</span>
-                    <span className={`ml-2 px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md border ${
-                      feature.source === 'inherited'
-                        ? 'bg-blue-400/10 text-blue-600 border-blue-400/20'
-                        : 'bg-violet-400/10 text-violet-600 border-violet-400/20'
-                    }`}>{feature.source}</span>
-                  </td>
-                  {(['essential', 'growth', 'advanced'] as const).map(planKey => (
-                    <td key={planKey} className="px-8 py-4 text-center">
-                      <button
-                        onClick={() => toggleFeature(feature.id, planKey)}
-                        className="transition-all hover:scale-110 active:scale-95"
-                      >
-                        {feature[planKey] ? (
-                          <span className="material-symbols-outlined text-lime-500">toggle_on</span>
-                        ) : (
-                          <span className="material-symbols-outlined text-slate-300">toggle_off</span>
-                        )}
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-slate-100 bg-slate-50/50">
+                  <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Feature</th>
+                  {activePlans.map(plan => (
+                    <th key={plan.id} className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">{plan.name}</th>
+                  ))}
+                  <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {featuresData.map((feature) => (
+                  <tr key={feature.id} className="hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0">
+                    <td className="px-8 py-4">
+                      <span className="font-bold text-slate-900">{feature.name}</span>
+                      <span className={`ml-2 px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md border ${
+                        feature.source === 'inherited'
+                          ? 'bg-blue-400/10 text-blue-600 border-blue-400/20'
+                          : 'bg-violet-400/10 text-violet-600 border-violet-400/20'
+                      }`}>{feature.source}</span>
+                    </td>
+                    {activePlans.map(plan => (
+                      <td key={plan.id} className="px-6 py-4 text-center">
+                        <button
+                          onClick={() => toggleFeature(feature.id, plan.id)}
+                          className="transition-all hover:scale-110 active:scale-95"
+                        >
+                          {feature.planAvailability[plan.id] ? (
+                            <span className="material-symbols-outlined text-lime-500">toggle_on</span>
+                          ) : (
+                            <span className="material-symbols-outlined text-slate-300">toggle_off</span>
+                          )}
+                        </button>
+                      </td>
+                    ))}
+                    <td className="px-8 py-4 text-center">
+                      <button onClick={() => removeFeature(feature.id)} className="text-slate-400 hover:text-red-500 transition-colors">
+                        <span className="material-symbols-outlined text-sm">delete</span>
                       </button>
                     </td>
-                  ))}
-                  <td className="px-8 py-4 text-center">
-                    <button onClick={() => removeFeature(feature.id)} className="text-slate-400 hover:text-red-500 transition-colors">
-                      <span className="material-symbols-outlined text-sm">delete</span>
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
