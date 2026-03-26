@@ -1,12 +1,12 @@
 import React, { useState, useMemo } from 'react';
-import { tenants, billingTransactions, invoiceHistory, creditNotes } from './mockData';
+import { tenants, billingTransactions, invoiceHistory, creditNotes as initialCreditNotes } from './mockData';
 import { motion, AnimatePresence } from 'motion/react';
 
 type BillingTab = 'transactions' | 'invoices' | 'credits' | 'ledger';
 type TxFilter = 'all' | 'paid' | 'failed' | 'refunded';
 type InvFilter = 'all' | 'paid' | 'overdue' | 'void';
 type ConfirmAction = { type: 'retry' | 'refund'; tenant: string; amount: number; invoiceNo: string } | null;
-type DetailModal = { type: 'invoice'; data: typeof invoiceHistory[0] } | { type: 'credit'; data: typeof creditNotes[0] } | null;
+type DetailModal = { type: 'invoice'; data: typeof invoiceHistory[0] } | { type: 'credit'; data: typeof initialCreditNotes[0] } | null;
 type FormModal = 'invoice' | 'refund' | 'credit' | 'apply_credit' | null;
 
 const BillingPage: React.FC = () => {
@@ -26,6 +26,7 @@ const BillingPage: React.FC = () => {
   const [formPlan, setFormPlan] = useState('');
   const [formCreditId, setFormCreditId] = useState('');
   const [formInvoiceId, setFormInvoiceId] = useState('');
+  const [creditNotes, setCreditNotes] = useState(() => [...initialCreditNotes]);
 
   const totalRevenue = billingTransactions.filter(t => t.status === 'paid').reduce((s, t) => s + t.amount, 0);
   const failedTotal = billingTransactions.filter(t => t.status === 'failed').reduce((s, t) => s + t.amount, 0);
@@ -61,7 +62,7 @@ const BillingPage: React.FC = () => {
 
   const filteredCredits = useMemo(() => {
     return applyDateFilter(creditNotes);
-  }, [dateFrom, dateTo, tenantFilter]);
+  }, [dateFrom, dateTo, tenantFilter, creditNotes]);
 
   const uniqueTenants = [...new Set(billingTransactions.map(t => t.tenant))];
 
@@ -88,7 +89,7 @@ const BillingPage: React.FC = () => {
         creditCount: tenantCredits.length,
       };
     });
-  }, []);
+  }, [creditNotes]);
 
   const statusBadge = (status: string) => {
     const styles: Record<string, string> = {
@@ -164,7 +165,18 @@ const BillingPage: React.FC = () => {
     if (formModal === 'invoice') label = `Invoice issued to ${formTenant} for $${formAmount}`;
     else if (formModal === 'refund') label = `Refund of $${formAmount} issued to ${formTenant}`;
     else if (formModal === 'credit') label = `Credit note of $${formAmount} created for ${formTenant}`;
-    else if (formModal === 'apply_credit') label = `Credit ${formCreditId} applied to ${formInvoiceId}`;
+    else if (formModal === 'apply_credit') {
+      label = `Credit ${formCreditId} applied to ${formInvoiceId}`;
+      const credit = creditNotes.find(c => c.creditNo === formCreditId);
+      if (credit) {
+        const remaining = credit.amount - credit.appliedAmount;
+        setCreditNotes(prev => prev.map(c =>
+          c.creditNo === formCreditId
+            ? { ...c, appliedAmount: c.amount, appliedToInvoice: formInvoiceId, appliedDate: new Date().toISOString().split('T')[0], status: remaining <= c.amount ? 'applied' as const : c.status }
+            : c
+        ));
+      }
+    }
     setFormModal(null);
     setFormConfirmStep(false);
     setFormTenant('');
@@ -899,9 +911,14 @@ const BillingPage: React.FC = () => {
                           <label className={labelClass}>Credit Note</label>
                           <select value={formCreditId} onChange={e => { setFormCreditId(e.target.value); setFormInvoiceId(''); }} className={inputClass}>
                             <option value="">Select credit note...</option>
-                            {creditNotes.filter(c => c.amount - c.appliedAmount > 0).map(c => (
-                              <option key={c.id} value={c.creditNo}>{c.creditNo} — {c.tenant} — ${(c.amount - c.appliedAmount).toFixed(2)} remaining</option>
-                            ))}
+                            {creditNotes.map(c => {
+                              const rem = c.amount - c.appliedAmount;
+                              return (
+                                <option key={c.id} value={c.creditNo}>
+                                  {c.creditNo} — {c.tenant} — {rem > 0 ? `$${rem.toFixed(2)} remaining` : 'Fully applied'}
+                                </option>
+                              );
+                            })}
                           </select>
                         </div>
                         {selectedCredit && (
