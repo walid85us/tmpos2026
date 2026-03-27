@@ -12,11 +12,39 @@ interface Session {
   status: 'active' | 'invited' | 'suspended' | 'pending_setup';
 }
 
+export type OnboardingStage = 'invited' | 'pending_setup' | 'setup_incomplete' | 'pending_activation' | 'active';
+export type DomainMode = 'platform_subdomain' | 'custom_pending' | 'custom_dns_pending' | 'custom_ssl_pending' | 'custom_active';
+
+export interface OnboardingChecklist {
+  profileComplete: boolean;
+  paymentMethodAdded: boolean;
+  firstProductAdded: boolean;
+  domainConfigured: boolean;
+  teamInvited: boolean;
+  storeCustomized: boolean;
+}
+
+export interface TenantDomainInfo {
+  mode: DomainMode;
+  subdomain: string;
+  customDomain?: string;
+  dnsVerified: boolean;
+  sslProvisioned: boolean;
+  propagated: boolean;
+}
+
 interface Tenant {
   id: string;
   name: string;
   plan: Plan;
   status: AccountStatus;
+  onboardingStage?: OnboardingStage;
+  onboardingChecklist?: OnboardingChecklist;
+  domainInfo?: TenantDomainInfo;
+  inviteSentDate?: string;
+  setupStartedDate?: string;
+  activatedDate?: string;
+  trialEndsDate?: string;
 }
 
 interface AccessContextType {
@@ -82,7 +110,13 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
               setRealTenant(null);
             } else {
               console.log('[AccessContext] Tenant user — setting mock tenant');
-              setRealTenant({ id: 'tenant-1', name: 'My Store', plan: 'growth', status: 'active' });
+              setRealTenant({
+                id: 'tenant-1', name: 'My Store', plan: 'growth', status: 'active',
+                onboardingStage: 'active',
+                onboardingChecklist: { profileComplete: true, paymentMethodAdded: true, firstProductAdded: true, domainConfigured: true, teamInvited: true, storeCustomized: true },
+                domainInfo: { mode: 'custom_active', subdomain: 'my-store.repairplatform.io', customDomain: 'mystore.com', dnsVerified: true, sslProvisioned: true, propagated: true },
+                activatedDate: '2026-02-15',
+              });
             }
 
             setAuthError(null);

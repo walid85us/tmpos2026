@@ -2,140 +2,402 @@ import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAccess } from '../context/AccessContext';
+import type { OnboardingStage, OnboardingChecklist, TenantDomainInfo, DomainMode } from '../context/AccessContext';
 import ApprovalQueue from './ApprovalQueue';
+
+function DomainStatusCard({ domainInfo }: { domainInfo: TenantDomainInfo }) {
+  const modeLabels: Record<DomainMode, { label: string; color: string; icon: string; desc: string }> = {
+    platform_subdomain: { label: 'Platform Subdomain', color: 'text-blue-700 bg-blue-50 border-blue-200', icon: 'dns', desc: 'Your store is accessible via platform subdomain.' },
+    custom_pending: { label: 'Custom Domain Pending', color: 'text-amber-700 bg-amber-50 border-amber-200', icon: 'pending', desc: 'Custom domain registration is being processed.' },
+    custom_dns_pending: { label: 'DNS Verification Pending', color: 'text-orange-700 bg-orange-50 border-orange-200', icon: 'domain_verification', desc: 'Add DNS records to verify your domain ownership.' },
+    custom_ssl_pending: { label: 'SSL Provisioning', color: 'text-violet-700 bg-violet-50 border-violet-200', icon: 'lock', desc: 'DNS verified. SSL certificate is being provisioned.' },
+    custom_active: { label: 'Custom Domain Active', color: 'text-lime-700 bg-lime-50 border-lime-200', icon: 'verified', desc: 'Your custom domain is live and secured with SSL.' },
+  };
+
+  const mode = modeLabels[domainInfo.mode];
+
+  return (
+    <div className={`p-4 rounded-2xl border ${mode.color} space-y-3`}>
+      <div className="flex items-center gap-2">
+        <span className="material-symbols-outlined text-sm">{mode.icon}</span>
+        <span className="text-[10px] font-black uppercase tracking-widest">{mode.label}</span>
+      </div>
+      <p className="text-[11px] font-bold opacity-80">{mode.desc}</p>
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between">
+          <span className="text-[10px] font-bold opacity-60">Platform URL</span>
+          <span className="text-[10px] font-black">{domainInfo.subdomain}</span>
+        </div>
+        {domainInfo.customDomain && (
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-bold opacity-60">Custom Domain</span>
+            <span className="text-[10px] font-black">{domainInfo.customDomain}</span>
+          </div>
+        )}
+      </div>
+      <div className="flex gap-2 flex-wrap pt-1">
+        <StatusChip label="DNS" done={domainInfo.dnsVerified} />
+        <StatusChip label="Propagated" done={domainInfo.propagated} />
+        <StatusChip label="SSL" done={domainInfo.sslProvisioned} />
+      </div>
+      {domainInfo.mode === 'custom_dns_pending' && (
+        <div className="p-3 bg-white/60 rounded-xl border border-orange-100 mt-1">
+          <p className="text-[10px] font-black text-orange-800 uppercase tracking-widest mb-1">Action Required</p>
+          <p className="text-[10px] font-bold text-orange-600">Add the following DNS records at your domain registrar, then wait for propagation (up to 48 hours).</p>
+          <div className="mt-2 flex gap-2">
+            <button className="px-3 py-1.5 bg-orange-500 text-white text-[9px] font-black rounded-lg uppercase tracking-widest hover:bg-orange-600 transition-colors">View DNS Records</button>
+            <button className="px-3 py-1.5 bg-white text-orange-600 text-[9px] font-black rounded-lg uppercase tracking-widest border border-orange-200 hover:bg-orange-50 transition-colors">Check Status</button>
+          </div>
+        </div>
+      )}
+      {domainInfo.mode === 'platform_subdomain' && !domainInfo.customDomain && (
+        <button className="w-full py-2 bg-blue-500 text-white text-[9px] font-black rounded-xl uppercase tracking-widest hover:bg-blue-600 transition-colors mt-1">
+          <span className="material-symbols-outlined text-xs mr-1 align-middle">add</span>
+          Connect Custom Domain
+        </button>
+      )}
+    </div>
+  );
+}
+
+function StatusChip({ label, done }: { label: string; done: boolean }) {
+  return (
+    <div className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[8px] font-black uppercase tracking-widest ${
+      done ? 'bg-lime-100 text-lime-700 border border-lime-200' : 'bg-slate-100 text-slate-400 border border-slate-200'
+    }`}>
+      <span className="material-symbols-outlined" style={{ fontSize: '10px' }}>{done ? 'check_circle' : 'radio_button_unchecked'}</span>
+      {label}
+    </div>
+  );
+}
+
+function OnboardingChecklistCard({ checklist, onboardingStage }: { checklist: OnboardingChecklist; onboardingStage: OnboardingStage }) {
+  const items = [
+    { key: 'profileComplete', label: 'Complete store profile', icon: 'storefront', action: 'Go to Settings', route: '/settings' },
+    { key: 'paymentMethodAdded', label: 'Add payment method', icon: 'credit_card', action: 'Add Payment', route: '/settings' },
+    { key: 'firstProductAdded', label: 'Add first product or service', icon: 'inventory_2', action: 'Add Product', route: '/inventory' },
+    { key: 'domainConfigured', label: 'Configure domain', icon: 'public', action: 'Set Up Domain', route: '/settings' },
+    { key: 'teamInvited', label: 'Invite team members', icon: 'group_add', action: 'Invite Team', route: '/employees' },
+    { key: 'storeCustomized', label: 'Customize store appearance', icon: 'palette', action: 'Customize', route: '/settings' },
+  ] as const;
+
+  const completedCount = items.filter(item => checklist[item.key]).length;
+  const totalCount = items.length;
+  const progress = Math.round((completedCount / totalCount) * 100);
+  const allDone = completedCount === totalCount;
+
+  if (allDone && onboardingStage === 'active') return null;
+
+  return (
+    <div className="p-4 bg-white rounded-2xl ghost-border shadow-sm space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="material-symbols-outlined text-sm text-primary">checklist</span>
+          <span className="text-[10px] font-black text-primary uppercase tracking-widest">Setup Checklist</span>
+        </div>
+        <span className="text-[10px] font-black text-slate-500">{completedCount}/{totalCount}</span>
+      </div>
+      <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+        <div className="h-full bg-lime-500 rounded-full transition-all duration-500" style={{ width: `${progress}%` }} />
+      </div>
+      <div className="space-y-1">
+        {items.map(item => (
+          <div key={item.key} className={`flex items-center justify-between p-2.5 rounded-xl transition-colors ${checklist[item.key] ? 'bg-lime-50/50' : 'bg-slate-50 hover:bg-slate-100'}`}>
+            <div className="flex items-center gap-2.5">
+              <span className={`material-symbols-outlined text-sm ${checklist[item.key] ? 'text-lime-500' : 'text-slate-300'}`}>
+                {checklist[item.key] ? 'check_circle' : 'radio_button_unchecked'}
+              </span>
+              <span className={`text-[11px] font-bold ${checklist[item.key] ? 'text-slate-400 line-through' : 'text-slate-700'}`}>{item.label}</span>
+            </div>
+            {!checklist[item.key] && (
+              <Link to={item.route} className="text-[8px] font-black text-primary uppercase tracking-widest hover:text-primary/80 transition-colors">
+                {item.action}
+              </Link>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function LifecycleStepper({ onboardingStage, inviteSentDate, setupStartedDate, activatedDate }: {
+  onboardingStage: OnboardingStage;
+  inviteSentDate?: string;
+  setupStartedDate?: string;
+  activatedDate?: string;
+}) {
+  const stages: { key: OnboardingStage; label: string; icon: string; date?: string }[] = [
+    { key: 'invited', label: 'Invited', icon: 'mail', date: inviteSentDate },
+    { key: 'pending_setup', label: 'Setup Started', icon: 'engineering', date: setupStartedDate },
+    { key: 'setup_incomplete', label: 'Setup In Progress', icon: 'build', date: undefined },
+    { key: 'pending_activation', label: 'Pending Activation', icon: 'hourglass_top', date: undefined },
+    { key: 'active', label: 'Active & Live', icon: 'check_circle', date: activatedDate },
+  ];
+
+  const stageOrder: OnboardingStage[] = ['invited', 'pending_setup', 'setup_incomplete', 'pending_activation', 'active'];
+  const currentIdx = stageOrder.indexOf(onboardingStage);
+
+  return (
+    <div className="flex items-center gap-0 w-full">
+      {stages.map((stage, i) => {
+        const isDone = i < currentIdx;
+        const isCurrent = i === currentIdx;
+        const isFuture = i > currentIdx;
+        return (
+          <React.Fragment key={stage.key}>
+            <div className="flex flex-col items-center gap-1 flex-1 min-w-0">
+              <div className={`w-8 h-8 rounded-full flex items-center justify-center transition-all ${
+                isDone ? 'bg-lime-100 border-2 border-lime-400' :
+                isCurrent ? 'bg-blue-100 border-2 border-blue-400 ring-2 ring-blue-200' :
+                'bg-slate-100 border-2 border-slate-200'
+              }`}>
+                <span className={`material-symbols-outlined text-sm ${
+                  isDone ? 'text-lime-600' : isCurrent ? 'text-blue-600' : 'text-slate-400'
+                }`}>{isDone ? 'check' : stage.icon}</span>
+              </div>
+              <span className={`text-[7px] font-black uppercase tracking-widest text-center leading-tight ${
+                isDone ? 'text-lime-700' : isCurrent ? 'text-blue-700' : 'text-slate-400'
+              }`}>{stage.label}</span>
+              {stage.date && (
+                <span className="text-[7px] font-bold text-slate-400">{stage.date}</span>
+              )}
+            </div>
+            {i < stages.length - 1 && (
+              <div className={`h-0.5 w-4 mt-[-20px] flex-shrink-0 ${isDone ? 'bg-lime-400' : 'bg-slate-200'}`} />
+            )}
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+}
 
 function StoreActivationPanel() {
   const { session, tenant } = useAccess();
   if (!session || session.role !== 'store_owner' || !tenant) return null;
 
+  const onboardingStage = tenant.onboardingStage || (tenant.status === 'active' || tenant.status === 'trialing' ? 'active' : 'pending_setup');
+  const isOnboardedByStage = onboardingStage === 'active';
+  const checklist = tenant.onboardingChecklist || {
+    profileComplete: isOnboardedByStage, paymentMethodAdded: isOnboardedByStage, firstProductAdded: isOnboardedByStage,
+    domainConfigured: isOnboardedByStage, teamInvited: isOnboardedByStage, storeCustomized: isOnboardedByStage
+  };
+  const domainInfo = tenant.domainInfo || {
+    mode: 'platform_subdomain' as const, subdomain: `${tenant.name.toLowerCase().replace(/\s/g, '-')}.repairplatform.io`,
+    dnsVerified: false, sslProvisioned: false, propagated: false,
+  };
+
   const isLive = tenant.status === 'active' || tenant.status === 'trialing';
-  const isPendingActivation = tenant.status === 'pending_activation';
   const isSuspended = tenant.status === 'suspended';
   const isOverdue = tenant.status === 'overdue';
   const isReadOnly = tenant.status === 'read_only';
-
-  const steps = [
-    { key: 'onboarded', label: 'Onboarded', icon: 'person_add', done: true },
-    { key: 'setup', label: 'Account Setup', icon: 'settings', done: isLive || isOverdue || isReadOnly },
-    { key: 'domain', label: 'Domain Ready', icon: 'public', done: isLive || isOverdue },
-    { key: 'activation', label: 'Activated', icon: 'rocket_launch', done: isLive || isOverdue },
-    { key: 'live', label: 'Store Live', icon: 'storefront', done: isLive },
-  ];
+  const isFullyOnboarded = onboardingStage === 'active' && isLive;
+  const checklistComplete = Object.values(checklist).every(v => v);
 
   if (isSuspended) {
     return (
-      <div className="p-5 bg-red-50 rounded-2xl border border-red-200">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-red-100 rounded-full flex items-center justify-center">
-            <span className="material-symbols-outlined text-red-600">block</span>
+      <div className="space-y-4">
+        <div className="p-5 bg-red-50 rounded-2xl border border-red-200">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-red-100 rounded-full flex items-center justify-center">
+              <span className="material-symbols-outlined text-red-600">block</span>
+            </div>
+            <div className="flex-1">
+              <p className="text-sm font-black text-red-800">Your store has been suspended</p>
+              <p className="text-[10px] text-red-600 font-bold">Please contact support or resolve outstanding billing issues to restore access.</p>
+            </div>
           </div>
-          <div>
-            <p className="text-sm font-black text-red-800">Your store has been suspended</p>
-            <p className="text-[10px] text-red-600 font-bold">Please contact support or resolve outstanding billing issues to restore access.</p>
+          <div className="mt-3 flex gap-2">
+            <div className="flex items-center gap-1.5 px-3 py-1.5 bg-white/80 rounded-lg border border-red-200">
+              <span className="material-symbols-outlined text-xs text-red-400">error</span>
+              <span className="text-[9px] font-black text-red-600 uppercase tracking-widest">Access Blocked</span>
+            </div>
+            <div className="flex items-center gap-1.5 px-3 py-1.5 bg-white/80 rounded-lg border border-red-200">
+              <span className="material-symbols-outlined text-xs text-red-400">support_agent</span>
+              <span className="text-[9px] font-black text-red-600 uppercase tracking-widest">Contact Support</span>
+            </div>
           </div>
         </div>
+        {domainInfo && <DomainStatusCard domainInfo={domainInfo} />}
       </div>
     );
   }
 
   if (isReadOnly) {
     return (
-      <div className="p-5 bg-violet-50 rounded-2xl border border-violet-200">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-violet-100 rounded-full flex items-center justify-center">
-            <span className="material-symbols-outlined text-violet-600">visibility</span>
-          </div>
-          <div>
-            <p className="text-sm font-black text-violet-800">Your store is in read-only mode</p>
-            <p className="text-[10px] text-violet-600 font-bold">You can view data but editing is disabled. Contact your platform admin to restore full access.</p>
+      <div className="space-y-4">
+        <div className="p-5 bg-violet-50 rounded-2xl border border-violet-200">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-violet-100 rounded-full flex items-center justify-center">
+              <span className="material-symbols-outlined text-violet-600">visibility</span>
+            </div>
+            <div>
+              <p className="text-sm font-black text-violet-800">Your store is in read-only mode</p>
+              <p className="text-[10px] text-violet-600 font-bold">You can view data but editing is disabled. Contact your platform admin to restore full access.</p>
+            </div>
           </div>
         </div>
+        {domainInfo && <DomainStatusCard domainInfo={domainInfo} />}
       </div>
     );
   }
 
   if (isOverdue) {
     return (
-      <div className="p-5 bg-amber-50 rounded-2xl border border-amber-200">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-amber-100 rounded-full flex items-center justify-center">
-            <span className="material-symbols-outlined text-amber-600">warning</span>
+      <div className="space-y-4">
+        <div className="p-5 bg-amber-50 rounded-2xl border border-amber-200">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-amber-100 rounded-full flex items-center justify-center">
+              <span className="material-symbols-outlined text-amber-600">warning</span>
+            </div>
+            <div className="flex-1">
+              <p className="text-sm font-black text-amber-800">Payment overdue — action required</p>
+              <p className="text-[10px] text-amber-600 font-bold">Your store is still accessible, but please update your payment method to avoid interruption.</p>
+            </div>
           </div>
-          <div>
-            <p className="text-sm font-black text-amber-800">Payment overdue — action required</p>
-            <p className="text-[10px] text-amber-600 font-bold">Your store is still accessible, but please update your payment method to avoid interruption.</p>
+          <div className="mt-3 flex gap-2">
+            <button className="px-3 py-1.5 bg-amber-500 text-white text-[9px] font-black rounded-lg uppercase tracking-widest hover:bg-amber-600 transition-colors">Update Payment</button>
           </div>
         </div>
+        {domainInfo && <DomainStatusCard domainInfo={domainInfo} />}
       </div>
     );
   }
 
-  if (isLive) {
+  if (isFullyOnboarded && checklistComplete) {
     return (
-      <div className="p-5 bg-lime-50 rounded-2xl border border-lime-200 space-y-3">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-lime-100 rounded-full flex items-center justify-center">
-            <span className="material-symbols-outlined text-lime-600">check_circle</span>
+      <div className="space-y-4">
+        <div className="p-5 bg-lime-50 rounded-2xl border border-lime-200 space-y-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-lime-100 rounded-full flex items-center justify-center">
+              <span className="material-symbols-outlined text-lime-600">check_circle</span>
+            </div>
+            <div className="flex-1">
+              <p className="text-sm font-black text-lime-800">
+                {tenant.status === 'trialing' ? 'Your store is active (trial)' : 'Your store is fully active and live'}
+              </p>
+              <p className="text-[10px] text-lime-600 font-bold">
+                {tenant.status === 'trialing' && tenant.trialEndsDate
+                  ? `Free trial ends ${tenant.trialEndsDate}. Upgrade to keep your store running.`
+                  : tenant.status === 'trialing'
+                  ? 'You are on a free trial. Upgrade before it expires to keep your store running.'
+                  : 'All setup steps are complete. Your store is accessible to customers.'}
+              </p>
+            </div>
           </div>
-          <div>
-            <p className="text-sm font-black text-lime-800">Your store is {tenant.status === 'trialing' ? 'active (trial)' : 'fully active and live'}</p>
-            <p className="text-[10px] text-lime-600 font-bold">
-              {tenant.status === 'trialing' ? 'You are on a free trial. Upgrade before it expires to keep your store running.' : 'All setup steps are complete. Your store is accessible to customers.'}
-            </p>
+          <div className="flex gap-2 flex-wrap">
+            <div className="flex items-center gap-1.5 px-3 py-1.5 bg-white/80 rounded-lg border border-lime-200">
+              <span className="material-symbols-outlined text-xs text-lime-600">rocket_launch</span>
+              <span className="text-[9px] font-black text-lime-700 uppercase tracking-widest">Onboarding Complete</span>
+            </div>
+            {tenant.activatedDate && (
+              <div className="flex items-center gap-1.5 px-3 py-1.5 bg-white/80 rounded-lg border border-lime-200">
+                <span className="material-symbols-outlined text-xs text-lime-600">event_available</span>
+                <span className="text-[9px] font-black text-lime-700 uppercase tracking-widest">Since {tenant.activatedDate}</span>
+              </div>
+            )}
+            <div className="flex items-center gap-1.5 px-3 py-1.5 bg-white/80 rounded-lg border border-lime-200">
+              <span className="material-symbols-outlined text-xs text-lime-600">verified_user</span>
+              <span className="text-[9px] font-black text-lime-700 uppercase tracking-widest">{tenant.plan} Plan</span>
+            </div>
           </div>
         </div>
-        <div className="flex gap-3 flex-wrap">
-          <div className="flex items-center gap-1.5 px-3 py-1.5 bg-white/80 rounded-lg border border-lime-200">
-            <span className="material-symbols-outlined text-xs text-lime-600">public</span>
-            <span className="text-[9px] font-black text-lime-700 uppercase tracking-widest">Domain Active</span>
-          </div>
-          <div className="flex items-center gap-1.5 px-3 py-1.5 bg-white/80 rounded-lg border border-lime-200">
-            <span className="material-symbols-outlined text-xs text-lime-600">lock</span>
-            <span className="text-[9px] font-black text-lime-700 uppercase tracking-widest">SSL Secured</span>
-          </div>
-          <div className="flex items-center gap-1.5 px-3 py-1.5 bg-white/80 rounded-lg border border-lime-200">
-            <span className="material-symbols-outlined text-xs text-lime-600">verified</span>
-            <span className="text-[9px] font-black text-lime-700 uppercase tracking-widest">DNS Verified</span>
-          </div>
-        </div>
+        <DomainStatusCard domainInfo={domainInfo} />
       </div>
     );
   }
+
+  const stageMessages: Record<OnboardingStage, { title: string; subtitle: string; color: string; bg: string; border: string; iconBg: string }> = {
+    invited: {
+      title: 'Welcome! Your store invitation is ready',
+      subtitle: 'Complete your account setup to get started. Follow the checklist below.',
+      color: 'text-indigo-800', bg: 'bg-indigo-50', border: 'border-indigo-200', iconBg: 'bg-indigo-100',
+    },
+    pending_setup: {
+      title: 'Account setup started',
+      subtitle: 'Continue setting up your store. Complete the required items in the checklist.',
+      color: 'text-blue-800', bg: 'bg-blue-50', border: 'border-blue-200', iconBg: 'bg-blue-100',
+    },
+    setup_incomplete: {
+      title: 'Setup in progress — items remaining',
+      subtitle: 'You still have setup steps to complete before your store can go live.',
+      color: 'text-amber-800', bg: 'bg-amber-50', border: 'border-amber-200', iconBg: 'bg-amber-100',
+    },
+    pending_activation: {
+      title: 'Almost there — activation pending',
+      subtitle: 'Your setup is being reviewed. Your store will be activated shortly.',
+      color: 'text-violet-800', bg: 'bg-violet-50', border: 'border-violet-200', iconBg: 'bg-violet-100',
+    },
+    active: {
+      title: 'Your store is active — finish remaining setup',
+      subtitle: 'Your store is live but some optional setup items remain. Complete them for the best experience.',
+      color: 'text-lime-800', bg: 'bg-lime-50', border: 'border-lime-200', iconBg: 'bg-lime-100',
+    },
+  };
+
+  const msg = stageMessages[onboardingStage];
+  const stageIcons: Record<OnboardingStage, string> = {
+    invited: 'mail',
+    pending_setup: 'engineering',
+    setup_incomplete: 'build',
+    pending_activation: 'hourglass_top',
+    active: 'check_circle',
+  };
 
   return (
-    <div className="p-5 bg-white rounded-2xl ghost-border shadow-sm space-y-4">
-      <div className="flex items-center gap-3">
-        <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">
-          <span className="material-symbols-outlined text-blue-600">rocket_launch</span>
+    <div className="space-y-4">
+      <div className={`p-5 ${msg.bg} rounded-2xl ${msg.border} border space-y-4`}>
+        <div className="flex items-center gap-3">
+          <div className={`w-10 h-10 ${msg.iconBg} rounded-full flex items-center justify-center`}>
+            <span className={`material-symbols-outlined ${msg.color}`}>{stageIcons[onboardingStage]}</span>
+          </div>
+          <div className="flex-1">
+            <p className={`text-sm font-black ${msg.color}`}>{msg.title}</p>
+            <p className={`text-[10px] font-bold ${msg.color} opacity-70`}>{msg.subtitle}</p>
+          </div>
         </div>
-        <div>
-          <p className="text-sm font-black text-primary">Complete Your Store Setup</p>
-          <p className="text-[10px] text-slate-500 font-bold">
-            {isPendingActivation ? 'Your account is being activated. This should complete shortly.' : 'Complete the remaining setup steps to make your store live.'}
-          </p>
-        </div>
+        <LifecycleStepper
+          onboardingStage={onboardingStage}
+          inviteSentDate={tenant.inviteSentDate}
+          setupStartedDate={tenant.setupStartedDate}
+          activatedDate={tenant.activatedDate}
+        />
+        {onboardingStage === 'invited' && (
+          <div className="p-3 bg-white/60 rounded-xl border border-indigo-100">
+            <p className="text-[10px] font-black text-indigo-700 uppercase tracking-widest mb-1">First-Time Login</p>
+            <p className="text-[10px] font-bold text-indigo-600">
+              {tenant.inviteSentDate
+                ? `Invitation sent on ${tenant.inviteSentDate}. Complete your profile to begin store setup.`
+                : 'Check your email for the invitation link to begin setting up your store.'}
+            </p>
+            <button className="mt-2 px-4 py-2 bg-indigo-500 text-white text-[9px] font-black rounded-xl uppercase tracking-widest hover:bg-indigo-600 transition-colors">
+              Begin Store Setup
+            </button>
+          </div>
+        )}
+        {onboardingStage === 'pending_activation' && (
+          <div className="p-3 bg-white/60 rounded-xl border border-violet-100">
+            <p className="text-[10px] font-bold text-violet-600 flex items-center gap-1">
+              <span className="material-symbols-outlined text-xs">info</span>
+              Your store activation is in progress. You will be notified once it is complete.
+            </p>
+          </div>
+        )}
+        {(onboardingStage === 'setup_incomplete' || onboardingStage === 'pending_setup') && (
+          <div className="p-3 bg-white/60 rounded-xl border border-amber-100">
+            <p className="text-[10px] font-bold text-amber-600 flex items-center gap-1">
+              <span className="material-symbols-outlined text-xs">info</span>
+              Complete all checklist items below to proceed to activation.
+            </p>
+            <Link to="/settings" className="inline-block mt-2 px-4 py-2 bg-amber-500 text-white text-[9px] font-black rounded-xl uppercase tracking-widest hover:bg-amber-600 transition-colors">
+              Continue Setup
+            </Link>
+          </div>
+        )}
       </div>
-      <div className="flex items-center gap-0">
-        {steps.map((step, i, arr) => (
-          <React.Fragment key={step.key}>
-            <div className="flex flex-col items-center gap-1 flex-1">
-              <div className={`w-9 h-9 rounded-full flex items-center justify-center ${step.done ? 'bg-lime-100 border-2 border-lime-400' : i === steps.findIndex(s => !s.done) ? 'bg-blue-100 border-2 border-blue-400 ring-2 ring-blue-200' : 'bg-slate-100 border-2 border-slate-200'}`}>
-                <span className={`material-symbols-outlined text-sm ${step.done ? 'text-lime-600' : i === steps.findIndex(s => !s.done) ? 'text-blue-600' : 'text-slate-400'}`}>{step.done ? 'check' : step.icon}</span>
-              </div>
-              <span className={`text-[8px] font-black uppercase tracking-widest ${step.done ? 'text-lime-700' : i === steps.findIndex(s => !s.done) ? 'text-blue-700' : 'text-slate-400'}`}>{step.label}</span>
-            </div>
-            {i < arr.length - 1 && <div className={`h-0.5 w-6 mt-[-12px] ${step.done ? 'bg-lime-400' : 'bg-slate-200'}`} />}
-          </React.Fragment>
-        ))}
-      </div>
-      {isPendingActivation && (
-        <div className="p-3 bg-blue-50 rounded-xl border border-blue-100">
-          <p className="text-sm text-blue-700 font-bold flex items-center gap-1">
-            <span className="material-symbols-outlined text-xs">hourglass_top</span>
-            Your store activation is in progress. You'll be notified once it's complete.
-          </p>
-        </div>
-      )}
+      <OnboardingChecklistCard checklist={checklist} onboardingStage={onboardingStage} />
+      <DomainStatusCard domainInfo={domainInfo} />
     </div>
   );
 }

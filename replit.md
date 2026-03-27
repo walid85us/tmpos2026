@@ -82,7 +82,14 @@ A multi-tenant SaaS platform frontend built with React, TypeScript, Vite, Tailwi
 - **Credit rules**: Credits apply ONLY to invoices with status `overdue` or `pending`; `eligibleInvoicesForCredit` memo enforces this everywhere
 - **Refund detail**: `currency_exchange` icon for refund items; refund section in Credit Detail modal (ref, source invoice, amount, date)
 - **Domain workflow**: `domainPropagation` state (`unknown|checking|propagated|not_propagated`); 6-step stepper with `failed` states; separate Check Propagation → Verify DNS → Provision SSL controls
-- **Store-side activation**: `StoreActivationPanel` in DashboardOverview shows status-aware banners (active/trialing/overdue/suspended/pending_activation/read_only) with setup progress stepper; active state shows domain readiness badges (Domain Active, SSL Secured, DNS Verified); stepper includes Domain Ready step
+- **Store-side activation/onboarding**: `StoreActivationPanel` is a comprehensive lifecycle/domain/onboarding surface:
+  - **Lifecycle stepper**: invited → pending_setup → setup_incomplete → pending_activation → active with dates
+  - **Onboarding checklist**: 6-item checklist (profile, payment, product, domain, team, customization) with progress bar and action links; auto-hides when complete + active
+  - **Domain readiness card**: shows domain mode (platform_subdomain/custom_pending/custom_dns_pending/custom_ssl_pending/custom_active), subdomain/custom domain URLs, DNS/SSL/propagation status chips, action prompts (View DNS Records, Check Status, Connect Custom Domain)
+  - **Status-aware banners**: suspended (red), read_only (violet), overdue (amber with Update Payment), invited (indigo with Begin Store Setup), pending_setup/setup_incomplete (amber/blue with Continue Setup), pending_activation (violet with info), active/trialing (lime with plan badge + activation date)
+  - **Fallback defaults**: derive from `onboardingStage` — active stores default checklist to complete, non-active default to incomplete
+- **Tenant interface**: Extended with `onboardingStage`, `onboardingChecklist`, `domainInfo` (TenantDomainInfo), `inviteSentDate`, `setupStartedDate`, `activatedDate`, `trialEndsDate`
+- **DevSessionSwitcher**: 11 test scenarios (active, trial, invited, setup_incomplete, domain_pending, pending_activation, suspended, overdue, pending_setup, custom_pending/domain_registering, ssl_pending) with "Test Scenarios" toggle button
 - **Activation lifecycle (T006)**: Resend Invite button on Overview for non-active tenants; accountSetupDate display; awaiting-status messaging; active confirmation banner
 
 ## Data Model
