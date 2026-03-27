@@ -1,0 +1,220 @@
+You are now acting as:
+Principal Tenant Lifecycle Architect + Principal Store Onboarding Experience Architect + Principal SaaS Activation & Access-Gating Architect + Principal RBAC Architect + Principal Domain/Readiness Workflow Architect + Principal React/TypeScript Engineer + Principal UX Workflow Designer + Principal QA Auditor + Principal Side Auditor & Systems Thinker
+
+IMPORTANT:
+You must not only fix the visible issue.
+You must also act as:
+- a side auditor
+- a systems thinker
+- an activation/access-gating architect
+
+That means:
+- identify any missing supporting process needed to make store activation/onboarding truly coherent
+- implement the missing support process if required
+- avoid shallow “banner only” fixes
+- deliver a result that is operationally testable and lifecycle-safe
+
+This is a final correction pass ONLY for:
+Tenant Management & Provisioning → Store-side activation/onboarding gating
+
+Do not touch unrelated modules.
+Do not redesign the UI.
+Preserve the current design baseline exactly.
+
+==================================================
+1. STORE ACTIVATION MUST CONTROL STORE ACCESS
+==================================================
+
+Current issue:
+Store-side activation/onboarding awareness exists, but the full store experience is still too accessible before activation is complete.
+
+Required:
+Before store activation/onboarding is complete, the Store Owner dashboard must act as the primary onboarding control center.
+
+Rule:
+- until activation is complete, side-menu sections/pages/modules should NOT appear or should remain clearly locked/hidden based on the activation state
+- once activation is complete, the store should operate normally and the full allowed menu should appear based on plan + permissions
+
+Implement lifecycle-based store access gating using the current architecture.
+
+==================================================
+2. DASHBOARD AS ONBOARDING CONTROL CENTER
+==================================================
+
+Required:
+When Store Owner is not fully activated/live, the dashboard must clearly become the onboarding and activation workspace.
+
+It should show:
+- current lifecycle state
+- completed steps
+- remaining steps
+- next required action
+- domain readiness
+- account setup readiness
+- activation blockers
+- selected plan context
+- onboarding checklist / progress
+- continue setup actions
+
+Goal:
+The Store Owner should immediately understand what is required before the store becomes fully operational.
+
+==================================================
+3. SIDE MENU GATING RULES
+==================================================
+
+Required:
+Before activation is complete:
+- only the minimum necessary pages should appear, such as:
+  - Dashboard
+  - any onboarding/setup page needed
+  - domain/setup readiness if needed
+  - support/help if needed
+- all operational store modules should remain hidden or clearly locked until activation completes, including as appropriate:
+  - Sales
+  - Repairs
+  - Inventory
+  - Customers
+  - Employees
+  - Invoices
+  - Services
+  - Supply Chain
+  - Reports
+  - Prospects
+  - Marketing
+  - Integrations
+  - Widgets
+  - Settings sections that should not be usable yet
+
+Once activation is complete:
+- restore the normal store navigation according to:
+  - selected plan
+  - granted permissions
+  - role visibility rules
+
+Do not break existing RBAC.
+This is lifecycle gating layered on top of RBAC and plan access.
+
+==================================================
+4. PLAN-AWARE ACTIVATION GATING
+==================================================
+
+Required:
+Activation gating must respect the selected plan.
+
+Examples:
+- only modules/features included in the selected plan should become available after activation
+- if onboarding checklist/setup differs by plan, reflect that cleanly
+- if certain setup requirements exist for plan-specific modules, include them in onboarding logic where relevant
+
+Goal:
+The transition from onboarding state to active state should feel tied to the tenant’s actual commercial plan.
+
+==================================================
+5. TESTABLE LIFECYCLE STATES
+==================================================
+
+Required:
+Make the store-side lifecycle visibly testable in current architecture.
+
+Support states such as:
+- invited
+- pending setup
+- setup incomplete
+- pending activation
+- domain pending
+- verification pending
+- active/live
+- onboarding complete
+
+There must be a realistic and testable state transition path.
+If backend services are not fully live, use local/mock/dev-safe state handling to make the flow testable.
+
+==================================================
+6. STORE-SIDE DOMAIN READINESS INSIDE ONBOARDING
+==================================================
+
+Required:
+Integrate domain readiness into the onboarding/activation control center.
+
+Show clearly where relevant:
+- using default subdomain
+- custom domain pending
+- DNS verification pending
+- SSL pending
+- custom domain active
+- live on platform domain vs custom domain
+
+This should help the Store Owner understand whether the store is truly ready to go live.
+
+==================================================
+7. PLATFORM/STORE LIFECYCLE COHERENCE
+==================================================
+
+Required:
+Ensure platform-side lifecycle and store-side lifecycle stay coherent.
+
+Examples:
+- if platform side shows pending activation, store side should not appear fully active
+- if platform side shows active/live, store side can unlock the full menu according to plan and permissions
+- if domain verification is pending, store-side readiness should reflect that appropriately
+
+==================================================
+8. SIDE AUDIT / SYSTEM THINKER REQUIREMENT
+==================================================
+
+Before finishing, audit whether this workflow needs additional supporting process such as:
+- activation blockers
+- checklist items
+- plan-specific readiness rules
+- first-login guidance
+- progress indicators
+- locked-module explanation states
+- onboarding completion criteria
+
+If needed, add the minimal but professional supporting process.
+Do not add random unrelated features.
+
+==================================================
+9. DO NOT BREAK THESE
+==================================================
+
+Do NOT break:
+- auth flow
+- preview mode
+- current platform/store hierarchy
+- RBAC logic
+- current design baseline
+- existing working tenant tabs and flows
+- existing plan-based visibility after activation
+
+==================================================
+10. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether dashboard now acts as onboarding/activation control center before activation
+C. which side-menu items remain visible before activation
+D. whether operational modules are hidden/locked until activation completes
+E. whether full normal menu returns after activation according to plan + permissions
+F. whether activation gating is now plan-aware
+G. what lifecycle states are now testable
+H. whether platform/store lifecycle mapping is coherent
+I. what supporting process was added from side-audit/system-thinking
+J. confirmation that no visual drift was introduced
+
+==================================================
+11. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- store dashboard acts as onboarding/activation control center before activation
+- side menu is gated before activation
+- operational modules are not accessible before activation
+- normal store access returns after activation
+- gating respects selected plan and RBAC
+- lifecycle states are testable
+- platform/store lifecycle mapping is coherent
+- auth flow still works
+- no visual drift was introduced
