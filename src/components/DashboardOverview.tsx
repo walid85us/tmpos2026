@@ -4,6 +4,110 @@ import { motion, AnimatePresence } from 'motion/react';
 import { useAccess } from '../context/AccessContext';
 import ApprovalQueue from './ApprovalQueue';
 
+function StoreActivationPanel() {
+  const { session, tenant } = useAccess();
+  if (!session || session.role !== 'store_owner' || !tenant) return null;
+
+  const isLive = tenant.status === 'active' || tenant.status === 'trialing';
+  const isPendingActivation = tenant.status === 'pending_activation';
+  const isSuspended = tenant.status === 'suspended';
+  const isOverdue = tenant.status === 'overdue';
+
+  const steps = [
+    { key: 'onboarded', label: 'Onboarded', icon: 'person_add', done: true },
+    { key: 'setup', label: 'Account Setup', icon: 'settings', done: isLive || isOverdue },
+    { key: 'activation', label: 'Activated', icon: 'rocket_launch', done: isLive || isOverdue },
+    { key: 'live', label: 'Store Live', icon: 'storefront', done: isLive },
+  ];
+
+  if (isSuspended) {
+    return (
+      <div className="p-5 bg-red-50 rounded-2xl border border-red-200">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 bg-red-100 rounded-full flex items-center justify-center">
+            <span className="material-symbols-outlined text-red-600">block</span>
+          </div>
+          <div>
+            <p className="text-sm font-black text-red-800">Your store has been suspended</p>
+            <p className="text-[10px] text-red-600 font-bold">Please contact support or resolve outstanding billing issues to restore access.</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (isOverdue) {
+    return (
+      <div className="p-5 bg-amber-50 rounded-2xl border border-amber-200">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 bg-amber-100 rounded-full flex items-center justify-center">
+            <span className="material-symbols-outlined text-amber-600">warning</span>
+          </div>
+          <div>
+            <p className="text-sm font-black text-amber-800">Payment overdue — action required</p>
+            <p className="text-[10px] text-amber-600 font-bold">Your store is still accessible, but please update your payment method to avoid interruption.</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (isLive) {
+    return (
+      <div className="p-5 bg-lime-50 rounded-2xl border border-lime-200">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 bg-lime-100 rounded-full flex items-center justify-center">
+            <span className="material-symbols-outlined text-lime-600">check_circle</span>
+          </div>
+          <div>
+            <p className="text-sm font-black text-lime-800">Your store is {tenant.status === 'trialing' ? 'active (trial)' : 'fully active and live'}</p>
+            <p className="text-[10px] text-lime-600 font-bold">
+              {tenant.status === 'trialing' ? 'You are on a free trial. Upgrade before it expires to keep your store running.' : 'All setup steps are complete. Your store is accessible to customers.'}
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-5 bg-white rounded-2xl ghost-border shadow-sm space-y-4">
+      <div className="flex items-center gap-3">
+        <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">
+          <span className="material-symbols-outlined text-blue-600">rocket_launch</span>
+        </div>
+        <div>
+          <p className="text-sm font-black text-primary">Complete Your Store Setup</p>
+          <p className="text-[10px] text-slate-500 font-bold">
+            {isPendingActivation ? 'Your account is being activated. This should complete shortly.' : 'Complete the remaining setup steps to make your store live.'}
+          </p>
+        </div>
+      </div>
+      <div className="flex items-center gap-0">
+        {steps.map((step, i, arr) => (
+          <React.Fragment key={step.key}>
+            <div className="flex flex-col items-center gap-1 flex-1">
+              <div className={`w-9 h-9 rounded-full flex items-center justify-center ${step.done ? 'bg-lime-100 border-2 border-lime-400' : i === steps.findIndex(s => !s.done) ? 'bg-blue-100 border-2 border-blue-400 ring-2 ring-blue-200' : 'bg-slate-100 border-2 border-slate-200'}`}>
+                <span className={`material-symbols-outlined text-sm ${step.done ? 'text-lime-600' : i === steps.findIndex(s => !s.done) ? 'text-blue-600' : 'text-slate-400'}`}>{step.done ? 'check' : step.icon}</span>
+              </div>
+              <span className={`text-[8px] font-black uppercase tracking-widest ${step.done ? 'text-lime-700' : i === steps.findIndex(s => !s.done) ? 'text-blue-700' : 'text-slate-400'}`}>{step.label}</span>
+            </div>
+            {i < arr.length - 1 && <div className={`h-0.5 w-6 mt-[-12px] ${step.done ? 'bg-lime-400' : 'bg-slate-200'}`} />}
+          </React.Fragment>
+        ))}
+      </div>
+      {isPendingActivation && (
+        <div className="p-3 bg-blue-50 rounded-xl border border-blue-100">
+          <p className="text-sm text-blue-700 font-bold flex items-center gap-1">
+            <span className="material-symbols-outlined text-xs">hourglass_top</span>
+            Your store activation is in progress. You'll be notified once it's complete.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => void }) {
   const { session } = useAccess();
   const navigate = useNavigate();
@@ -38,6 +142,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
 
   return (
     <div className="space-y-8">
+      {session?.role === 'store_owner' && <StoreActivationPanel />}
       {(session?.role === 'store_owner' || session?.role === 'system_owner' || session?.role === 'manager') && <ApprovalQueue />}
       <header className="flex items-end justify-between">
         <div>

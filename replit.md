@@ -76,8 +76,14 @@ A multi-tenant SaaS platform frontend built with React, TypeScript, Vite, Tailwi
   - Support Notes: existing notes, flags, add note with local state persistence
 - **Toast system**: Centralized `showToast()` with useRef cleanup on unmount (no stale setTimeout leaks)
 - **Mock data**: `accessMockData.ts` tenantUsers with `tenantId`, `billingTransactions` with `tenantId`, `tenantFeatureOverrides`, `provisioningTemplates` with settings/features
-- **Types**: `FeatureOverrideType` includes `pending_payment`; `ActivationStatus = 'invited' | 'pending_activation' | 'account_setup' | 'active'`; all 5 tenants carry `activationStatus`, `inviteSentDate`, `activatedDate` fields
+- **Types**: `FeatureOverrideType` includes `pending_payment`; `ActivationStatus = 'invited' | 'pending_activation' | 'account_setup' | 'active'`; all 5 tenants carry `activationStatus`, `inviteSentDate`, `accountSetupDate`, `activatedDate` fields
 - **Accessibility**: label/id pairs on form inputs, keyboard-navigable table rows, modal dialog semantics
+- **Governance**: `canDeleteOwner`/`canDeactivateOwner`/`isPrimaryOwner` helpers; blocks deletion of last/primary owner with explanation UI; Reassignment modal for primary owner transfers
+- **Credit rules**: Credits apply ONLY to invoices with status `overdue` or `pending`; `eligibleInvoicesForCredit` memo enforces this everywhere
+- **Refund detail**: `currency_exchange` icon for refund items; refund section in Credit Detail modal (ref, source invoice, amount, date)
+- **Domain workflow**: `domainPropagation` state (`unknown|checking|propagated|not_propagated`); 6-step stepper with `failed` states; separate Check Propagation → Verify DNS → Provision SSL controls
+- **Store-side activation**: `StoreActivationPanel` in DashboardOverview shows status-aware banners (active/trialing/overdue/suspended/pending_activation) with setup progress stepper
+- **Activation lifecycle (T006)**: Resend Invite button on Overview for non-active tenants; accountSetupDate display; awaiting-status messaging; active confirmation banner
 
 ## Data Model
 

@@ -144,7 +144,9 @@ const TenantDetailPage: React.FC = () => {
       failed: 'bg-red-400/10 text-red-700 border-red-400/20',
       refunded: 'bg-amber-400/10 text-amber-700 border-amber-400/20',
       void: 'bg-slate-400/10 text-slate-500 border-slate-200',
+      voided: 'bg-slate-400/10 text-slate-500 border-slate-200',
       pending: 'bg-amber-400/10 text-amber-700 border-amber-400/20',
+      issued: 'bg-blue-400/10 text-blue-700 border-blue-400/20',
       verified: 'bg-lime-400/10 text-lime-700 border-lime-400/20',
       invited: 'bg-blue-400/10 text-blue-700 border-blue-400/20',
       applied: 'bg-lime-400/10 text-lime-700 border-lime-400/20',
@@ -297,17 +299,45 @@ const TenantDetailPage: React.FC = () => {
     }
   };
 
+  const [domainPropagation, setDomainPropagation] = useState<'unknown' | 'checking' | 'propagated' | 'not_propagated'>('unknown');
+
   const handleRemoveDomain = () => {
     setCustomDomainLocal(null);
     setDomainVerification('pending');
     setDomainSsl('pending');
+    setDomainPropagation('unknown');
     showToast('Custom domain removed.');
   };
 
+  const handleCheckPropagation = () => {
+    setDomainPropagation('checking');
+    setTimeout(() => {
+      setDomainPropagation('propagated');
+      showToast('DNS propagation confirmed. You can now verify the domain.');
+    }, 1500);
+  };
+
   const handleVerifyDomain = () => {
+    if (domainPropagation !== 'propagated') {
+      showToast('DNS propagation must be confirmed before verification. Run Check Propagation first.');
+      return;
+    }
     setDomainVerification('verified');
+    showToast('DNS records verified successfully.');
+  };
+
+  const handleProvisionSsl = () => {
+    if (domainVerification !== 'verified') {
+      showToast('DNS must be verified before SSL can be provisioned.');
+      return;
+    }
     setDomainSsl('active');
-    showToast('Domain verified and SSL provisioned!');
+    showToast('SSL certificate provisioned and active.');
+  };
+
+  const handleFailDomain = () => {
+    setDomainVerification('failed');
+    showToast('DNS verification failed. Check records and try again.');
   };
 
   const pinnedNotes = supportNotes.filter(n => n.pinned);
@@ -364,6 +394,30 @@ const TenantDetailPage: React.FC = () => {
   const voidCredit = voidConfirmId ? effectiveCredits.find(c => c.id === voidConfirmId) : null;
   const revokeFeature = revokeModal ? featureMatrix.find(f => f.id === revokeModal) : null;
   const revokeOverride = revokeModal ? localOverrides.find(o => o.featureId === revokeModal) as (typeof localOverrides[0] & { price?: number; pricingModel?: string; pricingNotes?: string }) | undefined : undefined;
+
+  const activeStoreOwners = useMemo(() => storeOwners.filter(o => o.status === 'active'), [storeOwners]);
+  const [primaryOwnerId, setPrimaryOwnerId] = useState<string>(() => {
+    const match = allScopedUsers.find(u => u.email === tenant.owner.email && u.role === 'store_owner');
+    return match?.id || '';
+  });
+  const isPrimaryOwner = useCallback((userId: string) => {
+    return userId === primaryOwnerId;
+  }, [primaryOwnerId]);
+  const canDeleteOwner = useCallback((userId: string) => {
+    if (activeStoreOwners.length <= 1) return { allowed: false, reason: 'Cannot delete the last remaining active Store Owner. At least one active Store Owner must exist for tenant continuity.' };
+    if (isPrimaryOwner(userId)) return { allowed: false, reason: 'This is the primary Store Owner. To delete, first reassign ownership to another Store Owner.' };
+    return { allowed: true, reason: '' };
+  }, [activeStoreOwners, isPrimaryOwner]);
+  const canDeactivateOwner = useCallback((userId: string) => {
+    const otherActive = activeStoreOwners.filter(o => o.id !== userId);
+    if (otherActive.length === 0) return { allowed: false, reason: 'Cannot deactivate the last active Store Owner. At least one active Store Owner is required.' };
+    if (isPrimaryOwner(userId)) return { allowed: false, reason: 'Cannot deactivate the primary Store Owner. Reassign primary ownership first.' };
+    return { allowed: true, reason: '' };
+  }, [activeStoreOwners, isPrimaryOwner]);
+
+  const eligibleInvoicesForCredit = useMemo(() => effectiveInvoices.filter(inv => inv.status === 'overdue' || inv.status === 'pending'), [effectiveInvoices]);
+
+  const [reassignOwnerId, setReassignOwnerId] = useState<string | null>(null);
 
   return (
     <div className="space-y-6">
@@ -469,8 +523,8 @@ const TenantDetailPage: React.FC = () => {
               </div>
             </div>
 
-            {(tenant as typeof tenant & { activationStatus?: ActivationStatus; inviteSentDate?: string; activatedDate?: string | null }).activationStatus && (() => {
-              const t = tenant as typeof tenant & { activationStatus: ActivationStatus; inviteSentDate?: string; activatedDate?: string | null };
+            {(tenant as typeof tenant & { activationStatus?: ActivationStatus; inviteSentDate?: string; activatedDate?: string | null; accountSetupDate?: string | null }).activationStatus && (() => {
+              const t = tenant as typeof tenant & { activationStatus: ActivationStatus; inviteSentDate?: string; activatedDate?: string | null; accountSetupDate?: string | null };
               const steps: { key: ActivationStatus; label: string; icon: string }[] = [
                 { key: 'invited', label: 'Invited', icon: 'mail' },
                 { key: 'pending_activation', label: 'Pending', icon: 'hourglass_top' },
@@ -480,10 +534,21 @@ const TenantDetailPage: React.FC = () => {
               const currentIdx = steps.findIndex(s => s.key === t.activationStatus);
               return (
                 <div className="p-5 bg-white/80 backdrop-blur-xl rounded-2xl border border-slate-100 shadow-sm">
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-1">
-                    <span className="material-symbols-outlined text-xs text-primary">rocket_launch</span>
-                    Activation Lifecycle
-                  </p>
+                  <div className="flex justify-between items-center mb-4">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1">
+                      <span className="material-symbols-outlined text-xs text-primary">rocket_launch</span>
+                      Activation Lifecycle
+                    </p>
+                    {t.activationStatus !== 'active' && (
+                      <div className="flex gap-2">
+                        {(t.activationStatus === 'invited' || t.activationStatus === 'pending_activation') && (
+                          <button onClick={() => showToast(`Invitation resent to ${tenant.owner.email}`)} className="px-3 py-1.5 bg-blue-500 text-white font-black text-[10px] rounded-lg uppercase tracking-widest hover:bg-blue-600 transition-all flex items-center gap-1">
+                            <span className="material-symbols-outlined text-xs">forward_to_inbox</span> Resend Invite
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
                   <div className="flex items-center justify-between gap-2 mb-4">
                     {steps.map((step, idx) => (
                       <React.Fragment key={step.key}>
@@ -497,10 +562,22 @@ const TenantDetailPage: React.FC = () => {
                       </React.Fragment>
                     ))}
                   </div>
-                  <div className="flex gap-4 text-[10px] text-slate-500">
+                  <div className="flex gap-4 flex-wrap text-[10px] text-slate-500">
                     {t.inviteSentDate && <span className="flex items-center gap-1"><span className="material-symbols-outlined text-xs">mail</span> Invited: {t.inviteSentDate}</span>}
+                    {t.accountSetupDate && <span className="flex items-center gap-1"><span className="material-symbols-outlined text-xs">settings</span> Setup: {t.accountSetupDate}</span>}
                     {t.activatedDate && <span className="flex items-center gap-1"><span className="material-symbols-outlined text-xs">check_circle</span> Activated: {t.activatedDate}</span>}
+                    {!t.activatedDate && t.activationStatus !== 'active' && (
+                      <span className="flex items-center gap-1 text-amber-600"><span className="material-symbols-outlined text-xs">schedule</span> Awaiting {t.activationStatus === 'invited' ? 'invite acceptance' : t.activationStatus === 'pending_activation' ? 'activation' : 'account setup completion'}</span>
+                    )}
                   </div>
+                  {t.activationStatus === 'active' && (
+                    <div className="mt-3 p-3 bg-lime-50 rounded-xl border border-lime-100">
+                      <p className="text-sm text-lime-700 font-bold flex items-center gap-1">
+                        <span className="material-symbols-outlined text-xs">check_circle</span>
+                        Tenant fully activated. Store is accessible at {effectiveDomain && domainVerification === 'verified' ? effectiveDomain : `${tenant.subdomain}.repairplatform.com`}
+                      </p>
+                    </div>
+                  )}
                 </div>
               );
             })()}
@@ -678,15 +755,21 @@ const TenantDetailPage: React.FC = () => {
                           <span className="material-symbols-outlined text-xs">edit</span> Edit Profile
                         </button>
                       )}
-                      {selectedUserDetail.role === 'store_owner' && selectedUserDetail.status === 'active' && (
-                        <button onClick={() => { setDeactivateOwnerId(selectedUserDetail.id); setUserDetailId(null); }} className="px-4 py-2.5 bg-amber-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-amber-600 transition-all">Deactivate</button>
-                      )}
+                      {selectedUserDetail.role === 'store_owner' && selectedUserDetail.status === 'active' && (() => {
+                        const deactivateCheck = canDeactivateOwner(selectedUserDetail.id);
+                        return deactivateCheck.allowed
+                          ? <button onClick={() => { setDeactivateOwnerId(selectedUserDetail.id); setUserDetailId(null); }} className="px-4 py-2.5 bg-amber-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-amber-600 transition-all">Deactivate</button>
+                          : <span className="px-4 py-2.5 bg-slate-100 text-slate-400 font-black text-[10px] rounded-xl uppercase tracking-widest cursor-not-allowed" title={deactivateCheck.reason}>Deactivate</span>;
+                      })()}
                       {selectedUserDetail.role === 'store_owner' && selectedUserDetail.status === 'deactivated' && (
                         <button onClick={() => { setLocalOwnerStatuses(prev => ({ ...prev, [selectedUserDetail.id]: 'active' })); setUserDetailId(null); showToast(`${selectedUserDetail.name} reactivated`); }} className="px-4 py-2.5 bg-lime-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-lime-600 transition-all">Reactivate</button>
                       )}
-                      {selectedUserDetail.role === 'store_owner' && (
-                        <button onClick={() => { setDeleteOwnerId(selectedUserDetail.id); setUserDetailId(null); }} className="px-4 py-2.5 bg-red-100 text-red-600 font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-red-200 transition-all">Delete</button>
-                      )}
+                      {selectedUserDetail.role === 'store_owner' && (() => {
+                        const deleteCheck = canDeleteOwner(selectedUserDetail.id);
+                        return deleteCheck.allowed
+                          ? <button onClick={() => { setDeleteOwnerId(selectedUserDetail.id); setUserDetailId(null); }} className="px-4 py-2.5 bg-red-100 text-red-600 font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-red-200 transition-all">Delete</button>
+                          : <span className="px-4 py-2.5 bg-slate-100 text-slate-400 font-black text-[10px] rounded-xl uppercase tracking-widest cursor-not-allowed" title={deleteCheck.reason}>Delete</span>;
+                      })()}
                       {selectedUserDetail.status === 'active' && selectedUserDetail.role !== 'store_owner' && (
                         <button onClick={() => { setLocalOwnerStatuses(prev => ({ ...prev, [selectedUserDetail.id]: 'deactivated' })); setUserDetailId(null); showToast(`${selectedUserDetail.name} deactivated`); }} className="px-4 py-2.5 bg-red-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-red-600 transition-all">Deactivate</button>
                       )}
@@ -725,53 +808,138 @@ const TenantDetailPage: React.FC = () => {
             </AnimatePresence>
 
             <AnimatePresence>
-              {deactivateOwnerId && (
-                <div role="dialog" aria-modal="true" aria-label="Deactivate Store Owner" className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setDeactivateOwnerId(null)} onKeyDown={e => { if (e.key === 'Escape') setDeactivateOwnerId(null); }}>
-                  <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} onClick={e => e.stopPropagation()} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
-                    <div className="p-8 border-b border-slate-100">
-                      <h3 className="text-xl font-black text-primary tracking-tight">Deactivate Store Owner</h3>
-                      <p className="text-sm text-slate-500 mt-1">This will revoke the Store Owner's access to {tenant.name}.</p>
-                    </div>
-                    <div className="p-8 space-y-4">
-                      <div className="p-3 bg-amber-50 rounded-xl border border-amber-100">
-                        <p className="text-sm text-amber-700 font-bold flex items-center gap-1">
-                          <span className="material-symbols-outlined text-xs">warning</span>
-                          The owner will lose all admin access. This action can be reversed by reactivating the account.
-                        </p>
+              {deactivateOwnerId && (() => {
+                const deactivateCheck = canDeactivateOwner(deactivateOwnerId);
+                return (
+                  <div role="dialog" aria-modal="true" aria-label="Deactivate Store Owner" className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setDeactivateOwnerId(null)} onKeyDown={e => { if (e.key === 'Escape') setDeactivateOwnerId(null); }}>
+                    <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} onClick={e => e.stopPropagation()} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
+                      <div className="p-8 border-b border-slate-100">
+                        <h3 className="text-xl font-black text-primary tracking-tight">{deactivateCheck.allowed ? 'Deactivate Store Owner' : 'Deactivation Blocked'}</h3>
+                        <p className="text-sm text-slate-500 mt-1">{deactivateCheck.allowed ? `This will revoke the Store Owner's access to ${tenant.name}.` : 'This action cannot be completed right now.'}</p>
                       </div>
-                    </div>
-                    <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3">
-                      <button onClick={() => setDeactivateOwnerId(null)} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
-                      <button onClick={() => { setLocalOwnerStatuses(prev => ({ ...prev, [deactivateOwnerId]: 'deactivated' })); setDeactivateOwnerId(null); showToast('Store Owner account deactivated'); }} className="flex-1 py-4 bg-amber-500 text-white font-black text-sm rounded-2xl shadow-lg shadow-amber-500/20 uppercase tracking-widest transition-all hover:bg-amber-600">Deactivate</button>
-                    </div>
-                  </motion.div>
-                </div>
-              )}
+                      <div className="p-8 space-y-4">
+                        {!deactivateCheck.allowed ? (
+                          <div className="p-4 bg-amber-50 rounded-xl border border-amber-100">
+                            <p className="text-sm text-amber-700 font-bold flex items-center gap-2">
+                              <span className="material-symbols-outlined text-sm">shield</span>
+                              {deactivateCheck.reason}
+                            </p>
+                          </div>
+                        ) : (
+                          <div className="p-3 bg-amber-50 rounded-xl border border-amber-100">
+                            <p className="text-sm text-amber-700 font-bold flex items-center gap-1">
+                              <span className="material-symbols-outlined text-xs">warning</span>
+                              The owner will lose all admin access. This action can be reversed by reactivating the account.
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                      <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3">
+                        <button onClick={() => setDeactivateOwnerId(null)} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">{deactivateCheck.allowed ? 'Cancel' : 'Close'}</button>
+                        {deactivateCheck.allowed && (
+                          <button onClick={() => { setLocalOwnerStatuses(prev => ({ ...prev, [deactivateOwnerId]: 'deactivated' })); setDeactivateOwnerId(null); showToast('Store Owner account deactivated'); }} className="flex-1 py-4 bg-amber-500 text-white font-black text-sm rounded-2xl shadow-lg shadow-amber-500/20 uppercase tracking-widest transition-all hover:bg-amber-600">Deactivate</button>
+                        )}
+                      </div>
+                    </motion.div>
+                  </div>
+                );
+              })()}
             </AnimatePresence>
 
             <AnimatePresence>
-              {deleteOwnerId && (
-                <div role="dialog" aria-modal="true" aria-label="Delete Store Owner" className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setDeleteOwnerId(null)} onKeyDown={e => { if (e.key === 'Escape') setDeleteOwnerId(null); }}>
-                  <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} onClick={e => e.stopPropagation()} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
-                    <div className="p-8 border-b border-slate-100">
-                      <h3 className="text-xl font-black text-red-600 tracking-tight">Delete Store Owner</h3>
-                      <p className="text-sm text-slate-500 mt-1">Permanently remove this Store Owner from {tenant.name}.</p>
-                    </div>
-                    <div className="p-8 space-y-4">
-                      <div className="p-3 bg-red-50 rounded-xl border border-red-100">
-                        <p className="text-sm text-red-700 font-bold flex items-center gap-1">
-                          <span className="material-symbols-outlined text-xs">error</span>
-                          This action is permanent and cannot be undone. The account and all associated permissions will be removed.
-                        </p>
+              {deleteOwnerId && (() => {
+                const deleteCheck = canDeleteOwner(deleteOwnerId);
+                return (
+                  <div role="dialog" aria-modal="true" aria-label="Delete Store Owner" className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setDeleteOwnerId(null)} onKeyDown={e => { if (e.key === 'Escape') setDeleteOwnerId(null); }}>
+                    <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} onClick={e => e.stopPropagation()} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
+                      <div className="p-8 border-b border-slate-100">
+                        <h3 className="text-xl font-black text-red-600 tracking-tight">{deleteCheck.allowed ? 'Delete Store Owner' : 'Deletion Blocked'}</h3>
+                        <p className="text-sm text-slate-500 mt-1">{deleteCheck.allowed ? `Permanently remove this Store Owner from ${tenant.name}.` : 'This action cannot be completed right now.'}</p>
                       </div>
-                    </div>
-                    <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3">
-                      <button onClick={() => setDeleteOwnerId(null)} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
-                      <button onClick={() => { setLocalOwnerStatuses(prev => ({ ...prev, [deleteOwnerId]: 'deleted' })); setDeleteOwnerId(null); showToast('Store Owner account deleted'); }} className="flex-1 py-4 bg-red-500 text-white font-black text-sm rounded-2xl shadow-lg shadow-red-500/20 uppercase tracking-widest transition-all hover:bg-red-600">Delete Permanently</button>
-                    </div>
-                  </motion.div>
-                </div>
-              )}
+                      <div className="p-8 space-y-4">
+                        {!deleteCheck.allowed && (
+                          <div className="p-4 bg-amber-50 rounded-xl border border-amber-100">
+                            <p className="text-sm text-amber-700 font-bold flex items-center gap-2">
+                              <span className="material-symbols-outlined text-sm">shield</span>
+                              {deleteCheck.reason}
+                            </p>
+                          </div>
+                        )}
+                        {!deleteCheck.allowed && isPrimaryOwner(deleteOwnerId) && activeStoreOwners.length > 1 && (
+                          <div className="p-4 bg-blue-50 rounded-xl border border-blue-100">
+                            <p className="text-[10px] font-black text-blue-700 uppercase tracking-widest mb-2">Reassign Primary Ownership First</p>
+                            <p className="text-sm text-blue-600 mb-3">Select a new primary Store Owner before deleting this account.</p>
+                            <button onClick={() => { setDeleteOwnerId(null); setReassignOwnerId(deleteOwnerId); }} className="px-4 py-2 bg-blue-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-blue-600 transition-all">Start Reassignment</button>
+                          </div>
+                        )}
+                        {deleteCheck.allowed && (
+                          <div className="p-3 bg-red-50 rounded-xl border border-red-100">
+                            <p className="text-sm text-red-700 font-bold flex items-center gap-1">
+                              <span className="material-symbols-outlined text-xs">error</span>
+                              This action is permanent and cannot be undone. The account and all associated permissions will be removed.
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                      <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3">
+                        <button onClick={() => setDeleteOwnerId(null)} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">{deleteCheck.allowed ? 'Cancel' : 'Close'}</button>
+                        {deleteCheck.allowed && (
+                          <button onClick={() => { setLocalOwnerStatuses(prev => ({ ...prev, [deleteOwnerId]: 'deleted' })); setDeleteOwnerId(null); showToast('Store Owner account deleted'); }} className="flex-1 py-4 bg-red-500 text-white font-black text-sm rounded-2xl shadow-lg shadow-red-500/20 uppercase tracking-widest transition-all hover:bg-red-600">Delete Permanently</button>
+                        )}
+                      </div>
+                    </motion.div>
+                  </div>
+                );
+              })()}
+            </AnimatePresence>
+
+            <AnimatePresence>
+              {reassignOwnerId && (() => {
+                const currentOwner = allScopedUsers.find(u => u.id === reassignOwnerId);
+                const otherOwners = storeOwners.filter(o => o.id !== reassignOwnerId && o.status === 'active');
+                return (
+                  <div role="dialog" aria-modal="true" aria-label="Reassign Primary Ownership" className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setReassignOwnerId(null)} onKeyDown={e => { if (e.key === 'Escape') setReassignOwnerId(null); }}>
+                    <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} onClick={e => e.stopPropagation()} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
+                      <div className="p-8 border-b border-slate-100">
+                        <h3 className="text-xl font-black text-primary tracking-tight">Reassign Primary Ownership</h3>
+                        <p className="text-sm text-slate-500 mt-1">Transfer primary ownership from {currentOwner?.name} to another Store Owner.</p>
+                      </div>
+                      <div className="p-8 space-y-4">
+                        <div className="p-3 bg-violet-50 rounded-xl border border-violet-100">
+                          <p className="text-[10px] text-violet-700 font-bold flex items-center gap-1">
+                            <span className="material-symbols-outlined text-xs">info</span>
+                            The new primary owner will become the main contact and governance anchor for this tenant.
+                          </p>
+                        </div>
+                        <div>
+                          <p className={labelClass}>Select New Primary Owner</p>
+                          <div className="space-y-2">
+                            {otherOwners.map(o => (
+                              <button key={o.id} onClick={() => {
+                                setPrimaryOwnerId(o.id);
+                                setReassignOwnerId(null);
+                                showToast(`Primary ownership reassigned to ${o.name}. You may now delete the previous owner.`);
+                              }} className="w-full flex items-center gap-3 p-3 bg-slate-50 rounded-xl border border-slate-100 hover:bg-violet-50 hover:border-violet-200 transition-colors text-left">
+                                <div className="w-8 h-8 bg-violet-100 rounded-full flex items-center justify-center">
+                                  <span className="material-symbols-outlined text-violet-600 text-sm">shield_person</span>
+                                </div>
+                                <div>
+                                  <p className="font-bold text-slate-900 text-sm">{o.name}</p>
+                                  <p className="text-[10px] text-slate-400">{o.email}</p>
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                          {otherOwners.length === 0 && <p className="text-sm text-slate-400 font-bold py-2">No other active Store Owners available. Create a new Store Owner first.</p>}
+                        </div>
+                      </div>
+                      <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3">
+                        <button onClick={() => setReassignOwnerId(null)} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
+                      </div>
+                    </motion.div>
+                  </div>
+                );
+              })()}
             </AnimatePresence>
 
             <AnimatePresence>
@@ -1303,7 +1471,7 @@ const TenantDetailPage: React.FC = () => {
                   {effectiveCredits.map(cr => (
                     <button type="button" key={cr.id} className="w-full flex justify-between items-center p-3 bg-slate-50 rounded-xl border border-slate-100 hover:bg-slate-100 transition-colors text-left cursor-pointer">
                       <div className="flex items-center gap-3 flex-1" onClick={() => setCreditDetailId(cr.id)}>
-                        <span className="material-symbols-outlined text-sm text-violet-400">{cr.type === 'refund' ? 'undo' : cr.type === 'cancellation' ? 'cancel' : 'redeem'}</span>
+                        <span className={`material-symbols-outlined text-sm ${cr.type === 'refund' ? 'text-amber-500' : cr.type === 'cancellation' ? 'text-red-400' : 'text-violet-400'}`}>{cr.type === 'refund' ? 'currency_exchange' : cr.type === 'cancellation' ? 'cancel' : 'redeem'}</span>
                         <div>
                           <p className="font-bold text-slate-900 text-sm">{cr.creditNo}</p>
                           <p className="text-[10px] text-slate-400">{cr.date} · {cr.reason.slice(0, 50)}{cr.reason.length > 50 ? '...' : ''}</p>
@@ -1313,17 +1481,17 @@ const TenantDetailPage: React.FC = () => {
                       <div className="flex items-center gap-2">
                         <span className="font-black text-violet-600">${cr.amount.toFixed(2)}</span>
                         {statusBadge(cr.status)}
-                        {cr.status === 'issued' && (
+                        {(cr.status === 'issued' || cr.status === 'pending') && (
                           <div className="flex gap-1 ml-1" onClick={e => e.stopPropagation()}>
                             <button onClick={() => {
-                              const unpaid = effectiveInvoices.find(inv => inv.status === 'overdue' || inv.status === 'pending');
-                              if (unpaid) {
+                              const target = eligibleInvoicesForCredit[0];
+                              if (target) {
                                 setLocalCreditStatuses(prev => ({ ...prev, [cr.id]: 'applied' }));
-                                setLocalInvoiceStatuses(prev => ({ ...prev, [unpaid.id]: 'paid' }));
-                                setLocalCreditLinks(prev => ({ ...prev, [cr.id]: { appliedToInvoice: unpaid.invoiceNo, appliedAmount: cr.amount, appliedDate: '2026-03-26' } }));
-                                showToast(`Credit ${cr.creditNo} applied to ${unpaid.invoiceNo}`);
+                                setLocalInvoiceStatuses(prev => ({ ...prev, [target.id]: 'paid' }));
+                                setLocalCreditLinks(prev => ({ ...prev, [cr.id]: { appliedToInvoice: target.invoiceNo, appliedAmount: cr.amount, appliedDate: '2026-03-26' } }));
+                                showToast(`Credit ${cr.creditNo} applied to ${target.invoiceNo}`);
                               } else {
-                                showToast('No unpaid invoices to apply credit to');
+                                showToast('No eligible invoices (overdue or pending) to apply credit to');
                               }
                             }} className="text-[8px] font-black text-lime-600 bg-lime-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-lime-100 transition-colors">Apply</button>
                             <button onClick={() => setVoidConfirmId(cr.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">Void</button>
@@ -1478,27 +1646,52 @@ const TenantDetailPage: React.FC = () => {
                           <p className="font-bold text-slate-900">{selectedCredit.appliedDate}</p>
                         </div>
                       )}
-                      {selectedCredit.status === 'pending' && (
+                      {(selectedCredit.status === 'pending' || selectedCredit.status === 'issued') && (
                         <div className="p-3 bg-amber-50 rounded-xl border border-amber-100">
                           <p className="text-sm text-amber-700 font-bold flex items-center gap-1">
                             <span className="material-symbols-outlined text-xs">info</span>
-                            This credit has not been applied to any invoice yet. Use the actions below to apply or void it.
+                            {eligibleInvoicesForCredit.length > 0
+                              ? `This credit can be applied to ${eligibleInvoicesForCredit.length} eligible invoice(s) (overdue or pending).`
+                              : 'No eligible invoices (overdue or pending) available to apply this credit to.'}
                           </p>
+                        </div>
+                      )}
+                      {selectedCredit.type === 'refund' && (
+                        <div className="p-3 bg-amber-50/50 rounded-xl border border-amber-100">
+                          <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest mb-1">Refund Details</p>
+                          <div className="grid grid-cols-2 gap-3 mt-2">
+                            <div>
+                              <p className={labelClass}>Refund Reference</p>
+                              <p className="font-bold text-slate-900 text-sm">{selectedCredit.creditNo}</p>
+                            </div>
+                            <div>
+                              <p className={labelClass}>Source Invoice</p>
+                              <p className="font-bold text-slate-900 text-sm">{selectedCredit.relatedInvoice || '—'}</p>
+                            </div>
+                            <div>
+                              <p className={labelClass}>Refund Amount</p>
+                              <p className="font-black text-amber-600 text-sm">${selectedCredit.amount.toFixed(2)}</p>
+                            </div>
+                            <div>
+                              <p className={labelClass}>Refund Date</p>
+                              <p className="font-bold text-slate-900 text-sm">{selectedCredit.date}</p>
+                            </div>
+                          </div>
                         </div>
                       )}
                     </div>
                     <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3 flex-wrap">
                       {(selectedCredit.status === 'pending' || selectedCredit.status === 'issued') && (
                         <button onClick={() => {
-                          const unpaid = effectiveInvoices.find(inv => inv.status === 'overdue' || inv.status === 'pending');
-                          if (unpaid) {
+                          const target = eligibleInvoicesForCredit[0];
+                          if (target) {
                             setLocalCreditStatuses(prev => ({ ...prev, [selectedCredit.id]: 'applied' }));
-                            setLocalInvoiceStatuses(prev => ({ ...prev, [unpaid.id]: 'paid' }));
-                            setLocalCreditLinks(prev => ({ ...prev, [selectedCredit.id]: { appliedToInvoice: unpaid.invoiceNo, appliedAmount: selectedCredit.amount, appliedDate: '2026-03-26' } }));
+                            setLocalInvoiceStatuses(prev => ({ ...prev, [target.id]: 'paid' }));
+                            setLocalCreditLinks(prev => ({ ...prev, [selectedCredit.id]: { appliedToInvoice: target.invoiceNo, appliedAmount: selectedCredit.amount, appliedDate: '2026-03-26' } }));
                             setCreditDetailId(null);
-                            showToast(`Credit ${selectedCredit.creditNo} applied to ${unpaid.invoiceNo}`);
+                            showToast(`Credit ${selectedCredit.creditNo} applied to ${target.invoiceNo}`);
                           } else {
-                            showToast('No unpaid invoices to apply credit to');
+                            showToast('No eligible invoices (overdue or pending) to apply credit to');
                           }
                         }} className="px-4 py-2.5 bg-lime-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-lime-600 transition-all flex items-center gap-1">
                           <span className="material-symbols-outlined text-xs">check</span> Apply Credit
@@ -1618,79 +1811,112 @@ const TenantDetailPage: React.FC = () => {
             {effectiveDomain && (
               <div>
                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Domain Setup Progress</p>
+                {domainVerification === 'failed' && (
+                  <div className="p-3 bg-red-50 rounded-xl border border-red-100 mb-3">
+                    <p className="text-sm text-red-700 font-bold flex items-center gap-1">
+                      <span className="material-symbols-outlined text-xs">error</span>
+                      DNS verification failed. Please check your DNS records and try again.
+                    </p>
+                  </div>
+                )}
                 <div className="flex items-center gap-0">
                   {[
-                    { label: 'Domain Added', done: true, icon: 'add_circle' },
-                    { label: 'DNS Records', done: domainVerification === 'verified', icon: 'dns' },
-                    { label: 'Verified', done: domainVerification === 'verified', icon: 'verified' },
-                    { label: 'SSL Issued', done: domainSsl === 'active', icon: 'lock' },
-                    { label: 'Live', done: domainVerification === 'verified' && domainSsl === 'active', icon: 'public' },
+                    { label: 'Added', done: true, failed: false, icon: 'add_circle' },
+                    { label: 'DNS Config', done: domainPropagation === 'propagated' || domainVerification === 'verified', failed: false, icon: 'dns' },
+                    { label: 'Propagated', done: domainPropagation === 'propagated' || domainVerification === 'verified', failed: domainPropagation === 'not_propagated', icon: domainPropagation === 'checking' ? 'hourglass_top' : 'wifi' },
+                    { label: 'Verified', done: domainVerification === 'verified', failed: domainVerification === 'failed', icon: 'verified' },
+                    { label: 'SSL Active', done: domainSsl === 'active', failed: false, icon: 'lock' },
+                    { label: 'Live', done: domainVerification === 'verified' && domainSsl === 'active', failed: false, icon: 'public' },
                   ].map((step, i, arr) => (
                     <React.Fragment key={i}>
                       <div className="flex flex-col items-center gap-1 flex-1">
-                        <div className={`w-9 h-9 rounded-full flex items-center justify-center ${step.done ? 'bg-lime-100 border-2 border-lime-400' : 'bg-slate-100 border-2 border-slate-200'}`}>
-                          <span className={`material-symbols-outlined text-sm ${step.done ? 'text-lime-600' : 'text-slate-400'}`}>{step.done ? 'check' : step.icon}</span>
+                        <div className={`w-9 h-9 rounded-full flex items-center justify-center ${step.failed ? 'bg-red-100 border-2 border-red-400' : step.done ? 'bg-lime-100 border-2 border-lime-400' : 'bg-slate-100 border-2 border-slate-200'}`}>
+                          <span className={`material-symbols-outlined text-sm ${step.failed ? 'text-red-600' : step.done ? 'text-lime-600' : 'text-slate-400'}`}>{step.failed ? 'close' : step.done ? 'check' : step.icon}</span>
                         </div>
-                        <span className={`text-[8px] font-black uppercase tracking-widest ${step.done ? 'text-lime-700' : 'text-slate-400'}`}>{step.label}</span>
+                        <span className={`text-[8px] font-black uppercase tracking-widest ${step.failed ? 'text-red-600' : step.done ? 'text-lime-700' : 'text-slate-400'}`}>{step.label}</span>
                       </div>
-                      {i < arr.length - 1 && <div className={`h-0.5 w-6 mt-[-12px] ${step.done ? 'bg-lime-400' : 'bg-slate-200'}`} />}
+                      {i < arr.length - 1 && <div className={`h-0.5 w-6 mt-[-12px] ${step.failed ? 'bg-red-300' : step.done ? 'bg-lime-400' : 'bg-slate-200'}`} />}
                     </React.Fragment>
                   ))}
                 </div>
               </div>
             )}
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="p-5 bg-slate-50 rounded-2xl border border-slate-100">
                 <div className="flex justify-between items-center mb-2">
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">SSL Certificate</p>
-                  {statusBadge(domainSsl)}
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">DNS Propagation</p>
+                  {statusBadge(domainPropagation === 'propagated' || domainVerification === 'verified' ? 'active' : domainPropagation === 'checking' ? 'pending' : domainPropagation === 'not_propagated' ? 'failed' : 'pending')}
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className={`material-symbols-outlined text-sm ${domainSsl === 'active' ? 'text-lime-600' : domainSsl === 'pending' ? 'text-amber-500' : 'text-red-500'}`}>
-                    {domainSsl === 'active' ? 'verified_user' : domainSsl === 'pending' ? 'hourglass_top' : 'gpp_bad'}
+                  <span className={`material-symbols-outlined text-sm ${domainPropagation === 'propagated' || domainVerification === 'verified' ? 'text-lime-600' : domainPropagation === 'checking' ? 'text-amber-500 animate-spin' : 'text-slate-400'}`}>
+                    {domainPropagation === 'propagated' || domainVerification === 'verified' ? 'check_circle' : domainPropagation === 'checking' ? 'progress_activity' : 'wifi'}
                   </span>
                   <p className="text-sm font-bold text-slate-600">
-                    {domainSsl === 'active' ? 'SSL is active and valid' : domainSsl === 'pending' ? 'SSL certificate is being provisioned' : 'SSL certificate is inactive'}
+                    {domainPropagation === 'propagated' || domainVerification === 'verified' ? 'DNS propagated' : domainPropagation === 'checking' ? 'Checking propagation...' : 'Awaiting propagation'}
                   </p>
                 </div>
-                {domainSsl !== 'active' && effectiveDomain && (
-                  <button onClick={() => { setDomainSsl('active'); showToast('SSL certificate provisioned'); }} className="mt-2 px-3 py-1.5 bg-lime-500 hover:bg-lime-600 text-white font-black text-[10px] rounded-lg uppercase tracking-widest transition-all">Provision SSL</button>
+                {domainPropagation !== 'propagated' && domainVerification !== 'verified' && effectiveDomain && domainPropagation !== 'checking' && (
+                  <button onClick={handleCheckPropagation} className="mt-2 px-3 py-1.5 bg-blue-500 hover:bg-blue-600 text-white font-black text-[10px] rounded-lg uppercase tracking-widest transition-all">Check Propagation</button>
                 )}
               </div>
               <div className="p-5 bg-slate-50 rounded-2xl border border-slate-100">
                 <div className="flex justify-between items-center mb-2">
                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">DNS Verification</p>
-                  {statusBadge(domainVerification)}
+                  {statusBadge(domainVerification === 'verified' ? 'verified' : domainVerification === 'failed' ? 'failed' : 'pending')}
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className={`material-symbols-outlined text-sm ${domainVerification === 'verified' ? 'text-lime-600' : domainVerification === 'pending' ? 'text-amber-500' : 'text-red-500'}`}>
-                    {domainVerification === 'verified' ? 'check_circle' : domainVerification === 'pending' ? 'pending' : 'cancel'}
+                  <span className={`material-symbols-outlined text-sm ${domainVerification === 'verified' ? 'text-lime-600' : domainVerification === 'failed' ? 'text-red-500' : 'text-amber-500'}`}>
+                    {domainVerification === 'verified' ? 'check_circle' : domainVerification === 'failed' ? 'cancel' : 'pending'}
                   </span>
                   <p className="text-sm font-bold text-slate-600">
-                    {domainVerification === 'verified' ? 'DNS records verified' : domainVerification === 'pending' ? 'Awaiting DNS propagation' : 'DNS verification failed'}
+                    {domainVerification === 'verified' ? 'DNS records verified' : domainVerification === 'failed' ? 'Verification failed' : 'Awaiting verification'}
                   </p>
                 </div>
-                {domainVerification !== 'verified' && effectiveDomain && (
-                  <button onClick={handleVerifyDomain} className="mt-2 px-3 py-1.5 bg-blue-500 hover:bg-blue-600 text-white font-black text-[10px] rounded-lg uppercase tracking-widest transition-all">Check DNS</button>
+                {effectiveDomain && domainVerification !== 'verified' && (
+                  <div className="flex gap-2 mt-2">
+                    <button onClick={handleVerifyDomain} disabled={domainPropagation !== 'propagated'} className={`px-3 py-1.5 font-black text-[10px] rounded-lg uppercase tracking-widest transition-all ${domainPropagation === 'propagated' ? 'bg-lime-500 hover:bg-lime-600 text-white' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}>{domainPropagation !== 'propagated' ? 'Verify DNS (propagation required)' : 'Verify DNS'}</button>
+                    {domainVerification !== 'failed' && (
+                      <button onClick={handleFailDomain} className="px-3 py-1.5 bg-red-100 hover:bg-red-200 text-red-600 font-black text-[10px] rounded-lg uppercase tracking-widest transition-all">Simulate Fail</button>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="p-5 bg-slate-50 rounded-2xl border border-slate-100">
+                <div className="flex justify-between items-center mb-2">
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">SSL Certificate</p>
+                  {statusBadge(domainSsl === 'active' ? 'active' : 'pending')}
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={`material-symbols-outlined text-sm ${domainSsl === 'active' ? 'text-lime-600' : 'text-amber-500'}`}>
+                    {domainSsl === 'active' ? 'verified_user' : 'hourglass_top'}
+                  </span>
+                  <p className="text-sm font-bold text-slate-600">
+                    {domainSsl === 'active' ? 'SSL is active and valid' : domainVerification !== 'verified' ? 'Requires DNS verification first' : 'Ready for provisioning'}
+                  </p>
+                </div>
+                {domainSsl !== 'active' && effectiveDomain && (
+                  <button onClick={handleProvisionSsl} disabled={domainVerification !== 'verified'} className="mt-2 px-3 py-1.5 bg-lime-500 hover:bg-lime-600 text-white font-black text-[10px] rounded-lg uppercase tracking-widest transition-all disabled:opacity-40 disabled:cursor-not-allowed">Provision SSL</button>
                 )}
               </div>
             </div>
 
             {effectiveDomain && (
               <div>
-                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Required DNS Records</p>
-                <p className="text-[10px] text-slate-400 mb-3">Add these records at your domain registrar's DNS management panel. Changes may take up to 48 hours to propagate.</p>
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Setup Checklist</p>
+                <p className="text-[10px] text-slate-400 mb-3">Complete each step in order. DNS changes may take up to 48 hours to propagate.</p>
                 <div className="space-y-2">
                   {[
-                    { label: 'CNAME record points to platform', done: domainVerification === 'verified' },
-                    { label: 'TXT verification record added', done: domainVerification === 'verified' },
-                    { label: 'DNS propagation complete', done: domainVerification === 'verified' },
+                    { label: 'CNAME record points to platform', done: domainPropagation === 'propagated' || domainVerification === 'verified' },
+                    { label: 'TXT verification record added', done: domainPropagation === 'propagated' || domainVerification === 'verified' },
+                    { label: 'DNS propagation confirmed', done: domainPropagation === 'propagated' || domainVerification === 'verified' },
+                    { label: 'DNS ownership verified', done: domainVerification === 'verified', failed: domainVerification === 'failed' },
                     { label: 'SSL certificate provisioned', done: domainSsl === 'active' },
+                    { label: 'Domain live and resolving', done: domainVerification === 'verified' && domainSsl === 'active' },
                   ].map((item, i) => (
                     <div key={i} className="flex items-center gap-3 p-3 bg-slate-50 rounded-xl border border-slate-100">
-                      <span className={`material-symbols-outlined text-sm ${item.done ? 'text-lime-600' : 'text-slate-300'}`}>{item.done ? 'check_circle' : 'radio_button_unchecked'}</span>
-                      <span className={`text-sm font-bold ${item.done ? 'text-slate-900' : 'text-slate-400'}`}>{item.label}</span>
+                      <span className={`material-symbols-outlined text-sm ${'failed' in item && item.failed ? 'text-red-500' : item.done ? 'text-lime-600' : 'text-slate-300'}`}>{'failed' in item && item.failed ? 'cancel' : item.done ? 'check_circle' : 'radio_button_unchecked'}</span>
+                      <span className={`text-sm font-bold ${'failed' in item && item.failed ? 'text-red-600' : item.done ? 'text-slate-900' : 'text-slate-400'}`}>{item.label}</span>
                     </div>
                   ))}
                 </div>

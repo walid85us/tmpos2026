@@ -1,0 +1,220 @@
+You are now acting as:
+Principal SaaS Platform Architect + Principal Tenant Lifecycle Architect + Principal Identity & Access Governance Architect + Principal Billing/Refund Workflow Architect + Principal Domain/SSL/DNS Systems Architect + Principal Account Activation & Onboarding Architect + Principal React/TypeScript Engineer + Principal UX Workflow Designer + Principal QA Auditor + Principal Side Auditor & Systems Thinker
+
+IMPORTANT:
+You must not only fix the visible issues below.
+You must also act as a side auditor and systems thinker:
+- identify any missing supporting process needed for the requested workflow
+- implement the missing process if it is necessary to make the workflow coherent
+- avoid shallow “button works” fixes
+- deliver a commercially credible and governance-safe result
+
+This is a correction/elevation pass ONLY for:
+Tenant Management & Provisioning
+
+Do not touch unrelated modules.
+Do not redesign the UI.
+Preserve the current design baseline exactly.
+
+==================================================
+1. STORE OWNER GOVERNANCE RULES
+==================================================
+
+Current issue:
+Store Owner management works, but governance protections are incomplete.
+
+Required:
+- if only one Store Owner exists for a tenant, do NOT allow deleting that Store Owner
+- if the Store Owner is the primary owner created/assigned by System Owner, do NOT allow deletion without ownership reassignment / replacement flow
+- allow safe deactivate/delete only when governance rules are satisfied
+- show clear explanation in UI when deletion is blocked
+- preserve platform-only control of Store Owner identity
+
+Goal:
+Store Owner continuity must always be protected.
+
+==================================================
+2. APPLY CREDIT WORKFLOW CONSISTENCY
+==================================================
+
+Current issue:
+Apply Credit works, but the error/state logic is inconsistent.
+Example: an error like “no unpaid invoice to apply the credit to” conflicts with the broader eligibility logic.
+
+Required:
+- normalize the exact business rule for applying credit
+- ensure messages, validations, selectable invoices, and final application logic all follow the same rule
+- if credits may apply to overdue or paid invoices, keep that rule consistent everywhere
+- if they should apply only to a narrower invoice set, update selection and wording accordingly
+- when Apply Credit succeeds, related invoice status and related credit status must update correctly and consistently
+- eliminate stale or contradictory messaging
+
+Goal:
+Credit application must feel internally consistent and finance-safe.
+
+==================================================
+3. REFUND DETAIL FLOW
+==================================================
+
+Current issue:
+Refund detail flow is still not clear/discoverable enough.
+
+Required:
+- make refund items clearly visible and testable inside the Billing tab
+- clicking a refund item must open a proper refund detail modal/drawer/page
+- include meaningful details such as:
+  - refund reference/ID
+  - related invoice
+  - tenant/account
+  - amount
+  - status
+  - reason
+  - date
+  - relevant actions/history
+- bring refund detail to parity with invoice/credit detail quality
+
+Goal:
+Refund detail flow should be obvious, usable, and operational.
+
+==================================================
+4. CUSTOM DOMAIN / SSL / DNS WORKFLOW
+==================================================
+
+Current issue:
+Custom-domain workflow is still only partial.
+
+Required:
+Build a stronger multitenant SaaS custom-domain workflow for a hosted tenant system.
+
+Assume:
+- tenant front-end is hosted on the platform infrastructure
+- default access is via subdomain:
+  - store.mysystem.com
+- custom domains can be mapped later
+
+Implement/improve:
+- add custom domain
+- domain ownership/verification flow
+- DNS verification guidance
+- DNS records/checklist
+- SSL certificate process/status
+- verification / pending / active / failed states
+- propagation/readiness states
+- platform-side controls for verification and activation
+- clearer domain status progression
+- primary/default domain logic where appropriate
+
+Behavior:
+- once customer domain is verified and active, represent clearly how it resolves into the hosted tenant experience
+- preserve current design system
+
+==================================================
+5. STORE-SIDE DOMAIN / ACTIVATION AWARENESS
+==================================================
+
+Current issue:
+Platform-side tenant activation lifecycle exists, but store-side visibility is missing or too weak.
+
+Required:
+Add a clear store-side activation/onboarding awareness flow for Store Owner.
+
+Examples of acceptable behavior:
+- banner or main-dashboard activation card
+- onboarding state panel
+- pending activation / setup incomplete notice
+- domain readiness / verification state where appropriate
+- prompt to complete setup or continue onboarding
+
+Goal:
+When acting as Store Owner, it should be clear whether the tenant is:
+- invited
+- pending setup
+- active
+- domain pending
+- verification pending
+- onboarding complete
+
+==================================================
+6. TENANT INVITE / ACTIVATION / ACCOUNT-SETUP FLOW
+==================================================
+
+Current issue:
+Platform-side lifecycle exists, but the full process needs to feel more coherent.
+
+Required:
+Keep and strengthen the workflow:
+- System Owner provisions tenant
+- tenant receives invite/onboarding flow
+- tenant completes account setup
+- tenant creates username/password
+- account becomes active
+- tenant can access store front-end at:
+  - store.mysystem.com
+
+If backend email sending is not live:
+- maintain a realistic operational scaffold
+- surface clear invite status
+- resend invite
+- pending activation
+- activation completed
+- login readiness
+- store-side activation awareness
+
+==================================================
+7. SIDE AUDIT / SYSTEM THINKER REQUIREMENT
+==================================================
+
+Before finishing, audit whether these workflows need any additional supporting logic to feel coherent, including:
+- ownership reassignment safeguards
+- billing state dependencies
+- refund/credit history linkage
+- activation lifecycle blockers
+- domain verification blockers
+- onboarding checklist items
+- auditability of sensitive platform actions
+
+If needed, add the minimal but professional supporting process.
+
+Do not add random unrelated features.
+
+==================================================
+8. DO NOT BREAK THESE
+==================================================
+
+Do NOT break:
+- auth flow
+- preview mode
+- current platform/store hierarchy
+- RBAC logic
+- existing working tenant tabs and flows
+- current design baseline
+
+==================================================
+9. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether Store Owner deletion is now blocked safely when only one owner exists
+C. whether primary Store Owner deletion now requires reassignment or equivalent protection
+D. whether Apply Credit logic/messages are now fully consistent
+E. whether refund detail flow is now clear and discoverable
+F. whether custom-domain workflow now includes stronger SSL/DNS verification process
+G. whether store-side domain/activation awareness now exists
+H. whether tenant invite/activation/account-setup flow is now more coherent end-to-end
+I. what supporting process was added as part of side-audit/system-thinking
+J. confirmation that no visual drift was introduced
+
+==================================================
+10. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- last/primary Store Owner deletion is protected correctly
+- Apply Credit logic/messages are consistent
+- refund detail flow is clear
+- custom-domain workflow includes SSL and DNS verification states/process
+- store-side activation/domain awareness exists
+- tenant invite/activation/account-setup flow is coherent
+- auth flow still works
+- no visual drift was introduced

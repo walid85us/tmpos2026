@@ -34,6 +34,7 @@ export const tenants = [
     trialEnd: null as string | null,
     activationStatus: 'active' as ActivationStatus,
     inviteSentDate: '2025-11-10',
+    accountSetupDate: '2025-11-10',
     activatedDate: '2025-11-11',
   },
   {
@@ -59,6 +60,7 @@ export const tenants = [
     trialEnd: null as string | null,
     activationStatus: 'active' as ActivationStatus,
     inviteSentDate: '2026-02-18',
+    accountSetupDate: '2026-02-18',
     activatedDate: '2026-02-19',
   },
   {
@@ -84,6 +86,7 @@ export const tenants = [
     trialEnd: '2026-03-28',
     activationStatus: 'account_setup' as ActivationStatus,
     inviteSentDate: '2026-03-14',
+    accountSetupDate: null as string | null,
     activatedDate: null as string | null,
   },
   {
@@ -109,6 +112,7 @@ export const tenants = [
     trialEnd: null as string | null,
     activationStatus: 'active' as ActivationStatus,
     inviteSentDate: '2025-09-05',
+    accountSetupDate: '2025-09-05',
     activatedDate: '2025-09-06',
   },
   {
@@ -134,6 +138,7 @@ export const tenants = [
     trialEnd: null as string | null,
     activationStatus: 'active' as ActivationStatus,
     inviteSentDate: '2025-06-20',
+    accountSetupDate: '2025-06-20',
     activatedDate: '2025-06-21',
   },
 ];
