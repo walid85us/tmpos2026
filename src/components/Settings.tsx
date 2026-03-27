@@ -488,6 +488,62 @@ export default function Settings() {
         </div>
       </section>
 
+      {/* Domain & Storefront URL */}
+      <section className="space-y-6">
+        <div className="flex items-center gap-3 mb-2">
+          <span className="material-symbols-outlined text-primary">language</span>
+          <h3 className="text-xl font-black text-primary tracking-tight">Domain & Storefront URL</h3>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="bg-white/80 backdrop-blur-xl p-8 rounded-[2.5rem] border border-slate-200 shadow-sm space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-lime-50 rounded-xl flex items-center justify-center">
+                <span className="material-symbols-outlined text-lime-600">verified</span>
+              </div>
+              <div>
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Platform Subdomain</p>
+                <p className="font-black text-primary">yourstore.repairplatform.com</p>
+              </div>
+            </div>
+            <p className="text-[10px] text-slate-400">This is your default storefront URL, managed by the platform. It is always active and cannot be changed.</p>
+            <div className="flex items-center gap-2 p-3 bg-lime-50 rounded-xl border border-lime-100">
+              <span className="material-symbols-outlined text-lime-600 text-sm">lock</span>
+              <p className="text-[10px] font-bold text-lime-700">SSL active · Managed by platform</p>
+            </div>
+          </div>
+          <div className="bg-white/80 backdrop-blur-xl p-8 rounded-[2.5rem] border border-slate-200 shadow-sm space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-blue-50 rounded-xl flex items-center justify-center">
+                <span className="material-symbols-outlined text-blue-600">dns</span>
+              </div>
+              <div>
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Custom Domain</p>
+                <p className="font-bold text-slate-900">Connect your own domain</p>
+              </div>
+            </div>
+            <p className="text-[10px] text-slate-400">To use a custom domain (e.g. repairs.yourbusiness.com), contact your platform administrator. They will add the domain, provide DNS records, and handle SSL provisioning.</p>
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 p-3 bg-slate-50 rounded-xl border border-slate-100">
+                <span className="material-symbols-outlined text-slate-400 text-sm">check_circle</span>
+                <p className="text-[10px] font-bold text-slate-500">1. Request domain from platform admin</p>
+              </div>
+              <div className="flex items-center gap-2 p-3 bg-slate-50 rounded-xl border border-slate-100">
+                <span className="material-symbols-outlined text-slate-400 text-sm">dns</span>
+                <p className="text-[10px] font-bold text-slate-500">2. Add DNS records at your registrar</p>
+              </div>
+              <div className="flex items-center gap-2 p-3 bg-slate-50 rounded-xl border border-slate-100">
+                <span className="material-symbols-outlined text-slate-400 text-sm">lock</span>
+                <p className="text-[10px] font-bold text-slate-500">3. Platform verifies & provisions SSL</p>
+              </div>
+              <div className="flex items-center gap-2 p-3 bg-slate-50 rounded-xl border border-slate-100">
+                <span className="material-symbols-outlined text-slate-400 text-sm">public</span>
+                <p className="text-[10px] font-bold text-slate-500">4. Custom domain goes live</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       {/* 2. Document Template Customization */}
       <section className="space-y-6">
         <div className="flex items-center gap-3 mb-2">

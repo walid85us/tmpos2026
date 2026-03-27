@@ -63,14 +63,14 @@ A multi-tenant SaaS platform frontend built with React, TypeScript, Vite, Tailwi
 ## Tenant Management & Provisioning (Workstream 2)
 
 - **TenantsPage**: 6-card summary row (Active, Trialing, Overdue, Suspended, Total MRR, Avg Health), richer health indicator with bar+label+color, subdomain+billingCycle shown in table rows, renewal countdown in days, seats progress bar
-- **ProvisioningPage**: 3-step flow with onboarding presets showing full pre-configured settings (currency/timezone/tax/modules grid), preset details shown on confirm screen, "Next Steps" section on success page, 8-item onboarding checklist
+- **ProvisioningPage**: 3-step flow; plan selection uses dropdown (no card grid conflict with presets); when preset selected, plan shown as read-only auto-selected card; onboarding presets show full pre-configured settings, preset details on confirm screen, "Next Steps" on success, 8-item checklist
 - **TenantDetailPage**: 9 fully-built tabs:
   - Overview: summary cards (plan, MRR, renewal, onboarded, seats, locations, domain, SSL/DNS), flags, quick actions
-  - Owner & Users: tenant-scoped users, invite user modal, violet "Create Store Owner" button + platform-only modal
+  - Owner & Users: tenant-scoped users, invite user modal, violet "Create Store Owner" button + platform-only modal; `localCreatedOwners` state merges with DB users via `allScopedUsers` memo so newly created owners appear instantly
   - Subscription: `currentPlan` local state that updates on plan change confirmation, limits adjust to new plan
-  - Features: `localOverrides` state with working Trial (modal with duration picker), Paid Override (confirmation modal), End Trial/Revoke/Remove buttons; `paid_override` type distinction
-  - Billing: invoices are clickable, opening invoice detail modal with line items table, subtotal/tax/total breakdown, Download PDF and Send Reminder actions
-  - Domains: local state (customDomainLocal, domainVerification, domainSsl) with working Add/Remove/Verify Now/Check DNS/Provision SSL buttons
+  - Features: `localOverrides` state with Trial (modal + duration picker), Paid Override (modal with pricing model monthly/annual/one-time, price input, internal notes), End Trial/Revoke/Remove buttons; `paid_override` objects carry `price`, `pricingModel`, `pricingNotes`
+  - Billing: invoices clickable → invoice detail modal (line items, subtotal/tax/total, PDF/Reminder actions); credits/refunds clickable → credit detail modal (amount/applied/remaining, reason, Apply Credit/Void/Download PDF actions)
+  - Domains: primary domain info banner, 5-step setup progress stepper (Domain Added → DNS Records → Verified → SSL Issued → Live), DNS instructions text, local state with working Add/Remove/Verify/Check DNS/Provision SSL
   - Usage: seats, locations, API, storage, SMS, tickets/invoices with progress bars and trend arrows
   - Activity/Audit: audit entries are clickable, opening audit log detail modal with all fields (action, target, actor, date, category, severity, tenant)
   - Support Notes: existing notes, flags, add note with local state persistence
@@ -109,7 +109,7 @@ A multi-tenant SaaS platform frontend built with React, TypeScript, Vite, Tailwi
 - **POS Dead Buttons**: Apply Discount, Redeem Points, Add Payment Method, Verify Credit, Suggestive Sales, POS Config — all wired with modals/state
 - **TenantHeader**: Profile menu, notification click handlers, mark-all-read — all wired
 - **Dashboard Cards**: Stat cards made clickable, navigate to relevant pages
-- **Store Components** (12 components fixed): Marketing (campaign+tool modals), SupplyChain (PO+RMA modals), Reports (PDF export via window.print), Prospects (dynamic create modal), Integrations (detail modal for all buttons), Widgets (save+add handlers), Inventory (all tab action buttons), Invoices (print/PDF/SMS/email/duplicate/apply payment), Services (CRUD+category+upload), Settings (save with feedback)
+- **Store Components** (12 components fixed): Marketing (campaign+tool modals), SupplyChain (PO+RMA modals), Reports (PDF export via window.print), Prospects (dynamic create modal), Integrations (detail modal for all buttons), Widgets (save+add handlers), Inventory (all tab action buttons), Invoices (print/PDF/SMS/email/duplicate/apply payment), Services (CRUD+category+upload), Settings (save with feedback, Domain & Storefront URL section with platform subdomain + custom domain 4-step setup guide)
 - **Owner Pages** (8 pages fixed): TenantsPage (navigate provisioning/detail), TenantDetailPage (tab management), ProvisioningPage (animated feedback), PlansPage (create/edit/archive), DomainsPage/SubscriptionsPage/AddOnsPage/SupportToolsPage/PlatformSettingsPage (manage/save buttons)
 
 ### RBAC Validation

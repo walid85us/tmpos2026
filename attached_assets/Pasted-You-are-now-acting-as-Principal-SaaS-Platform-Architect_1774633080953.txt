@@ -1,0 +1,137 @@
+You are now acting as:
+Principal SaaS Platform Architect + Principal Tenant Lifecycle Designer + Principal Subscription & Commercial Packaging Architect + Principal Billing Workflow Architect + Principal Domain Management Architect + Principal React/TypeScript Engineer + Principal UX Workflow Designer + Principal QA Auditor
+
+IMPORTANT:
+This is a correction pass ONLY for the completed workstream:
+Tenant Management & Provisioning
+
+Do not touch unrelated modules.
+Do not redesign the UI.
+Preserve the current design baseline exactly.
+
+Fix the following verified QA issues:
+
+==================================================
+1. PROVISIONING FLOW
+==================================================
+
+Current issue:
+Provisioning templates are still too similar to the separate Select Plan step.
+
+Required:
+- remove the conflicting/duplicative Select Plan section if it creates overlap with Onboarding Presets
+- make Onboarding Presets the primary preset-driven onboarding choice
+- presets must clearly represent a meaningful preconfigured setup, not a duplicate plan selector
+- preserve a clear plan assignment model, but avoid UI redundancy/conflict
+
+Goal:
+Provisioning should feel cleaner and more intentional.
+
+==================================================
+2. OWNER & USERS — ADDITIONAL STORE OWNER CREATION
+==================================================
+
+Current issue:
+Platform-only additional Store Owner creation exists partially, but the result is not clearly showing under Store Owner management.
+
+Required:
+- keep Store Owner creation platform-only
+- ensure newly created Store Owner appears correctly in the Owner & Users experience
+- if this is blocked only because of missing backend persistence, make the local/mock state behavior still visibly reflect the creation so the UI workflow is testable
+- do not expose Store Owner creation to tenant-side roles
+
+==================================================
+3. FEATURES TAB — PAID OVERRIDE COMMERCIAL FLOW
+==================================================
+
+Current issue:
+Paid Override exists, but it does not ask the System Owner to define pricing.
+
+Required:
+- when clicking Paid Override, open a proper modal/flow
+- allow the System Owner to set pricing for that override
+- support pricing models such as:
+  - monthly recurring charge
+  - one-time charge when billed annually
+  - or equivalent commercial options if you already have a clean structure
+- show the override state clearly after activation
+- keep trial flow working
+
+Goal:
+Paid overrides must behave like real commercial feature packaging, not just a toggle.
+
+==================================================
+4. BILLING TAB — CREDIT / REFUND DETAIL PARITY
+==================================================
+
+Current issue:
+Invoice details open correctly, but credit/refund items need equivalent detail behavior.
+
+Required:
+- clicking a credit note should open a proper credit detail modal/drawer/page
+- clicking a refund item should open a proper refund detail modal/drawer/page
+- include meaningful detail and related actions consistent with invoice detail behavior
+- preserve existing tenant-scoped billing logic
+
+==================================================
+5. DOMAINS TAB — CUSTOM DOMAIN WORKFLOW
+==================================================
+
+Current issue:
+Domains tab is improved, but the custom-domain workflow is still incomplete.
+
+Required:
+- make custom-domain workflow work clearly in the System Owner tenant-management surface
+- also add the corresponding store-side awareness/process where appropriate for Store Owner
+- improve domain operations with a realistic SaaS custom-domain flow, including where appropriate:
+  - add custom domain
+  - verification guidance
+  - DNS records/checklist
+  - SSL state
+  - verification/provisioning status
+  - primary/default domain behavior if relevant
+  - clearer workflow between platform side and store side
+
+Use best-practice ideas for serious multitenant SaaS domain management while preserving the current design system.
+
+==================================================
+6. DO NOT BREAK THESE
+==================================================
+
+Do NOT break:
+- auth flow
+- preview mode
+- current platform/store hierarchy
+- RBAC logic
+- current design baseline
+- existing working tenant tabs and flows
+
+==================================================
+7. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether Provisioning now removes the plan/preset conflict
+C. whether additional Store Owner creation now visibly appears in Owner & Users flow
+D. whether Paid Override now asks for pricing and supports commercial billing intent
+E. whether credit note detail now opens
+F. whether refund detail now opens
+G. whether custom-domain workflow now works more clearly on platform side
+H. whether related custom-domain/store-side process now exists
+I. confirmation that no visual drift was introduced
+
+==================================================
+8. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- Provisioning no longer has preset/plan conflict
+- additional Store Owner creation is visibly reflected
+- Paid Override includes pricing workflow
+- credit note detail opens
+- refund detail opens
+- custom-domain workflow is clearly improved
+- related store-side process exists where appropriate
+- auth flow still works
+- no visual drift was introduced

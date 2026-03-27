@@ -200,24 +200,26 @@ const ProvisioningPage: React.FC = () => {
                   </div>
                 </div>
 
-                <div>
-                  <label className={labelClass}>Select Plan *</label>
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                    {plans.map(p => (
-                      <button key={p.id} onClick={() => setSelectedPlan(p.id)} className={`p-5 rounded-2xl border text-left transition-all ${selectedPlan === p.id ? 'bg-primary/5 border-primary/30 ring-2 ring-primary/20' : 'bg-slate-50 border-slate-200 hover:border-primary/20'}`}>
-                        <p className="font-black text-slate-900">{p.name}</p>
-                        <div className="mt-1">
-                          <p className="text-lg font-black text-primary">${billingCycle === 'annual' ? p.annualPrice : p.price}<span className="text-[10px] text-slate-400 font-bold">/{billingCycle === 'annual' ? 'yr' : 'mo'}</span></p>
-                          {billingCycle === 'annual' && <p className="text-[10px] font-bold text-lime-600">{p.savingsLabel} vs monthly</p>}
-                        </div>
-                        <p className="text-[10px] text-slate-400 mt-1">{p.limits.seats} seats · {p.limits.locations} location{p.limits.locations !== 1 ? 's' : ''}</p>
-                        <div className="flex flex-wrap gap-1 mt-2">
-                          {p.features.slice(0, 3).map(f => <span key={f} className="text-[8px] font-black text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded uppercase tracking-widest">{f}</span>)}
-                        </div>
-                      </button>
-                    ))}
+                {!selectedTemplate && (
+                  <div>
+                    <label htmlFor="prov-plan" className={labelClass}>Plan *</label>
+                    <select id="prov-plan" value={selectedPlan} onChange={e => setSelectedPlan(e.target.value)} className={inputClass}>
+                      {plans.map(p => (
+                        <option key={p.id} value={p.id}>{p.name} — ${billingCycle === 'annual' ? p.annualPrice : p.price}/{billingCycle === 'annual' ? 'yr' : 'mo'} ({p.limits.seats} seats, {p.limits.locations} loc{p.limits.locations !== 1 ? 's' : ''})</option>
+                      ))}
+                    </select>
+                    <p className="text-[10px] text-slate-400 mt-1">Or select an Onboarding Preset above to auto-configure plan and settings.</p>
                   </div>
-                </div>
+                )}
+                {selectedTemplate && (
+                  <div className="flex items-center gap-3 p-4 bg-primary/5 rounded-xl border border-primary/10">
+                    <span className="material-symbols-outlined text-primary text-sm">check_circle</span>
+                    <div className="flex-1">
+                      <p className="text-[10px] font-black text-primary uppercase tracking-widest">Plan Auto-Selected by Preset</p>
+                      <p className="font-bold text-slate-900 capitalize">{plan?.name} — ${billingCycle === 'annual' ? plan?.annualPrice : plan?.price}/{billingCycle === 'annual' ? 'yr' : 'mo'}</p>
+                    </div>
+                  </div>
+                )}
 
                 <div>
                   <label className={labelClass}>Billing Cycle</label>
