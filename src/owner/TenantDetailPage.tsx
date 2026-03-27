@@ -105,7 +105,7 @@ const TenantDetailPage: React.FC = () => {
     const totalBilled = tenantInv.reduce((s, i) => s + i.total, 0);
     const totalPaid = tenantTx.filter(tx => tx.status === 'paid').reduce((s, tx) => s + tx.amount, 0);
     const appliedCredits = tenantCredits.filter(c => c.status === 'applied').reduce((s, c) => s + c.appliedAmount, 0);
-    const unappliedCredits = tenantCredits.filter(c => c.status === 'pending').reduce((s, c) => s + c.amount, 0);
+    const unappliedCredits = tenantCredits.filter(c => c.status === 'issued').reduce((s, c) => s + c.amount, 0);
     return { totalBilled, totalPaid, appliedCredits, unappliedCredits, balance: totalBilled - totalPaid - appliedCredits };
   }, [tenantInv, tenantTx, tenantCredits]);
 
@@ -404,14 +404,16 @@ const TenantDetailPage: React.FC = () => {
     return userId === primaryOwnerId;
   }, [primaryOwnerId]);
   const canDeleteOwner = useCallback((userId: string) => {
-    if (activeStoreOwners.length <= 1) return { allowed: false, reason: 'Cannot delete the last remaining active Store Owner. At least one active Store Owner must exist for tenant continuity.' };
     if (isPrimaryOwner(userId)) return { allowed: false, reason: 'This is the primary Store Owner. To delete, first reassign ownership to another Store Owner.' };
+    if (storeOwners.length <= 1) return { allowed: false, reason: 'Cannot delete the only Store Owner. At least one Store Owner must exist for tenant continuity.' };
+    const userObj = storeOwners.find(o => o.id === userId);
+    if (userObj?.status === 'active' && activeStoreOwners.length <= 1) return { allowed: false, reason: 'Cannot delete the last active Store Owner. At least one active Store Owner is required for tenant operations.' };
     return { allowed: true, reason: '' };
-  }, [activeStoreOwners, isPrimaryOwner]);
+  }, [storeOwners, activeStoreOwners, isPrimaryOwner]);
   const canDeactivateOwner = useCallback((userId: string) => {
+    if (isPrimaryOwner(userId)) return { allowed: false, reason: 'Cannot deactivate the primary Store Owner. Reassign primary ownership first.' };
     const otherActive = activeStoreOwners.filter(o => o.id !== userId);
     if (otherActive.length === 0) return { allowed: false, reason: 'Cannot deactivate the last active Store Owner. At least one active Store Owner is required.' };
-    if (isPrimaryOwner(userId)) return { allowed: false, reason: 'Cannot deactivate the primary Store Owner. Reassign primary ownership first.' };
     return { allowed: true, reason: '' };
   }, [activeStoreOwners, isPrimaryOwner]);
 
@@ -655,7 +657,7 @@ const TenantDetailPage: React.FC = () => {
                       <span className="material-symbols-outlined text-violet-600 text-sm">shield_person</span>
                     </div>
                     <div>
-                      <p className="font-bold text-slate-900">{user.name}</p>
+                      <p className="font-bold text-slate-900 flex items-center gap-2">{user.name}{isPrimaryOwner(user.id) && <span className="text-[8px] font-black text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200 uppercase tracking-widest">Primary</span>}</p>
                       <p className="text-[10px] text-slate-400">{user.email}</p>
                       {user.lastActive && <p className="text-[10px] text-slate-400">Last active: {user.lastActive}</p>}
                     </div>
@@ -709,7 +711,10 @@ const TenantDetailPage: React.FC = () => {
                         <p className="text-sm text-slate-500 mt-1">{selectedUserDetail.email}</p>
                       </div>
                       {selectedUserDetail.role === 'store_owner' && (
-                        <span className="text-[9px] font-black text-violet-600 bg-violet-100 px-2 py-1 rounded-lg uppercase tracking-widest">Store Owner</span>
+                        <div className="flex flex-col items-end gap-1">
+                          <span className="text-[9px] font-black text-violet-600 bg-violet-100 px-2 py-1 rounded-lg uppercase tracking-widest">Store Owner</span>
+                          {isPrimaryOwner(selectedUserDetail.id) && <span className="text-[8px] font-black text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200 uppercase tracking-widest">Primary</span>}
+                        </div>
                       )}
                     </div>
                     <div className="p-8 space-y-4">
@@ -769,6 +774,19 @@ const TenantDetailPage: React.FC = () => {
                         return deleteCheck.allowed
                           ? <button onClick={() => { setDeleteOwnerId(selectedUserDetail.id); setUserDetailId(null); }} className="px-4 py-2.5 bg-red-100 text-red-600 font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-red-200 transition-all">Delete</button>
                           : <span className="px-4 py-2.5 bg-slate-100 text-slate-400 font-black text-[10px] rounded-xl uppercase tracking-widest cursor-not-allowed" title={deleteCheck.reason}>Delete</span>;
+                      })()}
+                      {selectedUserDetail.role === 'store_owner' && (() => {
+                        const deleteCheck = canDeleteOwner(selectedUserDetail.id);
+                        const deactivateCheck = canDeactivateOwner(selectedUserDetail.id);
+                        const blockedReason = !deleteCheck.allowed ? deleteCheck.reason : !deactivateCheck.allowed ? deactivateCheck.reason : null;
+                        return blockedReason ? (
+                          <div className="w-full mt-1 p-2 bg-slate-50 rounded-lg border border-slate-100">
+                            <p className="text-[9px] text-slate-500 font-bold flex items-center gap-1">
+                              <span className="material-symbols-outlined text-[10px]">info</span>
+                              {blockedReason}
+                            </p>
+                          </div>
+                        ) : null;
                       })()}
                       {selectedUserDetail.status === 'active' && selectedUserDetail.role !== 'store_owner' && (
                         <button onClick={() => { setLocalOwnerStatuses(prev => ({ ...prev, [selectedUserDetail.id]: 'deactivated' })); setUserDetailId(null); showToast(`${selectedUserDetail.name} deactivated`); }} className="px-4 py-2.5 bg-red-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-red-600 transition-all">Deactivate</button>
@@ -1481,7 +1499,7 @@ const TenantDetailPage: React.FC = () => {
                       <div className="flex items-center gap-2">
                         <span className="font-black text-violet-600">${cr.amount.toFixed(2)}</span>
                         {statusBadge(cr.status)}
-                        {(cr.status === 'issued' || cr.status === 'pending') && (
+                        {cr.status === 'issued' && (
                           <div className="flex gap-1 ml-1" onClick={e => e.stopPropagation()}>
                             <button onClick={() => {
                               const target = eligibleInvoicesForCredit[0];
@@ -1491,7 +1509,7 @@ const TenantDetailPage: React.FC = () => {
                                 setLocalCreditLinks(prev => ({ ...prev, [cr.id]: { appliedToInvoice: target.invoiceNo, appliedAmount: cr.amount, appliedDate: '2026-03-26' } }));
                                 showToast(`Credit ${cr.creditNo} applied to ${target.invoiceNo}`);
                               } else {
-                                showToast('No eligible invoices (overdue or pending) to apply credit to');
+                                showToast('No invoices with overdue or pending status to apply this credit to');
                               }
                             }} className="text-[8px] font-black text-lime-600 bg-lime-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-lime-100 transition-colors">Apply</button>
                             <button onClick={() => setVoidConfirmId(cr.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">Void</button>
@@ -1646,13 +1664,13 @@ const TenantDetailPage: React.FC = () => {
                           <p className="font-bold text-slate-900">{selectedCredit.appliedDate}</p>
                         </div>
                       )}
-                      {(selectedCredit.status === 'pending' || selectedCredit.status === 'issued') && (
+                      {selectedCredit.status === 'issued' && (
                         <div className="p-3 bg-amber-50 rounded-xl border border-amber-100">
                           <p className="text-sm text-amber-700 font-bold flex items-center gap-1">
                             <span className="material-symbols-outlined text-xs">info</span>
                             {eligibleInvoicesForCredit.length > 0
-                              ? `This credit can be applied to ${eligibleInvoicesForCredit.length} eligible invoice(s) (overdue or pending).`
-                              : 'No eligible invoices (overdue or pending) available to apply this credit to.'}
+                              ? `This credit can be applied to ${eligibleInvoicesForCredit.length} eligible invoice(s) with overdue or pending status.`
+                              : 'No invoices with overdue or pending status are available to apply this credit to.'}
                           </p>
                         </div>
                       )}
@@ -1681,7 +1699,7 @@ const TenantDetailPage: React.FC = () => {
                       )}
                     </div>
                     <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3 flex-wrap">
-                      {(selectedCredit.status === 'pending' || selectedCredit.status === 'issued') && (
+                      {selectedCredit.status === 'issued' && (
                         <button onClick={() => {
                           const target = eligibleInvoicesForCredit[0];
                           if (target) {
@@ -1691,13 +1709,13 @@ const TenantDetailPage: React.FC = () => {
                             setCreditDetailId(null);
                             showToast(`Credit ${selectedCredit.creditNo} applied to ${target.invoiceNo}`);
                           } else {
-                            showToast('No eligible invoices (overdue or pending) to apply credit to');
+                            showToast('No invoices with overdue or pending status to apply this credit to');
                           }
                         }} className="px-4 py-2.5 bg-lime-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-lime-600 transition-all flex items-center gap-1">
                           <span className="material-symbols-outlined text-xs">check</span> Apply Credit
                         </button>
                       )}
-                      {(selectedCredit.status === 'pending' || selectedCredit.status === 'issued') && (
+                      {selectedCredit.status === 'issued' && (
                         <button onClick={() => { setCreditDetailId(null); setVoidConfirmId(selectedCredit.id); }} className="px-4 py-2.5 bg-red-100 text-red-600 font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-red-200 transition-all">Void</button>
                       )}
                       <button onClick={() => { setCreditDetailId(null); showToast('Credit note PDF downloaded'); }} className="px-4 py-2.5 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-primary/90 transition-all flex items-center gap-1">

@@ -12,10 +12,12 @@ function StoreActivationPanel() {
   const isPendingActivation = tenant.status === 'pending_activation';
   const isSuspended = tenant.status === 'suspended';
   const isOverdue = tenant.status === 'overdue';
+  const isReadOnly = tenant.status === 'read_only';
 
   const steps = [
     { key: 'onboarded', label: 'Onboarded', icon: 'person_add', done: true },
-    { key: 'setup', label: 'Account Setup', icon: 'settings', done: isLive || isOverdue },
+    { key: 'setup', label: 'Account Setup', icon: 'settings', done: isLive || isOverdue || isReadOnly },
+    { key: 'domain', label: 'Domain Ready', icon: 'public', done: isLive || isOverdue },
     { key: 'activation', label: 'Activated', icon: 'rocket_launch', done: isLive || isOverdue },
     { key: 'live', label: 'Store Live', icon: 'storefront', done: isLive },
   ];
@@ -30,6 +32,22 @@ function StoreActivationPanel() {
           <div>
             <p className="text-sm font-black text-red-800">Your store has been suspended</p>
             <p className="text-[10px] text-red-600 font-bold">Please contact support or resolve outstanding billing issues to restore access.</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (isReadOnly) {
+    return (
+      <div className="p-5 bg-violet-50 rounded-2xl border border-violet-200">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 bg-violet-100 rounded-full flex items-center justify-center">
+            <span className="material-symbols-outlined text-violet-600">visibility</span>
+          </div>
+          <div>
+            <p className="text-sm font-black text-violet-800">Your store is in read-only mode</p>
+            <p className="text-[10px] text-violet-600 font-bold">You can view data but editing is disabled. Contact your platform admin to restore full access.</p>
           </div>
         </div>
       </div>
@@ -54,7 +72,7 @@ function StoreActivationPanel() {
 
   if (isLive) {
     return (
-      <div className="p-5 bg-lime-50 rounded-2xl border border-lime-200">
+      <div className="p-5 bg-lime-50 rounded-2xl border border-lime-200 space-y-3">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 bg-lime-100 rounded-full flex items-center justify-center">
             <span className="material-symbols-outlined text-lime-600">check_circle</span>
@@ -64,6 +82,20 @@ function StoreActivationPanel() {
             <p className="text-[10px] text-lime-600 font-bold">
               {tenant.status === 'trialing' ? 'You are on a free trial. Upgrade before it expires to keep your store running.' : 'All setup steps are complete. Your store is accessible to customers.'}
             </p>
+          </div>
+        </div>
+        <div className="flex gap-3 flex-wrap">
+          <div className="flex items-center gap-1.5 px-3 py-1.5 bg-white/80 rounded-lg border border-lime-200">
+            <span className="material-symbols-outlined text-xs text-lime-600">public</span>
+            <span className="text-[9px] font-black text-lime-700 uppercase tracking-widest">Domain Active</span>
+          </div>
+          <div className="flex items-center gap-1.5 px-3 py-1.5 bg-white/80 rounded-lg border border-lime-200">
+            <span className="material-symbols-outlined text-xs text-lime-600">lock</span>
+            <span className="text-[9px] font-black text-lime-700 uppercase tracking-widest">SSL Secured</span>
+          </div>
+          <div className="flex items-center gap-1.5 px-3 py-1.5 bg-white/80 rounded-lg border border-lime-200">
+            <span className="material-symbols-outlined text-xs text-lime-600">verified</span>
+            <span className="text-[9px] font-black text-lime-700 uppercase tracking-widest">DNS Verified</span>
           </div>
         </div>
       </div>

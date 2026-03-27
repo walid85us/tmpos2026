@@ -1,0 +1,201 @@
+You are now acting as:
+Principal SaaS Platform Architect + Principal Tenant Lifecycle Architect + Principal Identity & Access Governance Architect + Principal Billing/Refund Workflow Architect + Principal Account Activation & Onboarding Architect + Principal React/TypeScript Engineer + Principal UX Workflow Designer + Principal QA Auditor + Principal Side Auditor & Systems Thinker
+
+IMPORTANT:
+From this pass onward, you must not only fix the visible issue.
+You must also act as:
+- a side auditor
+- a systems thinker
+- a governance-aware platform architect
+
+That means:
+- identify any missing supporting process required to make the workflow coherent
+- implement the missing support process if necessary
+- avoid shallow “button works” fixes
+- deliver a result that is operationally testable and commercially credible
+
+This is a final correction pass ONLY for:
+Tenant Management & Provisioning
+
+Do not touch unrelated modules.
+Do not redesign the UI.
+Preserve the current design baseline exactly.
+
+==================================================
+1. STORE OWNER DELETE GOVERNANCE
+==================================================
+
+Current issue:
+Store Owner deletion protection is too broad.
+The primary Store Owner is protected correctly, but newly created additional Store Owners also have delete disabled when they should not always be.
+
+Required rule:
+- if only one Store Owner exists, deletion must be blocked
+- if the Store Owner is the primary owner created/assigned by System Owner, deletion must be blocked unless ownership reassignment/replacement happens first
+- secondary/additional Store Owners should be deletable when governance rules are satisfied
+- show clear blocked-state messaging when deletion is not allowed
+- preserve platform-only control of Store Owner identity
+
+Goal:
+Deletion rules must be governance-safe but not over-restrictive.
+
+==================================================
+2. APPLY CREDIT RULE / MESSAGE CONSISTENCY
+==================================================
+
+Current issue:
+Apply Credit messaging is still inconsistent.
+The UI is now showing wording like:
+“No eligible invoices (overdue or pending) to apply credit to.”
+This must be fully normalized.
+
+Required:
+- define one final business rule for eligible invoices in this Apply Credit workflow
+- make selection logic, labels, helper text, validation, and errors all follow the same rule
+- remove contradictory wording from all states
+- preserve correct tenant filtering
+- preserve correct no-balance safeguards
+- preserve correct invoice/credit status updates after successful apply
+
+Goal:
+The credit workflow must be internally consistent and finance-safe.
+
+==================================================
+3. REFUND DETAIL FLOW / QA TESTABILITY
+==================================================
+
+Current issue:
+Refund detail flow cannot be properly tested because there is no clear or discoverable refund scenario visible in Billing.
+
+Required:
+- make refund rows/items clearly visible and testable in the Billing tab
+- clicking a refund must open a proper refund detail modal/drawer/page
+- include meaningful refund details:
+  - refund reference
+  - related invoice
+  - tenant/account
+  - amount
+  - status
+  - reason
+  - date
+  - action/history context
+
+If necessary for QA:
+- create one safe local/mock refund scenario so refund detail can actually be tested in the UI
+- do not rely on hidden or impossible-to-reach refund states
+
+Goal:
+Refund detail flow must be discoverable, testable, and on par with invoice/credit detail.
+
+==================================================
+4. STORE-SIDE ACTIVATION / DOMAIN AWARENESS
+==================================================
+
+Current issue:
+Platform-side lifecycle exists, but store-side visibility is too weak.
+Right now Store Owner only sees a generic active note.
+
+Required:
+Build a clearer store-side activation/onboarding/domain-awareness surface.
+
+Support visible states such as:
+- invited
+- pending setup
+- setup incomplete
+- pending activation
+- domain pending
+- verification pending
+- live / active
+- onboarding complete
+
+Acceptable UX patterns:
+- dashboard activation card
+- onboarding state panel
+- status banner
+- checklist/progress card
+- continue setup prompt
+
+Goal:
+When acting as Store Owner, it should be clear what stage the account/store/domain is in and what action is needed next.
+
+==================================================
+5. TENANT INVITE / ACTIVATION FLOW COHERENCE
+==================================================
+
+Current issue:
+Platform-side lifecycle exists, but the full end-to-end process needs stronger testable coherence.
+
+Required:
+Keep and strengthen the flow:
+- System Owner provisions tenant
+- tenant receives invite/onboarding flow
+- tenant completes setup
+- tenant creates username/password
+- account becomes active
+- tenant can access store front-end at:
+  - store.mysystem.com
+
+If backend email is not live:
+- keep a realistic operational scaffold
+- surface invite sent / pending activation / activation complete / login ready clearly
+- make the process visibly testable from platform side and store side
+
+==================================================
+6. SIDE AUDIT / SYSTEM THINKER REQUIREMENT
+==================================================
+
+Before finishing, audit whether the above workflows need extra supporting logic to feel coherent, including:
+- ownership reassignment safeguards
+- billing/refund state dependencies
+- activation lifecycle blockers
+- onboarding checklist states
+- auditability of Store Owner management actions
+- discoverability of refund and activation flows
+
+If needed, add the minimal but professional supporting process.
+
+Do not add random unrelated features.
+
+==================================================
+7. DO NOT BREAK THESE
+==================================================
+
+Do NOT break:
+- auth flow
+- preview mode
+- current platform/store hierarchy
+- RBAC logic
+- existing working tenant tabs and flows
+- current design baseline
+
+==================================================
+8. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether secondary Store Owners can now be deleted when allowed
+C. whether primary/last-owner deletion remains protected correctly
+D. what final Apply Credit eligibility rule is used
+E. whether Apply Credit messages/logic are now fully consistent
+F. whether refund detail flow is now discoverable and testable
+G. whether a safe refund QA scenario was added if needed
+H. whether store-side activation/domain awareness now exists with meaningful lifecycle states
+I. whether tenant invite/activation flow is now more coherent end-to-end
+J. what extra supporting process was added from side-audit/system-thinking
+K. confirmation that no visual drift was introduced
+
+==================================================
+9. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- secondary Store Owners are deletable when governance rules allow
+- last/primary Store Owner deletion is still protected
+- Apply Credit logic/messages are fully consistent
+- refund detail flow is clear and testable
+- store-side activation/domain awareness exists with meaningful state
+- tenant invite/activation flow is coherent
+- auth flow still works
+- no visual drift was introduced
+After Replit finishes, test on
