@@ -1,0 +1,147 @@
+You are now acting as:
+Principal Tenant Lifecycle Architect + Principal Store Onboarding Experience Architect + Principal SaaS Activation Systems Designer + Principal Domain/Readiness Workflow Architect + Principal React/TypeScript Engineer + Principal UX Workflow Designer + Principal QA Auditor + Principal Side Auditor & Systems Thinker
+
+IMPORTANT:
+You must not only fix the visible issue.
+You must also act as:
+- a side auditor
+- a systems thinker
+- a lifecycle/onboarding architect
+
+That means:
+- identify any missing supporting state/process needed for the requested flow
+- implement the missing support process if required
+- avoid shallow “single banner” fixes
+- deliver a result that is operationally testable and coherent
+
+This is a final narrow correction pass ONLY for:
+Tenant Management & Provisioning → Store-side activation/onboarding/domain-awareness
+
+Do not touch unrelated modules.
+Do not redesign the UI.
+Preserve the current design baseline exactly.
+
+==================================================
+1. STORE-SIDE ACTIVATION / ONBOARDING EXPERIENCE
+==================================================
+
+Current issue:
+Store Owner side still does not expose a real, testable activation/onboarding lifecycle.
+Right now it only shows a generic “Your store is fully active and live” note.
+
+Required:
+Replace/upgrade this into a true lifecycle/readiness surface for Store Owner.
+
+Support visible lifecycle states such as:
+- invited
+- pending setup
+- setup incomplete
+- pending activation
+- domain pending
+- verification pending
+- live / active
+- onboarding complete
+
+Acceptable UX patterns:
+- dashboard activation card
+- onboarding state panel
+- progress/checklist card
+- continue setup prompt
+- domain readiness card
+- status banner with actionable next step
+
+Goal:
+When acting as Store Owner, it must be obvious:
+- what stage the store is in
+- what has been completed
+- what action is needed next
+- whether the store/domain is fully live
+
+==================================================
+2. TESTABLE STATE TRANSITIONS
+==================================================
+
+Current issue:
+The flow is not clearly testable in the current architecture.
+
+Required:
+Make the store-side activation lifecycle visibly testable with realistic local/mock state if backend services are not yet live.
+
+There must be a way to represent and test states such as:
+- invite sent
+- account setup pending
+- onboarding incomplete
+- domain pending
+- verification pending
+- active/live
+
+The UI must not jump directly to “fully active” without making the lifecycle visible.
+
+==================================================
+3. STORE-SIDE DOMAIN READINESS
+==================================================
+
+Current issue:
+Domain awareness technically exists, but it is not integrated strongly enough into store-side lifecycle/readiness.
+
+Required:
+Show domain-related readiness states where relevant on Store Owner side, such as:
+- using default subdomain
+- custom domain pending
+- DNS verification pending
+- SSL pending
+- custom domain active
+- live on platform domain vs live on custom domain
+
+This should be understandable and actionable for Store Owner.
+
+==================================================
+4. SIDE AUDIT / SYSTEM THINKER REQUIREMENT
+==================================================
+
+Before finishing, audit whether this workflow needs any missing supporting pieces such as:
+- checklist items
+- activation blockers
+- first-login guidance
+- pending verification states
+- continue setup actions
+- status chips
+- timeline/progress indicators
+
+If needed, add the minimal but professional supporting process.
+Do not add unrelated features.
+
+==================================================
+5. DO NOT BREAK THESE
+==================================================
+
+Do NOT break:
+- auth flow
+- preview mode
+- current platform/store hierarchy
+- RBAC logic
+- current design baseline
+- existing working tenant tabs and flows
+
+==================================================
+6. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether store-side activation/onboarding awareness now clearly exists
+C. what lifecycle states are now visible to Store Owner
+D. whether store-side domain readiness now appears clearly
+E. what supporting process/checklist/state was added from side-audit/system-thinking
+F. confirmation that no visual drift was introduced
+
+==================================================
+7. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- Store Owner can clearly see activation/onboarding state
+- Store Owner can clearly see domain readiness/state
+- the workflow is testable in the current architecture
+- auth flow still works
+- no visual drift was introduced
