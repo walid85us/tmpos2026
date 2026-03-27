@@ -1,0 +1,159 @@
+You are now acting as:
+Principal Tenant Lifecycle Architect + Principal Store Onboarding Experience Architect + Principal Identity & Access Activation Systems Designer + Principal Domain/Readiness Workflow Architect + Principal React/TypeScript Engineer + Principal UX Workflow Designer + Principal QA Auditor + Principal Side Auditor & Systems Thinker
+
+IMPORTANT:
+You must not only fix the visible issue.
+You must also act as:
+- a side auditor
+- a systems thinker
+- a lifecycle/onboarding architect
+
+That means:
+- identify any missing supporting process needed to make activation/onboarding testable
+- implement the missing support process if required
+- avoid shallow “status banner only” fixes
+- deliver a result that is operationally testable in the current architecture
+
+This is a final narrow correction pass ONLY for:
+Tenant Management & Provisioning → activation/onboarding process testability
+
+Do not touch unrelated modules.
+Do not redesign the UI.
+Preserve the current design baseline exactly.
+
+==================================================
+1. MAKE ACTIVATION / ONBOARDING PROCESS TESTABLE
+==================================================
+
+Current issue:
+Store-side activation/onboarding awareness now exists, but the actual lifecycle is still not clearly testable end-to-end.
+
+Required:
+Create a realistic and testable activation/onboarding flow in the current architecture.
+
+If backend email / auth provisioning / domain services are not fully live:
+- create a dev-safe or preview-safe operational scaffold/simulator
+- make it possible to test lifecycle progression without needing the real backend service
+
+The process must support visibly testable states such as:
+- invite sent
+- account setup pending
+- username/password setup pending
+- onboarding incomplete
+- domain pending
+- verification pending
+- active/live
+
+==================================================
+2. TESTABLE STATE TRANSITIONS
+==================================================
+
+Required:
+Make the lifecycle transition through meaningful steps.
+
+Examples of acceptable testable actions:
+- resend invite
+- start setup
+- complete account setup
+- mark username/password created
+- continue onboarding
+- mark domain verification pending
+- mark domain verified
+- activate tenant/store
+
+These actions may be local/mock/dev-only if backend is not live yet,
+but they must be:
+- visible
+- coherent
+- testable
+- aligned with the platform-side lifecycle
+
+==================================================
+3. STORE-SIDE EXPERIENCE
+==================================================
+
+Required:
+On the Store Owner side, show a real lifecycle/onboarding surface, not just a final note.
+
+It should clearly communicate:
+- current stage
+- what is done
+- what remains
+- what action is needed next
+- whether the store/domain is fully live
+
+Acceptable UX patterns:
+- onboarding checklist
+- lifecycle progress card
+- activation state panel
+- continue setup actions
+- domain readiness steps
+
+==================================================
+4. PLATFORM-SIDE COHERENCE
+==================================================
+
+Required:
+Ensure the store-side lifecycle remains coherent with the platform-side tenant lifecycle.
+
+The platform should be able to reflect states like:
+- invite sent
+- pending setup
+- setup complete
+- pending activation
+- active
+
+And the store-side experience should map to those states in a way that is testable.
+
+==================================================
+5. SIDE AUDIT / SYSTEM THINKER REQUIREMENT
+==================================================
+
+Before finishing, audit whether the activation/onboarding flow needs extra supporting pieces such as:
+- checklist items
+- activation blockers
+- first-login guidance
+- username/password setup readiness
+- invite resend state
+- lifecycle status chips
+- completion timeline/progress indicators
+
+If needed, add the minimal but professional supporting process.
+Do not add random unrelated features.
+
+==================================================
+6. DO NOT BREAK THESE
+==================================================
+
+Do NOT break:
+- auth flow
+- preview mode
+- current platform/store hierarchy
+- RBAC logic
+- current design baseline
+- existing working tenant tabs and flows
+
+==================================================
+7. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether activation/onboarding process is now truly testable
+C. what lifecycle states are now testable
+D. whether store-side lifecycle actions now exist
+E. whether platform/store lifecycle mapping is coherent
+F. what supporting process was added from side-audit/system-thinking
+G. confirmation that no visual drift was introduced
+
+==================================================
+8. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- activation/onboarding process is testable in the current architecture
+- Store Owner can see meaningful lifecycle actions, not only awareness text
+- lifecycle state transitions are visible and coherent
+- platform/store lifecycle mapping is coherent
+- auth flow still works
+- no visual drift was introduced
