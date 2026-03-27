@@ -47,12 +47,15 @@ interface Tenant {
   trialEndsDate?: string;
 }
 
+export const ONBOARDING_ALLOWED_MODULES = ['dashboard', 'settings', 'support'];
+
 interface AccessContextType {
   session: Session | null;
   tenant: Tenant | null;
   loading: boolean;
   authError: string | null;
   canAccess: (feature: string) => boolean;
+  isStoreActivated: () => boolean;
   resolveLandingRoute: (session: Session) => string;
   isPreviewModeEnabled: boolean;
   enablePreviewMode: () => void;
@@ -147,6 +150,13 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   const session = isPreviewModeEnabled ? previewSession : realSession;
   const tenant = isPreviewModeEnabled ? previewTenant : realTenant;
 
+  const isStoreActivated = (): boolean => {
+    if (!session || !tenant) return false;
+    if (session.userType === 'platform') return true;
+    const stage = tenant.onboardingStage || (tenant.status === 'active' || tenant.status === 'trialing' ? 'active' : 'pending_setup');
+    return stage === 'active' && (tenant.status === 'active' || tenant.status === 'trialing' || tenant.status === 'overdue');
+  };
+
   const canAccess = (feature: string) => {
     if (!session) return false;
 
@@ -164,8 +174,14 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
 
     if (tenant) {
       const isAdminPerm = adminPermissions.includes(feature);
+      const activated = isStoreActivated();
 
-      if (!isAdminPerm) {
+      if (!isAdminPerm && !activated) {
+        if (!ONBOARDING_ALLOWED_MODULES.includes(feature)) return false;
+        if (session.role === 'store_owner') return true;
+      }
+
+      if (!isAdminPerm && activated) {
         const features = planFeatures[tenant.plan];
         if (!features.includes(feature)) return false;
       }
@@ -214,6 +230,7 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       loading,
       authError,
       canAccess,
+      isStoreActivated,
       resolveLandingRoute,
       isPreviewModeEnabled,
       enablePreviewMode: () => setIsPreviewModeEnabled(true),

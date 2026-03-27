@@ -82,6 +82,7 @@ A multi-tenant SaaS platform frontend built with React, TypeScript, Vite, Tailwi
 - **Credit rules**: Credits apply ONLY to invoices with status `overdue` or `pending`; `eligibleInvoicesForCredit` memo enforces this everywhere
 - **Refund detail**: `currency_exchange` icon for refund items; refund section in Credit Detail modal (ref, source invoice, amount, date)
 - **Domain workflow**: `domainPropagation` state (`unknown|checking|propagated|not_propagated`); 6-step stepper with `failed` states; separate Check Propagation → Verify DNS → Provision SSL controls
+- **Lifecycle access gating**: `canAccess()` gates operational modules (sales, repairs, inventory, etc.) during onboarding. Only `dashboard`, `settings`, `support` are accessible before activation. `ONBOARDING_ALLOWED_MODULES` constant is exported from AccessContext and shared with TenantLayout. `isStoreActivated()` checks onboardingStage==='active' + tenant status. Plan filtering is applied only after activation. TenantLayout shows locked items with lock icons under "After Activation" divider (plan-filtered). Route redirect to `/` via useEffect for direct navigation to gated routes.
 - **Store-side activation/onboarding**: `StoreActivationPanel` is a comprehensive lifecycle/domain/onboarding surface:
   - **Lifecycle stepper**: invited → pending_setup → setup_incomplete → pending_activation → active with dates
   - **Onboarding checklist**: 6-item checklist (profile, payment, product, domain, team, customization) with progress bar and action links; auto-hides when complete + active

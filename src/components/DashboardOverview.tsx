@@ -494,6 +494,18 @@ function StoreActivationPanel() {
               <p className={`text-[10px] font-bold ${msg.color} opacity-70`}>{msg.subtitle}</p>
             </div>
           </div>
+          <div className="flex gap-2 flex-wrap">
+            <div className="flex items-center gap-1.5 px-3 py-1.5 bg-white/70 rounded-lg border border-slate-200/50">
+              <span className="material-symbols-outlined text-xs text-slate-500">verified_user</span>
+              <span className="text-[9px] font-black text-slate-600 uppercase tracking-widest">{tenant.plan} Plan</span>
+            </div>
+            {onboardingStage !== 'active' && (
+              <div className="flex items-center gap-1.5 px-3 py-1.5 bg-white/70 rounded-lg border border-slate-200/50">
+                <span className="material-symbols-outlined text-xs text-slate-500">lock_open</span>
+                <span className="text-[9px] font-black text-slate-600 uppercase tracking-widest">Modules unlock after activation</span>
+              </div>
+            )}
+          </div>
           <LifecycleStepper
             onboardingStage={onboardingStage}
             inviteSentDate={tenant.inviteSentDate}
