@@ -1,0 +1,240 @@
+You are now acting as:
+Principal SaaS Platform Architect + Principal Tenant Lifecycle Architect + Principal Account Provisioning Architect + Principal Subscription & Commercial Packaging Architect + Principal Billing/Finance Workflow Architect + Principal Domain/SSL/DNS Systems Architect + Principal Identity & Access Onboarding Architect + Principal React/TypeScript Engineer + Principal UX Workflow Designer + Principal QA Auditor + Principal Side Auditor & Systems Thinker
+
+IMPORTANT:
+You must not only fix the visible issues below.
+You must also act as a side auditor and systems thinker:
+- identify any missing supporting process needed for the requested workflow
+- implement the missing process if it is necessary to make the workflow coherent
+- avoid shallow “button works” fixes
+- build the complete product logic needed for this workstream while preserving the current design system
+
+This is a correction/elevation pass ONLY for:
+Tenant Management & Provisioning
+
+Do not touch unrelated modules.
+Do not redesign the UI.
+Preserve the current design baseline exactly.
+
+==================================================
+1. STORE OWNER MANAGEMENT IN OWNER & USERS
+==================================================
+
+Current issue:
+Additional Store Owner creation exists, but new Store Owners are being listed under Team Members instead of under Store Owner management.
+
+Required:
+- distinguish clearly between:
+  - Store Owner(s)
+  - Team Members
+- additional Store Owners must appear under the correct Store Owner section/grouping
+- Store Owner profile management must support:
+  - view details
+  - edit profile
+  - deactivate account
+  - delete account
+- this must apply to:
+  - the main Store Owner
+  - any additional Store Owner created by platform side
+
+Governance rule:
+- Store Owner identity remains platform-controlled
+- tenant-side roles must not manage Store Owner identity
+
+==================================================
+2. PAID OVERRIDE — COMMERCIAL BILLING LOGIC
+==================================================
+
+Current issue:
+Paid Override exists, but it is not fully commercialized.
+
+Required:
+- when System Owner clicks Paid Override:
+  - open a proper pricing workflow
+  - require pricing definition
+  - support commercial options such as:
+    - monthly recurring fee
+    - one-time fee
+    - annual-billing add-on behavior where appropriate
+- the feature should not become fully enabled until the fee is considered paid/approved in the workflow
+- show clear state transitions such as:
+  - pending payment
+  - active paid override
+  - trial
+  - revoked
+  - expired if appropriate
+
+Revoke/refund requirement:
+- when System Owner clicks Revoke:
+  - open a proper modal
+  - show how much has been charged
+  - show refund eligibility logic
+  - allow refund only within one week
+  - after one week, make it clear that the fee is non-refundable
+- preserve existing trial logic
+
+Also:
+- connect this override state meaningfully into tenant billing context where appropriate
+
+==================================================
+3. CREDIT NOTE / REFUND WORKFLOW CONSISTENCY
+==================================================
+
+Current issues:
+- Credit Note detail opens, but Void needs confirmation
+- Apply Credit says it succeeded, but invoice status may not update correctly
+- Refund detail needs stronger parity/clarity
+
+Required:
+A. Credit note detail
+- clicking Void must open confirmation modal
+- if void is confirmed, state/status must update correctly in UI
+
+B. Apply Credit
+- when Apply Credit is successful, related invoice status must update correctly
+- avoid “success” with stale status state
+- keep tenant-specific filtering and no-balance safeguards intact
+
+C. Refund detail
+- ensure refund detail has parity with invoice/credit detail quality
+- make the refund detail flow easy to locate and use within Billing
+- include meaningful refund details and actions
+
+Goal:
+The Billing surface inside Tenant Management must feel internally consistent and operational.
+
+==================================================
+4. CUSTOM DOMAIN / SSL / DNS WORKFLOW
+==================================================
+
+Current issue:
+Custom-domain workflow is still partial and not yet strong enough.
+
+Required:
+Build a more complete custom-domain process for a SaaS system where tenant stores are hosted under the main system domain.
+
+Assume:
+- tenant front-end lives on the system’s hosting/server
+- default access is via subdomain:
+  - store.mysystem.com
+- custom domains can be mapped later
+
+Implement/improve:
+- add custom domain
+- domain ownership/verification flow
+- DNS verification guidance
+- SSL certificate process/status
+- DNS verification status
+- propagation / pending / verified / active states
+- clear checklist or progression flow
+- platform-side controls for verification and activation
+- store-side visibility/awareness where appropriate
+
+Behavior:
+- once customer domain is verified and active, it should map correctly into the hosted tenant experience
+- if the final routing model is that custom domain forwards/resolves into the hosted tenant app, represent that clearly in UI/process
+
+Use best-practice SaaS domain-management logic.
+Preserve current design system.
+
+==================================================
+5. TENANT PROVISIONING → INVITE / ACTIVATION / ACCOUNT SETUP
+==================================================
+
+This is a critical missing systems process and must be implemented or clearly scaffolded now.
+
+Required end-to-end process:
+- System Owner provisions a new tenant
+- new tenant receives invitation/onboarding email or equivalent invite flow
+- tenant completes provisioning
+- tenant sets username and password
+- tenant account becomes active
+- tenant can then access their store front-end at:
+  - store.mysystem.com
+where:
+- store = subdomain
+- mysystem.com = platform main domain
+
+Implement this as clearly as possible in the current architecture.
+If full backend email sending is not live yet:
+- create a realistic operational scaffold/workflow
+- make the UI/process explicit and testable
+- do not leave this as an implied concept only
+
+Include where appropriate:
+- invite status
+- pending activation
+- account setup state
+- activated state
+- resend invite
+- activation completed
+- tenant login readiness
+
+==================================================
+6. SIDE AUDIT / SYSTEM THINKER REQUIREMENT
+==================================================
+
+Before finishing, act as a side auditor and systems thinker.
+
+Review whether the above workflows need any additional supporting pieces to feel coherent, such as:
+- activation statuses
+- lifecycle states
+- billing linkage
+- tenant account readiness indicators
+- verification blockers
+- onboarding checklist items
+- support/escalation traces
+- auditability of important platform actions
+
+If such supporting process is required, implement it in a minimal but professional way within this workstream.
+
+Do not add random unrelated features.
+Only add what is needed to make the requested workflows coherent and commercially credible.
+
+==================================================
+7. DO NOT BREAK THESE
+==================================================
+
+Do NOT break:
+- auth flow
+- preview mode
+- current platform/store hierarchy
+- RBAC logic
+- existing working tenant tabs and flows
+- current design baseline
+
+==================================================
+8. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether additional Store Owners now appear in the correct Store Owner section
+C. whether Store Owner profile management now supports edit/deactivate/delete
+D. whether Paid Override now includes pricing + billing intent + gated activation
+E. whether Revoke now includes refund window logic
+F. whether credit note Void uses confirmation and status updates correctly
+G. whether Apply Credit now updates invoice status correctly
+H. whether refund detail flow is now stronger and easier to use
+I. whether custom-domain workflow now includes SSL + DNS verification process
+J. whether tenant provisioning now includes invite / activation / account setup workflow
+K. what additional supporting process was added as part of side-audit/system-thinking
+L. confirmation that no visual drift was introduced
+
+==================================================
+9. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- additional Store Owners appear in the correct Store Owner section
+- Store Owner profile supports edit/deactivate/delete
+- Paid Override includes pricing and billing logic
+- feature is gated until payment/approval state is satisfied
+- Revoke includes refund-window handling
+- Credit Void uses confirmation
+- Apply Credit updates invoice status correctly
+- refund detail flow is coherent
+- custom-domain workflow includes SSL and DNS verification states/process
+- tenant provisioning includes invite/activation/account-setup flow
+- auth flow still works
+- no visual drift was introduced

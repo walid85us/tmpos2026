@@ -32,6 +32,9 @@ export const tenants = [
     onboardedDate: '2025-11-10',
     billingCycle: 'monthly' as const,
     trialEnd: null as string | null,
+    activationStatus: 'active' as ActivationStatus,
+    inviteSentDate: '2025-11-10',
+    activatedDate: '2025-11-11',
   },
   {
     id: 't2',
@@ -54,6 +57,9 @@ export const tenants = [
     onboardedDate: '2026-02-18',
     billingCycle: 'monthly' as const,
     trialEnd: null as string | null,
+    activationStatus: 'active' as ActivationStatus,
+    inviteSentDate: '2026-02-18',
+    activatedDate: '2026-02-19',
   },
   {
     id: 't3',
@@ -76,6 +82,9 @@ export const tenants = [
     onboardedDate: '2026-03-14',
     billingCycle: 'monthly' as const,
     trialEnd: '2026-03-28',
+    activationStatus: 'account_setup' as ActivationStatus,
+    inviteSentDate: '2026-03-14',
+    activatedDate: null as string | null,
   },
   {
     id: 't4',
@@ -98,6 +107,9 @@ export const tenants = [
     onboardedDate: '2025-09-05',
     billingCycle: 'monthly' as const,
     trialEnd: null as string | null,
+    activationStatus: 'active' as ActivationStatus,
+    inviteSentDate: '2025-09-05',
+    activatedDate: '2025-09-06',
   },
   {
     id: 't5',
@@ -120,6 +132,9 @@ export const tenants = [
     onboardedDate: '2025-06-20',
     billingCycle: 'monthly' as const,
     trialEnd: null as string | null,
+    activationStatus: 'active' as ActivationStatus,
+    inviteSentDate: '2025-06-20',
+    activatedDate: '2025-06-21',
   },
 ];
 
@@ -156,9 +171,11 @@ export const featureMatrix = [
   { id: 'voice_assistant', name: 'Voice Assistant', planAvailability: { essential: false, growth: false, advanced: false } as Record<string, boolean>, source: 'custom' as const, lifecycle: 'draft' as FeatureLifecycle },
 ];
 
-export type FeatureOverrideType = 'inherited' | 'overridden' | 'paid_override' | 'trial' | 'disabled' | 'addon';
+export type FeatureOverrideType = 'inherited' | 'overridden' | 'paid_override' | 'pending_payment' | 'trial' | 'disabled' | 'addon';
 
-export const tenantFeatureOverrides: { tenantId: string; featureId: string; type: FeatureOverrideType; trialEnd?: string; addedBy?: string; addedDate?: string; }[] = [
+export type ActivationStatus = 'invited' | 'pending_activation' | 'account_setup' | 'active';
+
+export const tenantFeatureOverrides: { tenantId: string; featureId: string; type: FeatureOverrideType; trialEnd?: string; addedBy?: string; addedDate?: string; price?: number; pricingModel?: 'monthly' | 'one_time' | 'annual'; pricingNotes?: string; }[] = [
   { tenantId: 't1', featureId: 'api', type: 'overridden', addedBy: 'Admin Alice', addedDate: '2026-01-15' },
   { tenantId: 't1', featureId: 'reporting', type: 'addon', addedBy: 'System', addedDate: '2026-03-12' },
   { tenantId: 't2', featureId: 'customers', type: 'trial', trialEnd: '2026-04-18', addedBy: 'Admin Alice', addedDate: '2026-03-20' },

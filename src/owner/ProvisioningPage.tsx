@@ -395,13 +395,42 @@ const ProvisioningPage: React.FC = () => {
                 ))}
               </div>
 
-              <div className="p-4 bg-blue-50 rounded-xl border border-blue-100">
-                <p className="text-[10px] font-black text-blue-700 uppercase tracking-widest mb-2">Next Steps</p>
-                <div className="space-y-1">
-                  <p className="text-sm text-blue-700 font-bold flex items-center gap-2"><span className="material-symbols-outlined text-xs">mail</span> Owner invitation sent to {ownerEmail}</p>
-                  <p className="text-sm text-blue-700 font-bold flex items-center gap-2"><span className="material-symbols-outlined text-xs">language</span> Subdomain active at {subdomain || subdomainSlug}.repairplatform.com</p>
-                  <p className="text-sm text-blue-700 font-bold flex items-center gap-2"><span className="material-symbols-outlined text-xs">event</span> 14-day trial period started</p>
-                  <p className="text-sm text-blue-700 font-bold flex items-center gap-2"><span className="material-symbols-outlined text-xs">lock</span> SSL certificate provisioning in progress</p>
+              <div className="p-5 bg-white/80 backdrop-blur-xl rounded-2xl border border-slate-100 shadow-sm">
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-1">
+                  <span className="material-symbols-outlined text-xs text-primary">rocket_launch</span>
+                  Activation Lifecycle
+                </p>
+                <div className="flex items-center justify-between gap-2 mb-4">
+                  {[
+                    { label: 'Invited', icon: 'mail', done: true, current: true },
+                    { label: 'Pending', icon: 'hourglass_top', done: false, current: false },
+                    { label: 'Setup', icon: 'settings', done: false, current: false },
+                    { label: 'Active', icon: 'check_circle', done: false, current: false },
+                  ].map((s, idx, arr) => (
+                    <React.Fragment key={s.label}>
+                      <div className={`flex flex-col items-center gap-1 ${s.done || s.current ? 'opacity-100' : 'opacity-30'}`}>
+                        <div className={`w-10 h-10 rounded-full flex items-center justify-center ${s.current ? 'bg-primary/10 text-primary ring-2 ring-primary/30' : s.done ? 'bg-lime-100 text-lime-600' : 'bg-slate-100 text-slate-400'}`}>
+                          <span className="material-symbols-outlined text-sm">{s.done && !s.current ? 'check' : s.icon}</span>
+                        </div>
+                        <span className="text-[9px] font-black uppercase tracking-widest text-slate-600">{s.label}</span>
+                      </div>
+                      {idx < arr.length - 1 && <div className={`flex-1 h-0.5 ${idx === 0 && s.done ? 'bg-lime-300' : 'bg-slate-200'}`} />}
+                    </React.Fragment>
+                  ))}
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 text-sm text-lime-700 font-bold bg-lime-50 p-2.5 rounded-xl border border-lime-100">
+                    <span className="material-symbols-outlined text-xs">check_circle</span>
+                    Invitation sent to {ownerEmail}
+                  </div>
+                  <div className="flex items-center gap-2 text-sm text-blue-600 font-bold bg-blue-50 p-2.5 rounded-xl border border-blue-100">
+                    <span className="material-symbols-outlined text-xs">schedule</span>
+                    Awaiting owner account activation
+                  </div>
+                  <div className="flex items-center gap-2 text-[10px] text-slate-400 pl-1">
+                    <span className="material-symbols-outlined text-xs">language</span>
+                    {subdomain || subdomainSlug}.repairplatform.com · 14-day trial started · SSL provisioning
+                  </div>
                 </div>
               </div>
             </div>

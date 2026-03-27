@@ -6,7 +6,7 @@ import {
   invoiceHistory, creditNotes, auditLogs, addOns, tenantFeatureOverrides,
   tenantSupportNotes, tenantDomainHistory, planHistory,
 } from './mockData';
-import type { SupportNoteCategory, FeatureOverrideType } from './mockData';
+import type { SupportNoteCategory, FeatureOverrideType, ActivationStatus } from './mockData';
 import { tenantUsers } from './accessMockData';
 
 type Tab = 'Overview' | 'Owner & Users' | 'Subscription' | 'Features' | 'Billing' | 'Domains' | 'Usage' | 'Activity / Audit' | 'Support Notes';
@@ -52,8 +52,20 @@ const TenantDetailPage: React.FC = () => {
   const [paidOverridePrice, setPaidOverridePrice] = useState('');
   const [paidOverrideModel, setPaidOverrideModel] = useState<'monthly' | 'one_time' | 'annual'>('monthly');
   const [paidOverrideNotes, setPaidOverrideNotes] = useState('');
-  const [localCreatedOwners, setLocalCreatedOwners] = useState<{ id: string; name: string; email: string; }[]>([]);
+  const [localCreatedOwners, setLocalCreatedOwners] = useState<{ id: string; name: string; email: string; status: string; }[]>([]);
   const [creditDetailId, setCreditDetailId] = useState<string | null>(null);
+  const [voidConfirmId, setVoidConfirmId] = useState<string | null>(null);
+  const [localCreditStatuses, setLocalCreditStatuses] = useState<Record<string, string>>({});
+  const [localInvoiceStatuses, setLocalInvoiceStatuses] = useState<Record<string, string>>({});
+  const [revokeModal, setRevokeModal] = useState<string | null>(null);
+  const [editOwnerModal, setEditOwnerModal] = useState<string | null>(null);
+  const [editOwnerName, setEditOwnerName] = useState('');
+  const [editOwnerEmail, setEditOwnerEmail] = useState('');
+  const [deactivateOwnerId, setDeactivateOwnerId] = useState<string | null>(null);
+  const [deleteOwnerId, setDeleteOwnerId] = useState<string | null>(null);
+  const [localOwnerStatuses, setLocalOwnerStatuses] = useState<Record<string, string>>({});
+  const [localOwnerEdits, setLocalOwnerEdits] = useState<Record<string, { name: string; email: string }>>({});
+  const [localCreditLinks, setLocalCreditLinks] = useState<Record<string, { appliedToInvoice: string; appliedAmount: number; appliedDate: string }>>({});
 
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const showToast = useCallback((msg: string, durationMs = 3000) => {
@@ -142,6 +154,10 @@ const TenantDetailPage: React.FC = () => {
       disabled: 'bg-red-400/10 text-red-700 border-red-400/20',
       addon: 'bg-amber-400/10 text-amber-700 border-amber-400/20',
       'paid_override': 'bg-emerald-400/10 text-emerald-700 border-emerald-400/20',
+      'pending_payment': 'bg-amber-400/10 text-amber-700 border-amber-400/20',
+      deactivated: 'bg-slate-400/10 text-slate-500 border-slate-200',
+      account_setup: 'bg-blue-400/10 text-blue-700 border-blue-400/20',
+      pending_activation: 'bg-amber-400/10 text-amber-700 border-amber-400/20',
       upgrade: 'bg-lime-400/10 text-lime-700 border-lime-400/20',
       new: 'bg-blue-400/10 text-blue-700 border-blue-400/20',
       trial_start: 'bg-indigo-400/10 text-indigo-700 border-indigo-200',
@@ -212,6 +228,15 @@ const TenantDetailPage: React.FC = () => {
     return { type: 'disabled' };
   };
 
+  const getRefundEligibility = (addedDate?: string) => {
+    if (!addedDate) return { eligible: false, daysAgo: 999, message: 'No charge date available' };
+    const added = new Date(addedDate);
+    const today = new Date('2026-03-26');
+    const daysAgo = Math.floor((today.getTime() - added.getTime()) / (1000 * 60 * 60 * 24));
+    if (daysAgo <= 7) return { eligible: true, daysAgo, message: `Charged ${daysAgo} day(s) ago — eligible for full refund` };
+    return { eligible: false, daysAgo, message: `Charged ${daysAgo} days ago — refund window expired (7-day policy)` };
+  };
+
   const handleEnableTrial = (featureId: string) => {
     const days = parseInt(featureTrialDays) || 14;
     const trialEnd = new Date('2026-03-26');
@@ -230,19 +255,36 @@ const TenantDetailPage: React.FC = () => {
     const price = parseFloat(paidOverridePrice) || 0;
     setLocalOverrides(prev => {
       const filtered = prev.filter(o => o.featureId !== featureId);
-      return [...filtered, { tenantId: tenant.id, featureId, type: 'paid_override' as FeatureOverrideType, addedBy: 'You', addedDate: '2026-03-26', pricingModel: paidOverrideModel, price, pricingNotes: paidOverrideNotes || undefined }];
+      return [...filtered, { tenantId: tenant.id, featureId, type: 'pending_payment' as FeatureOverrideType, addedBy: 'You', addedDate: '2026-03-26', pricingModel: paidOverrideModel, price, pricingNotes: paidOverrideNotes || undefined }];
     });
     setFeaturePaidModal(null);
     setPaidOverridePrice('');
     setPaidOverrideModel('monthly');
     setPaidOverrideNotes('');
     const modelLabel = paidOverrideModel === 'monthly' ? '/mo' : paidOverrideModel === 'annual' ? '/yr' : ' one-time';
-    showToast(`Paid override enabled for ${featureMatrix.find(f => f.id === featureId)?.name || featureId} at $${price}${modelLabel}`);
+    showToast(`Paid override pending payment for ${featureMatrix.find(f => f.id === featureId)?.name || featureId} at $${price}${modelLabel}`);
+  };
+
+  const handleApprovePayment = (featureId: string) => {
+    setLocalOverrides(prev => prev.map(o => o.featureId === featureId ? { ...o, type: 'paid_override' as FeatureOverrideType } : o));
+    showToast(`Payment approved — ${featureMatrix.find(f => f.id === featureId)?.name || featureId} is now active`);
   };
 
   const handleRevokeFeature = (featureId: string) => {
+    const override = localOverrides.find(o => o.featureId === featureId) as (typeof localOverrides[0] & { price?: number }) | undefined;
+    if (override && override.type === 'paid_override' && override.price && override.price > 0) {
+      setRevokeModal(featureId);
+    } else {
+      setLocalOverrides(prev => prev.filter(o => o.featureId !== featureId));
+      showToast(`Override revoked for ${featureMatrix.find(f => f.id === featureId)?.name || featureId}`);
+    }
+  };
+
+  const handleConfirmRevoke = (featureId: string, issueRefund: boolean) => {
     setLocalOverrides(prev => prev.filter(o => o.featureId !== featureId));
-    showToast(`Override revoked for ${featureMatrix.find(f => f.id === featureId)?.name || featureId}`);
+    setRevokeModal(null);
+    const name = featureMatrix.find(f => f.id === featureId)?.name || featureId;
+    showToast(issueRefund ? `${name} revoked — refund issued` : `${name} revoked — no refund (past refund window)`);
   };
 
   const handleAddDomain = () => {
@@ -283,17 +325,45 @@ const TenantDetailPage: React.FC = () => {
   const auditActors = [...new Set(tenantLogs.map(l => l.actor))];
 
   const allScopedUsers = useMemo(() => {
-    const created = localCreatedOwners.map(o => ({
-      id: o.id, name: o.name, email: o.email, role: 'store_owner', status: 'invited' as const,
-      tenantId: tenant.id, lastActive: null as string | null, phone: null as string | null, notes: 'Created by platform admin' as string | null,
-    }));
-    return [...scopedUsers, ...created];
-  }, [scopedUsers, localCreatedOwners, tenant.id]);
+    const created = localCreatedOwners.filter(o => o.status !== 'deleted' && localOwnerStatuses[o.id] !== 'deleted').map(o => {
+      const edits = localOwnerEdits[o.id];
+      return {
+        id: o.id, name: edits?.name || o.name, email: edits?.email || o.email, role: 'store_owner', status: localOwnerStatuses[o.id] || o.status,
+        tenantId: tenant.id, lastActive: null as string | null, phone: null as string | null, notes: 'Created by platform admin' as string | null,
+      };
+    });
+    const dbUsers = scopedUsers.filter(u => localOwnerStatuses[u.id] !== 'deleted').map(u => {
+      const edits = localOwnerEdits[u.id];
+      return { ...u, name: edits?.name || u.name, email: edits?.email || u.email, status: localOwnerStatuses[u.id] || u.status };
+    });
+    return [...dbUsers, ...created];
+  }, [scopedUsers, localCreatedOwners, tenant.id, localOwnerStatuses, localOwnerEdits]);
+
+  const storeOwners = useMemo(() => allScopedUsers.filter(u => u.role === 'store_owner'), [allScopedUsers]);
+  const teamMembers = useMemo(() => allScopedUsers.filter(u => u.role !== 'store_owner'), [allScopedUsers]);
+
+  const effectiveInvoices = useMemo(() =>
+    tenantInv.map(inv => ({ ...inv, status: (localInvoiceStatuses[inv.id] || inv.status) as typeof inv.status })),
+  [tenantInv, localInvoiceStatuses]);
+
+  const effectiveCredits = useMemo(() =>
+    tenantCredits.map(cr => {
+      const link = localCreditLinks[cr.id];
+      return {
+        ...cr,
+        status: (localCreditStatuses[cr.id] || cr.status) as typeof cr.status,
+        ...(link ? { appliedToInvoice: link.appliedToInvoice, appliedAmount: link.appliedAmount, appliedDate: link.appliedDate } : {}),
+      };
+    }),
+  [tenantCredits, localCreditStatuses, localCreditLinks]);
 
   const selectedUserDetail = userDetailId ? allScopedUsers.find(u => u.id === userDetailId) : null;
-  const selectedInvoice = invoiceDetailId ? tenantInv.find(i => i.id === invoiceDetailId) : null;
+  const selectedInvoice = invoiceDetailId ? effectiveInvoices.find(i => i.id === invoiceDetailId) : null;
   const selectedAuditLog = auditDetailId ? tenantLogs.find(l => l.id === auditDetailId) : null;
-  const selectedCredit = creditDetailId ? tenantCredits.find(c => c.id === creditDetailId) : null;
+  const selectedCredit = creditDetailId ? effectiveCredits.find(c => c.id === creditDetailId) : null;
+  const voidCredit = voidConfirmId ? effectiveCredits.find(c => c.id === voidConfirmId) : null;
+  const revokeFeature = revokeModal ? featureMatrix.find(f => f.id === revokeModal) : null;
+  const revokeOverride = revokeModal ? localOverrides.find(o => o.featureId === revokeModal) as (typeof localOverrides[0] & { price?: number; pricingModel?: string; pricingNotes?: string }) | undefined : undefined;
 
   return (
     <div className="space-y-6">
@@ -399,6 +469,42 @@ const TenantDetailPage: React.FC = () => {
               </div>
             </div>
 
+            {(tenant as typeof tenant & { activationStatus?: ActivationStatus; inviteSentDate?: string; activatedDate?: string | null }).activationStatus && (() => {
+              const t = tenant as typeof tenant & { activationStatus: ActivationStatus; inviteSentDate?: string; activatedDate?: string | null };
+              const steps: { key: ActivationStatus; label: string; icon: string }[] = [
+                { key: 'invited', label: 'Invited', icon: 'mail' },
+                { key: 'pending_activation', label: 'Pending', icon: 'hourglass_top' },
+                { key: 'account_setup', label: 'Setup', icon: 'settings' },
+                { key: 'active', label: 'Active', icon: 'check_circle' },
+              ];
+              const currentIdx = steps.findIndex(s => s.key === t.activationStatus);
+              return (
+                <div className="p-5 bg-white/80 backdrop-blur-xl rounded-2xl border border-slate-100 shadow-sm">
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-1">
+                    <span className="material-symbols-outlined text-xs text-primary">rocket_launch</span>
+                    Activation Lifecycle
+                  </p>
+                  <div className="flex items-center justify-between gap-2 mb-4">
+                    {steps.map((step, idx) => (
+                      <React.Fragment key={step.key}>
+                        <div className={`flex flex-col items-center gap-1 ${idx <= currentIdx ? 'opacity-100' : 'opacity-30'}`}>
+                          <div className={`w-10 h-10 rounded-full flex items-center justify-center ${idx < currentIdx ? 'bg-lime-100 text-lime-600' : idx === currentIdx ? 'bg-primary/10 text-primary ring-2 ring-primary/30' : 'bg-slate-100 text-slate-400'}`}>
+                            <span className="material-symbols-outlined text-sm">{idx < currentIdx ? 'check' : step.icon}</span>
+                          </div>
+                          <span className="text-[9px] font-black uppercase tracking-widest text-slate-600">{step.label}</span>
+                        </div>
+                        {idx < steps.length - 1 && <div className={`flex-1 h-0.5 ${idx < currentIdx ? 'bg-lime-300' : 'bg-slate-200'}`} />}
+                      </React.Fragment>
+                    ))}
+                  </div>
+                  <div className="flex gap-4 text-[10px] text-slate-500">
+                    {t.inviteSentDate && <span className="flex items-center gap-1"><span className="material-symbols-outlined text-xs">mail</span> Invited: {t.inviteSentDate}</span>}
+                    {t.activatedDate && <span className="flex items-center gap-1"><span className="material-symbols-outlined text-xs">check_circle</span> Activated: {t.activatedDate}</span>}
+                  </div>
+                </div>
+              );
+            })()}
+
             {tenant.flags.length > 0 && (
               <div className="p-4 bg-amber-50 rounded-xl border border-amber-100">
                 <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest mb-2 flex items-center gap-1">
@@ -447,40 +553,60 @@ const TenantDetailPage: React.FC = () => {
 
         {activeTab === 'Owner & Users' && (
           <div className="space-y-6">
-            <button type="button" className="w-full bg-slate-50 p-5 rounded-2xl border border-slate-100 flex justify-between items-center cursor-pointer hover:bg-slate-100 transition-colors text-left" onClick={() => setUserDetailId(scopedUsers.find(u => u.role === 'store_owner')?.id || null)}>
-              <div>
-                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Store Owner</p>
-                <p className="font-bold text-slate-900">{tenant.owner.name}</p>
-                <p className="text-sm text-slate-500">{tenant.owner.email}</p>
-              </div>
-              <div className="flex items-center gap-3">
-                {statusBadge('active')}
-                <span className="material-symbols-outlined text-slate-400 text-sm">chevron_right</span>
-              </div>
-            </button>
-
             <div className="flex justify-between items-center flex-wrap gap-2">
-              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Team Members ({allScopedUsers.length})</p>
-              <div className="flex gap-2">
-                <button onClick={() => setCreateOwnerModal(true)} className="px-4 py-2 bg-violet-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-violet-600 transition-all active:scale-95 flex items-center gap-1">
-                  <span className="material-symbols-outlined text-sm">shield_person</span> Create Store Owner
-                </button>
-                <button onClick={() => setInviteModal(true)} className="px-4 py-2 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-primary/90 transition-all active:scale-95 flex items-center gap-1">
-                  <span className="material-symbols-outlined text-sm">person_add</span> Invite User
-                </button>
-              </div>
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1">
+                <span className="material-symbols-outlined text-xs text-violet-500">shield_person</span>
+                Store Owners ({storeOwners.length})
+              </p>
+              <button onClick={() => setCreateOwnerModal(true)} className="px-4 py-2 bg-violet-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-violet-600 transition-all active:scale-95 flex items-center gap-1">
+                <span className="material-symbols-outlined text-sm">shield_person</span> Create Store Owner
+              </button>
             </div>
 
             <div className="p-3 bg-violet-50 rounded-xl border border-violet-100">
               <p className="text-[10px] text-violet-700 font-bold flex items-center gap-1">
                 <span className="material-symbols-outlined text-xs">info</span>
-                Store Owner creation is a platform-only action. Only System Owners can create additional Store Owner accounts.
+                Store Owner identity is platform-controlled. Only System Owners can create, edit, deactivate, or delete Store Owner accounts. Tenant-side roles cannot manage Store Owner identity.
               </p>
             </div>
 
             <div className="space-y-2">
-              {allScopedUsers.length === 0 && <p className="text-sm text-slate-400 font-bold py-4">No team members for this tenant.</p>}
-              {allScopedUsers.map(user => (
+              {storeOwners.map(user => (
+                <button type="button" key={user.id} className="w-full flex justify-between items-center p-4 bg-violet-50/50 rounded-xl border border-violet-100 cursor-pointer hover:bg-violet-50 transition-colors text-left" onClick={() => setUserDetailId(user.id)}>
+                  <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 bg-violet-100 rounded-full flex items-center justify-center">
+                      <span className="material-symbols-outlined text-violet-600 text-sm">shield_person</span>
+                    </div>
+                    <div>
+                      <p className="font-bold text-slate-900">{user.name}</p>
+                      <p className="text-[10px] text-slate-400">{user.email}</p>
+                      {user.lastActive && <p className="text-[10px] text-slate-400">Last active: {user.lastActive}</p>}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className="text-[9px] font-black text-violet-600 bg-violet-100 px-2 py-1 rounded-lg uppercase tracking-widest">Store Owner</span>
+                    {statusBadge(user.status)}
+                    <span className="material-symbols-outlined text-slate-400 text-sm">chevron_right</span>
+                  </div>
+                </button>
+              ))}
+            </div>
+
+            <div className="border-t border-slate-100 pt-6" />
+
+            <div className="flex justify-between items-center flex-wrap gap-2">
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1">
+                <span className="material-symbols-outlined text-xs text-primary">group</span>
+                Team Members ({teamMembers.length})
+              </p>
+              <button onClick={() => setInviteModal(true)} className="px-4 py-2 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-primary/90 transition-all active:scale-95 flex items-center gap-1">
+                <span className="material-symbols-outlined text-sm">person_add</span> Invite User
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              {teamMembers.length === 0 && <p className="text-sm text-slate-400 font-bold py-4">No team members for this tenant.</p>}
+              {teamMembers.map(user => (
                 <button type="button" key={user.id} className="w-full flex justify-between items-center p-4 bg-slate-50 rounded-xl border border-slate-100 cursor-pointer hover:bg-slate-100 transition-colors text-left" onClick={() => setUserDetailId(user.id)}>
                   <div>
                     <p className="font-bold text-slate-900">{user.name}</p>
@@ -500,9 +626,14 @@ const TenantDetailPage: React.FC = () => {
               {selectedUserDetail && (
                 <div role="dialog" aria-modal="true" aria-label="User Detail" className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setUserDetailId(null)} onKeyDown={e => { if (e.key === 'Escape') setUserDetailId(null); }}>
                   <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} onClick={e => e.stopPropagation()} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
-                    <div className="p-8 border-b border-slate-100">
-                      <h3 className="text-xl font-black text-primary tracking-tight">{selectedUserDetail.name}</h3>
-                      <p className="text-sm text-slate-500 mt-1">{selectedUserDetail.email}</p>
+                    <div className="p-8 border-b border-slate-100 flex justify-between items-start">
+                      <div>
+                        <h3 className="text-xl font-black text-primary tracking-tight">{selectedUserDetail.name}</h3>
+                        <p className="text-sm text-slate-500 mt-1">{selectedUserDetail.email}</p>
+                      </div>
+                      {selectedUserDetail.role === 'store_owner' && (
+                        <span className="text-[9px] font-black text-violet-600 bg-violet-100 px-2 py-1 rounded-lg uppercase tracking-widest">Store Owner</span>
+                      )}
                     </div>
                     <div className="p-8 space-y-4">
                       <div className="grid grid-cols-2 gap-4">
@@ -529,15 +660,114 @@ const TenantDetailPage: React.FC = () => {
                           <p className="text-sm text-slate-600">{selectedUserDetail.notes}</p>
                         </div>
                       )}
+                      {selectedUserDetail.role === 'store_owner' && (
+                        <div className="p-3 bg-violet-50 rounded-xl border border-violet-100">
+                          <p className="text-[10px] text-violet-700 font-bold flex items-center gap-1">
+                            <span className="material-symbols-outlined text-xs">shield</span>
+                            Platform-controlled identity. Changes to Store Owner accounts are audited.
+                          </p>
+                        </div>
+                      )}
                     </div>
                     <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3 flex-wrap">
                       {selectedUserDetail.status === 'invited' && (
-                        <button className="px-4 py-2.5 bg-blue-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-blue-600 transition-all">Resend Invite</button>
+                        <button onClick={() => { showToast(`Invitation resent to ${selectedUserDetail.email}`); }} className="px-4 py-2.5 bg-blue-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-blue-600 transition-all">Resend Invite</button>
+                      )}
+                      {selectedUserDetail.role === 'store_owner' && selectedUserDetail.status !== 'deactivated' && (
+                        <button onClick={() => { setEditOwnerModal(selectedUserDetail.id); setEditOwnerName(selectedUserDetail.name); setEditOwnerEmail(selectedUserDetail.email); setUserDetailId(null); }} className="px-4 py-2.5 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-primary/90 transition-all flex items-center gap-1">
+                          <span className="material-symbols-outlined text-xs">edit</span> Edit Profile
+                        </button>
+                      )}
+                      {selectedUserDetail.role === 'store_owner' && selectedUserDetail.status === 'active' && (
+                        <button onClick={() => { setDeactivateOwnerId(selectedUserDetail.id); setUserDetailId(null); }} className="px-4 py-2.5 bg-amber-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-amber-600 transition-all">Deactivate</button>
+                      )}
+                      {selectedUserDetail.role === 'store_owner' && selectedUserDetail.status === 'deactivated' && (
+                        <button onClick={() => { setLocalOwnerStatuses(prev => ({ ...prev, [selectedUserDetail.id]: 'active' })); setUserDetailId(null); showToast(`${selectedUserDetail.name} reactivated`); }} className="px-4 py-2.5 bg-lime-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-lime-600 transition-all">Reactivate</button>
+                      )}
+                      {selectedUserDetail.role === 'store_owner' && (
+                        <button onClick={() => { setDeleteOwnerId(selectedUserDetail.id); setUserDetailId(null); }} className="px-4 py-2.5 bg-red-100 text-red-600 font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-red-200 transition-all">Delete</button>
                       )}
                       {selectedUserDetail.status === 'active' && selectedUserDetail.role !== 'store_owner' && (
-                        <button className="px-4 py-2.5 bg-red-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-red-600 transition-all">Deactivate</button>
+                        <button onClick={() => { setLocalOwnerStatuses(prev => ({ ...prev, [selectedUserDetail.id]: 'deactivated' })); setUserDetailId(null); showToast(`${selectedUserDetail.name} deactivated`); }} className="px-4 py-2.5 bg-red-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-red-600 transition-all">Deactivate</button>
                       )}
                       <button onClick={() => setUserDetailId(null)} className="px-4 py-2.5 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all ml-auto">Close</button>
+                    </div>
+                  </motion.div>
+                </div>
+              )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+              {editOwnerModal && (
+                <div role="dialog" aria-modal="true" aria-label="Edit Store Owner" className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setEditOwnerModal(null)} onKeyDown={e => { if (e.key === 'Escape') setEditOwnerModal(null); }}>
+                  <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} onClick={e => e.stopPropagation()} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
+                    <div className="p-8 border-b border-slate-100">
+                      <h3 className="text-xl font-black text-primary tracking-tight">Edit Store Owner Profile</h3>
+                      <p className="text-sm text-slate-500 mt-1">Platform-controlled identity update for {tenant.name}.</p>
+                    </div>
+                    <div className="p-8 space-y-5">
+                      <div>
+                        <label htmlFor="edit-owner-name" className={labelClass}>Full Name</label>
+                        <input id="edit-owner-name" value={editOwnerName} onChange={e => setEditOwnerName(e.target.value)} className={inputClass} />
+                      </div>
+                      <div>
+                        <label htmlFor="edit-owner-email" className={labelClass}>Email</label>
+                        <input id="edit-owner-email" value={editOwnerEmail} onChange={e => setEditOwnerEmail(e.target.value)} className={inputClass} type="email" />
+                      </div>
+                    </div>
+                    <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3">
+                      <button onClick={() => setEditOwnerModal(null)} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
+                      <button disabled={!editOwnerName || !editOwnerEmail.includes('@')} onClick={() => { setLocalOwnerEdits(prev => ({ ...prev, [editOwnerModal!]: { name: editOwnerName, email: editOwnerEmail } })); setEditOwnerModal(null); showToast('Store Owner profile updated'); }} className="flex-1 py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest transition-all disabled:opacity-40 hover:bg-primary/90">Save Changes</button>
+                    </div>
+                  </motion.div>
+                </div>
+              )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+              {deactivateOwnerId && (
+                <div role="dialog" aria-modal="true" aria-label="Deactivate Store Owner" className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setDeactivateOwnerId(null)} onKeyDown={e => { if (e.key === 'Escape') setDeactivateOwnerId(null); }}>
+                  <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} onClick={e => e.stopPropagation()} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
+                    <div className="p-8 border-b border-slate-100">
+                      <h3 className="text-xl font-black text-primary tracking-tight">Deactivate Store Owner</h3>
+                      <p className="text-sm text-slate-500 mt-1">This will revoke the Store Owner's access to {tenant.name}.</p>
+                    </div>
+                    <div className="p-8 space-y-4">
+                      <div className="p-3 bg-amber-50 rounded-xl border border-amber-100">
+                        <p className="text-sm text-amber-700 font-bold flex items-center gap-1">
+                          <span className="material-symbols-outlined text-xs">warning</span>
+                          The owner will lose all admin access. This action can be reversed by reactivating the account.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3">
+                      <button onClick={() => setDeactivateOwnerId(null)} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
+                      <button onClick={() => { setLocalOwnerStatuses(prev => ({ ...prev, [deactivateOwnerId]: 'deactivated' })); setDeactivateOwnerId(null); showToast('Store Owner account deactivated'); }} className="flex-1 py-4 bg-amber-500 text-white font-black text-sm rounded-2xl shadow-lg shadow-amber-500/20 uppercase tracking-widest transition-all hover:bg-amber-600">Deactivate</button>
+                    </div>
+                  </motion.div>
+                </div>
+              )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+              {deleteOwnerId && (
+                <div role="dialog" aria-modal="true" aria-label="Delete Store Owner" className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setDeleteOwnerId(null)} onKeyDown={e => { if (e.key === 'Escape') setDeleteOwnerId(null); }}>
+                  <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} onClick={e => e.stopPropagation()} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
+                    <div className="p-8 border-b border-slate-100">
+                      <h3 className="text-xl font-black text-red-600 tracking-tight">Delete Store Owner</h3>
+                      <p className="text-sm text-slate-500 mt-1">Permanently remove this Store Owner from {tenant.name}.</p>
+                    </div>
+                    <div className="p-8 space-y-4">
+                      <div className="p-3 bg-red-50 rounded-xl border border-red-100">
+                        <p className="text-sm text-red-700 font-bold flex items-center gap-1">
+                          <span className="material-symbols-outlined text-xs">error</span>
+                          This action is permanent and cannot be undone. The account and all associated permissions will be removed.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3">
+                      <button onClick={() => setDeleteOwnerId(null)} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
+                      <button onClick={() => { setLocalOwnerStatuses(prev => ({ ...prev, [deleteOwnerId]: 'deleted' })); setDeleteOwnerId(null); showToast('Store Owner account deleted'); }} className="flex-1 py-4 bg-red-500 text-white font-black text-sm rounded-2xl shadow-lg shadow-red-500/20 uppercase tracking-widest transition-all hover:bg-red-600">Delete Permanently</button>
                     </div>
                   </motion.div>
                 </div>
@@ -570,7 +800,7 @@ const TenantDetailPage: React.FC = () => {
                     </div>
                     <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3">
                       <button onClick={() => { setCreateOwnerModal(false); setCreateOwnerName(''); setCreateOwnerEmail(''); }} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
-                      <button disabled={!createOwnerName || !createOwnerEmail.includes('@')} onClick={() => { setLocalCreatedOwners(prev => [...prev, { id: `owner-local-${Date.now()}`, name: createOwnerName, email: createOwnerEmail }]); setCreateOwnerModal(false); showToast(`Store Owner account created for ${createOwnerEmail}`); setCreateOwnerName(''); setCreateOwnerEmail(''); }} className="flex-1 py-4 bg-violet-500 text-white font-black text-sm rounded-2xl shadow-lg shadow-violet-500/20 uppercase tracking-widest transition-all disabled:opacity-40 disabled:cursor-not-allowed hover:bg-violet-600">Create Owner</button>
+                      <button disabled={!createOwnerName || !createOwnerEmail.includes('@')} onClick={() => { setLocalCreatedOwners(prev => [...prev, { id: `owner-local-${Date.now()}`, name: createOwnerName, email: createOwnerEmail, status: 'invited' }]); setCreateOwnerModal(false); showToast(`Store Owner account created for ${createOwnerEmail}. Invitation sent.`); setCreateOwnerName(''); setCreateOwnerEmail(''); }} className="flex-1 py-4 bg-violet-500 text-white font-black text-sm rounded-2xl shadow-lg shadow-violet-500/20 uppercase tracking-widest transition-all disabled:opacity-40 disabled:cursor-not-allowed hover:bg-violet-600">Create Owner</button>
                     </div>
                   </motion.div>
                 </div>
@@ -804,21 +1034,21 @@ const TenantDetailPage: React.FC = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               {featureMatrix.filter(f => f.lifecycle !== 'draft').map(feature => {
                 const state = getFeatureState(feature.id);
-                const enabled = state.type !== 'disabled';
+                const enabled = state.type !== 'disabled' && state.type !== 'pending_payment';
                 return (
-                  <div key={feature.id} className={`p-4 rounded-xl border ${enabled ? 'bg-slate-50 border-slate-100' : 'bg-slate-50/50 border-slate-100/50'}`}>
+                  <div key={feature.id} className={`p-4 rounded-xl border ${state.type === 'pending_payment' ? 'bg-amber-50/50 border-amber-100' : enabled ? 'bg-slate-50 border-slate-100' : 'bg-slate-50/50 border-slate-100/50'}`}>
                     <div className="flex justify-between items-start">
                       <div className="flex items-center gap-3">
-                        <span className={`material-symbols-outlined text-sm ${enabled ? 'text-lime-600' : 'text-slate-300'}`}>{enabled ? 'check_circle' : 'remove_circle_outline'}</span>
+                        <span className={`material-symbols-outlined text-sm ${state.type === 'pending_payment' ? 'text-amber-500' : enabled ? 'text-lime-600' : 'text-slate-300'}`}>{state.type === 'pending_payment' ? 'hourglass_top' : enabled ? 'check_circle' : 'remove_circle_outline'}</span>
                         <div>
-                          <span className={`font-bold ${enabled ? 'text-slate-900' : 'text-slate-400'}`}>{feature.name}</span>
+                          <span className={`font-bold ${enabled ? 'text-slate-900' : state.type === 'pending_payment' ? 'text-amber-800' : 'text-slate-400'}`}>{feature.name}</span>
                           {feature.lifecycle !== 'implemented' && (
                             <span className="ml-2 text-[8px] font-black text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded uppercase tracking-widest">{feature.lifecycle}</span>
                           )}
                           {state.trialEnd && <p className="text-[10px] text-indigo-500 font-bold">Trial until {state.trialEnd}</p>}
-                          {state.type === 'paid_override' && (() => {
+                          {(state.type === 'paid_override' || state.type === 'pending_payment') && (() => {
                             const ov = localOverrides.find(o => o.featureId === feature.id) as (typeof localOverrides[0] & { price?: number; pricingModel?: string }) | undefined;
-                            return ov?.price ? <p className="text-[10px] text-emerald-600 font-bold">${ov.price}/{ov.pricingModel === 'monthly' ? 'mo' : ov.pricingModel === 'annual' ? 'yr' : 'once'}</p> : null;
+                            return ov?.price ? <p className={`text-[10px] font-bold ${state.type === 'pending_payment' ? 'text-amber-600' : 'text-emerald-600'}`}>${ov.price}/{ov.pricingModel === 'monthly' ? 'mo' : ov.pricingModel === 'annual' ? 'yr' : 'once'}{state.type === 'pending_payment' ? ' · Awaiting payment' : ''}</p> : null;
                           })()}
                         </div>
                       </div>
@@ -828,6 +1058,12 @@ const TenantDetailPage: React.FC = () => {
                           <div className="flex gap-1">
                             <button onClick={() => setFeatureTrialModal(feature.id)} className="text-[8px] font-black text-indigo-600 bg-indigo-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-indigo-100 transition-colors">Trial</button>
                             <button onClick={() => setFeaturePaidModal(feature.id)} className="text-[8px] font-black text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-emerald-100 transition-colors">Paid Override</button>
+                          </div>
+                        )}
+                        {state.type === 'pending_payment' && (
+                          <div className="flex gap-1">
+                            <button onClick={() => handleApprovePayment(feature.id)} className="text-[8px] font-black text-lime-600 bg-lime-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-lime-100 transition-colors">Approve</button>
+                            <button onClick={() => handleRevokeFeature(feature.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">Cancel</button>
                           </div>
                         )}
                         {state.type === 'trial' && (
@@ -943,6 +1179,63 @@ const TenantDetailPage: React.FC = () => {
                 </div>
               )}
             </AnimatePresence>
+
+            <AnimatePresence>
+              {revokeModal && revokeFeature && (
+                <div role="dialog" aria-modal="true" aria-label="Revoke Feature Override" className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setRevokeModal(null)} onKeyDown={e => { if (e.key === 'Escape') setRevokeModal(null); }}>
+                  <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} onClick={e => e.stopPropagation()} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
+                    <div className="p-8 border-b border-slate-100">
+                      <h3 className="text-xl font-black text-red-600 tracking-tight">Revoke Paid Override</h3>
+                      <p className="text-sm text-slate-500 mt-1">Remove {revokeFeature.name} from {tenant.name}</p>
+                    </div>
+                    <div className="p-8 space-y-4">
+                      {revokeOverride?.price && (
+                        <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                          <div className="flex justify-between items-center">
+                            <div>
+                              <p className={labelClass}>Charged Amount</p>
+                              <p className="text-lg font-black text-slate-900">${revokeOverride.price}/{revokeOverride.pricingModel === 'monthly' ? 'mo' : revokeOverride.pricingModel === 'annual' ? 'yr' : 'once'}</p>
+                            </div>
+                            <div className="text-right">
+                              <p className={labelClass}>Added</p>
+                              <p className="text-sm font-bold text-slate-700">{revokeOverride.addedDate}</p>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                      {(() => {
+                        const refundInfo = getRefundEligibility(revokeOverride?.addedDate);
+                        return (
+                          <div className={`p-3 rounded-xl border ${refundInfo.eligible ? 'bg-lime-50 border-lime-100' : 'bg-amber-50 border-amber-100'}`}>
+                            <p className={`text-sm font-bold flex items-center gap-1 ${refundInfo.eligible ? 'text-lime-700' : 'text-amber-700'}`}>
+                              <span className="material-symbols-outlined text-xs">{refundInfo.eligible ? 'check_circle' : 'schedule'}</span>
+                              {refundInfo.message}
+                            </p>
+                          </div>
+                        );
+                      })()}
+                      <div className="p-3 bg-red-50 rounded-xl border border-red-100">
+                        <p className="text-[10px] text-red-700 font-bold flex items-center gap-1">
+                          <span className="material-symbols-outlined text-xs">warning</span>
+                          The tenant will immediately lose access to this feature.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3">
+                      <button onClick={() => setRevokeModal(null)} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
+                      {getRefundEligibility(revokeOverride?.addedDate).eligible ? (
+                        <>
+                          <button onClick={() => handleConfirmRevoke(revokeModal, false)} className="py-4 px-5 bg-amber-500 text-white font-black text-[10px] rounded-2xl uppercase tracking-widest transition-all hover:bg-amber-600">Revoke Only</button>
+                          <button onClick={() => handleConfirmRevoke(revokeModal, true)} className="py-4 px-5 bg-red-500 text-white font-black text-[10px] rounded-2xl shadow-lg shadow-red-500/20 uppercase tracking-widest transition-all hover:bg-red-600">Revoke + Refund</button>
+                        </>
+                      ) : (
+                        <button onClick={() => handleConfirmRevoke(revokeModal, false)} className="flex-1 py-4 bg-red-500 text-white font-black text-sm rounded-2xl shadow-lg shadow-red-500/20 uppercase tracking-widest transition-all hover:bg-red-600">Revoke Override</button>
+                      )}
+                    </div>
+                  </motion.div>
+                </div>
+              )}
+            </AnimatePresence>
           </div>
         )}
 
@@ -984,7 +1277,7 @@ const TenantDetailPage: React.FC = () => {
             <div>
               <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Invoices</p>
               <div className="space-y-2">
-                {tenantInv.map(inv => (
+                {effectiveInvoices.map(inv => (
                   <button type="button" key={inv.id} onClick={() => setInvoiceDetailId(inv.id)} className="w-full flex justify-between items-center p-3 bg-slate-50 rounded-xl border border-slate-100 hover:bg-slate-100 transition-colors text-left cursor-pointer">
                     <div className="flex items-center gap-3">
                       <span className="material-symbols-outlined text-sm text-slate-400">receipt</span>
@@ -1003,13 +1296,13 @@ const TenantDetailPage: React.FC = () => {
               </div>
             </div>
 
-            {tenantCredits.length > 0 && (
+            {effectiveCredits.length > 0 && (
               <div>
                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Credits & Refunds</p>
                 <div className="space-y-2">
-                  {tenantCredits.map(cr => (
-                    <button type="button" key={cr.id} onClick={() => setCreditDetailId(cr.id)} className="w-full flex justify-between items-center p-3 bg-slate-50 rounded-xl border border-slate-100 hover:bg-slate-100 transition-colors text-left cursor-pointer">
-                      <div className="flex items-center gap-3">
+                  {effectiveCredits.map(cr => (
+                    <button type="button" key={cr.id} className="w-full flex justify-between items-center p-3 bg-slate-50 rounded-xl border border-slate-100 hover:bg-slate-100 transition-colors text-left cursor-pointer">
+                      <div className="flex items-center gap-3 flex-1" onClick={() => setCreditDetailId(cr.id)}>
                         <span className="material-symbols-outlined text-sm text-violet-400">{cr.type === 'refund' ? 'undo' : cr.type === 'cancellation' ? 'cancel' : 'redeem'}</span>
                         <div>
                           <p className="font-bold text-slate-900 text-sm">{cr.creditNo}</p>
@@ -1017,10 +1310,26 @@ const TenantDetailPage: React.FC = () => {
                           <p className="text-[10px] text-slate-400 capitalize">{cr.type} · {cr.appliedToInvoice ? `Applied to ${cr.appliedToInvoice}` : 'Unapplied'}</p>
                         </div>
                       </div>
-                      <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-2">
                         <span className="font-black text-violet-600">${cr.amount.toFixed(2)}</span>
                         {statusBadge(cr.status)}
-                        <span className="material-symbols-outlined text-slate-400 text-sm">chevron_right</span>
+                        {cr.status === 'issued' && (
+                          <div className="flex gap-1 ml-1" onClick={e => e.stopPropagation()}>
+                            <button onClick={() => {
+                              const unpaid = effectiveInvoices.find(inv => inv.status === 'overdue' || inv.status === 'pending');
+                              if (unpaid) {
+                                setLocalCreditStatuses(prev => ({ ...prev, [cr.id]: 'applied' }));
+                                setLocalInvoiceStatuses(prev => ({ ...prev, [unpaid.id]: 'paid' }));
+                                setLocalCreditLinks(prev => ({ ...prev, [cr.id]: { appliedToInvoice: unpaid.invoiceNo, appliedAmount: cr.amount, appliedDate: '2026-03-26' } }));
+                                showToast(`Credit ${cr.creditNo} applied to ${unpaid.invoiceNo}`);
+                              } else {
+                                showToast('No unpaid invoices to apply credit to');
+                              }
+                            }} className="text-[8px] font-black text-lime-600 bg-lime-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-lime-100 transition-colors">Apply</button>
+                            <button onClick={() => setVoidConfirmId(cr.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">Void</button>
+                          </div>
+                        )}
+                        <span className="material-symbols-outlined text-slate-400 text-sm" onClick={() => setCreditDetailId(cr.id)}>chevron_right</span>
                       </div>
                     </button>
                   ))}
@@ -1179,18 +1488,64 @@ const TenantDetailPage: React.FC = () => {
                       )}
                     </div>
                     <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3 flex-wrap">
-                      {selectedCredit.status === 'pending' && (
-                        <button onClick={() => { setCreditDetailId(null); showToast(`Credit ${selectedCredit.creditNo} applied to next invoice`); }} className="px-4 py-2.5 bg-lime-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-lime-600 transition-all flex items-center gap-1">
+                      {(selectedCredit.status === 'pending' || selectedCredit.status === 'issued') && (
+                        <button onClick={() => {
+                          const unpaid = effectiveInvoices.find(inv => inv.status === 'overdue' || inv.status === 'pending');
+                          if (unpaid) {
+                            setLocalCreditStatuses(prev => ({ ...prev, [selectedCredit.id]: 'applied' }));
+                            setLocalInvoiceStatuses(prev => ({ ...prev, [unpaid.id]: 'paid' }));
+                            setLocalCreditLinks(prev => ({ ...prev, [selectedCredit.id]: { appliedToInvoice: unpaid.invoiceNo, appliedAmount: selectedCredit.amount, appliedDate: '2026-03-26' } }));
+                            setCreditDetailId(null);
+                            showToast(`Credit ${selectedCredit.creditNo} applied to ${unpaid.invoiceNo}`);
+                          } else {
+                            showToast('No unpaid invoices to apply credit to');
+                          }
+                        }} className="px-4 py-2.5 bg-lime-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-lime-600 transition-all flex items-center gap-1">
                           <span className="material-symbols-outlined text-xs">check</span> Apply Credit
                         </button>
                       )}
-                      {selectedCredit.status === 'pending' && (
-                        <button onClick={() => { setCreditDetailId(null); showToast(`Credit ${selectedCredit.creditNo} voided`); }} className="px-4 py-2.5 bg-red-100 text-red-600 font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-red-200 transition-all">Void</button>
+                      {(selectedCredit.status === 'pending' || selectedCredit.status === 'issued') && (
+                        <button onClick={() => { setCreditDetailId(null); setVoidConfirmId(selectedCredit.id); }} className="px-4 py-2.5 bg-red-100 text-red-600 font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-red-200 transition-all">Void</button>
                       )}
                       <button onClick={() => { setCreditDetailId(null); showToast('Credit note PDF downloaded'); }} className="px-4 py-2.5 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-primary/90 transition-all flex items-center gap-1">
                         <span className="material-symbols-outlined text-xs">download</span> Download PDF
                       </button>
                       <button onClick={() => setCreditDetailId(null)} className="px-4 py-2.5 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all ml-auto">Close</button>
+                    </div>
+                  </motion.div>
+                </div>
+              )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+              {voidConfirmId && voidCredit && (
+                <div role="dialog" aria-modal="true" aria-label="Void Credit Confirmation" className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setVoidConfirmId(null)} onKeyDown={e => { if (e.key === 'Escape') setVoidConfirmId(null); }}>
+                  <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} onClick={e => e.stopPropagation()} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
+                    <div className="p-8 border-b border-slate-100">
+                      <h3 className="text-xl font-black text-red-600 tracking-tight">Void Credit Note</h3>
+                      <p className="text-sm text-slate-500 mt-1">This will permanently void {voidCredit.creditNo}</p>
+                    </div>
+                    <div className="p-8 space-y-4">
+                      <div className="p-4 bg-slate-50 rounded-xl border border-slate-100 flex justify-between items-center">
+                        <div>
+                          <p className={labelClass}>Credit Amount</p>
+                          <p className="text-lg font-black text-violet-600">${voidCredit.amount.toFixed(2)}</p>
+                        </div>
+                        <div className="text-right">
+                          <p className={labelClass}>Type</p>
+                          <p className="text-sm font-bold text-slate-700 capitalize">{voidCredit.type}</p>
+                        </div>
+                      </div>
+                      <div className="p-3 bg-red-50 rounded-xl border border-red-100">
+                        <p className="text-sm text-red-700 font-bold flex items-center gap-1">
+                          <span className="material-symbols-outlined text-xs">warning</span>
+                          Voided credits cannot be reinstated. The tenant will no longer have this credit available.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3">
+                      <button onClick={() => setVoidConfirmId(null)} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
+                      <button onClick={() => { setLocalCreditStatuses(prev => ({ ...prev, [voidConfirmId]: 'voided' })); setVoidConfirmId(null); showToast(`${voidCredit.creditNo} has been voided`); }} className="flex-1 py-4 bg-red-500 text-white font-black text-sm rounded-2xl shadow-lg shadow-red-500/20 uppercase tracking-widest transition-all hover:bg-red-600">Void Credit</button>
                     </div>
                   </motion.div>
                 </div>
@@ -1344,24 +1699,38 @@ const TenantDetailPage: React.FC = () => {
 
             {dnsRecords.length > 0 && (
               <div>
-                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Required DNS Records</p>
-                <div className="space-y-2">
-                  {dnsRecords.map((rec, i) => (
-                    <div key={i} className="p-4 bg-slate-50 rounded-xl border border-slate-100">
-                      <div className="flex justify-between items-start">
-                        <div className="space-y-1">
-                          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{rec.type} Record</p>
-                          <p className="text-sm font-bold text-slate-900">Name: <span className="font-mono text-primary">{rec.name}</span></p>
-                          <p className="text-sm font-bold text-slate-900">Value: <span className="font-mono text-primary">{rec.value}</span></p>
-                          <p className="text-[10px] text-slate-400">TTL: {rec.ttl}</p>
-                        </div>
-                        <button onClick={() => copyToClipboard(`${rec.type}\t${rec.name}\t${rec.value}\t${rec.ttl}`, `dns-${i}`)} className="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-600 font-black text-[10px] rounded-lg uppercase tracking-widest transition-all flex items-center gap-1">
-                          <span className="material-symbols-outlined text-xs">{copiedDns === `dns-${i}` ? 'check' : 'content_copy'}</span>
-                          {copiedDns === `dns-${i}` ? 'Copied' : 'Copy'}
-                        </button>
-                      </div>
-                    </div>
-                  ))}
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">DNS Records Configuration</p>
+                <p className="text-[10px] text-slate-400 mb-3">Configure these DNS records at your domain registrar. Click any row to copy.</p>
+                <div className="bg-slate-50 rounded-2xl border border-slate-100 overflow-hidden">
+                  <table className="w-full">
+                    <thead>
+                      <tr className="border-b border-slate-200">
+                        <th className="px-4 py-3 text-[9px] font-black text-slate-400 uppercase tracking-widest text-left">Type</th>
+                        <th className="px-4 py-3 text-[9px] font-black text-slate-400 uppercase tracking-widest text-left">Name</th>
+                        <th className="px-4 py-3 text-[9px] font-black text-slate-400 uppercase tracking-widest text-left">Value</th>
+                        <th className="px-4 py-3 text-[9px] font-black text-slate-400 uppercase tracking-widest text-left">TTL</th>
+                        <th className="px-4 py-3 text-[9px] font-black text-slate-400 uppercase tracking-widest text-center">Status</th>
+                        <th className="px-4 py-3 text-[9px] font-black text-slate-400 uppercase tracking-widest text-right"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {dnsRecords.map((rec, i) => (
+                        <tr key={i} className="border-b border-slate-100 last:border-0 hover:bg-slate-100/50 transition-colors">
+                          <td className="px-4 py-3"><span className="text-[9px] font-black text-white bg-primary/70 px-2 py-0.5 rounded-md uppercase">{rec.type}</span></td>
+                          <td className="px-4 py-3 font-mono text-sm font-bold text-slate-700">{rec.name}</td>
+                          <td className="px-4 py-3 font-mono text-sm font-bold text-primary max-w-[200px] truncate">{rec.value}</td>
+                          <td className="px-4 py-3 text-sm text-slate-500 font-bold">{rec.ttl}</td>
+                          <td className="px-4 py-3 text-center">{statusBadge(domainVerification === 'verified' ? 'verified' : 'pending')}</td>
+                          <td className="px-4 py-3 text-right">
+                            <button onClick={() => copyToClipboard(`${rec.type}\t${rec.name}\t${rec.value}\t${rec.ttl}`, `dns-${i}`)} className="px-2.5 py-1 bg-slate-200 hover:bg-slate-300 text-slate-600 font-black text-[9px] rounded-lg uppercase tracking-widest transition-all flex items-center gap-1 ml-auto">
+                              <span className="material-symbols-outlined text-xs">{copiedDns === `dns-${i}` ? 'check' : 'content_copy'}</span>
+                              {copiedDns === `dns-${i}` ? 'Copied' : 'Copy'}
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               </div>
             )}

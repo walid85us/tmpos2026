@@ -63,19 +63,20 @@ A multi-tenant SaaS platform frontend built with React, TypeScript, Vite, Tailwi
 ## Tenant Management & Provisioning (Workstream 2)
 
 - **TenantsPage**: 6-card summary row (Active, Trialing, Overdue, Suspended, Total MRR, Avg Health), richer health indicator with bar+label+color, subdomain+billingCycle shown in table rows, renewal countdown in days, seats progress bar
-- **ProvisioningPage**: 3-step flow; plan selection uses dropdown (no card grid conflict with presets); when preset selected, plan shown as read-only auto-selected card; onboarding presets show full pre-configured settings, preset details on confirm screen, "Next Steps" on success, 8-item checklist
+- **ProvisioningPage**: 3-step flow; plan selection uses dropdown (no card grid conflict with presets); when preset selected, plan shown as read-only auto-selected card; onboarding presets show full pre-configured settings, preset details on confirm screen, 8-item checklist; **success step** shows Activation Lifecycle stepper (invited → pending → setup → active), invitation confirmation + "Awaiting activation" status
 - **TenantDetailPage**: 9 fully-built tabs:
-  - Overview: summary cards (plan, MRR, renewal, onboarded, seats, locations, domain, SSL/DNS), flags, quick actions
-  - Owner & Users: tenant-scoped users, invite user modal, violet "Create Store Owner" button + platform-only modal; `localCreatedOwners` state merges with DB users via `allScopedUsers` memo so newly created owners appear instantly
+  - Overview: summary cards (plan, MRR, renewal, onboarded, seats, locations, domain, SSL/DNS), **Activation Lifecycle** stepper (invited → pending_activation → account_setup → active) with invite/activated dates, flags, quick actions
+  - Owner & Users: **Separated sections** — Store Owners (violet-themed cards with shield icons, platform-controlled identity banner) and Team Members. Owner profile modal with Edit/Deactivate/Reactivate/Delete actions; deactivate/delete use confirmation modals. `localOwnerStatuses` tracks status changes; `localCreatedOwners` carry `status` field. `storeOwners`/`teamMembers` derived via useMemo from `allScopedUsers`
   - Subscription: `currentPlan` local state that updates on plan change confirmation, limits adjust to new plan
-  - Features: `localOverrides` state with Trial (modal + duration picker), Paid Override (modal with pricing model monthly/annual/one-time, price input, internal notes), End Trial/Revoke/Remove buttons; `paid_override` objects carry `price`, `pricingModel`, `pricingNotes`
-  - Billing: invoices clickable → invoice detail modal (line items, subtotal/tax/total, PDF/Reminder actions); credits/refunds clickable → credit detail modal (amount/applied/remaining, reason, Apply Credit/Void/Download PDF actions)
-  - Domains: primary domain info banner, 5-step setup progress stepper (Domain Added → DNS Records → Verified → SSL Issued → Live), DNS instructions text, local state with working Add/Remove/Verify/Check DNS/Provision SSL
+  - Features: `localOverrides` state with Trial (modal + duration picker), Paid Override (starts as `pending_payment` → Approve transitions to `paid_override`). `pending_payment` features show amber styling + hourglass icon + Approve/Cancel buttons. Revoke on paid overrides opens refund eligibility modal (7-day refund window based on `addedDate`); `getRefundEligibility()` helper. Revoke + Refund or Revoke Only options
+  - Billing: invoices via `effectiveInvoices` (local status overrides); credits via `effectiveCredits`. Credit list shows inline Apply/Void buttons for `issued` credits. Apply Credit finds first unpaid invoice, marks credit `applied` + invoice `paid`. Void opens confirmation modal (`voidConfirmId`); confirmed voids mark credit `voided`. Credit detail modal also has working Apply/Void buttons
+  - Domains: primary domain info banner, 5-step setup progress stepper, **DNS records table** with Type/Name/Value/TTL/Status/Copy columns, local state with working Add/Remove/Verify/Check DNS/Provision SSL
   - Usage: seats, locations, API, storage, SMS, tickets/invoices with progress bars and trend arrows
   - Activity/Audit: audit entries are clickable, opening audit log detail modal with all fields (action, target, actor, date, category, severity, tenant)
   - Support Notes: existing notes, flags, add note with local state persistence
 - **Toast system**: Centralized `showToast()` with useRef cleanup on unmount (no stale setTimeout leaks)
 - **Mock data**: `accessMockData.ts` tenantUsers with `tenantId`, `billingTransactions` with `tenantId`, `tenantFeatureOverrides`, `provisioningTemplates` with settings/features
+- **Types**: `FeatureOverrideType` includes `pending_payment`; `ActivationStatus = 'invited' | 'pending_activation' | 'account_setup' | 'active'`; all 5 tenants carry `activationStatus`, `inviteSentDate`, `activatedDate` fields
 - **Accessibility**: label/id pairs on form inputs, keyboard-navigable table rows, modal dialog semantics
 
 ## Data Model
