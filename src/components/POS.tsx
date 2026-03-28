@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   CartItem, 
@@ -8,11 +9,24 @@ import {
   HeldOrder, 
   Customer 
 } from '../types';
+import { useStoreLocalState } from '../context/StoreLocalState';
 import ContextualHelp from './ContextualHelp';
 
 const TAX_RATE = 0.0825;
 
+const PROMO_CODES: Record<string, { name: string; type: 'percent' | 'fixed'; value: number }> = {
+  'SAVE10': { name: '10% Off (SAVE10)', type: 'percent', value: 10 },
+  'SAVE20': { name: '20% Off (SAVE20)', type: 'percent', value: 20 },
+  'FLAT5': { name: '$5 Off (FLAT5)', type: 'fixed', value: 5 },
+  'FLAT15': { name: '$15 Off (FLAT15)', type: 'fixed', value: 15 },
+  'VIP25': { name: '25% VIP Discount', type: 'percent', value: 25 },
+};
+
+const POINTS_VALUE_RATIO = 0.01;
+
 export const POS: React.FC = () => {
+  const location = useLocation();
+  const { customers: sharedCustomers, addCustomer, stockItems: sharedStockItems, addStockItem } = useStoreLocalState();
   // State
   const [cart, setCart] = useState<CartItem[]>([]);
   const [payments, setPayments] = useState<PaymentMethod[]>([
@@ -85,13 +99,33 @@ export const POS: React.FC = () => {
   const [customerSearch, setCustomerSearch] = useState('');
   const [stockSaved, setStockSaved] = useState(false);
 
-  const allCustomers: Customer[] = [
-    { id: 'c1', name: 'Alexander Wright', phone: '555-0123', email: 'alex@example.com', totalSpent: 1240, lastVisit: '2026-03-25' },
-    { id: 'c2', name: 'Sarah Jenkins', phone: '555-0456', email: 'sarah@example.com', totalSpent: 890, lastVisit: '2026-03-22' },
-    { id: 'c3', name: 'Mike Rodriguez', phone: '555-0789', email: 'mike@example.com', totalSpent: 320, lastVisit: '2026-03-20' },
-    { id: 'c4', name: 'Emma Chen', phone: '555-0321', email: 'emma@example.com', totalSpent: 560, lastVisit: '2026-03-18' },
-  ];
-  const [customersList, setCustomersList] = useState<Customer[]>(allCustomers);
+  const [redeemPointsAmount, setRedeemPointsAmount] = useState('');
+  const [promoCodeError, setPromoCodeError] = useState('');
+
+  const locationHandled = useRef(false);
+  useEffect(() => {
+    if (locationHandled.current) return;
+    const state = location.state as { autoQuickCheckIn?: boolean; openHeldOrders?: boolean } | null;
+    if (state?.autoQuickCheckIn) {
+      locationHandled.current = true;
+      const quickRepair: CartItem = {
+        id: `QR-${Date.now()}`,
+        name: 'Quick Check-in Repair',
+        description: 'Standard diagnostic & repair',
+        price: 0,
+        icon: 'bolt',
+        type: 'repair'
+      };
+      setPendingRepairItem(quickRepair);
+      setIsRepairDetailsModalOpen(true);
+      window.history.replaceState({}, document.title);
+    }
+    if (state?.openHeldOrders) {
+      locationHandled.current = true;
+      setIsHeldOrdersOpen(true);
+      window.history.replaceState({}, document.title);
+    }
+  }, [location.state]);
 
   const subtotal = cart.reduce((acc, item) => acc + item.price * (item.qty || 1), 0);
   const discountTotal = discounts.reduce((acc, d) => {
@@ -1033,32 +1067,46 @@ export const POS: React.FC = () => {
                     <span className="material-symbols-outlined text-3xl text-lime-600" style={{fontVariationSettings: "'FILL' 1"}}>check_circle</span>
                   </div>
                   <p className="text-lg font-black text-primary">Stock Added</p>
+                  <p className="text-xs text-slate-500">{sharedStockItems.length} item{sharedStockItems.length !== 1 ? 's' : ''} in local inventory</p>
                   <button onClick={() => { setIsAddInventoryModalOpen(false); setStockSaved(false); }} className="px-8 py-3 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest">Done</button>
                 </div>
               ) : (
-                <form onSubmit={(e) => { e.preventDefault(); setStockSaved(true); }} className="space-y-4">
+                <form onSubmit={(e) => {
+                  e.preventDefault();
+                  const fd = new FormData(e.currentTarget);
+                  addStockItem({
+                    id: `stk-${Date.now()}`,
+                    name: fd.get('productName') as string || '',
+                    sku: fd.get('sku') as string || '',
+                    qty: parseInt(fd.get('quantity') as string) || 1,
+                    cost: parseFloat(fd.get('costPrice') as string) || 0,
+                    category: fd.get('category') as string || 'Parts',
+                    addedAt: new Date().toISOString(),
+                  });
+                  setStockSaved(true);
+                }} className="space-y-4">
                   <div className="space-y-1">
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Product Name</label>
-                    <input required className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="iPhone 13 Screen" />
+                    <input name="productName" required className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="iPhone 13 Screen" />
                   </div>
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-1">
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">SKU</label>
-                      <input className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="IP13-SCR-001" />
+                      <input name="sku" className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="IP13-SCR-001" />
                     </div>
                     <div className="space-y-1">
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Quantity</label>
-                      <input type="number" min="1" defaultValue={1} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" />
+                      <input name="quantity" type="number" min="1" defaultValue={1} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" />
                     </div>
                   </div>
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-1">
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Cost Price</label>
-                      <input type="number" step="0.01" className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="0.00" />
+                      <input name="costPrice" type="number" step="0.01" className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="0.00" />
                     </div>
                     <div className="space-y-1">
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Category</label>
-                      <select className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary">
+                      <select name="category" className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary">
                         <option>Parts</option>
                         <option>Accessories</option>
                         <option>Devices</option>
@@ -1140,7 +1188,7 @@ export const POS: React.FC = () => {
                   </button>
 
                   <div className="space-y-2 max-h-[40vh] overflow-y-auto pr-1">
-                    {customersList.filter(c => c.name.toLowerCase().includes(customerSearch.toLowerCase()) || c.phone.includes(customerSearch)).map((c) => (
+                    {sharedCustomers.filter(c => c.name.toLowerCase().includes(customerSearch.toLowerCase()) || c.phone.includes(customerSearch)).map((c) => (
                       <button key={c.id} onClick={() => { setSelectedCustomer(c); setCustomerValidationError(''); setIsCustomerModalOpen(false); setCustomerSearch(''); }} className="w-full p-4 bg-slate-50 hover:bg-secondary hover:text-white rounded-2xl text-left transition-all group">
                         <div className="flex items-center justify-between">
                           <div>
@@ -1170,7 +1218,7 @@ export const POS: React.FC = () => {
                     totalSpent: 0,
                     lastVisit: '',
                   };
-                  setCustomersList([...customersList, newCust]);
+                  addCustomer(newCust);
                   setSelectedCustomer(newCust);
                   setCustomerValidationError('');
                   setNewCustMode(false);
@@ -1213,54 +1261,96 @@ export const POS: React.FC = () => {
             <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-md w-full p-8 ghost-border">
               <div className="flex justify-between items-center mb-8">
                 <h3 className="text-2xl font-black text-primary tracking-tight">Apply Discount</h3>
-                <button onClick={() => setIsDiscountModalOpen(false)} className="text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+                <button onClick={() => { setIsDiscountModalOpen(false); setPromoCodeError(''); setDiscountCode(''); }} className="text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
               </div>
               <div className="space-y-6">
                 <div className="space-y-2">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Discount Code</label>
-                  <input value={discountCode} onChange={(e) => setDiscountCode(e.target.value)} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="Enter discount code..." />
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Promo Code</label>
+                  <input value={discountCode} onChange={(e) => { setDiscountCode(e.target.value.toUpperCase()); setPromoCodeError(''); }} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="e.g. SAVE10, FLAT5, VIP25" />
+                  {promoCodeError && (
+                    <p className="text-xs font-bold text-rose-500 ml-4 flex items-center gap-1">
+                      <span className="material-symbols-outlined text-xs">error</span>
+                      {promoCodeError}
+                    </p>
+                  )}
+                  <p className="text-[10px] text-slate-400 ml-4">Valid codes: SAVE10, SAVE20, FLAT5, FLAT15, VIP25</p>
                 </div>
                 <div className="grid grid-cols-3 gap-3">
                   {[5, 10, 15].map(pct => (
                     <button key={pct} onClick={() => {
                       setDiscounts([...discounts, { id: `d-${Date.now()}-${pct}`, name: `${pct}% Off`, type: 'percent', value: pct }]);
-                      setIsDiscountModalOpen(false); setDiscountCode('');
+                      setIsDiscountModalOpen(false); setDiscountCode(''); setPromoCodeError('');
                     }} className="py-3 bg-slate-50 text-primary text-[10px] font-black uppercase tracking-widest rounded-xl border border-slate-200 hover:bg-primary hover:text-white transition-all">{pct}% Off</button>
                   ))}
                 </div>
                 <button onClick={() => {
-                  if (discountCode.trim()) {
-                    setDiscounts([...discounts, { id: `d-code-${Date.now()}`, name: discountCode, type: 'fixed', value: 10 }]);
+                  const code = discountCode.trim().toUpperCase();
+                  if (!code) return;
+                  const promo = PROMO_CODES[code];
+                  if (!promo) {
+                    setPromoCodeError(`"${code}" is not a valid promo code.`);
+                    return;
                   }
-                  setIsDiscountModalOpen(false); setDiscountCode('');
+                  if (discounts.some(d => d.name === promo.name)) {
+                    setPromoCodeError('This code has already been applied.');
+                    return;
+                  }
+                  setDiscounts([...discounts, { id: `d-code-${Date.now()}`, name: promo.name, type: promo.type, value: promo.value }]);
+                  setIsDiscountModalOpen(false); setDiscountCode(''); setPromoCodeError('');
                 }} disabled={!discountCode.trim()} className="w-full py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed">Apply Code</button>
               </div>
             </motion.div>
           </motion.div>
         )}
 
-        {isRedeemPointsOpen && (
+        {isRedeemPointsOpen && (() => {
+          const AVAILABLE_POINTS = 2450;
+          const maxCreditValue = AVAILABLE_POINTS * POINTS_VALUE_RATIO;
+          const pointsNum = parseInt(redeemPointsAmount) || 0;
+          const creditValue = Math.min(pointsNum, AVAILABLE_POINTS) * POINTS_VALUE_RATIO;
+          const pointsValid = pointsNum > 0 && pointsNum <= AVAILABLE_POINTS;
+          const alreadyRedeemed = discounts.some(d => d.name.startsWith('Points Redemption'));
+          return (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[150] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
             <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-md w-full p-8 ghost-border">
               <div className="flex justify-between items-center mb-8">
                 <h3 className="text-2xl font-black text-primary tracking-tight">Redeem Points</h3>
-                <button onClick={() => setIsRedeemPointsOpen(false)} className="text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+                <button onClick={() => { setIsRedeemPointsOpen(false); setRedeemPointsAmount(''); }} className="text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
               </div>
               <div className="space-y-6">
                 <div className="p-6 bg-teal-50 rounded-2xl border border-teal-100 text-center">
                   <span className="text-[10px] font-black text-teal-600 uppercase tracking-widest block mb-2">Available Points</span>
-                  <span className="text-4xl font-black text-teal-700">2,450</span>
-                  <p className="text-xs text-teal-500 mt-1">= $24.50 credit value</p>
+                  <span className="text-4xl font-black text-teal-700">{AVAILABLE_POINTS.toLocaleString()}</span>
+                  <p className="text-xs text-teal-500 mt-1">= ${maxCreditValue.toFixed(2)} credit value (1pt = ${POINTS_VALUE_RATIO})</p>
                 </div>
-                <div className="space-y-2">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Points to Redeem</label>
-                  <input type="number" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="Enter points amount..." />
-                </div>
-                <button onClick={() => setIsRedeemPointsOpen(false)} className="w-full py-4 bg-teal-600 text-white font-black text-sm rounded-2xl shadow-lg shadow-teal-600/20 uppercase tracking-widest hover:bg-teal-700">Apply Points</button>
+                {alreadyRedeemed ? (
+                  <div className="p-4 bg-amber-50 rounded-2xl border border-amber-200 text-center">
+                    <p className="text-sm font-bold text-amber-700">Points already redeemed on this order.</p>
+                    <p className="text-xs text-amber-500 mt-1">Remove the existing points discount to redeem a different amount.</p>
+                  </div>
+                ) : (
+                  <>
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Points to Redeem</label>
+                      <input type="number" min="1" max={AVAILABLE_POINTS} value={redeemPointsAmount} onChange={(e) => setRedeemPointsAmount(e.target.value)} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder={`Max ${AVAILABLE_POINTS.toLocaleString()}`} />
+                      {pointsNum > 0 && (
+                        <p className="text-xs font-bold text-teal-600 ml-4">{pointsValid ? `= $${creditValue.toFixed(2)} discount` : `Max ${AVAILABLE_POINTS.toLocaleString()} points`}</p>
+                      )}
+                    </div>
+                    <button onClick={() => {
+                      if (pointsValid) {
+                        setDiscounts([...discounts, { id: `d-pts-${Date.now()}`, name: `Points Redemption (${pointsNum.toLocaleString()}pts)`, type: 'fixed', value: creditValue }]);
+                        setIsRedeemPointsOpen(false);
+                        setRedeemPointsAmount('');
+                      }
+                    }} disabled={!pointsValid} className="w-full py-4 bg-teal-600 text-white font-black text-sm rounded-2xl shadow-lg shadow-teal-600/20 uppercase tracking-widest hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed">Apply ${creditValue.toFixed(2)} Discount</button>
+                  </>
+                )}
               </div>
             </motion.div>
           </motion.div>
-        )}
+          );
+        })()}
 
         {isSettingsModalOpen && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[150] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">

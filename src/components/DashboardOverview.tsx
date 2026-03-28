@@ -4,6 +4,9 @@ import { motion, AnimatePresence } from 'motion/react';
 import { useAccess } from '../context/AccessContext';
 import type { OnboardingStage, OnboardingChecklist, TenantDomainInfo, DomainMode } from '../context/AccessContext';
 import { planFeatures } from '../context/accessConfig';
+import { useStoreLocalState } from '../context/StoreLocalState';
+import type { StockItem } from '../context/StoreLocalState';
+import type { Customer } from '../types';
 import ApprovalQueue from './ApprovalQueue';
 
 function DomainStatusCard({ domainInfo, onDomainAction }: { domainInfo: TenantDomainInfo; onDomainAction?: (action: string) => void }) {
@@ -689,6 +692,7 @@ function StoreActivationPanel() {
 export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => void }) {
   const { session, canAccess } = useAccess();
   const navigate = useNavigate();
+  const { addCustomer, addStockItem } = useStoreLocalState();
   const [showPrintLabelModal, setShowPrintLabelModal] = useState(false);
   const [showScanQRModal, setShowScanQRModal] = useState(false);
   const [showAddStockModal, setShowAddStockModal] = useState(false);
@@ -710,7 +714,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
     { label: 'Add Stock', icon: 'inventory_2', color: 'bg-teal-800', roles: ['store_owner', 'manager'], requires: 'inventory' },
     { label: 'New Customer', icon: 'person_add', color: 'bg-secondary', roles: ['store_owner', 'manager', 'sales_staff'] },
     { label: 'Print Label', icon: 'print', color: 'bg-slate-800', roles: ['store_owner', 'manager', 'technician', 'sales_staff'] },
-    { label: 'Hold Sale', icon: 'pause_circle', color: 'bg-slate-600', roles: ['store_owner', 'manager', 'sales_staff'] },
+    { label: 'Held Orders', icon: 'history', color: 'bg-slate-600', roles: ['store_owner', 'manager', 'sales_staff'] },
     { label: 'Scan QR', icon: 'qr_code_scanner', color: 'bg-lime-600', roles: ['store_owner', 'manager', 'technician', 'sales_staff'] },
   ];
 
@@ -726,7 +730,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
         navigate('/sales');
         break;
       case 'Quick Intake':
-        navigate('/sales');
+        navigate('/sales', { state: { autoQuickCheckIn: true } });
         break;
       case 'Add Stock':
         setShowAddStockModal(true);
@@ -737,8 +741,8 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
       case 'Print Label':
         setShowPrintLabelModal(true);
         break;
-      case 'Hold Sale':
-        navigate('/sales');
+      case 'Held Orders':
+        navigate('/sales', { state: { openHeldOrders: true } });
         break;
       case 'Scan QR':
         setShowScanQRModal(true);
@@ -994,29 +998,42 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                     <button onClick={() => { setShowAddStockModal(false); setStockSaved(false); }} className="px-8 py-3 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest">Done</button>
                   </div>
                 ) : (
-                  <form onSubmit={(e) => { e.preventDefault(); setStockSaved(true); }} className="space-y-4">
+                  <form onSubmit={(e) => {
+                    e.preventDefault();
+                    const fd = new FormData(e.currentTarget);
+                    addStockItem({
+                      id: `stk-${Date.now()}`,
+                      name: fd.get('productName') as string || '',
+                      sku: fd.get('sku') as string || '',
+                      qty: parseInt(fd.get('quantity') as string) || 1,
+                      cost: parseFloat(fd.get('costPrice') as string) || 0,
+                      category: fd.get('category') as string || 'Parts',
+                      addedAt: new Date().toISOString(),
+                    });
+                    setStockSaved(true);
+                  }} className="space-y-4">
                     <div className="space-y-1">
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Product Name</label>
-                      <input required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="iPhone 13 Screen" />
+                      <input name="productName" required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="iPhone 13 Screen" />
                     </div>
                     <div className="grid grid-cols-2 gap-4">
                       <div className="space-y-1">
                         <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">SKU</label>
-                        <input className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="IP13-SCR-001" />
+                        <input name="sku" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="IP13-SCR-001" />
                       </div>
                       <div className="space-y-1">
                         <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Quantity</label>
-                        <input type="number" min="1" defaultValue={1} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" />
+                        <input name="quantity" type="number" min="1" defaultValue={1} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" />
                       </div>
                     </div>
                     <div className="grid grid-cols-2 gap-4">
                       <div className="space-y-1">
                         <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Cost Price</label>
-                        <input type="number" step="0.01" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="0.00" />
+                        <input name="costPrice" type="number" step="0.01" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="0.00" />
                       </div>
                       <div className="space-y-1">
                         <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Category</label>
-                        <select className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700">
+                        <select name="category" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700">
                           <option>Parts</option>
                           <option>Accessories</option>
                           <option>Devices</option>
@@ -1071,7 +1088,20 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                     <button onClick={() => { setShowNewCustomerModal(false); setCustomerSaved(false); }} className="px-8 py-3 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest">Done</button>
                   </div>
                 ) : (
-                  <form onSubmit={(e) => { e.preventDefault(); setCustomerSaved(true); }} className="space-y-4">
+                  <form onSubmit={(e) => {
+                    e.preventDefault();
+                    const fd = new FormData(e.currentTarget);
+                    const newCust: Customer = {
+                      id: `c-${Date.now()}`,
+                      name: `${fd.get('firstName')} ${fd.get('lastName')}`,
+                      phone: fd.get('phone') as string || '',
+                      email: fd.get('email') as string || '',
+                      totalSpent: 0,
+                      lastVisit: '',
+                    };
+                    addCustomer(newCust);
+                    setCustomerSaved(true);
+                  }} className="space-y-4">
                     <div className="grid grid-cols-2 gap-4">
                       <div className="space-y-1">
                         <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">First Name</label>

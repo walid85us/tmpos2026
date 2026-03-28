@@ -23,7 +23,8 @@ A multi-tenant SaaS platform frontend built with React, TypeScript, Vite, Tailwi
 - `src/components/Employees.tsx` - Employee management with roles, time tracking, payroll, activity
 - `src/components/PendingApproval.tsx` - Approval workflow with labeled field detail view
 - `src/components/ApprovalQueue.tsx` - Dashboard approval widget with inline review modal for approvers
-- `src/components/POS.tsx` - Full POS with cart, payments, modals, repair intake, held orders, tax calculation (8.25%), discount application, qty support, inline new customer creation, walk-in customer, controlled payment inputs, change due display
+- `src/components/POS.tsx` - Full POS with cart, payments, modals, repair intake, held orders, tax calculation (8.25%), discount application (PROMO_CODES lookup), qty support, inline new customer creation (shared state), walk-in customer, controlled payment inputs, change due display, points redemption (POINTS_VALUE_RATIO=0.01)
+- `src/context/StoreLocalState.tsx` - Shared local mock state for customers and stock items (consumed by both Dashboard and POS)
 - `src/components/Customers.tsx` - CRM with customer list, profiles, new customer modal
 - `src/components/Reports.tsx` - Reports dashboard with charts (recharts)
 - `src/components/Prospects.tsx` - Estimates, leads, inquiries pipeline

@@ -5,6 +5,7 @@ import AccountStatusBanner from '../components/AccountStatusBanner';
 import DevSessionSwitcher from '../components/DevSessionSwitcher';
 import { useAccess, ONBOARDING_ALLOWED_MODULES } from '../context/AccessContext';
 import { planFeatures } from '../context/accessConfig';
+import { StoreLocalStateProvider } from '../context/StoreLocalState';
 
 const navItems = [
   { id: 'dashboard', label: 'Dashboard', icon: 'dashboard', path: '/' },
@@ -111,7 +112,9 @@ export default function TenantLayout() {
         <AccountStatusBanner />
         <TenantHeader />
         <div className="p-8 max-w-7xl mx-auto w-full">
-          <Outlet />
+          <StoreLocalStateProvider>
+            <Outlet />
+          </StoreLocalStateProvider>
         </div>
       </main>
       {import.meta.env.DEV && <DevSessionSwitcher />}

@@ -1,0 +1,66 @@
+Run a narrow correction pass only for the current workstream:
+Store Dashboard & POS Refinement
+
+Do not start any new workstream.
+Do not redesign the UI.
+Do not broaden scope.
+Preserve the current design baseline exactly.
+Preserve auth, preview mode, RBAC, lifecycle gating, plan entitlement gating, and platform/store hierarchy.
+
+Act as:
+Principal Repair/POS Product Architect
++ Principal Store Operations Workflow Designer
++ Principal Payments & Tender Flow Architect
++ Principal React/TypeScript Engineer
++ Principal UX Workflow Designer
++ Principal QA Auditor
++ Principal Side Auditor & Systems Thinker
+
+This is a narrow correction pass only.
+Fix only the gaps that your own QA report admitted.
+
+Required fixes:
+
+1) Dashboard Quick Intake must become a true handoff
+- From dashboard, Quick Intake must navigate to /sales and auto-trigger the Quick Check-in / repair intake flow immediately
+- Use location state or query param, whichever fits the codebase better
+- Remove the current partial behavior where dashboard Quick Intake only navigates without opening intake
+
+2) Dashboard Hold Sale must stop being misleading
+- Current dashboard Hold Sale only navigates to /sales and is not a real hold-sale action
+- Replace it with one coherent behavior:
+  preferred: navigate to /sales and auto-open Held Orders / resume context
+  acceptable: remove/hide the dashboard Hold Sale action if a meaningful dashboard-level hold workflow is not possible
+- Do not leave it as a dead/semi-dead shortcut
+
+3) Unify quick Add Stock into one coherent local workflow
+- The dashboard Add Stock and POS Add Stock flows must stop being disconnected mockups
+- Implement a shared local/mock inventory support path so a quick-added stock item writes into a shared local inventory state/source used by both places
+- Keep this lightweight and narrow; do not redesign inventory module
+- It is acceptable if this is local/mock persistence only for now, but it must be shared and immediately reusable, not isolated success feedback only
+
+4) Unify quick New Customer into one coherent local workflow
+- A customer created from dashboard must appear in POS customer search immediately
+- Use a narrow shared local/mock customer state/source if needed
+- Do not redesign CRM/customers module
+- Keep the current UI baseline
+
+5) Fix payment stub behavior
+- Discount code must not remain a fake hardcoded $10 application
+- Redeem Points must not remain a modal that closes without affecting cart state
+- If no real backend validation exists, implement explicit local/mock rules that are honest and deterministic
+- Prefer simple, transparent local behavior over fake realism
+
+6) Re-test at implementation level
+After fixes, return:
+- what you changed
+- exact files changed in this correction pass
+- any supporting shared/local state you introduced
+- any known limitations still intentionally left unchanged
+- a short implementation-level verification summary
+
+Important:
+- Do not claim final QA closure on behalf of the user
+- Do not mark the workstream complete yet
+- The user will perform the final manual QA
+- Stop after the correction-pass report and wait for user testing feedback
