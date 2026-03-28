@@ -89,12 +89,13 @@ function OnboardingChecklistCard({ checklist, onboardingStage, onToggleItem, isL
   onToggleItem?: (key: keyof OnboardingChecklist) => void;
   isLocked?: boolean;
 }) {
-  const items = [
-    { key: 'profileComplete' as const, label: 'Complete store profile', icon: 'storefront', action: 'Go to Settings', route: '/settings' },
-    { key: 'teamInvited' as const, label: 'Invite team members', icon: 'group_add', action: 'Invite Team', route: '/settings' },
-    { key: 'storeCustomized' as const, label: 'Customize store appearance', icon: 'palette', action: 'Customize', route: '/settings' },
+  const items: { key: keyof OnboardingChecklist; label: string; icon: string; action: string; route: string; optional?: boolean }[] = [
+    { key: 'storeSetupComplete', label: 'Set up store profile & branding', icon: 'storefront', action: 'Go to Settings', route: '/settings' },
+    { key: 'teamInvited', label: 'Invite team members', icon: 'group_add', action: 'Add Employee', route: '/employees?action=add', optional: true },
   ];
 
+  const requiredItems = items.filter(i => !i.optional);
+  const requiredDone = requiredItems.filter(item => checklist[item.key]).length;
   const completedCount = items.filter(item => checklist[item.key]).length;
   const totalCount = items.length;
   const progress = Math.round((completedCount / totalCount) * 100);
@@ -147,7 +148,10 @@ function OnboardingChecklistCard({ checklist, onboardingStage, onToggleItem, isL
                   {checklist[item.key] ? 'check_circle' : 'radio_button_unchecked'}
                 </span>
               )}
-              <span className={`text-[11px] font-bold ${checklist[item.key] ? 'text-slate-400 line-through' : 'text-slate-700'}`}>{item.label}</span>
+              <span className={`text-[11px] font-bold ${checklist[item.key] ? 'text-slate-400 line-through' : 'text-slate-700'}`}>
+                {item.label}
+                {item.optional && <span className="text-[8px] font-bold text-slate-400 ml-1.5 uppercase tracking-wider">(optional)</span>}
+              </span>
             </div>
             {!checklist[item.key] && (
               <div className="flex items-center gap-2">
@@ -227,14 +231,17 @@ function StoreActivationPanel() {
   const isOnboardedByStage = onboardingStage === 'active';
   const checklist = tenant.onboardingChecklist || {
     profileComplete: isOnboardedByStage, paymentMethodAdded: isOnboardedByStage, firstProductAdded: isOnboardedByStage,
-    domainConfigured: isOnboardedByStage, teamInvited: isOnboardedByStage, storeCustomized: isOnboardedByStage
+    domainConfigured: isOnboardedByStage, teamInvited: isOnboardedByStage, storeCustomized: isOnboardedByStage,
+    storeSetupComplete: isOnboardedByStage,
   };
   const domainInfo = tenant.domainInfo || {
     mode: 'platform_subdomain' as const, subdomain: `${tenant.name.toLowerCase().replace(/\s/g, '-')}.repairplatform.io`,
     dnsVerified: false, sslProvisioned: false, propagated: false,
   };
 
-  const storeChecklistKeys: (keyof OnboardingChecklist)[] = ['profileComplete', 'teamInvited', 'storeCustomized'];
+  const requiredChecklistKeys: (keyof OnboardingChecklist)[] = ['storeSetupComplete'];
+  const optionalChecklistKeys: (keyof OnboardingChecklist)[] = ['teamInvited'];
+  const storeChecklistKeys: (keyof OnboardingChecklist)[] = [...requiredChecklistKeys, ...optionalChecklistKeys];
 
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
@@ -265,14 +272,14 @@ function StoreActivationPanel() {
 
   const toggleChecklistItem = useCallback((key: keyof OnboardingChecklist) => {
     const newChecklist = { ...checklist, [key]: !checklist[key] };
-    const completedCount = storeChecklistKeys.filter(k => newChecklist[k]).length;
-    const totalItems = storeChecklistKeys.length;
+    const requiredDone = requiredChecklistKeys.every(k => newChecklist[k]);
+    const anyDone = storeChecklistKeys.some(k => newChecklist[k]);
     let newStage = onboardingStage;
-    if (completedCount === totalItems && onboardingStage !== 'active') {
+    if (requiredDone && onboardingStage !== 'active') {
       newStage = 'pending_activation';
-    } else if (completedCount > 0 && completedCount < totalItems) {
+    } else if (anyDone) {
       newStage = onboardingStage === 'invited' ? 'pending_setup' : 'setup_incomplete';
-    } else if (completedCount === 0 && onboardingStage !== 'invited') {
+    } else if (!anyDone && onboardingStage !== 'invited') {
       newStage = 'pending_setup';
     }
     const today = new Date().toISOString().split('T')[0];
@@ -316,7 +323,7 @@ function StoreActivationPanel() {
   const isOverdue = tenant.status === 'overdue';
   const isReadOnly = tenant.status === 'read_only';
   const isFullyOnboarded = onboardingStage === 'active' && isLive;
-  const checklistComplete = storeChecklistKeys.every(k => checklist[k]);
+  const checklistComplete = requiredChecklistKeys.every(k => checklist[k]);
 
   const toast = toastMsg ? (
     <div className="fixed top-6 right-6 z-[200] px-5 py-3 bg-slate-900 text-white text-sm font-bold rounded-2xl shadow-2xl flex items-center gap-2 animate-in fade-in slide-in-from-top-2">
@@ -565,7 +572,7 @@ function StoreActivationPanel() {
             <div className="p-3 bg-white/60 rounded-xl border border-amber-100">
               <p className="text-[10px] font-bold text-amber-600 flex items-center gap-1">
                 <span className="material-symbols-outlined text-xs">info</span>
-                {storeChecklistKeys.filter(k => checklist[k]).length}/{storeChecklistKeys.length} completed — finish all items below to proceed to activation.
+                {storeChecklistKeys.filter(k => checklist[k]).length}/{storeChecklistKeys.length} completed — complete the required items below to proceed to activation.
               </p>
               <div className="mt-2">
                 <Link to="/settings" className="px-4 py-2 bg-amber-500 text-white text-[9px] font-black rounded-xl uppercase tracking-widest hover:bg-amber-600 transition-colors inline-block">

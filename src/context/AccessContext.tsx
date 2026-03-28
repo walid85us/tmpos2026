@@ -22,6 +22,7 @@ export interface OnboardingChecklist {
   domainConfigured: boolean;
   teamInvited: boolean;
   storeCustomized: boolean;
+  storeSetupComplete: boolean;
 }
 
 export interface TenantDomainInfo {
@@ -47,7 +48,7 @@ interface Tenant {
   trialEndsDate?: string;
 }
 
-export const ONBOARDING_ALLOWED_MODULES = ['dashboard', 'settings', 'support'];
+export const ONBOARDING_ALLOWED_MODULES = ['dashboard', 'settings', 'support', 'employees'];
 
 interface AccessContextType {
   session: Session | null;
@@ -116,7 +117,7 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
               setRealTenant({
                 id: 'tenant-1', name: 'My Store', plan: 'growth', status: 'active',
                 onboardingStage: 'active',
-                onboardingChecklist: { profileComplete: true, paymentMethodAdded: true, firstProductAdded: true, domainConfigured: true, teamInvited: true, storeCustomized: true },
+                onboardingChecklist: { profileComplete: true, paymentMethodAdded: true, firstProductAdded: true, domainConfigured: true, teamInvited: true, storeCustomized: true, storeSetupComplete: true },
                 domainInfo: { mode: 'custom_active', subdomain: 'my-store.repairplatform.io', customDomain: 'mystore.com', dnsVerified: true, sslProvisioned: true, propagated: true },
                 activatedDate: '2026-02-15',
               });

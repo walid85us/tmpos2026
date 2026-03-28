@@ -10,7 +10,7 @@ const storeScenarios = [
     tenant: {
       id: 'preview-tenant', name: 'Preview Store', plan: 'growth' as const, status: 'active' as const,
       onboardingStage: 'active' as const,
-      onboardingChecklist: { profileComplete: true, paymentMethodAdded: true, firstProductAdded: true, domainConfigured: true, teamInvited: true, storeCustomized: true },
+      onboardingChecklist: { profileComplete: true, paymentMethodAdded: true, firstProductAdded: true, domainConfigured: true, teamInvited: true, storeCustomized: true, storeSetupComplete: true },
       domainInfo: { mode: 'custom_active' as const, subdomain: 'preview-store.repairplatform.io', customDomain: 'previewstore.com', dnsVerified: true, sslProvisioned: true, propagated: true },
       activatedDate: '2026-02-15',
     }
@@ -21,7 +21,7 @@ const storeScenarios = [
     tenant: {
       id: 'preview-tenant', name: 'Trial Store', plan: 'growth' as const, status: 'trialing' as const,
       onboardingStage: 'active' as const,
-      onboardingChecklist: { profileComplete: true, paymentMethodAdded: false, firstProductAdded: true, domainConfigured: false, teamInvited: false, storeCustomized: true },
+      onboardingChecklist: { profileComplete: true, paymentMethodAdded: false, firstProductAdded: true, domainConfigured: false, teamInvited: false, storeCustomized: true, storeSetupComplete: true },
       domainInfo: { mode: 'platform_subdomain' as const, subdomain: 'trial-store.repairplatform.io', dnsVerified: false, sslProvisioned: false, propagated: false },
       activatedDate: '2026-03-20',
       trialEndsDate: '2026-04-20',
@@ -33,7 +33,7 @@ const storeScenarios = [
     tenant: {
       id: 'preview-tenant', name: 'New Store', plan: 'starter' as const, status: 'pending_activation' as const,
       onboardingStage: 'invited' as const,
-      onboardingChecklist: { profileComplete: false, paymentMethodAdded: false, firstProductAdded: false, domainConfigured: false, teamInvited: false, storeCustomized: false },
+      onboardingChecklist: { profileComplete: false, paymentMethodAdded: false, firstProductAdded: false, domainConfigured: false, teamInvited: false, storeCustomized: false, storeSetupComplete: false },
       domainInfo: { mode: 'platform_subdomain' as const, subdomain: 'new-store.repairplatform.io', dnsVerified: false, sslProvisioned: false, propagated: false },
       inviteSentDate: '2026-03-25',
     }
@@ -44,7 +44,7 @@ const storeScenarios = [
     tenant: {
       id: 'preview-tenant', name: 'Setting Up Store', plan: 'growth' as const, status: 'pending_activation' as const,
       onboardingStage: 'setup_incomplete' as const,
-      onboardingChecklist: { profileComplete: true, paymentMethodAdded: false, firstProductAdded: false, domainConfigured: false, teamInvited: false, storeCustomized: false },
+      onboardingChecklist: { profileComplete: true, paymentMethodAdded: false, firstProductAdded: false, domainConfigured: false, teamInvited: true, storeCustomized: false, storeSetupComplete: false },
       domainInfo: { mode: 'platform_subdomain' as const, subdomain: 'setting-up.repairplatform.io', dnsVerified: false, sslProvisioned: false, propagated: false },
       setupStartedDate: '2026-03-24',
     }
@@ -55,7 +55,7 @@ const storeScenarios = [
     tenant: {
       id: 'preview-tenant', name: 'Domain Setup Store', plan: 'advanced' as const, status: 'active' as const,
       onboardingStage: 'active' as const,
-      onboardingChecklist: { profileComplete: true, paymentMethodAdded: true, firstProductAdded: true, domainConfigured: true, teamInvited: true, storeCustomized: true },
+      onboardingChecklist: { profileComplete: true, paymentMethodAdded: true, firstProductAdded: true, domainConfigured: true, teamInvited: true, storeCustomized: true, storeSetupComplete: true },
       domainInfo: { mode: 'custom_dns_pending' as const, subdomain: 'domain-setup.repairplatform.io', customDomain: 'mydomain.com', dnsVerified: false, sslProvisioned: false, propagated: false },
       activatedDate: '2026-03-10',
     }
@@ -66,7 +66,7 @@ const storeScenarios = [
     tenant: {
       id: 'preview-tenant', name: 'Almost Ready Store', plan: 'growth' as const, status: 'pending_activation' as const,
       onboardingStage: 'pending_activation' as const,
-      onboardingChecklist: { profileComplete: true, paymentMethodAdded: false, firstProductAdded: false, domainConfigured: false, teamInvited: true, storeCustomized: true },
+      onboardingChecklist: { profileComplete: true, paymentMethodAdded: false, firstProductAdded: false, domainConfigured: false, teamInvited: true, storeCustomized: true, storeSetupComplete: true },
       domainInfo: { mode: 'platform_subdomain' as const, subdomain: 'almost-ready.repairplatform.io', dnsVerified: false, sslProvisioned: false, propagated: false },
       setupStartedDate: '2026-03-22',
     }
@@ -77,7 +77,7 @@ const storeScenarios = [
     tenant: {
       id: 'preview-tenant', name: 'Read Only Store', plan: 'growth' as const, status: 'read_only' as const,
       onboardingStage: 'active' as const,
-      onboardingChecklist: { profileComplete: true, paymentMethodAdded: true, firstProductAdded: true, domainConfigured: true, teamInvited: true, storeCustomized: true },
+      onboardingChecklist: { profileComplete: true, paymentMethodAdded: true, firstProductAdded: true, domainConfigured: true, teamInvited: true, storeCustomized: true, storeSetupComplete: true },
       domainInfo: { mode: 'custom_active' as const, subdomain: 'readonly.repairplatform.io', customDomain: 'readonly-store.com', dnsVerified: true, sslProvisioned: true, propagated: true },
       activatedDate: '2026-01-15',
     }
@@ -88,7 +88,7 @@ const storeScenarios = [
     tenant: {
       id: 'preview-tenant', name: 'Suspended Store', plan: 'growth' as const, status: 'suspended' as const,
       onboardingStage: 'active' as const,
-      onboardingChecklist: { profileComplete: true, paymentMethodAdded: true, firstProductAdded: true, domainConfigured: true, teamInvited: true, storeCustomized: true },
+      onboardingChecklist: { profileComplete: true, paymentMethodAdded: true, firstProductAdded: true, domainConfigured: true, teamInvited: true, storeCustomized: true, storeSetupComplete: true },
       domainInfo: { mode: 'custom_active' as const, subdomain: 'suspended.repairplatform.io', customDomain: 'suspended-store.com', dnsVerified: true, sslProvisioned: true, propagated: true },
       activatedDate: '2026-01-10',
     }
@@ -99,7 +99,7 @@ const storeScenarios = [
     tenant: {
       id: 'preview-tenant', name: 'Overdue Store', plan: 'growth' as const, status: 'overdue' as const,
       onboardingStage: 'active' as const,
-      onboardingChecklist: { profileComplete: true, paymentMethodAdded: true, firstProductAdded: true, domainConfigured: true, teamInvited: true, storeCustomized: true },
+      onboardingChecklist: { profileComplete: true, paymentMethodAdded: true, firstProductAdded: true, domainConfigured: true, teamInvited: true, storeCustomized: true, storeSetupComplete: true },
       domainInfo: { mode: 'custom_active' as const, subdomain: 'overdue.repairplatform.io', customDomain: 'overdue-store.com', dnsVerified: true, sslProvisioned: true, propagated: true },
       activatedDate: '2026-02-01',
     }
@@ -110,7 +110,7 @@ const storeScenarios = [
     tenant: {
       id: 'preview-tenant', name: 'New Setup Store', plan: 'starter' as const, status: 'pending_activation' as const,
       onboardingStage: 'pending_setup' as const,
-      onboardingChecklist: { profileComplete: false, paymentMethodAdded: false, firstProductAdded: false, domainConfigured: false, teamInvited: false, storeCustomized: false },
+      onboardingChecklist: { profileComplete: false, paymentMethodAdded: false, firstProductAdded: false, domainConfigured: false, teamInvited: false, storeCustomized: false, storeSetupComplete: false },
       domainInfo: { mode: 'platform_subdomain' as const, subdomain: 'new-setup.repairplatform.io', dnsVerified: false, sslProvisioned: false, propagated: false },
       inviteSentDate: '2026-03-20',
       setupStartedDate: '2026-03-24',
@@ -122,7 +122,7 @@ const storeScenarios = [
     tenant: {
       id: 'preview-tenant', name: 'Domain Register Store', plan: 'growth' as const, status: 'active' as const,
       onboardingStage: 'active' as const,
-      onboardingChecklist: { profileComplete: true, paymentMethodAdded: true, firstProductAdded: true, domainConfigured: true, teamInvited: true, storeCustomized: true },
+      onboardingChecklist: { profileComplete: true, paymentMethodAdded: true, firstProductAdded: true, domainConfigured: true, teamInvited: true, storeCustomized: true, storeSetupComplete: true },
       domainInfo: { mode: 'custom_pending' as const, subdomain: 'domain-register.repairplatform.io', customDomain: 'newdomain.com', dnsVerified: false, sslProvisioned: false, propagated: false },
       activatedDate: '2026-03-01',
     }
@@ -133,7 +133,7 @@ const storeScenarios = [
     tenant: {
       id: 'preview-tenant', name: 'SSL Setup Store', plan: 'advanced' as const, status: 'active' as const,
       onboardingStage: 'active' as const,
-      onboardingChecklist: { profileComplete: true, paymentMethodAdded: true, firstProductAdded: true, domainConfigured: true, teamInvited: true, storeCustomized: true },
+      onboardingChecklist: { profileComplete: true, paymentMethodAdded: true, firstProductAdded: true, domainConfigured: true, teamInvited: true, storeCustomized: true, storeSetupComplete: true },
       domainInfo: { mode: 'custom_ssl_pending' as const, subdomain: 'ssl-setup.repairplatform.io', customDomain: 'ssldomain.com', dnsVerified: true, sslProvisioned: false, propagated: true },
       activatedDate: '2026-02-20',
     }

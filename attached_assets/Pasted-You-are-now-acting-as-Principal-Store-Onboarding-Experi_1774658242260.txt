@@ -1,0 +1,136 @@
+You are now acting as:
+Principal Store Onboarding Experience Architect + Principal UX Workflow Designer + Principal Tenant Lifecycle Architect + Principal React/TypeScript Engineer + Principal QA Auditor + Principal Side Auditor & Systems Thinker
+
+IMPORTANT:
+You must not only fix the visible issue.
+You must also act as:
+- a side auditor
+- a systems thinker
+- an onboarding UX architect
+
+That means:
+- identify any missing support logic needed to make the onboarding checklist coherent
+- implement the cleanest professional solution
+- avoid shallow routing fixes
+- preserve the current design baseline exactly
+
+This is a final narrow refinement pass ONLY for:
+Tenant Management & Provisioning → Store Owner onboarding checklist UX
+
+Do not touch unrelated modules.
+Do not redesign the UI.
+Preserve auth, preview mode, platform/store hierarchy, and RBAC.
+
+==================================================
+1. COMBINE PROFILE + APPEARANCE INTO ONE CHECKLIST STEP
+==================================================
+
+Current issue:
+“Complete store profile” and “Customize store appearance” are separate checklist items, but both route to the same Settings area.
+
+Required:
+- combine them into one onboarding checklist step
+- use a clearer label such as:
+  - Set up store profile & branding
+  OR
+  - Complete store setup
+- keep the underlying settings sections if needed, but present them as one onboarding step
+
+Completion logic:
+- mark this combined step complete only when the required onboarding fields are saved
+- the step should feel meaningful, not artificially split
+
+==================================================
+2. INVITE TEAM MEMBERS SHOULD NOT ROUTE TO SETTINGS
+==================================================
+
+Current issue:
+“Invite team members” routes to Settings, which is the wrong destination.
+
+Required:
+- route Store Owner to Employees / Manage Employees context
+- best option: open Add New Employee modal directly from the onboarding action
+- keep the experience fast and obvious
+
+Completion logic:
+- mark “Invite team members” complete once at least one employee is successfully added or invited
+
+==================================================
+3. OPTIONAL VS REQUIRED CHECKLIST LOGIC
+==================================================
+
+Act as a systems thinker and make the onboarding checklist coherent.
+
+Recommended behavior:
+- Store profile & branding = required
+- Invite team members = optional but recommended, unless current business rules explicitly require at least one additional employee
+
+If invite-team is optional:
+- allow store activation/onboarding completion without forcing additional employee creation
+- clearly label it as optional or skippable where appropriate
+
+If you determine a different rule is absolutely necessary, make it explicit and coherent.
+
+==================================================
+4. DASHBOARD ONBOARDING CONTROL CENTER
+==================================================
+
+Keep the dashboard as the onboarding control center before activation is complete.
+
+Required:
+- updated checklist should be clean and intentional
+- no duplicate steps
+- no misrouted checklist actions
+- progress state should remain clear
+
+==================================================
+5. SIDE AUDIT / SYSTEM THINKER REQUIREMENT
+==================================================
+
+Before finishing, audit whether this onboarding flow needs any additional supporting logic such as:
+- better checklist completion criteria
+- optional vs required labeling
+- clearer CTA progression
+- employee invite completion state
+- cleaner routing/deep-linking into the correct destination
+
+Add only the minimal professional support logic needed.
+
+==================================================
+6. DO NOT BREAK THESE
+==================================================
+
+Do NOT break:
+- auth flow
+- preview mode
+- current lifecycle gating
+- current design baseline
+- existing activation flow
+- existing dashboard onboarding control center
+
+==================================================
+7. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether profile + appearance were combined into one onboarding step
+C. what the final checklist step label is
+D. whether Invite Team Members now routes correctly to Employees/Add New Employee
+E. what the completion logic is for each checklist item
+F. whether Invite Team Members is optional or required
+G. what supporting onboarding logic was added from side-audit/system-thinking
+H. confirmation that no visual drift was introduced
+
+==================================================
+8. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- profile + appearance are no longer duplicate onboarding steps
+- Invite Team Members no longer routes to Settings
+- Add New Employee opens from the correct onboarding action
+- checklist completion logic is coherent
+- onboarding remains clean and intentional
+- auth flow still works
+- no visual drift was introduced

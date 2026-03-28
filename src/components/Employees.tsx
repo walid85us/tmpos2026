@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { useSearchParams } from 'react-router-dom';
 import { 
   Employee, EmployeeTimeLog, EmployeeActivityLog, 
   EmployeeCommission, EmployeePayroll 
@@ -89,13 +90,21 @@ const storeAdminFeatures = [
 const storeFeatures = [...storeModuleFeatures, ...storeAdminFeatures];
 
 export default function Employees() {
-  const { session, tenantRolesState = [], addTenantRole, updateTenantRole, canAccess } = useAccess();
+  const { session, tenant, setPreviewTenant, isPreviewModeEnabled, tenantRolesState = [], addTenantRole, updateTenantRole, canAccess } = useAccess();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<'list' | 'time' | 'roles' | 'permissions' | 'activity' | 'payroll'>('list');
   const [employees, setEmployees] = useState<Employee[]>(MOCK_EMPLOYEES);
   const [timeLogs, setTimeLogs] = useState<EmployeeTimeLog[]>(MOCK_TIME_LOGS);
   const [activityLogs, setActivityLogs] = useState<EmployeeActivityLog[]>(MOCK_ACTIVITY_LOGS);
   const [searchQuery, setSearchQuery] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
+
+  useEffect(() => {
+    if (searchParams.get('action') === 'add') {
+      setShowAddModal(true);
+      setSearchParams({}, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
   const [showPayrollWizard, setShowPayrollWizard] = useState(false);
   const [showCreateRoleModal, setShowCreateRoleModal] = useState(false);
   const [showTimeEditModal, setShowTimeEditModal] = useState(false);
@@ -288,6 +297,12 @@ export default function Employees() {
         };
         setEmployees(prev => [...prev, newEmployee]);
         logActivity(newEmployee.id, `${firstName} ${lastName}`, 'Employee Added', `New employee added with role ${roleId}`);
+        if (isPreviewModeEnabled && tenant && tenant.onboardingChecklist && !tenant.onboardingChecklist.teamInvited) {
+          setPreviewTenant({
+            ...tenant,
+            onboardingChecklist: { ...tenant.onboardingChecklist, teamInvited: true },
+          });
+        }
         showToast('Employee added successfully.');
       }
     }
