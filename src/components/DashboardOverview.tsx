@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAccess } from '../context/AccessContext';
 import type { OnboardingStage, OnboardingChecklist, TenantDomainInfo, DomainMode } from '../context/AccessContext';
+import { planFeatures } from '../context/accessConfig';
 import ApprovalQueue from './ApprovalQueue';
 
 function DomainStatusCard({ domainInfo, onDomainAction }: { domainInfo: TenantDomainInfo; onDomainAction?: (action: string) => void }) {
@@ -83,19 +84,20 @@ function StatusChip({ label, done }: { label: string; done: boolean }) {
   );
 }
 
-function OnboardingChecklistCard({ checklist, onboardingStage, onToggleItem, isLocked }: {
+function OnboardingChecklistCard({ checklist, onboardingStage, onToggleItem, isLocked, employeesEntitled }: {
   checklist: OnboardingChecklist;
   onboardingStage: OnboardingStage;
   onToggleItem?: (key: keyof OnboardingChecklist) => void;
   isLocked?: boolean;
+  employeesEntitled: boolean;
 }) {
-  const items: { key: keyof OnboardingChecklist; label: string; icon: string; action: string; route: string; optional?: boolean }[] = [
+  const items: { key: keyof OnboardingChecklist; label: string; icon: string; action: string; route: string; systemDriven?: boolean }[] = [
     { key: 'storeSetupComplete', label: 'Set up store profile & branding', icon: 'storefront', action: 'Go to Settings', route: '/settings' },
-    { key: 'teamInvited', label: 'Invite team members', icon: 'group_add', action: 'Add Employee', route: '/employees?action=add', optional: true },
   ];
+  if (employeesEntitled) {
+    items.push({ key: 'teamInvited', label: 'Invite team members', icon: 'group_add', action: 'Add Employee', route: '/employees?action=add', systemDriven: true });
+  }
 
-  const requiredItems = items.filter(i => !i.optional);
-  const requiredDone = requiredItems.filter(item => checklist[item.key]).length;
   const completedCount = items.filter(item => checklist[item.key]).length;
   const totalCount = items.length;
   const progress = Math.round((completedCount / totalCount) * 100);
@@ -137,25 +139,16 @@ function OnboardingChecklistCard({ checklist, onboardingStage, onToggleItem, isL
         {items.map(item => (
           <div key={item.key} className={`flex items-center justify-between p-2.5 rounded-xl transition-colors ${checklist[item.key] ? 'bg-lime-50/50' : 'bg-slate-50 hover:bg-slate-100'}`}>
             <div className="flex items-center gap-2.5">
-              {onToggleItem ? (
-                <button onClick={() => onToggleItem(item.key)} className="flex items-center gap-0 group">
-                  <span className={`material-symbols-outlined text-sm ${checklist[item.key] ? 'text-lime-500 group-hover:text-lime-600' : 'text-slate-300 group-hover:text-blue-400'}`}>
-                    {checklist[item.key] ? 'check_circle' : 'radio_button_unchecked'}
-                  </span>
-                </button>
-              ) : (
-                <span className={`material-symbols-outlined text-sm ${checklist[item.key] ? 'text-lime-500' : 'text-slate-300'}`}>
-                  {checklist[item.key] ? 'check_circle' : 'radio_button_unchecked'}
-                </span>
-              )}
+              <span className={`material-symbols-outlined text-sm ${checklist[item.key] ? 'text-lime-500' : 'text-slate-300'}`}>
+                {checklist[item.key] ? 'check_circle' : 'radio_button_unchecked'}
+              </span>
               <span className={`text-[11px] font-bold ${checklist[item.key] ? 'text-slate-400 line-through' : 'text-slate-700'}`}>
                 {item.label}
-                {item.optional && <span className="text-[8px] font-bold text-slate-400 ml-1.5 uppercase tracking-wider">(optional)</span>}
               </span>
             </div>
             {!checklist[item.key] && (
               <div className="flex items-center gap-2">
-                {onToggleItem && (
+                {onToggleItem && !item.systemDriven && (
                   <button onClick={() => onToggleItem(item.key)} className="text-[8px] font-black text-lime-600 bg-lime-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-lime-100 transition-colors border border-lime-200">
                     Mark Done
                   </button>
@@ -239,9 +232,10 @@ function StoreActivationPanel() {
     dnsVerified: false, sslProvisioned: false, propagated: false,
   };
 
-  const requiredChecklistKeys: (keyof OnboardingChecklist)[] = ['storeSetupComplete'];
-  const optionalChecklistKeys: (keyof OnboardingChecklist)[] = ['teamInvited'];
-  const storeChecklistKeys: (keyof OnboardingChecklist)[] = [...requiredChecklistKeys, ...optionalChecklistKeys];
+  const employeesEntitled = (planFeatures[tenant.plan] || []).includes('employees');
+  const storeChecklistKeys: (keyof OnboardingChecklist)[] = employeesEntitled
+    ? ['storeSetupComplete', 'teamInvited']
+    : ['storeSetupComplete'];
 
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
@@ -272,10 +266,10 @@ function StoreActivationPanel() {
 
   const toggleChecklistItem = useCallback((key: keyof OnboardingChecklist) => {
     const newChecklist = { ...checklist, [key]: !checklist[key] };
-    const requiredDone = requiredChecklistKeys.every(k => newChecklist[k]);
+    const allDone = storeChecklistKeys.every(k => newChecklist[k]);
     const anyDone = storeChecklistKeys.some(k => newChecklist[k]);
     let newStage = onboardingStage;
-    if (requiredDone && onboardingStage !== 'active') {
+    if (allDone && onboardingStage !== 'active') {
       newStage = 'pending_activation';
     } else if (anyDone) {
       newStage = onboardingStage === 'invited' ? 'pending_setup' : 'setup_incomplete';
@@ -323,7 +317,7 @@ function StoreActivationPanel() {
   const isOverdue = tenant.status === 'overdue';
   const isReadOnly = tenant.status === 'read_only';
   const isFullyOnboarded = onboardingStage === 'active' && isLive;
-  const checklistComplete = requiredChecklistKeys.every(k => checklist[k]);
+  const checklistComplete = storeChecklistKeys.every(k => checklist[k]);
 
   const toast = toastMsg ? (
     <div className="fixed top-6 right-6 z-[200] px-5 py-3 bg-slate-900 text-white text-sm font-bold rounded-2xl shadow-2xl flex items-center gap-2 animate-in fade-in slide-in-from-top-2">
@@ -587,6 +581,7 @@ function StoreActivationPanel() {
           onboardingStage={onboardingStage}
           onToggleItem={isPreviewModeEnabled ? toggleChecklistItem : undefined}
           isLocked={onboardingStage === 'invited'}
+          employeesEntitled={employeesEntitled}
         />
         {(domainInfo.mode !== 'platform_subdomain' || !!domainInfo.customDomain) && (
           <DomainStatusCard domainInfo={domainInfo} onDomainAction={isPreviewModeEnabled ? handleDomainAction : undefined} />

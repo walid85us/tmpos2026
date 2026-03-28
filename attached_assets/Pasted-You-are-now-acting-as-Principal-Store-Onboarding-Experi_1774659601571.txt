@@ -1,0 +1,147 @@
+You are now acting as:
+Principal Store Onboarding Experience Architect + Principal SaaS Activation & Access-Gating Architect + Principal Plan/Entitlement Systems Architect + Principal RBAC Architect + Principal React/TypeScript Engineer + Principal UX Workflow Designer + Principal QA Auditor + Principal Side Auditor & Systems Thinker
+
+IMPORTANT:
+You must not only fix the visible issue.
+You must also act as:
+- a side auditor
+- a systems thinker
+- an onboarding/entitlement architect
+
+That means:
+- identify any missing support logic needed to make the onboarding checklist coherent
+- implement the missing support process if required
+- avoid shallow routing-only fixes
+- preserve the current design baseline exactly
+
+This is a final narrow refinement pass ONLY for:
+Tenant Management & Provisioning → Store Owner onboarding checklist entitlement logic
+
+Do not touch unrelated modules.
+Do not redesign the UI.
+Preserve auth, preview mode, platform/store hierarchy, lifecycle gating, and RBAC.
+
+==================================================
+1. INVITE TEAM MEMBERS MUST BE PLAN/FEATURE-DRIVEN
+==================================================
+
+Current issue:
+The “Invite team members” onboarding checklist item is currently shown as optional, but it should depend on whether Employee Management is actually included in the tenant’s active entitlement.
+
+Required:
+- if the tenant’s active entitlement includes Employee Management, show the checklist item:
+  - Invite team members
+- if the tenant’s active entitlement does NOT include Employee Management, do NOT show this checklist item at all
+
+Active entitlement may come from:
+- selected plan
+- paid override
+- active feature trial
+- other existing entitlement logic if already implemented
+
+Do not hardcode this to plan name only.
+It must follow the actual feature entitlement state.
+
+==================================================
+2. INVITE TEAM MEMBERS MUST NOT BE OPTIONAL WHEN INCLUDED
+==================================================
+
+Required:
+- if Employee Management is included in the active entitlement, the checklist item must NOT be optional
+- remove optional labeling in that case
+- the onboarding flow should clearly require the Store Owner to go through that step
+
+==================================================
+3. REMOVE MANUAL MARKING
+==================================================
+
+Current issue:
+The step should not rely on a manual mark button.
+
+Required:
+- remove the manual mark/complete button for Invite team members
+- checklist completion must be system-driven based on actual workflow completion
+
+Completion rule:
+- mark the step complete only when at least one employee has been successfully added/invited
+
+==================================================
+4. ROUTE TO THE CORRECT ACTION
+==================================================
+
+Current issue:
+Invite team members should not route to Settings.
+
+Required:
+- clicking Invite team members should take the Store Owner into the Employees / Manage Employees flow
+- best behavior: open the Add New Employee modal directly
+- the modal should be clearly titled:
+  - Add New Employee
+- after successful employee creation/invite, the checklist step should immediately reflect completion
+
+==================================================
+5. CHECKLIST COHERENCE
+==================================================
+
+Act as a systems thinker and make the onboarding checklist coherent.
+
+Requirements:
+- keep the checklist clean and intentional
+- do not show onboarding items that the tenant is not entitled to use
+- do not leave duplicate or misleading checklist actions
+- completion should be tied to real system state, not manual toggles
+- if Employee Management becomes enabled later via paid override or trial, the checklist item may appear if onboarding is still incomplete and the step has not been completed yet
+
+==================================================
+6. SIDE AUDIT / SYSTEM THINKER REQUIREMENT
+==================================================
+
+Before finishing, audit whether the onboarding checklist needs any additional supporting logic such as:
+- better entitlement checks
+- clearer optional vs required rules
+- employee-invite completion criteria
+- better deep-linking or modal-opening behavior
+- better checklist persistence/state mapping
+
+Add only the minimal professional support logic needed.
+Do not add unrelated features.
+
+==================================================
+7. DO NOT BREAK THESE
+==================================================
+
+Do NOT break:
+- auth flow
+- preview mode
+- current lifecycle gating
+- current design baseline
+- current activation/onboarding flow
+- current plan/feature entitlement logic
+- existing Store Owner dashboard onboarding control center
+
+==================================================
+8. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether Invite team members is now shown only when Employee Management is included in active entitlement
+C. whether Invite team members is no longer optional when included
+D. whether the manual mark/complete button was removed
+E. whether clicking Invite team members now opens the correct Add New Employee flow
+F. what exact system event now marks the step complete
+G. what supporting onboarding/entitlement logic was added from side-audit/system-thinking
+H. confirmation that no visual drift was introduced
+
+==================================================
+9. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- Invite team members only appears when Employee Management is actively entitled
+- it is not optional when entitled
+- manual mark button is removed
+- Add New Employee opens from the checklist action
+- the step auto-completes only after at least one employee is successfully added/invited
+- auth flow still works
+- no visual drift was introduced

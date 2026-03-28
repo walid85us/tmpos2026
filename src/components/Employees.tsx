@@ -6,6 +6,7 @@ import {
   EmployeeCommission, EmployeePayroll 
 } from '../types';
 import { useAccess } from '../context/AccessContext';
+import { planFeatures } from '../context/accessConfig';
 import PendingApproval from './PendingApproval';
 
 const MOCK_EMPLOYEES: Employee[] = [
@@ -298,9 +299,22 @@ export default function Employees() {
         setEmployees(prev => [...prev, newEmployee]);
         logActivity(newEmployee.id, `${firstName} ${lastName}`, 'Employee Added', `New employee added with role ${roleId}`);
         if (isPreviewModeEnabled && tenant && tenant.onboardingChecklist && !tenant.onboardingChecklist.teamInvited) {
+          const updatedChecklist = { ...tenant.onboardingChecklist, teamInvited: true };
+          const checklistKeys: string[] = (planFeatures[tenant.plan] || []).includes('employees')
+            ? ['storeSetupComplete', 'teamInvited']
+            : ['storeSetupComplete'];
+          const allDone = checklistKeys.every(k => (updatedChecklist as Record<string, boolean>)[k]);
+          const stage = tenant.onboardingStage;
+          let newStage = stage;
+          if (allDone && stage !== 'active') {
+            newStage = 'pending_activation';
+          } else if (stage === 'invited' || stage === 'pending_setup') {
+            newStage = 'setup_incomplete';
+          }
           setPreviewTenant({
             ...tenant,
-            onboardingChecklist: { ...tenant.onboardingChecklist, teamInvited: true },
+            onboardingChecklist: updatedChecklist,
+            onboardingStage: newStage,
           });
         }
         showToast('Employee added successfully.');
