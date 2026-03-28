@@ -44,7 +44,7 @@ const storeScenarios = [
     tenant: {
       id: 'preview-tenant', name: 'Setting Up Store', plan: 'growth' as const, status: 'pending_activation' as const,
       onboardingStage: 'setup_incomplete' as const,
-      onboardingChecklist: { profileComplete: true, paymentMethodAdded: true, firstProductAdded: false, domainConfigured: false, teamInvited: false, storeCustomized: false },
+      onboardingChecklist: { profileComplete: true, paymentMethodAdded: false, firstProductAdded: false, domainConfigured: false, teamInvited: false, storeCustomized: false },
       domainInfo: { mode: 'platform_subdomain' as const, subdomain: 'setting-up.repairplatform.io', dnsVerified: false, sslProvisioned: false, propagated: false },
       setupStartedDate: '2026-03-24',
     }
@@ -66,9 +66,20 @@ const storeScenarios = [
     tenant: {
       id: 'preview-tenant', name: 'Almost Ready Store', plan: 'growth' as const, status: 'pending_activation' as const,
       onboardingStage: 'pending_activation' as const,
-      onboardingChecklist: { profileComplete: true, paymentMethodAdded: true, firstProductAdded: true, domainConfigured: false, teamInvited: false, storeCustomized: true },
+      onboardingChecklist: { profileComplete: true, paymentMethodAdded: false, firstProductAdded: false, domainConfigured: false, teamInvited: true, storeCustomized: true },
       domainInfo: { mode: 'platform_subdomain' as const, subdomain: 'almost-ready.repairplatform.io', dnsVerified: false, sslProvisioned: false, propagated: false },
       setupStartedDate: '2026-03-22',
+    }
+  },
+  {
+    id: 'read_only',
+    label: 'Read Only',
+    tenant: {
+      id: 'preview-tenant', name: 'Read Only Store', plan: 'growth' as const, status: 'read_only' as const,
+      onboardingStage: 'active' as const,
+      onboardingChecklist: { profileComplete: true, paymentMethodAdded: true, firstProductAdded: true, domainConfigured: true, teamInvited: true, storeCustomized: true },
+      domainInfo: { mode: 'custom_active' as const, subdomain: 'readonly.repairplatform.io', customDomain: 'readonly-store.com', dnsVerified: true, sslProvisioned: true, propagated: true },
+      activatedDate: '2026-01-15',
     }
   },
   {

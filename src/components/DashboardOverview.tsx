@@ -249,7 +249,7 @@ function StoreActivationPanel() {
   }, [tenant, isPreviewModeEnabled, setPreviewTenant]);
 
   const advanceStage = useCallback((nextStage: OnboardingStage) => {
-    const today = '2026-03-27';
+    const today = new Date().toISOString().split('T')[0];
     const dateUpdates: Record<string, string> = {};
     if (nextStage === 'pending_setup') dateUpdates.setupStartedDate = today;
     if (nextStage === 'active') dateUpdates.activatedDate = today;
@@ -268,15 +268,16 @@ function StoreActivationPanel() {
     const completedCount = storeChecklistKeys.filter(k => newChecklist[k]).length;
     const totalItems = storeChecklistKeys.length;
     let newStage = onboardingStage;
-    if (onboardingStage === 'invited' && completedCount > 0) {
-      newStage = 'pending_setup';
-    } else if ((onboardingStage === 'pending_setup' || onboardingStage === 'setup_incomplete') && completedCount > 0 && completedCount < totalItems) {
-      newStage = 'setup_incomplete';
-    } else if (completedCount === totalItems && onboardingStage !== 'active') {
+    if (completedCount === totalItems && onboardingStage !== 'active') {
       newStage = 'pending_activation';
+    } else if (completedCount > 0 && completedCount < totalItems) {
+      newStage = onboardingStage === 'invited' ? 'pending_setup' : 'setup_incomplete';
+    } else if (completedCount === 0 && onboardingStage !== 'invited') {
+      newStage = 'pending_setup';
     }
+    const today = new Date().toISOString().split('T')[0];
     const dateUpdates: Record<string, string> = {};
-    if (newStage === 'pending_setup' && !tenant.setupStartedDate) dateUpdates.setupStartedDate = '2026-03-27';
+    if (newStage === 'pending_setup' && !tenant.setupStartedDate) dateUpdates.setupStartedDate = today;
     updateTenant({ onboardingChecklist: newChecklist, onboardingStage: newStage, ...dateUpdates });
     showToast(`${checklist[key] ? 'Unchecked' : 'Completed'}: ${key.replace(/([A-Z])/g, ' $1').toLowerCase()}`);
   }, [checklist, onboardingStage, tenant, updateTenant, showToast]);
@@ -316,13 +317,6 @@ function StoreActivationPanel() {
   const isReadOnly = tenant.status === 'read_only';
   const isFullyOnboarded = onboardingStage === 'active' && isLive;
   const checklistComplete = storeChecklistKeys.every(k => checklist[k]);
-
-  const nextStageMap: Partial<Record<OnboardingStage, OnboardingStage>> = {
-    invited: 'pending_setup',
-    pending_setup: 'setup_incomplete',
-    setup_incomplete: 'pending_activation',
-    pending_activation: 'active',
-  };
 
   const toast = toastMsg ? (
     <div className="fixed top-6 right-6 z-[200] px-5 py-3 bg-slate-900 text-white text-sm font-bold rounded-2xl shadow-2xl flex items-center gap-2 animate-in fade-in slide-in-from-top-2">
@@ -501,12 +495,6 @@ function StoreActivationPanel() {
     active: 'check_circle',
   };
 
-  const nextStage = nextStageMap[onboardingStage];
-  const nextStageLabels: Record<OnboardingStage, string> = {
-    invited: 'Begin Setup', pending_setup: 'Continue Setup', setup_incomplete: 'Submit for Activation',
-    pending_activation: 'Activate Store', active: '',
-  };
-
   return (
     <>
       {toast}
@@ -577,19 +565,12 @@ function StoreActivationPanel() {
             <div className="p-3 bg-white/60 rounded-xl border border-amber-100">
               <p className="text-[10px] font-bold text-amber-600 flex items-center gap-1">
                 <span className="material-symbols-outlined text-xs">info</span>
-                Complete the checklist items below to proceed to activation.
+                {storeChecklistKeys.filter(k => checklist[k]).length}/{storeChecklistKeys.length} completed — finish all items below to proceed to activation.
               </p>
-              <div className="mt-2 flex gap-2 flex-wrap">
-                {isPreviewModeEnabled && nextStage && (
-                  <button onClick={() => advanceStage(nextStage)} className="px-4 py-2 bg-amber-500 text-white text-[9px] font-black rounded-xl uppercase tracking-widest hover:bg-amber-600 transition-colors">
-                    Continue Setup
-                  </button>
-                )}
-                {!isPreviewModeEnabled && (
-                  <Link to="/settings" className="px-4 py-2 bg-amber-500 text-white text-[9px] font-black rounded-xl uppercase tracking-widest hover:bg-amber-600 transition-colors inline-block">
-                    Continue Setup
-                  </Link>
-                )}
+              <div className="mt-2">
+                <Link to="/settings" className="px-4 py-2 bg-amber-500 text-white text-[9px] font-black rounded-xl uppercase tracking-widest hover:bg-amber-600 transition-colors inline-block">
+                  Continue Setup
+                </Link>
               </div>
             </div>
           )}
