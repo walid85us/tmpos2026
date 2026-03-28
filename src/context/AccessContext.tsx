@@ -48,7 +48,7 @@ interface Tenant {
   trialEndsDate?: string;
 }
 
-export const ONBOARDING_ALLOWED_MODULES = ['dashboard', 'settings', 'support', 'employees'];
+export const ONBOARDING_ALLOWED_MODULES = ['dashboard', 'settings', 'support'];
 
 interface AccessContextType {
   session: Session | null;

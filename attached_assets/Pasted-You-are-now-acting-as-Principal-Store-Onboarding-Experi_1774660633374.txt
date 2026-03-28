@@ -1,0 +1,160 @@
+You are now acting as:
+Principal Store Onboarding Experience Architect + Principal SaaS Activation & Access-Gating Architect + Principal Plan/Entitlement Systems Architect + Principal RBAC Architect + Principal React/TypeScript Engineer + Principal UX Workflow Designer + Principal QA Auditor + Principal Side Auditor & Systems Thinker
+
+IMPORTANT:
+You must not only fix the visible issue.
+You must also act as:
+- a side auditor
+- a systems thinker
+- an onboarding/entitlement architect
+
+That means:
+- identify any missing support logic needed to make the onboarding checklist and Employees access coherent
+- implement the missing support process if required
+- avoid shallow routing-only fixes
+- preserve the current design baseline exactly
+
+This is a final narrow refinement pass ONLY for:
+Tenant Management & Provisioning → Invite team members entitlement + activation gating logic
+
+Do not touch unrelated modules.
+Do not redesign the UI.
+Preserve auth, preview mode, platform/store hierarchy, lifecycle gating, and RBAC.
+
+==================================================
+1. INVITE TEAM MEMBERS CHECKLIST ENTITLEMENT RULE
+==================================================
+
+Current issue:
+The “Invite team members” checklist item still appears when Employee Management is not entitled.
+
+Required:
+- show “Invite team members” in the onboarding checklist ONLY when Employee Management is included in the tenant’s active entitlement
+- active entitlement may come from:
+  - selected plan
+  - paid override
+  - active feature trial
+  - other existing entitlement logic if already implemented
+- if Employee Management is NOT actively entitled, do NOT show this checklist item at all
+
+==================================================
+2. EMPLOYEES SIDE MENU MUST FOLLOW BOTH RULES
+==================================================
+
+Current issue:
+The Employees page is still appearing in the side menu when it should not.
+
+Required:
+Employees side-menu visibility must follow BOTH:
+A. activation gating
+B. feature entitlement
+
+Rule:
+- before store activation is complete:
+  - Employees must remain hidden/locked in side menu
+  - even if Employee Management is included in the plan
+- after activation is complete:
+  - show Employees in side menu ONLY if Employee Management is actively entitled
+- if Employee Management is not entitled:
+  - Employees must not appear in side menu even after activation
+
+==================================================
+3. CHECKLIST ACTION MUST OPEN ADD NEW EMPLOYEE DIRECTLY
+==================================================
+
+Current issue:
+The checklist action is not opening the correct workflow.
+
+Required:
+- clicking “Invite team members” from onboarding checklist must open the Add New Employee flow directly
+- best behavior:
+  - open Add New Employee modal from the dashboard onboarding context
+- do NOT require the Employees page to be exposed before activation
+- do NOT route this action to Settings
+
+==================================================
+4. REMOVE MANUAL MARK BUTTON / USE SYSTEM-DRIVEN COMPLETION
+==================================================
+
+Current issue:
+Checklist completion should not rely on manual marking.
+
+Required:
+- fully remove manual mark/complete button for Invite team members
+- completion must be system-driven only
+
+Completion rule:
+- mark the checklist step complete only after at least one employee is successfully added/invited
+
+==================================================
+5. CHECKLIST + LIFECYCLE COHERENCE
+==================================================
+
+Required:
+Make the onboarding checklist coherent with lifecycle gating.
+
+Rules:
+- before activation:
+  - dashboard checklist can surface Invite team members only if entitled
+  - Employees side menu remains hidden/locked
+- after activation:
+  - normal Employees module visibility follows entitlement
+- if Employee Management becomes entitled later through paid override or feature trial:
+  - the checklist item may appear if onboarding is still incomplete and the step has not already been completed
+
+==================================================
+6. SIDE AUDIT / SYSTEM THINKER REQUIREMENT
+==================================================
+
+Before finishing, audit whether this workflow needs additional supporting logic such as:
+- better entitlement checks
+- cleaner side-menu gating
+- clearer onboarding CTA behavior
+- employee invite completion state persistence
+- better dashboard-to-modal flow
+- clearer explanation when Employees is unavailable due to plan or activation state
+
+Add only the minimal professional support logic needed.
+Do not add unrelated features.
+
+==================================================
+7. DO NOT BREAK THESE
+==================================================
+
+Do NOT break:
+- auth flow
+- preview mode
+- current lifecycle gating
+- current design baseline
+- current activation/onboarding flow
+- current plan/feature entitlement logic
+- existing Store Owner dashboard onboarding control center
+
+==================================================
+8. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether Invite team members now appears only when Employee Management is actively entitled
+C. whether Employees side menu is now hidden before activation
+D. whether Employees side menu now appears only after activation + entitlement
+E. whether clicking Invite team members now opens Add New Employee directly from dashboard onboarding
+F. whether the manual mark button was fully removed
+G. what exact system event now marks the step complete
+H. what supporting onboarding/entitlement logic was added from side-audit/system-thinking
+I. confirmation that no visual drift was introduced
+
+==================================================
+9. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- Invite team members only appears when Employee Management is actively entitled
+- Employees side menu is hidden before activation
+- Employees side menu appears only after activation and only if entitled
+- Add New Employee opens directly from checklist action
+- manual mark button is fully removed
+- checklist step auto-completes only after first employee is successfully added/invited
+- auth flow still works
+- no visual drift was introduced

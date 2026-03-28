@@ -84,18 +84,19 @@ function StatusChip({ label, done }: { label: string; done: boolean }) {
   );
 }
 
-function OnboardingChecklistCard({ checklist, onboardingStage, onToggleItem, isLocked, employeesEntitled }: {
+function OnboardingChecklistCard({ checklist, onboardingStage, onToggleItem, isLocked, employeesEntitled, onAddEmployee }: {
   checklist: OnboardingChecklist;
   onboardingStage: OnboardingStage;
   onToggleItem?: (key: keyof OnboardingChecklist) => void;
   isLocked?: boolean;
   employeesEntitled: boolean;
+  onAddEmployee?: () => void;
 }) {
-  const items: { key: keyof OnboardingChecklist; label: string; icon: string; action: string; route: string; systemDriven?: boolean }[] = [
+  const items: { key: keyof OnboardingChecklist; label: string; icon: string; action: string; route?: string; systemDriven?: boolean; onClick?: () => void }[] = [
     { key: 'storeSetupComplete', label: 'Set up store profile & branding', icon: 'storefront', action: 'Go to Settings', route: '/settings' },
   ];
   if (employeesEntitled) {
-    items.push({ key: 'teamInvited', label: 'Invite team members', icon: 'group_add', action: 'Add Employee', route: '/employees?action=add', systemDriven: true });
+    items.push({ key: 'teamInvited', label: 'Invite team members', icon: 'group_add', action: 'Add Employee', systemDriven: true, onClick: onAddEmployee });
   }
 
   const completedCount = items.filter(item => checklist[item.key]).length;
@@ -153,9 +154,15 @@ function OnboardingChecklistCard({ checklist, onboardingStage, onToggleItem, isL
                     Mark Done
                   </button>
                 )}
-                <Link to={item.route} className="text-[8px] font-black text-primary uppercase tracking-widest hover:text-primary/80 transition-colors">
-                  {item.action}
-                </Link>
+                {item.onClick ? (
+                  <button onClick={item.onClick} className="text-[8px] font-black text-primary uppercase tracking-widest hover:text-primary/80 transition-colors">
+                    {item.action}
+                  </button>
+                ) : item.route ? (
+                  <Link to={item.route} className="text-[8px] font-black text-primary uppercase tracking-widest hover:text-primary/80 transition-colors">
+                    {item.action}
+                  </Link>
+                ) : null}
               </div>
             )}
           </div>
@@ -238,6 +245,7 @@ function StoreActivationPanel() {
     : ['storeSetupComplete'];
 
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [showAddEmployeeModal, setShowAddEmployeeModal] = useState(false);
 
   const showToast = useCallback((msg: string) => {
     setToastMsg(msg);
@@ -282,6 +290,30 @@ function StoreActivationPanel() {
     updateTenant({ onboardingChecklist: newChecklist, onboardingStage: newStage, ...dateUpdates });
     showToast(`${checklist[key] ? 'Unchecked' : 'Completed'}: ${key.replace(/([A-Z])/g, ' $1').toLowerCase()}`);
   }, [checklist, onboardingStage, tenant, updateTenant, showToast]);
+
+  const handleInlineAddEmployee = useCallback((e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    const firstName = fd.get('firstName') as string;
+    const lastName = fd.get('lastName') as string;
+    if (!firstName?.trim() || !lastName?.trim()) return;
+    const updatedChecklist = { ...checklist, teamInvited: true };
+    const allDone = storeChecklistKeys.every(k => updatedChecklist[k]);
+    let newStage = onboardingStage;
+    if (allDone && onboardingStage !== 'active') {
+      newStage = 'pending_activation';
+    } else if (onboardingStage === 'invited') {
+      newStage = 'pending_setup';
+    } else if (onboardingStage !== 'active') {
+      newStage = 'setup_incomplete';
+    }
+    const today = new Date().toISOString().split('T')[0];
+    const dateUpdates: Record<string, string> = {};
+    if (newStage === 'pending_setup' && !tenant.setupStartedDate) dateUpdates.setupStartedDate = today;
+    updateTenant({ onboardingChecklist: updatedChecklist, onboardingStage: newStage, ...dateUpdates });
+    setShowAddEmployeeModal(false);
+    showToast(`Employee ${firstName} ${lastName} invited successfully`);
+  }, [checklist, storeChecklistKeys, onboardingStage, tenant, updateTenant, showToast]);
 
   const handleDomainAction = useCallback((action: string) => {
     const di = { ...domainInfo };
@@ -582,11 +614,74 @@ function StoreActivationPanel() {
           onToggleItem={isPreviewModeEnabled ? toggleChecklistItem : undefined}
           isLocked={onboardingStage === 'invited'}
           employeesEntitled={employeesEntitled}
+          onAddEmployee={() => setShowAddEmployeeModal(true)}
         />
         {(domainInfo.mode !== 'platform_subdomain' || !!domainInfo.customDomain) && (
           <DomainStatusCard domainInfo={domainInfo} onDomainAction={isPreviewModeEnabled ? handleDomainAction : undefined} />
         )}
       </div>
+
+      <AnimatePresence>
+        {showAddEmployeeModal && (
+          <div key="add-emp-modal" className="fixed inset-0 z-50 flex items-center justify-center p-6">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowAddEmployeeModal(false)}
+              className="absolute inset-0 bg-slate-900/40 backdrop-blur-md"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-lg bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden"
+            >
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                <div>
+                  <h3 className="text-2xl font-black text-primary tracking-tight">Add Employee</h3>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Invite a team member to get started</p>
+                </div>
+                <button onClick={() => setShowAddEmployeeModal(false)} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-slate-400">close</span>
+                </button>
+              </div>
+              <form onSubmit={handleInlineAddEmployee} className="p-8 space-y-6">
+                <div className="grid grid-cols-2 gap-6">
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">First Name</label>
+                    <input name="firstName" required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="John" />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Last Name</label>
+                    <input name="lastName" required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="Doe" />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Email Address</label>
+                  <input name="email" type="email" required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="john@example.com" />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Role</label>
+                  <select name="role" required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700">
+                    <option value="technician">Technician</option>
+                    <option value="sales_associate">Sales Associate</option>
+                    <option value="manager">Manager</option>
+                  </select>
+                </div>
+                <div className="flex gap-3 pt-2">
+                  <button type="button" onClick={() => setShowAddEmployeeModal(false)} className="flex-1 px-6 py-4 bg-slate-100 text-slate-600 font-black text-sm rounded-2xl uppercase tracking-widest hover:bg-slate-200 transition-colors">
+                    Cancel
+                  </button>
+                  <button type="submit" className="flex-1 px-6 py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-xl shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 transition-all">
+                    Send Invite
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </>
   );
 }
