@@ -1,0 +1,161 @@
+You are now acting as:
+Principal Tenant Lifecycle Architect + Principal Store Onboarding Experience Architect + Principal SaaS Activation & Access-Gating Architect + Principal Domain/Readiness Workflow Architect + Principal RBAC Architect + Principal React/TypeScript Engineer + Principal UX Workflow Designer + Principal QA Auditor + Principal Side Auditor & Systems Thinker
+
+IMPORTANT:
+You must not only adjust the visible UI.
+You must also act as:
+- a side auditor
+- a systems thinker
+- an onboarding/access-gating architect
+
+That means:
+- identify any missing supporting process needed to make Store Owner onboarding coherent
+- implement the missing support process if required
+- avoid shallow fixes
+- preserve the current design baseline exactly
+
+This is a final narrow refinement pass ONLY for:
+Tenant Management & Provisioning → Store Owner activation/onboarding dashboard gating
+
+Do not touch unrelated modules.
+Do not redesign the UI.
+Preserve auth, preview mode, platform/store hierarchy, and RBAC.
+
+==================================================
+1. INVITED / PRE-ACTIVATION STORE OWNER SCENARIO
+==================================================
+
+Refine the Store Owner onboarding experience for the invited / pre-activation state.
+
+Required:
+- show the purchased/assigned plan name clearly on the Store Owner dashboard
+- show the selected billing context if appropriate
+- remove "Resend invite" from Store Owner side
+- "Resend invite" must remain platform-side only for System Owner / authorized platform team
+
+==================================================
+2. SETUP CHECKLIST BEHAVIOR
+==================================================
+
+Current requirement:
+The setup checklist should not be immediately active when the Store Owner first lands.
+
+Required behavior:
+- checklist remains inactive/locked until Store Owner clicks:
+  - "Begin Store Setup"
+- once clicked:
+  - the CTA should become "Continue Setup"
+  - checklist becomes active
+- only these checklist items should remain on the store-side onboarding checklist:
+  1. Complete store profile
+  2. Invite team members
+  3. Customize store appearance
+- remove other unnecessary checklist items from the Store Owner dashboard onboarding experience
+
+Goal:
+The onboarding process should feel clean, intentional, and not overloaded.
+
+==================================================
+3. DASHBOARD AS ONBOARDING CONTROL CENTER
+==================================================
+
+Before activation is complete:
+- the Dashboard must remain the onboarding control center
+- the dashboard must clearly show:
+  - lifecycle state
+  - selected plan
+  - activation/setup progress
+  - next required action
+  - checklist progress
+  - domain readiness if relevant
+
+Do not dilute this with unnecessary operational widgets before activation completes.
+
+==================================================
+4. SIDE MENU GATING RULE
+==================================================
+
+Before store activation is complete:
+- all normal operational side-menu pages/modules should remain hidden or unavailable
+- only the minimal onboarding-safe navigation should remain visible
+- this gating must respect the selected plan and lifecycle state
+
+Once activation is complete:
+- the normal store menu should return according to:
+  - selected plan
+  - role permissions
+  - RBAC logic already implemented
+
+==================================================
+5. PLATFORM SUBDOMAIN VISIBILITY RULE
+==================================================
+
+Current requirement:
+The platform subdomain should not appear on the Store Owner dashboard by default.
+
+Required behavior:
+- hide the Platform Subdomain block/card by default
+- only show the Platform Subdomain section when Custom Domain has been added and the context makes it useful/relevant
+- if Custom Domain is not added, do NOT show the Platform Subdomain block on the Store Owner dashboard
+- keep platform/domain-management logic coherent with platform-side domain handling
+
+==================================================
+6. SIDE AUDIT / SYSTEM THINKER REQUIREMENT
+==================================================
+
+Before finishing, audit whether the above onboarding flow needs any additional supporting process such as:
+- better invited-state messaging
+- cleaner CTA progression
+- clearer checklist completion logic
+- better lifecycle labels
+- better locked-menu explanation
+- clearer activation-complete transition
+
+If needed, add the minimal but professional supporting process.
+Do not add unrelated features.
+
+==================================================
+7. DO NOT BREAK THESE
+==================================================
+
+Do NOT break:
+- auth flow
+- preview mode
+- current platform/store hierarchy
+- RBAC logic
+- current design baseline
+- existing working tenant lifecycle mapping
+- existing activation gating after activation
+
+==================================================
+8. OUTPUT REQUIRED
+==================================================
+
+Return:
+A. exact files modified
+B. whether invited state now shows purchased/assigned plan clearly
+C. whether Resend Invite is removed from Store Owner side
+D. whether checklist stays inactive until Begin Store Setup is clicked
+E. whether Continue Setup appears after onboarding starts
+F. whether only the 3 requested checklist items remain
+G. whether side menu remains gated before activation
+H. whether normal menu returns after activation
+I. whether Platform Subdomain is now hidden unless Custom Domain is added/relevant
+J. what supporting process was added from side-audit/system-thinking
+K. confirmation that no visual drift was introduced
+
+==================================================
+9. STRICT ACCEPTANCE RULE
+==================================================
+
+Do not say fixed unless ALL are true:
+- invited state shows purchased/assigned plan
+- Resend Invite is not shown on Store Owner side
+- checklist is inactive until Begin Store Setup
+- Continue Setup appears after onboarding begins
+- only the 3 requested checklist items remain
+- side menu is gated before activation
+- normal menu returns after activation
+- Platform Subdomain is hidden unless Custom Domain is relevant
+- auth flow still works
+- no visual drift was introduced

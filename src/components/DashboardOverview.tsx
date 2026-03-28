@@ -83,17 +83,15 @@ function StatusChip({ label, done }: { label: string; done: boolean }) {
   );
 }
 
-function OnboardingChecklistCard({ checklist, onboardingStage, onToggleItem }: {
+function OnboardingChecklistCard({ checklist, onboardingStage, onToggleItem, isLocked }: {
   checklist: OnboardingChecklist;
   onboardingStage: OnboardingStage;
   onToggleItem?: (key: keyof OnboardingChecklist) => void;
+  isLocked?: boolean;
 }) {
   const items = [
     { key: 'profileComplete' as const, label: 'Complete store profile', icon: 'storefront', action: 'Go to Settings', route: '/settings' },
-    { key: 'paymentMethodAdded' as const, label: 'Add payment method', icon: 'credit_card', action: 'Add Payment', route: '/settings' },
-    { key: 'firstProductAdded' as const, label: 'Add first product or service', icon: 'inventory_2', action: 'Add Product', route: '/inventory' },
-    { key: 'domainConfigured' as const, label: 'Configure domain', icon: 'public', action: 'Set Up Domain', route: '/settings' },
-    { key: 'teamInvited' as const, label: 'Invite team members', icon: 'group_add', action: 'Invite Team', route: '/employees' },
+    { key: 'teamInvited' as const, label: 'Invite team members', icon: 'group_add', action: 'Invite Team', route: '/settings' },
     { key: 'storeCustomized' as const, label: 'Customize store appearance', icon: 'palette', action: 'Customize', route: '/settings' },
   ];
 
@@ -103,6 +101,24 @@ function OnboardingChecklistCard({ checklist, onboardingStage, onToggleItem }: {
   const allDone = completedCount === totalCount;
 
   if (allDone && onboardingStage === 'active') return null;
+
+  if (isLocked) {
+    return (
+      <div className="p-4 bg-white rounded-2xl ghost-border shadow-sm space-y-3 opacity-60">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-sm text-slate-400">lock</span>
+            <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Setup Checklist</span>
+          </div>
+          <span className="text-[10px] font-black text-slate-400">0/{totalCount}</span>
+        </div>
+        <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+          <div className="h-full bg-slate-200 rounded-full" style={{ width: '0%' }} />
+        </div>
+        <p className="text-[10px] font-bold text-slate-400 text-center py-2">Click "Begin Store Setup" above to unlock the checklist</p>
+      </div>
+    );
+  }
 
   return (
     <div className="p-4 bg-white rounded-2xl ghost-border shadow-sm space-y-3">
@@ -218,6 +234,8 @@ function StoreActivationPanel() {
     dnsVerified: false, sslProvisioned: false, propagated: false,
   };
 
+  const storeChecklistKeys: (keyof OnboardingChecklist)[] = ['profileComplete', 'teamInvited', 'storeCustomized'];
+
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
   const showToast = useCallback((msg: string) => {
@@ -247,13 +265,14 @@ function StoreActivationPanel() {
 
   const toggleChecklistItem = useCallback((key: keyof OnboardingChecklist) => {
     const newChecklist = { ...checklist, [key]: !checklist[key] };
-    const completedCount = Object.values(newChecklist).filter(v => v).length;
+    const completedCount = storeChecklistKeys.filter(k => newChecklist[k]).length;
+    const totalItems = storeChecklistKeys.length;
     let newStage = onboardingStage;
     if (onboardingStage === 'invited' && completedCount > 0) {
       newStage = 'pending_setup';
-    } else if ((onboardingStage === 'pending_setup' || onboardingStage === 'setup_incomplete') && completedCount > 0 && completedCount < 6) {
+    } else if ((onboardingStage === 'pending_setup' || onboardingStage === 'setup_incomplete') && completedCount > 0 && completedCount < totalItems) {
       newStage = 'setup_incomplete';
-    } else if (completedCount === 6 && onboardingStage !== 'active') {
+    } else if (completedCount === totalItems && onboardingStage !== 'active') {
       newStage = 'pending_activation';
     }
     const dateUpdates: Record<string, string> = {};
@@ -296,7 +315,7 @@ function StoreActivationPanel() {
   const isOverdue = tenant.status === 'overdue';
   const isReadOnly = tenant.status === 'read_only';
   const isFullyOnboarded = onboardingStage === 'active' && isLive;
-  const checklistComplete = Object.values(checklist).every(v => v);
+  const checklistComplete = storeChecklistKeys.every(k => checklist[k]);
 
   const nextStageMap: Partial<Record<OnboardingStage, OnboardingStage>> = {
     invited: 'pending_setup',
@@ -338,7 +357,9 @@ function StoreActivationPanel() {
               </div>
             </div>
           </div>
-          <DomainStatusCard domainInfo={domainInfo} onDomainAction={isPreviewModeEnabled ? handleDomainAction : undefined} />
+          {(domainInfo.mode !== 'platform_subdomain' || !!domainInfo.customDomain) && (
+            <DomainStatusCard domainInfo={domainInfo} onDomainAction={isPreviewModeEnabled ? handleDomainAction : undefined} />
+          )}
         </div>
       </>
     );
@@ -360,7 +381,9 @@ function StoreActivationPanel() {
               </div>
             </div>
           </div>
-          <DomainStatusCard domainInfo={domainInfo} onDomainAction={isPreviewModeEnabled ? handleDomainAction : undefined} />
+          {(domainInfo.mode !== 'platform_subdomain' || !!domainInfo.customDomain) && (
+            <DomainStatusCard domainInfo={domainInfo} onDomainAction={isPreviewModeEnabled ? handleDomainAction : undefined} />
+          )}
         </div>
       </>
     );
@@ -385,7 +408,9 @@ function StoreActivationPanel() {
               <button className="px-3 py-1.5 bg-amber-500 text-white text-[9px] font-black rounded-lg uppercase tracking-widest hover:bg-amber-600 transition-colors">Update Payment</button>
             </div>
           </div>
-          <DomainStatusCard domainInfo={domainInfo} onDomainAction={isPreviewModeEnabled ? handleDomainAction : undefined} />
+          {(domainInfo.mode !== 'platform_subdomain' || !!domainInfo.customDomain) && (
+            <DomainStatusCard domainInfo={domainInfo} onDomainAction={isPreviewModeEnabled ? handleDomainAction : undefined} />
+          )}
         </div>
       </>
     );
@@ -431,7 +456,9 @@ function StoreActivationPanel() {
               </div>
             </div>
           </div>
-          <DomainStatusCard domainInfo={domainInfo} onDomainAction={isPreviewModeEnabled ? handleDomainAction : undefined} />
+          {(domainInfo.mode !== 'platform_subdomain' || !!domainInfo.customDomain) && (
+            <DomainStatusCard domainInfo={domainInfo} onDomainAction={isPreviewModeEnabled ? handleDomainAction : undefined} />
+          )}
         </div>
       </>
     );
@@ -514,24 +541,18 @@ function StoreActivationPanel() {
           />
           {onboardingStage === 'invited' && (
             <div className="p-3 bg-white/60 rounded-xl border border-indigo-100">
-              <p className="text-[10px] font-black text-indigo-700 uppercase tracking-widest mb-1">First-Time Login</p>
+              <p className="text-[10px] font-black text-indigo-700 uppercase tracking-widest mb-1">Get Started</p>
               <p className="text-[10px] font-bold text-indigo-600">
                 {tenant.inviteSentDate
-                  ? `Invitation sent on ${tenant.inviteSentDate}. Complete your profile to begin store setup.`
-                  : 'Check your email for the invitation link to begin setting up your store.'}
+                  ? `Welcome! Your ${tenant.plan} plan is ready. Click below to begin setting up your store.`
+                  : 'Welcome! Click below to begin setting up your store.'}
               </p>
               <div className="mt-2 flex gap-2 flex-wrap">
-                {isPreviewModeEnabled && (
-                  <>
-                    <button onClick={() => advanceStage('pending_setup')} className="px-4 py-2 bg-indigo-500 text-white text-[9px] font-black rounded-xl uppercase tracking-widest hover:bg-indigo-600 transition-colors">
-                      Begin Store Setup
-                    </button>
-                    <button onClick={() => showToast('Invitation resent to store owner email')} className="px-4 py-2 bg-white text-indigo-600 text-[9px] font-black rounded-xl uppercase tracking-widest border border-indigo-200 hover:bg-indigo-50 transition-colors">
-                      Resend Invite
-                    </button>
-                  </>
-                )}
-                {!isPreviewModeEnabled && (
+                {isPreviewModeEnabled ? (
+                  <button onClick={() => advanceStage('pending_setup')} className="px-4 py-2 bg-indigo-500 text-white text-[9px] font-black rounded-xl uppercase tracking-widest hover:bg-indigo-600 transition-colors">
+                    Begin Store Setup
+                  </button>
+                ) : (
                   <Link to="/settings" className="px-4 py-2 bg-indigo-500 text-white text-[9px] font-black rounded-xl uppercase tracking-widest hover:bg-indigo-600 transition-colors inline-block">
                     Begin Store Setup
                   </Link>
@@ -556,12 +577,12 @@ function StoreActivationPanel() {
             <div className="p-3 bg-white/60 rounded-xl border border-amber-100">
               <p className="text-[10px] font-bold text-amber-600 flex items-center gap-1">
                 <span className="material-symbols-outlined text-xs">info</span>
-                Complete all checklist items below to proceed to activation.
+                Complete the checklist items below to proceed to activation.
               </p>
               <div className="mt-2 flex gap-2 flex-wrap">
                 {isPreviewModeEnabled && nextStage && (
                   <button onClick={() => advanceStage(nextStage)} className="px-4 py-2 bg-amber-500 text-white text-[9px] font-black rounded-xl uppercase tracking-widest hover:bg-amber-600 transition-colors">
-                    {nextStageLabels[onboardingStage]}
+                    Continue Setup
                   </button>
                 )}
                 {!isPreviewModeEnabled && (
@@ -577,8 +598,11 @@ function StoreActivationPanel() {
           checklist={checklist}
           onboardingStage={onboardingStage}
           onToggleItem={isPreviewModeEnabled ? toggleChecklistItem : undefined}
+          isLocked={onboardingStage === 'invited'}
         />
-        <DomainStatusCard domainInfo={domainInfo} onDomainAction={isPreviewModeEnabled ? handleDomainAction : undefined} />
+        {(domainInfo.mode !== 'platform_subdomain' || !!domainInfo.customDomain) && (
+          <DomainStatusCard domainInfo={domainInfo} onDomainAction={isPreviewModeEnabled ? handleDomainAction : undefined} />
+        )}
       </div>
     </>
   );
