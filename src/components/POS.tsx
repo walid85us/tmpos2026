@@ -10,6 +10,8 @@ import {
 } from '../types';
 import ContextualHelp from './ContextualHelp';
 
+const TAX_RATE = 0.0825;
+
 export const POS: React.FC = () => {
   // State
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -17,7 +19,7 @@ export const POS: React.FC = () => {
     { id: 'p1', method: 'Cash', amount: 0, icon: 'payments' },
     { id: 'p2', method: 'Card Terminal', amount: 0, icon: 'credit_card', detail: 'Awaiting Entry', locked: true }
   ]);
-  const [discounts] = useState<Discount[]>([]);
+  const [discounts, setDiscounts] = useState<Discount[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
 
@@ -77,15 +79,31 @@ export const POS: React.FC = () => {
     customFields: {} as Record<string, string>
   });
 
-  // Calculations
-  const subtotal = cart.reduce((acc, item) => acc + item.price, 0);
+  const [holdToast, setHoldToast] = useState('');
+
+  const [newCustMode, setNewCustMode] = useState(false);
+  const [customerSearch, setCustomerSearch] = useState('');
+  const [stockSaved, setStockSaved] = useState(false);
+
+  const allCustomers: Customer[] = [
+    { id: 'c1', name: 'Alexander Wright', phone: '555-0123', email: 'alex@example.com', totalSpent: 1240, lastVisit: '2026-03-25' },
+    { id: 'c2', name: 'Sarah Jenkins', phone: '555-0456', email: 'sarah@example.com', totalSpent: 890, lastVisit: '2026-03-22' },
+    { id: 'c3', name: 'Mike Rodriguez', phone: '555-0789', email: 'mike@example.com', totalSpent: 320, lastVisit: '2026-03-20' },
+    { id: 'c4', name: 'Emma Chen', phone: '555-0321', email: 'emma@example.com', totalSpent: 560, lastVisit: '2026-03-18' },
+  ];
+  const [customersList, setCustomersList] = useState<Customer[]>(allCustomers);
+
+  const subtotal = cart.reduce((acc, item) => acc + item.price * (item.qty || 1), 0);
   const discountTotal = discounts.reduce((acc, d) => {
     if (d.type === 'percent') return acc + (subtotal * (d.value / 100));
     return acc + d.value;
   }, 0);
-  const total = Math.max(0, subtotal - discountTotal);
+  const afterDiscount = Math.max(0, subtotal - discountTotal);
+  const tax = afterDiscount * TAX_RATE;
+  const total = afterDiscount + tax;
   const totalAllocated = payments.reduce((acc, p) => acc + p.amount, 0);
   const remaining = total - totalAllocated;
+  const changeDue = totalAllocated > total && total > 0 ? totalAllocated - total : 0;
   const progress = total > 0 ? (totalAllocated / total) * 100 : 0;
 
   // Handlers
@@ -150,18 +168,39 @@ export const POS: React.FC = () => {
       customerName: selectedCustomer?.name || 'Walk-in Customer',
       items: [...cart],
       total,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      payments: [...payments],
+      discounts: [...discounts],
+      customer: selectedCustomer,
     };
     setHeldOrders([...heldOrders, newHeldOrder]);
     setCart([]);
+    setDiscounts([]);
     setSelectedCustomer(null);
+    setPayments([
+      { id: 'p1', method: 'Cash', amount: 0, icon: 'payments' },
+      { id: 'p2', method: 'Card Terminal', amount: 0, icon: 'credit_card', detail: 'Awaiting Entry', locked: true }
+    ]);
+    setHoldToast('Order held successfully');
+    setTimeout(() => setHoldToast(''), 3000);
   };
+
+  const defaultPayments: PaymentMethod[] = [
+    { id: 'p1', method: 'Cash', amount: 0, icon: 'payments' },
+    { id: 'p2', method: 'Card Terminal', amount: 0, icon: 'credit_card', detail: 'Awaiting Entry', locked: true }
+  ];
 
   const resumeOrder = (order: HeldOrder) => {
     setCart(order.items);
+    setPayments(order.payments ?? defaultPayments);
+    setDiscounts(order.discounts ?? []);
+    setSelectedCustomer(order.customer ?? null);
     setHeldOrders(heldOrders.filter(o => o.id !== order.id));
     setIsHeldOrdersOpen(false);
   };
+
+  const [finalTotal, setFinalTotal] = useState(0);
+  const [finalTxId, setFinalTxId] = useState('');
 
   const handleFinalize = async () => {
     if (!selectedCustomer) {
@@ -171,11 +210,18 @@ export const POS: React.FC = () => {
     }
     setCustomerValidationError('');
     setIsProcessing(true);
+    const txId = `TX-${Date.now().toString().slice(-5)}`;
+    setFinalTotal(total);
+    setFinalTxId(txId);
     await new Promise(resolve => setTimeout(resolve, 2000));
     setIsProcessing(false);
     setIsSuccess(true);
     setCart([]);
-    setPayments(payments.map(p => ({ ...p, amount: 0 })));
+    setDiscounts([]);
+    setPayments([
+      { id: 'p1', method: 'Cash', amount: 0, icon: 'payments' },
+      { id: 'p2', method: 'Card Terminal', amount: 0, icon: 'credit_card', detail: 'Awaiting Entry', locked: true }
+    ]);
   };
 
   const handlePrintReceipt = () => {
@@ -191,13 +237,13 @@ export const POS: React.FC = () => {
   const handleEditItem = (item: CartItem) => {
     setEditingItem(item);
     setEditPrice(item.price);
-    setEditQty(1); // Default Qty
+    setEditQty(item.qty || 1);
     setIsEditItemModalOpen(true);
   };
 
   const saveEditedItem = () => {
     if (editingItem) {
-      setCart(cart.map(i => i.id === editingItem.id ? { ...i, price: editPrice } : i));
+      setCart(cart.map(i => i.id === editingItem.id ? { ...i, price: editPrice, qty: editQty } : i));
       setIsEditItemModalOpen(false);
       setEditingItem(null);
     }
@@ -280,32 +326,10 @@ export const POS: React.FC = () => {
   return (
     <div className="space-y-8 relative">
       <AnimatePresence>
-        {isSuccess && (
-          <motion.div 
-            initial={{ opacity: 0, scale: 0.9 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.9 }}
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-primary/20 backdrop-blur-sm p-4"
-          >
-            <div className="bg-white p-12 rounded-[3rem] shadow-2xl text-center max-w-md w-full ghost-border">
-              <div className="w-24 h-24 bg-lime-400 text-teal-950 rounded-full flex items-center justify-center mx-auto mb-8 shadow-xl">
-                <span className="material-symbols-outlined text-5xl" style={{fontVariationSettings: "'FILL' 1"}}>check_circle</span>
-              </div>
-              <h3 className="text-3xl font-black text-primary tracking-tight mb-2">Transaction Complete</h3>
-              <p className="text-slate-500 font-medium mb-8">Receipt #TX-99210 has been sent to Alexander Wright.</p>
-              <button 
-                onClick={() => setIsSuccess(false)}
-                className="w-full py-4 bg-primary text-white rounded-2xl font-black uppercase tracking-widest shadow-lg active:scale-95 transition-transform"
-              >
-                New Transaction
-              </button>
-              <button 
-                onClick={handlePrintReceipt}
-                className="w-full mt-3 py-4 bg-slate-100 text-slate-600 rounded-2xl font-black uppercase tracking-widest hover:bg-slate-200 transition-all"
-              >
-                Print Receipt
-              </button>
-            </div>
+        {holdToast && (
+          <motion.div initial={{ opacity: 0, y: 50 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 50 }} className="fixed bottom-8 left-1/2 -translate-x-1/2 z-[200] bg-teal-950 text-white px-8 py-4 rounded-2xl shadow-2xl flex items-center gap-4">
+            <span className="material-symbols-outlined text-lime-400">pause_circle</span>
+            <span className="font-bold">{holdToast}</span>
           </motion.div>
         )}
       </AnimatePresence>
@@ -422,7 +446,8 @@ export const POS: React.FC = () => {
                       </div>
                     </div>
                     <div className="flex items-center gap-3">
-                      <span className="font-bold text-primary">${item.price.toFixed(2)}</span>
+                      {(item.qty || 1) > 1 && <span className="text-xs text-slate-400 font-bold">×{item.qty}</span>}
+                      <span className="font-bold text-primary">${(item.price * (item.qty || 1)).toFixed(2)}</span>
                       <button onClick={(e) => { e.stopPropagation(); removeItem(item.id); }} className="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-red-500 transition-all">
                         <span className="material-symbols-outlined text-sm">close</span>
                       </button>
@@ -438,6 +463,31 @@ export const POS: React.FC = () => {
                 <span className="text-slate-500 font-medium">Subtotal</span>
                 <span className="font-bold text-slate-900">${subtotal.toFixed(2)}</span>
               </div>
+              {discountTotal > 0 && (
+                <div className="flex justify-between text-sm">
+                  <span className="text-lime-600 font-medium flex items-center gap-1">
+                    <span className="material-symbols-outlined text-xs">sell</span>
+                    Discount
+                  </span>
+                  <span className="font-bold text-lime-600">-${discountTotal.toFixed(2)}</span>
+                </div>
+              )}
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-500 font-medium">Tax ({(TAX_RATE * 100).toFixed(2)}%)</span>
+                <span className="font-bold text-slate-900">${tax.toFixed(2)}</span>
+              </div>
+              {discounts.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 py-1">
+                  {discounts.map(d => (
+                    <span key={d.id} className="inline-flex items-center gap-1 text-[9px] font-black px-2 py-0.5 bg-lime-50 text-lime-700 rounded-full border border-lime-200 uppercase tracking-widest">
+                      {d.name}
+                      <button onClick={() => setDiscounts(discounts.filter(x => x.id !== d.id))} className="hover:text-red-500 transition-colors">
+                        <span className="material-symbols-outlined" style={{ fontSize: '10px' }}>close</span>
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
               <div className="flex justify-between items-center pt-3">
                 <span className="text-lg font-black text-primary uppercase tracking-tighter">Total Amount</span>
                 <span className="text-3xl font-black text-primary tracking-tighter">${total.toFixed(2)}</span>
@@ -490,7 +540,19 @@ export const POS: React.FC = () => {
                     <div className="w-32">
                       <div className="relative">
                         <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400">$</span>
-                        <input readOnly={p.locked} className={`w-full bg-white border-none rounded-lg pl-6 pr-3 py-1 text-sm font-black text-right focus:ring-secondary shadow-sm ${p.locked ? 'text-slate-400 cursor-not-allowed' : 'text-primary'}`} type="text" defaultValue={p.amount.toFixed(2)} />
+                        <input
+                          readOnly={p.locked}
+                          className={`w-full bg-white border-none rounded-lg pl-6 pr-3 py-1 text-sm font-black text-right focus:ring-secondary shadow-sm ${p.locked ? 'text-slate-400 cursor-not-allowed' : 'text-primary'}`}
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={p.amount || ''}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value) || 0;
+                            setPayments(payments.map(pm => pm.id === p.id ? { ...pm, amount: val } : pm));
+                          }}
+                          placeholder="0.00"
+                        />
                       </div>
                     </div>
                     <button disabled={p.locked} onClick={() => removePayment(p.id)} className={`${p.locked ? 'text-slate-300 cursor-not-allowed' : 'text-slate-300 hover:text-red-500 transition-colors'}`}>
@@ -525,6 +587,9 @@ export const POS: React.FC = () => {
                 <div className="text-right">
                   <span className="text-sm font-bold text-secondary uppercase tracking-widest block">Allocated</span>
                   <span className="text-xl font-bold text-slate-900">${totalAllocated.toFixed(2)}</span>
+                  {changeDue > 0 && (
+                    <span className="block text-sm font-black text-lime-600 mt-1">Change: ${changeDue.toFixed(2)}</span>
+                  )}
                 </div>
               </div>
               <div className="w-full bg-slate-100 h-4 rounded-full overflow-hidden mb-12 shadow-inner">
@@ -585,7 +650,8 @@ export const POS: React.FC = () => {
                 <span className="material-symbols-outlined text-5xl" style={{fontVariationSettings: "'FILL' 1"}}>check_circle</span>
               </div>
               <h3 className="text-3xl font-black text-primary tracking-tight mb-2">Transaction Complete</h3>
-              <p className="text-slate-500 font-medium mb-8">Receipt #TX-99210 has been sent to {selectedCustomer?.name || 'Customer'}.</p>
+              <p className="text-slate-500 font-medium mb-2">Receipt #{finalTxId} has been sent to {selectedCustomer?.name || 'Customer'}.</p>
+              <p className="text-2xl font-black text-primary mb-8">${finalTotal.toFixed(2)}</p>
               <div className="space-y-3">
                 <button 
                   onClick={() => { setIsSuccess(false); setSelectedCustomer(null); }}
@@ -957,11 +1023,52 @@ export const POS: React.FC = () => {
         {isAddInventoryModalOpen && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[110] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
             <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-lg w-full p-8 ghost-border">
-              <h3 className="text-2xl font-black text-primary mb-8">Quick Add Stock</h3>
-              <div className="space-y-4">
-                <input className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold" placeholder="Product Name" type="text" />
-                <button onClick={() => setIsAddInventoryModalOpen(false)} className="w-full py-5 bg-primary text-white rounded-2xl font-black uppercase">Save</button>
+              <div className="flex justify-between items-center mb-8">
+                <h3 className="text-2xl font-black text-primary tracking-tight">Quick Add Stock</h3>
+                <button onClick={() => { setIsAddInventoryModalOpen(false); setStockSaved(false); }} className="text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
               </div>
+              {stockSaved ? (
+                <div className="py-8 text-center space-y-4">
+                  <div className="w-16 h-16 bg-lime-100 rounded-full flex items-center justify-center mx-auto">
+                    <span className="material-symbols-outlined text-3xl text-lime-600" style={{fontVariationSettings: "'FILL' 1"}}>check_circle</span>
+                  </div>
+                  <p className="text-lg font-black text-primary">Stock Added</p>
+                  <button onClick={() => { setIsAddInventoryModalOpen(false); setStockSaved(false); }} className="px-8 py-3 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest">Done</button>
+                </div>
+              ) : (
+                <form onSubmit={(e) => { e.preventDefault(); setStockSaved(true); }} className="space-y-4">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Product Name</label>
+                    <input required className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="iPhone 13 Screen" />
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">SKU</label>
+                      <input className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="IP13-SCR-001" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Quantity</label>
+                      <input type="number" min="1" defaultValue={1} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Cost Price</label>
+                      <input type="number" step="0.01" className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="0.00" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Category</label>
+                      <select className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary">
+                        <option>Parts</option>
+                        <option>Accessories</option>
+                        <option>Devices</option>
+                        <option>Other</option>
+                      </select>
+                    </div>
+                  </div>
+                  <button type="submit" className="w-full py-4 bg-primary text-white rounded-2xl font-black uppercase tracking-widest shadow-lg active:scale-95 transition-all">Save Stock</button>
+                </form>
+              )}
             </motion.div>
           </motion.div>
         )}
@@ -1004,9 +1111,9 @@ export const POS: React.FC = () => {
         {isCustomerModalOpen && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[110] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
             <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-2xl w-full p-8 ghost-border">
-              <div className="flex justify-between items-center mb-8">
+              <div className="flex justify-between items-center mb-6">
                 <h3 className="text-2xl font-black text-primary tracking-tight">Customer Management</h3>
-                <button onClick={() => setIsCustomerModalOpen(false)} className="text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+                <button onClick={() => { setIsCustomerModalOpen(false); setNewCustMode(false); setCustomerSearch(''); }} className="text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
               </div>
               {customerValidationError && (
                 <div className="flex items-center gap-2 p-3 bg-rose-50 border border-rose-200 rounded-xl mb-4">
@@ -1014,17 +1121,87 @@ export const POS: React.FC = () => {
                   <p className="text-xs font-bold text-rose-600">{customerValidationError}</p>
                 </div>
               )}
-              <div className="space-y-4">
-                {[
-                  { id: 'c1', name: 'Alexander Wright', phone: '555-0123' },
-                  { id: 'c2', name: 'Sarah Jenkins', phone: '555-0456' },
-                ].map((c) => (
-                  <button key={c.id} onClick={() => { setSelectedCustomer(c as any); setCustomerValidationError(''); setIsCustomerModalOpen(false); }} className="w-full p-4 bg-slate-50 hover:bg-secondary hover:text-white rounded-2xl text-left transition-all">
-                    <p className="font-bold">{c.name}</p>
-                    <p className="text-xs opacity-60">{c.phone}</p>
+
+              {!newCustMode ? (
+                <div className="space-y-4">
+                  <div className="relative">
+                    <span className="absolute left-4 top-1/2 -translate-y-1/2 material-symbols-outlined text-slate-400 text-sm">search</span>
+                    <input value={customerSearch} onChange={(e) => setCustomerSearch(e.target.value)} className="w-full bg-slate-50 border-none rounded-2xl pl-11 pr-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="Search customers..." />
+                  </div>
+
+                  <button onClick={() => { setSelectedCustomer({ id: 'walk-in', name: 'Walk-in Customer', email: '', phone: '', totalSpent: 0, lastVisit: '' }); setCustomerValidationError(''); setIsCustomerModalOpen(false); }} className="w-full p-4 bg-slate-100 hover:bg-slate-200 rounded-2xl text-left transition-all flex items-center gap-3">
+                    <div className="w-10 h-10 bg-slate-200 rounded-full flex items-center justify-center">
+                      <span className="material-symbols-outlined text-slate-500">person_outline</span>
+                    </div>
+                    <div>
+                      <p className="font-bold text-slate-700">Walk-in Customer</p>
+                      <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">No customer record needed</p>
+                    </div>
                   </button>
-                ))}
-              </div>
+
+                  <div className="space-y-2 max-h-[40vh] overflow-y-auto pr-1">
+                    {customersList.filter(c => c.name.toLowerCase().includes(customerSearch.toLowerCase()) || c.phone.includes(customerSearch)).map((c) => (
+                      <button key={c.id} onClick={() => { setSelectedCustomer(c); setCustomerValidationError(''); setIsCustomerModalOpen(false); setCustomerSearch(''); }} className="w-full p-4 bg-slate-50 hover:bg-secondary hover:text-white rounded-2xl text-left transition-all group">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <p className="font-bold">{c.name}</p>
+                            <p className="text-xs opacity-60">{c.phone} &bull; {c.email}</p>
+                          </div>
+                          <span className="material-symbols-outlined text-slate-300 group-hover:text-white/60">chevron_right</span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+
+                  <button onClick={() => setNewCustMode(true)} className="w-full py-3 border-2 border-dashed border-slate-200 rounded-2xl text-xs font-black text-secondary uppercase tracking-widest hover:border-secondary hover:bg-secondary/5 transition-all flex items-center justify-center gap-2">
+                    <span className="material-symbols-outlined text-sm">person_add</span>
+                    Create New Customer
+                  </button>
+                </div>
+              ) : (
+                <form onSubmit={(e) => {
+                  e.preventDefault();
+                  const fd = new FormData(e.currentTarget);
+                  const newCust = {
+                    id: `c-${Date.now()}`,
+                    name: `${fd.get('firstName')} ${fd.get('lastName')}`,
+                    phone: fd.get('phone') as string || '',
+                    email: fd.get('email') as string || '',
+                  };
+                  setCustomersList([...customersList, newCust]);
+                  setSelectedCustomer(newCust as any);
+                  setCustomerValidationError('');
+                  setNewCustMode(false);
+                  setIsCustomerModalOpen(false);
+                }} className="space-y-4">
+                  <button type="button" onClick={() => setNewCustMode(false)} className="text-xs font-bold text-secondary flex items-center gap-1 hover:underline">
+                    <span className="material-symbols-outlined text-sm">arrow_back</span>
+                    Back to search
+                  </button>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">First Name</label>
+                      <input name="firstName" required className="w-full px-4 py-3 bg-slate-50 rounded-2xl border border-slate-200 focus:ring-2 focus:ring-primary/20 font-bold text-slate-700 text-sm" placeholder="John" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Last Name</label>
+                      <input name="lastName" required className="w-full px-4 py-3 bg-slate-50 rounded-2xl border border-slate-200 focus:ring-2 focus:ring-primary/20 font-bold text-slate-700 text-sm" placeholder="Doe" />
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Phone</label>
+                    <input name="phone" className="w-full px-4 py-3 bg-slate-50 rounded-2xl border border-slate-200 focus:ring-2 focus:ring-primary/20 font-bold text-slate-700 text-sm" placeholder="555-0000" />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Email</label>
+                    <input name="email" type="email" className="w-full px-4 py-3 bg-slate-50 rounded-2xl border border-slate-200 focus:ring-2 focus:ring-primary/20 font-bold text-slate-700 text-sm" placeholder="john@example.com" />
+                  </div>
+                  <div className="flex gap-3 pt-2">
+                    <button type="button" onClick={() => setNewCustMode(false)} className="flex-1 py-3 bg-slate-100 text-slate-600 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-colors">Cancel</button>
+                    <button type="submit" className="flex-1 py-3 bg-secondary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-lg active:scale-95 transition-all">Create & Select</button>
+                  </div>
+                </form>
+              )}
             </motion.div>
           </motion.div>
         )}
@@ -1043,10 +1220,18 @@ export const POS: React.FC = () => {
                 </div>
                 <div className="grid grid-cols-3 gap-3">
                   {[5, 10, 15].map(pct => (
-                    <button key={pct} onClick={() => { setIsDiscountModalOpen(false); setDiscountCode(''); }} className="py-3 bg-slate-50 text-primary text-[10px] font-black uppercase tracking-widest rounded-xl border border-slate-200 hover:bg-primary hover:text-white transition-all">{pct}% Off</button>
+                    <button key={pct} onClick={() => {
+                      setDiscounts([...discounts, { id: `d-${Date.now()}-${pct}`, name: `${pct}% Off`, type: 'percent', value: pct }]);
+                      setIsDiscountModalOpen(false); setDiscountCode('');
+                    }} className="py-3 bg-slate-50 text-primary text-[10px] font-black uppercase tracking-widest rounded-xl border border-slate-200 hover:bg-primary hover:text-white transition-all">{pct}% Off</button>
                   ))}
                 </div>
-                <button onClick={() => { setIsDiscountModalOpen(false); setDiscountCode(''); }} disabled={!discountCode.trim()} className="w-full py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed">Apply Code</button>
+                <button onClick={() => {
+                  if (discountCode.trim()) {
+                    setDiscounts([...discounts, { id: `d-code-${Date.now()}`, name: discountCode, type: 'fixed', value: 10 }]);
+                  }
+                  setIsDiscountModalOpen(false); setDiscountCode('');
+                }} disabled={!discountCode.trim()} className="w-full py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed">Apply Code</button>
               </div>
             </motion.div>
           </motion.div>

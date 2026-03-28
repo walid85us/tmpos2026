@@ -687,24 +687,52 @@ function StoreActivationPanel() {
 }
 
 export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => void }) {
-  const { session } = useAccess();
+  const { session, canAccess } = useAccess();
   const navigate = useNavigate();
   const [showPrintLabelModal, setShowPrintLabelModal] = useState(false);
   const [showScanQRModal, setShowScanQRModal] = useState(false);
+  const [showAddStockModal, setShowAddStockModal] = useState(false);
+  const [showNewCustomerModal, setShowNewCustomerModal] = useState(false);
   const [printLabelText, setPrintLabelText] = useState('');
   const [printLabelQty, setPrintLabelQty] = useState(1);
+  const [printLabelType, setPrintLabelType] = useState<'barcode' | 'price' | 'asset'>('barcode');
+  const [printSent, setPrintSent] = useState(false);
   const [scanResult, setScanResult] = useState('');
+  const [stockSaved, setStockSaved] = useState(false);
+  const [customerSaved, setCustomerSaved] = useState(false);
+
+  const role = session?.role;
+  const todayStr = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+
+  const allActions = [
+    { label: 'New Sale', icon: 'shopping_cart', color: 'bg-primary', roles: ['store_owner', 'manager', 'sales_staff'] },
+    { label: 'Quick Intake', icon: 'bolt', color: 'bg-secondary', roles: ['store_owner', 'manager', 'technician'] },
+    { label: 'Add Stock', icon: 'inventory_2', color: 'bg-teal-800', roles: ['store_owner', 'manager'], requires: 'inventory' },
+    { label: 'New Customer', icon: 'person_add', color: 'bg-secondary', roles: ['store_owner', 'manager', 'sales_staff'] },
+    { label: 'Print Label', icon: 'print', color: 'bg-slate-800', roles: ['store_owner', 'manager', 'technician', 'sales_staff'] },
+    { label: 'Hold Sale', icon: 'pause_circle', color: 'bg-slate-600', roles: ['store_owner', 'manager', 'sales_staff'] },
+    { label: 'Scan QR', icon: 'qr_code_scanner', color: 'bg-lime-600', roles: ['store_owner', 'manager', 'technician', 'sales_staff'] },
+  ];
+
+  const visibleActions = allActions.filter(a => {
+    if (!a.roles.includes(role || '')) return false;
+    if (a.requires && !canAccess(a.requires)) return false;
+    return true;
+  });
 
   const handleQuickAction = (label: string) => {
     switch (label) {
       case 'New Sale':
         navigate('/sales');
         break;
+      case 'Quick Intake':
+        navigate('/sales');
+        break;
       case 'Add Stock':
-        navigate('/inventory');
+        setShowAddStockModal(true);
         break;
       case 'New Customer':
-        navigate('/customers');
+        setShowNewCustomerModal(true);
         break;
       case 'Print Label':
         setShowPrintLabelModal(true);
@@ -718,6 +746,14 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
     }
   };
 
+  const statCards: { label: string; value: string; color: string; bg: string; border: string; icon: string; route: string; sub?: string; roles: string[] }[] = [
+    { label: "Today's Revenue", value: '$4,285.50', color: 'text-white', bg: 'signature-gradient', border: '', icon: 'payments', route: '/reports', sub: '+12.5% vs yesterday', roles: ['store_owner', 'manager', 'sales_staff'] },
+    { label: 'Active Repairs', value: '18', color: 'text-primary', bg: 'bg-white', border: 'border border-outline-variant/10', icon: 'build', route: '/repairs', sub: '3 awaiting parts', roles: ['store_owner', 'manager', 'technician'] },
+    { label: 'Critical Stock', value: '04', color: 'text-red-700', bg: 'bg-red-50', border: 'border border-red-100', icon: 'warning', route: '/inventory', sub: 'Immediate reorder required', roles: ['store_owner', 'manager'] },
+  ];
+
+  const visibleStats = statCards.filter(s => s.roles.includes(role || ''));
+
   return (
     <div className="space-y-8">
       {session?.role === 'store_owner' && <StoreActivationPanel />}
@@ -725,32 +761,27 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
       <header className="flex items-end justify-between">
         <div>
           <span className="text-[10px] uppercase tracking-[0.2em] text-secondary font-extrabold mb-1 block">Operational Overview</span>
-          <h2 className="text-3xl font-extrabold text-primary tracking-tight font-headline">Welcome back, Architect</h2>
+          <h2 className="text-3xl font-extrabold text-primary tracking-tight font-headline">Welcome back, {session?.user?.name?.split(' ')[0] || 'Architect'}</h2>
         </div>
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2 text-slate-500 bg-slate-100 px-4 py-2 rounded-xl ghost-border">
             <span className="material-symbols-outlined text-sm">calendar_today</span>
-            <span className="text-sm font-semibold">Today, Oct 24</span>
+            <span className="text-sm font-semibold">{todayStr}</span>
           </div>
-          <button 
-            onClick={onNewRepair}
-            className="bg-secondary text-white px-6 py-2 rounded-xl font-bold text-sm shadow-lg flex items-center gap-2 active:scale-95 transition-transform"
-          >
-            <span className="material-symbols-outlined text-sm">add</span>
-            Quick Intake
-          </button>
+          {(role === 'store_owner' || role === 'manager' || role === 'technician') && (
+            <button 
+              onClick={() => navigate('/sales')}
+              className="bg-secondary text-white px-6 py-2 rounded-xl font-bold text-sm shadow-lg flex items-center gap-2 active:scale-95 transition-transform"
+            >
+              <span className="material-symbols-outlined text-sm">add</span>
+              Quick Intake
+            </button>
+          )}
         </div>
       </header>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
-        {[
-          { label: 'New Sale', icon: 'shopping_cart', color: 'bg-primary' },
-          { label: 'Add Stock', icon: 'inventory_2', color: 'bg-teal-800' },
-          { label: 'New Customer', icon: 'person_add', color: 'bg-secondary' },
-          { label: 'Print Label', icon: 'print', color: 'bg-slate-800' },
-          { label: 'Hold Sale', icon: 'pause_circle', color: 'bg-slate-600' },
-          { label: 'Scan QR', icon: 'qr_code_scanner', color: 'bg-lime-600' },
-        ].map((action, i) => (
+      <div className={`grid grid-cols-2 md:grid-cols-4 ${visibleActions.length > 4 ? 'lg:grid-cols-' + Math.min(visibleActions.length, 7) : ''} gap-4`}>
+        {visibleActions.map((action, i) => (
           <button key={i} onClick={() => handleQuickAction(action.label)} className="flex flex-col items-center justify-center p-4 bg-white rounded-2xl ghost-border shadow-sm hover:shadow-md transition-all group active:scale-95">
             <div className={`w-10 h-10 ${action.color} text-white rounded-xl flex items-center justify-center mb-2 group-hover:scale-110 transition-transform`}>
               <span className="material-symbols-outlined text-xl">{action.icon}</span>
@@ -760,44 +791,28 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
         ))}
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div onClick={() => navigate('/reports')} className="signature-gradient p-8 rounded-[2rem] shadow-xl text-white relative overflow-hidden flex flex-col justify-between h-52 cursor-pointer hover:shadow-2xl transition-shadow">
-          <div className="z-10">
-            <span className="text-teal-100/60 uppercase text-[10px] font-bold tracking-widest">Today's Revenue</span>
-            <div className="text-5xl font-black mt-2 tracking-tighter">$4,285.50</div>
-          </div>
-          <div className="z-10 flex items-center gap-2">
-            <span className="bg-lime-400 text-teal-950 px-2 py-0.5 rounded text-[10px] font-bold">+12.5%</span>
-            <span className="text-teal-100/50 text-xs">vs yesterday</span>
-          </div>
-          <span className="material-symbols-outlined absolute -right-4 -bottom-4 text-9xl opacity-10">payments</span>
-        </div>
-
-        <div onClick={() => navigate('/repairs')} className="bg-white p-8 rounded-[2rem] shadow-sm border border-outline-variant/10 flex flex-col justify-between h-52 cursor-pointer hover:shadow-md transition-shadow">
-          <div>
-            <span className="text-slate-500 uppercase text-[10px] font-bold tracking-widest">Active Repairs</span>
-            <div className="text-5xl font-black text-primary mt-2 tracking-tighter">18</div>
-          </div>
-          <div className="flex -space-x-2">
-            {[1,2,3].map(i => (
-              <div key={i} className="w-10 h-10 rounded-full border-4 border-white bg-slate-200 overflow-hidden">
-                <img src={`https://i.pravatar.cc/100?img=${i+10}`} alt="avatar" />
+      <div className={`grid grid-cols-1 md:grid-cols-${visibleStats.length} gap-6`}>
+        {visibleStats.map((stat, i) => (
+          <div key={i} onClick={() => navigate(stat.route)} className={`${stat.bg} p-8 rounded-[2rem] shadow-sm ${stat.border} flex flex-col justify-between h-52 cursor-pointer hover:shadow-xl transition-shadow relative overflow-hidden`}>
+            <div className="z-10">
+              <span className={`${stat.color === 'text-white' ? 'text-white/60' : stat.color} uppercase text-[10px] font-bold tracking-widest opacity-70`}>{stat.label}</span>
+              <div className={`text-5xl font-black mt-2 tracking-tighter ${stat.color}`}>{stat.value}</div>
+            </div>
+            {stat.sub && (
+              <div className="z-10 flex items-center gap-2">
+                {stat.label === "Today's Revenue" ? (
+                  <>
+                    <span className="bg-lime-400 text-teal-950 px-2 py-0.5 rounded text-[10px] font-bold">+12.5%</span>
+                    <span className="text-teal-100/50 text-xs">vs yesterday</span>
+                  </>
+                ) : (
+                  <span className={`text-xs font-bold uppercase tracking-wider ${stat.color} opacity-70`}>{stat.sub}</span>
+                )}
               </div>
-            ))}
-            <div className="w-10 h-10 rounded-full border-4 border-white bg-primary text-[10px] flex items-center justify-center text-white font-bold">+15</div>
+            )}
+            <span className="material-symbols-outlined absolute -right-4 -bottom-4 text-9xl opacity-10">{stat.icon}</span>
           </div>
-        </div>
-
-        <div onClick={() => navigate('/inventory')} className="bg-red-50 p-8 rounded-[2rem] border border-red-100 flex flex-col justify-between h-52 cursor-pointer hover:shadow-md transition-shadow">
-          <div>
-            <span className="text-red-800 uppercase text-[10px] font-bold tracking-widest">Critical Stock</span>
-            <div className="text-5xl font-black text-red-700 mt-2 tracking-tighter">04</div>
-          </div>
-          <div className="flex items-center gap-2 text-red-700">
-            <span className="material-symbols-outlined text-sm">warning</span>
-            <span className="text-xs font-bold uppercase tracking-wider">Immediate reorder required</span>
-          </div>
-        </div>
+        ))}
       </div>
 
       <AnimatePresence>
@@ -826,39 +841,63 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                 </button>
               </div>
               <div className="p-8 space-y-6">
-                <div className="space-y-2">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Label Text / SKU</label>
-                  <input
-                    value={printLabelText}
-                    onChange={(e) => setPrintLabelText(e.target.value)}
-                    className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700"
-                    placeholder="Enter SKU or product name..."
-                  />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Quantity</label>
-                  <input
-                    type="number"
-                    min={1}
-                    value={printLabelQty}
-                    onChange={(e) => setPrintLabelQty(Number(e.target.value))}
-                    className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700"
-                  />
-                </div>
-                <div className="bg-slate-50 p-6 rounded-2xl border border-slate-100 flex items-center justify-center">
-                  <div className="text-center">
-                    <span className="material-symbols-outlined text-5xl text-slate-300 mb-2">qr_code_2</span>
-                    <p className="text-xs font-bold text-slate-400">Label preview will appear here</p>
+                {printSent ? (
+                  <div className="py-8 text-center space-y-4">
+                    <div className="w-16 h-16 bg-lime-100 rounded-full flex items-center justify-center mx-auto">
+                      <span className="material-symbols-outlined text-3xl text-lime-600" style={{fontVariationSettings: "'FILL' 1"}}>check_circle</span>
+                    </div>
+                    <p className="text-lg font-black text-primary">Sent to Printer</p>
+                    <p className="text-xs text-slate-500 font-bold">{printLabelQty} {printLabelType} label{printLabelQty > 1 ? 's' : ''} queued</p>
+                    <button onClick={() => { setShowPrintLabelModal(false); setPrintLabelText(''); setPrintLabelQty(1); setPrintSent(false); }} className="px-8 py-3 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest">Done</button>
                   </div>
-                </div>
-                <button
-                  onClick={() => { setShowPrintLabelModal(false); setPrintLabelText(''); setPrintLabelQty(1); }}
-                  disabled={!printLabelText.trim()}
-                  className="w-full py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                >
-                  <span className="material-symbols-outlined text-sm">print</span>
-                  Print {printLabelQty} Label{printLabelQty > 1 ? 's' : ''}
-                </button>
+                ) : (
+                  <>
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Label Type</label>
+                      <div className="grid grid-cols-3 gap-2">
+                        {([['barcode', 'qr_code_2', 'Barcode'], ['price', 'sell', 'Price Tag'], ['asset', 'inventory', 'Asset']] as const).map(([val, icon, lbl]) => (
+                          <button key={val} onClick={() => setPrintLabelType(val)} className={`py-3 rounded-xl text-[10px] font-black uppercase tracking-widest flex flex-col items-center gap-1 border transition-all ${printLabelType === val ? 'bg-primary text-white border-primary' : 'bg-slate-50 text-slate-600 border-slate-200 hover:border-primary/30'}`}>
+                            <span className="material-symbols-outlined text-sm">{icon}</span>
+                            {lbl}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Label Text / SKU</label>
+                      <input
+                        value={printLabelText}
+                        onChange={(e) => setPrintLabelText(e.target.value)}
+                        className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700"
+                        placeholder="Enter SKU or product name..."
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Quantity</label>
+                      <input
+                        type="number"
+                        min={1}
+                        value={printLabelQty}
+                        onChange={(e) => setPrintLabelQty(Number(e.target.value))}
+                        className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700"
+                      />
+                    </div>
+                    <div className="bg-slate-50 p-6 rounded-2xl border border-slate-100 flex items-center justify-center">
+                      <div className="text-center">
+                        <span className="material-symbols-outlined text-5xl text-slate-300 mb-2">{printLabelType === 'barcode' ? 'qr_code_2' : printLabelType === 'price' ? 'sell' : 'inventory'}</span>
+                        <p className="text-xs font-bold text-slate-400">{printLabelType === 'barcode' ? 'Barcode' : printLabelType === 'price' ? 'Price Tag' : 'Asset'} preview</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setPrintSent(true)}
+                      disabled={!printLabelText.trim()}
+                      className="w-full py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    >
+                      <span className="material-symbols-outlined text-sm">print</span>
+                      Print {printLabelQty} Label{printLabelQty > 1 ? 's' : ''}
+                    </button>
+                  </>
+                )}
               </div>
             </motion.div>
           </div>
@@ -914,6 +953,149 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                     </button>
                   </div>
                 </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showAddStockModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-slate-900/40 backdrop-blur-md"
+              onClick={() => { setShowAddStockModal(false); setStockSaved(false); }}
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-lg bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden"
+            >
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                <div>
+                  <h3 className="text-2xl font-black text-primary tracking-tight">Quick Add Stock</h3>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Add inventory from the counter</p>
+                </div>
+                <button onClick={() => { setShowAddStockModal(false); setStockSaved(false); }} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-slate-400">close</span>
+                </button>
+              </div>
+              <div className="p-8">
+                {stockSaved ? (
+                  <div className="py-8 text-center space-y-4">
+                    <div className="w-16 h-16 bg-lime-100 rounded-full flex items-center justify-center mx-auto">
+                      <span className="material-symbols-outlined text-3xl text-lime-600" style={{fontVariationSettings: "'FILL' 1"}}>check_circle</span>
+                    </div>
+                    <p className="text-lg font-black text-primary">Stock Added</p>
+                    <button onClick={() => { setShowAddStockModal(false); setStockSaved(false); }} className="px-8 py-3 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest">Done</button>
+                  </div>
+                ) : (
+                  <form onSubmit={(e) => { e.preventDefault(); setStockSaved(true); }} className="space-y-4">
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Product Name</label>
+                      <input required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="iPhone 13 Screen" />
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">SKU</label>
+                        <input className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="IP13-SCR-001" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Quantity</label>
+                        <input type="number" min="1" defaultValue={1} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Cost Price</label>
+                        <input type="number" step="0.01" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="0.00" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Category</label>
+                        <select className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700">
+                          <option>Parts</option>
+                          <option>Accessories</option>
+                          <option>Devices</option>
+                          <option>Other</option>
+                        </select>
+                      </div>
+                    </div>
+                    <button type="submit" className="w-full py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 transition-all flex items-center justify-center gap-2">
+                      <span className="material-symbols-outlined text-sm">inventory_2</span>
+                      Save Stock
+                    </button>
+                  </form>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showNewCustomerModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-slate-900/40 backdrop-blur-md"
+              onClick={() => { setShowNewCustomerModal(false); setCustomerSaved(false); }}
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-lg bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden"
+            >
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                <div>
+                  <h3 className="text-2xl font-black text-primary tracking-tight">New Customer</h3>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Create a customer record</p>
+                </div>
+                <button onClick={() => { setShowNewCustomerModal(false); setCustomerSaved(false); }} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-slate-400">close</span>
+                </button>
+              </div>
+              <div className="p-8">
+                {customerSaved ? (
+                  <div className="py-8 text-center space-y-4">
+                    <div className="w-16 h-16 bg-lime-100 rounded-full flex items-center justify-center mx-auto">
+                      <span className="material-symbols-outlined text-3xl text-lime-600" style={{fontVariationSettings: "'FILL' 1"}}>person_add</span>
+                    </div>
+                    <p className="text-lg font-black text-primary">Customer Created</p>
+                    <button onClick={() => { setShowNewCustomerModal(false); setCustomerSaved(false); }} className="px-8 py-3 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest">Done</button>
+                  </div>
+                ) : (
+                  <form onSubmit={(e) => { e.preventDefault(); setCustomerSaved(true); }} className="space-y-4">
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">First Name</label>
+                        <input name="firstName" required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="John" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Last Name</label>
+                        <input name="lastName" required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="Doe" />
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Phone</label>
+                      <input name="phone" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="555-0000" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Email</label>
+                      <input name="email" type="email" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="john@example.com" />
+                    </div>
+                    <button type="submit" className="w-full py-4 bg-secondary text-white font-black text-sm rounded-2xl shadow-lg shadow-secondary/20 uppercase tracking-widest hover:bg-secondary/90 transition-all flex items-center justify-center gap-2">
+                      <span className="material-symbols-outlined text-sm">person_add</span>
+                      Create Customer
+                    </button>
+                  </form>
+                )}
               </div>
             </motion.div>
           </div>

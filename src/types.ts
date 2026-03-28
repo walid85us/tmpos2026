@@ -3,6 +3,7 @@ export interface CartItem {
   name: string;
   description: string;
   price: number;
+  qty?: number;
   icon: string;
   type: 'product' | 'repair' | 'special' | 'deposit';
   imei?: string;
@@ -255,6 +256,9 @@ export interface HeldOrder {
   total: number;
   createdAt: string;
   note?: string;
+  payments?: PaymentMethod[];
+  discounts?: Discount[];
+  customer?: Customer | null;
 }
 
 export interface SpecialPartOrder {

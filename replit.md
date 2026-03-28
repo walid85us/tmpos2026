@@ -23,7 +23,7 @@ A multi-tenant SaaS platform frontend built with React, TypeScript, Vite, Tailwi
 - `src/components/Employees.tsx` - Employee management with roles, time tracking, payroll, activity
 - `src/components/PendingApproval.tsx` - Approval workflow with labeled field detail view
 - `src/components/ApprovalQueue.tsx` - Dashboard approval widget with inline review modal for approvers
-- `src/components/POS.tsx` - Full POS with cart, payments, modals, repair intake, held orders
+- `src/components/POS.tsx` - Full POS with cart, payments, modals, repair intake, held orders, tax calculation (8.25%), discount application, qty support, inline new customer creation, walk-in customer, controlled payment inputs, change due display
 - `src/components/Customers.tsx` - CRM with customer list, profiles, new customer modal
 - `src/components/Reports.tsx` - Reports dashboard with charts (recharts)
 - `src/components/Prospects.tsx` - Estimates, leads, inquiries pipeline
@@ -122,6 +122,8 @@ A multi-tenant SaaS platform frontend built with React, TypeScript, Vite, Tailwi
 ### Fixed Issues
 - **Dead Routes**: 20+ PageShell placeholder routes converted to Navigate redirects (App.tsx)
 - **POS Dead Buttons**: Apply Discount, Redeem Points, Add Payment Method, Verify Credit, Suggestive Sales, POS Config — all wired with modals/state
+- **POS Math Coherence**: Tax (8.25%) computed on subtotal after discounts, qty multiplied into line totals, controlled payment inputs, change due display, discount buttons apply actual discounts, hold/resume preserves full state (payments, discounts, customer), success screen shows actual total + TX ID
+- **Dashboard Role-Awareness**: Quick actions filtered by role (technician=repairs bias, sales_staff=POS bias, manager=broad, owner=full), stat cards filtered by role, dynamic date, Add Stock/New Customer open inline modals instead of navigating, Print Label has type selector (barcode/price/asset) + print feedback
 - **TenantHeader**: Profile menu, notification click handlers, mark-all-read — all wired
 - **Dashboard Cards**: Stat cards made clickable, navigate to relevant pages
 - **Store Components** (12 components fixed): Marketing (campaign+tool modals), SupplyChain (PO+RMA modals), Reports (PDF export via window.print), Prospects (dynamic create modal), Integrations (detail modal for all buttons), Widgets (save+add handlers), Inventory (all tab action buttons), Invoices (print/PDF/SMS/email/duplicate/apply payment), Services (CRUD+category+upload), Settings (save with feedback, Domain & Storefront URL section with platform subdomain + custom domain 4-step setup guide)

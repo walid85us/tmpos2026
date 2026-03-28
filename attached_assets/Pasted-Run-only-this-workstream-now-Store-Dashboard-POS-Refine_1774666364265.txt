@@ -1,0 +1,221 @@
+Run only this workstream now:
+Store Dashboard & POS Refinement
+
+Do not execute any other workstream yet.
+Keep all other task plans as planning drafts only.
+When this workstream is finished, stop and wait for my review.
+
+Project truth and constraints:
+- Read and honor the current project baseline from replit.md
+- Use Ref.txt as product/workflow reference for repair/POS operational patterns
+- Preserve the current design baseline exactly
+- Preserve auth, preview mode, RBAC, lifecycle gating, plan entitlement gating, and platform/store hierarchy
+- Do not break existing onboarding gating behavior
+- Do not redesign the UI
+- Do not touch unrelated modules
+- Avoid shallow “button works” fixes
+- Prefer coherent end-to-end workflow refinement with narrow, regression-safe changes
+- If a supporting process is missing and required to make Store Dashboard or POS workflows truly coherent, implement it
+
+Run only these focus areas:
+- Store Owner dashboard
+- role-aware dashboard behavior
+- Quick Intake
+- Add Stock
+- New Customer
+- Print Label
+- Hold Sale
+- POS / checkout / tender flow
+- payment methods
+- tax/payment logic
+- POS quick actions
+- sales workflow usability
+
+Act as:
+Principal Repair/POS Product Architect
++ Principal Store Operations Workflow Designer
++ Principal Payments & Tender Flow Architect
++ Principal React/TypeScript Engineer
++ Principal UX Workflow Designer
++ Principal QA Auditor
++ Principal Side Auditor & Systems Thinker
+
+You must also:
+- act as a side auditor and systems thinker
+- identify any missing supporting process needed to make Store Dashboard and POS workflows coherent
+- implement the missing support process if required
+- explicitly check for cross-flow state integrity, permission integrity, and lifecycle/entitlement integrity
+- preserve all existing architectural rules already implemented in the app
+
+Critical current baseline you must preserve:
+- This is a multi-tenant SaaS frontend built with React, TypeScript, Vite, Tailwind, Firebase Auth, and Firestore
+- Existing routing, preview switching, and access control are already in place
+- Lifecycle gating is layered on top of RBAC and plan access
+- During onboarding, dashboard is the control center and operational modules remain hidden/locked until activation completes
+- Plan filtering applies only after activation
+- Existing modal, animation, and save-feedback patterns must be preserved
+- Existing POS dead-button wiring has already been done in earlier work, so this pass must refine workflow quality and consistency rather than redoing shallow button hookups
+
+Files/components most likely in scope:
+- src/components/POS.tsx
+- dashboard/store dashboard related components
+- customer creation flow components
+- inventory quick-add flow components
+- any shared types/helpers/state directly required for these flows
+- access/routing logic only if needed to preserve role-aware behavior and existing gating
+Do not spread changes beyond what is necessary for this workstream.
+
+Primary outcome:
+Upgrade the store-side dashboard and POS experience from “feature present” to “operationally coherent for daily store use”.
+
+Implement/refine the following behavior:
+
+1) Store Owner Dashboard strengthening
+- Make dashboard genuinely useful for a Store Owner as the daily control center
+- Improve role-aware behavior so content/actions differ appropriately for:
+  - store_owner
+  - manager
+  - technician
+  - sales_staff
+- Preserve existing activation gating and onboarding control-center behavior
+- Active stores should see actionable operational dashboard content
+- Non-active stores must still respect lifecycle gating and not expose blocked operational modules
+- Dashboard actions/cards must never bypass RBAC, plan entitlement, or lifecycle gating
+
+2) Role-aware dashboard behavior
+- Ensure quick actions, summary widgets, and operational shortcuts are shown/hidden/disabled based on role and access
+- Do not expose owner-level operational/financial controls to lower roles unless already permitted
+- Technician dashboard behavior should bias toward repair/ticket workflow relevance
+- Sales staff dashboard behavior should bias toward POS/customer workflow relevance
+- Manager dashboard should be broader than technician/sales but still respect owner-only governance limits
+- Store Owner dashboard should be the fullest store-level operational view
+
+3) Quick Intake refinement
+- Refine Quick Intake into a fast, low-friction flow for common repair/POS intake scenarios
+- Ensure it captures enough structured information to hand off cleanly into downstream repair/POS workflow
+- Prevent incoherent partial state
+- Respect any mandatory intake requirements already implied by system structure
+- Make sure Quick Intake creates a coherent resulting object/state and next action path
+
+4) Add Stock refinement
+- Refine quick Add Stock so it is useful in live store flow, not just a superficial modal
+- Ensure the flow captures the minimum viable inventory data cleanly
+- Respect store context and role permissions
+- Ensure resulting inventory state is usable immediately where expected
+- Preserve current design language and avoid unrelated inventory redesign
+
+5) New Customer refinement
+- Refine quick New Customer flow for speed and data quality
+- Ensure creation works cleanly from dashboard/POS contexts
+- Prevent broken downstream POS/cart/ticket states when customer is created inline
+- Preserve any existing customer-management structure and avoid CRM redesign
+
+6) Print Label refinement
+- Ensure Print Label is coherent with real store workflow
+- Label printing should have a clear source context and not operate on ambiguous data
+- If a supporting print context/selection step is required, implement the minimum coherent support process
+- Preserve current design baseline
+
+7) Hold Sale refinement
+- Ensure Hold Sale behaves like a real suspended/parked transaction flow
+- Held transactions must preserve enough cart context to resume safely
+- Resume/reopen behavior must be coherent
+- Avoid shallow “saved toast only” behavior
+- Preserve role/store context and avoid cross-tenant leakage
+
+8) POS / checkout / tender flow strengthening
+- Make checkout flow operationally coherent from cart review through payment completion
+- Improve tender flow logic
+- Ensure totals are trustworthy and payment state is consistent
+- Prevent contradictory or partial checkout states
+- Make payment confirmation, remaining due, and completion state clear
+- Preserve current UI baseline while improving flow clarity
+
+9) Payment methods refinement
+- Improve payment method handling for practical POS use
+- Make method selection and payment application more coherent
+- If split/multi-tender support is already partially present, refine it into a trustworthy flow rather than superficial UI
+- Preserve current architectural boundaries and do not invent backend integrations that do not exist
+
+10) Tax/payment logic refinement
+- Audit tax and payment math/state transitions carefully
+- Ensure subtotal, discount, tax, total, paid, remaining, and change-due logic are internally coherent
+- Eliminate obvious edge-case inconsistencies
+- Respect existing store/app context where tax behavior is already implied
+- Avoid fake enterprise complexity, but make the existing logic reliable and comprehensible
+
+11) POS quick actions refinement
+- Make POS quick actions feel intentionally designed for speed at the counter
+- Remove dead-end interactions, ambiguous state transitions, and awkward flow breaks
+- Improve usability without redesigning the visual system
+
+12) Sales workflow usability
+- Improve overall cashier/store workflow usability
+- Reduce friction between:
+  - selecting/creating customer
+  - adding repair/service/product items
+  - reviewing cart
+  - applying discounts / taxes / payment methods
+  - holding/resuming
+  - checkout completion
+  - printing relevant output
+- Maintain current design baseline exactly
+
+Side-auditor requirements:
+While implementing, actively audit for missing supporting processes needed for coherence, including if applicable:
+- dashboard quick action permission mismatches
+- customer creation to cart/intake handoff gaps
+- quick intake to ticket/POS handoff gaps
+- hold-sale resume state gaps
+- print-label context gaps
+- cart/tender summary inconsistencies
+- tax/discount/payment order-of-operations issues
+- role-aware dashboard action leakage
+- lifecycle/activation gating leaks
+- plan entitlement leaks
+If any are found, fix them within this workstream only when necessary for coherence.
+
+Important implementation style:
+- Make narrow, high-value corrections
+- Reuse existing patterns, components, state style, modal style, toast/save-feedback style, and motion patterns
+- Do not perform broad rewrites unless clearly necessary
+- Prefer targeted refactors only where they materially improve coherence and maintainability
+- Preserve existing design system exactly
+
+Definition of done for this workstream:
+- Dashboard is meaningfully role-aware
+- Quick Intake is coherent and usable
+- Add Stock is coherent and usable
+- New Customer is coherent and usable
+- Print Label is coherent and usable
+- Hold Sale is coherent and resumable
+- POS checkout/tender flow is materially stronger
+- Payment methods are clearer and more reliable
+- Tax/payment math and flow are coherent
+- POS quick actions are smoother and less brittle
+- No auth / preview mode / RBAC / lifecycle gating regressions
+- No unrelated module changes
+
+When implementation is finished:
+Do not mark complete immediately.
+
+First do manual QA and report back using pass/fail for:
+- Dashboard role-aware behavior
+- Quick Intake
+- Add Stock
+- New Customer
+- Print Label
+- Hold Sale
+- POS / checkout / tender flow
+- payment methods
+- tax/payment logic
+- POS quick actions
+- any broken button/route found
+
+In the QA report, also include:
+- files changed
+- any supporting process you added
+- any known limitations intentionally left unchanged
+- any follow-up items recommended for a narrow correction pass
+
+Then stop and wait for my review.
