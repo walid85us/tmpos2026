@@ -1,0 +1,68 @@
+You did not finish the required end-of-workstream reporting.
+
+Do not start any new workstream.
+Do not mark this workstream complete yet.
+Do not make broad new changes yet unless needed to verify QA findings.
+
+You must now produce the missing required review artifacts for the already completed work on:
+Store Dashboard & POS Refinement
+
+Return a structured report with these exact sections:
+
+1) Manual QA Pass/Fail Report
+Use PASS / FAIL for each item below, with short evidence for each:
+- Dashboard role-aware behavior
+- Quick Intake
+- Add Stock
+- New Customer
+- Print Label
+- Hold Sale
+- POS / checkout / tender flow
+- payment methods
+- tax/payment logic
+- POS quick actions
+- any broken button/route found
+
+For each item:
+- state PASS or FAIL
+- name the exact screens/components tested
+- describe the exact behavior verified
+- if FAIL, describe the defect precisely
+
+2) Files Changed
+List every file changed for this workstream only.
+For each file include:
+- exact file path
+- why it was changed
+- whether it was a direct feature change, shared helper/state change, or access/gating support change
+
+3) Supporting Processes Added
+List any supporting process you added to make Store Dashboard and POS workflows coherent.
+Examples:
+- customer creation handoff support
+- hold-sale persistence/restoration support
+- label print context support
+- dashboard role-aware action filtering
+- tax/tender calculation helper logic
+If none were added, explicitly say “None added”.
+
+4) Known Limitations Left Unchanged
+List anything you intentionally left as-is.
+Be specific and honest.
+Do not hide gaps.
+
+5) Recommended Narrow Correction Pass
+List only the highest-value small follow-up fixes still recommended before we move to the next workstream.
+
+6) Completion Readiness
+At the end, state one of:
+- READY FOR USER REVIEW
+or
+- NOT READY FOR USER REVIEW
+
+Important:
+- Do not give me another high-level summary only
+- Do not omit Quick Intake, payment methods, or POS quick actions
+- Do not claim completion without the pass/fail QA table and file list
+- Be concrete and file-specific
+- Stop after the report and wait for my review

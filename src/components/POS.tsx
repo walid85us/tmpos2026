@@ -1162,14 +1162,16 @@ export const POS: React.FC = () => {
                 <form onSubmit={(e) => {
                   e.preventDefault();
                   const fd = new FormData(e.currentTarget);
-                  const newCust = {
+                  const newCust: Customer = {
                     id: `c-${Date.now()}`,
                     name: `${fd.get('firstName')} ${fd.get('lastName')}`,
                     phone: fd.get('phone') as string || '',
                     email: fd.get('email') as string || '',
+                    totalSpent: 0,
+                    lastVisit: '',
                   };
                   setCustomersList([...customersList, newCust]);
-                  setSelectedCustomer(newCust as any);
+                  setSelectedCustomer(newCust);
                   setCustomerValidationError('');
                   setNewCustMode(false);
                   setIsCustomerModalOpen(false);
