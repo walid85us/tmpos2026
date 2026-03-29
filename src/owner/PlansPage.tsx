@@ -98,7 +98,7 @@ const PlansPage: React.FC = () => {
       features: planForm.features.split(',').map(f => f.trim()).filter(Boolean),
       limits: { seats: Number(planForm.seats), locations: Number(planForm.locations) },
       billingCycle: planForm.billingCycle,
-      status: 'active',
+      status: editingPlan?.status || 'active',
     };
     if (editingPlan) {
       setPlansData(prev => prev.map(p => p.id === editingPlan.id ? newPlan : p));

@@ -901,11 +901,11 @@ const BillingPage: React.FC = () => {
                     const creditRemaining = selectedCredit ? selectedCredit.amount - selectedCredit.appliedAmount : 0;
                     const creditTenant = selectedCredit?.tenant || '';
                     const eligibleInvoices = creditTenant
-                      ? invoiceHistory.filter(i => i.tenant === creditTenant && (i.status === 'overdue' || i.status === 'paid'))
+                      ? invoiceHistory.filter(i => i.tenant === creditTenant && (i.status === 'overdue' || i.status === 'pending'))
                       : [];
                     const noBalance = selectedCredit && creditRemaining <= 0;
                     const noEligible = selectedCredit && !noBalance && eligibleInvoices.length === 0;
-                    const eligibilityLabel = 'overdue or paid';
+                    const eligibilityLabel = 'overdue or pending';
                     return (
                       <>
                         <div>
