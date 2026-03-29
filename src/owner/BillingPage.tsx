@@ -166,15 +166,20 @@ const BillingPage: React.FC = () => {
     else if (formModal === 'refund') label = `Refund of $${formAmount} issued to ${formTenant}`;
     else if (formModal === 'credit') label = `Credit note of $${formAmount} created for ${formTenant}`;
     else if (formModal === 'apply_credit') {
-      label = `Credit ${formCreditId} applied to ${formInvoiceId}`;
       const credit = creditNotes.find(c => c.creditNo === formCreditId);
-      if (credit) {
-        const remaining = credit.amount - credit.appliedAmount;
+      const invoice = invoiceHistory.find(i => i.invoiceNo === formInvoiceId);
+      if (credit && invoice) {
+        const creditRemaining = credit.amount - credit.appliedAmount;
+        const applyAmount = Math.min(creditRemaining, invoice.total);
+        const newApplied = credit.appliedAmount + applyAmount;
+        label = `$${applyAmount.toFixed(2)} from ${formCreditId} applied to ${formInvoiceId}`;
         setCreditNotes(prev => prev.map(c =>
           c.creditNo === formCreditId
-            ? { ...c, appliedAmount: c.amount, appliedToInvoice: formInvoiceId, appliedDate: new Date().toISOString().split('T')[0], status: remaining <= c.amount ? 'applied' as const : c.status }
+            ? { ...c, appliedAmount: newApplied, appliedToInvoice: formInvoiceId, appliedDate: new Date().toISOString().split('T')[0], status: newApplied >= c.amount ? 'applied' as const : 'issued' as const }
             : c
         ));
+      } else {
+        label = `Credit ${formCreditId} applied to ${formInvoiceId}`;
       }
     }
     setFormModal(null);
