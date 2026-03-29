@@ -105,8 +105,9 @@ export const POS: React.FC = () => {
   const locationHandled = useRef(false);
   useEffect(() => {
     if (locationHandled.current) return;
-    const state = location.state as { autoQuickCheckIn?: boolean; openHeldOrders?: boolean } | null;
-    if (state?.autoQuickCheckIn) {
+    const state = location.state as { autoQuickCheckIn?: boolean; openHeldOrders?: boolean; autoRepairItem?: CartItem; addToCart?: CartItem } | null;
+    if (!state) return;
+    if (state.autoQuickCheckIn) {
       locationHandled.current = true;
       const quickRepair: CartItem = {
         id: `QR-${Date.now()}`,
@@ -120,9 +121,19 @@ export const POS: React.FC = () => {
       setIsRepairDetailsModalOpen(true);
       window.history.replaceState({}, document.title);
     }
-    if (state?.openHeldOrders) {
+    if (state.openHeldOrders) {
       locationHandled.current = true;
       setIsHeldOrdersOpen(true);
+      window.history.replaceState({}, document.title);
+    }
+    if (state.autoRepairItem) {
+      locationHandled.current = true;
+      setCart(prev => [...prev, { ...state.autoRepairItem!, id: `${state.autoRepairItem!.id}-${Date.now()}` }]);
+      window.history.replaceState({}, document.title);
+    }
+    if (state.addToCart) {
+      locationHandled.current = true;
+      setCart(prev => [...prev, { ...state.addToCart!, id: `SCAN-${Date.now()}` }]);
       window.history.replaceState({}, document.title);
     }
   }, [location.state]);
@@ -941,13 +952,28 @@ export const POS: React.FC = () => {
               </div>
 
               <div className="grid grid-cols-2 gap-4 max-h-[50vh] overflow-y-auto pr-2">
-                {[
-                  { id: 'p3', name: 'iPhone 13 Screen Repair', price: 189.00, icon: 'smartphone', type: 'repair', category: 'Repairs' },
-                  { id: 'p4', name: 'USB-C Charging Cable', price: 19.99, icon: 'cable', type: 'product', category: 'Accessories' },
-                  { id: 'p5', name: 'Samsung S21 Battery', price: 45.00, icon: 'battery_charging_full', type: 'product', category: 'Parts' },
-                ].filter(i => 
+                {(() => {
+                  const baseItems: { id: string; name: string; price: number; icon: string; type: 'repair' | 'product'; category: string; description: string }[] = [
+                    { id: 'p3', name: 'iPhone 13 Screen Repair', price: 189.00, icon: 'smartphone', type: 'repair', category: 'Repairs', description: 'Screen replacement service' },
+                    { id: 'p4', name: 'USB-C Charging Cable', price: 19.99, icon: 'cable', type: 'product', category: 'Accessories', description: 'Charging cable' },
+                    { id: 'p5', name: 'Samsung S21 Battery', price: 45.00, icon: 'battery_charging_full', type: 'product', category: 'Parts', description: 'Battery replacement' },
+                  ];
+                  const baseNames = new Set(baseItems.map(i => i.name.toLowerCase()));
+                  const fromStock = sharedStockItems
+                    .filter(si => !baseNames.has(si.name.toLowerCase()))
+                    .map(si => ({
+                      id: si.id,
+                      name: si.name,
+                      price: si.price,
+                      icon: si.category === 'Parts' ? 'build' : si.category === 'Accessories' ? 'cable' : 'inventory_2',
+                      type: 'product' as const,
+                      category: si.category,
+                      description: `SKU: ${si.sku} · ${si.qty} in stock`,
+                    }));
+                  return [...baseItems, ...fromStock];
+                })().filter(i => 
                   (searchCategory === 'All Categories' || i.category === searchCategory) &&
-                  i.name.toLowerCase().includes(searchQuery.toLowerCase())
+                  (i.name.toLowerCase().includes(searchQuery.toLowerCase()) || i.description.toLowerCase().includes(searchQuery.toLowerCase()))
                 ).map((item) => (
                   <button key={item.id} onClick={() => addItemToCart(item)} className="flex items-center gap-4 p-4 bg-slate-50 hover:bg-white hover:shadow-xl rounded-2xl text-left transition-all group">
                     <div className="w-12 h-12 bg-white rounded-xl flex items-center justify-center text-primary shadow-sm group-hover:bg-secondary group-hover:text-white transition-all">
@@ -956,6 +982,7 @@ export const POS: React.FC = () => {
                     <div>
                       <p className="font-bold text-slate-900">{item.name}</p>
                       <p className="text-xs text-secondary font-black">${item.price.toFixed(2)}</p>
+                      <p className="text-[10px] text-slate-400">{item.description}</p>
                     </div>
                   </button>
                 ))}
@@ -982,7 +1009,12 @@ export const POS: React.FC = () => {
         {isRepairDetailsModalOpen && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[120] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
             <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-2xl w-full p-8 ghost-border">
-              <h3 className="text-2xl font-black text-primary mb-8">Repair Intake Form</h3>
+              <div className="flex justify-between items-center mb-8">
+                <h3 className="text-2xl font-black text-primary tracking-tight">Repair Intake Form</h3>
+                <button onClick={() => { setIsRepairDetailsModalOpen(false); setPendingRepairItem(null); setRepairValidationError(''); }} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-slate-400">close</span>
+                </button>
+              </div>
               <div className="grid grid-cols-2 gap-6 mb-8">
                 <div className="space-y-4">
                   <div>
@@ -1080,6 +1112,7 @@ export const POS: React.FC = () => {
                     sku: fd.get('sku') as string || '',
                     qty: parseInt(fd.get('quantity') as string) || 1,
                     cost: parseFloat(fd.get('costPrice') as string) || 0,
+                    price: parseFloat(fd.get('sellPrice') as string) || 0,
                     category: fd.get('category') as string || 'Parts',
                     addedAt: new Date().toISOString(),
                   });
@@ -1099,10 +1132,14 @@ export const POS: React.FC = () => {
                       <input name="quantity" type="number" min="1" defaultValue={1} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" />
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-3 gap-4">
                     <div className="space-y-1">
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Cost Price</label>
                       <input name="costPrice" type="number" step="0.01" className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="0.00" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Sell Price</label>
+                      <input name="sellPrice" type="number" step="0.01" className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="0.00" />
                     </div>
                     <div className="space-y-1">
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Category</label>

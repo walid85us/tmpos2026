@@ -1,0 +1,90 @@
+Run one more narrow correction pass only for:
+Store Dashboard & POS Refinement
+
+Do not start any new workstream.
+Do not redesign the UI.
+Do not broaden scope.
+Preserve the current design baseline exactly.
+Preserve auth, preview mode, RBAC, lifecycle gating, plan entitlement gating, and platform/store hierarchy.
+
+Act as:
+Principal Repair/POS Product Architect
++ Principal Store Operations Workflow Designer
++ Principal Payments & Tender Flow Architect
++ Principal React/TypeScript Engineer
++ Principal UX Workflow Designer
++ Principal QA Auditor
++ Principal Side Auditor & Systems Thinker
+
+This is a narrow correction pass only.
+Fix only the issues found during user manual QA.
+
+Required fixes:
+
+1) Dashboard Quick Intake must open the real Repair Intake flow
+- From dashboard, Quick Intake must open the same Repair Intake / Quick Check-in form behavior used in POS
+- It must open immediately without requiring an extra manual click after navigation
+- The Repair Intake popup must include a visible X close button
+- Completing the intake must add the created repair/intake item into Order Summary
+- Do not leave dashboard Quick Intake as simple navigation-only behavior
+
+2) Dashboard Hold Orders behavior
+- Keep the current dashboard behavior where clicking Hold Orders opens the Held Orders popup/window
+- When a held order is selected from dashboard flow, take the user into Checkout / Tender with that held order restored
+- From the Sales page itself, preserve the current in-POS hold/resume behavior
+- Do not regress existing hold/resume logic
+
+3) Quick Add Stock must become a coherent shared flow
+- Dashboard Quick Add Stock and POS Quick Add Stock must stop being success-only mock feedback
+- Implement a shared local/mock inventory source so quick-added items are actually available afterward
+- Make the result verifiable in a simple way
+- Keep this narrow: local/mock shared state is acceptable for now
+- Do not redesign the inventory module
+- Add a clear lightweight verification path for the user to confirm the item now exists
+
+4) New Customer must sync into Customer Management
+- A customer created from dashboard must be written into the same shared customer source used by Customer Management
+- A customer created from POS inline customer creation must also be written into that same shared source
+- Result: customers created from dashboard or POS must appear in Customer Management and remain searchable in POS
+- Keep current UI baseline and do not redesign CRM
+
+5) Print Label must become more operationally coherent
+- Replace the free text “Label Text / SKU” behavior with inventory-backed search/selection wherever possible
+- The field should help the user find an existing inventory item
+- Preview should become type-aware and meaningfully based on the selected label type and selected item
+- Keep the UI design baseline; improve only the workflow realism and clarity
+- Preserve current enable/disable safety rules for print action
+
+6) Scan QR must support checkout workflow
+- Scan QR should support adding an inventory item into the Order Summary / cart / checkout flow
+- From dashboard, it may either:
+  a) open a lightweight scan/add modal that feeds checkout, or
+  b) route into POS checkout with scan/add context already active
+- Do not leave Scan QR as an unclear shortcut
+- The outcome must be coherent for store counter use
+
+7) Dashboard quick action behavior rule
+- Dashboard quick actions should prefer popup/modal-driven workflows for fast operations when possible
+- Only navigate away when truly necessary
+- Where navigation is required, provide a clear path into the main section
+- Do not create awkward context-switching for simple store actions
+
+8) Keep existing good fixes intact
+- Do not break discount code behavior
+- Do not break redeem points behavior
+- Do not break tax/payment totals logic
+- Do not break hold/resume state integrity
+- Do not break role-aware dashboard filtering
+
+After implementation, return only:
+1. What changed
+2. Exact files changed in this pass
+3. Any shared local/mock state introduced or unified
+4. Any known limitations still intentionally left unchanged
+5. A short implementation verification summary
+
+Important:
+- Do not claim final QA closure on behalf of the user
+- Do not mark the workstream complete yet
+- The user will do the final manual QA
+- Stop after the report and wait for user testing feedback

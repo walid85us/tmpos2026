@@ -692,18 +692,23 @@ function StoreActivationPanel() {
 export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => void }) {
   const { session, canAccess } = useAccess();
   const navigate = useNavigate();
-  const { addCustomer, addStockItem } = useStoreLocalState();
+  const { addCustomer, addStockItem, stockItems: sharedStockItems } = useStoreLocalState();
   const [showPrintLabelModal, setShowPrintLabelModal] = useState(false);
   const [showScanQRModal, setShowScanQRModal] = useState(false);
   const [showAddStockModal, setShowAddStockModal] = useState(false);
   const [showNewCustomerModal, setShowNewCustomerModal] = useState(false);
+  const [showQuickIntakeModal, setShowQuickIntakeModal] = useState(false);
   const [printLabelText, setPrintLabelText] = useState('');
   const [printLabelQty, setPrintLabelQty] = useState(1);
   const [printLabelType, setPrintLabelType] = useState<'barcode' | 'price' | 'asset'>('barcode');
   const [printSent, setPrintSent] = useState(false);
+  const [selectedPrintItem, setSelectedPrintItem] = useState<StockItem | null>(null);
   const [scanResult, setScanResult] = useState('');
   const [stockSaved, setStockSaved] = useState(false);
   const [customerSaved, setCustomerSaved] = useState(false);
+  const [lastAddedStock, setLastAddedStock] = useState<StockItem | null>(null);
+  const [intakeDetails, setIntakeDetails] = useState({ imei: '', serialNumber: '', passcode: '', network: '' });
+  const [intakeValidationError, setIntakeValidationError] = useState('');
 
   const role = session?.role;
   const todayStr = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
@@ -730,7 +735,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
         navigate('/sales');
         break;
       case 'Quick Intake':
-        navigate('/sales', { state: { autoQuickCheckIn: true } });
+        setShowQuickIntakeModal(true);
         break;
       case 'Add Stock':
         setShowAddStockModal(true);
@@ -774,7 +779,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
           </div>
           {(role === 'store_owner' || role === 'manager' || role === 'technician') && (
             <button 
-              onClick={() => navigate('/sales')}
+              onClick={() => setShowQuickIntakeModal(true)}
               className="bg-secondary text-white px-6 py-2 rounded-xl font-bold text-sm shadow-lg flex items-center gap-2 active:scale-95 transition-transform"
             >
               <span className="material-symbols-outlined text-sm">add</span>
@@ -851,8 +856,8 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                       <span className="material-symbols-outlined text-3xl text-lime-600" style={{fontVariationSettings: "'FILL' 1"}}>check_circle</span>
                     </div>
                     <p className="text-lg font-black text-primary">Sent to Printer</p>
-                    <p className="text-xs text-slate-500 font-bold">{printLabelQty} {printLabelType} label{printLabelQty > 1 ? 's' : ''} queued</p>
-                    <button onClick={() => { setShowPrintLabelModal(false); setPrintLabelText(''); setPrintLabelQty(1); setPrintSent(false); }} className="px-8 py-3 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest">Done</button>
+                    <p className="text-xs text-slate-500 font-bold">{printLabelQty} {printLabelType} label{printLabelQty > 1 ? 's' : ''} queued{selectedPrintItem ? ` — ${selectedPrintItem.name}` : ''}</p>
+                    <button onClick={() => { setShowPrintLabelModal(false); setPrintLabelText(''); setPrintLabelQty(1); setPrintSent(false); setSelectedPrintItem(null); }} className="px-8 py-3 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest">Done</button>
                   </div>
                 ) : (
                   <>
@@ -868,13 +873,38 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                       </div>
                     </div>
                     <div className="space-y-2">
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Label Text / SKU</label>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Search Inventory</label>
                       <input
                         value={printLabelText}
-                        onChange={(e) => setPrintLabelText(e.target.value)}
+                        onChange={(e) => { setPrintLabelText(e.target.value); setSelectedPrintItem(null); }}
                         className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700"
-                        placeholder="Enter SKU or product name..."
+                        placeholder="Search by name or SKU..."
                       />
+                      {printLabelText.trim() && !selectedPrintItem && (() => {
+                        const matches = sharedStockItems.filter(si =>
+                          si.name.toLowerCase().includes(printLabelText.toLowerCase()) ||
+                          si.sku.toLowerCase().includes(printLabelText.toLowerCase())
+                        );
+                        return matches.length > 0 ? (
+                          <div className="bg-white border border-slate-200 rounded-xl max-h-40 overflow-y-auto shadow-lg">
+                            {matches.map(si => (
+                              <button key={si.id} onClick={() => { setSelectedPrintItem(si); setPrintLabelText(si.name); }} className="w-full px-4 py-3 text-left hover:bg-slate-50 border-b border-slate-100 last:border-0">
+                                <p className="text-sm font-bold text-slate-700">{si.name}</p>
+                                <p className="text-[10px] text-slate-400">SKU: {si.sku} · ${si.price.toFixed(2)} · {si.qty} in stock</p>
+                              </button>
+                            ))}
+                          </div>
+                        ) : null;
+                      })()}
+                      {selectedPrintItem && (
+                        <div className="flex items-center gap-2 px-4 py-2 bg-lime-50 border border-lime-200 rounded-xl">
+                          <span className="material-symbols-outlined text-lime-600 text-sm" style={{fontVariationSettings: "'FILL' 1"}}>check_circle</span>
+                          <p className="text-xs font-bold text-lime-700">{selectedPrintItem.name} · SKU: {selectedPrintItem.sku}</p>
+                          <button onClick={() => { setSelectedPrintItem(null); setPrintLabelText(''); }} className="ml-auto text-slate-400 hover:text-red-500">
+                            <span className="material-symbols-outlined text-sm">close</span>
+                          </button>
+                        </div>
+                      )}
                     </div>
                     <div className="space-y-2">
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Quantity</label>
@@ -886,10 +916,37 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                         className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700"
                       />
                     </div>
-                    <div className="bg-slate-50 p-6 rounded-2xl border border-slate-100 flex items-center justify-center">
+                    <div className="bg-slate-50 p-6 rounded-2xl border border-slate-100">
                       <div className="text-center">
-                        <span className="material-symbols-outlined text-5xl text-slate-300 mb-2">{printLabelType === 'barcode' ? 'qr_code_2' : printLabelType === 'price' ? 'sell' : 'inventory'}</span>
-                        <p className="text-xs font-bold text-slate-400">{printLabelType === 'barcode' ? 'Barcode' : printLabelType === 'price' ? 'Price Tag' : 'Asset'} preview</p>
+                        {printLabelType === 'barcode' ? (
+                          <div>
+                            <div className="flex items-center justify-center gap-[2px] mb-2">
+                              {[3,2,3,1,2,3,2,1,3,2,1,2,3,1,2,3,2,1,3,2].map((w, i) => (
+                                <div key={i} className="bg-slate-800 rounded-sm" style={{ width: w, height: 40 }} />
+                              ))}
+                            </div>
+                            <p className="text-xs font-mono font-bold text-slate-600">{selectedPrintItem?.sku || printLabelText || '—'}</p>
+                            {selectedPrintItem && <p className="text-[10px] text-slate-400 mt-1">{selectedPrintItem.name}</p>}
+                          </div>
+                        ) : printLabelType === 'price' ? (
+                          <div>
+                            <span className="material-symbols-outlined text-3xl text-slate-300 mb-1">sell</span>
+                            <p className="text-2xl font-black text-primary">{selectedPrintItem ? `$${selectedPrintItem.price.toFixed(2)}` : '—'}</p>
+                            <p className="text-xs font-bold text-slate-500 mt-1">{selectedPrintItem?.name || printLabelText || 'Select an item'}</p>
+                            {selectedPrintItem && <p className="text-[10px] text-slate-400">SKU: {selectedPrintItem.sku}</p>}
+                          </div>
+                        ) : (
+                          <div>
+                            <span className="material-symbols-outlined text-3xl text-slate-300 mb-1">inventory</span>
+                            <p className="text-sm font-bold text-slate-600">{selectedPrintItem?.name || printLabelText || 'Select an item'}</p>
+                            {selectedPrintItem && (
+                              <>
+                                <p className="text-[10px] text-slate-400 mt-1">SKU: {selectedPrintItem.sku}</p>
+                                <p className="text-[10px] text-slate-400">Category: {selectedPrintItem.category}</p>
+                              </>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
                     <button
@@ -916,7 +973,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               className="absolute inset-0 bg-slate-900/40 backdrop-blur-md"
-              onClick={() => setShowScanQRModal(false)}
+              onClick={() => { setShowScanQRModal(false); setScanResult(''); }}
             />
             <motion.div
               initial={{ opacity: 0, scale: 0.9, y: 20 }}
@@ -927,36 +984,54 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
               <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
                 <div>
                   <h3 className="text-2xl font-black text-primary tracking-tight">Scan QR / Barcode</h3>
-                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Look up products or tickets</p>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Add item to checkout</p>
                 </div>
                 <button onClick={() => { setShowScanQRModal(false); setScanResult(''); }} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
                   <span className="material-symbols-outlined text-slate-400">close</span>
                 </button>
               </div>
               <div className="p-8 space-y-6">
-                <div className="bg-slate-900 rounded-2xl p-12 flex flex-col items-center justify-center">
-                  <span className="material-symbols-outlined text-6xl text-teal-400 mb-4">qr_code_scanner</span>
+                <div className="bg-slate-900 rounded-2xl p-8 flex flex-col items-center justify-center">
+                  <span className="material-symbols-outlined text-5xl text-teal-400 mb-2">qr_code_scanner</span>
                   <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Camera scanner ready</p>
-                  <p className="text-[10px] text-slate-500 mt-1">Point camera at barcode or QR code</p>
                 </div>
                 <div className="space-y-2">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Or enter code manually</label>
-                  <div className="flex gap-3">
-                    <input
-                      value={scanResult}
-                      onChange={(e) => setScanResult(e.target.value)}
-                      className="flex-1 px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700"
-                      placeholder="Enter barcode or QR value..."
-                    />
-                    <button
-                      onClick={() => { if (scanResult.trim()) { setShowScanQRModal(false); navigate('/sales'); setScanResult(''); } }}
-                      disabled={!scanResult.trim()}
-                      className="px-6 py-4 bg-primary text-white font-black text-xs rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      Look Up
-                    </button>
-                  </div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Enter barcode / SKU</label>
+                  <input
+                    value={scanResult}
+                    onChange={(e) => setScanResult(e.target.value)}
+                    className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700"
+                    placeholder="Scan or type SKU..."
+                  />
                 </div>
+                {scanResult.trim() && (() => {
+                  const matches = sharedStockItems.filter(si =>
+                    si.sku.toLowerCase().includes(scanResult.toLowerCase()) ||
+                    si.name.toLowerCase().includes(scanResult.toLowerCase())
+                  );
+                  return matches.length > 0 ? (
+                    <div className="space-y-2">
+                      {matches.slice(0, 5).map(si => (
+                        <button key={si.id} onClick={() => {
+                          setShowScanQRModal(false);
+                          setScanResult('');
+                          navigate('/sales', { state: { addToCart: { id: si.id, name: si.name, description: `SKU: ${si.sku}`, price: si.price, icon: si.category === 'Parts' ? 'build' : 'cable', type: 'product' } } });
+                        }} className="w-full p-4 bg-slate-50 hover:bg-primary hover:text-white rounded-2xl text-left transition-all group flex items-center justify-between">
+                          <div>
+                            <p className="font-bold text-sm">{si.name}</p>
+                            <p className="text-[10px] opacity-60">SKU: {si.sku} · {si.qty} in stock</p>
+                          </div>
+                          <div className="text-right">
+                            <p className="font-black text-sm">${si.price.toFixed(2)}</p>
+                            <p className="text-[10px] font-bold opacity-60 flex items-center gap-1 justify-end"><span className="material-symbols-outlined text-xs">add_shopping_cart</span> Add</p>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-center text-sm text-slate-400 py-4">No matching items in inventory</p>
+                  );
+                })()}
               </div>
             </motion.div>
           </div>
@@ -971,7 +1046,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               className="absolute inset-0 bg-slate-900/40 backdrop-blur-md"
-              onClick={() => { setShowAddStockModal(false); setStockSaved(false); }}
+              onClick={() => { setShowAddStockModal(false); setStockSaved(false); setLastAddedStock(null); }}
             />
             <motion.div
               initial={{ opacity: 0, scale: 0.9, y: 20 }}
@@ -984,7 +1059,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                   <h3 className="text-2xl font-black text-primary tracking-tight">Quick Add Stock</h3>
                   <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Add inventory from the counter</p>
                 </div>
-                <button onClick={() => { setShowAddStockModal(false); setStockSaved(false); }} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                <button onClick={() => { setShowAddStockModal(false); setStockSaved(false); setLastAddedStock(null); }} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
                   <span className="material-symbols-outlined text-slate-400">close</span>
                 </button>
               </div>
@@ -995,21 +1070,32 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                       <span className="material-symbols-outlined text-3xl text-lime-600" style={{fontVariationSettings: "'FILL' 1"}}>check_circle</span>
                     </div>
                     <p className="text-lg font-black text-primary">Stock Added</p>
-                    <button onClick={() => { setShowAddStockModal(false); setStockSaved(false); }} className="px-8 py-3 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest">Done</button>
+                    {lastAddedStock && (
+                      <div className="bg-slate-50 rounded-2xl p-4 text-left space-y-1">
+                        <p className="text-sm font-bold text-slate-700">{lastAddedStock.name}</p>
+                        <p className="text-[10px] text-slate-400">SKU: {lastAddedStock.sku} · Qty: {lastAddedStock.qty}</p>
+                        <p className="text-[10px] text-slate-400">Cost: ${lastAddedStock.cost.toFixed(2)} · Sell: ${lastAddedStock.price.toFixed(2)}</p>
+                      </div>
+                    )}
+                    <p className="text-[10px] text-teal-600 font-bold">Now available in POS Add Item catalog</p>
+                    <button onClick={() => { setShowAddStockModal(false); setStockSaved(false); setLastAddedStock(null); }} className="px-8 py-3 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest">Done</button>
                   </div>
                 ) : (
                   <form onSubmit={(e) => {
                     e.preventDefault();
                     const fd = new FormData(e.currentTarget);
-                    addStockItem({
+                    const item: StockItem = {
                       id: `stk-${Date.now()}`,
                       name: fd.get('productName') as string || '',
                       sku: fd.get('sku') as string || '',
                       qty: parseInt(fd.get('quantity') as string) || 1,
                       cost: parseFloat(fd.get('costPrice') as string) || 0,
+                      price: parseFloat(fd.get('sellPrice') as string) || 0,
                       category: fd.get('category') as string || 'Parts',
                       addedAt: new Date().toISOString(),
-                    });
+                    };
+                    addStockItem(item);
+                    setLastAddedStock(item);
                     setStockSaved(true);
                   }} className="space-y-4">
                     <div className="space-y-1">
@@ -1026,10 +1112,14 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                         <input name="quantity" type="number" min="1" defaultValue={1} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" />
                       </div>
                     </div>
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-3 gap-4">
                       <div className="space-y-1">
                         <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Cost Price</label>
                         <input name="costPrice" type="number" step="0.01" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="0.00" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Sell Price</label>
+                        <input name="sellPrice" type="number" step="0.01" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="0.00" />
                       </div>
                       <div className="space-y-1">
                         <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Category</label>
@@ -1047,6 +1137,99 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                     </button>
                   </form>
                 )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showQuickIntakeModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-slate-900/40 backdrop-blur-md"
+              onClick={() => { setShowQuickIntakeModal(false); setIntakeValidationError(''); }}
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-2xl bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden"
+            >
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                <div>
+                  <h3 className="text-2xl font-black text-primary tracking-tight">Quick Repair Intake</h3>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Device check-in from dashboard</p>
+                </div>
+                <button onClick={() => { setShowQuickIntakeModal(false); setIntakeValidationError(''); setIntakeDetails({ imei: '', serialNumber: '', passcode: '', network: '' }); }} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-slate-400">close</span>
+                </button>
+              </div>
+              <div className="p-8">
+                <div className="grid grid-cols-2 gap-6 mb-6">
+                  <div className="space-y-4">
+                    <div>
+                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1 block">Device Identity</label>
+                      <input value={intakeDetails.imei} onChange={(e) => setIntakeDetails({...intakeDetails, imei: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-primary/20" placeholder="IMEI Number" type="text" />
+                    </div>
+                    <input value={intakeDetails.serialNumber} onChange={(e) => setIntakeDetails({...intakeDetails, serialNumber: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-primary/20" placeholder="Serial Number" type="text" />
+                    <div>
+                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1 block">Security</label>
+                      <input value={intakeDetails.passcode} onChange={(e) => setIntakeDetails({...intakeDetails, passcode: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-primary/20" placeholder="Passcode / PIN" type="text" />
+                    </div>
+                  </div>
+                  <div className="space-y-4">
+                    <div>
+                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1 block">Network & Carrier</label>
+                      <select value={intakeDetails.network} onChange={(e) => setIntakeDetails({...intakeDetails, network: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-primary/20">
+                        <option value="">Select Network</option>
+                        <option>Verizon</option>
+                        <option>AT&T</option>
+                        <option>T-Mobile</option>
+                        <option>Unlocked</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1 block">Custom Fields</label>
+                      <input className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold mb-2 focus:outline-none focus:ring-2 focus:ring-primary/20" placeholder="Color" type="text" />
+                      <input className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-primary/20" placeholder="Condition" type="text" />
+                    </div>
+                  </div>
+                </div>
+                {intakeValidationError && (
+                  <div className="flex items-center gap-2 p-3 bg-rose-50 border border-rose-200 rounded-xl mb-4">
+                    <span className="material-symbols-outlined text-rose-500 text-sm">error</span>
+                    <p className="text-xs font-bold text-rose-600">{intakeValidationError}</p>
+                  </div>
+                )}
+                <button onClick={() => {
+                  if (!intakeDetails.imei || !intakeDetails.passcode || !intakeDetails.network) {
+                    setIntakeValidationError('IMEI, Passcode, and Network are mandatory for repair tickets.');
+                    return;
+                  }
+                  setIntakeValidationError('');
+                  const repairItem = {
+                    id: `QR-${Date.now()}`,
+                    name: 'Quick Check-in Repair',
+                    description: 'Standard diagnostic & repair',
+                    price: 0,
+                    icon: 'bolt',
+                    type: 'repair' as const,
+                    imei: intakeDetails.imei,
+                    serialNumber: intakeDetails.serialNumber,
+                    passcode: intakeDetails.passcode,
+                    network: intakeDetails.network,
+                  };
+                  setShowQuickIntakeModal(false);
+                  setIntakeDetails({ imei: '', serialNumber: '', passcode: '', network: '' });
+                  navigate('/sales', { state: { autoRepairItem: repairItem } });
+                }} className="w-full py-5 bg-secondary text-white rounded-2xl font-black uppercase tracking-[0.2em] shadow-lg shadow-secondary/20 active:scale-95 transition-all flex items-center justify-center gap-2">
+                  <span className="material-symbols-outlined text-sm">bolt</span>
+                  Finalize Intake & Open Checkout
+                </button>
               </div>
             </motion.div>
           </div>

@@ -1,5 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { useStoreLocalState } from '../context/StoreLocalState';
+import type { Customer as SharedCustomer } from '../types';
 
 type CustomerView = 'list' | 'profile';
 
@@ -74,12 +76,39 @@ const mockCustomers: Customer[] = [
 ];
 
 export default function Customers() {
+  const { customers: sharedCustomers, addCustomer: addSharedCustomer } = useStoreLocalState();
   const [view, setView] = useState<CustomerView>('list');
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [showNewCustomerModal, setShowNewCustomerModal] = useState(false);
-  const [customers, setCustomers] = useState<Customer[]>(mockCustomers);
+  const [localCustomers, setLocalCustomers] = useState<Customer[]>(mockCustomers);
   const [newCustomerForm, setNewCustomerForm] = useState({ firstName: '', lastName: '', email: '', phone: '', phoneLabel: 'Mobile', group: 'Retail' });
+
+  const customers = useMemo(() => {
+    const localNames = new Set(localCustomers.map(c => c.name.toLowerCase()));
+    const fromShared: Customer[] = sharedCustomers
+      .filter(sc => !localNames.has(sc.name.toLowerCase()))
+      .map(sc => ({
+        id: sc.id,
+        name: sc.name,
+        email: sc.email || '',
+        phone: sc.phone || '',
+        phoneLabel: 'Mobile',
+        tier: 'Bronze',
+        points: 0,
+        repairs: 0,
+        lastVisit: sc.lastVisit || 'Just now',
+        avatar: `https://i.pravatar.cc/100?img=${Math.abs(sc.id.split('').reduce((a, c) => a + c.charCodeAt(0), 0)) % 70}`,
+        group: 'Retail',
+        notes: [],
+        assets: [],
+        customFields: [],
+        gdprCompliant: true,
+        campaignerStatus: 'Pending' as const,
+        thirdPartyBilling: false,
+      }));
+    return [...localCustomers, ...fromShared];
+  }, [localCustomers, sharedCustomers]);
 
   const handleCreateCustomer = () => {
     if (!newCustomerForm.firstName.trim() || !newCustomerForm.lastName.trim()) return;
@@ -102,7 +131,15 @@ export default function Customers() {
       campaignerStatus: 'Pending',
       thirdPartyBilling: false
     };
-    setCustomers(prev => [...prev, newCustomer]);
+    setLocalCustomers(prev => [...prev, newCustomer]);
+    addSharedCustomer({
+      id: newCustomer.id,
+      name: newCustomer.name,
+      email: newCustomer.email,
+      phone: newCustomer.phone,
+      totalSpent: 0,
+      lastVisit: '',
+    });
     setNewCustomerForm({ firstName: '', lastName: '', email: '', phone: '', phoneLabel: 'Mobile', group: 'Retail' });
     setShowNewCustomerModal(false);
   };
