@@ -247,7 +247,7 @@ const BillingPage: React.FC = () => {
         <div className={`bg-white/80 backdrop-blur-xl p-5 rounded-[2.5rem] border shadow-sm ${unappliedCreditTotal > 0 ? 'border-amber-200 bg-amber-50/30' : 'border-slate-200'}`}>
           <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Unapplied Credits</p>
           <p className={`text-3xl font-black ${unappliedCreditTotal > 0 ? 'text-amber-600' : 'text-lime-600'}`}>${unappliedCreditTotal}</p>
-          <p className="text-[10px] font-black text-amber-400 mt-1">{creditNotes.filter(c => c.status === 'pending').length} pending</p>
+          <p className="text-[10px] font-black text-amber-400 mt-1">{creditNotes.filter(c => c.status === 'issued').length} unapplied</p>
         </div>
       </div>
 

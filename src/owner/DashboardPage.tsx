@@ -23,7 +23,7 @@ const DashboardPage: React.FC = () => {
   });
   const pendingDomains = tenants.filter(t => t.verification === 'pending' || t.ssl === 'pending');
   const flaggedTenants = tenants.filter(t => t.flags.length > 0);
-  const unappliedCredits = creditNotes.filter(c => c.status === 'pending');
+  const unappliedCredits = creditNotes.filter(c => c.status === 'issued');
   const unappliedTotal = unappliedCredits.reduce((s, c) => s + (c.amount - c.appliedAmount), 0);
   const overdueInvoices = invoiceHistory.filter(i => i.status === 'overdue');
   const overdueInvoiceTotal = overdueInvoices.reduce((s, i) => s + i.total, 0);
