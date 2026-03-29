@@ -1,0 +1,133 @@
+Run one more narrow correction pass only for:
+Store Dashboard & POS Refinement
+
+Do not start any new workstream.
+Do not redesign the UI.
+Do not broaden scope beyond the issues listed below.
+Preserve the current design baseline exactly.
+Preserve auth, preview mode, RBAC, lifecycle gating, plan entitlement gating, and platform/store hierarchy.
+
+Act as:
+Principal Repair/POS Product Architect
++ Principal Store Operations Workflow Designer
++ Principal Payments & Tender Flow Architect
++ Principal Inventory Workflow Architect
++ Principal Loyalty & Customer Retention Workflow Architect
++ Principal React/TypeScript Engineer
++ Principal UX Workflow Designer
++ Principal QA Auditor
++ Principal Side Auditor & Systems Thinker
+
+This is a narrow correction pass only.
+Fix only the issues found during user manual QA.
+
+Required fixes:
+
+1) Dashboard Hold Orders must be a real dashboard popup flow
+- From dashboard, clicking Hold Orders must open a dashboard-level popup/modal, not the POS page/modal directly
+- That popup must list the currently held orders
+- When a held order is selected from that dashboard popup, then take the user into POS Checkout / Tender with that held order fully restored
+- Preserve the current in-POS hold/resume behavior from the Sales page
+- Do not regress existing hold/resume integrity
+
+2) Held orders must be visible from dashboard flow
+- The dashboard Hold Orders popup must show the same held-order source used by POS
+- Do not leave dashboard and POS using disconnected held-order state
+- The user must be able to create a held order in POS, go to dashboard, open Hold Orders, and see that held order listed
+
+3) Quick Add Stock must become a real operational workflow
+Current problem:
+- It shows success feedback but the item is not truly usable afterward
+
+Implement a coherent shared workflow used by both dashboard Quick Add Stock and POS Quick Add Stock:
+- Use one shared local/mock inventory source
+- After quick-adding an item, the result must be verifiable and reusable
+- The user must be able to find that item afterward
+
+Required action options inside Quick Add Stock:
+A) Add to Order Only
+- Creates a temporary sale item and immediately adds it to the current Order Summary / cart
+- Does not require inventory approval
+- Intended for fast counter sale completion
+
+B) Add to Order + Submit to Inventory
+- Adds the item to the current Order Summary / cart immediately
+- Also creates a shared local/mock inventory entry with a visible status such as Pending Approval
+- This item must be visible in the inventory/local catalog flow afterward
+- A manager or user with inventory-maintenance permission must be able to approve it
+- Until approval, make its status explicit and honest in the UI
+- Keep this narrow and local/mock for now; do not build a large backend workflow
+
+Important:
+- Dashboard Quick Add Stock and POS Quick Add Stock must use the same shared logic/state
+- The user must not see two disconnected fake implementations anymore
+- Add a simple verification path so the user can confirm the item now exists and what status it has
+
+4) Scan QR / barcode / SKU flow must become real and reliable
+Current problem:
+- Entering an actual inventory SKU is not finding the item
+
+Implement a real checkout-oriented scan/add flow:
+- The “Enter barcode / SKU” field must work for:
+  - manual typing
+  - scanner-gun keyboard input
+  - barcode/SKU search against shared inventory data
+- Search must match inventory items by SKU and barcode, and may also support name as a fallback
+- Exact match and useful partial match behavior should both be supported where appropriate
+- When an item is found, the flow must allow adding it directly into Order Summary / cart / checkout
+- From POS, this should work as a fast add-to-order action
+- From dashboard, it may open a lightweight popup that then takes the user into checkout with the scanned item context, or directly route into checkout with that item ready to add/use
+- Do not leave Scan QR as an unclear shortcut
+
+Camera/device support:
+- If browser camera scanning can be added safely with a lightweight browser-native or progressive-enhancement approach, add it
+- If camera scanning is not safely available in this codebase, implement a strong manual/scanner-gun path now and structure the code so camera scanning can be added later without rework
+- Be explicit and honest in the UI about what scan modes are currently supported
+
+5) Loyalty / points redemption must become coherent
+Current problem:
+- points behavior needs real customer-linked rules
+
+Implement a narrow but real loyalty flow in POS and shared customer state:
+- Redeem Points must be disabled unless a customer is selected
+- Redemption must use the selected customer’s available points from shared customer data
+- The user must not be allowed to redeem more points than the customer has
+- Enforce a minimum redemption threshold of 100 points
+- Enforce redemption in clear deterministic increments/rules
+- Show the customer’s available points in the UI
+- Show how many points the customer will earn from the current sale before finalizing
+- On completed sale, update the selected customer’s points in shared local/mock customer state
+- Points logic must be centralized, not hardcoded in scattered UI handlers
+
+Loyalty rule source:
+- Reuse any existing loyalty configuration/module if already present in the project
+- If no usable rule source exists, implement a narrow centralized local/mock rule set for now and make it visible/understandable in the UI
+- Prefer honest deterministic behavior over fake realism
+
+6) Keep existing good fixes intact
+Do not break:
+- dashboard Quick Intake real handoff
+- customer sync into Customer Management and POS
+- Print Label inventory-backed behavior
+- discount code behavior that already works
+- tax/payment totals integrity
+- hold/resume sale integrity
+- role-aware dashboard filtering
+
+7) Dashboard interaction rule
+- Dashboard actions should prefer popup/modal-driven fast workflows first
+- Only navigate away when truly necessary
+- Where navigation is needed, it must be intentional and coherent, not a confusing shortcut
+
+After implementation, return only:
+1. What changed
+2. Exact files changed in this pass
+3. Any shared local/mock state introduced or unified
+4. Any known limitations still intentionally left unchanged
+5. A short implementation verification summary
+
+Important:
+- Do not claim final QA closure on behalf of the user
+- Do not mark the workstream complete yet
+- The user will perform the final manual QA
+- Stop after the report and wait for user testing feedback

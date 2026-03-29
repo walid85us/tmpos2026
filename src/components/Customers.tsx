@@ -95,7 +95,7 @@ export default function Customers() {
         phone: sc.phone || '',
         phoneLabel: 'Mobile',
         tier: 'Bronze',
-        points: 0,
+        points: sc.loyaltyPoints ?? 0,
         repairs: 0,
         lastVisit: sc.lastVisit || 'Just now',
         avatar: `https://i.pravatar.cc/100?img=${Math.abs(sc.id.split('').reduce((a, c) => a + c.charCodeAt(0), 0)) % 70}`,
@@ -139,6 +139,7 @@ export default function Customers() {
       phone: newCustomer.phone,
       totalSpent: 0,
       lastVisit: '',
+      loyaltyPoints: 0,
     });
     setNewCustomerForm({ firstName: '', lastName: '', email: '', phone: '', phoneLabel: 'Mobile', group: 'Retail' });
     setShowNewCustomerModal(false);

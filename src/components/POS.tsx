@@ -26,8 +26,7 @@ const POINTS_VALUE_RATIO = 0.01;
 
 export const POS: React.FC = () => {
   const location = useLocation();
-  const { customers: sharedCustomers, addCustomer, stockItems: sharedStockItems, addStockItem } = useStoreLocalState();
-  // State
+  const { customers: sharedCustomers, addCustomer, updateCustomer, stockItems: sharedStockItems, addStockItem, heldOrders, addHeldOrder, removeHeldOrder } = useStoreLocalState();
   const [cart, setCart] = useState<CartItem[]>([]);
   const [payments, setPayments] = useState<PaymentMethod[]>([
     { id: 'p1', method: 'Cash', amount: 0, icon: 'payments' },
@@ -37,9 +36,7 @@ export const POS: React.FC = () => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
 
-  // Advanced POS State
   const [activeShift, setActiveShift] = useState<Shift | null>(null);
-  const [heldOrders, setHeldOrders] = useState<HeldOrder[]>([]);
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [currentUserPin, setCurrentUserPin] = useState('');
@@ -105,7 +102,7 @@ export const POS: React.FC = () => {
   const locationHandled = useRef(false);
   useEffect(() => {
     if (locationHandled.current) return;
-    const state = location.state as { autoQuickCheckIn?: boolean; openHeldOrders?: boolean; autoRepairItem?: CartItem; addToCart?: CartItem } | null;
+    const state = location.state as { autoQuickCheckIn?: boolean; openHeldOrders?: boolean; autoRepairItem?: CartItem; addToCart?: CartItem; resumeHeldOrderId?: string } | null;
     if (!state) return;
     if (state.autoQuickCheckIn) {
       locationHandled.current = true;
@@ -124,6 +121,14 @@ export const POS: React.FC = () => {
     if (state.openHeldOrders) {
       locationHandled.current = true;
       setIsHeldOrdersOpen(true);
+      window.history.replaceState({}, document.title);
+    }
+    if (state.resumeHeldOrderId) {
+      locationHandled.current = true;
+      const order = heldOrders.find(o => o.id === state.resumeHeldOrderId);
+      if (order) {
+        resumeOrder(order);
+      }
       window.history.replaceState({}, document.title);
     }
     if (state.autoRepairItem) {
@@ -218,7 +223,7 @@ export const POS: React.FC = () => {
       discounts: [...discounts],
       customer: selectedCustomer,
     };
-    setHeldOrders([...heldOrders, newHeldOrder]);
+    addHeldOrder(newHeldOrder);
     setCart([]);
     setDiscounts([]);
     setSelectedCustomer(null);
@@ -240,7 +245,7 @@ export const POS: React.FC = () => {
     setPayments(order.payments ?? defaultPayments);
     setDiscounts(order.discounts ?? []);
     setSelectedCustomer(order.customer ?? null);
-    setHeldOrders(heldOrders.filter(o => o.id !== order.id));
+    removeHeldOrder(order.id);
     setIsHeldOrdersOpen(false);
   };
 
@@ -259,6 +264,22 @@ export const POS: React.FC = () => {
     setFinalTotal(total);
     setFinalTxId(txId);
     await new Promise(resolve => setTimeout(resolve, 2000));
+
+    if (selectedCustomer && selectedCustomer.id !== 'walk-in') {
+      const pointsEarned = Math.floor(total * 10);
+      const pointsRedeemed = discounts
+        .filter(d => d.name.startsWith('Points Redemption'))
+        .reduce((sum, d) => sum + Math.round(d.value / POINTS_VALUE_RATIO), 0);
+      const currentPoints = selectedCustomer.loyaltyPoints ?? 0;
+      const newPoints = Math.max(0, currentPoints - pointsRedeemed + pointsEarned);
+      updateCustomer(selectedCustomer.id, {
+        loyaltyPoints: newPoints,
+        totalSpent: (selectedCustomer.totalSpent || 0) + total,
+        lastVisit: new Date().toISOString().split('T')[0],
+      });
+      setSelectedCustomer(prev => prev ? { ...prev, loyaltyPoints: newPoints, totalSpent: (prev.totalSpent || 0) + total } : prev);
+    }
+
     setIsProcessing(false);
     setIsSuccess(true);
     setCart([]);
@@ -432,9 +453,9 @@ export const POS: React.FC = () => {
             <span className="text-sm font-semibold">
               {selectedCustomer ? selectedCustomer.name : 'Select Customer'}
             </span>
-            {selectedCustomer && (
+            {selectedCustomer && selectedCustomer.id !== 'walk-in' && (
               <span className="ml-2 px-2 py-0.5 bg-lime-100 text-lime-700 text-[9px] font-black rounded-full uppercase">
-                {Math.floor(Math.random() * 500)} Points
+                {(selectedCustomer.loyaltyPoints ?? 0).toLocaleString()} pts
               </span>
             )}
           </button>
@@ -537,6 +558,14 @@ export const POS: React.FC = () => {
                 <span className="text-lg font-black text-primary uppercase tracking-tighter">Total Amount</span>
                 <span className="text-3xl font-black text-primary tracking-tighter">${total.toFixed(2)}</span>
               </div>
+              {selectedCustomer && selectedCustomer.id !== 'walk-in' && total > 0 && (
+                <div className="flex items-center gap-2 mt-2 p-2 bg-teal-50 rounded-xl border border-teal-100">
+                  <span className="material-symbols-outlined text-teal-600 text-sm">stars</span>
+                  <span className="text-[10px] font-black text-teal-700 uppercase tracking-widest">
+                    Earns {Math.floor(total * 10).toLocaleString()} pts on this sale
+                  </span>
+                </div>
+              )}
             </div>
           </section>
 
@@ -552,7 +581,7 @@ export const POS: React.FC = () => {
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <button onClick={handleApplyDiscount} className="py-3 bg-white/5 hover:bg-white/10 rounded-xl text-[10px] font-black uppercase tracking-widest border border-white/10 transition-all">Apply Discount</button>
-                <button onClick={handleRedeemPoints} className="py-3 bg-teal-500 text-teal-950 rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg shadow-teal-500/20 transition-all active:scale-95">Redeem Points</button>
+                <button onClick={handleRedeemPoints} disabled={!selectedCustomer || selectedCustomer.id === 'walk-in' || (selectedCustomer.loyaltyPoints ?? 0) < 100} className="py-3 bg-teal-500 text-teal-950 rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg shadow-teal-500/20 transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed" title={!selectedCustomer ? 'Select a customer first' : (selectedCustomer.loyaltyPoints ?? 0) < 100 ? 'Minimum 100 points required' : ''}>Redeem Points</button>
               </div>
             </div>
           </section>
@@ -883,7 +912,7 @@ export const POS: React.FC = () => {
                           <span className="material-symbols-outlined text-sm">play_arrow</span>
                           Resume Sale
                         </button>
-                        <button onClick={() => setHeldOrders(heldOrders.filter(o => o.id !== order.id))} className="py-3 px-4 bg-slate-100 text-slate-500 rounded-xl hover:bg-red-50 hover:text-red-500 transition-all">
+                        <button onClick={() => removeHeldOrder(order.id)} className="py-3 px-4 bg-slate-100 text-slate-500 rounded-xl hover:bg-red-50 hover:text-red-500 transition-all">
                           <span className="material-symbols-outlined text-sm">delete</span>
                         </button>
                       </div>
@@ -960,7 +989,7 @@ export const POS: React.FC = () => {
                   ];
                   const baseNames = new Set(baseItems.map(i => i.name.toLowerCase()));
                   const fromStock = sharedStockItems
-                    .filter(si => !baseNames.has(si.name.toLowerCase()))
+                    .filter(si => !baseNames.has(si.name.toLowerCase()) && si.status !== 'pending_approval')
                     .map(si => ({
                       id: si.id,
                       name: si.name,
@@ -1103,21 +1132,7 @@ export const POS: React.FC = () => {
                   <button onClick={() => { setIsAddInventoryModalOpen(false); setStockSaved(false); }} className="px-8 py-3 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest">Done</button>
                 </div>
               ) : (
-                <form onSubmit={(e) => {
-                  e.preventDefault();
-                  const fd = new FormData(e.currentTarget);
-                  addStockItem({
-                    id: `stk-${Date.now()}`,
-                    name: fd.get('productName') as string || '',
-                    sku: fd.get('sku') as string || '',
-                    qty: parseInt(fd.get('quantity') as string) || 1,
-                    cost: parseFloat(fd.get('costPrice') as string) || 0,
-                    price: parseFloat(fd.get('sellPrice') as string) || 0,
-                    category: fd.get('category') as string || 'Parts',
-                    addedAt: new Date().toISOString(),
-                  });
-                  setStockSaved(true);
-                }} className="space-y-4">
+                <form onSubmit={(e) => { e.preventDefault(); }} data-add-stock-form className="space-y-4">
                   <div className="space-y-1">
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Product Name</label>
                     <input name="productName" required className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="iPhone 13 Screen" />
@@ -1151,7 +1166,63 @@ export const POS: React.FC = () => {
                       </select>
                     </div>
                   </div>
-                  <button type="submit" className="w-full py-4 bg-primary text-white rounded-2xl font-black uppercase tracking-widest shadow-lg active:scale-95 transition-all">Save Stock</button>
+                  <div className="grid grid-cols-2 gap-3 pt-2">
+                    <button type="button" onClick={() => {
+                      const form = document.querySelector('#pos-add-stock-form') as HTMLFormElement | null;
+                      const container = document.querySelector('[data-add-stock-form]') as HTMLElement | null;
+                      const inputs = container?.querySelectorAll('input, select');
+                      const fd: Record<string, string> = {};
+                      inputs?.forEach((el: any) => { if (el.name) fd[el.name] = el.value; });
+                      if (!fd.productName) return;
+                      const price = parseFloat(fd.sellPrice) || 0;
+                      setCart(prev => [...prev, {
+                        id: `QADD-${Date.now()}`,
+                        name: fd.productName,
+                        description: fd.sku ? `SKU: ${fd.sku}` : 'Quick add item',
+                        price,
+                        icon: 'add_business',
+                        type: 'product' as const,
+                      }]);
+                      setIsAddInventoryModalOpen(false);
+                      setStockSaved(false);
+                    }} className="py-4 bg-slate-100 text-slate-700 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200 transition-all flex flex-col items-center gap-1">
+                      <span className="material-symbols-outlined text-sm">add_shopping_cart</span>
+                      Add to Order Only
+                    </button>
+                    <button type="button" onClick={() => {
+                      const container = document.querySelector('[data-add-stock-form]') as HTMLElement | null;
+                      const inputs = container?.querySelectorAll('input, select');
+                      const fd: Record<string, string> = {};
+                      inputs?.forEach((el: any) => { if (el.name) fd[el.name] = el.value; });
+                      if (!fd.productName) return;
+                      const price = parseFloat(fd.sellPrice) || 0;
+                      const cost = parseFloat(fd.costPrice) || 0;
+                      addStockItem({
+                        id: `stk-${Date.now()}`,
+                        name: fd.productName,
+                        sku: fd.sku || '',
+                        qty: parseInt(fd.quantity) || 1,
+                        cost,
+                        price,
+                        category: fd.category || 'Parts',
+                        addedAt: new Date().toISOString(),
+                        status: 'pending_approval',
+                      });
+                      setCart(prev => [...prev, {
+                        id: `QADD-${Date.now()}`,
+                        name: fd.productName,
+                        description: fd.sku ? `SKU: ${fd.sku}` : 'Quick add item',
+                        price,
+                        icon: 'add_business',
+                        type: 'product' as const,
+                      }]);
+                      setStockSaved(true);
+                    }} className="py-4 bg-primary text-white rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all flex flex-col items-center gap-1">
+                      <span className="material-symbols-outlined text-sm">inventory_2</span>
+                      Add + Submit Inventory
+                    </button>
+                  </div>
+                  <p className="text-[9px] text-center text-slate-400">"Add to Order Only" skips inventory. "Add + Submit" creates a pending approval stock entry.</p>
                 </form>
               )}
             </motion.div>
@@ -1254,6 +1325,7 @@ export const POS: React.FC = () => {
                     email: fd.get('email') as string || '',
                     totalSpent: 0,
                     lastVisit: '',
+                    loyaltyPoints: 0,
                   };
                   addCustomer(newCust);
                   setSelectedCustomer(newCust);
@@ -1341,11 +1413,11 @@ export const POS: React.FC = () => {
         )}
 
         {isRedeemPointsOpen && (() => {
-          const AVAILABLE_POINTS = 2450;
-          const maxCreditValue = AVAILABLE_POINTS * POINTS_VALUE_RATIO;
+          const availablePoints = selectedCustomer?.loyaltyPoints ?? 0;
+          const maxCreditValue = availablePoints * POINTS_VALUE_RATIO;
           const pointsNum = parseInt(redeemPointsAmount) || 0;
-          const creditValue = Math.min(pointsNum, AVAILABLE_POINTS) * POINTS_VALUE_RATIO;
-          const pointsValid = pointsNum > 0 && pointsNum <= AVAILABLE_POINTS;
+          const creditValue = Math.min(pointsNum, availablePoints) * POINTS_VALUE_RATIO;
+          const pointsValid = pointsNum >= 100 && pointsNum <= availablePoints;
           const alreadyRedeemed = discounts.some(d => d.name.startsWith('Points Redemption'));
           return (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[150] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
@@ -1356,9 +1428,11 @@ export const POS: React.FC = () => {
               </div>
               <div className="space-y-6">
                 <div className="p-6 bg-teal-50 rounded-2xl border border-teal-100 text-center">
+                  <span className="text-[10px] font-black text-teal-600 uppercase tracking-widest block mb-1">{selectedCustomer?.name}</span>
                   <span className="text-[10px] font-black text-teal-600 uppercase tracking-widest block mb-2">Available Points</span>
-                  <span className="text-4xl font-black text-teal-700">{AVAILABLE_POINTS.toLocaleString()}</span>
+                  <span className="text-4xl font-black text-teal-700">{availablePoints.toLocaleString()}</span>
                   <p className="text-xs text-teal-500 mt-1">= ${maxCreditValue.toFixed(2)} credit value (1pt = ${POINTS_VALUE_RATIO})</p>
+                  <p className="text-[10px] text-teal-400 mt-1">Minimum 100 points to redeem</p>
                 </div>
                 {alreadyRedeemed ? (
                   <div className="p-4 bg-amber-50 rounded-2xl border border-amber-200 text-center">
@@ -1368,10 +1442,10 @@ export const POS: React.FC = () => {
                 ) : (
                   <>
                     <div className="space-y-2">
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Points to Redeem</label>
-                      <input type="number" min="1" max={AVAILABLE_POINTS} value={redeemPointsAmount} onChange={(e) => setRedeemPointsAmount(e.target.value)} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder={`Max ${AVAILABLE_POINTS.toLocaleString()}`} />
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Points to Redeem (min 100)</label>
+                      <input type="number" min="100" max={availablePoints} step="50" value={redeemPointsAmount} onChange={(e) => setRedeemPointsAmount(e.target.value)} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder={`100 – ${availablePoints.toLocaleString()}`} />
                       {pointsNum > 0 && (
-                        <p className="text-xs font-bold text-teal-600 ml-4">{pointsValid ? `= $${creditValue.toFixed(2)} discount` : `Max ${AVAILABLE_POINTS.toLocaleString()} points`}</p>
+                        <p className="text-xs font-bold text-teal-600 ml-4">{pointsValid ? `= $${creditValue.toFixed(2)} discount` : pointsNum < 100 ? 'Minimum 100 points required' : `Max ${availablePoints.toLocaleString()} points`}</p>
                       )}
                     </div>
                     <button onClick={() => {

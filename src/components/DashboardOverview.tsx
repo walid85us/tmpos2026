@@ -692,12 +692,13 @@ function StoreActivationPanel() {
 export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => void }) {
   const { session, canAccess } = useAccess();
   const navigate = useNavigate();
-  const { addCustomer, addStockItem, stockItems: sharedStockItems } = useStoreLocalState();
+  const { addCustomer, addStockItem, stockItems: sharedStockItems, heldOrders, removeHeldOrder } = useStoreLocalState();
   const [showPrintLabelModal, setShowPrintLabelModal] = useState(false);
   const [showScanQRModal, setShowScanQRModal] = useState(false);
   const [showAddStockModal, setShowAddStockModal] = useState(false);
   const [showNewCustomerModal, setShowNewCustomerModal] = useState(false);
   const [showQuickIntakeModal, setShowQuickIntakeModal] = useState(false);
+  const [showHeldOrdersModal, setShowHeldOrdersModal] = useState(false);
   const [printLabelText, setPrintLabelText] = useState('');
   const [printLabelQty, setPrintLabelQty] = useState(1);
   const [printLabelType, setPrintLabelType] = useState<'barcode' | 'price' | 'asset'>('barcode');
@@ -747,7 +748,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
         setShowPrintLabelModal(true);
         break;
       case 'Held Orders':
-        navigate('/sales', { state: { openHeldOrders: true } });
+        setShowHeldOrdersModal(true);
         break;
       case 'Scan QR':
         setShowScanQRModal(true);
@@ -882,8 +883,10 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                       />
                       {printLabelText.trim() && !selectedPrintItem && (() => {
                         const matches = sharedStockItems.filter(si =>
-                          si.name.toLowerCase().includes(printLabelText.toLowerCase()) ||
-                          si.sku.toLowerCase().includes(printLabelText.toLowerCase())
+                          si.status !== 'pending_approval' && (
+                            si.name.toLowerCase().includes(printLabelText.toLowerCase()) ||
+                            si.sku.toLowerCase().includes(printLabelText.toLowerCase())
+                          )
                         );
                         return matches.length > 0 ? (
                           <div className="bg-white border border-slate-200 rounded-xl max-h-40 overflow-y-auto shadow-lg">
@@ -1005,20 +1008,29 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                   />
                 </div>
                 {scanResult.trim() && (() => {
-                  const matches = sharedStockItems.filter(si =>
-                    si.sku.toLowerCase().includes(scanResult.toLowerCase()) ||
-                    si.name.toLowerCase().includes(scanResult.toLowerCase())
+                  const query = scanResult.toLowerCase().trim();
+                  const approvedItems = sharedStockItems.filter(si => si.status !== 'pending_approval');
+                  const exactSku = approvedItems.filter(si => si.sku.toLowerCase() === query);
+                  const partialMatches = approvedItems.filter(si =>
+                    si.sku.toLowerCase() !== query && (
+                      si.sku.toLowerCase().includes(query) ||
+                      si.name.toLowerCase().includes(query)
+                    )
                   );
+                  const matches = [...exactSku, ...partialMatches];
                   return matches.length > 0 ? (
                     <div className="space-y-2">
-                      {matches.slice(0, 5).map(si => (
+                      {matches.slice(0, 5).map((si, idx) => (
                         <button key={si.id} onClick={() => {
                           setShowScanQRModal(false);
                           setScanResult('');
                           navigate('/sales', { state: { addToCart: { id: si.id, name: si.name, description: `SKU: ${si.sku}`, price: si.price, icon: si.category === 'Parts' ? 'build' : 'cable', type: 'product' } } });
-                        }} className="w-full p-4 bg-slate-50 hover:bg-primary hover:text-white rounded-2xl text-left transition-all group flex items-center justify-between">
+                        }} className={`w-full p-4 rounded-2xl text-left transition-all group flex items-center justify-between ${idx === 0 && exactSku.length > 0 ? 'bg-teal-50 border-2 border-teal-200 hover:bg-teal-100' : 'bg-slate-50 hover:bg-primary hover:text-white'}`}>
                           <div>
-                            <p className="font-bold text-sm">{si.name}</p>
+                            <div className="flex items-center gap-2">
+                              <p className="font-bold text-sm">{si.name}</p>
+                              {idx === 0 && exactSku.length > 0 && <span className="text-[8px] font-black bg-teal-600 text-white px-1.5 py-0.5 rounded uppercase">Exact Match</span>}
+                            </div>
                             <p className="text-[10px] opacity-60">SKU: {si.sku} · {si.qty} in stock</p>
                           </div>
                           <div className="text-right">
@@ -1081,23 +1093,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                     <button onClick={() => { setShowAddStockModal(false); setStockSaved(false); setLastAddedStock(null); }} className="px-8 py-3 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest">Done</button>
                   </div>
                 ) : (
-                  <form onSubmit={(e) => {
-                    e.preventDefault();
-                    const fd = new FormData(e.currentTarget);
-                    const item: StockItem = {
-                      id: `stk-${Date.now()}`,
-                      name: fd.get('productName') as string || '',
-                      sku: fd.get('sku') as string || '',
-                      qty: parseInt(fd.get('quantity') as string) || 1,
-                      cost: parseFloat(fd.get('costPrice') as string) || 0,
-                      price: parseFloat(fd.get('sellPrice') as string) || 0,
-                      category: fd.get('category') as string || 'Parts',
-                      addedAt: new Date().toISOString(),
-                    };
-                    addStockItem(item);
-                    setLastAddedStock(item);
-                    setStockSaved(true);
-                  }} className="space-y-4">
+                  <form onSubmit={(e) => { e.preventDefault(); }} data-dash-stock-form className="space-y-4">
                     <div className="space-y-1">
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Product Name</label>
                       <input name="productName" required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="iPhone 13 Screen" />
@@ -1131,10 +1127,57 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                         </select>
                       </div>
                     </div>
-                    <button type="submit" className="w-full py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 transition-all flex items-center justify-center gap-2">
-                      <span className="material-symbols-outlined text-sm">inventory_2</span>
-                      Save Stock
-                    </button>
+                    <div className="grid grid-cols-2 gap-3 pt-2">
+                      <button type="button" onClick={() => {
+                        const container = document.querySelector('[data-dash-stock-form]') as HTMLElement | null;
+                        const inputs = container?.querySelectorAll('input, select');
+                        const fd: Record<string, string> = {};
+                        inputs?.forEach((el: any) => { if (el.name) fd[el.name] = el.value; });
+                        if (!fd.productName) return;
+                        const item: StockItem = {
+                          id: `stk-${Date.now()}`,
+                          name: fd.productName,
+                          sku: fd.sku || '',
+                          qty: parseInt(fd.quantity) || 1,
+                          cost: parseFloat(fd.costPrice) || 0,
+                          price: parseFloat(fd.sellPrice) || 0,
+                          category: fd.category || 'Parts',
+                          addedAt: new Date().toISOString(),
+                          status: 'approved',
+                        };
+                        addStockItem(item);
+                        setLastAddedStock(item);
+                        setStockSaved(true);
+                      }} className="py-4 bg-primary text-white rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-lg hover:bg-primary/90 transition-all flex flex-col items-center gap-1">
+                        <span className="material-symbols-outlined text-sm">inventory_2</span>
+                        Add to Inventory
+                      </button>
+                      <button type="button" onClick={() => {
+                        const container = document.querySelector('[data-dash-stock-form]') as HTMLElement | null;
+                        const inputs = container?.querySelectorAll('input, select');
+                        const fd: Record<string, string> = {};
+                        inputs?.forEach((el: any) => { if (el.name) fd[el.name] = el.value; });
+                        if (!fd.productName) return;
+                        const item: StockItem = {
+                          id: `stk-${Date.now()}`,
+                          name: fd.productName,
+                          sku: fd.sku || '',
+                          qty: parseInt(fd.quantity) || 1,
+                          cost: parseFloat(fd.costPrice) || 0,
+                          price: parseFloat(fd.sellPrice) || 0,
+                          category: fd.category || 'Parts',
+                          addedAt: new Date().toISOString(),
+                          status: 'pending_approval',
+                        };
+                        addStockItem(item);
+                        setLastAddedStock(item);
+                        setStockSaved(true);
+                      }} className="py-4 bg-amber-500 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-lg hover:bg-amber-600 transition-all flex flex-col items-center gap-1">
+                        <span className="material-symbols-outlined text-sm">pending_actions</span>
+                        Submit for Approval
+                      </button>
+                    </div>
+                    <p className="text-[9px] text-center text-slate-400">"Add to Inventory" makes it available immediately. "Submit for Approval" requires manager review.</p>
                   </form>
                 )}
               </div>
@@ -1281,6 +1324,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                       email: fd.get('email') as string || '',
                       totalSpent: 0,
                       lastVisit: '',
+                      loyaltyPoints: 0,
                     };
                     addCustomer(newCust);
                     setCustomerSaved(true);
@@ -1308,6 +1352,81 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                       Create Customer
                     </button>
                   </form>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showHeldOrdersModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-slate-900/40 backdrop-blur-md"
+              onClick={() => setShowHeldOrdersModal(false)}
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-2xl bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden"
+            >
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                <div>
+                  <h3 className="text-2xl font-black text-primary tracking-tight">Held Orders</h3>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">{heldOrders.length} order{heldOrders.length !== 1 ? 's' : ''} on hold</p>
+                </div>
+                <button onClick={() => setShowHeldOrdersModal(false)} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-slate-400">close</span>
+                </button>
+              </div>
+              <div className="p-8">
+                {heldOrders.length === 0 ? (
+                  <div className="py-12 text-center">
+                    <div className="w-16 h-16 bg-slate-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                      <span className="material-symbols-outlined text-3xl text-slate-300">pause_circle</span>
+                    </div>
+                    <p className="text-sm font-bold text-slate-400">No held orders</p>
+                    <p className="text-xs text-slate-300 mt-1">Hold a sale from the POS to suspend it for later</p>
+                  </div>
+                ) : (
+                  <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-2">
+                    {heldOrders.map(order => (
+                      <div key={order.id} className="p-6 bg-slate-50 rounded-3xl border border-slate-100 hover:bg-white hover:shadow-lg transition-all">
+                        <div className="flex items-center justify-between mb-3">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <p className="font-bold text-slate-900">{order.id}</p>
+                              <span className="text-[9px] font-black px-2 py-0.5 rounded uppercase bg-amber-100 text-amber-700">Held</span>
+                            </div>
+                            <p className="text-xs text-slate-500 mt-0.5">{order.customerName} &bull; {new Date(order.createdAt).toLocaleString()}</p>
+                          </div>
+                          <p className="text-lg font-black text-primary">${order.total.toFixed(2)}</p>
+                        </div>
+                        <div className="flex flex-wrap gap-2 mb-4">
+                          {order.items.map((item, idx) => (
+                            <span key={idx} className="text-[10px] font-bold bg-white px-2 py-1 rounded-lg border border-slate-100 text-slate-600">{item.name}</span>
+                          ))}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button onClick={() => {
+                            setShowHeldOrdersModal(false);
+                            navigate('/sales', { state: { resumeHeldOrderId: order.id } });
+                          }} className="flex-1 py-3 bg-primary text-white rounded-xl font-black text-xs uppercase tracking-widest shadow-lg active:scale-95 transition-all flex items-center justify-center gap-2">
+                            <span className="material-symbols-outlined text-sm">play_arrow</span>
+                            Resume in POS
+                          </button>
+                          <button onClick={() => removeHeldOrder(order.id)} className="py-3 px-4 bg-slate-100 text-slate-500 rounded-xl hover:bg-red-50 hover:text-red-500 transition-all">
+                            <span className="material-symbols-outlined text-sm">delete</span>
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 )}
               </div>
             </motion.div>

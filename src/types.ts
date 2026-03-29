@@ -198,6 +198,7 @@ export interface Customer {
   phone: string;
   totalSpent: number;
   lastVisit: string;
+  loyaltyPoints?: number;
 }
 
 export interface Sale {
