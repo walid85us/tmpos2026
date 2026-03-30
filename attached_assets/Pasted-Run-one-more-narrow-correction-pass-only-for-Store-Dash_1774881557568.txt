@@ -1,0 +1,189 @@
+Run one more narrow correction pass only for:
+Store Dashboard & POS Refinement
+
+Do not start any new workstream.
+Do not redesign the UI.
+Do not broaden scope beyond the issues listed below.
+Preserve the current design baseline exactly.
+Preserve auth, preview mode, RBAC, lifecycle gating, plan entitlement gating, and platform/store hierarchy.
+
+Act as:
+Principal Repair/POS Product Architect
++ Principal Store Operations Workflow Designer
++ Principal Payments & Tender Flow Architect
++ Principal Inventory Workflow Architect
++ Principal Loyalty & Customer Retention Workflow Architect
++ Principal React/TypeScript Engineer
++ Principal UX Workflow Designer
++ Principal QA Auditor
++ Principal Side Auditor & Systems Thinker
+
+This is a narrow correction pass only.
+Fix only the issues found during user manual QA.
+
+Required fixes:
+
+1) Quick Add Stock permission-aware workflow must be rebuilt correctly
+Current problem:
+- The logic is wrong and the resulting stock is not reliably usable afterward
+
+Implement a permission-aware workflow used by both Dashboard Quick Add Stock and POS Quick Add Stock.
+
+A. If the current user does NOT have permission to add inventory directly:
+Show exactly 2 action options:
+- Add to Cart / Order Summary
+- Submit for Approval
+
+Behavior:
+- Add to Cart / Order Summary:
+  creates a temporary sale item and adds it immediately into the current order summary/cart
+  does NOT add directly into inventory
+- Submit for Approval:
+  creates a pending inventory submission in shared local/mock inventory state
+  must be visible afterward in a simple approval path
+  must NOT pretend to already be approved inventory
+- Store owner or manager (or whichever role already has inventory-maintenance authority in the project) must be able to approve it
+
+B. If the current user DOES have permission to add inventory directly:
+Show exactly 2 action options:
+- Add to Cart / Order Summary
+- Add to Inventory
+
+Behavior:
+- Add to Cart / Order Summary:
+  adds a temporary sale item directly into the current order/cart
+- Add to Inventory:
+  writes the item into shared inventory/local mock inventory state immediately
+  after that, the item must be searchable/selectable in POS
+
+Important:
+- Dashboard and POS must use the same shared logic/state
+- Stop using disconnected fake success-only flows
+- The user must be able to verify the result afterward
+- Keep this narrow and local/mock if needed, but make it operationally coherent
+
+2) Inventory visibility and approval path must be real
+Current problems:
+- “Added to inventory” says success but item cannot be found
+- approval path is not visible
+
+Fixes:
+- Items added to inventory must appear in the shared inventory flow and be findable afterward
+- Items submitted for approval must appear in a visible pending state
+- Users with inventory approval authority must have a clear path to approve pending items
+- After approval, the item status must update and the item must be usable in POS
+- Keep this lightweight and local/mock if needed, but make the workflow honest and verifiable
+
+3) SKU / barcode / manual scan flow must work correctly
+Current problem:
+- product name works, SKU does not
+- scanner/manual fast entry does not work
+
+Fixes:
+- Inventory lookup must match by:
+  - SKU
+  - barcode
+  - product name fallback
+- Manual typed SKU must find the inventory item
+- Fast pasted/scanner-gun-style input must also find the inventory item
+- Exact match must work reliably
+- Useful partial match behavior may still exist, but exact SKU/barcode lookup must work first
+- After finding the item, the flow must support adding it directly into Order Summary / cart
+
+Dashboard Scan QR rule:
+- From dashboard, Scan QR must behave coherently
+- It may open a popup first, or take the user into checkout with scan/add context active
+- It must help continue the sale, not act as a dead shortcut
+
+4) Loyalty / points finalize flow must be corrected
+Current problems:
+- points must only deduct after sale finalization
+- when using discount code or redeem points, sale is not finalizing properly even when cash matches
+- earning preview/update is incomplete
+
+Fixes:
+- Finalize sale must still complete correctly when discount code is applied
+- Finalize sale must still complete correctly when redeem points is applied
+- If the tendered cash matches the final payable amount, checkout must finalize successfully
+- Redeemed points must only be deducted after successful sale finalization
+- If sale does not finalize, customer points must not be deducted
+- Earning preview must show how many points the customer will gain from the current sale
+- After successful sale finalization, the customer’s shared customer profile/state must update correctly:
+  - deduct redeemed points if used
+  - add earned points for the completed sale
+- Keep points logic centralized and deterministic
+
+5) Broken POS action buttons found in manual QA must be fixed now
+These are inside the active workstream and should be fixed now, not queued for later.
+
+A. Special Part Order
+Current problems:
+- modal needs X close button
+- Add button should be disabled until name is entered
+- price field missing
+
+Fixes:
+- Special Part Order popup must include visible X close button
+- Name field is required
+- Add button must remain disabled until a name is entered
+- Add a price field
+- When added, the typed part name must appear properly in Order Summary
+- Preserve the existing helpful “Non-Catalogued item” context if already present
+
+B. Deposit
+Current problem:
+- clicking Deposit immediately adds a preset line item without asking for details
+
+Fixes:
+- Clicking Deposit must open a popup/modal first
+- User must enter:
+  - deposit amount
+  - fee/description/reason text that appears as the smaller supporting text under the line item
+- Only after confirmation should it be added to Order Summary
+- Do not auto-add it blindly on first click
+
+C. Add Method
+Current problems:
+- clicking Add Method immediately adds “Store Credit”
+- the added method cannot be deleted correctly
+- Store Credit should only appear when buyer redeems store credit
+
+Fixes:
+- Clicking Add Method must open a popup/modal first
+- For this correction pass, keep it narrow and show selection for:
+  - Cash
+  - Credit / Debit Card
+- Credit / Debit Card should represent terminal/card processing path conceptually in the UI
+- Do NOT auto-add Store Credit from Add Method
+- Store Credit must only enter the flow when customer actually redeems store credit through the proper store-credit path
+- Added payment methods must remain removable/editable appropriately unless business rules intentionally prevent removal
+- Do not leave an undeletable ghost line
+
+6) Keep existing good fixes intact
+Do not break:
+- dashboard Hold Orders popup flow
+- shared held-order visibility
+- dashboard Quick Intake real handoff
+- dashboard/POS new customer sync
+- Print Label inventory-backed workflow
+- tax/payment calculations that already work
+- hold/resume sale integrity
+- role-aware dashboard filtering
+
+7) Dashboard interaction rule
+- Dashboard actions should prefer popup/modal-driven fast workflows first
+- Only navigate away when truly necessary
+- Where navigation is needed, it must be intentional and coherent, not a confusing shortcut
+
+After implementation, return only:
+1. What changed
+2. Exact files changed in this pass
+3. Any shared local/mock state introduced or unified
+4. Any known limitations still intentionally left unchanged
+5. A short implementation verification summary
+
+Important:
+- Do not claim final QA closure on behalf of the user
+- Do not mark the workstream complete yet
+- The user will perform the final manual QA
+- Stop after the report and wait for user testing feedback

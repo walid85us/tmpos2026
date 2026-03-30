@@ -692,7 +692,8 @@ function StoreActivationPanel() {
 export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => void }) {
   const { session, canAccess } = useAccess();
   const navigate = useNavigate();
-  const { addCustomer, addStockItem, stockItems: sharedStockItems, heldOrders, removeHeldOrder } = useStoreLocalState();
+  const { addCustomer, addStockItem, updateStockItem, stockItems: sharedStockItems, approvedStockItems, pendingStockItems, heldOrders, removeHeldOrder } = useStoreLocalState();
+  const hasInventoryPermission = canAccess('inventory');
   const [showPrintLabelModal, setShowPrintLabelModal] = useState(false);
   const [showScanQRModal, setShowScanQRModal] = useState(false);
   const [showAddStockModal, setShowAddStockModal] = useState(false);
@@ -710,6 +711,12 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
   const [lastAddedStock, setLastAddedStock] = useState<StockItem | null>(null);
   const [intakeDetails, setIntakeDetails] = useState({ imei: '', serialNumber: '', passcode: '', network: '' });
   const [intakeValidationError, setIntakeValidationError] = useState('');
+  const [dashStockName, setDashStockName] = useState('');
+  const [dashStockSku, setDashStockSku] = useState('');
+  const [dashStockQty, setDashStockQty] = useState('1');
+  const [dashStockCost, setDashStockCost] = useState('');
+  const [dashStockPrice, setDashStockPrice] = useState('');
+  const [dashStockCategory, setDashStockCategory] = useState('Parts');
 
   const role = session?.role;
   const todayStr = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
@@ -717,7 +724,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
   const allActions = [
     { label: 'New Sale', icon: 'shopping_cart', color: 'bg-primary', roles: ['store_owner', 'manager', 'sales_staff'] },
     { label: 'Quick Intake', icon: 'bolt', color: 'bg-secondary', roles: ['store_owner', 'manager', 'technician'] },
-    { label: 'Add Stock', icon: 'inventory_2', color: 'bg-teal-800', roles: ['store_owner', 'manager'], requires: 'inventory' },
+    { label: 'Add Stock', icon: 'inventory_2', color: 'bg-teal-800', roles: ['store_owner', 'manager', 'technician', 'sales_staff'] },
     { label: 'New Customer', icon: 'person_add', color: 'bg-secondary', roles: ['store_owner', 'manager', 'sales_staff'] },
     { label: 'Print Label', icon: 'print', color: 'bg-slate-800', roles: ['store_owner', 'manager', 'technician', 'sales_staff'] },
     { label: 'Held Orders', icon: 'history', color: 'bg-slate-600', roles: ['store_owner', 'manager', 'sales_staff'] },
@@ -825,6 +832,41 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
         ))}
       </div>
 
+      {hasInventoryPermission && pendingStockItems.length > 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-[2rem] p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-amber-100 rounded-xl flex items-center justify-center">
+                <span className="material-symbols-outlined text-amber-600">pending_actions</span>
+              </div>
+              <div>
+                <h3 className="text-sm font-black text-amber-900 uppercase tracking-widest">Pending Stock Approval</h3>
+                <p className="text-[10px] text-amber-600 font-bold">{pendingStockItems.length} item{pendingStockItems.length !== 1 ? 's' : ''} awaiting review</p>
+              </div>
+            </div>
+          </div>
+          <div className="space-y-2 max-h-60 overflow-y-auto">
+            {pendingStockItems.map(item => (
+              <div key={item.id} className="flex items-center justify-between bg-white p-4 rounded-2xl border border-amber-100">
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-bold text-slate-800 truncate">{item.name}</p>
+                  <p className="text-[10px] text-slate-400">SKU: {item.sku} · Qty: {item.qty} · ${item.price.toFixed(2)}</p>
+                </div>
+                <div className="flex items-center gap-2 ml-4">
+                  <button onClick={() => updateStockItem(item.id, { status: 'approved' })} className="px-4 py-2 bg-lime-500 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-lime-600 transition-all flex items-center gap-1">
+                    <span className="material-symbols-outlined text-xs">check</span>
+                    Approve
+                  </button>
+                  <button onClick={() => updateStockItem(item.id, { status: 'rejected' })} className="px-3 py-2 bg-red-100 text-red-600 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-red-200 transition-all">
+                    <span className="material-symbols-outlined text-xs">close</span>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <AnimatePresence>
         {showPrintLabelModal && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
@@ -882,11 +924,9 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                         placeholder="Search by name or SKU..."
                       />
                       {printLabelText.trim() && !selectedPrintItem && (() => {
-                        const matches = sharedStockItems.filter(si =>
-                          si.status !== 'pending_approval' && (
-                            si.name.toLowerCase().includes(printLabelText.toLowerCase()) ||
-                            si.sku.toLowerCase().includes(printLabelText.toLowerCase())
-                          )
+                        const matches = approvedStockItems.filter(si =>
+                          si.name.toLowerCase().includes(printLabelText.toLowerCase()) ||
+                          si.sku.toLowerCase().includes(printLabelText.toLowerCase())
                         );
                         return matches.length > 0 ? (
                           <div className="bg-white border border-slate-200 rounded-xl max-h-40 overflow-y-auto shadow-lg">
@@ -1009,9 +1049,8 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                 </div>
                 {scanResult.trim() && (() => {
                   const query = scanResult.toLowerCase().trim();
-                  const approvedItems = sharedStockItems.filter(si => si.status !== 'pending_approval');
-                  const exactSku = approvedItems.filter(si => si.sku.toLowerCase() === query);
-                  const partialMatches = approvedItems.filter(si =>
+                  const exactSku = approvedStockItems.filter(si => si.sku.toLowerCase() === query);
+                  const partialMatches = approvedStockItems.filter(si =>
                     si.sku.toLowerCase() !== query && (
                       si.sku.toLowerCase().includes(query) ||
                       si.name.toLowerCase().includes(query)
@@ -1081,7 +1120,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                     <div className="w-16 h-16 bg-lime-100 rounded-full flex items-center justify-center mx-auto">
                       <span className="material-symbols-outlined text-3xl text-lime-600" style={{fontVariationSettings: "'FILL' 1"}}>check_circle</span>
                     </div>
-                    <p className="text-lg font-black text-primary">Stock Added</p>
+                    <p className="text-lg font-black text-primary">{lastAddedStock?.status === 'approved' ? 'Added to Inventory' : 'Submitted for Approval'}</p>
                     {lastAddedStock && (
                       <div className="bg-slate-50 rounded-2xl p-4 text-left space-y-1">
                         <p className="text-sm font-bold text-slate-700">{lastAddedStock.name}</p>
@@ -1089,37 +1128,37 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                         <p className="text-[10px] text-slate-400">Cost: ${lastAddedStock.cost.toFixed(2)} · Sell: ${lastAddedStock.price.toFixed(2)}</p>
                       </div>
                     )}
-                    <p className="text-[10px] text-teal-600 font-bold">Now available in POS Add Item catalog</p>
-                    <button onClick={() => { setShowAddStockModal(false); setStockSaved(false); setLastAddedStock(null); }} className="px-8 py-3 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest">Done</button>
+                    <p className="text-[10px] font-bold" style={{color: lastAddedStock?.status === 'approved' ? '#0d9488' : '#d97706'}}>{lastAddedStock?.status === 'approved' ? 'Now available in POS Add Item catalog' : 'Pending manager approval before appearing in POS'}</p>
+                    <button onClick={() => { setShowAddStockModal(false); setStockSaved(false); setLastAddedStock(null); setDashStockName(''); setDashStockSku(''); setDashStockQty('1'); setDashStockCost(''); setDashStockPrice(''); setDashStockCategory('Parts'); }} className="px-8 py-3 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest">Done</button>
                   </div>
                 ) : (
-                  <form onSubmit={(e) => { e.preventDefault(); }} data-dash-stock-form className="space-y-4">
+                  <div className="space-y-4">
                     <div className="space-y-1">
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Product Name</label>
-                      <input name="productName" required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="iPhone 13 Screen" />
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Product Name *</label>
+                      <input value={dashStockName} onChange={(e) => setDashStockName(e.target.value)} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="iPhone 13 Screen" />
                     </div>
                     <div className="grid grid-cols-2 gap-4">
                       <div className="space-y-1">
                         <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">SKU</label>
-                        <input name="sku" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="IP13-SCR-001" />
+                        <input value={dashStockSku} onChange={(e) => setDashStockSku(e.target.value)} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="IP13-SCR-001" />
                       </div>
                       <div className="space-y-1">
                         <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Quantity</label>
-                        <input name="quantity" type="number" min="1" defaultValue={1} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" />
+                        <input value={dashStockQty} onChange={(e) => setDashStockQty(e.target.value)} type="number" min="1" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" />
                       </div>
                     </div>
                     <div className="grid grid-cols-3 gap-4">
                       <div className="space-y-1">
                         <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Cost Price</label>
-                        <input name="costPrice" type="number" step="0.01" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="0.00" />
+                        <input value={dashStockCost} onChange={(e) => setDashStockCost(e.target.value)} type="number" step="0.01" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="0.00" />
                       </div>
                       <div className="space-y-1">
                         <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Sell Price</label>
-                        <input name="sellPrice" type="number" step="0.01" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="0.00" />
+                        <input value={dashStockPrice} onChange={(e) => setDashStockPrice(e.target.value)} type="number" step="0.01" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700" placeholder="0.00" />
                       </div>
                       <div className="space-y-1">
                         <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Category</label>
-                        <select name="category" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700">
+                        <select value={dashStockCategory} onChange={(e) => setDashStockCategory(e.target.value)} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700">
                           <option>Parts</option>
                           <option>Accessories</option>
                           <option>Devices</option>
@@ -1127,58 +1166,49 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                         </select>
                       </div>
                     </div>
-                    <div className="grid grid-cols-2 gap-3 pt-2">
-                      <button type="button" onClick={() => {
-                        const container = document.querySelector('[data-dash-stock-form]') as HTMLElement | null;
-                        const inputs = container?.querySelectorAll('input, select');
-                        const fd: Record<string, string> = {};
-                        inputs?.forEach((el: any) => { if (el.name) fd[el.name] = el.value; });
-                        if (!fd.productName) return;
+                    {hasInventoryPermission ? (
+                      <button type="button" disabled={!dashStockName.trim()} onClick={() => {
                         const item: StockItem = {
                           id: `stk-${Date.now()}`,
-                          name: fd.productName,
-                          sku: fd.sku || '',
-                          qty: parseInt(fd.quantity) || 1,
-                          cost: parseFloat(fd.costPrice) || 0,
-                          price: parseFloat(fd.sellPrice) || 0,
-                          category: fd.category || 'Parts',
+                          name: dashStockName.trim(),
+                          sku: dashStockSku || `SKU-${Date.now().toString().slice(-6)}`,
+                          qty: parseInt(dashStockQty) || 1,
+                          cost: parseFloat(dashStockCost) || 0,
+                          price: parseFloat(dashStockPrice) || 0,
+                          category: dashStockCategory,
                           addedAt: new Date().toISOString(),
                           status: 'approved',
                         };
                         addStockItem(item);
                         setLastAddedStock(item);
                         setStockSaved(true);
-                      }} className="py-4 bg-primary text-white rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-lg hover:bg-primary/90 transition-all flex flex-col items-center gap-1">
+                      }} className="w-full py-4 bg-primary text-white rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-lg hover:bg-primary/90 transition-all flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed">
                         <span className="material-symbols-outlined text-sm">inventory_2</span>
                         Add to Inventory
                       </button>
-                      <button type="button" onClick={() => {
-                        const container = document.querySelector('[data-dash-stock-form]') as HTMLElement | null;
-                        const inputs = container?.querySelectorAll('input, select');
-                        const fd: Record<string, string> = {};
-                        inputs?.forEach((el: any) => { if (el.name) fd[el.name] = el.value; });
-                        if (!fd.productName) return;
+                    ) : (
+                      <button type="button" disabled={!dashStockName.trim()} onClick={() => {
                         const item: StockItem = {
                           id: `stk-${Date.now()}`,
-                          name: fd.productName,
-                          sku: fd.sku || '',
-                          qty: parseInt(fd.quantity) || 1,
-                          cost: parseFloat(fd.costPrice) || 0,
-                          price: parseFloat(fd.sellPrice) || 0,
-                          category: fd.category || 'Parts',
+                          name: dashStockName.trim(),
+                          sku: dashStockSku || `SKU-${Date.now().toString().slice(-6)}`,
+                          qty: parseInt(dashStockQty) || 1,
+                          cost: parseFloat(dashStockCost) || 0,
+                          price: parseFloat(dashStockPrice) || 0,
+                          category: dashStockCategory,
                           addedAt: new Date().toISOString(),
                           status: 'pending_approval',
                         };
                         addStockItem(item);
                         setLastAddedStock(item);
                         setStockSaved(true);
-                      }} className="py-4 bg-amber-500 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-lg hover:bg-amber-600 transition-all flex flex-col items-center gap-1">
+                      }} className="w-full py-4 bg-amber-500 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-lg hover:bg-amber-600 transition-all flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed">
                         <span className="material-symbols-outlined text-sm">pending_actions</span>
                         Submit for Approval
                       </button>
-                    </div>
-                    <p className="text-[9px] text-center text-slate-400">"Add to Inventory" makes it available immediately. "Submit for Approval" requires manager review.</p>
-                  </form>
+                    )}
+                    <p className="text-[9px] text-center text-slate-400">{hasInventoryPermission ? 'Item will be immediately available in POS catalog.' : 'Item will be sent to manager for approval before appearing in POS.'}</p>
+                  </div>
                 )}
               </div>
             </motion.div>

@@ -10,6 +10,7 @@ import {
   Customer 
 } from '../types';
 import { useStoreLocalState } from '../context/StoreLocalState';
+import { useAccess } from '../context/AccessContext';
 import ContextualHelp from './ContextualHelp';
 
 const TAX_RATE = 0.0825;
@@ -26,7 +27,9 @@ const POINTS_VALUE_RATIO = 0.01;
 
 export const POS: React.FC = () => {
   const location = useLocation();
-  const { customers: sharedCustomers, addCustomer, updateCustomer, stockItems: sharedStockItems, addStockItem, heldOrders, addHeldOrder, removeHeldOrder } = useStoreLocalState();
+  const { canAccess } = useAccess();
+  const { customers: sharedCustomers, addCustomer, updateCustomer, stockItems: sharedStockItems, addStockItem, approvedStockItems, pendingStockItems, heldOrders, addHeldOrder, removeHeldOrder } = useStoreLocalState();
+  const hasInventoryPermission = canAccess('inventory');
   const [cart, setCart] = useState<CartItem[]>([]);
   const [payments, setPayments] = useState<PaymentMethod[]>([
     { id: 'p1', method: 'Cash', amount: 0, icon: 'payments' },
@@ -98,6 +101,19 @@ export const POS: React.FC = () => {
 
   const [redeemPointsAmount, setRedeemPointsAmount] = useState('');
   const [promoCodeError, setPromoCodeError] = useState('');
+  const [isDepositModalOpen, setIsDepositModalOpen] = useState(false);
+  const [depositAmount, setDepositAmount] = useState('');
+  const [depositReason, setDepositReason] = useState('');
+  const [isAddMethodModalOpen, setIsAddMethodModalOpen] = useState(false);
+  const [specialPartName, setSpecialPartName] = useState('');
+  const [specialPartPrice, setSpecialPartPrice] = useState('');
+  const [addStockName, setAddStockName] = useState('');
+  const [addStockSku, setAddStockSku] = useState('');
+  const [addStockQty, setAddStockQty] = useState('1');
+  const [addStockCost, setAddStockCost] = useState('');
+  const [addStockPrice, setAddStockPrice] = useState('');
+  const [addStockCategory, setAddStockCategory] = useState('Parts');
+  const [addStockSuccess, setAddStockSuccess] = useState<string | null>(null);
 
   const locationHandled = useRef(false);
   useEffect(() => {
@@ -194,21 +210,39 @@ export const POS: React.FC = () => {
   };
 
   const handleAddDeposit = () => {
+    setDepositAmount('');
+    setDepositReason('');
+    setIsDepositModalOpen(true);
+  };
+
+  const confirmDeposit = () => {
+    const amt = parseFloat(depositAmount) || 0;
+    if (amt <= 0) return;
     const depositItem: CartItem = {
       id: `DEP-${Date.now()}`,
-      name: 'Bench Fee / Deposit',
-      description: 'Initial diagnostic fee',
-      price: 25.00,
+      name: 'Deposit',
+      description: depositReason.trim() || 'Customer deposit',
+      price: amt,
       icon: 'payments',
       type: 'deposit'
     };
     setCart([...cart, depositItem]);
+    setIsDepositModalOpen(false);
+    setDepositAmount('');
+    setDepositReason('');
   };
 
   const removeItem = (id: string) => setCart(cart.filter(i => i.id !== id));
   
   const removePayment = (id: string) => {
-    setPayments(payments.map(p => p.id === id ? { ...p, amount: 0 } : p));
+    const p = payments.find(pm => pm.id === id);
+    if (!p) return;
+    if (p.locked) return;
+    if (p.id === 'p1' || p.id === 'p2') {
+      setPayments(payments.map(pm => pm.id === id ? { ...pm, amount: 0 } : pm));
+    } else {
+      setPayments(payments.filter(pm => pm.id !== id));
+    }
   };
 
   const handleHoldOrder = () => {
@@ -336,6 +370,17 @@ export const POS: React.FC = () => {
   };
 
   const handleApplyDiscount = () => {
+    if (discountCode.trim()) {
+      const code = discountCode.trim().toUpperCase();
+      const promo = PROMO_CODES[code];
+      if (promo) {
+        if (!discounts.some(d => d.name === promo.name)) {
+          setDiscounts([...discounts, { id: `d-code-${Date.now()}`, name: promo.name, type: promo.type, value: promo.value }]);
+          setDiscountCode('');
+          return;
+        }
+      }
+    }
     setIsDiscountModalOpen(true);
   };
 
@@ -344,13 +389,20 @@ export const POS: React.FC = () => {
   };
 
   const handleAddPaymentMethod = () => {
-    const newMethod: PaymentMethod = {
-      id: `p${Date.now()}`,
-      method: 'Store Credit',
-      amount: 0,
-      icon: 'account_balance_wallet'
-    };
+    setIsAddMethodModalOpen(true);
+  };
+
+  const addPaymentMethodByType = (type: 'Cash' | 'Card') => {
+    const existing = payments.find(p => p.method === (type === 'Cash' ? 'Cash' : 'Card Terminal'));
+    if (existing) {
+      setIsAddMethodModalOpen(false);
+      return;
+    }
+    const newMethod: PaymentMethod = type === 'Cash'
+      ? { id: `p-cash-${Date.now()}`, method: 'Cash', amount: 0, icon: 'payments' }
+      : { id: `p-card-${Date.now()}`, method: 'Card Terminal', amount: 0, icon: 'credit_card', detail: 'Terminal', locked: true };
     setPayments([...payments, newMethod]);
+    setIsAddMethodModalOpen(false);
   };
 
   const handleVerifyStoreCredit = () => {
@@ -577,7 +629,7 @@ export const POS: React.FC = () => {
             <div className="space-y-4">
               <div className="relative">
                 <span className="absolute left-4 top-1/2 -translate-y-1/2 material-symbols-outlined text-teal-400/50">confirmation_number</span>
-                <input className="w-full bg-white/5 border-white/10 rounded-2xl pl-12 pr-4 py-4 text-sm font-bold focus:ring-secondary focus:bg-white/10 transition-all placeholder:text-white/20" placeholder="Enter Promo Code..." type="text" />
+                <input value={discountCode} onChange={(e) => setDiscountCode(e.target.value.toUpperCase())} onKeyDown={(e) => { if (e.key === 'Enter') { handleApplyDiscount(); } }} className="w-full bg-white/5 border-white/10 rounded-2xl pl-12 pr-4 py-4 text-sm font-bold text-white focus:ring-secondary focus:bg-white/10 transition-all placeholder:text-white/20" placeholder="Enter Promo Code..." type="text" />
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <button onClick={handleApplyDiscount} className="py-3 bg-white/5 hover:bg-white/10 rounded-xl text-[10px] font-black uppercase tracking-widest border border-white/10 transition-all">Apply Discount</button>
@@ -982,14 +1034,14 @@ export const POS: React.FC = () => {
 
               <div className="grid grid-cols-2 gap-4 max-h-[50vh] overflow-y-auto pr-2">
                 {(() => {
-                  const baseItems: { id: string; name: string; price: number; icon: string; type: 'repair' | 'product'; category: string; description: string }[] = [
+                  const baseItems: { id: string; name: string; price: number; icon: string; type: 'repair' | 'product'; category: string; description: string; sku?: string; isExact?: boolean }[] = [
                     { id: 'p3', name: 'iPhone 13 Screen Repair', price: 189.00, icon: 'smartphone', type: 'repair', category: 'Repairs', description: 'Screen replacement service' },
                     { id: 'p4', name: 'USB-C Charging Cable', price: 19.99, icon: 'cable', type: 'product', category: 'Accessories', description: 'Charging cable' },
                     { id: 'p5', name: 'Samsung S21 Battery', price: 45.00, icon: 'battery_charging_full', type: 'product', category: 'Parts', description: 'Battery replacement' },
                   ];
                   const baseNames = new Set(baseItems.map(i => i.name.toLowerCase()));
-                  const fromStock = sharedStockItems
-                    .filter(si => !baseNames.has(si.name.toLowerCase()) && si.status !== 'pending_approval')
+                  const fromStock = approvedStockItems
+                    .filter(si => !baseNames.has(si.name.toLowerCase()))
                     .map(si => ({
                       id: si.id,
                       name: si.name,
@@ -998,18 +1050,30 @@ export const POS: React.FC = () => {
                       type: 'product' as const,
                       category: si.category,
                       description: `SKU: ${si.sku} · ${si.qty} in stock`,
+                      sku: si.sku,
                     }));
-                  return [...baseItems, ...fromStock];
-                })().filter(i => 
-                  (searchCategory === 'All Categories' || i.category === searchCategory) &&
-                  (i.name.toLowerCase().includes(searchQuery.toLowerCase()) || i.description.toLowerCase().includes(searchQuery.toLowerCase()))
-                ).map((item) => (
-                  <button key={item.id} onClick={() => addItemToCart(item)} className="flex items-center gap-4 p-4 bg-slate-50 hover:bg-white hover:shadow-xl rounded-2xl text-left transition-all group">
+                  const allItems = [...baseItems, ...fromStock];
+                  const q = searchQuery.toLowerCase().trim();
+                  const filtered = allItems.filter(i =>
+                    (searchCategory === 'All Categories' || i.category === searchCategory) &&
+                    (!q || i.name.toLowerCase().includes(q) || i.description.toLowerCase().includes(q) || (i.sku && i.sku.toLowerCase().includes(q)))
+                  );
+                  if (q) {
+                    const exact = filtered.filter(i => i.sku && i.sku.toLowerCase() === q).map(i => ({ ...i, isExact: true }));
+                    const rest = filtered.filter(i => !(i.sku && i.sku.toLowerCase() === q));
+                    return [...exact, ...rest];
+                  }
+                  return filtered;
+                })().map((item) => (
+                  <button key={item.id} onClick={() => addItemToCart(item)} className={`flex items-center gap-4 p-4 hover:bg-white hover:shadow-xl rounded-2xl text-left transition-all group ${item.isExact ? 'bg-teal-50 border-2 border-teal-200' : 'bg-slate-50'}`}>
                     <div className="w-12 h-12 bg-white rounded-xl flex items-center justify-center text-primary shadow-sm group-hover:bg-secondary group-hover:text-white transition-all">
                       <span className="material-symbols-outlined">{item.icon}</span>
                     </div>
                     <div>
-                      <p className="font-bold text-slate-900">{item.name}</p>
+                      <div className="flex items-center gap-2">
+                        <p className="font-bold text-slate-900">{item.name}</p>
+                        {item.isExact && <span className="text-[8px] font-black bg-teal-600 text-white px-1.5 py-0.5 rounded uppercase">Exact Match</span>}
+                      </div>
                       <p className="text-xs text-secondary font-black">${item.price.toFixed(2)}</p>
                       <p className="text-[10px] text-slate-400">{item.description}</p>
                     </div>
@@ -1120,45 +1184,47 @@ export const POS: React.FC = () => {
             <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-lg w-full p-8 ghost-border">
               <div className="flex justify-between items-center mb-8">
                 <h3 className="text-2xl font-black text-primary tracking-tight">Quick Add Stock</h3>
-                <button onClick={() => { setIsAddInventoryModalOpen(false); setStockSaved(false); }} className="text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+                <button onClick={() => { setIsAddInventoryModalOpen(false); setAddStockSuccess(null); setAddStockName(''); setAddStockSku(''); setAddStockQty('1'); setAddStockCost(''); setAddStockPrice(''); setAddStockCategory('Parts'); }} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-slate-400">close</span>
+                </button>
               </div>
-              {stockSaved ? (
+              {addStockSuccess ? (
                 <div className="py-8 text-center space-y-4">
                   <div className="w-16 h-16 bg-lime-100 rounded-full flex items-center justify-center mx-auto">
                     <span className="material-symbols-outlined text-3xl text-lime-600" style={{fontVariationSettings: "'FILL' 1"}}>check_circle</span>
                   </div>
-                  <p className="text-lg font-black text-primary">Stock Added</p>
-                  <p className="text-xs text-slate-500">{sharedStockItems.length} item{sharedStockItems.length !== 1 ? 's' : ''} in local inventory</p>
-                  <button onClick={() => { setIsAddInventoryModalOpen(false); setStockSaved(false); }} className="px-8 py-3 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest">Done</button>
+                  <p className="text-lg font-black text-primary">{addStockSuccess}</p>
+                  <p className="text-xs text-slate-500">{approvedStockItems.length} approved item{approvedStockItems.length !== 1 ? 's' : ''} in inventory{pendingStockItems.length > 0 ? ` · ${pendingStockItems.length} pending approval` : ''}</p>
+                  <button onClick={() => { setIsAddInventoryModalOpen(false); setAddStockSuccess(null); setAddStockName(''); setAddStockSku(''); setAddStockQty('1'); setAddStockCost(''); setAddStockPrice(''); setAddStockCategory('Parts'); }} className="px-8 py-3 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest">Done</button>
                 </div>
               ) : (
-                <form onSubmit={(e) => { e.preventDefault(); }} data-add-stock-form className="space-y-4">
+                <div className="space-y-4">
                   <div className="space-y-1">
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Product Name</label>
-                    <input name="productName" required className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="iPhone 13 Screen" />
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Product Name *</label>
+                    <input value={addStockName} onChange={(e) => setAddStockName(e.target.value)} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="iPhone 13 Screen" />
                   </div>
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-1">
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">SKU</label>
-                      <input name="sku" className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="IP13-SCR-001" />
+                      <input value={addStockSku} onChange={(e) => setAddStockSku(e.target.value)} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="IP13-SCR-001" />
                     </div>
                     <div className="space-y-1">
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Quantity</label>
-                      <input name="quantity" type="number" min="1" defaultValue={1} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" />
+                      <input value={addStockQty} onChange={(e) => setAddStockQty(e.target.value)} type="number" min="1" className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" />
                     </div>
                   </div>
                   <div className="grid grid-cols-3 gap-4">
                     <div className="space-y-1">
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Cost Price</label>
-                      <input name="costPrice" type="number" step="0.01" className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="0.00" />
+                      <input value={addStockCost} onChange={(e) => setAddStockCost(e.target.value)} type="number" step="0.01" className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="0.00" />
                     </div>
                     <div className="space-y-1">
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Sell Price</label>
-                      <input name="sellPrice" type="number" step="0.01" className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="0.00" />
+                      <input value={addStockPrice} onChange={(e) => setAddStockPrice(e.target.value)} type="number" step="0.01" className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="0.00" />
                     </div>
                     <div className="space-y-1">
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Category</label>
-                      <select name="category" className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary">
+                      <select value={addStockCategory} onChange={(e) => setAddStockCategory(e.target.value)} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary">
                         <option>Parts</option>
                         <option>Accessories</option>
                         <option>Devices</option>
@@ -1167,63 +1233,66 @@ export const POS: React.FC = () => {
                     </div>
                   </div>
                   <div className="grid grid-cols-2 gap-3 pt-2">
-                    <button type="button" onClick={() => {
-                      const form = document.querySelector('#pos-add-stock-form') as HTMLFormElement | null;
-                      const container = document.querySelector('[data-add-stock-form]') as HTMLElement | null;
-                      const inputs = container?.querySelectorAll('input, select');
-                      const fd: Record<string, string> = {};
-                      inputs?.forEach((el: any) => { if (el.name) fd[el.name] = el.value; });
-                      if (!fd.productName) return;
-                      const price = parseFloat(fd.sellPrice) || 0;
+                    <button type="button" disabled={!addStockName.trim()} onClick={() => {
+                      const price = parseFloat(addStockPrice) || 0;
                       setCart(prev => [...prev, {
                         id: `QADD-${Date.now()}`,
-                        name: fd.productName,
-                        description: fd.sku ? `SKU: ${fd.sku}` : 'Quick add item',
+                        name: addStockName.trim(),
+                        description: addStockSku ? `SKU: ${addStockSku}` : 'Quick add item',
                         price,
-                        icon: 'add_business',
+                        icon: 'add_shopping_cart',
                         type: 'product' as const,
                       }]);
                       setIsAddInventoryModalOpen(false);
-                      setStockSaved(false);
-                    }} className="py-4 bg-slate-100 text-slate-700 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200 transition-all flex flex-col items-center gap-1">
+                      setAddStockName(''); setAddStockSku(''); setAddStockQty('1'); setAddStockCost(''); setAddStockPrice(''); setAddStockCategory('Parts');
+                    }} className="py-4 bg-slate-100 text-slate-700 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200 transition-all flex flex-col items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed">
                       <span className="material-symbols-outlined text-sm">add_shopping_cart</span>
-                      Add to Order Only
+                      Add to Cart
                     </button>
-                    <button type="button" onClick={() => {
-                      const container = document.querySelector('[data-add-stock-form]') as HTMLElement | null;
-                      const inputs = container?.querySelectorAll('input, select');
-                      const fd: Record<string, string> = {};
-                      inputs?.forEach((el: any) => { if (el.name) fd[el.name] = el.value; });
-                      if (!fd.productName) return;
-                      const price = parseFloat(fd.sellPrice) || 0;
-                      const cost = parseFloat(fd.costPrice) || 0;
-                      addStockItem({
-                        id: `stk-${Date.now()}`,
-                        name: fd.productName,
-                        sku: fd.sku || '',
-                        qty: parseInt(fd.quantity) || 1,
-                        cost,
-                        price,
-                        category: fd.category || 'Parts',
-                        addedAt: new Date().toISOString(),
-                        status: 'pending_approval',
-                      });
-                      setCart(prev => [...prev, {
-                        id: `QADD-${Date.now()}`,
-                        name: fd.productName,
-                        description: fd.sku ? `SKU: ${fd.sku}` : 'Quick add item',
-                        price,
-                        icon: 'add_business',
-                        type: 'product' as const,
-                      }]);
-                      setStockSaved(true);
-                    }} className="py-4 bg-primary text-white rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all flex flex-col items-center gap-1">
-                      <span className="material-symbols-outlined text-sm">inventory_2</span>
-                      Add + Submit Inventory
-                    </button>
+                    {hasInventoryPermission ? (
+                      <button type="button" disabled={!addStockName.trim()} onClick={() => {
+                        const price = parseFloat(addStockPrice) || 0;
+                        const cost = parseFloat(addStockCost) || 0;
+                        addStockItem({
+                          id: `stk-${Date.now()}`,
+                          name: addStockName.trim(),
+                          sku: addStockSku || `SKU-${Date.now().toString().slice(-6)}`,
+                          qty: parseInt(addStockQty) || 1,
+                          cost,
+                          price,
+                          category: addStockCategory,
+                          addedAt: new Date().toISOString(),
+                          status: 'approved',
+                        });
+                        setAddStockSuccess('Added to Inventory');
+                      }} className="py-4 bg-primary text-white rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all flex flex-col items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed">
+                        <span className="material-symbols-outlined text-sm">inventory_2</span>
+                        Add to Inventory
+                      </button>
+                    ) : (
+                      <button type="button" disabled={!addStockName.trim()} onClick={() => {
+                        const price = parseFloat(addStockPrice) || 0;
+                        const cost = parseFloat(addStockCost) || 0;
+                        addStockItem({
+                          id: `stk-${Date.now()}`,
+                          name: addStockName.trim(),
+                          sku: addStockSku || `SKU-${Date.now().toString().slice(-6)}`,
+                          qty: parseInt(addStockQty) || 1,
+                          cost,
+                          price,
+                          category: addStockCategory,
+                          addedAt: new Date().toISOString(),
+                          status: 'pending_approval',
+                        });
+                        setAddStockSuccess('Submitted for Approval');
+                      }} className="py-4 bg-amber-500 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all flex flex-col items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed">
+                        <span className="material-symbols-outlined text-sm">pending_actions</span>
+                        Submit for Approval
+                      </button>
+                    )}
                   </div>
-                  <p className="text-[9px] text-center text-slate-400">"Add to Order Only" skips inventory. "Add + Submit" creates a pending approval stock entry.</p>
-                </form>
+                  <p className="text-[9px] text-center text-slate-400">{hasInventoryPermission ? '"Add to Cart" adds to order only. "Add to Inventory" makes it immediately available in POS.' : '"Add to Cart" adds to order only. "Submit for Approval" sends to manager for review.'}</p>
+                </div>
               )}
             </motion.div>
           </motion.div>
@@ -1255,10 +1324,42 @@ export const POS: React.FC = () => {
         {isSpecialPartModalOpen && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[110] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
             <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-lg w-full p-8 ghost-border">
-              <h3 className="text-2xl font-black text-primary mb-8">Special Part Order</h3>
-              <div className="space-y-6">
-                <input className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold" placeholder="Part Name" type="text" />
-                <button onClick={() => { setCart([...cart, { id: `SP-${Date.now()}`, name: 'Special Part Order', description: 'Non-catalogued item', price: 85.00, icon: 'inventory_2', type: 'special' }]); setIsSpecialPartModalOpen(false); }} className="w-full py-5 bg-secondary text-white rounded-2xl font-black uppercase">Add to Basket</button>
+              <div className="flex justify-between items-center mb-8">
+                <h3 className="text-2xl font-black text-primary tracking-tight">Special Part Order</h3>
+                <button onClick={() => { setIsSpecialPartModalOpen(false); setSpecialPartName(''); setSpecialPartPrice(''); }} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-slate-400">close</span>
+                </button>
+              </div>
+              <div className="space-y-4">
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Part Name *</label>
+                  <input value={specialPartName} onChange={(e) => setSpecialPartName(e.target.value)} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="e.g. Samsung S22 Flex Cable" type="text" />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Price</label>
+                  <div className="relative">
+                    <span className="absolute left-4 top-1/2 -translate-y-1/2 text-sm font-black text-slate-300">$</span>
+                    <input value={specialPartPrice} onChange={(e) => setSpecialPartPrice(e.target.value)} className="w-full bg-slate-50 border-none rounded-xl pl-8 pr-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="0.00" type="number" step="0.01" min="0" />
+                  </div>
+                </div>
+                <p className="text-[9px] text-slate-400 ml-4">Non-catalogued item — will appear in Order Summary</p>
+                <button
+                  disabled={!specialPartName.trim()}
+                  onClick={() => {
+                    setCart([...cart, {
+                      id: `SP-${Date.now()}`,
+                      name: specialPartName.trim(),
+                      description: 'Non-catalogued item',
+                      price: parseFloat(specialPartPrice) || 0,
+                      icon: 'inventory_2',
+                      type: 'special'
+                    }]);
+                    setIsSpecialPartModalOpen(false);
+                    setSpecialPartName('');
+                    setSpecialPartPrice('');
+                  }}
+                  className="w-full py-5 bg-secondary text-white rounded-2xl font-black uppercase tracking-widest shadow-lg active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                >Add to Order</button>
               </div>
             </motion.div>
           </motion.div>
@@ -1495,6 +1596,66 @@ export const POS: React.FC = () => {
                     <button className="w-full py-2 border-2 border-dashed border-slate-200 rounded-xl text-xs font-black text-slate-400 hover:border-secondary hover:text-secondary transition-all">+ Add Category</button>
                   </div>
                 </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {isDepositModalOpen && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[150] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-md w-full p-8 ghost-border">
+              <div className="flex justify-between items-center mb-8">
+                <h3 className="text-2xl font-black text-primary tracking-tight">Add Deposit</h3>
+                <button onClick={() => setIsDepositModalOpen(false)} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-slate-400">close</span>
+                </button>
+              </div>
+              <div className="space-y-4">
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Deposit Amount *</label>
+                  <div className="relative">
+                    <span className="absolute left-4 top-1/2 -translate-y-1/2 text-lg font-black text-slate-300">$</span>
+                    <input value={depositAmount} onChange={(e) => setDepositAmount(e.target.value)} className="w-full bg-slate-50 border-none rounded-2xl pl-10 pr-4 py-4 text-2xl font-black text-primary focus:ring-secondary" placeholder="0.00" type="number" step="0.01" min="0.01" autoFocus />
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Description / Reason</label>
+                  <input value={depositReason} onChange={(e) => setDepositReason(e.target.value)} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary" placeholder="e.g. Bench fee, diagnostic deposit" type="text" />
+                </div>
+                <button onClick={confirmDeposit} disabled={!depositAmount || parseFloat(depositAmount) <= 0} className="w-full py-5 bg-secondary text-white rounded-2xl font-black uppercase tracking-widest shadow-lg active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed">Add to Order</button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {isAddMethodModalOpen && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[150] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-sm w-full p-8 ghost-border">
+              <div className="flex justify-between items-center mb-8">
+                <h3 className="text-2xl font-black text-primary tracking-tight">Add Payment Method</h3>
+                <button onClick={() => setIsAddMethodModalOpen(false)} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-slate-400">close</span>
+                </button>
+              </div>
+              <div className="space-y-3">
+                <button onClick={() => addPaymentMethodByType('Cash')} className="w-full p-4 bg-slate-50 hover:bg-primary hover:text-white rounded-2xl text-left transition-all group flex items-center gap-4">
+                  <div className="w-12 h-12 bg-white rounded-xl flex items-center justify-center text-primary shadow-sm group-hover:bg-white/20 group-hover:text-white transition-all">
+                    <span className="material-symbols-outlined">payments</span>
+                  </div>
+                  <div>
+                    <p className="font-bold text-sm">Cash</p>
+                    <p className="text-[10px] opacity-60">Manual cash payment</p>
+                  </div>
+                </button>
+                <button onClick={() => addPaymentMethodByType('Card')} className="w-full p-4 bg-slate-50 hover:bg-primary hover:text-white rounded-2xl text-left transition-all group flex items-center gap-4">
+                  <div className="w-12 h-12 bg-white rounded-xl flex items-center justify-center text-primary shadow-sm group-hover:bg-white/20 group-hover:text-white transition-all">
+                    <span className="material-symbols-outlined">credit_card</span>
+                  </div>
+                  <div>
+                    <p className="font-bold text-sm">Credit / Debit Card</p>
+                    <p className="text-[10px] opacity-60">Card terminal processing</p>
+                  </div>
+                </button>
               </div>
             </motion.div>
           </motion.div>

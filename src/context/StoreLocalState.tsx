@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback } from 'react';
+import React, { createContext, useContext, useState, useCallback, useMemo } from 'react';
 import { Customer, HeldOrder } from '../types';
 
 export interface StockItem {
@@ -10,7 +10,7 @@ export interface StockItem {
   price: number;
   category: string;
   addedAt: string;
-  status?: 'approved' | 'pending_approval';
+  status: 'approved' | 'pending_approval' | 'rejected';
 }
 
 interface StoreLocalStateContextType {
@@ -19,6 +19,9 @@ interface StoreLocalStateContextType {
   updateCustomer: (id: string, updates: Partial<Customer>) => void;
   stockItems: StockItem[];
   addStockItem: (item: StockItem) => void;
+  updateStockItem: (id: string, updates: Partial<StockItem>) => void;
+  approvedStockItems: StockItem[];
+  pendingStockItems: StockItem[];
   heldOrders: HeldOrder[];
   addHeldOrder: (order: HeldOrder) => void;
   removeHeldOrder: (id: string) => void;
@@ -58,6 +61,13 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
     setStockItems(prev => [...prev, item]);
   }, []);
 
+  const updateStockItem = useCallback((id: string, updates: Partial<StockItem>) => {
+    setStockItems(prev => prev.map(si => si.id === id ? { ...si, ...updates } : si));
+  }, []);
+
+  const approvedStockItems = useMemo(() => stockItems.filter(si => si.status === 'approved'), [stockItems]);
+  const pendingStockItems = useMemo(() => stockItems.filter(si => si.status === 'pending_approval'), [stockItems]);
+
   const addHeldOrder = useCallback((order: HeldOrder) => {
     setHeldOrders(prev => [...prev, order]);
   }, []);
@@ -67,7 +77,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   }, []);
 
   return (
-    <StoreLocalStateContext.Provider value={{ customers, addCustomer, updateCustomer, stockItems, addStockItem, heldOrders, addHeldOrder, removeHeldOrder }}>
+    <StoreLocalStateContext.Provider value={{ customers, addCustomer, updateCustomer, stockItems, addStockItem, updateStockItem, approvedStockItems, pendingStockItems, heldOrders, addHeldOrder, removeHeldOrder }}>
       {children}
     </StoreLocalStateContext.Provider>
   );
