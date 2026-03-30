@@ -1,0 +1,215 @@
+Run one dedicated implementation pass only for:
+Store Dashboard & POS Quick Actions Completion
+
+This is still inside the current workstream:
+Store Dashboard & POS Refinement
+
+Do not start any new workstream.
+Do not redesign the UI.
+Do not broaden scope beyond the items listed below.
+Preserve the current design baseline exactly.
+Preserve auth, preview mode, RBAC, lifecycle gating, plan entitlement gating, and platform/store hierarchy.
+
+Act as:
+Principal Repair/POS Product Architect
++ Principal Store Operations Workflow Designer
++ Principal Refund & Exchange Workflow Architect
++ Principal Warranty Claim Workflow Architect
++ Principal Inventory Workflow Architect
++ Principal React/TypeScript Engineer
++ Principal UX Workflow Designer
++ Principal QA Auditor
++ Principal Side Auditor & Systems Thinker
+
+You must also:
+- act as a side auditor and systems thinker
+- avoid shallow button hookups
+- simulate coherent end-to-end process if backend/live integrations are not yet available
+- use honest local/mock operational flows where needed
+- preserve all already working POS/dashboard logic
+- do not regress the completed fixes already in place
+
+Critical research instruction before coding:
+1. Read the attached replit.md fully and honor the current architecture/baseline.
+2. Read the attached Ref.txt fully.
+3. Visit, read, and analyze all relevant links from Ref.txt related to POS, tickets, inventory, customers, settings, employees, warranty, refund, orders, payment methods, hold orders, and quick actions.
+4. Specifically visit, read, and analyze all of these warranty and refund references before implementing.
+
+Warranty references:
+https://help.repairdesk.co/portal/en/kb/articles/how-to-process-the-warranty-claim-for-a-repair-part
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-process-warranty-claim-for-repair-parts
+https://help.repairdesk.co/portal/en/kb/articles/how-to-copy-the-original-ticket-notes-into-the-warranty-repair-ticket
+https://help.repairdesk.co/portal/en/kb/articles/how-to-add-a-new-repair-part-process-a-warranty-claim-for-a-repair-part
+https://help.repairdesk.co/portal/en/kb/articles/difference-warranty-claim-for-a-service-and-warranty-claim-for-a-part
+https://help.repairdesk.co/portal/en/kb/articles/how-to-set-warranty-for-a-repair-service
+https://help.repairdesk.co/portal/en/kb/articles/how-to-set-warranty-for-a-repair-part
+https://help.repairdesk.co/portal/en/kb/articles/warranty
+
+Refund references:
+https://help.repairdesk.co/portal/en/kb/articles/how-to-offer-refunds-using-payfacto
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-process-refund-exchange-in-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/refund-exchange
+
+Implementation target:
+Make the POS quick-action buttons operationally coherent and useful for day-to-day store operations, not shallow placeholders.
+
+Required fixes and implementation:
+
+1) Switch User must become a real operational POS flow
+Current issue:
+- It does not work and the purpose is unclear
+
+Implement it as a true counter/user handoff flow:
+- Purpose: switch the active POS operator without losing the current register context
+- Clicking Switch User must open a modal, not a dead action
+- In preview/local mode, simulate a coherent user-switch process:
+  - show eligible store users for the active location/session
+  - require a simple confirmation or PIN-style mock verification if appropriate
+- Preserve current in-progress POS draft/cart unless business logic requires explicit warning
+- Clearly show the newly active operator in POS after switching
+- Respect RBAC and store hierarchy
+- Do not log the user out of the whole app unless that is explicitly part of the designed switch flow
+- This should behave like store-counter operator handoff / lock-switch, not a full app sign-out
+
+2) Refund module must become a real simulated workflow
+Current issue:
+- Invoice search does nothing
+
+Implement a coherent refund flow:
+- Refund quick action opens a modal/workflow
+- Search must work by:
+  - invoice number
+  - customer name
+  - phone number
+- Search results must use real app data available in the current mock/shared data layer
+- Selecting a result must show invoice/order detail with items, totals, payment info, and refund-eligible context
+- Support at least:
+  - full refund
+  - line-item refund
+  - quantity-aware refund where relevant
+- Require refund reason
+- Allow refund method path appropriate to current simulated system
+- Reflect outcome honestly in local/mock order history/state
+- If inventory-backed item is refunded and returned to stock, simulate that coherently
+- Do not pretend live payment-terminal refund integration exists unless it really does
+- If terminal refund is not live, clearly simulate/manual-mark the refund path
+
+3) Warranty module must become a real simulated workflow
+Current issue:
+- Searching invoice and clicking process claim does nothing
+
+Implement a coherent warranty claim flow inspired by the reference material:
+- Warranty quick action opens a modal/workflow
+- Search must work by:
+  - invoice number
+  - ticket number if available
+  - customer name
+  - phone number
+- Search results must use real mock/shared system data
+- Selecting an eligible result must show:
+  - original item/service
+  - original date
+  - warranty context/status
+  - whether this is service warranty vs part warranty where possible
+- Claim flow must let the user:
+  - start a warranty claim
+  - record claim reason / notes
+  - carry over useful original reference details
+- If a warranty-repair/ticket simulation is needed, create a coherent local/mock claim record or warranty ticket entry
+- Reuse/copy relevant original notes where appropriate
+- Be honest where backend/live warranty rules are still mocked
+- Do not leave this as a search-with-no-action placeholder
+
+4) Orders module must be upgraded from a shallow list into a real lookup/view flow
+Current issue:
+- It opens a popup but needs proper search and invoice detail view
+
+Implement:
+- Orders quick action opens a searchable order history modal/workflow
+- Search must support:
+  - invoice number
+  - customer name
+  - phone number
+- Results must use real shared order/invoice/customer data
+- Selecting/viewing an order must open detailed invoice/order view with:
+  - order/invoice number
+  - customer details
+  - line items
+  - totals
+  - payment details/status
+  - order dates/status
+- Keep this narrow and usable; do not redesign the invoice module
+
+5) Suggestive Sales maintenance path
+Current issue:
+- user wants a real way to maintain Suggestive Sales
+
+Implement:
+- When adding/editing a product, add a simple checkbox/toggle such as:
+  - Mark as Suggestive Sale
+- Add a dedicated Inventory tab or management surface called:
+  - Suggestive Sales
+- That view must allow owner/manager to review and manage which inventory items are marked for suggestive sales
+- Keep this narrow and inventory-driven
+- Do not build a huge recommendation engine
+- Just make the maintenance path clear and usable
+
+6) Cash rounding exact reset bug
+Current issue:
+- when switching back from Round Up / Round Down to Exact, the amount does not return to the true exact total
+
+Fix:
+- Selecting Exact must restore the exact payable amount every time
+- Keep Round Up and Round Down explicit and deterministic
+- Do not leave stale rounded amounts in place
+
+7) Stock-count refinement in checkout/order summary
+Current issue:
+- logic is close but needs refinement
+
+Implement:
+- Inventory-backed items in checkout must respect stock quantity
+- If user adds the same inventory item again, merge into the existing line instead of creating duplicate lines where appropriate
+- The displayed available count under the item should reflect the remaining available stock as quantity is increased
+- If all available stock is already allocated to cart, available count should show 0 and further increase must be blocked
+- Out-of-stock items should remain in inventory but clearly indicate out-of-stock
+- If stock later changes, allowed quantity should reflect the updated stock
+
+8) Preserve all already working flows
+Do not break:
+- Quick Add Stock permission rules
+- approval-to-inventory path
+- direct Add to Inventory path
+- exact SKU lookup
+- Scan QR aligned to inventory
+- POS Add Item search-first behavior
+- finalize sale with discount + points
+- payment allocation starting empty
+- card exactness
+- POS draft persistence across navigation
+- New Sale reset button
+- Hold Orders popup flow
+- customer sync
+- Print Label
+- Quick Intake handoff
+- Special Part Order
+- Deposit
+- Add Method improvements already working
+
+9) Output format after implementation
+After implementation, return only:
+1. What changed
+2. Exact files changed in this pass
+3. How Switch User now works
+4. How Refund now works
+5. How Warranty now works
+6. How Orders now works
+7. Where Suggestive Sales is maintained now
+8. Any known limitations still intentionally left unchanged
+9. A short implementation verification summary
+
+Important:
+- Do not claim final QA closure on behalf of the user
+- Do not mark the workstream complete yet
+- The user will perform the final manual QA
+- Stop after the report and wait for user testing feedback
