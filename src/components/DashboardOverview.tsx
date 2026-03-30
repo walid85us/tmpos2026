@@ -693,7 +693,12 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
   const { session, canAccess } = useAccess();
   const navigate = useNavigate();
   const { addCustomer, addStockItem, updateStockItem, stockItems: sharedStockItems, approvedStockItems, pendingStockItems, heldOrders, removeHeldOrder } = useStoreLocalState();
-  const hasInventoryPermission = canAccess('inventory');
+  const hasInventoryPermission = (() => {
+    if (!session) return false;
+    if (session.role === 'system_owner' || session.role === 'store_owner' || session.role === 'manager') return true;
+    if (session.role === 'technician') return true;
+    return false;
+  })();
   const [showPrintLabelModal, setShowPrintLabelModal] = useState(false);
   const [showScanQRModal, setShowScanQRModal] = useState(false);
   const [showAddStockModal, setShowAddStockModal] = useState(false);

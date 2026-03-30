@@ -1,0 +1,142 @@
+Run one more narrow precision correction pass only for:
+Store Dashboard & POS Refinement
+
+Do not start any new workstream.
+Do not redesign the UI.
+Do not broaden scope beyond the issues listed below.
+Preserve the current design baseline exactly.
+Preserve auth, preview mode, RBAC, lifecycle gating, plan entitlement gating, and platform/store hierarchy.
+
+Act as:
+Principal Repair/POS Product Architect
++ Principal Store Operations Workflow Designer
++ Principal Payments & Tender Flow Architect
++ Principal Inventory Workflow Architect
++ Principal React/TypeScript Engineer
++ Principal UX Workflow Designer
++ Principal QA Auditor
++ Principal Side Auditor & Systems Thinker
+
+This is a narrow precision correction pass only.
+Fix only the remaining issues found during user manual QA.
+
+Required fixes:
+
+1) Quick Add Stock low-permission approval rule
+Current issue:
+- low-permission behavior is close, but needs to be explicit and consistent
+
+Required behavior:
+- Any role with inventory permission = none or view-only must NOT see Add to Inventory
+- Those roles must see exactly:
+  - Add to Cart / Order Summary
+  - Submit for Approval
+- Roles with actual inventory-add authority must see:
+  - Add to Cart / Order Summary
+  - Add to Inventory
+
+Apply this rule consistently in both Dashboard Quick Add Stock and POS Quick Add Stock.
+Do not key this only off role title names; use the actual permission capability logic already present in the app.
+
+2) POS Add Item popup must become search-first, not full inventory dump
+Current issue:
+- Add Item popup is functional, but it should not list all inventory items by default
+
+Required behavior:
+- On open, do not dump the full inventory list
+- Results should appear only after the user searches by name / SKU / barcode
+- Search results must come only from real inventory
+- Once an item is selected, Add Item must add it correctly into Order Summary/cart
+
+3) Suggestive Sales maintenance path must become clear
+Current issue:
+- user needs a real way to control / maintain Suggestive Sales
+
+Required behavior:
+- If a Suggestive Sales maintenance/configuration path already exists, surface it clearly from the relevant POS flow and/or settings path
+- If no real maintenance path exists, implement a narrow owner/manager-maintained local/mock configuration path for Suggestive Sales
+- Make it clear where store owner/manager can maintain suggested upsell items/rules
+- Keep this narrow and operational; do not redesign broader inventory/marketing systems
+
+4) Cash rounding must support both round up and round down
+Current issue:
+- round up exists, round down is missing
+
+Required behavior:
+- For Cash, exact amount remains default
+- Add explicit visible options for:
+  - Round Up
+  - Round Down
+- Behavior must be deterministic, visible, and easy to understand
+- Do not apply rounding silently
+- Credit / Debit Card remains exact-only
+
+5) Stock-count enforcement in checkout / order summary
+Current issue:
+- POS should prevent selling more than available stock
+
+Required behavior:
+- Inventory-backed items added to POS must respect available stock quantity
+- If available stock = 1, user must not be able to increase quantity beyond 1
+- If quantity limit is reached, disable further increase and show clear out-of-stock / stock-limit feedback
+- If stock later increases, adding more should become possible again
+- Keep this narrow and aligned to real inventory quantity state already in use
+
+6) POS draft cart/session persistence across navigation
+Current issue:
+- if customer/walk-in is selected and items are added, leaving POS clears the current sale
+- this is not acceptable for normal store workflow
+
+Required behavior:
+- Preserve the current in-progress POS sale when user leaves POS and returns
+- Persist at least:
+  - selected customer or walk-in state
+  - cart/order summary items
+  - quantities
+  - discounts
+  - payment method state if already entered and safe to preserve
+- This should survive navigation to dashboard/other sections within the active session
+- Keep Hold Sale as a distinct intentional action; do not confuse draft persistence with held orders
+- Add a clear “New Sale” button to intentionally reset/clear the POS draft
+- Place New Sale in a logical POS location, such as top area or near Hold Sale
+- Reset should be explicit and user-driven, not automatic on navigation
+
+7) Keep all working fixes intact
+Do not break:
+- Quick Add Stock approval-to-inventory path
+- direct Add to Inventory path
+- POS Quick Add Stock visibility
+- exact SKU lookup
+- exact barcode/fast input lookup
+- dashboard Scan QR aligned to inventory
+- finalize sale with discount + points
+- payment allocation starting empty
+- card exactness
+- hold orders popup flow
+- customer sync
+- Print Label
+- Quick Intake handoff
+- Special Part Order
+- Deposit
+- Add Method improvements already working
+
+8) About Switch User / Refund / Warranty / Orders
+For this pass:
+- Do not do a broad buildout unless these buttons are currently shallow, broken, or dead
+- If they are already implemented enough for now, leave them untouched
+- If any of them are still placeholder/dead-end/shallow and clearly within current POS quick action scope, report that explicitly in your output so the next dedicated pass can target them
+
+After implementation, return only:
+1. What changed
+2. Exact files changed in this pass
+3. Which permission rule you corrected for Quick Add Stock
+4. How POS draft persistence now works
+5. Where Suggestive Sales is maintained after this pass
+6. Any known limitations still intentionally left unchanged
+7. A short implementation verification summary
+
+Important:
+- Do not claim final QA closure on behalf of the user
+- Do not mark the workstream complete yet
+- The user will perform the final manual QA
+- Stop after the report and wait for user testing feedback

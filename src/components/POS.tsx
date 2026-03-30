@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -27,18 +27,26 @@ const POINTS_VALUE_RATIO = 0.01;
 
 export const POS: React.FC = () => {
   const location = useLocation();
-  const { canAccess } = useAccess();
-  const { customers: sharedCustomers, addCustomer, updateCustomer, stockItems: sharedStockItems, addStockItem, approvedStockItems, pendingStockItems, heldOrders, addHeldOrder, removeHeldOrder } = useStoreLocalState();
-  const hasInventoryPermission = canAccess('inventory');
-  const [cart, setCart] = useState<CartItem[]>([]);
-  const [payments, setPayments] = useState<PaymentMethod[]>([]);
-  const [discounts, setDiscounts] = useState<Discount[]>([]);
+  const { canAccess, session } = useAccess();
+  const { customers: sharedCustomers, addCustomer, updateCustomer, stockItems: sharedStockItems, addStockItem, approvedStockItems, pendingStockItems, heldOrders, addHeldOrder, removeHeldOrder, suggestiveSalesItems, addSuggestiveSaleItem, removeSuggestiveSaleItem, draftCart, setDraftCart, clearDraftCart } = useStoreLocalState();
+  const hasInventoryPermission = (() => {
+    if (!session) return false;
+    if (session.role === 'system_owner' || session.role === 'store_owner' || session.role === 'manager') return true;
+    if (session.role === 'technician') return true;
+    return false;
+  })();
+  const [cart, setCart] = useState<CartItem[]>(draftCart.cart);
+  const [payments, setPayments] = useState<PaymentMethod[]>(draftCart.payments);
+  const [discounts, setDiscounts] = useState<Discount[]>(draftCart.discounts);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
 
   const [activeShift, setActiveShift] = useState<Shift | null>(null);
-  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
+  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(draftCart.selectedCustomer);
   const [searchQuery, setSearchQuery] = useState('');
+  const [isSuggestiveSettingsOpen, setIsSuggestiveSettingsOpen] = useState(false);
+  const [newSugName, setNewSugName] = useState('');
+  const [newSugPrice, setNewSugPrice] = useState('');
   const [currentUserPin, setCurrentUserPin] = useState('');
   const [repairValidationError, setRepairValidationError] = useState('');
   const [customerValidationError, setCustomerValidationError] = useState('');
@@ -69,7 +77,7 @@ export const POS: React.FC = () => {
   const [discountCode, setDiscountCode] = useState('');
   const [storeCreditId, setStoreCreditId] = useState('');
   const [storeCreditVerified, setStoreCreditVerified] = useState(false);
-  const [cashRoundingEnabled, setCashRoundingEnabled] = useState(false);
+  const [cashRoundingMode, setCashRoundingMode] = useState<'exact' | 'up' | 'down'>('exact');
 
   // Advanced Search & Filter
   const [searchCategory, setSearchCategory] = useState('All Categories');
@@ -157,6 +165,24 @@ export const POS: React.FC = () => {
     }
   }, [location.state]);
 
+  useEffect(() => {
+    setDraftCart({ cart, selectedCustomer, payments, discounts });
+  }, [cart, selectedCustomer, payments, discounts]);
+
+  const handleNewSale = () => {
+    setCart([]);
+    setPayments([]);
+    setDiscounts([]);
+    setSelectedCustomer(null);
+    setSearchQuery('');
+    setDiscountCode('');
+    setStoreCreditId('');
+    setStoreCreditVerified(false);
+    setCashRoundingMode('exact');
+    clearDraftCart();
+    setIsSuccess(false);
+  };
+
   const subtotal = cart.reduce((acc, item) => acc + item.price * (item.qty || 1), 0);
   const discountTotal = discounts.reduce((acc, d) => {
     if (d.type === 'percent') return acc + (subtotal * (d.value / 100));
@@ -169,9 +195,27 @@ export const POS: React.FC = () => {
   const hasCardMethod = payments.some(p => p.locked);
   const cardAutoAmount = hasCardMethod ? Math.max(0, parseFloat((total - manualAllocated).toFixed(2))) : 0;
   const totalAllocated = parseFloat((manualAllocated + cardAutoAmount).toFixed(2));
-  const remaining = parseFloat((total - totalAllocated).toFixed(2));
+  const cashRoundingDiscount = (() => {
+    if (cashRoundingMode !== 'down') return 0;
+    const cashPayment = payments.find(p => p.method === 'Cash' && !p.locked);
+    if (!cashPayment || cashPayment.amount <= 0) return 0;
+    const otherTotal = payments.filter(pm => pm.id !== cashPayment.id).reduce((sum, pm) => sum + (pm.locked ? cardAutoAmount : pm.amount || 0), 0);
+    const owed = parseFloat((total - otherTotal).toFixed(2));
+    const floored = Math.floor(owed);
+    if (floored > 0 && floored < owed && cashPayment.amount === floored) return parseFloat((owed - floored).toFixed(2));
+    return 0;
+  })();
+  const remaining = parseFloat((total - totalAllocated - cashRoundingDiscount).toFixed(2));
   const changeDue = totalAllocated > total && total > 0 ? parseFloat((totalAllocated - total).toFixed(2)) : 0;
-  const progress = total > 0 ? (totalAllocated / total) * 100 : 0;
+  const progress = total > 0 ? ((totalAllocated + cashRoundingDiscount) / total) * 100 : 0;
+
+  const getStockAvailable = useCallback((itemId: string): number | null => {
+    const baseId = itemId.split('-').slice(0, -1).join('-') || itemId;
+    const stockItem = approvedStockItems.find(si => si.id === baseId || si.id === itemId);
+    if (!stockItem) return null;
+    const inCart = cart.filter(ci => ci.type === 'product' && (ci.id.startsWith(baseId + '-') || ci.id.startsWith(itemId + '-') || ci.id === baseId || ci.id === itemId)).reduce((sum, ci) => sum + (ci.qty || 1), 0);
+    return Math.max(0, stockItem.qty - inCart);
+  }, [approvedStockItems, cart]);
 
   // Handlers
   const addItemToCart = (item: any) => {
@@ -180,7 +224,14 @@ export const POS: React.FC = () => {
       setIsRepairDetailsModalOpen(true);
       setIsAddItemModalOpen(false);
     } else {
-      setCart([...cart, { ...item, id: `${item.id}-${Date.now()}` }]);
+      const stockItem = approvedStockItems.find(si => si.id === item.id);
+      if (stockItem) {
+        const inCartQty = cart.filter(ci => ci.id.startsWith(item.id + '-') || ci.id === item.id).reduce((sum, ci) => sum + (ci.qty || 1), 0);
+        if (inCartQty >= stockItem.qty) {
+          return;
+        }
+      }
+      setCart([...cart, { ...item, id: `${item.id}-${Date.now()}`, stockItemId: item.id }]);
       setIsAddItemModalOpen(false);
     }
   };
@@ -307,6 +358,7 @@ export const POS: React.FC = () => {
     setCart([]);
     setDiscounts([]);
     setPayments([]);
+    clearDraftCart();
   };
 
   const handlePrintReceipt = () => {
@@ -328,7 +380,17 @@ export const POS: React.FC = () => {
 
   const saveEditedItem = () => {
     if (editingItem) {
-      setCart(cart.map(i => i.id === editingItem.id ? { ...i, price: editPrice, qty: editQty } : i));
+      let qty = editQty;
+      if (editingItem.type === 'product') {
+        const baseId = (editingItem as any).stockItemId || editingItem.id.replace(/-\d+$/, '');
+        const stockItem = approvedStockItems.find(si => si.id === baseId);
+        if (stockItem) {
+          const otherInCart = cart.filter(ci => ci.id !== editingItem.id && ci.type === 'product' && (ci.id.startsWith(baseId + '-') || ci.id === baseId)).reduce((sum, ci) => sum + (ci.qty || 1), 0);
+          qty = Math.min(qty, stockItem.qty - otherInCart);
+          if (qty < 1) qty = 1;
+        }
+      }
+      setCart(cart.map(i => i.id === editingItem.id ? { ...i, price: editPrice, qty } : i));
       setIsEditItemModalOpen(false);
       setEditingItem(null);
     }
@@ -470,6 +532,13 @@ export const POS: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-3">
+          <button 
+            onClick={handleNewSale}
+            className="flex items-center gap-2 text-white bg-secondary px-4 py-2 rounded-xl hover:bg-secondary/90 transition-all shadow-sm active:scale-95"
+          >
+            <span className="material-symbols-outlined text-sm">add_circle</span>
+            <span className="text-sm font-black uppercase tracking-wider">New Sale</span>
+          </button>
           <button 
             onClick={() => setIsHeldOrdersOpen(true)}
             className="flex items-center gap-2 text-slate-500 bg-white border border-slate-200 px-4 py-2 rounded-xl hover:bg-slate-50 transition-all relative"
@@ -649,7 +718,8 @@ export const POS: React.FC = () => {
                   const isCash = p.method === 'Cash';
                   const otherPaymentsTotal = payments.filter(pm => pm.id !== p.id).reduce((sum, pm) => sum + (pm.locked ? (cardAutoAmount ?? 0) : (pm.amount || 0)), 0);
                   const cashOwed = parseFloat((total - otherPaymentsTotal).toFixed(2));
-                  const roundedUp = isCash && cashRoundingEnabled && cashOwed > 0 ? Math.ceil(cashOwed) : null;
+                  const roundedUp = isCash && cashRoundingMode === 'up' && cashOwed > 0 ? Math.ceil(cashOwed) : null;
+                  const roundedDown = isCash && cashRoundingMode === 'down' && cashOwed > 0 ? Math.floor(cashOwed) : null;
                   return (
                   <motion.div key={p.id} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}>
                     <div className="flex items-center gap-4 p-4 bg-slate-50 rounded-2xl border border-slate-100">
@@ -686,15 +756,19 @@ export const POS: React.FC = () => {
                     </button>
                     </div>
                     {isCash && (
-                      <div className="flex items-center justify-between mt-2 px-4">
-                        <button
-                          onClick={() => setCashRoundingEnabled(!cashRoundingEnabled)}
-                          className={`flex items-center gap-2 text-[10px] font-black uppercase tracking-widest px-3 py-1.5 rounded-xl transition-all ${cashRoundingEnabled ? 'bg-lime-100 text-lime-700 border border-lime-200' : 'bg-slate-100 text-slate-400 border border-slate-200 hover:border-lime-300'}`}
-                        >
-                          <span className="material-symbols-outlined text-xs">{cashRoundingEnabled ? 'check_circle' : 'radio_button_unchecked'}</span>
-                          Round up cash
-                        </button>
-                        {cashRoundingEnabled && roundedUp !== null && roundedUp > 0 && (
+                      <div className="flex items-center justify-between mt-2 px-4 flex-wrap gap-2">
+                        <div className="flex items-center gap-1 bg-slate-100 rounded-xl p-0.5">
+                          {([['exact', 'Exact'], ['up', 'Round Up'], ['down', 'Round Down']] as const).map(([mode, label]) => (
+                            <button
+                              key={mode}
+                              onClick={() => setCashRoundingMode(mode)}
+                              className={`text-[10px] font-black uppercase tracking-widest px-3 py-1.5 rounded-xl transition-all ${cashRoundingMode === mode ? (mode === 'exact' ? 'bg-white text-slate-700 shadow-sm' : 'bg-lime-100 text-lime-700 shadow-sm') : 'text-slate-400 hover:text-slate-600'}`}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                        {roundedUp !== null && roundedUp > 0 && (
                           <button
                             onClick={() => setPayments(payments.map(pm => pm.id === p.id ? { ...pm, amount: roundedUp } : pm))}
                             className="text-[10px] font-black text-lime-700 bg-lime-50 px-3 py-1.5 rounded-xl border border-lime-200 hover:bg-lime-100 transition-all flex items-center gap-1"
@@ -702,6 +776,16 @@ export const POS: React.FC = () => {
                             <span className="material-symbols-outlined text-xs">arrow_upward</span>
                             Use ${roundedUp.toFixed(2)}
                             {roundedUp - cashOwed > 0.005 && <span className="text-lime-500 ml-1">(+${(roundedUp - cashOwed).toFixed(2)} change)</span>}
+                          </button>
+                        )}
+                        {roundedDown !== null && roundedDown > 0 && roundedDown < cashOwed && (
+                          <button
+                            onClick={() => setPayments(payments.map(pm => pm.id === p.id ? { ...pm, amount: roundedDown } : pm))}
+                            className="text-[10px] font-black text-orange-700 bg-orange-50 px-3 py-1.5 rounded-xl border border-orange-200 hover:bg-orange-100 transition-all flex items-center gap-1"
+                          >
+                            <span className="material-symbols-outlined text-xs">arrow_downward</span>
+                            Use ${roundedDown.toFixed(2)}
+                            <span className="text-orange-500 ml-1">(-${(cashOwed - roundedDown).toFixed(2)} discount)</span>
                           </button>
                         )}
                       </div>
@@ -738,6 +822,9 @@ export const POS: React.FC = () => {
                   <span className="text-xl font-bold text-slate-900">${totalAllocated.toFixed(2)}</span>
                   {changeDue > 0 && (
                     <span className="block text-sm font-black text-lime-600 mt-1">Change: ${changeDue.toFixed(2)}</span>
+                  )}
+                  {cashRoundingDiscount > 0 && (
+                    <span className="block text-sm font-black text-orange-600 mt-1">Round-down: -${cashRoundingDiscount.toFixed(2)}</span>
                   )}
                 </div>
               </div>
@@ -1057,24 +1144,31 @@ export const POS: React.FC = () => {
 
               <div className="grid grid-cols-2 gap-4 max-h-[50vh] overflow-y-auto pr-2">
                 {(() => {
-                  const baseItems: { id: string; name: string; price: number; icon: string; type: 'repair' | 'product'; category: string; description: string; sku?: string; isExact?: boolean }[] = [
+                  const q = searchQuery.toLowerCase().trim();
+                  if (!q && searchCategory === 'All Categories') {
+                    return [{ type: 'empty-state' as const }];
+                  }
+                  const baseItems: { id: string; name: string; price: number; icon: string; type: 'repair' | 'product'; category: string; description: string; sku?: string; isExact?: boolean; stockQty?: number }[] = [
                     { id: 'svc-screen', name: 'iPhone 13 Screen Repair', price: 189.00, icon: 'smartphone', type: 'repair', category: 'Repairs', description: 'Screen replacement service' },
                     { id: 'svc-battery', name: 'Battery Replacement Service', price: 79.00, icon: 'battery_charging_full', type: 'repair', category: 'Repairs', description: 'Battery swap service' },
                     { id: 'svc-port', name: 'Charging Port Repair', price: 99.00, icon: 'electrical_services', type: 'repair', category: 'Repairs', description: 'Port replacement service' },
                   ];
                   const fromStock = approvedStockItems
-                    .map(si => ({
-                      id: si.id,
-                      name: si.name,
-                      price: si.price,
-                      icon: si.category === 'Parts' ? 'build' : si.category === 'Accessories' ? 'cable' : 'inventory_2',
-                      type: 'product' as const,
-                      category: si.category,
-                      description: `SKU: ${si.sku} · ${si.qty} in stock`,
-                      sku: si.sku,
-                    }));
+                    .map(si => {
+                      const inCartQty = cart.filter(ci => ci.type === 'product' && ci.id.startsWith(si.id + '-')).reduce((sum, ci) => sum + (ci.qty || 1), 0);
+                      return {
+                        id: si.id,
+                        name: si.name,
+                        price: si.price,
+                        icon: si.category === 'Parts' ? 'build' : si.category === 'Accessories' ? 'cable' : 'inventory_2',
+                        type: 'product' as const,
+                        category: si.category,
+                        description: `SKU: ${si.sku} · ${si.qty - inCartQty} avail`,
+                        sku: si.sku,
+                        stockQty: si.qty - inCartQty,
+                      };
+                    });
                   const allItems = [...baseItems, ...fromStock];
-                  const q = searchQuery.toLowerCase().trim();
                   const filtered = allItems.filter(i =>
                     (searchCategory === 'All Categories' || i.category === searchCategory) &&
                     (!q || i.name.toLowerCase().includes(q) || i.description.toLowerCase().includes(q) || (i.sku && i.sku.toLowerCase().includes(q)))
@@ -1085,8 +1179,15 @@ export const POS: React.FC = () => {
                     return [...exact, ...rest];
                   }
                   return filtered;
-                })().map((item) => (
-                  <button key={item.id} onClick={() => addItemToCart(item)} className={`flex items-center gap-4 p-4 hover:bg-white hover:shadow-xl rounded-2xl text-left transition-all group ${item.isExact ? 'bg-teal-50 border-2 border-teal-200' : 'bg-slate-50'}`}>
+                })().map((item: any, idx) => (
+                  item.type === 'empty-state' ? (
+                    <div key="empty" className="col-span-2 py-12 text-center">
+                      <span className="material-symbols-outlined text-4xl text-slate-200 mb-3 block">search</span>
+                      <p className="text-sm font-bold text-slate-400">Search by name, SKU, or barcode</p>
+                      <p className="text-xs text-slate-300 mt-1">Or select a category to browse</p>
+                    </div>
+                  ) : (
+                  <button key={item.id || idx} disabled={item.type === 'product' && item.stockQty !== undefined && item.stockQty <= 0} onClick={() => addItemToCart(item)} className={`flex items-center gap-4 p-4 hover:bg-white hover:shadow-xl rounded-2xl text-left transition-all group ${item.isExact ? 'bg-teal-50 border-2 border-teal-200' : 'bg-slate-50'} ${item.type === 'product' && item.stockQty !== undefined && item.stockQty <= 0 ? 'opacity-40 cursor-not-allowed' : ''}`}>
                     <div className="w-12 h-12 bg-white rounded-xl flex items-center justify-center text-primary shadow-sm group-hover:bg-secondary group-hover:text-white transition-all">
                       <span className="material-symbols-outlined">{item.icon}</span>
                     </div>
@@ -1094,26 +1195,34 @@ export const POS: React.FC = () => {
                       <div className="flex items-center gap-2">
                         <p className="font-bold text-slate-900">{item.name}</p>
                         {item.isExact && <span className="text-[8px] font-black bg-teal-600 text-white px-1.5 py-0.5 rounded uppercase">Exact Match</span>}
+                        {item.type === 'product' && item.stockQty !== undefined && item.stockQty <= 0 && <span className="text-[8px] font-black bg-red-100 text-red-600 px-1.5 py-0.5 rounded uppercase">Out of stock</span>}
                       </div>
                       <p className="text-xs text-secondary font-black">${item.price.toFixed(2)}</p>
                       <p className="text-[10px] text-slate-400">{item.description}</p>
                     </div>
                   </button>
+                  )
                 ))}
               </div>
 
               <div className="mt-8 pt-8 border-t border-dashed border-slate-200">
-                <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-4">Suggestive Sales</h4>
-                <div className="flex gap-4">
-                  {[
-                    { name: 'Tempered Glass', price: 9.99 },
-                    { name: 'Protective Case', price: 24.99 }
-                  ].map((s, i) => (
-                    <button key={i} onClick={() => handleAddSuggestiveItem(s.name, s.price)} className="flex items-center gap-3 px-4 py-2 bg-lime-50 rounded-xl border border-lime-100 hover:bg-lime-100 transition-all active:scale-95">
+                <div className="flex items-center justify-between mb-4">
+                  <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400">Suggestive Sales</h4>
+                  {hasInventoryPermission && (
+                    <button onClick={() => setIsSuggestiveSettingsOpen(true)} className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1 hover:text-primary transition-colors">
+                      <span className="material-symbols-outlined text-xs">settings</span>
+                      Manage
+                    </button>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-3">
+                  {suggestiveSalesItems.map((s) => (
+                    <button key={s.id} onClick={() => handleAddSuggestiveItem(s.name, s.price)} className="flex items-center gap-3 px-4 py-2 bg-lime-50 rounded-xl border border-lime-100 hover:bg-lime-100 transition-all active:scale-95">
                       <span className="material-symbols-outlined text-lime-600 text-sm">add_shopping_cart</span>
-                      <span className="text-xs font-bold text-lime-700">{s.name} - ${s.price}</span>
+                      <span className="text-xs font-bold text-lime-700">{s.name} - ${s.price.toFixed(2)}</span>
                     </button>
                   ))}
+                  {suggestiveSalesItems.length === 0 && <p className="text-xs text-slate-300 italic">No suggestive sales configured</p>}
                 </div>
               </div>
             </motion.div>
@@ -1700,6 +1809,73 @@ export const POS: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {isSuggestiveSettingsOpen && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-6">
+          <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden">
+            <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-black text-primary">Manage Suggestive Sales</h3>
+                <p className="text-xs text-slate-400 mt-1">Items shown as quick-add suggestions during checkout</p>
+              </div>
+              <button onClick={() => setIsSuggestiveSettingsOpen(false)} className="text-slate-300 hover:text-slate-500 transition-colors">
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+            <div className="p-6 space-y-4 max-h-[50vh] overflow-y-auto">
+              {suggestiveSalesItems.map((item) => (
+                <div key={item.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl">
+                  <div>
+                    <p className="text-sm font-bold text-slate-900">{item.name}</p>
+                    <p className="text-xs text-secondary font-black">${item.price.toFixed(2)}</p>
+                  </div>
+                  <button onClick={() => removeSuggestiveSaleItem(item.id)} className="text-slate-300 hover:text-red-500 transition-colors">
+                    <span className="material-symbols-outlined text-lg">delete</span>
+                  </button>
+                </div>
+              ))}
+              {suggestiveSalesItems.length === 0 && (
+                <p className="text-center text-sm text-slate-300 py-4">No suggestive sale items configured</p>
+              )}
+            </div>
+            <div className="p-6 border-t border-slate-100">
+              <div className="flex gap-2">
+                <input
+                  value={newSugName}
+                  onChange={(e) => setNewSugName(e.target.value)}
+                  className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-secondary focus:border-secondary"
+                  placeholder="Item name"
+                />
+                <div className="relative w-28">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400">$</span>
+                  <input
+                    value={newSugPrice}
+                    onChange={(e) => setNewSugPrice(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-6 pr-3 py-2 text-sm focus:ring-secondary focus:border-secondary"
+                    placeholder="0.00"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                  />
+                </div>
+                <button
+                  onClick={() => {
+                    const price = parseFloat(newSugPrice);
+                    if (newSugName.trim() && price > 0) {
+                      addSuggestiveSaleItem({ id: `sug-${Date.now()}`, name: newSugName.trim(), price });
+                      setNewSugName('');
+                      setNewSugPrice('');
+                    }
+                  }}
+                  className="bg-secondary text-white px-4 py-2 rounded-xl font-black text-sm hover:bg-secondary/90 transition-all active:scale-95"
+                >
+                  Add
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        </div>
+      )}
 
       <ContextualHelp 
         title="POS & Sales Guide"

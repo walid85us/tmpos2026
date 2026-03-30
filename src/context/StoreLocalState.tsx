@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useMemo } from 'react';
-import { Customer, HeldOrder } from '../types';
+import { Customer, HeldOrder, CartItem, PaymentMethod, Discount } from '../types';
 
 export interface StockItem {
   id: string;
@@ -11,6 +11,19 @@ export interface StockItem {
   category: string;
   addedAt: string;
   status: 'approved' | 'pending_approval' | 'rejected';
+}
+
+export interface SuggestiveSaleItem {
+  id: string;
+  name: string;
+  price: number;
+}
+
+export interface DraftCart {
+  cart: CartItem[];
+  selectedCustomer: Customer | null;
+  payments: PaymentMethod[];
+  discounts: Discount[];
 }
 
 interface StoreLocalStateContextType {
@@ -25,6 +38,12 @@ interface StoreLocalStateContextType {
   heldOrders: HeldOrder[];
   addHeldOrder: (order: HeldOrder) => void;
   removeHeldOrder: (id: string) => void;
+  suggestiveSalesItems: SuggestiveSaleItem[];
+  addSuggestiveSaleItem: (item: SuggestiveSaleItem) => void;
+  removeSuggestiveSaleItem: (id: string) => void;
+  draftCart: DraftCart;
+  setDraftCart: (draft: DraftCart) => void;
+  clearDraftCart: () => void;
 }
 
 const SEED_CUSTOMERS: Customer[] = [
@@ -42,12 +61,21 @@ const SEED_STOCK_ITEMS: StockItem[] = [
   { id: 'stk-005', name: 'iPad Air 5 Digitizer', sku: 'IPAD-A5-DIG', qty: 4, cost: 65.00, price: 129.00, category: 'Parts', addedAt: '2026-03-20T10:00:00Z', status: 'approved' },
 ];
 
+const SEED_SUGGESTIVE_SALES: SuggestiveSaleItem[] = [
+  { id: 'sug-1', name: 'Tempered Glass', price: 9.99 },
+  { id: 'sug-2', name: 'Protective Case', price: 24.99 },
+];
+
+const EMPTY_DRAFT: DraftCart = { cart: [], selectedCustomer: null, payments: [], discounts: [] };
+
 const StoreLocalStateContext = createContext<StoreLocalStateContextType | null>(null);
 
 export function StoreLocalStateProvider({ children }: { children: React.ReactNode }) {
   const [customers, setCustomers] = useState<Customer[]>(SEED_CUSTOMERS);
   const [stockItems, setStockItems] = useState<StockItem[]>(SEED_STOCK_ITEMS);
   const [heldOrders, setHeldOrders] = useState<HeldOrder[]>([]);
+  const [suggestiveSalesItems, setSuggestiveSalesItems] = useState<SuggestiveSaleItem[]>(SEED_SUGGESTIVE_SALES);
+  const [draftCart, setDraftCartState] = useState<DraftCart>(EMPTY_DRAFT);
 
   const addCustomer = useCallback((c: Customer) => {
     setCustomers(prev => [...prev, c]);
@@ -76,8 +104,24 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
     setHeldOrders(prev => prev.filter(o => o.id !== id));
   }, []);
 
+  const addSuggestiveSaleItem = useCallback((item: SuggestiveSaleItem) => {
+    setSuggestiveSalesItems(prev => [...prev, item]);
+  }, []);
+
+  const removeSuggestiveSaleItem = useCallback((id: string) => {
+    setSuggestiveSalesItems(prev => prev.filter(i => i.id !== id));
+  }, []);
+
+  const setDraftCart = useCallback((draft: DraftCart) => {
+    setDraftCartState(draft);
+  }, []);
+
+  const clearDraftCart = useCallback(() => {
+    setDraftCartState(EMPTY_DRAFT);
+  }, []);
+
   return (
-    <StoreLocalStateContext.Provider value={{ customers, addCustomer, updateCustomer, stockItems, addStockItem, updateStockItem, approvedStockItems, pendingStockItems, heldOrders, addHeldOrder, removeHeldOrder }}>
+    <StoreLocalStateContext.Provider value={{ customers, addCustomer, updateCustomer, stockItems, addStockItem, updateStockItem, approvedStockItems, pendingStockItems, heldOrders, addHeldOrder, removeHeldOrder, suggestiveSalesItems, addSuggestiveSaleItem, removeSuggestiveSaleItem, draftCart, setDraftCart, clearDraftCart }}>
       {children}
     </StoreLocalStateContext.Provider>
   );
