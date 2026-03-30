@@ -1166,48 +1166,59 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                         </select>
                       </div>
                     </div>
-                    {hasInventoryPermission ? (
+                    <div className="grid grid-cols-2 gap-3">
                       <button type="button" disabled={!dashStockName.trim()} onClick={() => {
-                        const item: StockItem = {
-                          id: `stk-${Date.now()}`,
-                          name: dashStockName.trim(),
-                          sku: dashStockSku || `SKU-${Date.now().toString().slice(-6)}`,
-                          qty: parseInt(dashStockQty) || 1,
-                          cost: parseFloat(dashStockCost) || 0,
-                          price: parseFloat(dashStockPrice) || 0,
-                          category: dashStockCategory,
-                          addedAt: new Date().toISOString(),
-                          status: 'approved',
-                        };
-                        addStockItem(item);
-                        setLastAddedStock(item);
-                        setStockSaved(true);
-                      }} className="w-full py-4 bg-primary text-white rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-lg hover:bg-primary/90 transition-all flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed">
-                        <span className="material-symbols-outlined text-sm">inventory_2</span>
-                        Add to Inventory
+                        const price = parseFloat(dashStockPrice) || 0;
+                        navigate('/sales', { state: { addToCart: { id: `DADD-${Date.now()}`, name: dashStockName.trim(), price, description: dashStockSku ? `SKU: ${dashStockSku}` : 'Added from dashboard', icon: 'add_shopping_cart', type: 'product' } } });
+                        setShowAddStockModal(false);
+                        setDashStockName(''); setDashStockSku(''); setDashStockQty('1'); setDashStockCost(''); setDashStockPrice(''); setDashStockCategory('Parts');
+                      }} className="py-4 bg-slate-100 text-slate-700 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200 transition-all flex flex-col items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed">
+                        <span className="material-symbols-outlined text-sm">add_shopping_cart</span>
+                        Add to Cart
                       </button>
-                    ) : (
-                      <button type="button" disabled={!dashStockName.trim()} onClick={() => {
-                        const item: StockItem = {
-                          id: `stk-${Date.now()}`,
-                          name: dashStockName.trim(),
-                          sku: dashStockSku || `SKU-${Date.now().toString().slice(-6)}`,
-                          qty: parseInt(dashStockQty) || 1,
-                          cost: parseFloat(dashStockCost) || 0,
-                          price: parseFloat(dashStockPrice) || 0,
-                          category: dashStockCategory,
-                          addedAt: new Date().toISOString(),
-                          status: 'pending_approval',
-                        };
-                        addStockItem(item);
-                        setLastAddedStock(item);
-                        setStockSaved(true);
-                      }} className="w-full py-4 bg-amber-500 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-lg hover:bg-amber-600 transition-all flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed">
-                        <span className="material-symbols-outlined text-sm">pending_actions</span>
-                        Submit for Approval
-                      </button>
-                    )}
-                    <p className="text-[9px] text-center text-slate-400">{hasInventoryPermission ? 'Item will be immediately available in POS catalog.' : 'Item will be sent to manager for approval before appearing in POS.'}</p>
+                      {hasInventoryPermission ? (
+                        <button type="button" disabled={!dashStockName.trim()} onClick={() => {
+                          const item: StockItem = {
+                            id: `stk-${Date.now()}`,
+                            name: dashStockName.trim(),
+                            sku: dashStockSku || `SKU-${Date.now().toString().slice(-6)}`,
+                            qty: parseInt(dashStockQty) || 1,
+                            cost: parseFloat(dashStockCost) || 0,
+                            price: parseFloat(dashStockPrice) || 0,
+                            category: dashStockCategory,
+                            addedAt: new Date().toISOString(),
+                            status: 'approved',
+                          };
+                          addStockItem(item);
+                          setLastAddedStock(item);
+                          setStockSaved(true);
+                        }} className="py-4 bg-primary text-white rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-lg hover:bg-primary/90 transition-all flex flex-col items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed">
+                          <span className="material-symbols-outlined text-sm">inventory_2</span>
+                          Add to Inventory
+                        </button>
+                      ) : (
+                        <button type="button" disabled={!dashStockName.trim()} onClick={() => {
+                          const item: StockItem = {
+                            id: `stk-${Date.now()}`,
+                            name: dashStockName.trim(),
+                            sku: dashStockSku || `SKU-${Date.now().toString().slice(-6)}`,
+                            qty: parseInt(dashStockQty) || 1,
+                            cost: parseFloat(dashStockCost) || 0,
+                            price: parseFloat(dashStockPrice) || 0,
+                            category: dashStockCategory,
+                            addedAt: new Date().toISOString(),
+                            status: 'pending_approval',
+                          };
+                          addStockItem(item);
+                          setLastAddedStock(item);
+                          setStockSaved(true);
+                        }} className="py-4 bg-amber-500 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-lg hover:bg-amber-600 transition-all flex flex-col items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed">
+                          <span className="material-symbols-outlined text-sm">pending_actions</span>
+                          Submit for Approval
+                        </button>
+                      )}
+                    </div>
+                    <p className="text-[9px] text-center text-slate-400">{hasInventoryPermission ? '"Add to Cart" navigates to POS. "Add to Inventory" makes it immediately available.' : '"Add to Cart" navigates to POS. "Submit for Approval" sends to manager for review.'}</p>
                   </div>
                 )}
               </div>

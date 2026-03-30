@@ -31,10 +31,7 @@ export const POS: React.FC = () => {
   const { customers: sharedCustomers, addCustomer, updateCustomer, stockItems: sharedStockItems, addStockItem, approvedStockItems, pendingStockItems, heldOrders, addHeldOrder, removeHeldOrder } = useStoreLocalState();
   const hasInventoryPermission = canAccess('inventory');
   const [cart, setCart] = useState<CartItem[]>([]);
-  const [payments, setPayments] = useState<PaymentMethod[]>([
-    { id: 'p1', method: 'Cash', amount: 0, icon: 'payments' },
-    { id: 'p2', method: 'Card Terminal', amount: 0, icon: 'credit_card', detail: 'Awaiting Entry', locked: true }
-  ]);
+  const [payments, setPayments] = useState<PaymentMethod[]>([]);
   const [discounts, setDiscounts] = useState<Discount[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
@@ -166,10 +163,13 @@ export const POS: React.FC = () => {
   }, 0);
   const afterDiscount = Math.max(0, subtotal - discountTotal);
   const tax = afterDiscount * TAX_RATE;
-  const total = afterDiscount + tax;
-  const totalAllocated = payments.reduce((acc, p) => acc + p.amount, 0);
-  const remaining = total - totalAllocated;
-  const changeDue = totalAllocated > total && total > 0 ? totalAllocated - total : 0;
+  const total = parseFloat((afterDiscount + tax).toFixed(2));
+  const manualAllocated = payments.filter(p => !p.locked).reduce((acc, p) => acc + p.amount, 0);
+  const hasCardMethod = payments.some(p => p.locked);
+  const cardAutoAmount = hasCardMethod ? Math.max(0, parseFloat((total - manualAllocated).toFixed(2))) : 0;
+  const totalAllocated = parseFloat((manualAllocated + cardAutoAmount).toFixed(2));
+  const remaining = parseFloat((total - totalAllocated).toFixed(2));
+  const changeDue = totalAllocated > total && total > 0 ? parseFloat((totalAllocated - total).toFixed(2)) : 0;
   const progress = total > 0 ? (totalAllocated / total) * 100 : 0;
 
   // Handlers
@@ -237,12 +237,7 @@ export const POS: React.FC = () => {
   const removePayment = (id: string) => {
     const p = payments.find(pm => pm.id === id);
     if (!p) return;
-    if (p.locked) return;
-    if (p.id === 'p1' || p.id === 'p2') {
-      setPayments(payments.map(pm => pm.id === id ? { ...pm, amount: 0 } : pm));
-    } else {
-      setPayments(payments.filter(pm => pm.id !== id));
-    }
+    setPayments(payments.filter(pm => pm.id !== id));
   };
 
   const handleHoldOrder = () => {
@@ -261,22 +256,14 @@ export const POS: React.FC = () => {
     setCart([]);
     setDiscounts([]);
     setSelectedCustomer(null);
-    setPayments([
-      { id: 'p1', method: 'Cash', amount: 0, icon: 'payments' },
-      { id: 'p2', method: 'Card Terminal', amount: 0, icon: 'credit_card', detail: 'Awaiting Entry', locked: true }
-    ]);
+    setPayments([]);
     setHoldToast('Order held successfully');
     setTimeout(() => setHoldToast(''), 3000);
   };
 
-  const defaultPayments: PaymentMethod[] = [
-    { id: 'p1', method: 'Cash', amount: 0, icon: 'payments' },
-    { id: 'p2', method: 'Card Terminal', amount: 0, icon: 'credit_card', detail: 'Awaiting Entry', locked: true }
-  ];
-
   const resumeOrder = (order: HeldOrder) => {
     setCart(order.items);
-    setPayments(order.payments ?? defaultPayments);
+    setPayments(order.payments ?? []);
     setDiscounts(order.discounts ?? []);
     setSelectedCustomer(order.customer ?? null);
     removeHeldOrder(order.id);
@@ -318,10 +305,7 @@ export const POS: React.FC = () => {
     setIsSuccess(true);
     setCart([]);
     setDiscounts([]);
-    setPayments([
-      { id: 'p1', method: 'Cash', amount: 0, icon: 'payments' },
-      { id: 'p2', method: 'Card Terminal', amount: 0, icon: 'credit_card', detail: 'Awaiting Entry', locked: true }
-    ]);
+    setPayments([]);
   };
 
   const handlePrintReceipt = () => {
@@ -650,29 +634,38 @@ export const POS: React.FC = () => {
             </div>
 
             <div className="flex-1 space-y-4">
+              {payments.length === 0 && (
+                <div className="py-8 text-center border-2 border-dashed border-slate-200 rounded-2xl">
+                  <div className="w-14 h-14 bg-slate-100 rounded-2xl flex items-center justify-center mx-auto mb-3">
+                    <span className="material-symbols-outlined text-2xl text-slate-300">add_card</span>
+                  </div>
+                  <p className="text-sm font-bold text-slate-400">No payment methods added</p>
+                  <p className="text-xs text-slate-300 mt-1">Use "Add Method" above to add Cash or Card</p>
+                </div>
+              )}
               <AnimatePresence>
                 {payments.map((p) => (
-                  <motion.div key={p.id} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="flex items-center gap-4 p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                  <motion.div key={p.id} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="flex items-center gap-4 p-4 bg-slate-50 rounded-2xl border border-slate-100">
                     <div className="w-12 h-12 bg-white rounded-xl flex items-center justify-center text-primary shadow-sm">
                       <span className="material-symbols-outlined">{p.icon}</span>
                     </div>
                     <div className="flex-1">
                       <div className="flex items-center gap-2">
                         <p className="text-sm font-extrabold text-slate-900">{p.method}</p>
-                        {p.detail && <span className="text-[10px] font-bold text-secondary">{p.detail}</span>}
+                        {p.locked && <span className="text-[10px] font-bold text-secondary">Auto-calculated</span>}
                       </div>
-                      <p className="text-[10px] text-slate-500 uppercase tracking-wider">{p.locked ? 'Automated Deduction' : 'User Applied'}</p>
+                      <p className="text-[10px] text-slate-500 uppercase tracking-wider">{p.locked ? 'Covers exact remaining balance' : 'Manual entry'}</p>
                     </div>
                     <div className="w-32">
                       <div className="relative">
                         <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400">$</span>
                         <input
-                          readOnly={p.locked}
-                          className={`w-full bg-white border-none rounded-lg pl-6 pr-3 py-1 text-sm font-black text-right focus:ring-secondary shadow-sm ${p.locked ? 'text-slate-400 cursor-not-allowed' : 'text-primary'}`}
+                          disabled={p.locked}
+                          className={`w-full bg-white border-none rounded-lg pl-6 pr-3 py-1 text-sm font-black text-right focus:ring-secondary shadow-sm ${p.locked ? 'text-slate-400 cursor-not-allowed bg-slate-50' : 'text-primary'}`}
                           type="number"
                           step="0.01"
                           min="0"
-                          value={p.amount || ''}
+                          value={p.locked ? (cardAutoAmount || '') : (p.amount || '')}
                           onChange={(e) => {
                             const val = parseFloat(e.target.value) || 0;
                             setPayments(payments.map(pm => pm.id === p.id ? { ...pm, amount: val } : pm));
@@ -681,8 +674,8 @@ export const POS: React.FC = () => {
                         />
                       </div>
                     </div>
-                    <button disabled={p.locked} onClick={() => removePayment(p.id)} className={`${p.locked ? 'text-slate-300 cursor-not-allowed' : 'text-slate-300 hover:text-red-500 transition-colors'}`}>
-                      <span className="material-symbols-outlined text-lg">{p.locked ? 'lock' : 'cancel'}</span>
+                    <button onClick={() => removePayment(p.id)} className="text-slate-300 hover:text-red-500 transition-colors">
+                      <span className="material-symbols-outlined text-lg">cancel</span>
                     </button>
                   </motion.div>
                 ))}
@@ -723,7 +716,7 @@ export const POS: React.FC = () => {
               </div>
 
               <div className="grid grid-cols-2 gap-4">
-                <button disabled={remaining > 0 || isProcessing} onClick={handleFinalize} className={`py-6 rounded-2xl text-white font-black text-lg flex flex-col items-center justify-center gap-2 shadow-xl transition-all ${remaining <= 0 ? 'signature-gradient shadow-teal-900/30 active:scale-[0.98]' : 'bg-slate-300 cursor-not-allowed shadow-none'} ${isProcessing ? 'opacity-80' : ''}`}>
+                <button disabled={remaining > 0.005 || isProcessing || cart.length === 0 || payments.length === 0} onClick={handleFinalize} className={`py-6 rounded-2xl text-white font-black text-lg flex flex-col items-center justify-center gap-2 shadow-xl transition-all ${remaining <= 0.005 && cart.length > 0 && payments.length > 0 ? 'signature-gradient shadow-teal-900/30 active:scale-[0.98]' : 'bg-slate-300 cursor-not-allowed shadow-none'} ${isProcessing ? 'opacity-80' : ''}`}>
                   {isProcessing ? <span>PROCESSING...</span> : <span>FINALIZE SALE</span>}
                 </button>
                 <div className="grid grid-cols-2 gap-2">
@@ -1035,13 +1028,11 @@ export const POS: React.FC = () => {
               <div className="grid grid-cols-2 gap-4 max-h-[50vh] overflow-y-auto pr-2">
                 {(() => {
                   const baseItems: { id: string; name: string; price: number; icon: string; type: 'repair' | 'product'; category: string; description: string; sku?: string; isExact?: boolean }[] = [
-                    { id: 'p3', name: 'iPhone 13 Screen Repair', price: 189.00, icon: 'smartphone', type: 'repair', category: 'Repairs', description: 'Screen replacement service' },
-                    { id: 'p4', name: 'USB-C Charging Cable', price: 19.99, icon: 'cable', type: 'product', category: 'Accessories', description: 'Charging cable' },
-                    { id: 'p5', name: 'Samsung S21 Battery', price: 45.00, icon: 'battery_charging_full', type: 'product', category: 'Parts', description: 'Battery replacement' },
+                    { id: 'svc-screen', name: 'iPhone 13 Screen Repair', price: 189.00, icon: 'smartphone', type: 'repair', category: 'Repairs', description: 'Screen replacement service' },
+                    { id: 'svc-battery', name: 'Battery Replacement Service', price: 79.00, icon: 'battery_charging_full', type: 'repair', category: 'Repairs', description: 'Battery swap service' },
+                    { id: 'svc-port', name: 'Charging Port Repair', price: 99.00, icon: 'electrical_services', type: 'repair', category: 'Repairs', description: 'Port replacement service' },
                   ];
-                  const baseNames = new Set(baseItems.map(i => i.name.toLowerCase()));
                   const fromStock = approvedStockItems
-                    .filter(si => !baseNames.has(si.name.toLowerCase()))
                     .map(si => ({
                       id: si.id,
                       name: si.name,

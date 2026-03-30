@@ -1,0 +1,146 @@
+Run one more narrow correction pass only for:
+Store Dashboard & POS Refinement
+
+Do not start any new workstream.
+Do not redesign the UI.
+Do not broaden scope beyond the issues listed below.
+Preserve the current design baseline exactly.
+Preserve auth, preview mode, RBAC, lifecycle gating, plan entitlement gating, and platform/store hierarchy.
+
+Act as:
+Principal Repair/POS Product Architect
++ Principal Store Operations Workflow Designer
++ Principal Payments & Tender Flow Architect
++ Principal Inventory Workflow Architect
++ Principal Loyalty & Customer Retention Workflow Architect
++ Principal React/TypeScript Engineer
++ Principal UX Workflow Designer
++ Principal QA Auditor
++ Principal Side Auditor & Systems Thinker
+
+This is a narrow correction pass only.
+Fix only the issues found during user manual QA.
+
+Required fixes:
+
+1) Approved Quick Add Stock items must actually enter inventory
+Current problem:
+- submission/approval flow exists
+- after approval, the item still does not appear in inventory
+- direct “Add to Inventory” also shows success but does not persist into inventory view/catalog
+
+Fix:
+- unify the inventory write path so both:
+  a) direct Add to Inventory
+  b) Submit for Approval -> Approve
+  end in the same shared inventory source
+- once approved or directly added, the item must appear in inventory list/catalog and be findable afterward in POS
+- do not show success unless the item is truly written into the shared inventory source used by the app
+
+2) Quick Add Stock permission logic must be corrected
+Current problem:
+- roles without direct inventory permission only see Submit for Approval
+- they are missing the required Add to Cart / Order Summary option
+
+Fix:
+For users without direct inventory-add permission, show exactly 2 options:
+- Add to Cart / Order Summary
+- Submit for Approval
+
+Behavior:
+- Add to Cart / Order Summary:
+  immediately creates a temporary sale item and adds it to the current order summary/cart
+  does not add to inventory
+- Submit for Approval:
+  sends item into shared pending approval inventory flow
+  after approval it must become real inventory
+
+For users with direct inventory-add permission, show exactly 2 options:
+- Add to Cart / Order Summary
+- Add to Inventory
+
+Important:
+- same workflow and same state model for dashboard and POS
+- no fake success-only flows
+- result must be verifiable afterward
+
+3) SKU / barcode lookup must be rebuilt to prefer true inventory matching
+Current problems:
+- exact SKU lookup fails
+- product-name search returns random non-inventory items
+- dashboard scan flow remains unreliable
+
+Fix:
+- scan/add lookup must search the actual shared inventory dataset first
+- exact SKU match must work
+- exact barcode match must work
+- only after exact SKU/barcode checks should name fallback search run
+- name fallback must be restricted to inventory items only, not random unrelated product suggestions
+- fast typed/pasted/scanner-gun style input must work
+- when an item is found, adding to cart/order summary must use that real inventory item
+
+Dashboard Scan QR behavior:
+- keep it coherent and checkout-oriented
+- either popup first or go into checkout with scan context active
+- but underlying lookup must use the corrected true inventory source
+
+4) Finalize sale must work correctly with discount + redeemed points together
+Current problem:
+- using redeem points alone can work
+- using discount + redeem points together can leave Finalize Sale disabled even when payment is correct
+
+Fix:
+- recompute payable total correctly after discount and redeemed points
+- Finalize Sale must enable when payment exactly satisfies the final payable amount
+- keep redeemed points deduction only after successful finalization
+- do not regress the working loyalty earning preview/profile update behavior
+
+5) Payment Allocation section must start empty
+Current problem:
+- payment allocation behavior is confusing because methods appear too early
+
+Fix:
+- Payment Allocation section should be empty until the user explicitly adds a payment method
+- no ghost/default payment lines should appear before user action
+- Add Method must populate payment allocation intentionally
+
+6) Payment amount rules must be tightened
+Current problem:
+- cash can exceed total and behavior is unclear
+- user wants exact-match finalization and clean rounding behavior
+- credit/debit must be exact
+
+Fix:
+- for Credit / Debit Card: amount must equal the remaining payable amount exactly
+- for Cash: by default require exact match for finalization
+- add a clear, narrow rounding option if needed for cash only, with explicit user choice
+- do not silently over-allocate cash
+- if rounding is supported, make it visible and deterministic
+- keep card path exact and strict
+
+7) Keep existing good fixes intact
+Do not break:
+- dashboard Hold Orders popup flow
+- shared held-order visibility
+- dashboard Quick Intake real handoff
+- dashboard/POS new customer sync
+- Print Label inventory-backed workflow
+- redeemed-points-only finalize flow that already works
+- loyalty earning preview and profile update
+- Special Part Order workflow
+- Deposit workflow
+- role-aware dashboard filtering
+
+8) Reporting back
+After implementation, return only:
+1. What changed
+2. Exact files changed in this pass
+3. Which shared inventory source / lookup path / payment logic you corrected
+4. Any known limitations still intentionally left unchanged
+5. A short implementation verification summary
+
+Important:
+- Do not claim final QA closure on behalf of the user
+- Do not mark the workstream complete yet
+- The user will perform the final manual QA
+- Stop after the report and wait for user testing feedback
