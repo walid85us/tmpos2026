@@ -69,9 +69,10 @@ export const POS: React.FC = () => {
   const [discountCode, setDiscountCode] = useState('');
   const [storeCreditId, setStoreCreditId] = useState('');
   const [storeCreditVerified, setStoreCreditVerified] = useState(false);
+  const [cashRoundingEnabled, setCashRoundingEnabled] = useState(false);
 
   // Advanced Search & Filter
-  const [searchCategory, setSearchCategory] = useState('All');
+  const [searchCategory, setSearchCategory] = useState('All Categories');
   const [searchManufacturer, setSearchManufacturer] = useState('All');
 
   // Editing Item State
@@ -644,8 +645,14 @@ export const POS: React.FC = () => {
                 </div>
               )}
               <AnimatePresence>
-                {payments.map((p) => (
-                  <motion.div key={p.id} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="flex items-center gap-4 p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                {payments.map((p) => {
+                  const isCash = p.method === 'Cash';
+                  const otherPaymentsTotal = payments.filter(pm => pm.id !== p.id).reduce((sum, pm) => sum + (pm.locked ? (cardAutoAmount ?? 0) : (pm.amount || 0)), 0);
+                  const cashOwed = parseFloat((total - otherPaymentsTotal).toFixed(2));
+                  const roundedUp = isCash && cashRoundingEnabled && cashOwed > 0 ? Math.ceil(cashOwed) : null;
+                  return (
+                  <motion.div key={p.id} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}>
+                    <div className="flex items-center gap-4 p-4 bg-slate-50 rounded-2xl border border-slate-100">
                     <div className="w-12 h-12 bg-white rounded-xl flex items-center justify-center text-primary shadow-sm">
                       <span className="material-symbols-outlined">{p.icon}</span>
                     </div>
@@ -677,8 +684,31 @@ export const POS: React.FC = () => {
                     <button onClick={() => removePayment(p.id)} className="text-slate-300 hover:text-red-500 transition-colors">
                       <span className="material-symbols-outlined text-lg">cancel</span>
                     </button>
+                    </div>
+                    {isCash && (
+                      <div className="flex items-center justify-between mt-2 px-4">
+                        <button
+                          onClick={() => setCashRoundingEnabled(!cashRoundingEnabled)}
+                          className={`flex items-center gap-2 text-[10px] font-black uppercase tracking-widest px-3 py-1.5 rounded-xl transition-all ${cashRoundingEnabled ? 'bg-lime-100 text-lime-700 border border-lime-200' : 'bg-slate-100 text-slate-400 border border-slate-200 hover:border-lime-300'}`}
+                        >
+                          <span className="material-symbols-outlined text-xs">{cashRoundingEnabled ? 'check_circle' : 'radio_button_unchecked'}</span>
+                          Round up cash
+                        </button>
+                        {cashRoundingEnabled && roundedUp !== null && roundedUp > 0 && (
+                          <button
+                            onClick={() => setPayments(payments.map(pm => pm.id === p.id ? { ...pm, amount: roundedUp } : pm))}
+                            className="text-[10px] font-black text-lime-700 bg-lime-50 px-3 py-1.5 rounded-xl border border-lime-200 hover:bg-lime-100 transition-all flex items-center gap-1"
+                          >
+                            <span className="material-symbols-outlined text-xs">arrow_upward</span>
+                            Use ${roundedUp.toFixed(2)}
+                            {roundedUp - cashOwed > 0.005 && <span className="text-lime-500 ml-1">(+${(roundedUp - cashOwed).toFixed(2)} change)</span>}
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </motion.div>
-                ))}
+                  );
+                })}
               </AnimatePresence>
 
               <div className="p-6 bg-white border-2 border-dashed border-slate-200 rounded-2xl relative overflow-hidden">

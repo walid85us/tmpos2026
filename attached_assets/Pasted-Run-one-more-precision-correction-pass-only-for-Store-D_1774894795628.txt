@@ -1,0 +1,175 @@
+Run one more precision correction pass only for:
+Store Dashboard & POS Refinement
+
+Do not start any new workstream.
+Do not redesign the UI.
+Do not broaden scope beyond the issues listed below.
+Preserve the current design baseline exactly.
+Preserve auth, preview mode, RBAC, lifecycle gating, plan entitlement gating, and platform/store hierarchy.
+
+Act as:
+Principal Repair/POS Product Architect
++ Principal Store Operations Workflow Designer
++ Principal Payments & Tender Flow Architect
++ Principal Inventory Workflow Architect
++ Principal React/TypeScript Engineer
++ Principal UX Workflow Designer
++ Principal QA Auditor
++ Principal Side Auditor & Systems Thinker
+
+This is a precision correction pass only.
+Fix only the issues found during user manual QA.
+
+Critical rule for this pass:
+There must be ONE shared inventory source of truth for all of the following flows:
+- Inventory page/list
+- Quick Add Stock
+- POS Add Item search
+- Scan QR / barcode / SKU lookup
+- any inventory-backed label/search flow already completed
+
+Do not allow separate mock arrays, hidden local lists, or disconnected lookup sources.
+If one flow says an item was added to inventory, that same item must appear in Inventory and be searchable everywhere else that depends on inventory.
+
+Required fixes:
+
+1) Quick Add Stock permission logic must be corrected exactly
+Current problem:
+- a low-permission role still sees the wrong option set
+- role behavior is inconsistent
+
+Required behavior:
+A. For a role WITHOUT direct inventory-add permission:
+Show exactly 2 options only:
+- Add to Cart / Order Summary
+- Submit for Approval
+
+Must NOT show:
+- Add to Inventory
+
+Behavior:
+- Add to Cart / Order Summary:
+  adds item directly into the current order/cart only
+  does not write into inventory
+- Submit for Approval:
+  creates pending inventory submission
+  visible in approval path
+  after approval it must enter real shared inventory source
+
+B. For a role WITH direct inventory-add permission:
+Show exactly 2 options only:
+- Add to Cart / Order Summary
+- Add to Inventory
+
+Behavior:
+- Add to Cart / Order Summary:
+  adds item into current order/cart only
+- Add to Inventory:
+  writes item into the real shared inventory source immediately
+
+Enforce this consistently in both dashboard and POS versions of Quick Add Stock.
+
+2) Add to Inventory and approval must write into actual inventory
+Current problem:
+- success message appears
+- item still does not show in Inventory
+
+Fix:
+- direct Add to Inventory must write into the same inventory dataset used by Inventory page/list
+- Submit for Approval -> Approve must also write into that same inventory dataset
+- after either path, the item must:
+  a) appear in Inventory
+  b) be searchable in POS Add Item
+  c) be searchable in Scan QR / SKU lookup
+Do not show success unless this actually happened.
+
+3) POS Quick Add Stock must exist and use the same logic
+Current problem:
+- Quick Add Stock is not visible in POS
+
+Fix:
+- restore/show POS Quick Add Stock entry point in the intended POS quick-actions area
+- it must use the exact same permission-aware logic and shared inventory write path as dashboard Quick Add Stock
+- do not create a second implementation
+
+4) SKU / barcode lookup must use real inventory only
+Current problem:
+- exact SKU still fails
+- lookup seems to use something other than real inventory
+- dashboard Scan QR can see items not shown in inventory, which proves sources are inconsistent
+
+Fix:
+- Scan QR / barcode / SKU lookup must query ONLY the real shared inventory source
+- exact SKU match must work
+- exact barcode match must work
+- fast typed/pasted input must work
+- fallback name search must also search only real inventory items
+- remove any random/non-inventory lookup source from this flow
+- when found, item must add correctly into Order Summary/cart
+
+5) Dashboard Scan QR must align with real inventory
+Current problem:
+- dashboard scan flow is not aligned to actual inventory
+- it can surface items that do not exist on Inventory page
+
+Fix:
+- dashboard Scan QR must use the corrected real inventory lookup only
+- if an item is not in Inventory, it must not appear as valid inventory in Scan QR
+- flow must remain coherent for checkout continuation
+
+6) POS Add Item popup must use real inventory and support adding
+Current problem:
+- Add Item popup search is not showing actual inventory correctly
+- Add Item action is incomplete/missing
+
+Fix:
+- POS “Add Item” popup search bar must search the real shared inventory source
+- it must show real inventory items only
+- once an item is selected, there must be a clear Add Item action
+- clicking Add Item must add the selected inventory item into Order Summary/cart
+- do not leave popup as search-with-no-completion
+
+7) Cash rounding option must be implemented clearly
+Current problem:
+- exact amount is required
+- there is no visible rounding choice for cash
+
+Fix:
+- keep Credit / Debit Card exact only
+- for Cash, keep exact amount by default
+- add a clear optional rounding choice for cash only
+- rounding behavior must be explicit, visible, and deterministic
+- user must understand whether they are rounding up/down and to what final payable amount
+- do not silently over-allocate
+
+8) Keep existing good fixes intact
+Do not break:
+- discount + redeemed points finalize flow
+- points deduction timing
+- payment allocation starting empty
+- customer sync
+- Print Label
+- Hold Orders popup flow
+- Quick Intake handoff
+- role-aware dashboard behavior
+- Special Part Order
+- Deposit
+- Add Method improvements already working
+
+9) Reporting back
+After implementation, return only:
+1. What changed
+2. Exact files changed in this pass
+3. The single shared inventory source/path now used by:
+   - Inventory page
+   - Quick Add Stock
+   - POS Add Item
+   - Scan QR / SKU lookup
+4. Any known limitations still intentionally left unchanged
+5. A short implementation verification summary
+
+Important:
+- Do not claim final QA closure on behalf of the user
+- Do not mark the workstream complete yet
+- The user will perform the final manual QA
+- Stop after the report and wait for user testing feedback

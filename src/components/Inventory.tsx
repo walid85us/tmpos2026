@@ -1,21 +1,31 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Product, TradeInItem, RefurbishmentJob, InventoryTransfer, InventoryCount, BillPayment, GiftCard, InventoryBundle } from '../types';
+import { TradeInItem, RefurbishmentJob, InventoryTransfer, InventoryCount, BillPayment, GiftCard, InventoryBundle } from '../types';
+import { useStoreLocalState, StockItem } from '../context/StoreLocalState';
+import { useAccess } from '../context/AccessContext';
 import ContextualHelp from './ContextualHelp';
 
 const Inventory: React.FC = () => {
+  const { approvedStockItems, pendingStockItems, addStockItem, updateStockItem } = useStoreLocalState();
+  const { canAccess } = useAccess();
+  const hasInventoryPermission = canAccess('inventory');
   const [activeTab, setActiveTab] = useState<string>('inventory');
   const [searchQuery, setSearchQuery] = useState('');
   const [isAddProductModalOpen, setIsAddProductModalOpen] = useState(false);
 
-  // Mock Data
-  const [products] = useState<Product[]>([
-    { id: '1', name: 'iPhone 14 Pro Screen (OEM)', category: 'Screens', price: 189.00, costPrice: 65.00, stock: 12, sku: 'SCR-IP14P', type: 'non-serialized', manufacturer: 'Apple', minStockLevel: 5 },
-    { id: '2', name: 'iPhone 13 Battery (High Cap)', category: 'Batteries', price: 35.00, costPrice: 8.00, stock: 3, sku: 'BAT-IP13', type: 'non-serialized', manufacturer: 'Apple', minStockLevel: 10 },
-    { id: '3', name: 'MacBook Air M1 Logic Board', category: 'Logic Boards', price: 499.00, costPrice: 320.00, stock: 2, sku: 'BRD-MBA-M1', type: 'serialized', manufacturer: 'Apple', minStockLevel: 1 },
-    { id: '4', name: 'USB-C to USB-C Cable 2m', category: 'Accessories', price: 19.00, costPrice: 4.50, stock: 45, sku: 'ACC-USBC-2M', type: 'non-serialized', manufacturer: 'Generic', minStockLevel: 20 },
-    { id: '5', name: 'Samsung S23 Ultra Screen', category: 'Screens', price: 299.00, costPrice: 145.00, stock: 4, sku: 'SCR-S23U', type: 'non-serialized', manufacturer: 'Samsung', minStockLevel: 5 },
-  ]);
+  const [newProductName, setNewProductName] = useState('');
+  const [newProductCategory, setNewProductCategory] = useState('Parts');
+  const [newProductSku, setNewProductSku] = useState('');
+  const [newProductCost, setNewProductCost] = useState('');
+  const [newProductPrice, setNewProductPrice] = useState('');
+  const [newProductQty, setNewProductQty] = useState('1');
+  const [addProductSuccess, setAddProductSuccess] = useState(false);
+
+  const resetAddProductForm = () => {
+    setNewProductName(''); setNewProductCategory('Parts'); setNewProductSku('');
+    setNewProductCost(''); setNewProductPrice(''); setNewProductQty('1');
+    setAddProductSuccess(false);
+  };
 
   const [tradeIns] = useState<TradeInItem[]>([
     { id: 'T1', customerId: 'C1', customerName: 'John Doe', device: 'iPhone 12', condition: 'Good', buybackPrice: 250, status: 'In Inventory', createdAt: '2024-03-15' },
@@ -57,13 +67,32 @@ const Inventory: React.FC = () => {
     { id: 'bundles', label: 'Bundles', icon: 'inventory' },
   ];
 
-  const filteredProducts = products.filter(p => {
+  const allInventoryItems = approvedStockItems;
+  const filteredProducts = allInventoryItems.filter(p => {
     if (searchQuery.startsWith('cat:')) {
       return p.category === searchQuery.slice(4);
     }
     return p.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
       p.sku.toLowerCase().includes(searchQuery.toLowerCase());
   });
+
+  const handleSaveProduct = () => {
+    if (!newProductName.trim()) return;
+    const item: StockItem = {
+      id: `stk-${Date.now()}`,
+      name: newProductName.trim(),
+      sku: newProductSku || `SKU-${Date.now().toString().slice(-6)}`,
+      qty: parseInt(newProductQty) || 1,
+      cost: parseFloat(newProductCost) || 0,
+      price: parseFloat(newProductPrice) || 0,
+      category: newProductCategory,
+      addedAt: new Date().toISOString(),
+      status: hasInventoryPermission ? 'approved' : 'pending_approval',
+    };
+    addStockItem(item);
+    setAddProductSuccess(true);
+    setTimeout(() => { setIsAddProductModalOpen(false); resetAddProductForm(); }, 1500);
+  };
 
   const renderInventory = () => (
     <div className="space-y-6">
@@ -72,7 +101,7 @@ const Inventory: React.FC = () => {
           <span className="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-slate-400">search</span>
           <input
             type="text"
-            placeholder="Search products, SKU, UPC..."
+            placeholder="Search products, SKU..."
             className="w-full pl-12 pr-4 py-3 bg-white/50 backdrop-blur-md border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all font-medium"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
@@ -85,7 +114,7 @@ const Inventory: React.FC = () => {
             className="flex-1 md:flex-none px-6 py-3 bg-white border border-slate-200 text-primary font-black text-xs rounded-2xl hover:bg-slate-50 transition-all uppercase tracking-widest appearance-none cursor-pointer"
           >
             <option value="">All Categories</option>
-            {[...new Set(products.map(p => p.category))].map(cat => (
+            {[...new Set(allInventoryItems.map(p => p.category))].map(cat => (
               <option key={cat} value={cat}>{cat}</option>
             ))}
           </select>
@@ -94,7 +123,7 @@ const Inventory: React.FC = () => {
             Export
           </button>
           <button 
-            onClick={() => setIsAddProductModalOpen(true)}
+            onClick={() => { resetAddProductForm(); setIsAddProductModalOpen(true); }}
             className="flex-1 md:flex-none px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center justify-center gap-2"
           >
             <span className="material-symbols-outlined text-sm">add</span>
@@ -103,6 +132,29 @@ const Inventory: React.FC = () => {
         </div>
       </div>
 
+      {hasInventoryPermission && pendingStockItems.length > 0 && (
+        <div className="bg-amber-50 rounded-[2.5rem] border border-amber-200 p-6">
+          <div className="flex items-center gap-3 mb-4">
+            <span className="material-symbols-outlined text-amber-600">pending_actions</span>
+            <h3 className="text-sm font-black text-amber-800 uppercase tracking-widest">Pending Approval ({pendingStockItems.length})</h3>
+          </div>
+          <div className="space-y-2">
+            {pendingStockItems.map(item => (
+              <div key={item.id} className="flex items-center justify-between p-4 bg-white rounded-2xl border border-amber-100">
+                <div>
+                  <p className="font-bold text-slate-900">{item.name}</p>
+                  <p className="text-[10px] text-slate-400">SKU: {item.sku} · Qty: {item.qty} · ${item.price.toFixed(2)}</p>
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={() => updateStockItem(item.id, { status: 'approved' })} className="px-4 py-2 bg-lime-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-lime-600 transition-all">Approve</button>
+                  <button onClick={() => updateStockItem(item.id, { status: 'rejected' })} className="px-4 py-2 bg-slate-200 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-red-100 hover:text-red-600 transition-all">Reject</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
@@ -110,33 +162,37 @@ const Inventory: React.FC = () => {
               <tr className="border-b border-slate-100 bg-slate-50/50">
                 <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Product Details</th>
                 <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Category</th>
-                <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">SKU / UPC</th>
+                <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">SKU</th>
                 <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Price</th>
                 <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Stock</th>
                 <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
-              {filteredProducts.map((product) => (
+              {filteredProducts.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="px-8 py-12 text-center">
+                    <div className="flex flex-col items-center gap-3">
+                      <div className="w-16 h-16 bg-slate-100 rounded-2xl flex items-center justify-center">
+                        <span className="material-symbols-outlined text-3xl text-slate-300">inventory_2</span>
+                      </div>
+                      <p className="text-sm font-bold text-slate-400">No inventory items found</p>
+                      <p className="text-xs text-slate-300">Add products via "Add Product" or Quick Add Stock from Dashboard/POS</p>
+                    </div>
+                  </td>
+                </tr>
+              ) : filteredProducts.map((product) => (
                 <tr key={product.id} className="group hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0">
                   <td className="px-8 py-6">
                     <div className="flex items-center gap-4">
-                      <div className="w-12 h-12 bg-slate-100 rounded-xl flex items-center justify-center relative">
+                      <div className="w-12 h-12 bg-slate-100 rounded-xl flex items-center justify-center">
                         <span className="material-symbols-outlined text-slate-400">
-                          {product.type === 'serialized' ? 'qr_code_2' : 'inventory_2'}
+                          {product.category === 'Parts' ? 'build' : product.category === 'Accessories' ? 'cable' : product.category === 'Devices' ? 'smartphone' : 'inventory_2'}
                         </span>
-                        {product.images && product.images.length > 0 && (
-                          <img src={product.images[0]} className="absolute inset-0 w-full h-full object-cover rounded-xl" alt="" />
-                        )}
                       </div>
                       <div>
                         <p className="font-bold text-slate-900">{product.name}</p>
-                        <div className="flex items-center gap-2">
-                          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{product.manufacturer}</p>
-                          {product.attributes && Object.entries(product.attributes).map(([k, v]) => (
-                            <span key={k} className="text-[8px] font-black bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded uppercase">{v}</span>
-                          ))}
-                        </div>
+                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{product.category}</p>
                       </div>
                     </div>
                   </td>
@@ -147,35 +203,31 @@ const Inventory: React.FC = () => {
                   </td>
                   <td className="px-8 py-6">
                     <p className="font-mono text-xs font-bold text-slate-500">{product.sku}</p>
-                    <p className="font-mono text-[10px] text-slate-300">{product.upc || 'NO UPC'}</p>
                   </td>
                   <td className="px-8 py-6">
                     <p className="font-black text-primary">${product.price.toFixed(2)}</p>
-                    <p className="text-[10px] text-slate-400 font-bold">Cost: ${product.costPrice?.toFixed(2)}</p>
+                    <p className="text-[10px] text-slate-400 font-bold">Cost: ${product.cost.toFixed(2)}</p>
                   </td>
                   <td className="px-8 py-6">
                     <div className="flex items-center gap-3">
                       <div className="flex-1 bg-slate-100 h-1.5 rounded-full overflow-hidden w-24">
                         <div 
-                          className={`h-full transition-all duration-500 ${product.stock <= (product.minStockLevel || 0) ? 'bg-orange-500' : 'bg-lime-500'}`} 
-                          style={{ width: `${Math.min((product.stock / ((product.minStockLevel || 1) * 3)) * 100, 100)}%` }}
+                          className={`h-full transition-all duration-500 ${product.qty <= 5 ? 'bg-orange-500' : 'bg-lime-500'}`} 
+                          style={{ width: `${Math.min((product.qty / 30) * 100, 100)}%` }}
                         ></div>
                       </div>
-                      <span className={`text-sm font-black ${product.stock <= (product.minStockLevel || 0) ? 'text-orange-600' : 'text-primary'}`}>
-                        {product.stock}
+                      <span className={`text-sm font-black ${product.qty <= 5 ? 'text-orange-600' : 'text-primary'}`}>
+                        {product.qty}
                       </span>
                     </div>
                   </td>
                   <td className="px-8 py-6 text-right">
                     <div className="flex justify-end gap-2">
-                      <button onClick={() => setIsAddProductModalOpen(true)} className="p-2 hover:bg-white rounded-xl transition-all text-slate-400 hover:text-primary" title="Edit Product">
+                      <button className="p-2 hover:bg-white rounded-xl transition-all text-slate-400 hover:text-primary" title="Edit Product">
                         <span className="material-symbols-outlined text-sm">edit</span>
                       </button>
                       <button onClick={() => window.print()} className="p-2 hover:bg-white rounded-xl transition-all text-slate-400 hover:text-primary" title="Print Barcode">
                         <span className="material-symbols-outlined text-sm">print</span>
-                      </button>
-                      <button onClick={() => setIsAddProductModalOpen(true)} className="p-2 hover:bg-white rounded-xl transition-all text-slate-400 hover:text-orange-500" title="Inventory Adjustment">
-                        <span className="material-symbols-outlined text-sm">tune</span>
                       </button>
                     </div>
                   </td>
@@ -579,7 +631,7 @@ const Inventory: React.FC = () => {
               initial={{ opacity: 0, scale: 0.95, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="bg-white rounded-[3rem] shadow-2xl w-full max-w-4xl overflow-hidden"
+              className="bg-white rounded-[3rem] shadow-2xl w-full max-w-2xl overflow-hidden"
             >
               <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
                 <div>
@@ -587,91 +639,76 @@ const Inventory: React.FC = () => {
                   <p className="text-slate-500 text-sm font-medium">Enter product details to add to inventory.</p>
                 </div>
                 <button 
-                  onClick={() => setIsAddProductModalOpen(false)}
+                  onClick={() => { setIsAddProductModalOpen(false); resetAddProductForm(); }}
                   className="w-12 h-12 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary transition-all"
                 >
                   <span className="material-symbols-outlined">close</span>
                 </button>
               </div>
-              <div className="p-8 grid grid-cols-2 gap-8 max-h-[60vh] overflow-y-auto">
-                <div className="space-y-6">
-                  <div>
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Product Name</label>
-                    <input type="text" className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold" placeholder="e.g. iPhone 15 Screen" />
+              {addProductSuccess ? (
+                <div className="p-12 text-center space-y-4">
+                  <div className="w-16 h-16 bg-lime-100 rounded-full flex items-center justify-center mx-auto">
+                    <span className="material-symbols-outlined text-3xl text-lime-600" style={{fontVariationSettings: "'FILL' 1"}}>check_circle</span>
                   </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Category</label>
-                      <select className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold">
-                        <option>Screens</option>
-                        <option>Batteries</option>
-                        <option>Accessories</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Type</label>
-                      <select className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold">
-                        <option>Non-Serialized</option>
-                        <option>Serialized</option>
-                        <option>Handset</option>
-                      </select>
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">SKU</label>
-                      <input type="text" className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-mono text-sm font-bold" placeholder="AUTO-GENERATE" />
-                    </div>
-                    <div>
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">UPC / Barcode</label>
-                      <input type="text" className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-mono text-sm font-bold" placeholder="Scan Barcode" />
-                    </div>
-                  </div>
+                  <p className="text-lg font-black text-primary">{hasInventoryPermission ? 'Added to Inventory' : 'Submitted for Approval'}</p>
+                  <p className="text-xs text-slate-500">{approvedStockItems.length} approved item{approvedStockItems.length !== 1 ? 's' : ''} in inventory{pendingStockItems.length > 0 ? ` · ${pendingStockItems.length} pending approval` : ''}</p>
                 </div>
-                <div className="space-y-6">
-                  <div className="grid grid-cols-2 gap-4">
+              ) : (
+                <>
+                  <div className="p-8 space-y-6 max-h-[60vh] overflow-y-auto">
                     <div>
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Cost Price</label>
-                      <div className="relative">
-                        <span className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400 font-bold">$</span>
-                        <input type="number" className="w-full pl-10 pr-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold" placeholder="0.00" />
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Product Name *</label>
+                      <input type="text" value={newProductName} onChange={(e) => setNewProductName(e.target.value)} className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold" placeholder="e.g. iPhone 15 Screen" />
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Category</label>
+                        <select value={newProductCategory} onChange={(e) => setNewProductCategory(e.target.value)} className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold">
+                          <option>Parts</option>
+                          <option>Accessories</option>
+                          <option>Devices</option>
+                          <option>Other</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">SKU</label>
+                        <input type="text" value={newProductSku} onChange={(e) => setNewProductSku(e.target.value)} className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-mono text-sm font-bold" placeholder="Auto-generated if blank" />
                       </div>
                     </div>
-                    <div>
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Retail Price</label>
-                      <div className="relative">
-                        <span className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400 font-bold">$</span>
-                        <input type="number" className="w-full pl-10 pr-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold" placeholder="0.00" />
+                    <div className="grid grid-cols-3 gap-4">
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Cost Price</label>
+                        <div className="relative">
+                          <span className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400 font-bold">$</span>
+                          <input type="number" step="0.01" value={newProductCost} onChange={(e) => setNewProductCost(e.target.value)} className="w-full pl-10 pr-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold" placeholder="0.00" />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Sell Price</label>
+                        <div className="relative">
+                          <span className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400 font-bold">$</span>
+                          <input type="number" step="0.01" value={newProductPrice} onChange={(e) => setNewProductPrice(e.target.value)} className="w-full pl-10 pr-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold" placeholder="0.00" />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Quantity</label>
+                        <input type="number" min="1" value={newProductQty} onChange={(e) => setNewProductQty(e.target.value)} className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold" placeholder="1" />
                       </div>
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Initial Stock</label>
-                      <input type="number" className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold" placeholder="0" />
-                    </div>
-                    <div>
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Min Stock Level</label>
-                      <input type="number" className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold" placeholder="5" />
-                    </div>
+                  <div className="p-8 bg-slate-50 border-t border-slate-100 flex justify-end gap-4">
+                    <button 
+                      onClick={() => { setIsAddProductModalOpen(false); resetAddProductForm(); }}
+                      className="px-8 py-4 bg-white border border-slate-200 text-slate-500 font-black text-xs rounded-2xl hover:bg-slate-100 transition-all uppercase tracking-widest"
+                    >
+                      Cancel
+                    </button>
+                    <button disabled={!newProductName.trim()} onClick={handleSaveProduct} className="px-8 py-4 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed">
+                      {hasInventoryPermission ? 'Save Product' : 'Submit for Approval'}
+                    </button>
                   </div>
-                  <div>
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Manufacturer</label>
-                    <input type="text" className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold" placeholder="e.g. Apple" />
-                  </div>
-                </div>
-              </div>
-              <div className="p-8 bg-slate-50 border-t border-slate-100 flex justify-end gap-4">
-                <button 
-                  onClick={() => setIsAddProductModalOpen(false)}
-                  className="px-8 py-4 bg-white border border-slate-200 text-slate-500 font-black text-xs rounded-2xl hover:bg-slate-100 transition-all uppercase tracking-widest"
-                >
-                  Cancel
-                </button>
-                <button onClick={() => setIsAddProductModalOpen(false)} className="px-8 py-4 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest active:scale-95">
-                  Save Product
-                </button>
-              </div>
+                </>
+              )}
             </motion.div>
           </div>
         )}
