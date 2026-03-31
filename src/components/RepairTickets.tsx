@@ -2,6 +2,7 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { RepairTicket, TicketComment, TicketAttachment, TicketHistory } from '../types';
 import { useStoreLocalState } from '../context/StoreLocalState';
+import { useAccess } from '../context/AccessContext';
 import ContextualHelp from './ContextualHelp';
 
 const MOCK_TICKETS: RepairTicket[] = [
@@ -83,6 +84,10 @@ const MOCK_TICKETS: RepairTicket[] = [
 
 export default function RepairTickets() {
   const { warrantyRepairTickets, updateWarrantyRepairTicket, warrantyClaims, updateWarrantyClaim } = useStoreLocalState();
+  const { checkPermission } = useAccess();
+  const canCreateTickets = checkPermission('repairs', 'create');
+  const canEditTickets = checkPermission('repairs', 'edit');
+  const canManageTickets = checkPermission('repairs', 'manage');
   const [localTickets, setLocalTickets] = useState<RepairTicket[]>(MOCK_TICKETS);
 
   const tickets = useMemo(() => [...localTickets, ...warrantyRepairTickets], [localTickets, warrantyRepairTickets]);
@@ -145,6 +150,7 @@ export default function RepairTickets() {
   };
 
   const handleStatusChange = (id: string, newStatus: RepairTicket['status']) => {
+    if (!canEditTickets) return;
     const timestamp = new Date().toISOString();
     setTickets(tickets.map(t => t.id === id ? { 
       ...t, 
@@ -226,13 +232,15 @@ export default function RepairTickets() {
           >
             <span className="material-symbols-outlined">download</span>
           </button>
-          <button 
-            onClick={() => setIsNewTicketModalOpen(true)}
-            className="bg-lime-400 text-teal-950 px-6 py-2 rounded-xl font-bold text-sm shadow-lg active:scale-95 transition-transform flex items-center gap-2"
-          >
-            <span className="material-symbols-outlined text-sm">add</span>
-            New Ticket
-          </button>
+          {canCreateTickets && (
+            <button 
+              onClick={() => setIsNewTicketModalOpen(true)}
+              className="bg-lime-400 text-teal-950 px-6 py-2 rounded-xl font-bold text-sm shadow-lg active:scale-95 transition-transform flex items-center gap-2"
+            >
+              <span className="material-symbols-outlined text-sm">add</span>
+              New Ticket
+            </button>
+          )}
         </div>
       </header>
 
@@ -443,7 +451,8 @@ export default function RepairTickets() {
                           <select 
                             value={selectedTicket.status}
                             onChange={(e) => handleStatusChange(selectedTicket.id, e.target.value as any)}
-                            className="w-full bg-slate-50 border-none rounded-2xl px-5 py-4 text-sm font-bold focus:ring-secondary shadow-inner"
+                            disabled={!canEditTickets}
+                            className="w-full bg-slate-50 border-none rounded-2xl px-5 py-4 text-sm font-bold focus:ring-secondary shadow-inner disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             <option value="Pending">Pending</option>
                             <option value="In Progress">In Progress</option>
@@ -647,13 +656,14 @@ export default function RepairTickets() {
                         </div>
                       </div>
 
-                      {/* Danger Zone */}
-                      <div className="pt-4">
-                        <button className="w-full py-4 bg-red-50 text-red-600 hover:bg-red-100 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2">
-                          <span className="material-symbols-outlined text-sm">delete</span>
-                          Delete Repair Ticket
-                        </button>
-                      </div>
+                      {canManageTickets && (
+                        <div className="pt-4">
+                          <button className="w-full py-4 bg-red-50 text-red-600 hover:bg-red-100 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2">
+                            <span className="material-symbols-outlined text-sm">delete</span>
+                            Delete Repair Ticket
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}

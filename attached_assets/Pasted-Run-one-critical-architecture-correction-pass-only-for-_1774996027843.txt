@@ -1,0 +1,251 @@
+Run one critical architecture correction pass only for:
+Global Permission Hierarchy Enforcement Across the Entire Store Permissions System
+
+This is still inside the current workstream:
+Store Dashboard & POS Refinement
+
+Do not start any new workstream.
+Do not redesign the UI.
+Do not broaden scope beyond permission architecture, permission mapping, and permission enforcement consistency.
+Preserve the current design baseline exactly.
+Preserve auth, preview mode, RBAC, lifecycle gating, plan entitlement gating, and platform/store hierarchy.
+
+Act as:
+Principal RBAC / Access-Control Architect
++ Principal Repair/POS Product Architect
++ Principal Store Operations Workflow Designer
++ Principal React/TypeScript Engineer
++ Principal UX Workflow Designer
++ Principal QA Auditor
++ Principal Side Auditor & Systems Thinker
+
+This is a strict permission-architecture pass.
+Do not do shallow fixes.
+Do not do one-off patches for individual buttons only.
+Fix the permission hierarchy correctly at the system level so the same rules apply everywhere in the permission page and everywhere in the app.
+
+Critical rule:
+The permission hierarchy must apply to EVERYTHING in the Store Permissions page.
+Not only Warranty.
+Not only Refund.
+Not only Inventory.
+The same permission logic model must apply consistently to every assignable capability/module/action in the permission page.
+
+Required global permission levels:
+- None
+- View only
+- Create
+- Edit
+- Manage
+- Approve
+- Full Access
+
+These levels must become the standard permission model across the system.
+
+Global behavior model to enforce for every permission domain:
+- None:
+  no access, no visibility of restricted actions, no execution
+- View only:
+  can view allowed module/list/detail surfaces only
+  cannot create, edit, manage, approve, or execute restricted actions
+- Create:
+  can create/initiate new records/transactions in that domain
+  does NOT automatically gain edit/manage/approve/full powers
+- Edit:
+  can edit/update allowed existing records in that domain
+  does NOT automatically gain approve/full powers
+- Manage:
+  can perform operational management actions in that domain
+  such as assignment, workflow handling, queue handling, state movement where appropriate
+  does NOT automatically imply Approve unless explicitly granted
+- Approve:
+  can approve/reject/final-authorize actions in that domain where approval applies
+  does NOT automatically imply unrelated manage/edit/full powers unless explicitly intended
+- Full Access:
+  includes all capabilities in that domain
+
+Important:
+- Lower levels must NOT silently behave like higher levels
+- Create must not imply Approve
+- View only must not imply Create
+- Manage must not automatically imply Approve unless explicitly designed and documented
+- Approve must not automatically imply unrelated management/edit powers unless explicitly designed
+- Full Access may include all lower capabilities for that domain
+- Apply this same hierarchy pattern to the entire permissions system, not selectively
+
+Primary implementation goal:
+Create one coherent permission engine/source of truth that governs:
+- permission page values
+- side menu/module visibility
+- page access
+- route guards
+- dashboard quick actions
+- POS quick actions
+- Orders history actions
+- detail-view action buttons
+- modal actions
+- approval flows
+- any action launched from alternate entry points
+
+No fragmented permission logic.
+No one-off hardcoded exceptions unless explicitly documented as a business rule.
+No “menu visible but action disabled for unexplained reason.”
+No “action available from Orders but blocked from POS.”
+No stale permission state after role/user change.
+
+Required fixes:
+
+1) Rebuild the permission system as a global hierarchy model
+Current problem:
+- permissions are behaving too flatly
+- one permission level may incorrectly unlock higher-level behavior
+- behavior differs depending on where the action is launched
+
+Fix:
+- refactor the permission model so every permission entry in the Store Permissions page uses the same hierarchy engine
+- centralize the capability evaluation logic
+- replace fragmented boolean/one-off checks with shared permission helpers
+- make every capability read from one consistent source of truth
+
+2) Apply hierarchy rules to every permission domain in the permission page
+Do not limit this to a few modules.
+Whatever appears in the Store Permissions page must follow the same hierarchy rules.
+
+This includes, at minimum, any permission areas related to:
+- dashboard/store actions
+- sales/POS
+- repairs/tickets
+- warranty
+- refunds
+- inventory/add stock
+- customers
+- employees/team
+- invoices/orders
+- reports
+- services
+- settings/supporting operational modules
+- Suggestive Sales
+- Warranty Management
+and any other assignable capability already present in the permission page
+
+For each domain:
+- permission level must map to real allowed behavior
+- not just visibility
+- actual execution rights must follow the hierarchy
+
+3) Fix action parity across all entry points
+Current problem:
+- a user may be blocked in one place but still able to trigger the action somewhere else
+
+Fix:
+- every action in a domain must obey the exact same permission rule regardless of entry point
+Examples:
+- Refund from POS, Orders, invoice detail
+- Warranty from POS, Orders, invoice detail, Warranty Management
+- Add Stock from dashboard, POS, inventory-related quick flows
+- Inventory edit/approve actions from inventory pages and related modals
+- Any other domain that appears in the permission page
+
+There must be no bypasses.
+
+4) Make menu/page/action behavior consistent
+Fix:
+- side menu visibility must follow the correct permission threshold for each domain
+- page/module access must follow the correct permission threshold
+- action buttons inside that module must follow the correct permission threshold
+- being able to see a module does not automatically mean being able to create/edit/manage/approve inside it
+- View only must remain truly view only
+
+5) Preserve domain-specific workflow logic while enforcing the hierarchy
+Where a domain has special workflow rules, keep them, but make them obey hierarchy levels.
+
+Examples:
+- Inventory / Add Stock:
+  preserve submit-for-approval logic for users without direct authority
+  do not flatten all inventory behavior into direct Add to Inventory
+- Refund:
+  keep or refine supervisor-authorization flow when user lacks sufficient refund permission
+  do not permanently elevate user
+- Warranty:
+  warranty creation, management, approval, and completion must obey the correct level
+- Approval workflows generally:
+  approval authority must belong only to Approve or Full Access unless explicitly documented
+
+6) Refund special requirement: supervisor authorization path
+Keep this as a domain-specific exception inside the hierarchy model.
+
+Required refund behavior:
+- If user has sufficient refund permission based on hierarchy, refund works normally
+- If user lacks sufficient refund permission:
+  - keep Refund button visible/enabled in POS
+  - clicking it opens supervisor authorization popup
+  - popup lists users with sufficient refund authority
+  - selected supervisor enters PIN/mock PIN
+  - refund permission is activated temporarily for this refund transaction only
+  - after completion/cancel, temporary elevation expires
+- This must not permanently elevate the current user
+- This refund escalation path must still obey the overall permission model
+
+7) Refresh permissions correctly after role/user/permission changes
+Current problem:
+- permission state can become stale
+
+Fix:
+- after preview-mode role change, switched-user change, or permission change:
+  - side menu refreshes correctly
+  - page access refreshes correctly
+  - dashboard quick actions refresh correctly
+  - POS quick actions refresh correctly
+  - detail action buttons refresh correctly
+- no stale elevated state
+- no stale disabled state
+- effective active role/user context must always match visible actions and actual execution rights
+
+8) Preserve already working workflows
+Do not break:
+- preview-mode global role sync
+- POS active-role sync after navigation
+- warranty-to-repair creation
+- warranty repair completion sync
+- repaired warranty send-to-POS flow
+- repaired warranty reopen + completion lock
+- Warranty Management surface
+- Quick Add Stock approval-to-inventory path
+- direct Add to Inventory where permission truly allows it
+- exact SKU/barcode lookup
+- dashboard Scan QR aligned to inventory
+- POS Add Item search-first behavior
+- stock-count enforcement and merge behavior
+- finalize sale with discount + points
+- points deduction timing
+- payment allocation starting empty
+- cash/card behavior currently working
+- POS draft persistence across navigation
+- New Sale reset button
+- Hold Orders popup flow
+- customer sync
+- Refund flow where permission is properly granted
+- Orders search/detail flow
+- Print Label
+- Quick Intake handoff
+- Suggestive Sales maintenance
+- Special Part Order
+- Deposit
+- Add Method improvements already working
+
+9) Output format after implementation
+After implementation, return only:
+1. What changed
+2. Exact files changed in this pass
+3. The global permission hierarchy model you enforced
+4. How the hierarchy now applies across the whole permission page
+5. How menu/page/action parity now works
+6. How refund supervisor authorization fits into the hierarchy
+7. Any known limitations still intentionally left unchanged
+8. A short implementation verification summary
+
+Important:
+- Do not claim final QA closure on behalf of the user
+- Do not mark the workstream complete yet
+- The user will perform the final manual QA
+- Stop after the report and wait for user testing feedback

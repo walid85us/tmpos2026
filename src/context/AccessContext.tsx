@@ -1,8 +1,8 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
 import { auth, db } from '../firebase';
-import { Role, Plan, AccountStatus, platformRoles as initialPlatformRoles, tenantRoles as initialTenantRoles, planFeatures, adminPermissions } from './accessConfig';
+import { Role, Plan, AccountStatus, platformRoles as initialPlatformRoles, tenantRoles as initialTenantRoles, planFeatures, adminPermissions, PERMISSION_HIERARCHY, meetsPermissionLevel, PERMISSION_DOMAINS } from './accessConfig';
 import { EmployeeRole, PermissionLevel } from '../types';
 
 interface Session {
@@ -74,9 +74,26 @@ interface AccessContextType {
   setPosOperatorRole: (role: string | null) => void;
   effectiveRole: string;
   hasPermission: (perm: string) => boolean;
+  getPermissionLevel: (domain: string) => PermissionLevel;
+  checkPermission: (domain: string, requiredLevel: PermissionLevel) => boolean;
+  supervisorRefundAuth: { active: boolean; supervisorName: string } | null;
+  requestSupervisorRefundAuth: (supervisorId: string, pin: string) => boolean;
+  clearSupervisorRefundAuth: () => void;
 }
 
 const AccessContext = createContext<AccessContextType | undefined>(undefined);
+
+function resolvePermissionLevel(roleConfig: EmployeeRole, domain: string): PermissionLevel {
+  const perms = roleConfig.permissions;
+  if (Array.isArray(perms)) {
+    if (perms.includes('all')) return 'full';
+    if (perms.includes(domain)) return 'full';
+    if (perms.includes(`${domain}_read`)) return 'view';
+    return 'none';
+  }
+  if ((perms as Record<string, PermissionLevel>)['_grant'] === 'full') return 'full';
+  return (perms as Record<string, PermissionLevel>)[domain] || 'none';
+}
 
 export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [realSession, setRealSession] = useState<Session | null>(null);
@@ -91,6 +108,7 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   const [previewSession, setPreviewSession] = useState<Session | null>(null);
   const [previewTenant, setPreviewTenant] = useState<Tenant | null>(null);
   const [posOperatorRole, setPosOperatorRole] = useState<string | null>(null);
+  const [supervisorRefundAuth, setSupervisorRefundAuth] = useState<{ active: boolean; supervisorName: string } | null>(null);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
@@ -165,6 +183,20 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     return stage === 'active' && (tenant.status === 'active' || tenant.status === 'trialing' || tenant.status === 'overdue');
   };
 
+  const getPermissionLevel = useCallback((domain: string): PermissionLevel => {
+    if (!session) return 'none';
+    if (effectiveRole === 'system_owner' || effectiveRole === 'store_owner') return 'full';
+
+    const roleConfig = tenantRolesState.find(r => r.id === effectiveRole);
+    if (!roleConfig) return 'none';
+    return resolvePermissionLevel(roleConfig, domain);
+  }, [session, effectiveRole, tenantRolesState]);
+
+  const checkPermission = useCallback((domain: string, requiredLevel: PermissionLevel): boolean => {
+    const actual = getPermissionLevel(domain);
+    return meetsPermissionLevel(actual, requiredLevel);
+  }, [getPermissionLevel]);
+
   const canAccess = (feature: string) => {
     if (!session) return false;
 
@@ -189,6 +221,8 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         if (effectiveRole === 'store_owner') return true;
       }
 
+      const normalizedFeature = feature === 'supply-chain' ? 'supply_chain' : feature;
+
       if (!isAdminPerm && activated) {
         const features = planFeatures[tenant.plan];
         if (!features.includes(feature)) return false;
@@ -196,33 +230,20 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
 
       if (effectiveRole === 'store_owner') return true;
 
-      const roleConfig = tenantRolesState.find(r => r.id === effectiveRole);
-      if (!roleConfig) return false;
-
-      const hasPermission = Array.isArray(roleConfig.permissions)
-        ? roleConfig.permissions.includes(feature) || roleConfig.permissions.includes(`${feature}_read`) || roleConfig.permissions.includes('all')
-        : roleConfig.permissions[feature] && roleConfig.permissions[feature] !== 'none' || roleConfig.permissions['all'] === 'full';
-      return hasPermission;
+      const level = getPermissionLevel(normalizedFeature);
+      return meetsPermissionLevel(level, 'view');
     }
 
     return false;
   };
 
+  const hasPermission = (perm: string): boolean => {
+    return checkPermission(perm, 'create');
+  };
+
   const resolveLandingRoute = (session: Session) => {
     if (session.userType === 'platform') return '/owner';
     return '/';
-  };
-
-  const hasPermission = (perm: string): boolean => {
-    if (!session) return false;
-    if (effectiveRole === 'system_owner' || effectiveRole === 'store_owner') return true;
-    const roleConfig = tenantRolesState.find(r => r.id === effectiveRole);
-    if (!roleConfig) return false;
-    const perms = roleConfig.permissions;
-    if (Array.isArray(perms)) {
-      return perms.includes('all') || perms.includes(perm);
-    }
-    return perms['all'] === 'full' || (perms[perm] !== undefined && perms[perm] !== 'none');
   };
 
   const getAvailableRoles = () => ({ platform: platformRolesState, tenant: tenantRolesState });
@@ -243,6 +264,21 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     setTenantRolesState(prev => prev.map(r => r.id === roleId ? { ...r, permissions } : r));
   };
 
+  const requestSupervisorRefundAuth = (supervisorId: string, pin: string): boolean => {
+    if (pin !== '1234') return false;
+    const supervisorRole = tenantRolesState.find(r => r.id === supervisorId);
+    if (!supervisorRole) return false;
+    const refundLevel = resolvePermissionLevel(supervisorRole, 'refunds');
+    if (!meetsPermissionLevel(refundLevel, 'approve')) return false;
+    const names: Record<string, string> = { store_owner: 'Store Owner', manager: 'Manager' };
+    setSupervisorRefundAuth({ active: true, supervisorName: names[supervisorId] || supervisorRole.name });
+    return true;
+  };
+
+  const clearSupervisorRefundAuth = () => {
+    setSupervisorRefundAuth(null);
+  };
+
   return (
     <AccessContext.Provider value={{
       session,
@@ -254,8 +290,8 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       resolveLandingRoute,
       isPreviewModeEnabled,
       enablePreviewMode: () => setIsPreviewModeEnabled(true),
-      disablePreviewMode: () => { setIsPreviewModeEnabled(false); setPosOperatorRole(null); },
-      setPreviewSession: (s: Session) => { setPreviewSession(s); setPosOperatorRole(null); },
+      disablePreviewMode: () => { setIsPreviewModeEnabled(false); setPosOperatorRole(null); setSupervisorRefundAuth(null); },
+      setPreviewSession: (s: Session) => { setPreviewSession(s); setPosOperatorRole(null); setSupervisorRefundAuth(null); },
       setPreviewTenant,
       getAvailableRoles,
       addPlatformRole,
@@ -267,7 +303,12 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       posOperatorRole,
       setPosOperatorRole,
       effectiveRole,
-      hasPermission
+      hasPermission,
+      getPermissionLevel,
+      checkPermission,
+      supervisorRefundAuth,
+      requestSupervisorRefundAuth,
+      clearSupervisorRefundAuth
     }}>
       {children}
     </AccessContext.Provider>

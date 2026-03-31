@@ -1,8 +1,36 @@
-import { EmployeeRole } from '../types';
+import { EmployeeRole, PermissionLevel } from '../types';
 
 export type Role = 'system_owner' | 'support_admin' | 'billing_admin' | 'operations_admin' | 'security_admin' | 'store_owner' | 'manager' | 'technician' | 'sales_staff';
 export type Plan = 'starter' | 'growth' | 'advanced';
 export type AccountStatus = 'active' | 'trialing' | 'overdue' | 'suspended' | 'read_only' | 'pending_activation';
+
+export const PERMISSION_HIERARCHY: PermissionLevel[] = ['none', 'view', 'create', 'edit', 'manage', 'approve', 'full'];
+
+export function meetsPermissionLevel(actual: PermissionLevel, required: PermissionLevel): boolean {
+  return PERMISSION_HIERARCHY.indexOf(actual) >= PERMISSION_HIERARCHY.indexOf(required);
+}
+
+export const PERMISSION_DOMAINS = [
+  { id: 'dashboard', label: 'Dashboard', levels: ['none', 'view', 'full'] as PermissionLevel[] },
+  { id: 'sales', label: 'Sales / POS', levels: ['none', 'view', 'create', 'edit', 'manage', 'full'] as PermissionLevel[] },
+  { id: 'repairs', label: 'Repairs', levels: ['none', 'view', 'create', 'edit', 'manage', 'full'] as PermissionLevel[] },
+  { id: 'inventory', label: 'Inventory', levels: ['none', 'view', 'create', 'edit', 'manage', 'approve', 'full'] as PermissionLevel[] },
+  { id: 'customers', label: 'Customers', levels: ['none', 'view', 'create', 'edit', 'full'] as PermissionLevel[] },
+  { id: 'employees', label: 'Employees / Team', levels: ['none', 'view', 'manage', 'full'] as PermissionLevel[] },
+  { id: 'warranties', label: 'Warranties', levels: ['none', 'view', 'create', 'manage', 'full'] as PermissionLevel[] },
+  { id: 'refunds', label: 'Refunds', levels: ['none', 'view', 'create', 'approve', 'full'] as PermissionLevel[] },
+  { id: 'invoices', label: 'Invoices', levels: ['none', 'view', 'create', 'edit', 'full'] as PermissionLevel[] },
+  { id: 'services', label: 'Services', levels: ['none', 'view', 'create', 'edit', 'manage', 'full'] as PermissionLevel[] },
+  { id: 'reports', label: 'Reports', levels: ['none', 'view', 'full'] as PermissionLevel[] },
+  { id: 'prospects', label: 'Prospects', levels: ['none', 'view', 'create', 'edit', 'full'] as PermissionLevel[] },
+  { id: 'marketing', label: 'Marketing', levels: ['none', 'view', 'create', 'manage', 'full'] as PermissionLevel[] },
+  { id: 'suggestive_sales', label: 'Suggestive Sales', levels: ['none', 'view', 'manage', 'full'] as PermissionLevel[] },
+  { id: 'settings', label: 'Settings', levels: ['none', 'view', 'manage', 'full'] as PermissionLevel[] },
+  { id: 'support', label: 'Support', levels: ['none', 'view', 'create', 'full'] as PermissionLevel[] },
+  { id: 'supply_chain', label: 'Supply Chain', levels: ['none', 'view', 'create', 'edit', 'manage', 'full'] as PermissionLevel[] },
+  { id: 'integrations', label: 'Integrations', levels: ['none', 'view', 'manage', 'full'] as PermissionLevel[] },
+  { id: 'widgets', label: 'Widgets', levels: ['none', 'view', 'manage', 'full'] as PermissionLevel[] },
+] as const;
 
 export const adminPermissions = [
   'manage_employees',
@@ -26,31 +54,97 @@ export const platformRoles = [
 ];
 
 export const tenantRoles: EmployeeRole[] = [
-  { id: 'store_owner', name: 'Store Owner', permissions: ['all'], description: 'Full system access' },
-  { id: 'manager', name: 'Manager', permissions: [
-    'dashboard', 'sales', 'repairs', 'inventory', 'customers', 'employees', 'invoices', 'services', 'support', 'reports', 'prospects', 'warranties', 'suggestive_sales', 'refunds',
-    'manage_employees', 'assign_roles', 'manage_attendance', 'manage_compensation', 'approve_requests'
-  ], description: 'Store management access (limited)' },
-  { id: 'technician', name: 'Technician', permissions: ['dashboard', 'repairs', 'inventory', 'services', 'support', 'customers_read', 'invoices_read', 'warranties'], description: 'Repair and parts access' },
-  { id: 'sales_staff', name: 'Sales Associate', permissions: ['dashboard', 'sales', 'customers', 'invoices', 'support', 'prospects', 'inventory_read', 'suggestive_sales'], description: 'Sales and customer access' },
+  {
+    id: 'store_owner', name: 'Store Owner',
+    permissions: { _grant: 'full' } as Record<string, PermissionLevel>,
+    description: 'Full system access'
+  },
+  {
+    id: 'manager', name: 'Manager',
+    permissions: {
+      dashboard: 'full',
+      sales: 'full',
+      repairs: 'full',
+      inventory: 'manage',
+      customers: 'full',
+      employees: 'manage',
+      warranties: 'manage',
+      refunds: 'approve',
+      invoices: 'full',
+      services: 'full',
+      reports: 'full',
+      prospects: 'full',
+      marketing: 'manage',
+      suggestive_sales: 'manage',
+      settings: 'manage',
+      support: 'full',
+      supply_chain: 'manage',
+      integrations: 'manage',
+      widgets: 'manage',
+    } as Record<string, PermissionLevel>,
+    description: 'Store management access'
+  },
+  {
+    id: 'technician', name: 'Technician',
+    permissions: {
+      dashboard: 'view',
+      sales: 'none',
+      repairs: 'manage',
+      inventory: 'create',
+      customers: 'view',
+      employees: 'none',
+      warranties: 'create',
+      refunds: 'none',
+      invoices: 'view',
+      services: 'view',
+      reports: 'none',
+      prospects: 'none',
+      marketing: 'none',
+      suggestive_sales: 'none',
+      settings: 'none',
+      support: 'view',
+      supply_chain: 'none',
+      integrations: 'none',
+      widgets: 'none',
+    } as Record<string, PermissionLevel>,
+    description: 'Repair and parts access'
+  },
+  {
+    id: 'sales_staff', name: 'Sales Associate',
+    permissions: {
+      dashboard: 'view',
+      sales: 'create',
+      repairs: 'none',
+      inventory: 'view',
+      customers: 'create',
+      employees: 'none',
+      warranties: 'none',
+      refunds: 'none',
+      invoices: 'create',
+      services: 'none',
+      reports: 'none',
+      prospects: 'create',
+      marketing: 'none',
+      suggestive_sales: 'view',
+      settings: 'none',
+      support: 'view',
+      supply_chain: 'none',
+      integrations: 'none',
+      widgets: 'none',
+    } as Record<string, PermissionLevel>,
+    description: 'Sales and customer access'
+  },
 ];
 
 export const roles = [...platformRoles, ...tenantRoles];
 
 export const planFeatures: Record<Plan, string[]> = {
   starter: ['dashboard', 'sales', 'customers', 'invoices', 'support'],
-  growth: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'employees', 'warranties', 'suggestive_sales'],
-  advanced: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'employees', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'warranties', 'suggestive_sales'],
+  growth: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'employees', 'warranties', 'suggestive_sales', 'refunds'],
+  advanced: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'employees', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'warranties', 'suggestive_sales', 'refunds'],
 };
 
-export const permissions = [
-  { group: 'Sales', actions: ['view', 'create', 'edit', 'delete', 'export'] },
-  { group: 'Repairs', actions: ['view', 'create', 'edit', 'manage'] },
-  { group: 'Inventory', actions: ['view', 'create', 'edit', 'manage'] },
-  { group: 'Warranties', actions: ['view', 'create', 'manage'] },
-  { group: 'Refunds', actions: ['view', 'create', 'manage'] },
-  { group: 'Suggestive Sales', actions: ['view', 'manage'] },
-];
+export const permissions = PERMISSION_DOMAINS;
 
 export const accountStatusConfig = {
   active: { label: 'Active', color: 'bg-lime-400/10 text-lime-700 border-lime-400/20' },

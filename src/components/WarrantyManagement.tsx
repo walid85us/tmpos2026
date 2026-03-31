@@ -71,7 +71,7 @@ const AVAILABLE_TECHNICIANS = [
 
 const WarrantyManagement: React.FC = () => {
   const { warrantyClaims, updateWarrantyClaim, completedOrders, addWarrantyRepairTicket, addPendingReplacement } = useStoreLocalState();
-  const { session, effectiveRole, hasPermission } = useAccess();
+  const { session, effectiveRole, checkPermission } = useAccess();
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [typeFilter, setTypeFilter] = useState<string>('all');
@@ -83,7 +83,7 @@ const WarrantyManagement: React.FC = () => {
   const [repairAssignClaim, setRepairAssignClaim] = useState<WarrantyClaimRecord | null>(null);
   const [replacementSentToast, setReplacementSentToast] = useState('');
 
-  const canManage = hasPermission('warranties');
+  const canManage = checkPermission('warranties', 'manage');
 
   const filteredClaims = useMemo(() => {
     let list = warrantyClaims.filter(c => {

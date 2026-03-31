@@ -690,10 +690,10 @@ function StoreActivationPanel() {
 }
 
 export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => void }) {
-  const { session, canAccess, effectiveRole, hasPermission } = useAccess();
+  const { session, canAccess, effectiveRole, checkPermission } = useAccess();
   const navigate = useNavigate();
   const { addCustomer, addStockItem, updateStockItem, stockItems: sharedStockItems, approvedStockItems, pendingStockItems, heldOrders, removeHeldOrder } = useStoreLocalState();
-  const hasInventoryPermission = hasPermission('inventory');
+  const hasInventoryPermission = checkPermission('inventory', 'manage');
   const [showPrintLabelModal, setShowPrintLabelModal] = useState(false);
   const [showScanQRModal, setShowScanQRModal] = useState(false);
   const [showAddStockModal, setShowAddStockModal] = useState(false);
@@ -724,7 +724,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
   const allActions: { label: string; icon: string; color: string; permission?: string; moduleAccess?: string }[] = [
     { label: 'New Sale', icon: 'shopping_cart', color: 'bg-primary', permission: 'sales' },
     { label: 'Quick Intake', icon: 'bolt', color: 'bg-secondary', permission: 'repairs' },
-    { label: 'Add Stock', icon: 'inventory_2', color: 'bg-teal-800', moduleAccess: 'inventory' },
+    { label: 'Add Stock', icon: 'inventory_2', color: 'bg-teal-800', permission: 'inventory' },
     { label: 'New Customer', icon: 'person_add', color: 'bg-secondary', permission: 'customers' },
     { label: 'Print Label', icon: 'print', color: 'bg-slate-800' },
     { label: 'Held Orders', icon: 'history', color: 'bg-slate-600', permission: 'sales' },
@@ -732,7 +732,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
   ];
 
   const visibleActions = allActions.filter(a => {
-    if (a.permission && !hasPermission(a.permission)) return false;
+    if (a.permission && !checkPermission(a.permission, 'create')) return false;
     if (a.moduleAccess && !canAccess(a.moduleAccess)) return false;
     return true;
   });
@@ -774,7 +774,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
   return (
     <div className="space-y-8">
       {session?.role === 'store_owner' && <StoreActivationPanel />}
-      {hasPermission('approve_requests') && <ApprovalQueue />}
+      {checkPermission('inventory', 'approve') && <ApprovalQueue />}
       <header className="flex items-end justify-between">
         <div>
           <span className="text-[10px] uppercase tracking-[0.2em] text-secondary font-extrabold mb-1 block">Operational Overview</span>

@@ -93,7 +93,7 @@ const storeAdminFeatures = [
 const storeFeatures = [...storeModuleFeatures, ...storeAdminFeatures];
 
 export default function Employees() {
-  const { session, tenant, setPreviewTenant, isPreviewModeEnabled, tenantRolesState = [], addTenantRole, updateTenantRole, canAccess } = useAccess();
+  const { session, tenant, setPreviewTenant, isPreviewModeEnabled, tenantRolesState = [], addTenantRole, updateTenantRole, canAccess, checkPermission } = useAccess();
   const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<'list' | 'time' | 'roles' | 'permissions' | 'activity' | 'payroll'>('list');
   const [employees, setEmployees] = useState<Employee[]>(MOCK_EMPLOYEES);
@@ -250,8 +250,8 @@ export default function Employees() {
     const commissionRate = Number(formData.get('commissionRate')) || 0;
 
     const needsApproval = roleId === 'store_owner' || 
-      (roleId === 'manager' && !canAccess('assign_manager_role')) ||
-      (!canAccess('assign_roles'));
+      (roleId === 'manager' && !checkPermission('employees', 'manage')) ||
+      (!checkPermission('employees', 'edit'));
 
     if (needsApproval && session?.role !== 'store_owner' && session?.role !== 'system_owner') {
       setPendingRequests(prev => [...prev, { 
@@ -330,7 +330,7 @@ export default function Employees() {
     if (!newRole.name.trim()) return;
     const roleId = newRole.name.toLowerCase().replace(/\s+/g, '_');
 
-    if (!canAccess('create_roles') && session?.role !== 'store_owner' && session?.role !== 'system_owner') {
+    if (!checkPermission('employees', 'manage') && session?.role !== 'store_owner' && session?.role !== 'system_owner') {
       setPendingRequests(prev => [...prev, { 
         id: Date.now(), 
         employee: 'System', 
@@ -434,7 +434,7 @@ export default function Employees() {
   const [showBreakPicker, setShowBreakPicker] = useState(false);
   const [showEndBreakPicker, setShowEndBreakPicker] = useState(false);
 
-  const canManageAttendance = isOwner || canAccess('manage_attendance');
+  const canManageAttendance = isOwner || checkPermission('employees', 'edit');
 
   const handleStartBreak = () => {
     if (canManageAttendance) {
@@ -504,7 +504,7 @@ export default function Employees() {
 
   const renderEmployeeList = () => (
     <div className="space-y-6">
-      {(isOwner || canAccess('approve_requests')) && (
+      {(isOwner || checkPermission('employees', 'approve')) && (
         <PendingApproval 
           requests={pendingRequests} 
           onApprove={handleApprove} 
@@ -524,7 +524,7 @@ export default function Employees() {
             onChange={(e) => setSearchQuery(e.target.value)}
           />
         </div>
-        {(isOwner || canAccess('manage_employees')) && (
+        {(isOwner || checkPermission('employees', 'manage')) && (
           <button 
             onClick={() => setShowAddModal(true)}
             className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2"
@@ -538,7 +538,7 @@ export default function Employees() {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {filteredEmployees.map((emp) => {
           const isStoreOwner = emp.roleId === 'store_owner';
-          const canManage = session?.role === 'system_owner' || session?.role === 'store_owner' || (canAccess('manage_employees') && !isStoreOwner && emp.roleId !== 'manager');
+          const canManage = session?.role === 'system_owner' || session?.role === 'store_owner' || (checkPermission('employees', 'manage') && !isStoreOwner && emp.roleId !== 'manager');
 
           return (
             <motion.div 
@@ -803,7 +803,7 @@ export default function Employees() {
       <td className="px-4 py-4 text-sm font-bold text-slate-700">{feature.name}</td>
       {tenantRolesState.map(role => {
         const currentLevel = getPermissionLevel(role, feature.id);
-        const isLocked = role.id === 'store_owner' || (session?.role === 'manager' && (role.id === 'manager' || !canAccess('edit_roles')));
+        const isLocked = role.id === 'store_owner' || (session?.role === 'manager' && (role.id === 'manager' || !checkPermission('employees', 'manage')));
         return (
           <td key={role.id} className="px-4 py-4 text-center">
             {isAdminPerm ? (
@@ -888,7 +888,7 @@ export default function Employees() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-black text-primary tracking-tight">Roles & Permissions</h2>
-        {(isOwner || canAccess('create_roles')) && (
+        {(isOwner || checkPermission('employees', 'manage')) && (
           <button 
             onClick={() => {
               setNewRole({ name: '', description: '', status: 'active', permissions: [] });
@@ -939,7 +939,7 @@ export default function Employees() {
                       )
                     ))}
               </div>
-              {(isOwner || canAccess('manage_role_permissions')) && !isLocked && (
+              {(isOwner || checkPermission('employees', 'manage')) && !isLocked && (
                 <button 
                   onClick={() => setActiveTab('permissions')}
                   className="w-full py-3 bg-slate-50 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-slate-100 transition-colors"
@@ -999,7 +999,7 @@ export default function Employees() {
             { id: 'list', label: 'Employees', icon: 'group' },
             { id: 'time', label: 'Time Tracking', icon: 'schedule' },
             { id: 'roles', label: 'Roles', icon: 'security' },
-            ...((isOwner || canAccess('manage_role_permissions')) ? [{ id: 'permissions', label: 'Permissions', icon: 'key' }] : []),
+            ...((isOwner || checkPermission('employees', 'manage')) ? [{ id: 'permissions', label: 'Permissions', icon: 'key' }] : []),
             { id: 'activity', label: 'Activity Log', icon: 'history' },
             { id: 'payroll', label: 'Payroll', icon: 'payments' }
           ].map((tab) => (
@@ -1030,7 +1030,7 @@ export default function Employees() {
           {activeTab === 'list' && renderEmployeeList()}
           {activeTab === 'time' && renderTimeLogs()}
           {activeTab === 'roles' && renderRoles()}
-          {activeTab === 'permissions' && (isOwner || canAccess('manage_role_permissions')) && renderPermissions()}
+          {activeTab === 'permissions' && (isOwner || checkPermission('employees', 'manage')) && renderPermissions()}
           {activeTab === 'activity' && renderActivityLog()}
           {activeTab === 'payroll' && (
             <div className="bg-white/80 backdrop-blur-xl p-12 rounded-[3rem] border border-slate-200 flex flex-col items-center justify-center text-center">
@@ -1105,7 +1105,7 @@ export default function Employees() {
                       <select name="role" defaultValue={editingEmployee?.roleId} required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700">
                         {tenantRolesState.filter(r => {
                           if (r.id === 'store_owner') return false;
-                          if (r.id === 'manager' && !canAccess('assign_manager_role') && !isOwner) return false;
+                          if (r.id === 'manager' && !checkPermission('employees', 'manage') && !isOwner) return false;
                           return true;
                         }).map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
                       </select>

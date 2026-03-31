@@ -7,8 +7,8 @@ import ContextualHelp from './ContextualHelp';
 
 const Inventory: React.FC = () => {
   const { approvedStockItems, pendingStockItems, addStockItem, updateStockItem } = useStoreLocalState();
-  const { canAccess, session, hasPermission } = useAccess();
-  const hasInventoryPermission = hasPermission('inventory');
+  const { canAccess, session, checkPermission } = useAccess();
+  const hasInventoryPermission = checkPermission('inventory', 'manage');
   const [activeTab, setActiveTab] = useState<string>('inventory');
   const [searchQuery, setSearchQuery] = useState('');
   const [isAddProductModalOpen, setIsAddProductModalOpen] = useState(false);

@@ -27,16 +27,17 @@ const POINTS_VALUE_RATIO = 0.01;
 
 export const POS: React.FC = () => {
   const location = useLocation();
-  const { canAccess, session, setPosOperatorRole, effectiveRole, hasPermission } = useAccess();
+  const { canAccess, session, setPosOperatorRole, effectiveRole, checkPermission, getPermissionLevel, supervisorRefundAuth, requestSupervisorRefundAuth, clearSupervisorRefundAuth } = useAccess();
   const { customers: sharedCustomers, addCustomer, updateCustomer, stockItems: sharedStockItems, addStockItem, updateStockItem: updateStockItemCtx, approvedStockItems, pendingStockItems, heldOrders, addHeldOrder, removeHeldOrder, suggestiveSalesItems, addSuggestiveSaleItem, removeSuggestiveSaleItem, draftCart, setDraftCart, clearDraftCart, completedOrders, addCompletedOrder, updateCompletedOrder, refundRecords, addRefundRecord, warrantyClaims, addWarrantyClaim, updateWarrantyClaim: updateWarrantyClaimCtx, posOperator, setPosOperator, pendingReplacements, removePendingReplacement } = useStoreLocalState();
   const derivedSuggestiveItems = approvedStockItems.filter(s => s.isSuggestiveSale).map(s => ({ id: s.id, name: s.name, price: s.price }));
   const OPERATOR_ROLE_MAP: Record<string, string> = { 'Manager': 'manager', 'Sales Associate': 'sales_staff', 'Technician': 'technician', 'Store Owner': 'store_owner' };
   const isOwnerOrManager = effectiveRole === 'system_owner' || effectiveRole === 'store_owner' || effectiveRole === 'manager';
-  const hasInventoryPermission = hasPermission('inventory');
-  const canProcessRefund = hasPermission('refunds');
-  const canFileWarranty = hasPermission('warranties');
-  const canAddStock = canAccess('inventory');
-  const canManageSuggestive = hasPermission('suggestive_sales');
+  const hasInventoryPermission = checkPermission('inventory', 'manage');
+  const canProcessRefund = checkPermission('refunds', 'create') || (supervisorRefundAuth?.active ?? false);
+  const canFileWarranty = checkPermission('warranties', 'create');
+  const canAddStock = checkPermission('inventory', 'create');
+  const canManageSuggestive = checkPermission('suggestive_sales', 'manage');
+  const inventoryLevel = getPermissionLevel('inventory');
 
   useEffect(() => {
     const mappedRole = posOperator ? (OPERATOR_ROLE_MAP[posOperator.role] || 'sales_staff') : null;
@@ -75,6 +76,10 @@ export const POS: React.FC = () => {
   const [isExpenseModalOpen, setIsExpenseModalOpen] = useState(false);
   const [isPreviousOrdersOpen, setIsPreviousOrdersOpen] = useState(false);
   const [isPatternLockOpen, setIsPatternLockOpen] = useState(false);
+  const [isSupervisorAuthOpen, setIsSupervisorAuthOpen] = useState(false);
+  const [supervisorAuthPin, setSupervisorAuthPin] = useState('');
+  const [supervisorAuthTarget, setSupervisorAuthTarget] = useState<string>('');
+  const [supervisorAuthError, setSupervisorAuthError] = useState('');
   const [isManufacturerModalOpen, setIsManufacturerModalOpen] = useState(false);
   const [isPrintModalOpen, setIsPrintModalOpen] = useState(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
@@ -1015,9 +1020,21 @@ export const POS: React.FC = () => {
                     <span className="material-symbols-outlined text-primary group-hover:scale-110 transition-transform">switch_account</span>
                     <span className="text-[10px] font-bold uppercase tracking-tighter">Switch User</span>
                   </button>
-                  <button onClick={() => canProcessRefund && setIsRefundModalOpen(true)} className={`rounded-xl flex flex-col items-center justify-center gap-2 transition-all group ${canProcessRefund ? 'bg-slate-100 hover:bg-slate-200' : 'bg-slate-50 opacity-40 cursor-not-allowed'}`} title={!canProcessRefund ? 'Refunds require the refunds permission' : ''}>
+                  <button onClick={() => {
+                    if (canProcessRefund) {
+                      setIsRefundModalOpen(true);
+                    } else {
+                      setIsSupervisorAuthOpen(true);
+                      setSupervisorAuthPin('');
+                      setSupervisorAuthTarget('');
+                      setSupervisorAuthError('');
+                    }
+                  }} className="bg-slate-100 hover:bg-slate-200 rounded-xl flex flex-col items-center justify-center gap-2 transition-all group" title={!canProcessRefund ? 'Supervisor authorization required for refunds' : ''}>
                     <span className="material-symbols-outlined text-primary group-hover:scale-110 transition-transform">keyboard_return</span>
                     <span className="text-[10px] font-bold uppercase tracking-tighter">Refund</span>
+                    {!checkPermission('refunds', 'create') && !supervisorRefundAuth?.active && (
+                      <span className="material-symbols-outlined text-amber-500 text-[10px]">lock</span>
+                    )}
                   </button>
                   <button onClick={() => canAddStock && setIsAddInventoryModalOpen(true)} className={`rounded-xl flex flex-col items-center justify-center gap-2 transition-all group ${canAddStock ? 'bg-slate-100 hover:bg-slate-200' : 'bg-slate-50 opacity-40 cursor-not-allowed'}`} title={!canAddStock ? 'Adding stock requires Inventory access' : ''}>
                     <span className="material-symbols-outlined text-primary group-hover:scale-110 transition-transform">add_business</span>
@@ -1455,24 +1472,23 @@ export const POS: React.FC = () => {
                       </div>
                     ))}
                   </div>
-                  {ordersSelectedOrder.status === 'Paid' && (canProcessRefund || canFileWarranty) && (
+                  {ordersSelectedOrder.status === 'Paid' && (
                     <div className="flex gap-3">
-                      {canProcessRefund && (
-                        <button onClick={() => { setIsPreviousOrdersOpen(false); setOrdersSelectedOrder(null); setIsRefundModalOpen(true); setRefundSearch(ordersSelectedOrder.invoiceNumber); setRefundSelectedOrder(ordersSelectedOrder); setRefundStep('detail'); }} className="flex-1 py-3 bg-rose-50 text-rose-600 rounded-2xl font-black text-xs uppercase tracking-widest border border-rose-200 hover:bg-rose-100 transition-all flex items-center justify-center gap-2">
-                          <span className="material-symbols-outlined text-sm">keyboard_return</span>Initiate Refund
-                        </button>
-                      )}
+                      <button onClick={() => {
+                        if (canProcessRefund) {
+                          setIsPreviousOrdersOpen(false); setOrdersSelectedOrder(null); setIsRefundModalOpen(true); setRefundSearch(ordersSelectedOrder.invoiceNumber); setRefundSelectedOrder(ordersSelectedOrder); setRefundStep('detail');
+                        } else {
+                          setIsSupervisorAuthOpen(true); setSupervisorAuthPin(''); setSupervisorAuthTarget(''); setSupervisorAuthError('');
+                        }
+                      }} className="flex-1 py-3 bg-rose-50 text-rose-600 rounded-2xl font-black text-xs uppercase tracking-widest border border-rose-200 hover:bg-rose-100 transition-all flex items-center justify-center gap-2">
+                        <span className="material-symbols-outlined text-sm">keyboard_return</span>Initiate Refund
+                        {!checkPermission('refunds', 'create') && !supervisorRefundAuth?.active && <span className="material-symbols-outlined text-amber-500 text-[10px] ml-1">lock</span>}
+                      </button>
                       {canFileWarranty && (
                         <button onClick={() => { setIsPreviousOrdersOpen(false); setOrdersSelectedOrder(null); setIsWarrantyModalOpen(true); setWarrantySearch(ordersSelectedOrder.invoiceNumber); setWarrantySelectedOrder(ordersSelectedOrder); setWarrantyStep('select'); }} className="flex-1 py-3 bg-teal-50 text-teal-600 rounded-2xl font-black text-xs uppercase tracking-widest border border-teal-200 hover:bg-teal-100 transition-all flex items-center justify-center gap-2">
                           <span className="material-symbols-outlined text-sm">verified_user</span>Warranty Claim
                         </button>
                       )}
-                    </div>
-                  )}
-                  {ordersSelectedOrder.status === 'Paid' && !canProcessRefund && !canFileWarranty && (
-                    <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200 text-center">
-                      <span className="material-symbols-outlined text-slate-400 text-lg">lock</span>
-                      <p className="text-xs font-bold text-slate-400 mt-1">Your current role does not have permission to initiate refunds or warranty claims</p>
                     </div>
                   )}
                 </div>
@@ -2008,6 +2024,7 @@ export const POS: React.FC = () => {
                             status: allFullyRefunded ? 'Fully Refunded' : 'Partially Refunded',
                           });
                           setRefundSuccess(true);
+                          clearSupervisorRefundAuth();
                         }} className="w-full py-5 bg-rose-500 text-white rounded-2xl font-black uppercase tracking-widest shadow-lg active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed">Process Refund</button>
                       </>
                     );
@@ -2529,6 +2546,62 @@ export const POS: React.FC = () => {
                   Add
                 </button>
               </div>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {isSupervisorAuthOpen && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[200] flex items-center justify-center p-6">
+          <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="bg-white rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden">
+            <div className="p-6 border-b border-slate-100">
+              <div className="flex items-center gap-3">
+                <span className="material-symbols-outlined text-amber-500 text-2xl">admin_panel_settings</span>
+                <div>
+                  <h3 className="text-lg font-black text-primary">Supervisor Authorization</h3>
+                  <p className="text-xs text-slate-400">A supervisor must authorize this refund</p>
+                </div>
+              </div>
+            </div>
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1 block">Select Supervisor</label>
+                <select value={supervisorAuthTarget} onChange={(e) => { setSupervisorAuthTarget(e.target.value); setSupervisorAuthError(''); }} className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary">
+                  <option value="">Choose...</option>
+                  <option value="store_owner">Store Owner</option>
+                  <option value="manager">Manager</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1 block">Supervisor PIN</label>
+                <input type="password" maxLength={4} value={supervisorAuthPin} onChange={(e) => { setSupervisorAuthPin(e.target.value.replace(/\D/g, '')); setSupervisorAuthError(''); }} className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-center tracking-[0.5em] focus:ring-secondary" placeholder="••••" />
+              </div>
+              {supervisorAuthError && <p className="text-xs text-red-500 font-bold">{supervisorAuthError}</p>}
+              {supervisorRefundAuth?.active && (
+                <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 flex items-center gap-2">
+                  <span className="material-symbols-outlined text-emerald-500 text-sm">check_circle</span>
+                  <p className="text-xs font-bold text-emerald-700">Authorized by {supervisorRefundAuth.supervisorName}</p>
+                </div>
+              )}
+            </div>
+            <div className="p-6 pt-0 flex gap-3">
+              <button onClick={() => { setIsSupervisorAuthOpen(false); setSupervisorAuthPin(''); setSupervisorAuthTarget(''); setSupervisorAuthError(''); clearSupervisorRefundAuth(); }} className="flex-1 py-3 bg-slate-100 text-slate-600 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-all">
+                Cancel
+              </button>
+              {supervisorRefundAuth?.active ? (
+                <button onClick={() => { setIsSupervisorAuthOpen(false); setIsRefundModalOpen(true); }} className="flex-1 py-3 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-lg hover:bg-primary/90 transition-all">
+                  Proceed to Refund
+                </button>
+              ) : (
+                <button disabled={!supervisorAuthTarget || supervisorAuthPin.length !== 4} onClick={() => {
+                  const success = requestSupervisorRefundAuth(supervisorAuthTarget, supervisorAuthPin);
+                  if (!success) {
+                    setSupervisorAuthError('Invalid PIN or insufficient authority');
+                  }
+                }} className="flex-1 py-3 bg-amber-500 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-lg hover:bg-amber-600 transition-all disabled:opacity-40 disabled:cursor-not-allowed">
+                  Authorize
+                </button>
+              )}
             </div>
           </motion.div>
         </div>
