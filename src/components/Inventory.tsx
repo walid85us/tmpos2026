@@ -26,6 +26,11 @@ const Inventory: React.FC = () => {
   const [newProductQty, setNewProductQty] = useState('1');
   const [newProductSuggestive, setNewProductSuggestive] = useState(false);
   const [addProductSuccess, setAddProductSuccess] = useState(false);
+  const [editingSuggestiveItem, setEditingSuggestiveItem] = useState<StockItem | null>(null);
+  const [editSugName, setEditSugName] = useState('');
+  const [editSugPrice, setEditSugPrice] = useState('');
+  const [editSugCategory, setEditSugCategory] = useState('');
+  const [editSugSaveSuccess, setEditSugSaveSuccess] = useState(false);
 
   const resetAddProductForm = () => {
     setNewProductName(''); setNewProductCategory('Parts'); setNewProductSku('');
@@ -218,17 +223,29 @@ const Inventory: React.FC = () => {
                     <p className="text-[10px] text-slate-400 font-bold">Cost: ${product.cost.toFixed(2)}</p>
                   </td>
                   <td className="px-8 py-6">
-                    <div className="flex items-center gap-3">
-                      <div className="flex-1 bg-slate-100 h-1.5 rounded-full overflow-hidden w-24">
-                        <div 
-                          className={`h-full transition-all duration-500 ${product.qty <= 5 ? 'bg-orange-500' : 'bg-lime-500'}`} 
-                          style={{ width: `${Math.min((product.qty / 30) * 100, 100)}%` }}
-                        ></div>
+                    {product.qty === 0 ? (
+                      <div className="flex items-center gap-2">
+                        <span className="px-3 py-1 bg-red-100 text-red-700 text-[10px] font-black uppercase tracking-widest rounded-lg border border-red-200 flex items-center gap-1">
+                          <span className="material-symbols-outlined text-xs">block</span>
+                          Out of Stock
+                        </span>
                       </div>
-                      <span className={`text-sm font-black ${product.qty <= 5 ? 'text-orange-600' : 'text-primary'}`}>
-                        {product.qty}
-                      </span>
-                    </div>
+                    ) : (
+                      <div className="flex items-center gap-3">
+                        <div className="flex-1 bg-slate-100 h-1.5 rounded-full overflow-hidden w-24">
+                          <div 
+                            className={`h-full transition-all duration-500 ${product.qty <= 3 ? 'bg-red-500' : product.qty <= 10 ? 'bg-orange-500' : 'bg-lime-500'}`} 
+                            style={{ width: `${Math.min((product.qty / 30) * 100, 100)}%` }}
+                          ></div>
+                        </div>
+                        <span className={`text-sm font-black ${product.qty <= 3 ? 'text-red-600' : product.qty <= 10 ? 'text-orange-600' : 'text-primary'}`}>
+                          {product.qty}
+                        </span>
+                        {product.qty <= 3 && product.qty > 0 && (
+                          <span className="text-[9px] font-black text-red-500 uppercase tracking-wider">Low</span>
+                        )}
+                      </div>
+                    )}
                   </td>
                   <td className="px-8 py-6 text-right">
                     <div className="flex justify-end gap-2">
@@ -617,33 +634,83 @@ const Inventory: React.FC = () => {
                 <h3 className="text-lg font-black text-primary">Suggestive Sales Items</h3>
                 <p className="text-xs text-slate-400 mt-1">Toggle items to appear as quick-add suggestions during POS checkout</p>
               </div>
+              <div className="flex items-center gap-2 px-3 py-1.5 bg-lime-50 border border-lime-200 rounded-xl">
+                <span className="material-symbols-outlined text-lime-600 text-sm">lightbulb</span>
+                <span className="text-xs font-black text-lime-700">{approvedStockItems.filter(i => i.isSuggestiveSale).length} Active</span>
+              </div>
             </div>
-            <div className="space-y-3">
-              {approvedStockItems.map(item => (
-                <div key={item.id} className="flex items-center justify-between p-5 bg-white rounded-2xl ghost-border shadow-sm hover:shadow-md transition-all">
-                  <div className="flex items-center gap-4">
-                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${item.isSuggestiveSale ? 'bg-lime-100 text-lime-700' : 'bg-slate-100 text-slate-400'}`}>
-                      <span className="material-symbols-outlined text-lg">lightbulb</span>
+            {approvedStockItems.filter(i => i.isSuggestiveSale).length > 0 && (
+              <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] ghost-border overflow-hidden">
+                <div className="px-6 py-4 bg-lime-50/50 border-b border-lime-100">
+                  <p className="text-[10px] font-black text-lime-700 uppercase tracking-widest">Active Suggestive Items</p>
+                </div>
+                <div className="divide-y divide-slate-50">
+                  {approvedStockItems.filter(i => i.isSuggestiveSale).map(item => (
+                    <div key={item.id} className="flex items-center justify-between p-5 hover:bg-slate-50 transition-all">
+                      <button
+                        onClick={() => { setEditingSuggestiveItem(item); setEditSugName(item.name); setEditSugPrice(item.price.toString()); setEditSugCategory(item.category); setEditSugSaveSuccess(false); }}
+                        className="flex items-center gap-4 text-left flex-1 min-w-0"
+                      >
+                        <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-lime-100 text-lime-700">
+                          <span className="material-symbols-outlined text-lg">lightbulb</span>
+                        </div>
+                        <div className="min-w-0">
+                          <p className="font-bold text-sm text-slate-900">{item.name}</p>
+                          <p className="text-xs text-slate-500">{item.sku} · {item.category} · ${item.price.toFixed(2)} · {item.qty} in stock</p>
+                        </div>
+                      </button>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          onClick={() => { setEditingSuggestiveItem(item); setEditSugName(item.name); setEditSugPrice(item.price.toString()); setEditSugCategory(item.category); setEditSugSaveSuccess(false); }}
+                          className="p-2 hover:bg-white rounded-xl transition-all text-slate-400 hover:text-primary"
+                          title="Edit item details"
+                        >
+                          <span className="material-symbols-outlined text-sm">edit</span>
+                        </button>
+                        <button
+                          onClick={() => updateStockItem(item.id, { isSuggestiveSale: false })}
+                          className="p-2 hover:bg-red-50 rounded-xl transition-all text-slate-400 hover:text-red-500"
+                          title="Remove from suggestive sales"
+                        >
+                          <span className="material-symbols-outlined text-sm">delete</span>
+                        </button>
+                      </div>
                     </div>
-                    <div>
-                      <p className="font-bold text-sm text-slate-900">{item.name}</p>
-                      <p className="text-xs text-slate-500">{item.sku} &bull; {item.category} &bull; ${item.price.toFixed(2)} &bull; {item.qty} in stock</p>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] ghost-border overflow-hidden">
+              <div className="px-6 py-4 bg-slate-50/50 border-b border-slate-100">
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">All Inventory Items</p>
+              </div>
+              <div className="divide-y divide-slate-50">
+                {approvedStockItems.map(item => (
+                  <div key={item.id} className="flex items-center justify-between p-5 hover:bg-slate-50 transition-all">
+                    <div className="flex items-center gap-4">
+                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${item.isSuggestiveSale ? 'bg-lime-100 text-lime-700' : 'bg-slate-100 text-slate-400'}`}>
+                        <span className="material-symbols-outlined text-lg">lightbulb</span>
+                      </div>
+                      <div>
+                        <p className="font-bold text-sm text-slate-900">{item.name}</p>
+                        <p className="text-xs text-slate-500">{item.sku} · {item.category} · ${item.price.toFixed(2)} · {item.qty === 0 ? <span className="text-red-500 font-black">Out of Stock</span> : <>{item.qty} in stock</>}</p>
+                      </div>
                     </div>
+                    <button
+                      onClick={() => updateStockItem(item.id, { isSuggestiveSale: !item.isSuggestiveSale })}
+                      className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors ${item.isSuggestiveSale ? 'bg-lime-500' : 'bg-slate-200'}`}
+                    >
+                      <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-md transition-transform ${item.isSuggestiveSale ? 'translate-x-6' : 'translate-x-1'}`} />
+                    </button>
                   </div>
-                  <button
-                    onClick={() => updateStockItem(item.id, { isSuggestiveSale: !item.isSuggestiveSale })}
-                    className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors ${item.isSuggestiveSale ? 'bg-lime-500' : 'bg-slate-200'}`}
-                  >
-                    <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-md transition-transform ${item.isSuggestiveSale ? 'translate-x-6' : 'translate-x-1'}`} />
-                  </button>
-                </div>
-              ))}
-              {approvedStockItems.length === 0 && (
-                <div className="py-12 text-center">
-                  <p className="text-sm font-bold text-slate-400">No approved stock items</p>
-                  <p className="text-xs text-slate-300 mt-1">Add items to inventory first</p>
-                </div>
-              )}
+                ))}
+                {approvedStockItems.length === 0 && (
+                  <div className="py-12 text-center">
+                    <p className="text-sm font-bold text-slate-400">No approved stock items</p>
+                    <p className="text-xs text-slate-300 mt-1">Add items to inventory first</p>
+                  </div>
+                )}
+              </div>
             </div>
             <div className="p-4 bg-teal-50 rounded-2xl border border-teal-100">
               <div className="flex items-center gap-2 mb-2">
@@ -675,6 +742,98 @@ const Inventory: React.FC = () => {
         ]}
         accentColor="primary"
       />
+
+      <AnimatePresence>
+        {editingSuggestiveItem && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg overflow-hidden"
+            >
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                <div>
+                  <h2 className="text-xl font-black text-primary tracking-tight">Edit Suggestive Item</h2>
+                  <p className="text-slate-500 text-xs font-medium">Update item details for suggestive sales</p>
+                </div>
+                <button onClick={() => setEditingSuggestiveItem(null)} className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary transition-all">
+                  <span className="material-symbols-outlined">close</span>
+                </button>
+              </div>
+              {editSugSaveSuccess ? (
+                <div className="p-12 text-center space-y-4">
+                  <div className="w-16 h-16 bg-lime-100 rounded-full flex items-center justify-center mx-auto">
+                    <span className="material-symbols-outlined text-3xl text-lime-600" style={{fontVariationSettings: "'FILL' 1"}}>check_circle</span>
+                  </div>
+                  <p className="text-lg font-black text-primary">Item Updated</p>
+                </div>
+              ) : (
+                <>
+                  <div className="p-8 space-y-5">
+                    <div>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Item Name</label>
+                      <input type="text" value={editSugName} onChange={(e) => setEditSugName(e.target.value)} className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold" />
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Sell Price</label>
+                        <div className="relative">
+                          <span className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400 font-bold">$</span>
+                          <input type="number" step="0.01" value={editSugPrice} onChange={(e) => setEditSugPrice(e.target.value)} className="w-full pl-10 pr-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold" />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Category</label>
+                        <select value={editSugCategory} onChange={(e) => setEditSugCategory(e.target.value)} className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold">
+                          <option>Parts</option>
+                          <option>Accessories</option>
+                          <option>Devices</option>
+                          <option>Other</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div className="bg-slate-50 rounded-2xl p-4">
+                      <div className="flex justify-between text-xs">
+                        <span className="text-slate-400 font-bold">SKU</span>
+                        <span className="font-mono text-slate-600">{editingSuggestiveItem.sku}</span>
+                      </div>
+                      <div className="flex justify-between text-xs mt-2">
+                        <span className="text-slate-400 font-bold">Current Stock</span>
+                        <span className={`font-black ${editingSuggestiveItem.qty === 0 ? 'text-red-600' : 'text-primary'}`}>{editingSuggestiveItem.qty === 0 ? 'Out of Stock' : `${editingSuggestiveItem.qty} units`}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="p-8 bg-slate-50 border-t border-slate-100 flex justify-between">
+                    <button
+                      onClick={() => { updateStockItem(editingSuggestiveItem.id, { isSuggestiveSale: false }); setEditingSuggestiveItem(null); }}
+                      className="px-6 py-4 bg-white border border-red-200 text-red-600 font-black text-xs rounded-2xl hover:bg-red-50 transition-all uppercase tracking-widest flex items-center gap-2"
+                    >
+                      <span className="material-symbols-outlined text-sm">delete</span>
+                      Remove from Suggestive
+                    </button>
+                    <button
+                      disabled={!editSugName.trim()}
+                      onClick={() => {
+                        updateStockItem(editingSuggestiveItem.id, {
+                          name: editSugName.trim(),
+                          price: parseFloat(editSugPrice) || editingSuggestiveItem.price,
+                          category: editSugCategory,
+                        });
+                        setEditSugSaveSuccess(true);
+                        setTimeout(() => { setEditingSuggestiveItem(null); setEditSugSaveSuccess(false); }, 1200);
+                      }}
+                      className="px-8 py-4 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Save Changes
+                    </button>
+                  </div>
+                </>
+              )}
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Add Product Modal */}
       <AnimatePresence>

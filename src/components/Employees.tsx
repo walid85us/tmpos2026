@@ -73,6 +73,8 @@ const storeModuleFeatures = [
   { id: 'widgets', name: 'Widgets' },
   { id: 'settings', name: 'Store Settings' },
   { id: 'support', name: 'Support Center' },
+  { id: 'warranties', name: 'Warranty Management' },
+  { id: 'suggestive_sales', name: 'Suggestive Sales' },
 ];
 
 const storeAdminFeatures = [

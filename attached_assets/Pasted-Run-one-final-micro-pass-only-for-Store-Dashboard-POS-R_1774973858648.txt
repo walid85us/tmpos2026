@@ -1,0 +1,162 @@
+Run one final micro-pass only for:
+Store Dashboard & POS Refinement – Role Integrity, Warranty Management Maturity, Suggestive Sales Admin, Inventory Stock Visibility, and Permissions Matrix Completion
+
+This is still inside the current workstream.
+Do not start any new workstream.
+Do not redesign the UI.
+Do not broaden scope beyond the items listed below.
+Preserve the current design baseline exactly.
+Preserve auth, preview mode, RBAC, lifecycle gating, plan entitlement gating, and platform/store hierarchy.
+
+Act as:
+Principal Repair/POS Product Architect
++ Principal Warranty Workflow Architect
++ Principal Inventory Workflow Architect
++ Principal RBAC / Access-Control Architect
++ Principal React/TypeScript Engineer
++ Principal UX Workflow Designer
++ Principal QA Auditor
++ Principal Side Auditor & Systems Thinker
+
+You must also:
+- act as a side auditor and systems thinker
+- preserve all already working flows
+- avoid shallow fixes
+- make this a narrow completion pass
+- do not regress the currently working POS/dashboard flows
+
+Mandatory research step before coding:
+1. Re-read replit.md fully and preserve the existing architecture, gating, RBAC, and design baseline.
+2. Re-read Ref.txt fully.
+3. Re-read the warranty references already provided earlier.
+4. Browse the internet for comparable modern repair/POS workflows and warranty-management patterns from similar systems before implementing enhancements.
+5. Focus research on practical workflow ideas, not visual redesign.
+6. Prefer ideas that fit the current app structure without broad rebuild.
+
+For internet research, study similar systems/workflows such as:
+- repair shop POS / warranty management systems
+- retail POS refund / warranty / order-management flows
+- service warranty claim lifecycle patterns
+- inventory-driven suggestive sales / upsell management patterns
+
+Research goal:
+Find missing workflow features that are common in competitive systems and improve this project only where it materially strengthens the current Warranty Management environment without causing scope explosion.
+
+Required fixes:
+
+1) Switch User must enforce real switched-user permissions
+Current issue:
+- users can be switched successfully
+- but after switch, all users still appear to have full access
+
+Fix:
+- after Switch User, effective permissions/access must reflect the switched user’s actual role and access rules
+- switched user must not inherit full-access behavior unless their role truly has it
+- role-aware dashboard, POS actions, and store permissions must all respect the switched user context
+- preserve preview/local QA usability, but do not bypass actual role enforcement
+- this should behave like a real operator switch, not just a cosmetic active-user label change
+
+2) Warranty Management must be made more complete and market-competitive
+Current issue:
+- Warranty Management now exists and works
+- but it needs stronger workflow maturity to match competitive systems
+
+Using the internet research plus the provided warranty references, refine Warranty Management in a narrow but meaningful way.
+
+Goals:
+- improve operational completeness, not visual redesign
+- add only high-value features that fit the current system and data model
+
+Expected enhancement areas:
+- stronger claim lifecycle/status handling
+- clearer distinction between service warranty and part warranty where feasible
+- better claim detail/history visibility
+- stronger notes/audit trail around claim actions
+- clearer claim decision/update actions
+- better management queue usability
+- any missing high-value workflow commonly seen in comparable systems, as long as it fits this app cleanly
+
+Important:
+- do not explode scope into a huge enterprise rebuild
+- do not fake backend/live integrations
+- stay honest with local/mock workflow where needed
+- preserve the current management surface and improve it
+
+3) Suggestive Sales admin refinement
+Current issue:
+- basic Suggestive Sales maintenance exists
+- but management actions are incomplete
+
+Fix:
+- In the Suggestive Sales tab, add:
+  - delete/remove action
+  - keep enable/disable toggle
+  - clicking/selecting an item should open a popup/modal item detail editor
+- the popup should allow editing the relevant item details without leaving context
+- preserve the current inventory-linked maintenance path
+- do not redesign the inventory module
+
+4) Out-of-stock visibility in Inventory must be clearer
+Current issue:
+- out-of-stock is clearer in POS than in Inventory
+- inventory section needs clearer stock-state visibility
+
+Fix:
+- in Inventory views/listing/details relevant to this flow, make out-of-stock state visually and textually clear
+- items with zero stock must remain visible in inventory and clearly indicate out-of-stock
+- do not hide them
+- preserve current design baseline while improving clarity
+
+5) Add Warranty Management and Suggestive Sales to Store Permissions Matrix
+Current issue:
+- these capabilities need to be assignable by role
+
+Fix:
+- extend the Store Permissions Matrix so Warranty Management and Suggestive Sales are proper assignable access-controlled capabilities
+- connect these permissions to the relevant UI/module access
+- preserve existing permission architecture and patterns
+- do not create inconsistent one-off access logic
+
+6) Preserve all already working behavior
+Do not break:
+- Quick Add Stock permission rules
+- approval-to-inventory path
+- direct Add to Inventory
+- POS Quick Add Stock visibility
+- exact SKU/barcode lookup
+- dashboard Scan QR aligned to inventory
+- POS Add Item search-first behavior
+- stock-count enforcement and merge behavior
+- finalize sale with discount + points
+- points deduction timing
+- payment allocation starting empty
+- cash rounding exact reset
+- card exactness
+- POS draft persistence across navigation
+- New Sale reset button
+- Hold Orders popup flow
+- customer sync
+- Refund flow
+- Orders search/detail flow
+- Print Label
+- Quick Intake handoff
+- Special Part Order
+- Deposit
+- Add Method improvements already working
+
+7) Output format after implementation
+After implementation, return only:
+1. What changed
+2. Exact files changed in this pass
+3. How Switch User permission enforcement now works
+4. What Warranty Management improvements were added from the research/reference pass
+5. How Suggestive Sales management now works
+6. How Warranty Management and Suggestive Sales were added to the permissions matrix
+7. Any known limitations still intentionally left unchanged
+8. A short implementation verification summary
+
+Important:
+- Do not claim final QA closure on behalf of the user
+- Do not mark the workstream complete yet
+- The user will perform the final manual QA
+- Stop after the report and wait for user testing feedback

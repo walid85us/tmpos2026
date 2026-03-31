@@ -11,6 +11,7 @@ import {
 } from '../types';
 import { useStoreLocalState, SEED_POS_OPERATORS, type CompletedOrder, type CompletedOrderItem } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
+import { tenantRoles } from '../context/accessConfig';
 import ContextualHelp from './ContextualHelp';
 
 const TAX_RATE = 0.0825;
@@ -30,12 +31,24 @@ export const POS: React.FC = () => {
   const { canAccess, session } = useAccess();
   const { customers: sharedCustomers, addCustomer, updateCustomer, stockItems: sharedStockItems, addStockItem, updateStockItem: updateStockItemCtx, approvedStockItems, pendingStockItems, heldOrders, addHeldOrder, removeHeldOrder, suggestiveSalesItems, addSuggestiveSaleItem, removeSuggestiveSaleItem, draftCart, setDraftCart, clearDraftCart, completedOrders, addCompletedOrder, updateCompletedOrder, refundRecords, addRefundRecord, warrantyClaims, addWarrantyClaim, posOperator, setPosOperator } = useStoreLocalState();
   const derivedSuggestiveItems = approvedStockItems.filter(s => s.isSuggestiveSale).map(s => ({ id: s.id, name: s.name, price: s.price }));
-  const hasInventoryPermission = (() => {
-    if (!session) return false;
-    if (session.role === 'system_owner' || session.role === 'store_owner' || session.role === 'manager') return true;
-    if (session.role === 'technician') return true;
-    return false;
+  const OPERATOR_ROLE_MAP: Record<string, string> = { 'Manager': 'manager', 'Sales Associate': 'sales_staff', 'Technician': 'technician', 'Store Owner': 'store_owner' };
+  const effectiveRole = posOperator ? (OPERATOR_ROLE_MAP[posOperator.role] || 'sales_staff') : (session?.role || '');
+  const effectivePermissions: string[] = (() => {
+    const role = tenantRoles.find(r => r.id === effectiveRole);
+    if (!role) return [];
+    const perms = role.permissions;
+    if (Array.isArray(perms)) {
+      return perms as string[];
+    }
+    return Object.keys(perms);
   })();
+  const hasEffectivePerm = (perm: string) => effectivePermissions.includes('all') || effectivePermissions.includes(perm);
+  const isOwnerOrManager = effectiveRole === 'system_owner' || effectiveRole === 'store_owner' || effectiveRole === 'manager';
+  const hasInventoryPermission = hasEffectivePerm('inventory');
+  const canProcessRefund = isOwnerOrManager;
+  const canFileWarranty = hasEffectivePerm('warranties');
+  const canAddStock = hasInventoryPermission;
+  const canManageSuggestive = hasEffectivePerm('suggestive_sales');
   const [cart, setCart] = useState<CartItem[]>(draftCart.cart);
   const [payments, setPayments] = useState<PaymentMethod[]>(draftCart.payments);
   const [discounts, setDiscounts] = useState<Discount[]>(draftCart.discounts);
@@ -586,7 +599,7 @@ export const POS: React.FC = () => {
               <div className="w-8 h-8 bg-teal-600 rounded-full flex items-center justify-center text-white text-xs font-black">{posOperator.name.split(' ').map(n => n[0]).join('')}</div>
               <div className="text-left">
                 <p className="text-[10px] font-black text-teal-800 uppercase tracking-widest leading-none">{posOperator.name}</p>
-                <p className="text-[9px] font-bold text-teal-500">{posOperator.role}</p>
+                <p className="text-[9px] font-bold text-teal-500">{posOperator.role}{!isOwnerOrManager && ' · Limited Access'}</p>
               </div>
             </div>
           )}
@@ -936,15 +949,15 @@ export const POS: React.FC = () => {
                     <span className="material-symbols-outlined text-primary group-hover:scale-110 transition-transform">switch_account</span>
                     <span className="text-[10px] font-bold uppercase tracking-tighter">Switch User</span>
                   </button>
-                  <button onClick={() => setIsRefundModalOpen(true)} className="bg-slate-100 hover:bg-slate-200 rounded-xl flex flex-col items-center justify-center gap-2 transition-all group">
+                  <button onClick={() => canProcessRefund && setIsRefundModalOpen(true)} className={`rounded-xl flex flex-col items-center justify-center gap-2 transition-all group ${canProcessRefund ? 'bg-slate-100 hover:bg-slate-200' : 'bg-slate-50 opacity-40 cursor-not-allowed'}`} title={!canProcessRefund ? 'Refunds require Manager or Owner access' : ''}>
                     <span className="material-symbols-outlined text-primary group-hover:scale-110 transition-transform">keyboard_return</span>
                     <span className="text-[10px] font-bold uppercase tracking-tighter">Refund</span>
                   </button>
-                  <button onClick={() => setIsAddInventoryModalOpen(true)} className="bg-slate-100 hover:bg-slate-200 rounded-xl flex flex-col items-center justify-center gap-2 transition-all group">
+                  <button onClick={() => canAddStock && setIsAddInventoryModalOpen(true)} className={`rounded-xl flex flex-col items-center justify-center gap-2 transition-all group ${canAddStock ? 'bg-slate-100 hover:bg-slate-200' : 'bg-slate-50 opacity-40 cursor-not-allowed'}`} title={!canAddStock ? 'Adding stock requires Inventory access' : ''}>
                     <span className="material-symbols-outlined text-primary group-hover:scale-110 transition-transform">add_business</span>
                     <span className="text-[10px] font-bold uppercase tracking-tighter">Add Stock</span>
                   </button>
-                  <button onClick={() => setIsWarrantyModalOpen(true)} className="bg-slate-100 hover:bg-slate-200 rounded-xl flex flex-col items-center justify-center gap-2 transition-all group">
+                  <button onClick={() => canFileWarranty && setIsWarrantyModalOpen(true)} className={`rounded-xl flex flex-col items-center justify-center gap-2 transition-all group ${canFileWarranty ? 'bg-slate-100 hover:bg-slate-200' : 'bg-slate-50 opacity-40 cursor-not-allowed'}`} title={!canFileWarranty ? 'Warranty claims require Manager, Owner, or Technician access' : ''}>
                     <span className="material-symbols-outlined text-primary group-hover:scale-110 transition-transform">verified_user</span>
                     <span className="text-[10px] font-bold uppercase tracking-tighter">Warranty</span>
                   </button>

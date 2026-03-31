@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState, type WarrantyClaimRecord } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
@@ -6,14 +6,14 @@ import PageShell from './PageShell';
 
 type ClaimStatus = WarrantyClaimRecord['status'];
 
-const STATUS_CONFIG: Record<ClaimStatus, { label: string; color: string; icon: string }> = {
-  'Submitted': { label: 'Submitted', color: 'bg-blue-100 text-blue-700 border-blue-200', icon: 'upload_file' },
-  'Under Review': { label: 'Under Review', color: 'bg-amber-100 text-amber-700 border-amber-200', icon: 'pending' },
-  'Approved': { label: 'Approved', color: 'bg-lime-100 text-lime-700 border-lime-200', icon: 'check_circle' },
-  'Rejected': { label: 'Rejected', color: 'bg-rose-100 text-rose-700 border-rose-200', icon: 'cancel' },
-  'In Repair': { label: 'In Repair', color: 'bg-indigo-100 text-indigo-700 border-indigo-200', icon: 'build' },
-  'Replacement Pending': { label: 'Replacement Pending', color: 'bg-purple-100 text-purple-700 border-purple-200', icon: 'swap_horiz' },
-  'Completed': { label: 'Completed', color: 'bg-emerald-100 text-emerald-700 border-emerald-200', icon: 'task_alt' },
+const STATUS_CONFIG: Record<ClaimStatus, { label: string; color: string; icon: string; order: number }> = {
+  'Submitted': { label: 'Submitted', color: 'bg-blue-100 text-blue-700 border-blue-200', icon: 'upload_file', order: 1 },
+  'Under Review': { label: 'Under Review', color: 'bg-amber-100 text-amber-700 border-amber-200', icon: 'pending', order: 2 },
+  'Approved': { label: 'Approved', color: 'bg-lime-100 text-lime-700 border-lime-200', icon: 'check_circle', order: 3 },
+  'Rejected': { label: 'Rejected', color: 'bg-rose-100 text-rose-700 border-rose-200', icon: 'cancel', order: 6 },
+  'In Repair': { label: 'In Repair', color: 'bg-indigo-100 text-indigo-700 border-indigo-200', icon: 'build', order: 4 },
+  'Replacement Pending': { label: 'Replacement Pending', color: 'bg-purple-100 text-purple-700 border-purple-200', icon: 'swap_horiz', order: 5 },
+  'Completed': { label: 'Completed', color: 'bg-emerald-100 text-emerald-700 border-emerald-200', icon: 'task_alt', order: 7 },
 };
 
 const ALLOWED_TRANSITIONS: Record<ClaimStatus, ClaimStatus[]> = {
@@ -26,6 +26,43 @@ const ALLOWED_TRANSITIONS: Record<ClaimStatus, ClaimStatus[]> = {
   'Completed': [],
 };
 
+const parseWarrantyPeriod = (period: string): number => {
+  const match = period.match(/(\d+)\s*(day|month|year)/i);
+  if (!match) return 0;
+  const num = parseInt(match[1]);
+  const unit = match[2].toLowerCase();
+  if (unit.startsWith('year')) return num * 365;
+  if (unit.startsWith('month')) return num * 30;
+  return num;
+};
+
+const getWarrantyExpiry = (originalDate: string, warrantyPeriod: string): Date => {
+  const days = parseWarrantyPeriod(warrantyPeriod);
+  const d = new Date(originalDate);
+  d.setDate(d.getDate() + days);
+  return d;
+};
+
+const isWarrantyExpired = (originalDate: string, warrantyPeriod: string): boolean => {
+  return getWarrantyExpiry(originalDate, warrantyPeriod) < new Date();
+};
+
+const getClaimAge = (createdAt: string): number => {
+  return Math.floor((Date.now() - new Date(createdAt).getTime()) / (1000 * 60 * 60 * 24));
+};
+
+const getClaimPriority = (claim: WarrantyClaimRecord): { level: 'high' | 'medium' | 'low'; label: string; color: string } => {
+  const age = getClaimAge(claim.createdAt);
+  const isExpiring = (() => {
+    const expiry = getWarrantyExpiry(claim.originalDate, claim.warrantyPeriod);
+    const daysLeft = Math.floor((expiry.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+    return daysLeft <= 7 && daysLeft >= 0;
+  })();
+  if (age > 7 || isExpiring) return { level: 'high', label: 'High', color: 'bg-red-100 text-red-700 border-red-200' };
+  if (age > 3) return { level: 'medium', label: 'Medium', color: 'bg-amber-100 text-amber-700 border-amber-200' };
+  return { level: 'low', label: 'Normal', color: 'bg-slate-100 text-slate-600 border-slate-200' };
+};
+
 const WarrantyManagement: React.FC = () => {
   const { warrantyClaims, updateWarrantyClaim, completedOrders } = useStoreLocalState();
   const { session } = useAccess();
@@ -34,39 +71,54 @@ const WarrantyManagement: React.FC = () => {
   const [typeFilter, setTypeFilter] = useState<string>('all');
   const [selectedClaim, setSelectedClaim] = useState<WarrantyClaimRecord | null>(null);
   const [transitionNote, setTransitionNote] = useState('');
+  const [sortBy, setSortBy] = useState<'newest' | 'oldest' | 'priority'>('newest');
 
   const canManage = session?.role === 'system_owner' || session?.role === 'store_owner' || session?.role === 'manager';
 
-  const filteredClaims = warrantyClaims.filter(c => {
-    if (statusFilter !== 'all' && c.status !== statusFilter) return false;
-    if (typeFilter !== 'all' && c.warrantyType !== typeFilter) return false;
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      return c.ticketNumber.toLowerCase().includes(q) || c.invoiceNumber.toLowerCase().includes(q) || c.customerName.toLowerCase().includes(q) || c.reason.toLowerCase().includes(q);
-    }
-    return true;
-  });
+  const filteredClaims = useMemo(() => {
+    let list = warrantyClaims.filter(c => {
+      if (statusFilter !== 'all' && c.status !== statusFilter) return false;
+      if (typeFilter !== 'all' && c.warrantyType !== typeFilter) return false;
+      if (search.trim()) {
+        const q = search.toLowerCase();
+        return c.ticketNumber.toLowerCase().includes(q) || c.invoiceNumber.toLowerCase().includes(q) || c.customerName.toLowerCase().includes(q) || c.reason.toLowerCase().includes(q);
+      }
+      return true;
+    });
+    if (sortBy === 'newest') list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    else if (sortBy === 'oldest') list.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    else list.sort((a, b) => {
+      const pMap = { high: 0, medium: 1, low: 2 };
+      return pMap[getClaimPriority(a).level] - pMap[getClaimPriority(b).level];
+    });
+    return list;
+  }, [warrantyClaims, statusFilter, typeFilter, search, sortBy]);
 
   const handleStatusTransition = (claim: WarrantyClaimRecord, newStatus: ClaimStatus) => {
     const operatorName = session?.name || session?.email || 'Unknown';
-    updateWarrantyClaim(claim.id, {
-      status: newStatus,
-      statusHistory: [
-        ...claim.statusHistory,
-        { status: newStatus, date: new Date().toISOString(), by: operatorName, note: transitionNote || undefined },
-      ],
-    });
-    setSelectedClaim({ ...claim, status: newStatus, statusHistory: [...claim.statusHistory, { status: newStatus, date: new Date().toISOString(), by: operatorName, note: transitionNote || undefined }] });
+    const newHistory = [
+      ...claim.statusHistory,
+      { status: newStatus, date: new Date().toISOString(), by: operatorName, note: transitionNote || undefined },
+    ];
+    updateWarrantyClaim(claim.id, { status: newStatus, statusHistory: newHistory });
+    setSelectedClaim({ ...claim, status: newStatus, statusHistory: newHistory });
     setTransitionNote('');
   };
 
   const activeCount = warrantyClaims.filter(c => !['Completed', 'Rejected'].includes(c.status)).length;
+  const awaitingReview = warrantyClaims.filter(c => c.status === 'Submitted' || c.status === 'Under Review').length;
+  const inProgress = warrantyClaims.filter(c => c.status === 'In Repair' || c.status === 'Replacement Pending').length;
+  const resolvedCount = warrantyClaims.filter(c => c.status === 'Completed').length;
   const originalOrder = selectedClaim ? completedOrders.find(o => o.id === selectedClaim.originalOrderId) : null;
+  const selectedExpired = selectedClaim ? isWarrantyExpired(selectedClaim.originalDate, selectedClaim.warrantyPeriod) : false;
+  const selectedExpiry = selectedClaim ? getWarrantyExpiry(selectedClaim.originalDate, selectedClaim.warrantyPeriod) : null;
+  const selectedPriority = selectedClaim ? getClaimPriority(selectedClaim) : null;
+  const selectedAge = selectedClaim ? getClaimAge(selectedClaim.createdAt) : 0;
 
   return (
     <PageShell title="Warranty Management">
       <div className="space-y-6">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
           <div className="bg-white/80 backdrop-blur-xl rounded-[2rem] p-5 ghost-border">
             <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Total Claims</p>
             <p className="text-3xl font-black text-primary">{warrantyClaims.length}</p>
@@ -76,12 +128,16 @@ const WarrantyManagement: React.FC = () => {
             <p className="text-3xl font-black text-amber-600">{activeCount}</p>
           </div>
           <div className="bg-white/80 backdrop-blur-xl rounded-[2rem] p-5 ghost-border">
-            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Service Claims</p>
-            <p className="text-3xl font-black text-indigo-600">{warrantyClaims.filter(c => c.warrantyType === 'service').length}</p>
+            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Awaiting Review</p>
+            <p className="text-3xl font-black text-blue-600">{awaitingReview}</p>
           </div>
           <div className="bg-white/80 backdrop-blur-xl rounded-[2rem] p-5 ghost-border">
-            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Part Claims</p>
-            <p className="text-3xl font-black text-teal-600">{warrantyClaims.filter(c => c.warrantyType === 'part').length}</p>
+            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">In Progress</p>
+            <p className="text-3xl font-black text-indigo-600">{inProgress}</p>
+          </div>
+          <div className="bg-white/80 backdrop-blur-xl rounded-[2rem] p-5 ghost-border">
+            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Resolved</p>
+            <p className="text-3xl font-black text-emerald-600">{resolvedCount}</p>
           </div>
         </div>
 
@@ -116,6 +172,15 @@ const WarrantyManagement: React.FC = () => {
                 <option value="service">Service Warranty</option>
                 <option value="part">Part Warranty</option>
               </select>
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
+                className="px-5 py-3 bg-slate-50 border border-slate-200 rounded-2xl font-black text-xs uppercase tracking-widest"
+              >
+                <option value="newest">Newest First</option>
+                <option value="oldest">Oldest First</option>
+                <option value="priority">Priority</option>
+              </select>
             </div>
           </div>
 
@@ -129,6 +194,9 @@ const WarrantyManagement: React.FC = () => {
             ) : (
               filteredClaims.map(claim => {
                 const cfg = STATUS_CONFIG[claim.status];
+                const priority = getClaimPriority(claim);
+                const age = getClaimAge(claim.createdAt);
+                const expired = isWarrantyExpired(claim.originalDate, claim.warrantyPeriod);
                 return (
                   <button
                     key={claim.id}
@@ -139,18 +207,26 @@ const WarrantyManagement: React.FC = () => {
                       <span className="material-symbols-outlined text-lg">{cfg.icon}</span>
                     </div>
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 mb-0.5">
+                      <div className="flex items-center gap-2 mb-0.5 flex-wrap">
                         <p className="font-black text-sm text-primary">{claim.ticketNumber}</p>
                         <span className={`text-[9px] font-black px-2 py-0.5 rounded-lg border uppercase tracking-wider ${cfg.color}`}>{cfg.label}</span>
                         <span className={`text-[9px] font-black px-2 py-0.5 rounded-lg uppercase tracking-wider ${claim.warrantyType === 'service' ? 'bg-indigo-50 text-indigo-600 border border-indigo-200' : 'bg-teal-50 text-teal-600 border border-teal-200'}`}>
                           {claim.warrantyType}
                         </span>
+                        {!['Completed', 'Rejected'].includes(claim.status) && priority.level !== 'low' && (
+                          <span className={`text-[9px] font-black px-2 py-0.5 rounded-lg border uppercase tracking-wider ${priority.color}`}>
+                            {priority.label}
+                          </span>
+                        )}
+                        {expired && !['Completed', 'Rejected'].includes(claim.status) && (
+                          <span className="text-[9px] font-black px-2 py-0.5 rounded-lg border bg-red-50 text-red-600 border-red-200 uppercase tracking-wider">Expired</span>
+                        )}
                       </div>
                       <p className="text-xs text-slate-500 truncate">{claim.itemName} — {claim.customerName}</p>
                     </div>
                     <div className="text-right shrink-0">
                       <p className="text-xs font-bold text-slate-400">{claim.invoiceNumber}</p>
-                      <p className="text-[10px] text-slate-300">{new Date(claim.createdAt).toLocaleDateString()}</p>
+                      <p className="text-[10px] text-slate-300">{age === 0 ? 'Today' : `${age}d ago`}</p>
                     </div>
                     <span className="material-symbols-outlined text-slate-300">chevron_right</span>
                   </button>
@@ -177,14 +253,19 @@ const WarrantyManagement: React.FC = () => {
             >
               <div className="p-8 border-b border-slate-100 flex justify-between items-start shrink-0">
                 <div>
-                  <div className="flex items-center gap-3 mb-1">
+                  <div className="flex items-center gap-3 mb-1 flex-wrap">
                     <h3 className="text-2xl font-black text-primary tracking-tight">{selectedClaim.ticketNumber}</h3>
                     {(() => {
                       const cfg = STATUS_CONFIG[selectedClaim.status];
                       return <span className={`text-[10px] font-black px-3 py-1 rounded-lg border uppercase tracking-wider ${cfg.color}`}>{cfg.label}</span>;
                     })()}
+                    {selectedPriority && !['Completed', 'Rejected'].includes(selectedClaim.status) && (
+                      <span className={`text-[10px] font-black px-3 py-1 rounded-lg border uppercase tracking-wider ${selectedPriority.color}`}>
+                        {selectedPriority.label} Priority
+                      </span>
+                    )}
                   </div>
-                  <p className="text-sm text-slate-500">{selectedClaim.warrantyType === 'service' ? 'Service Warranty' : 'Part Warranty'} Claim</p>
+                  <p className="text-sm text-slate-500">{selectedClaim.warrantyType === 'service' ? 'Service Warranty' : 'Part Warranty'} Claim · {selectedAge === 0 ? 'Filed today' : `Filed ${selectedAge} day${selectedAge !== 1 ? 's' : ''} ago`}</p>
                 </div>
                 <button onClick={() => setSelectedClaim(null)} className="w-10 h-10 rounded-full hover:bg-slate-100 flex items-center justify-center transition-colors">
                   <span className="material-symbols-outlined text-slate-400">close</span>
@@ -212,12 +293,27 @@ const WarrantyManagement: React.FC = () => {
                   <div className="bg-slate-50 rounded-2xl p-4">
                     <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Warranty Period</p>
                     <p className="font-bold text-sm text-primary">{selectedClaim.warrantyPeriod}</p>
+                    {selectedExpiry && (
+                      <p className={`text-[10px] font-bold mt-0.5 ${selectedExpired ? 'text-red-500' : 'text-lime-600'}`}>
+                        {selectedExpired ? 'Expired ' : 'Expires '}{selectedExpiry.toLocaleDateString()}
+                      </p>
+                    )}
                   </div>
                   <div className="bg-slate-50 rounded-2xl p-4">
                     <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Filed By</p>
                     <p className="font-bold text-sm text-primary">{selectedClaim.processedBy}</p>
                   </div>
                 </div>
+
+                {selectedExpired && !['Completed', 'Rejected'].includes(selectedClaim.status) && (
+                  <div className="bg-red-50 rounded-2xl p-4 border border-red-200 flex items-center gap-3">
+                    <span className="material-symbols-outlined text-red-500">warning</span>
+                    <div>
+                      <p className="text-xs font-black text-red-700">Warranty Period Expired</p>
+                      <p className="text-[10px] text-red-600">This warranty expired on {selectedExpiry?.toLocaleDateString()}. Review carefully before approving — consider goodwill resolution or rejection with explanation.</p>
+                    </div>
+                  </div>
+                )}
 
                 <div className="bg-amber-50 rounded-2xl p-4 border border-amber-200">
                   <p className="text-[10px] font-black text-amber-600 uppercase tracking-widest mb-2">Claim Reason</p>
@@ -254,7 +350,7 @@ const WarrantyManagement: React.FC = () => {
                 )}
 
                 <div>
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Status History</p>
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Status History & Audit Trail</p>
                   <div className="space-y-3">
                     {selectedClaim.statusHistory.map((entry, i) => {
                       const isLast = i === selectedClaim.statusHistory.length - 1;
@@ -264,13 +360,17 @@ const WarrantyManagement: React.FC = () => {
                             <div className={`w-3 h-3 rounded-full ${isLast ? 'bg-primary' : 'bg-slate-300'}`} />
                             {i < selectedClaim.statusHistory.length - 1 && <div className="w-0.5 flex-1 bg-slate-200" />}
                           </div>
-                          <div className="pb-3">
+                          <div className="pb-3 flex-1">
                             <div className="flex items-center gap-2">
                               <p className={`text-xs font-black ${isLast ? 'text-primary' : 'text-slate-500'}`}>{entry.status}</p>
                               <p className="text-[10px] text-slate-400">{new Date(entry.date).toLocaleString()}</p>
                             </div>
                             <p className="text-[10px] text-slate-400">by {entry.by}</p>
-                            {entry.note && <p className="text-xs text-slate-600 mt-0.5 bg-slate-50 rounded-lg px-2 py-1">{entry.note}</p>}
+                            {entry.note && (
+                              <div className="mt-1 bg-slate-50 rounded-lg px-3 py-2 border border-slate-100">
+                                <p className="text-xs text-slate-600">{entry.note}</p>
+                              </div>
+                            )}
                           </div>
                         </div>
                       );
@@ -283,14 +383,26 @@ const WarrantyManagement: React.FC = () => {
                     <p className="text-[10px] font-black text-teal-600 uppercase tracking-widest mb-3">Update Claim Status</p>
                     <div className="space-y-3">
                       <div>
-                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Note (optional)</label>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Resolution Note {selectedClaim.status === 'Under Review' ? '(recommended)' : '(optional)'}</label>
                         <textarea
                           value={transitionNote}
                           onChange={(e) => setTransitionNote(e.target.value)}
                           className="w-full bg-white border border-slate-200 rounded-xl px-4 py-3 text-sm font-medium min-h-[60px] focus:ring-2 focus:ring-primary/20 focus:outline-none"
-                          placeholder="Add a note about this decision..."
+                          placeholder={
+                            selectedClaim.status === 'Under Review'
+                              ? 'Describe review findings, approval reason, or rejection rationale...'
+                              : selectedClaim.status === 'Approved'
+                              ? 'Note the repair plan or replacement details...'
+                              : 'Add a note about this decision...'
+                          }
                         />
                       </div>
+                      {selectedClaim.status === 'Under Review' && !transitionNote.trim() && (
+                        <p className="text-[10px] text-amber-600 font-bold flex items-center gap-1">
+                          <span className="material-symbols-outlined text-[10px]">info</span>
+                          Adding a review note is recommended for audit trail completeness
+                        </p>
+                      )}
                       <div className="flex flex-wrap gap-2">
                         {ALLOWED_TRANSITIONS[selectedClaim.status].map(nextStatus => {
                           const cfg = STATUS_CONFIG[nextStatus];
