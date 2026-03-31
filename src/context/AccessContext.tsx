@@ -242,7 +242,7 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       isPreviewModeEnabled,
       enablePreviewMode: () => setIsPreviewModeEnabled(true),
       disablePreviewMode: () => { setIsPreviewModeEnabled(false); setPosOperatorRole(null); },
-      setPreviewSession,
+      setPreviewSession: (s: Session) => { setPreviewSession(s); setPosOperatorRole(null); },
       setPreviewTenant,
       getAvailableRoles,
       addPlatformRole,

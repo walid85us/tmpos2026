@@ -1,0 +1,160 @@
+Run one narrow critical correction pass only for:
+Store Dashboard & POS Refinement – Global Role Sync, Permission Consistency, and Warranty Repair-to-POS Completion
+
+This is still inside the current workstream.
+Do not start any new workstream.
+Do not redesign the UI.
+Do not broaden scope beyond the issues listed below.
+Preserve the current design baseline exactly.
+Preserve auth, preview mode, RBAC, lifecycle gating, plan entitlement gating, and platform/store hierarchy.
+
+Act as:
+Principal RBAC / Access-Control Architect
++ Principal Repair/POS Product Architect
++ Principal Warranty Workflow Architect
++ Principal Store Operations Workflow Designer
++ Principal React/TypeScript Engineer
++ Principal UX Workflow Designer
++ Principal QA Auditor
++ Principal Side Auditor & Systems Thinker
+
+This is a narrow integrity correction pass.
+The goal is to fix:
+- preview-mode role sync across the whole app
+- permission consistency after role/user changes
+- warranty repair creation and repaired-item return-to-POS flow
+
+Non-negotiable rule:
+There must be one effective active store-user context at a time.
+That active context must drive:
+- side menu visibility
+- dashboard actions
+- POS role/actions
+- Orders history actions
+- Warranty / Refund action access
+- any role-gated workflow inside the store app
+
+No stale manager context.
+No preview-mode desync.
+No POS staying on an old role after preview-mode change.
+No entry-point permission bypasses.
+
+Required fixes:
+
+1) Fix global preview-mode role sync across the whole app
+Current bug:
+- switching role from preview mode does not fully sync across the system
+- side menu may remain stale
+- POS can still behave as manager even after preview role changed to sales or technician
+
+Fix:
+- when preview mode role is changed, the effective active store-user context must refresh globally
+- side menu must refresh immediately
+- dashboard quick actions must refresh immediately
+- POS permissions/buttons must refresh immediately
+- all role-gated modules/actions must reflect the newly selected preview role
+- no stale cached role should survive page navigation
+- switching via preview mode and switching via POS Switch User must both flow through the same effective access/session logic where appropriate
+
+2) Keep POS aligned to the current active role
+Current bug:
+- preview mode may say sales, but POS still acts like manager
+
+Fix:
+- POS must always use the current effective active role/user context
+- whatever role is currently active in preview/store session must be the role POS uses
+- role label, quick actions, permission-gated buttons, and available flows in POS must match that active role
+- do not let POS keep an older effective role after navigation
+
+3) Re-validate permission consistency after role sync
+Current risk:
+- warranty/refund/action permission testing is blocked until global role sync is fixed
+- cross-entry-point bypasses may still exist
+
+Fix:
+- after role sync is corrected, re-audit permission gates for:
+  - Warranty Claim
+  - Refund
+  - Add Stock
+  - relevant POS quick actions near checkout
+  - Orders history actions
+  - order/invoice detail actions
+- each action must be governed by the same permission rule no matter where launched from
+- a role lacking permission must not bypass through Orders/history/detail views
+- a role with permission must get consistent access across dashboard and POS
+
+4) Fix warranty-to-repair creation properly
+Current bug:
+- warranty sent for repair is not completing the intended operational flow correctly
+
+Fix:
+- when a warranty claim is sent for repair, it must create/link a real repair-management work item
+- it must appear in Repair Management
+- user must be able to choose:
+  - assign to specific tech
+  - assign to anyone / general queue
+- that assignment behavior must follow the current store repair-management pattern
+- keep this coherent in local/mock mode if backend is not live
+
+5) Fix repaired warranty completion flow back into POS
+Current bug:
+- when tech completes the linked repair, the warranty syncs to completed in warranty
+- but there is no action to send/add it back to POS
+
+Fix:
+- once a warranty repair is completed, there must be a controlled action to send/add it to POS
+- POS flow must open with the warranty customer preselected
+- the repaired warranty return flow should be zero-charge to customer unless current logic explicitly requires something else
+- this should mirror the replacement-to-POS logic in terms of lifecycle safety
+- once sent to POS, track that state so it is not repeatedly re-sent by mistake
+- if user clicks New Sale before finishing, there must be a controlled way to reopen/send the pending repaired warranty flow again
+- once the repaired warranty POS transaction is finalized, the warranty claim must be marked completed/finalized in a way that prevents repeated resending
+- align repaired-item return-to-POS lifecycle with the replacement logic already working
+
+6) Preserve what is already working
+Do not break:
+- Switch User side-menu enforcement that is already improved
+- warranty replacement-to-POS flow
+- warranty replacement reopen + completion lock
+- Quick Add Stock permission rules
+- approval-to-inventory path
+- direct Add to Inventory
+- POS Quick Add Stock visibility
+- exact SKU/barcode lookup
+- dashboard Scan QR aligned to inventory
+- POS Add Item search-first behavior
+- stock-count enforcement and merge behavior
+- finalize sale with discount + points
+- points deduction timing
+- payment allocation starting empty
+- cash/card behavior currently working
+- POS draft persistence across navigation
+- New Sale reset button
+- Hold Orders popup flow
+- customer sync
+- Refund flow
+- Orders search/detail flow
+- Print Label
+- Quick Intake handoff
+- Suggestive Sales maintenance
+- Special Part Order
+- Deposit
+- Add Method improvements already working
+
+7) Output format after implementation
+After implementation, return only:
+1. What changed
+2. Exact files changed in this pass
+3. How preview-mode role sync now works globally
+4. How POS now stays aligned to the active role
+5. Which permission gates were re-unified after the role-sync fix
+6. How warranty-to-repair creation now works
+7. How repaired-warranty-to-POS flow now works
+8. Any known limitations still intentionally left unchanged
+9. A short implementation verification summary
+
+Important:
+- Do not claim final QA closure on behalf of the user
+- Do not mark the workstream complete yet
+- The user will perform the final manual QA
+- Stop after the report and wait for user testing feedback

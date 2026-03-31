@@ -188,10 +188,29 @@ const WarrantyManagement: React.FC = () => {
       customerName: claim.customerName,
       customerId: claim.customerId,
       originalPrice: originalItem?.unitPrice || 0,
+      type: 'replacement',
     });
     updateWarrantyClaim(claim.id, { replacementSentToPOS: true });
     setSelectedClaim({ ...claim, replacementSentToPOS: true });
     setReplacementSentToast(`Replacement for "${claim.itemName}" sent to POS`);
+    setTimeout(() => setReplacementSentToast(''), 3000);
+  };
+
+  const handleSendRepairReturnToPOS = (claim: WarrantyClaimRecord) => {
+    if (claim.repairReturnSentToPOS || !canManage) return;
+    const originalOrder = completedOrders.find(o => o.id === claim.originalOrderId);
+    const originalItem = originalOrder?.items.find(i => i.id === claim.itemId);
+    addPendingReplacement({
+      warrantyClaimId: claim.id,
+      itemName: claim.itemName,
+      customerName: claim.customerName,
+      customerId: claim.customerId,
+      originalPrice: originalItem?.unitPrice || 0,
+      type: 'repair_return',
+    });
+    updateWarrantyClaim(claim.id, { repairReturnSentToPOS: true });
+    setSelectedClaim({ ...claim, repairReturnSentToPOS: true });
+    setReplacementSentToast(`Repaired item "${claim.itemName}" sent to POS for return`);
     setTimeout(() => setReplacementSentToast(''), 3000);
   };
 
@@ -508,6 +527,40 @@ const WarrantyManagement: React.FC = () => {
                       )}
                     </div>
                     <p className="text-[10px] text-slate-500 mt-2 italic">Note: This is a simulated local flow. In production, POS integration would handle this automatically via backend.</p>
+                  </div>
+                )}
+
+                {canManage && selectedClaim.status === 'Completed' && selectedClaim.linkedRepairId && (
+                  <div className="bg-indigo-50 rounded-2xl p-5 border border-indigo-200">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <span className="material-symbols-outlined text-indigo-600">build</span>
+                        <div>
+                          <p className="text-xs font-black text-indigo-700">Repaired Item Return</p>
+                          <p className="text-[10px] text-indigo-600">
+                            {selectedClaim.repairReturnSentToPOS
+                              ? selectedClaim.repairReturnOrderId
+                                ? 'Repaired item has been returned to customer via POS.'
+                                : 'Repaired item sent to POS. Complete the zero-charge return there.'
+                              : 'Repair is complete. Send the repaired item to POS to process customer return.'}
+                          </p>
+                        </div>
+                      </div>
+                      {!selectedClaim.repairReturnSentToPOS && (
+                        <button
+                          onClick={() => handleSendRepairReturnToPOS(selectedClaim)}
+                          className="px-4 py-2.5 bg-indigo-600 text-white rounded-xl font-black text-xs uppercase tracking-widest hover:bg-indigo-700 transition-all active:scale-95 flex items-center gap-2"
+                        >
+                          <span className="material-symbols-outlined text-sm">send</span>Send to POS
+                        </button>
+                      )}
+                      {selectedClaim.repairReturnSentToPOS && (
+                        <span className="text-[10px] font-black text-indigo-600 bg-indigo-100 px-3 py-1.5 rounded-lg flex items-center gap-1">
+                          <span className="material-symbols-outlined text-xs">check</span>{selectedClaim.repairReturnOrderId ? 'Completed' : 'Sent'}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[10px] text-slate-500 mt-2 italic">Note: This is a simulated local flow. In production, repair return would integrate with backend automatically.</p>
                   </div>
                 )}
 

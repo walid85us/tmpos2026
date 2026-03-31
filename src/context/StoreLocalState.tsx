@@ -1,5 +1,6 @@
-import React, { createContext, useContext, useState, useCallback, useMemo } from 'react';
+import React, { createContext, useContext, useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { Customer, HeldOrder, CartItem, PaymentMethod, Discount, RepairTicket } from '../types';
+import { useAccess } from './AccessContext';
 
 export interface StockItem {
   id: string;
@@ -93,6 +94,8 @@ export interface WarrantyClaimRecord {
   assignedTechnicianName?: string;
   replacementSentToPOS?: boolean;
   replacementOrderId?: string;
+  repairReturnSentToPOS?: boolean;
+  repairReturnOrderId?: string;
 }
 
 export interface POSOperator {
@@ -133,8 +136,8 @@ interface StoreLocalStateContextType {
   warrantyRepairTickets: RepairTicket[];
   addWarrantyRepairTicket: (ticket: RepairTicket) => void;
   updateWarrantyRepairTicket: (id: string, updates: Partial<RepairTicket>) => void;
-  pendingReplacements: { warrantyClaimId: string; itemName: string; customerName: string; customerId: string; originalPrice: number }[];
-  addPendingReplacement: (r: { warrantyClaimId: string; itemName: string; customerName: string; customerId: string; originalPrice: number }) => void;
+  pendingReplacements: { warrantyClaimId: string; itemName: string; customerName: string; customerId: string; originalPrice: number; type?: 'replacement' | 'repair_return' }[];
+  addPendingReplacement: (r: { warrantyClaimId: string; itemName: string; customerName: string; customerId: string; originalPrice: number; type?: 'replacement' | 'repair_return' }) => void;
   removePendingReplacement: (warrantyClaimId: string) => void;
 }
 
@@ -263,6 +266,7 @@ const EMPTY_DRAFT: DraftCart = { cart: [], selectedCustomer: null, payments: [],
 const StoreLocalStateContext = createContext<StoreLocalStateContextType | null>(null);
 
 export function StoreLocalStateProvider({ children }: { children: React.ReactNode }) {
+  const { session } = useAccess();
   const [customers, setCustomers] = useState<Customer[]>(SEED_CUSTOMERS);
   const [stockItems, setStockItems] = useState<StockItem[]>(SEED_STOCK_ITEMS);
   const [heldOrders, setHeldOrders] = useState<HeldOrder[]>([]);
@@ -271,9 +275,17 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const [completedOrders, setCompletedOrders] = useState<CompletedOrder[]>(SEED_COMPLETED_ORDERS);
   const [refundRecords, setRefundRecords] = useState<RefundRecord[]>([]);
   const [warrantyClaims, setWarrantyClaims] = useState<WarrantyClaimRecord[]>(SEED_WARRANTY_CLAIMS);
-  const [posOperator, setPosOperatorState] = useState<POSOperator | null>(SEED_POS_OPERATORS[0]);
+  const [posOperator, setPosOperatorState] = useState<POSOperator | null>(null);
   const [warrantyRepairTickets, setWarrantyRepairTickets] = useState<RepairTicket[]>([]);
-  const [pendingReplacements, setPendingReplacements] = useState<{ warrantyClaimId: string; itemName: string; customerName: string; customerId: string; originalPrice: number }[]>([]);
+  const [pendingReplacements, setPendingReplacements] = useState<{ warrantyClaimId: string; itemName: string; customerName: string; customerId: string; originalPrice: number; type?: 'replacement' | 'repair_return' }[]>([]);
+
+  const prevSessionRoleRef = useRef(session?.role);
+  useEffect(() => {
+    if (prevSessionRoleRef.current !== undefined && session?.role !== prevSessionRoleRef.current) {
+      setPosOperatorState(null);
+    }
+    prevSessionRoleRef.current = session?.role;
+  }, [session?.role]);
 
   const addCustomer = useCallback((c: Customer) => {
     setCustomers(prev => [...prev, c]);
@@ -350,7 +362,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
     setWarrantyRepairTickets(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t));
   }, []);
 
-  const addPendingReplacement = useCallback((r: { warrantyClaimId: string; itemName: string; customerName: string; customerId: string; originalPrice: number }) => {
+  const addPendingReplacement = useCallback((r: { warrantyClaimId: string; itemName: string; customerName: string; customerId: string; originalPrice: number; type?: 'replacement' | 'repair_return' }) => {
     setPendingReplacements(prev => {
       if (prev.some(p => p.warrantyClaimId === r.warrantyClaimId)) return prev;
       return [...prev, r];

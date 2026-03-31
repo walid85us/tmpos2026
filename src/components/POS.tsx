@@ -28,11 +28,10 @@ const POINTS_VALUE_RATIO = 0.01;
 
 export const POS: React.FC = () => {
   const location = useLocation();
-  const { canAccess, session, setPosOperatorRole, effectiveRole: accessEffectiveRole } = useAccess();
+  const { canAccess, session, setPosOperatorRole, effectiveRole } = useAccess();
   const { customers: sharedCustomers, addCustomer, updateCustomer, stockItems: sharedStockItems, addStockItem, updateStockItem: updateStockItemCtx, approvedStockItems, pendingStockItems, heldOrders, addHeldOrder, removeHeldOrder, suggestiveSalesItems, addSuggestiveSaleItem, removeSuggestiveSaleItem, draftCart, setDraftCart, clearDraftCart, completedOrders, addCompletedOrder, updateCompletedOrder, refundRecords, addRefundRecord, warrantyClaims, addWarrantyClaim, updateWarrantyClaim: updateWarrantyClaimCtx, posOperator, setPosOperator, pendingReplacements, removePendingReplacement } = useStoreLocalState();
   const derivedSuggestiveItems = approvedStockItems.filter(s => s.isSuggestiveSale).map(s => ({ id: s.id, name: s.name, price: s.price }));
   const OPERATOR_ROLE_MAP: Record<string, string> = { 'Manager': 'manager', 'Sales Associate': 'sales_staff', 'Technician': 'technician', 'Store Owner': 'store_owner' };
-  const effectiveRole = posOperator ? (OPERATOR_ROLE_MAP[posOperator.role] || 'sales_staff') : (session?.role || '');
   const effectivePermissions: string[] = (() => {
     const role = tenantRoles.find(r => r.id === effectiveRole);
     if (!role) return [];
@@ -54,6 +53,7 @@ export const POS: React.FC = () => {
     const mappedRole = posOperator ? (OPERATOR_ROLE_MAP[posOperator.role] || 'sales_staff') : null;
     setPosOperatorRole(mappedRole);
   }, [posOperator, setPosOperatorRole]);
+
 
   const [cart, setCart] = useState<CartItem[]>(draftCart.cart);
   const [payments, setPayments] = useState<PaymentMethod[]>(draftCart.payments);
@@ -374,14 +374,15 @@ export const POS: React.FC = () => {
   const handleLoadReplacement = (replacement: typeof pendingReplacements[0]) => {
     const customer = sharedCustomers.find(c => c.id === replacement.customerId);
     if (customer) setSelectedCustomer(customer);
+    const isRepairReturn = replacement.type === 'repair_return';
     const replacementItem: CartItem = {
       id: `repl-${Date.now()}`,
-      name: `Warranty Replacement: ${replacement.itemName}`,
-      description: `Warranty replacement — zero charge`,
+      name: isRepairReturn ? `Warranty Repair Return: ${replacement.itemName}` : `Warranty Replacement: ${replacement.itemName}`,
+      description: isRepairReturn ? `Repaired warranty item return — zero charge` : `Warranty replacement — zero charge`,
       price: 0,
       qty: 1,
       type: 'product' as any,
-      icon: 'swap_horiz',
+      icon: isRepairReturn ? 'build' : 'swap_horiz',
     };
     setCart([replacementItem]);
     setActiveReplacementClaimId(replacement.warrantyClaimId);
@@ -456,14 +457,22 @@ export const POS: React.FC = () => {
     }
 
     if (activeReplacementClaimId) {
-      updateWarrantyClaimCtx(activeReplacementClaimId, {
-        status: 'Completed',
-        replacementOrderId: newOrder.id,
-        statusHistory: (() => {
-          const claim = warrantyClaims.find(wc => wc.id === activeReplacementClaimId);
-          return [...(claim?.statusHistory || []), { status: 'Completed', date: new Date().toISOString(), by: posOperator?.name || 'POS Operator', note: `Replacement transaction completed — ${invNum}` }];
-        })(),
-      });
+      const activeClaim = warrantyClaims.find(wc => wc.id === activeReplacementClaimId);
+      const isRepairReturn = pendingReplacements.find(r => r.warrantyClaimId === activeReplacementClaimId)?.type === 'repair_return';
+
+      if (isRepairReturn) {
+        updateWarrantyClaimCtx(activeReplacementClaimId, {
+          repairReturnOrderId: newOrder.id,
+          repairReturnSentToPOS: true,
+          statusHistory: [...(activeClaim?.statusHistory || []), { status: 'Completed', date: new Date().toISOString(), by: posOperator?.name || 'POS Operator', note: `Repaired item returned to customer — ${invNum}` }],
+        });
+      } else {
+        updateWarrantyClaimCtx(activeReplacementClaimId, {
+          status: 'Completed',
+          replacementOrderId: newOrder.id,
+          statusHistory: [...(activeClaim?.statusHistory || []), { status: 'Completed', date: new Date().toISOString(), by: posOperator?.name || 'POS Operator', note: `Replacement transaction completed — ${invNum}` }],
+        });
+      }
       removePendingReplacement(activeReplacementClaimId);
       setActiveReplacementClaimId(null);
     }
@@ -631,15 +640,15 @@ export const POS: React.FC = () => {
             <h2 className="text-3xl font-extrabold text-primary tracking-tight font-headline">Checkout & Tender</h2>
           </div>
           <div className="h-12 w-px bg-slate-200"></div>
-          {posOperator && (
-            <div className="flex items-center gap-2 px-3 py-1.5 bg-teal-50 rounded-xl border border-teal-100">
-              <div className="w-8 h-8 bg-teal-600 rounded-full flex items-center justify-center text-white text-xs font-black">{posOperator.name.split(' ').map(n => n[0]).join('')}</div>
-              <div className="text-left">
-                <p className="text-[10px] font-black text-teal-800 uppercase tracking-widest leading-none">{posOperator.name}</p>
-                <p className="text-[9px] font-bold text-teal-500">{posOperator.role}{!isOwnerOrManager && ' · Limited Access'}</p>
-              </div>
+          <div className="flex items-center gap-2 px-3 py-1.5 bg-teal-50 rounded-xl border border-teal-100">
+            <div className="w-8 h-8 bg-teal-600 rounded-full flex items-center justify-center text-white text-xs font-black">
+              {(posOperator?.name || session?.user?.name || 'U').split(' ').map(n => n[0]).join('')}
             </div>
-          )}
+            <div className="text-left">
+              <p className="text-[10px] font-black text-teal-800 uppercase tracking-widest leading-none">{posOperator?.name || session?.user?.name || 'Unknown'}</p>
+              <p className="text-[9px] font-bold text-teal-500">{posOperator?.role || effectiveRole}{!isOwnerOrManager && ' · Limited Access'}</p>
+            </div>
+          </div>
           <div className="h-12 w-px bg-slate-200"></div>
           <button 
             onClick={() => setIsShiftModalOpen(true)}
@@ -700,10 +709,10 @@ export const POS: React.FC = () => {
       {pendingReplacements.length > 0 && !activeReplacementClaimId && (
         <div className="bg-purple-50 border border-purple-200 rounded-2xl p-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <span className="material-symbols-outlined text-purple-600">swap_horiz</span>
+            <span className="material-symbols-outlined text-purple-600">{pendingReplacements.some(r => r.type === 'repair_return') ? 'build' : 'swap_horiz'}</span>
             <div>
-              <p className="text-xs font-black text-purple-700">Pending Warranty Replacement{pendingReplacements.length > 1 ? 's' : ''}</p>
-              <p className="text-[10px] text-purple-600">{pendingReplacements.map(r => `${r.itemName} for ${r.customerName}`).join('; ')}</p>
+              <p className="text-xs font-black text-purple-700">Pending Warranty {pendingReplacements.some(r => r.type === 'repair_return') ? 'Repair Return' : 'Replacement'}{pendingReplacements.length > 1 ? 's' : ''}</p>
+              <p className="text-[10px] text-purple-600">{pendingReplacements.map(r => `${r.type === 'repair_return' ? '🔧 ' : ''}${r.itemName} for ${r.customerName}`).join('; ')}</p>
             </div>
           </div>
           <div className="flex gap-2">
