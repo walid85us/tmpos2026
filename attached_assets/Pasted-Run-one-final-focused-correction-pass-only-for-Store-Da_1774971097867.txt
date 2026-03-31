@@ -1,0 +1,199 @@
+Run one final focused correction pass only for:
+Store Dashboard & POS Refinement – Warranty, Suggestive Sales, and Stock Integrity Completion
+
+This is still inside the current workstream.
+Do not start any new workstream.
+Do not redesign the UI.
+Do not broaden scope beyond the items listed below.
+Preserve the current design baseline exactly.
+Preserve auth, preview mode, RBAC, lifecycle gating, plan entitlement gating, and platform/store hierarchy.
+
+Act as:
+Principal Repair/POS Product Architect
++ Principal Warranty Claim Workflow Architect
++ Principal Inventory Workflow Architect
++ Principal Store Operations Workflow Designer
++ Principal React/TypeScript Engineer
++ Principal UX Workflow Designer
++ Principal QA Auditor
++ Principal Side Auditor & Systems Thinker
+
+You must also:
+- act as a side auditor and systems thinker
+- avoid shallow button hookups
+- preserve all already working flows
+- use honest local/mock workflow where live backend/payment-terminal behavior is not available yet
+- keep all changes narrow, coherent, and operationally useful
+
+Mandatory research/reference step before coding:
+1. Re-read replit.md fully and preserve the existing architecture, gating, access rules, and design baseline.
+2. Re-read Ref.txt fully.
+3. Re-read the POS / refund / warranty / inventory / customer / invoice references from Ref.txt relevant to this pass.
+4. Specifically revisit and apply the warranty references below carefully before implementing.
+
+Warranty references:
+https://help.repairdesk.co/portal/en/kb/articles/how-to-process-the-warranty-claim-for-a-repair-part
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-process-warranty-claim-for-repair-parts
+https://help.repairdesk.co/portal/en/kb/articles/how-to-copy-the-original-ticket-notes-into-the-warranty-repair-ticket
+https://help.repairdesk.co/portal/en/kb/articles/how-to-add-a-new-repair-part-process-a-warranty-claim-for-a-repair-part
+https://help.repairdesk.co/portal/en/kb/articles/difference-warranty-claim-for-a-service-and-warranty-claim-for-a-part
+https://help.repairdesk.co/portal/en/kb/articles/how-to-set-warranty-for-a-repair-service
+https://help.repairdesk.co/portal/en/kb/articles/how-to-set-warranty-for-a-repair-part
+https://help.repairdesk.co/portal/en/kb/articles/warranty
+
+Refund references for payment-method awareness:
+https://help.repairdesk.co/portal/en/kb/articles/how-to-offer-refunds-using-payfacto
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-process-refund-exchange-in-repairdesk
+https://help.repairdesk.co/portal/en/kb/articles/refund-exchange
+
+Required fixes:
+
+1) Build a real Warranty Management environment
+Current issue:
+- Warranty search/claim flow is partially working
+- There is no real place to manage warranty claims after creation
+- The system needs a coherent warranty environment, not just a modal action
+
+Implement a dedicated warranty-management surface/module within the current app scope.
+It must be operationally coherent and narrow, not a giant unrelated expansion.
+
+Required capabilities:
+- A visible Warranty Management area/surface for roles that should manage warranty work
+- Search/filter claims by:
+  - invoice number
+  - ticket number if available
+  - customer name
+  - phone number
+  - claim status
+- Show a warranty claims list/queue with clear statuses
+- Support at least a basic lifecycle such as:
+  - submitted
+  - under_review
+  - approved
+  - rejected
+  - in_repair / replacement_pending if appropriate
+  - completed
+- Claim detail view must show:
+  - original invoice/ticket reference
+  - customer
+  - original item/service
+  - original date
+  - service-vs-part warranty context where possible
+  - notes / claim reason
+  - copied original notes where appropriate
+  - current claim status/history
+- From the Warranty quick action flow, claim creation must land in this warranty-management environment
+- If a warranty ticket/claim record needs to be simulated in local/mock state, do it coherently and visibly
+- Keep this honest and operational even if backend/live automation is not present yet
+- Respect role access; do not leak owner/manager-level warranty controls to inappropriate roles
+
+2) Make Warranty flow more complete and reference-informed
+Current issue:
+- claim creation exists, but the logic should better reflect the domain references
+
+Implement/refine:
+- distinction between service warranty and part warranty where feasible in current data model
+- carry over original notes/reference details into the claim record where appropriate
+- capture claim reason and staff notes
+- support claim decision/update actions within Warranty Management
+- show warranty eligibility/summary as clearly as possible from existing data
+- do not fake live backend integrations, but do simulate the decision process and record state properly
+
+3) Suggestive Sales maintenance must be implemented now
+Current issue:
+- there is no “Mark as Suggestive Sale” option
+- there is no dedicated Suggestive Sales management surface
+
+Implement:
+- In inventory product add/edit flow, add a simple control:
+  - Mark as Suggestive Sale
+- Add a dedicated Inventory tab/section:
+  - Suggestive Sales
+- In that section, owner/manager can review and manage which inventory items are marked as suggestive sales
+- Use the same shared inventory source of truth already established
+- Keep this narrow and operational
+- Do not build a huge recommendation engine; just build a clear maintenance path
+- If suggestive sales are already surfaced in POS, connect them to this maintained flag/source
+
+4) Stock-count integrity in checkout/order summary must be corrected
+Current issue:
+- available count does not decrease correctly
+- adding beyond stock is not blocked
+- exhausted stock is not shown clearly
+- same item behavior needs refinement
+
+Implement:
+- Inventory-backed items in checkout must use real available stock from the shared inventory source
+- If the same inventory item is added again, merge into the same order line where appropriate instead of duplicating lines
+- Available count shown under the line item must reflect remaining available stock after cart allocation
+- If quantity reaches all available stock, remaining available count must show 0 clearly
+- Further increase beyond available stock must be blocked/disabled
+- Out-of-stock items must remain in inventory and be clearly indicated as out of stock
+- If inventory quantity later changes, allowed order quantity should reflect the updated stock
+- Do not use fake or stale quantities disconnected from inventory
+
+5) Switch User must be QA-testable in preview/local mode
+Current issue:
+- user can see the list of users, but testing is blocked because the PIN is unknown
+
+Implement:
+- In preview/local/dev mode only, provide a clear QA-safe way to test Switch User
+- Options include:
+  - visible mock PIN hint
+  - test PIN help text
+  - preview-only bypass/confirm flow
+- Do not weaken the intended production-style structure
+- In normal design terms, keep the concept as PIN-protected switch/handoff
+- But in preview/local mode, make it testable by the user without hidden knowledge
+
+6) Refund payment-method awareness refinement
+Current issue:
+- refund flow is working, but it should remain honest about payment-method behavior
+
+Refine:
+- Show original payment method context in refund detail when available
+- Make refund outcome/method handling explicit and honest in local/mock mode
+- If payment-terminal/live processor refund is not implemented, label it clearly as simulated/manual where appropriate
+- Do not regress the currently working refund flow
+
+7) Preserve all already working behavior
+Do not break:
+- Quick Add Stock permission rules
+- approval-to-inventory path
+- direct Add to Inventory
+- POS Quick Add Stock visibility
+- exact SKU/barcode lookup
+- dashboard Scan QR aligned to inventory
+- POS Add Item search-first behavior
+- finalize sale with discount + points
+- points deduction timing
+- payment allocation starting empty
+- cash rounding exact reset
+- card exactness
+- POS draft persistence across navigation
+- New Sale reset button
+- Hold Orders popup flow
+- customer sync
+- Orders search/detail flow
+- Print Label
+- Quick Intake handoff
+- Special Part Order
+- Deposit
+- Add Method improvements already working
+
+8) Output format after implementation
+After implementation, return only:
+1. What changed
+2. Exact files changed in this pass
+3. Where Warranty Management now lives and how it works
+4. Where Suggestive Sales is maintained now
+5. How stock-count enforcement now works in checkout
+6. How Switch User can be tested safely in preview/local mode
+7. Any known limitations still intentionally left unchanged
+8. A short implementation verification summary
+
+Important:
+- Do not claim final QA closure on behalf of the user
+- Do not mark the workstream complete yet
+- The user will perform the final manual QA
+- Stop after the report and wait for user testing feedback

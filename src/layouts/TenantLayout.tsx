@@ -14,6 +14,7 @@ const navItems = [
   { id: 'inventory', label: 'Inventory', icon: 'inventory_2', path: '/inventory' },
   { id: 'customers', label: 'Customers', icon: 'group', path: '/customers' },
   { id: 'employees', label: 'Employees', icon: 'badge', path: '/employees' },
+  { id: 'warranties', label: 'Warranties', icon: 'verified_user', path: '/warranties' },
   { id: 'invoices', label: 'Invoices', icon: 'receipt_long', path: '/invoices' },
   { id: 'services', label: 'Services', icon: 'settings_suggest', path: '/services' },
   { id: 'supply-chain', label: 'Supply Chain', icon: 'local_shipping', path: '/supply-chain' },

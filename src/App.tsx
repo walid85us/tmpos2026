@@ -43,6 +43,7 @@ import SubscriptionsPage from './owner/SubscriptionsPage';
 import BillingPage from './owner/BillingPage';
 import UsagePage from './owner/UsagePage';
 import ProvisioningPage from './owner/ProvisioningPage';
+import WarrantyManagement from './components/WarrantyManagement';
 import PageShell from './components/PageShell';
 
 import Login from './components/Login';
@@ -80,6 +81,7 @@ const router = createBrowserRouter([
       { path: '/employees/new', element: <Navigate to="/employees" replace /> },
       { path: '/employees/roles', element: <Navigate to="/employees" replace /> },
       { path: '/employees/payroll', element: <Navigate to="/employees" replace /> },
+      { path: '/warranties', element: <AccessGuard feature="warranties"><WarrantyManagement /></AccessGuard> },
       { path: '/invoices', element: <AccessGuard feature="invoices"><Invoices /></AccessGuard> },
       { path: '/invoices/new', element: <Navigate to="/invoices" replace /> },
       { path: '/services', element: <AccessGuard feature="services"><Services /></AccessGuard> },

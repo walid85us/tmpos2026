@@ -28,10 +28,10 @@ export const platformRoles = [
 export const tenantRoles: EmployeeRole[] = [
   { id: 'store_owner', name: 'Store Owner', permissions: ['all'], description: 'Full system access' },
   { id: 'manager', name: 'Manager', permissions: [
-    'dashboard', 'sales', 'repairs', 'inventory', 'customers', 'employees', 'invoices', 'services', 'support', 'reports', 'prospects',
+    'dashboard', 'sales', 'repairs', 'inventory', 'customers', 'employees', 'invoices', 'services', 'support', 'reports', 'prospects', 'warranties',
     'manage_employees', 'assign_roles', 'manage_attendance', 'manage_compensation', 'approve_requests'
   ], description: 'Store management access (limited)' },
-  { id: 'technician', name: 'Technician', permissions: ['dashboard', 'repairs', 'inventory', 'services', 'support', 'customers_read', 'invoices_read'], description: 'Repair and parts access' },
+  { id: 'technician', name: 'Technician', permissions: ['dashboard', 'repairs', 'inventory', 'services', 'support', 'customers_read', 'invoices_read', 'warranties'], description: 'Repair and parts access' },
   { id: 'sales_staff', name: 'Sales Associate', permissions: ['dashboard', 'sales', 'customers', 'invoices', 'support', 'prospects', 'inventory_read'], description: 'Sales and customer access' },
 ];
 
@@ -39,8 +39,8 @@ export const roles = [...platformRoles, ...tenantRoles];
 
 export const planFeatures: Record<Plan, string[]> = {
   starter: ['dashboard', 'sales', 'customers', 'invoices', 'support'],
-  growth: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'employees'],
-  advanced: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'employees', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing'],
+  growth: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'employees', 'warranties'],
+  advanced: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'employees', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'warranties'],
 };
 
 export const permissions = [

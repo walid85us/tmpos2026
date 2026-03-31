@@ -24,11 +24,13 @@ const Inventory: React.FC = () => {
   const [newProductCost, setNewProductCost] = useState('');
   const [newProductPrice, setNewProductPrice] = useState('');
   const [newProductQty, setNewProductQty] = useState('1');
+  const [newProductSuggestive, setNewProductSuggestive] = useState(false);
   const [addProductSuccess, setAddProductSuccess] = useState(false);
 
   const resetAddProductForm = () => {
     setNewProductName(''); setNewProductCategory('Parts'); setNewProductSku('');
     setNewProductCost(''); setNewProductPrice(''); setNewProductQty('1');
+    setNewProductSuggestive(false);
     setAddProductSuccess(false);
   };
 
@@ -94,6 +96,7 @@ const Inventory: React.FC = () => {
       category: newProductCategory,
       addedAt: new Date().toISOString(),
       status: hasInventoryPermission ? 'approved' : 'pending_approval',
+      isSuggestiveSale: newProductSuggestive,
     };
     addStockItem(item);
     setAddProductSuccess(true);
@@ -744,6 +747,22 @@ const Inventory: React.FC = () => {
                         <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Quantity</label>
                         <input type="number" min="1" value={newProductQty} onChange={(e) => setNewProductQty(e.target.value)} className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold" placeholder="1" />
                       </div>
+                    </div>
+                    <div className="flex items-center justify-between p-4 bg-lime-50 border border-lime-200 rounded-2xl">
+                      <div className="flex items-center gap-3">
+                        <span className="material-symbols-outlined text-lime-600">lightbulb</span>
+                        <div>
+                          <p className="text-sm font-bold text-lime-800">Mark as Suggestive Sale</p>
+                          <p className="text-[10px] text-lime-600">This item will appear as a quick-add prompt during checkout</p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setNewProductSuggestive(!newProductSuggestive)}
+                        className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors ${newProductSuggestive ? 'bg-lime-500' : 'bg-slate-200'}`}
+                      >
+                        <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-md transition-transform ${newProductSuggestive ? 'translate-x-6' : 'translate-x-1'}`} />
+                      </button>
                     </div>
                   </div>
                   <div className="p-8 bg-slate-50 border-t border-slate-100 flex justify-end gap-4">

@@ -393,6 +393,16 @@ export const POS: React.FC = () => {
     };
     addCompletedOrder(newOrder);
 
+    completedItems.forEach(ci => {
+      const sid = ci.stockItemId;
+      if (sid) {
+        const stockItem = approvedStockItems.find(si => si.id === sid);
+        if (stockItem) {
+          updateStockItemCtx(sid, { qty: Math.max(0, stockItem.qty - (ci.qty || 1)) });
+        }
+      }
+    });
+
     if (selectedCustomer && selectedCustomer.id !== 'walk-in') {
       const pointsEarned = Math.floor(total * 10);
       const pointsRedeemed = discounts
@@ -685,6 +695,18 @@ export const POS: React.FC = () => {
                     </div>
                     <div className="flex items-center gap-3">
                       {(item.qty || 1) > 1 && <span className="text-xs text-slate-400 font-bold">×{item.qty}</span>}
+                      {(() => {
+                        const sid = (item as any).stockItemId;
+                        if (sid) {
+                          const stockItem = approvedStockItems.find(si => si.id === sid);
+                          if (stockItem) {
+                            const inCart = cart.filter(ci => (ci as any).stockItemId === sid).reduce((s, ci) => s + (ci.qty || 1), 0);
+                            const avail = Math.max(0, stockItem.qty - inCart);
+                            return <span className={`text-[9px] font-black px-1.5 py-0.5 rounded ${avail === 0 ? 'bg-rose-100 text-rose-600' : avail <= 3 ? 'bg-amber-100 text-amber-600' : 'bg-slate-100 text-slate-400'}`}>{avail} left</span>;
+                          }
+                        }
+                        return null;
+                      })()}
                       <span className="font-bold text-primary">${(item.price * (item.qty || 1)).toFixed(2)}</span>
                       <button onClick={(e) => { e.stopPropagation(); removeItem(item.id); }} className="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-red-500 transition-all">
                         <span className="material-symbols-outlined text-sm">close</span>
@@ -1063,11 +1085,27 @@ export const POS: React.FC = () => {
                 </div>
                 <div>
                   <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2 block">Quantity</label>
-                  <div className="flex items-center gap-4">
-                    <button onClick={() => setEditQty(Math.max(1, editQty - 1))} className="w-12 h-12 bg-slate-100 rounded-xl flex items-center justify-center text-primary hover:bg-slate-200 transition-all"><span className="material-symbols-outlined">remove</span></button>
-                    <span className="text-2xl font-black text-primary w-12 text-center">{editQty}</span>
-                    <button onClick={() => setEditQty(editQty + 1)} className="w-12 h-12 bg-slate-100 rounded-xl flex items-center justify-center text-primary hover:bg-slate-200 transition-all"><span className="material-symbols-outlined">add</span></button>
-                  </div>
+                  {(() => {
+                    const sid = editingItem ? (editingItem as any).stockItemId : null;
+                    const stockItem = sid ? approvedStockItems.find(si => si.id === sid) : null;
+                    const otherInCart = sid ? cart.filter(ci => ci.id !== editingItem?.id && (ci as any).stockItemId === sid).reduce((s, ci) => s + (ci.qty || 1), 0) : 0;
+                    const maxQty = stockItem ? stockItem.qty - otherInCart : Infinity;
+                    const atMax = editQty >= maxQty;
+                    return (
+                      <>
+                        <div className="flex items-center gap-4">
+                          <button onClick={() => setEditQty(Math.max(1, editQty - 1))} className="w-12 h-12 bg-slate-100 rounded-xl flex items-center justify-center text-primary hover:bg-slate-200 transition-all"><span className="material-symbols-outlined">remove</span></button>
+                          <span className="text-2xl font-black text-primary w-12 text-center">{editQty}</span>
+                          <button disabled={atMax} onClick={() => setEditQty(editQty + 1)} className={`w-12 h-12 bg-slate-100 rounded-xl flex items-center justify-center text-primary hover:bg-slate-200 transition-all ${atMax ? 'opacity-40 cursor-not-allowed' : ''}`}><span className="material-symbols-outlined">add</span></button>
+                        </div>
+                        {stockItem && (
+                          <p className={`text-[10px] font-bold mt-1 ml-1 ${atMax ? 'text-rose-500' : 'text-slate-400'}`}>
+                            {atMax ? 'Maximum stock reached' : `${Math.max(0, maxQty - editQty)} remaining in stock`}
+                          </p>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
                 <button onClick={saveEditedItem} className="w-full py-5 bg-secondary text-white rounded-2xl font-black uppercase tracking-widest shadow-lg active:scale-95 transition-all">Update Item</button>
               </div>
@@ -1191,8 +1229,19 @@ export const POS: React.FC = () => {
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Additional Notes</label>
                     <textarea value={warrantyNotes} onChange={(e) => setWarrantyNotes(e.target.value)} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-medium min-h-[80px] focus:ring-secondary" placeholder="Describe the issue..." />
                   </div>
+                  <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Warranty Details</p>
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <div><span className="text-slate-400">Type:</span> <span className="font-bold text-primary">{warrantySelectedItem.type === 'repair' ? 'Service Warranty' : 'Part Warranty'}</span></div>
+                      <div><span className="text-slate-400">Period:</span> <span className="font-bold text-primary">{warrantySelectedItem.warrantyPeriod}</span></div>
+                      <div><span className="text-slate-400">Purchased:</span> <span className="font-bold text-primary">{new Date(warrantySelectedOrder.createdAt).toLocaleDateString()}</span></div>
+                      <div><span className="text-slate-400">Operator:</span> <span className="font-bold text-primary">{warrantySelectedOrder.operatorName}</span></div>
+                    </div>
+                  </div>
                   <button disabled={!warrantyReason} onClick={() => {
                     const ticketNum = `WC-${Date.now().toString().slice(-6)}`;
+                    const now = new Date().toISOString();
+                    const operator = posOperator?.name || 'Unknown';
                     addWarrantyClaim({
                       id: `wc-${Date.now()}`,
                       ticketNumber: ticketNum,
@@ -1207,9 +1256,11 @@ export const POS: React.FC = () => {
                       warrantyPeriod: warrantySelectedItem.warrantyPeriod || '30 days',
                       reason: warrantyReason,
                       notes: warrantyNotes,
-                      status: 'Open',
-                      createdAt: new Date().toISOString(),
-                      processedBy: posOperator?.name || 'Unknown',
+                      status: 'Submitted',
+                      statusHistory: [{ status: 'Submitted', date: now, by: operator }],
+                      originalNotes: warrantySelectedItem.type === 'repair' ? `Original repair by ${warrantySelectedOrder.operatorName} on ${new Date(warrantySelectedOrder.createdAt).toLocaleDateString()}` : undefined,
+                      createdAt: now,
+                      processedBy: operator,
                     });
                     setWarrantySuccess(true);
                   }} className="w-full py-5 bg-secondary text-white rounded-2xl font-black uppercase tracking-widest shadow-lg active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed">
@@ -1803,12 +1854,22 @@ export const POS: React.FC = () => {
                     </select>
                   </div>
                   <div className="space-y-1">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Original Payment Method</label>
+                    <div className="px-4 py-2 bg-slate-100 rounded-xl mb-2">
+                      <p className="text-xs font-bold text-slate-600">{refundSelectedOrder.payments.map(p => `${p.method}: $${p.amount.toFixed(2)}`).join(' + ')}</p>
+                    </div>
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Refund Method</label>
                     <select value={refundMethod} onChange={(e) => setRefundMethod(e.target.value)} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary">
                       <option>Original Payment Method</option>
                       <option>Store Credit</option>
                       <option>Cash</option>
                     </select>
+                    {refundMethod === 'Original Payment Method' && refundSelectedOrder.payments.some(p => p.method === 'Card Terminal') && (
+                      <p className="text-[9px] text-amber-600 font-bold ml-4 flex items-center gap-1">
+                        <span className="material-symbols-outlined text-[10px]">info</span>
+                        Card refund will be processed manually — live terminal integration not connected
+                      </p>
+                    )}
                   </div>
                   {(() => {
                     const entries2 = Object.entries(refundItems) as [string, number][];
@@ -2257,6 +2318,12 @@ export const POS: React.FC = () => {
                   <div className="space-y-1">
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Enter PIN</label>
                     <input value={switchPinInput} onChange={(e) => { setSwitchPinInput(e.target.value.replace(/\D/g, '').slice(0, 4)); setSwitchError(''); }} className="w-full bg-slate-50 border-none rounded-2xl px-6 py-4 text-2xl font-black text-primary text-center tracking-[0.5em] focus:ring-secondary" placeholder="••••" type="password" maxLength={4} autoFocus />
+                    {import.meta.env.DEV && switchTarget && (
+                      <p className="text-[10px] font-medium text-indigo-400 ml-4 flex items-center gap-1 mt-1">
+                        <span className="material-symbols-outlined text-[10px]">bug_report</span>
+                        Preview mode — test PIN: {switchTarget.pin}
+                      </p>
+                    )}
                     {switchError && (
                       <p className="text-xs font-bold text-rose-500 ml-4 flex items-center gap-1">
                         <span className="material-symbols-outlined text-xs">error</span>{switchError}

@@ -83,7 +83,9 @@ export interface WarrantyClaimRecord {
   warrantyPeriod: string;
   reason: string;
   notes: string;
-  status: 'Open' | 'In Progress' | 'Resolved' | 'Rejected';
+  status: 'Submitted' | 'Under Review' | 'Approved' | 'Rejected' | 'In Repair' | 'Replacement Pending' | 'Completed';
+  statusHistory: { status: string; date: string; by: string; note?: string }[];
+  originalNotes?: string;
   createdAt: string;
   processedBy: string;
 }
@@ -196,6 +198,55 @@ const SEED_POS_OPERATORS: POSOperator[] = [
 
 export { SEED_POS_OPERATORS };
 
+const SEED_WARRANTY_CLAIMS: WarrantyClaimRecord[] = [
+  {
+    id: 'wc-seed-001', ticketNumber: 'WC-100001',
+    originalOrderId: 'ord-001', invoiceNumber: 'INV-1001',
+    customerName: 'Alexander Wright', customerId: 'c1',
+    itemName: 'iPhone 13 Screen Repair', itemId: 'oi-1',
+    warrantyType: 'service', originalDate: '2026-03-19T14:30:00Z', warrantyPeriod: '90 days',
+    reason: 'Screen malfunction', notes: 'Display flickering after 2 weeks of use. Customer reports intermittent black spots.',
+    status: 'Under Review',
+    statusHistory: [
+      { status: 'Submitted', date: '2026-03-25T10:00:00Z', by: 'Sarah J.' },
+      { status: 'Under Review', date: '2026-03-26T09:00:00Z', by: 'Mike R.', note: 'Scheduled for diagnostic inspection' },
+    ],
+    originalNotes: 'iPhone 13 screen replacement - OEM quality part used. Device serial: IP13-XK2948.',
+    createdAt: '2026-03-25T10:00:00Z', processedBy: 'Sarah J.',
+  },
+  {
+    id: 'wc-seed-002', ticketNumber: 'WC-100002',
+    originalOrderId: 'ord-003', invoiceNumber: 'INV-1003',
+    customerName: 'Mike Rodriguez', customerId: 'c3',
+    itemName: 'Battery Replacement Service', itemId: 'oi-5',
+    warrantyType: 'service', originalDate: '2026-03-15T09:45:00Z', warrantyPeriod: '90 days',
+    reason: 'Battery issue', notes: 'Phone shutting down at 30% battery.',
+    status: 'Approved',
+    statusHistory: [
+      { status: 'Submitted', date: '2026-03-28T11:00:00Z', by: 'Mike R.' },
+      { status: 'Under Review', date: '2026-03-28T14:00:00Z', by: 'Sarah J.' },
+      { status: 'Approved', date: '2026-03-29T10:00:00Z', by: 'Sarah J.', note: 'Confirmed battery defect within warranty period. Approved for free replacement.' },
+    ],
+    createdAt: '2026-03-28T11:00:00Z', processedBy: 'Mike R.',
+  },
+  {
+    id: 'wc-seed-003', ticketNumber: 'WC-100003',
+    originalOrderId: 'ord-002', invoiceNumber: 'INV-1002',
+    customerName: 'Sarah Jenkins', customerId: 'c2',
+    itemName: 'USB-C Charging Cable', itemId: 'oi-3',
+    warrantyType: 'part', originalDate: '2026-03-18T11:15:00Z', warrantyPeriod: '30 days',
+    reason: 'Defective product', notes: 'Cable stopped charging after 10 days.',
+    status: 'Completed',
+    statusHistory: [
+      { status: 'Submitted', date: '2026-03-22T09:00:00Z', by: 'Dana L.' },
+      { status: 'Approved', date: '2026-03-22T11:00:00Z', by: 'Sarah J.' },
+      { status: 'Replacement Pending', date: '2026-03-22T11:30:00Z', by: 'Sarah J.', note: 'Replacement cable pulled from stock.' },
+      { status: 'Completed', date: '2026-03-23T10:00:00Z', by: 'Sarah J.', note: 'Customer picked up replacement cable.' },
+    ],
+    createdAt: '2026-03-22T09:00:00Z', processedBy: 'Dana L.',
+  },
+];
+
 const EMPTY_DRAFT: DraftCart = { cart: [], selectedCustomer: null, payments: [], discounts: [] };
 
 const StoreLocalStateContext = createContext<StoreLocalStateContextType | null>(null);
@@ -208,7 +259,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const [draftCart, setDraftCartState] = useState<DraftCart>(EMPTY_DRAFT);
   const [completedOrders, setCompletedOrders] = useState<CompletedOrder[]>(SEED_COMPLETED_ORDERS);
   const [refundRecords, setRefundRecords] = useState<RefundRecord[]>([]);
-  const [warrantyClaims, setWarrantyClaims] = useState<WarrantyClaimRecord[]>([]);
+  const [warrantyClaims, setWarrantyClaims] = useState<WarrantyClaimRecord[]>(SEED_WARRANTY_CLAIMS);
   const [posOperator, setPosOperatorState] = useState<POSOperator | null>(SEED_POS_OPERATORS[0]);
 
   const addCustomer = useCallback((c: Customer) => {
