@@ -7,13 +7,8 @@ import ContextualHelp from './ContextualHelp';
 
 const Inventory: React.FC = () => {
   const { approvedStockItems, pendingStockItems, addStockItem, updateStockItem } = useStoreLocalState();
-  const { canAccess, session } = useAccess();
-  const hasInventoryPermission = (() => {
-    if (!session) return false;
-    if (session.role === 'system_owner' || session.role === 'store_owner' || session.role === 'manager') return true;
-    if (session.role === 'technician') return true;
-    return false;
-  })();
+  const { canAccess, session, hasPermission } = useAccess();
+  const hasInventoryPermission = hasPermission('inventory');
   const [activeTab, setActiveTab] = useState<string>('inventory');
   const [searchQuery, setSearchQuery] = useState('');
   const [isAddProductModalOpen, setIsAddProductModalOpen] = useState(false);

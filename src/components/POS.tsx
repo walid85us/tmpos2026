@@ -11,7 +11,6 @@ import {
 } from '../types';
 import { useStoreLocalState, SEED_POS_OPERATORS, type CompletedOrder, type CompletedOrderItem } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
-import { tenantRoles } from '../context/accessConfig';
 import ContextualHelp from './ContextualHelp';
 
 const TAX_RATE = 0.0825;
@@ -28,26 +27,16 @@ const POINTS_VALUE_RATIO = 0.01;
 
 export const POS: React.FC = () => {
   const location = useLocation();
-  const { canAccess, session, setPosOperatorRole, effectiveRole } = useAccess();
+  const { canAccess, session, setPosOperatorRole, effectiveRole, hasPermission } = useAccess();
   const { customers: sharedCustomers, addCustomer, updateCustomer, stockItems: sharedStockItems, addStockItem, updateStockItem: updateStockItemCtx, approvedStockItems, pendingStockItems, heldOrders, addHeldOrder, removeHeldOrder, suggestiveSalesItems, addSuggestiveSaleItem, removeSuggestiveSaleItem, draftCart, setDraftCart, clearDraftCart, completedOrders, addCompletedOrder, updateCompletedOrder, refundRecords, addRefundRecord, warrantyClaims, addWarrantyClaim, updateWarrantyClaim: updateWarrantyClaimCtx, posOperator, setPosOperator, pendingReplacements, removePendingReplacement } = useStoreLocalState();
   const derivedSuggestiveItems = approvedStockItems.filter(s => s.isSuggestiveSale).map(s => ({ id: s.id, name: s.name, price: s.price }));
   const OPERATOR_ROLE_MAP: Record<string, string> = { 'Manager': 'manager', 'Sales Associate': 'sales_staff', 'Technician': 'technician', 'Store Owner': 'store_owner' };
-  const effectivePermissions: string[] = (() => {
-    const role = tenantRoles.find(r => r.id === effectiveRole);
-    if (!role) return [];
-    const perms = role.permissions;
-    if (Array.isArray(perms)) {
-      return perms as string[];
-    }
-    return Object.keys(perms);
-  })();
-  const hasEffectivePerm = (perm: string) => effectivePermissions.includes('all') || effectivePermissions.includes(perm);
   const isOwnerOrManager = effectiveRole === 'system_owner' || effectiveRole === 'store_owner' || effectiveRole === 'manager';
-  const hasInventoryPermission = hasEffectivePerm('inventory');
-  const canProcessRefund = isOwnerOrManager;
-  const canFileWarranty = hasEffectivePerm('warranties');
-  const canAddStock = hasInventoryPermission;
-  const canManageSuggestive = hasEffectivePerm('suggestive_sales');
+  const hasInventoryPermission = hasPermission('inventory');
+  const canProcessRefund = hasPermission('refunds');
+  const canFileWarranty = hasPermission('warranties');
+  const canAddStock = canAccess('inventory');
+  const canManageSuggestive = hasPermission('suggestive_sales');
 
   useEffect(() => {
     const mappedRole = posOperator ? (OPERATOR_ROLE_MAP[posOperator.role] || 'sales_staff') : null;
@@ -1026,7 +1015,7 @@ export const POS: React.FC = () => {
                     <span className="material-symbols-outlined text-primary group-hover:scale-110 transition-transform">switch_account</span>
                     <span className="text-[10px] font-bold uppercase tracking-tighter">Switch User</span>
                   </button>
-                  <button onClick={() => canProcessRefund && setIsRefundModalOpen(true)} className={`rounded-xl flex flex-col items-center justify-center gap-2 transition-all group ${canProcessRefund ? 'bg-slate-100 hover:bg-slate-200' : 'bg-slate-50 opacity-40 cursor-not-allowed'}`} title={!canProcessRefund ? 'Refunds require Manager or Owner access' : ''}>
+                  <button onClick={() => canProcessRefund && setIsRefundModalOpen(true)} className={`rounded-xl flex flex-col items-center justify-center gap-2 transition-all group ${canProcessRefund ? 'bg-slate-100 hover:bg-slate-200' : 'bg-slate-50 opacity-40 cursor-not-allowed'}`} title={!canProcessRefund ? 'Refunds require the refunds permission' : ''}>
                     <span className="material-symbols-outlined text-primary group-hover:scale-110 transition-transform">keyboard_return</span>
                     <span className="text-[10px] font-bold uppercase tracking-tighter">Refund</span>
                   </button>
@@ -1615,7 +1604,7 @@ export const POS: React.FC = () => {
               <div className="mt-8 pt-8 border-t border-dashed border-slate-200">
                 <div className="flex items-center justify-between mb-4">
                   <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400">Suggestive Sales</h4>
-                  {hasInventoryPermission && (
+                  {canManageSuggestive && (
                     <button onClick={() => setIsSuggestiveSettingsOpen(true)} className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1 hover:text-primary transition-colors">
                       <span className="material-symbols-outlined text-xs">settings</span>
                       Manage

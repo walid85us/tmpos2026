@@ -28,7 +28,7 @@ export const platformRoles = [
 export const tenantRoles: EmployeeRole[] = [
   { id: 'store_owner', name: 'Store Owner', permissions: ['all'], description: 'Full system access' },
   { id: 'manager', name: 'Manager', permissions: [
-    'dashboard', 'sales', 'repairs', 'inventory', 'customers', 'employees', 'invoices', 'services', 'support', 'reports', 'prospects', 'warranties', 'suggestive_sales',
+    'dashboard', 'sales', 'repairs', 'inventory', 'customers', 'employees', 'invoices', 'services', 'support', 'reports', 'prospects', 'warranties', 'suggestive_sales', 'refunds',
     'manage_employees', 'assign_roles', 'manage_attendance', 'manage_compensation', 'approve_requests'
   ], description: 'Store management access (limited)' },
   { id: 'technician', name: 'Technician', permissions: ['dashboard', 'repairs', 'inventory', 'services', 'support', 'customers_read', 'invoices_read', 'warranties'], description: 'Repair and parts access' },
@@ -48,6 +48,7 @@ export const permissions = [
   { group: 'Repairs', actions: ['view', 'create', 'edit', 'manage'] },
   { group: 'Inventory', actions: ['view', 'create', 'edit', 'manage'] },
   { group: 'Warranties', actions: ['view', 'create', 'manage'] },
+  { group: 'Refunds', actions: ['view', 'create', 'manage'] },
   { group: 'Suggestive Sales', actions: ['view', 'manage'] },
 ];
 

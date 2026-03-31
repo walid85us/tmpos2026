@@ -73,6 +73,7 @@ interface AccessContextType {
   posOperatorRole: string | null;
   setPosOperatorRole: (role: string | null) => void;
   effectiveRole: string;
+  hasPermission: (perm: string) => boolean;
 }
 
 const AccessContext = createContext<AccessContextType | undefined>(undefined);
@@ -212,6 +213,18 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     return '/';
   };
 
+  const hasPermission = (perm: string): boolean => {
+    if (!session) return false;
+    if (effectiveRole === 'system_owner' || effectiveRole === 'store_owner') return true;
+    const roleConfig = tenantRolesState.find(r => r.id === effectiveRole);
+    if (!roleConfig) return false;
+    const perms = roleConfig.permissions;
+    if (Array.isArray(perms)) {
+      return perms.includes('all') || perms.includes(perm);
+    }
+    return perms['all'] === 'full' || (perms[perm] !== undefined && perms[perm] !== 'none');
+  };
+
   const getAvailableRoles = () => ({ platform: platformRolesState, tenant: tenantRolesState });
 
   const addPlatformRole = (role: EmployeeRole) => {
@@ -253,7 +266,8 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       tenantRolesState,
       posOperatorRole,
       setPosOperatorRole,
-      effectiveRole
+      effectiveRole,
+      hasPermission
     }}>
       {children}
     </AccessContext.Provider>

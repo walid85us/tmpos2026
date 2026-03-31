@@ -1,0 +1,161 @@
+Run one final micro-pass only for:
+Store Dashboard & POS Refinement – Permission-to-Action Parity Fix
+
+This is still inside the current workstream.
+Do not start any new workstream.
+Do not redesign the UI.
+Do not broaden scope beyond the issues listed below.
+Preserve the current design baseline exactly.
+Preserve auth, preview mode, RBAC, lifecycle gating, plan entitlement gating, and platform/store hierarchy.
+
+Act as:
+Principal RBAC / Access-Control Architect
++ Principal Repair/POS Product Architect
++ Principal Store Operations Workflow Designer
++ Principal React/TypeScript Engineer
++ Principal UX Workflow Designer
++ Principal QA Auditor
++ Principal Side Auditor & Systems Thinker
+
+This is a narrow permission-integrity pass.
+The goal is to fix capability mapping so that:
+- side menu access
+- dashboard quick actions
+- POS quick actions
+- Orders history actions
+- order/invoice detail actions
+all obey the same permission truth.
+
+Core problem to fix:
+A role may receive permission in the Store Permissions Matrix, but the matching POS action is still not enabled or not synced correctly.
+That means the permission model is still fragmented.
+
+Non-negotiable rule:
+For every relevant store capability, there must be one coherent permission rule that governs all entry points.
+
+Required fixes:
+
+1) Unify permission mapping for Warranty
+Current issue:
+- giving warranty-related permission can make Warranty appear in the side menu
+- but the matching Warranty action in POS is still not enabled consistently
+
+Fix:
+- define and enforce one coherent warranty capability mapping
+- if the role has the required warranty permission, then Warranty must behave consistently across:
+  - side menu/module visibility
+  - POS quick action/button
+  - Orders history entry points
+  - order/invoice detail entry points
+- if the role does not have the permission, all those entry points must be blocked consistently
+- do not allow “menu visible but POS disabled for no reason”
+- do not allow “POS enabled but side menu/module blocked” unless intentionally designed and documented
+
+2) Unify permission mapping for Refund
+Current issue:
+- refund permission behavior is still unclear/inconsistent in testing
+
+Fix:
+- define and enforce one coherent refund capability mapping
+- if a refund permission entry is missing or ambiguous in the Store Permissions Matrix, add the correct explicit permission/capability
+- wire Refund consistently across:
+  - POS quick action/button
+  - Orders history
+  - order/invoice detail actions
+- if role has refund permission, refund flow must be available consistently
+- if role lacks refund permission, it must be blocked consistently everywhere
+
+3) Unify permission mapping for Add Stock / inventory-add behavior
+Current issue:
+- role can gain add-inventory permission and see Inventory in side menu
+- dashboard Quick Add Stock responds to that permission
+- but POS behavior is still inconsistent
+
+Fix:
+- define and enforce one coherent inventory-add / quick-stock capability mapping
+- if role has direct inventory-add permission, the POS quick-add/add-stock behavior must reflect that same capability
+- if role lacks it, POS must not expose unauthorized direct inventory-add behavior
+- align:
+  - Inventory side menu visibility
+  - Dashboard Quick Add Stock
+  - POS Quick Add Stock / Add Stock behavior
+- keep distinction between:
+  - add to cart/order only
+  - submit for approval
+  - direct add to inventory
+but ensure the permission logic is identical across dashboard and POS
+
+4) Re-check role/action sync after permission changes
+Current issue:
+- permissions may change, but action state may not refresh coherently
+
+Fix:
+- when permissions/role context changes in preview mode or switched-user context, relevant actions must refresh correctly
+- no stale action state
+- if permission is granted, action becomes available where appropriate
+- if permission is removed, action becomes unavailable where appropriate
+- ensure this works for:
+  - Warranty
+  - Refund
+  - Add Stock / Quick Add Stock
+
+5) Make permission architecture explicit and consistent
+Fix:
+- audit the current access checks for:
+  - menu visibility
+  - module access
+  - quick actions
+  - detail-action buttons
+- remove mismatched one-off checks where possible
+- reuse the same permission helpers / capability checks instead of separate hardcoded logic
+- prefer one source of truth
+
+6) Preserve already working flows
+Do not break:
+- preview-mode global role sync
+- POS active-role sync after navigation
+- warranty-to-repair creation
+- warranty repair completion sync
+- repaired warranty send-to-POS flow
+- repaired warranty reopen + completion lock
+- Quick Add Stock approval-to-inventory path
+- direct Add to Inventory
+- exact SKU/barcode lookup
+- dashboard Scan QR aligned to inventory
+- POS Add Item search-first behavior
+- stock-count enforcement and merge behavior
+- finalize sale with discount + points
+- points deduction timing
+- payment allocation starting empty
+- cash/card behavior currently working
+- POS draft persistence across navigation
+- New Sale reset button
+- Hold Orders popup flow
+- customer sync
+- Refund flow behavior already working where permitted
+- Orders search/detail flow
+- Print Label
+- Quick Intake handoff
+- Suggestive Sales maintenance
+- Warranty Management surface
+- Special Part Order
+- Deposit
+- Add Method improvements already working
+
+7) Output format after implementation
+After implementation, return only:
+1. What changed
+2. Exact files changed in this pass
+3. The final capability mapping you enforced for:
+   - Warranty
+   - Refund
+   - Add Stock / Quick Add Stock
+4. How menu/module/action parity now works across side menu, dashboard, POS, Orders, and detail views
+5. Any known limitations still intentionally left unchanged
+6. A short implementation verification summary
+
+Important:
+- Do not claim final QA closure on behalf of the user
+- Do not mark the workstream complete yet
+- The user will perform the final manual QA
+- Stop after the report and wait for user testing feedback

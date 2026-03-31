@@ -690,16 +690,10 @@ function StoreActivationPanel() {
 }
 
 export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => void }) {
-  const { session, canAccess, effectiveRole } = useAccess();
+  const { session, canAccess, effectiveRole, hasPermission } = useAccess();
   const navigate = useNavigate();
   const { addCustomer, addStockItem, updateStockItem, stockItems: sharedStockItems, approvedStockItems, pendingStockItems, heldOrders, removeHeldOrder } = useStoreLocalState();
-  const hasInventoryPermission = (() => {
-    const r = effectiveRole || session?.role || '';
-    if (!r) return false;
-    if (r === 'system_owner' || r === 'store_owner' || r === 'manager') return true;
-    if (r === 'technician') return true;
-    return false;
-  })();
+  const hasInventoryPermission = hasPermission('inventory');
   const [showPrintLabelModal, setShowPrintLabelModal] = useState(false);
   const [showScanQRModal, setShowScanQRModal] = useState(false);
   const [showAddStockModal, setShowAddStockModal] = useState(false);
@@ -727,19 +721,19 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
   const role = effectiveRole || session?.role || '';
   const todayStr = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
 
-  const allActions: { label: string; icon: string; color: string; roles: string[]; requires?: string }[] = [
-    { label: 'New Sale', icon: 'shopping_cart', color: 'bg-primary', roles: ['store_owner', 'manager', 'sales_staff'] },
-    { label: 'Quick Intake', icon: 'bolt', color: 'bg-secondary', roles: ['store_owner', 'manager', 'technician'] },
-    { label: 'Add Stock', icon: 'inventory_2', color: 'bg-teal-800', roles: ['store_owner', 'manager', 'technician', 'sales_staff'] },
-    { label: 'New Customer', icon: 'person_add', color: 'bg-secondary', roles: ['store_owner', 'manager', 'sales_staff'] },
-    { label: 'Print Label', icon: 'print', color: 'bg-slate-800', roles: ['store_owner', 'manager', 'technician', 'sales_staff'] },
-    { label: 'Held Orders', icon: 'history', color: 'bg-slate-600', roles: ['store_owner', 'manager', 'sales_staff'] },
-    { label: 'Scan QR', icon: 'qr_code_scanner', color: 'bg-lime-600', roles: ['store_owner', 'manager', 'technician', 'sales_staff'] },
+  const allActions: { label: string; icon: string; color: string; permission?: string; moduleAccess?: string }[] = [
+    { label: 'New Sale', icon: 'shopping_cart', color: 'bg-primary', permission: 'sales' },
+    { label: 'Quick Intake', icon: 'bolt', color: 'bg-secondary', permission: 'repairs' },
+    { label: 'Add Stock', icon: 'inventory_2', color: 'bg-teal-800', moduleAccess: 'inventory' },
+    { label: 'New Customer', icon: 'person_add', color: 'bg-secondary', permission: 'customers' },
+    { label: 'Print Label', icon: 'print', color: 'bg-slate-800' },
+    { label: 'Held Orders', icon: 'history', color: 'bg-slate-600', permission: 'sales' },
+    { label: 'Scan QR', icon: 'qr_code_scanner', color: 'bg-lime-600' },
   ];
 
   const visibleActions = allActions.filter(a => {
-    if (!a.roles.includes(role)) return false;
-    if (a.requires && !canAccess(a.requires)) return false;
+    if (a.permission && !hasPermission(a.permission)) return false;
+    if (a.moduleAccess && !canAccess(a.moduleAccess)) return false;
     return true;
   });
 
@@ -780,7 +774,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
   return (
     <div className="space-y-8">
       {session?.role === 'store_owner' && <StoreActivationPanel />}
-      {(session?.role === 'store_owner' || session?.role === 'system_owner' || session?.role === 'manager') && <ApprovalQueue />}
+      {hasPermission('approve_requests') && <ApprovalQueue />}
       <header className="flex items-end justify-between">
         <div>
           <span className="text-[10px] uppercase tracking-[0.2em] text-secondary font-extrabold mb-1 block">Operational Overview</span>
