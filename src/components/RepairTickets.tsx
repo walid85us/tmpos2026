@@ -1,6 +1,7 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { RepairTicket, TicketComment, TicketAttachment, TicketHistory } from '../types';
+import { useStoreLocalState } from '../context/StoreLocalState';
 import ContextualHelp from './ContextualHelp';
 
 const MOCK_TICKETS: RepairTicket[] = [
@@ -81,7 +82,32 @@ const MOCK_TICKETS: RepairTicket[] = [
 ];
 
 export default function RepairTickets() {
-  const [tickets, setTickets] = useState<RepairTicket[]>(MOCK_TICKETS);
+  const { warrantyRepairTickets, updateWarrantyRepairTicket, warrantyClaims, updateWarrantyClaim } = useStoreLocalState();
+  const [localTickets, setLocalTickets] = useState<RepairTicket[]>(MOCK_TICKETS);
+
+  const tickets = useMemo(() => [...localTickets, ...warrantyRepairTickets], [localTickets, warrantyRepairTickets]);
+  const setTickets = (updater: RepairTicket[] | ((prev: RepairTicket[]) => RepairTicket[])) => {
+    const newTickets = typeof updater === 'function' ? updater(tickets) : updater;
+    const warrantyIds = new Set(warrantyRepairTickets.map(t => t.id));
+    const newLocal = newTickets.filter(t => !warrantyIds.has(t.id));
+    setLocalTickets(newLocal);
+    newTickets.filter(t => warrantyIds.has(t.id)).forEach(t => {
+      const original = warrantyRepairTickets.find(wt => wt.id === t.id);
+      if (original && original.status !== t.status) {
+        updateWarrantyRepairTicket(t.id, t);
+        if (t.status === 'Completed') {
+          const linkedClaim = warrantyClaims.find(wc => wc.linkedRepairId === t.id);
+          if (linkedClaim && linkedClaim.status === 'In Repair') {
+            updateWarrantyClaim(linkedClaim.id, {
+              status: 'Completed',
+              statusHistory: [...linkedClaim.statusHistory, { status: 'Completed', date: new Date().toISOString(), by: t.technicianName || 'Technician', note: 'Warranty repair completed' }],
+            });
+          }
+        }
+      }
+    });
+  };
+
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('All');
   const [selectedTicket, setSelectedTicket] = useState<RepairTicket | null>(null);

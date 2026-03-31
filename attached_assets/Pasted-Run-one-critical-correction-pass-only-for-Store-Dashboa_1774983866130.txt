@@ -1,0 +1,165 @@
+Run one critical correction pass only for:
+Store Dashboard & POS Refinement – RBAC Integrity, Warranty Execution Flow, and POS Action Permission Consistency
+
+This is still inside the current workstream.
+Do not start any new workstream.
+Do not redesign the UI.
+Do not broaden scope beyond the issues listed below.
+Preserve the current design baseline exactly.
+Preserve auth, preview mode, RBAC, lifecycle gating, plan entitlement gating, and platform/store hierarchy.
+
+Act as:
+Principal RBAC / Access-Control Architect
++ Principal Repair/POS Product Architect
++ Principal Warranty Workflow Architect
++ Principal Store Operations Workflow Designer
++ Principal React/TypeScript Engineer
++ Principal UX Workflow Designer
++ Principal QA Auditor
++ Principal Side Auditor & Systems Thinker
+
+This is a critical integrity pass.
+The goal is not cosmetic cleanup.
+The goal is to fix access-control truth, cross-module permission consistency, and warranty execution lifecycle.
+
+Non-negotiable rule:
+After Switch User, the effective user context must behave exactly like that user’s real role/permissions.
+No full-access leakage.
+No owner menu leakage.
+No quick-action permission leakage.
+No cross-entry-point bypasses.
+
+Required fixes:
+
+1) Fix Switch User so it enforces real role-based access everywhere
+Current critical bug:
+- after switching to sales or technician, they still see the full side menu like store owner
+
+Fix:
+- after Switch User, the active session/access context must fully recalculate from the switched user’s actual role and permissions
+- side menu visibility must refresh correctly
+- dashboard quick actions must refresh correctly
+- POS action buttons must refresh correctly
+- page/module access must refresh correctly
+- Store Permissions Matrix assignments must still be the source of truth
+- do not treat Switch User as only a label change
+- it must become a true effective-user context switch within the current store session
+
+Check specifically:
+- store_owner
+- manager
+- technician
+- sales
+and ensure each sees only what they are actually allowed to see/do
+
+2) Fix permission consistency across all entry points
+Current critical bug:
+- some actions are blocked in one place but still reachable through another place
+- example: sales user without warranty permission can still open warranty claim from Orders history
+- same risk exists for Refund and other POS actions
+- dashboard/POS Add Stock permission behavior is inconsistent
+
+Fix:
+- every action must use the same permission gate no matter where it is launched from
+- Warranty Claim permission must be enforced consistently from:
+  - POS quick action
+  - Orders history
+  - any invoice/order detail action
+- Refund permission must be enforced consistently from:
+  - POS quick action
+  - Orders history
+  - any invoice/order detail action
+- Add Stock permission must be enforced consistently between:
+  - dashboard
+  - POS
+  - any related quick-add flow
+- buttons may be hidden, disabled, or blocked with explanation depending on current pattern, but must not bypass permission rules
+- reevaluate all buttons next to Finalize Sale and any nearby POS actions so they respect role and permission logic correctly
+
+3) Warranty claim must integrate into Repair Management properly
+Current issue:
+- sending warranty claim for repair does not appear in Repair Management
+
+Fix:
+- when warranty claim is sent for repair, it must create or link a coherent repair-management record/work item
+- it must appear in Repair Management
+- user must have a choice:
+  - assign to specific technician
+  - assign to anyone
+- if assigned to anyone, it should appear in the general technician pool/queue according to current system pattern
+- if assigned to a specific tech, it should be associated accordingly
+- once tech marks repair completed, the linked warranty claim must update accordingly
+- status sync between repair work and warranty claim must be coherent and one-way safe
+
+4) Warranty replacement flow must integrate into POS properly
+Current issue:
+- replacement path needs a proper completion lifecycle
+
+Fix:
+- if warranty claim is approved for replacement, it must have a controlled path to send the replacement into POS with zero charge to the customer
+- when sent to POS, track that state explicitly so it is not repeatedly re-sent by mistake
+- if user clicks New Sale in POS before completing that replacement transaction, there must be a clear controlled way to reopen/send the pending replacement to POS again
+- once replacement transaction is finalized in POS, the warranty claim must be marked completed
+- after completion, it must not be sendable to POS again
+- keep this honest and coherent in local/mock mode
+
+5) Re-evaluate POS button/action permissions holistically
+Current issue:
+- role/button behavior is still inconsistent
+- example: sales role can sometimes do actions they should not, or cannot do actions they should when permission exists
+
+Fix:
+- audit the POS actions around checkout and quick actions
+- align them to actual role/permission capability, not hardcoded assumptions
+- if a role has permission to add inventory, that permission should behave consistently from dashboard and POS
+- if a role lacks refund/warranty permission, they must not be able to trigger those flows from Orders or anywhere else
+- make this permission model coherent across all tested scenarios
+
+6) Preserve already working behavior
+Do not break:
+- Warranty Management module/surface that already exists
+- Suggestive Sales maintenance
+- Quick Add Stock approval-to-inventory path
+- direct Add to Inventory
+- exact SKU/barcode lookup
+- dashboard Scan QR aligned to inventory
+- POS Add Item search-first behavior
+- stock-count enforcement and merge behavior
+- finalize sale with discount + points if currently working
+- points deduction timing
+- payment allocation starting empty
+- cash/card behavior currently working
+- POS draft persistence across navigation
+- New Sale reset button
+- Hold Orders popup flow
+- customer sync
+- Refund flow
+- Orders search/detail flow
+- Print Label
+- Quick Intake handoff
+- Special Part Order
+- Deposit
+- Add Method improvements already working
+
+7) Add implementation notes for future live mode
+Without broadening scope, add clear internal/local notes or honest UI messaging where needed so it is obvious that:
+- terminal/card refunds will need live backend/payment integration later
+- some refund/warranty execution steps are simulated/local until backend goes live
+Do not fake live integrations.
+
+8) Output format after implementation
+After implementation, return only:
+1. What changed
+2. Exact files changed in this pass
+3. How Switch User now enforces effective permissions
+4. Which permission gates were unified across POS / Orders / Dashboard
+5. How warranty-to-repair flow now works
+6. How warranty-to-replacement-to-POS flow now works
+7. Any known limitations still intentionally left unchanged
+8. A short implementation verification summary
+
+Important:
+- Do not claim final QA closure on behalf of the user
+- Do not mark the workstream complete yet
+- The user will perform the final manual QA
+- Stop after the report and wait for user testing feedback

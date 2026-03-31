@@ -690,13 +690,14 @@ function StoreActivationPanel() {
 }
 
 export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => void }) {
-  const { session, canAccess } = useAccess();
+  const { session, canAccess, effectiveRole } = useAccess();
   const navigate = useNavigate();
   const { addCustomer, addStockItem, updateStockItem, stockItems: sharedStockItems, approvedStockItems, pendingStockItems, heldOrders, removeHeldOrder } = useStoreLocalState();
   const hasInventoryPermission = (() => {
-    if (!session) return false;
-    if (session.role === 'system_owner' || session.role === 'store_owner' || session.role === 'manager') return true;
-    if (session.role === 'technician') return true;
+    const r = effectiveRole || session?.role || '';
+    if (!r) return false;
+    if (r === 'system_owner' || r === 'store_owner' || r === 'manager') return true;
+    if (r === 'technician') return true;
     return false;
   })();
   const [showPrintLabelModal, setShowPrintLabelModal] = useState(false);
@@ -723,10 +724,10 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
   const [dashStockPrice, setDashStockPrice] = useState('');
   const [dashStockCategory, setDashStockCategory] = useState('Parts');
 
-  const role = session?.role;
+  const role = effectiveRole || session?.role || '';
   const todayStr = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
 
-  const allActions = [
+  const allActions: { label: string; icon: string; color: string; roles: string[]; requires?: string }[] = [
     { label: 'New Sale', icon: 'shopping_cart', color: 'bg-primary', roles: ['store_owner', 'manager', 'sales_staff'] },
     { label: 'Quick Intake', icon: 'bolt', color: 'bg-secondary', roles: ['store_owner', 'manager', 'technician'] },
     { label: 'Add Stock', icon: 'inventory_2', color: 'bg-teal-800', roles: ['store_owner', 'manager', 'technician', 'sales_staff'] },
@@ -737,7 +738,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
   ];
 
   const visibleActions = allActions.filter(a => {
-    if (!a.roles.includes(role || '')) return false;
+    if (!a.roles.includes(role)) return false;
     if (a.requires && !canAccess(a.requires)) return false;
     return true;
   });

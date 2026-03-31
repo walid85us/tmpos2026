@@ -70,6 +70,9 @@ interface AccessContextType {
   updateTenantRole: (roleId: string, permissions: Record<string, PermissionLevel> | string[]) => void;
   platformRolesState: EmployeeRole[];
   tenantRolesState: EmployeeRole[];
+  posOperatorRole: string | null;
+  setPosOperatorRole: (role: string | null) => void;
+  effectiveRole: string;
 }
 
 const AccessContext = createContext<AccessContextType | undefined>(undefined);
@@ -86,6 +89,7 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   const [isPreviewModeEnabled, setIsPreviewModeEnabled] = useState(false);
   const [previewSession, setPreviewSession] = useState<Session | null>(null);
   const [previewTenant, setPreviewTenant] = useState<Tenant | null>(null);
+  const [posOperatorRole, setPosOperatorRole] = useState<string | null>(null);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
@@ -141,6 +145,7 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         setRealSession(null);
         setRealTenant(null);
         setAuthError(null);
+        setPosOperatorRole(null);
       }
 
       setLoading(false);
@@ -150,6 +155,7 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
 
   const session = isPreviewModeEnabled ? previewSession : realSession;
   const tenant = isPreviewModeEnabled ? previewTenant : realTenant;
+  const effectiveRole = (session?.userType === 'tenant' && posOperatorRole) ? posOperatorRole : (session?.role || '');
 
   const isStoreActivated = (): boolean => {
     if (!session || !tenant) return false;
@@ -179,7 +185,7 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
 
       if (!isAdminPerm && !activated) {
         if (!ONBOARDING_ALLOWED_MODULES.includes(feature)) return false;
-        if (session.role === 'store_owner') return true;
+        if (effectiveRole === 'store_owner') return true;
       }
 
       if (!isAdminPerm && activated) {
@@ -187,9 +193,9 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         if (!features.includes(feature)) return false;
       }
 
-      if (session.role === 'store_owner') return true;
+      if (effectiveRole === 'store_owner') return true;
 
-      const roleConfig = tenantRolesState.find(r => r.id === session.role);
+      const roleConfig = tenantRolesState.find(r => r.id === effectiveRole);
       if (!roleConfig) return false;
 
       const hasPermission = Array.isArray(roleConfig.permissions)
@@ -235,7 +241,7 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       resolveLandingRoute,
       isPreviewModeEnabled,
       enablePreviewMode: () => setIsPreviewModeEnabled(true),
-      disablePreviewMode: () => setIsPreviewModeEnabled(false),
+      disablePreviewMode: () => { setIsPreviewModeEnabled(false); setPosOperatorRole(null); },
       setPreviewSession,
       setPreviewTenant,
       getAvailableRoles,
@@ -244,7 +250,10 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       addTenantRole,
       updateTenantRole,
       platformRolesState,
-      tenantRolesState
+      tenantRolesState,
+      posOperatorRole,
+      setPosOperatorRole,
+      effectiveRole
     }}>
       {children}
     </AccessContext.Provider>

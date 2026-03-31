@@ -63,17 +63,28 @@ const getClaimPriority = (claim: WarrantyClaimRecord): { level: 'high' | 'medium
   return { level: 'low', label: 'Normal', color: 'bg-slate-100 text-slate-600 border-slate-200' };
 };
 
+const AVAILABLE_TECHNICIANS = [
+  { id: 'tech-john', name: 'John D.' },
+  { id: 'tech-sarah', name: 'Sarah L.' },
+  { id: 'tech-mike', name: 'Mike R.' },
+];
+
 const WarrantyManagement: React.FC = () => {
-  const { warrantyClaims, updateWarrantyClaim, completedOrders } = useStoreLocalState();
-  const { session } = useAccess();
+  const { warrantyClaims, updateWarrantyClaim, completedOrders, addWarrantyRepairTicket, addPendingReplacement } = useStoreLocalState();
+  const { session, effectiveRole } = useAccess();
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [typeFilter, setTypeFilter] = useState<string>('all');
   const [selectedClaim, setSelectedClaim] = useState<WarrantyClaimRecord | null>(null);
   const [transitionNote, setTransitionNote] = useState('');
   const [sortBy, setSortBy] = useState<'newest' | 'oldest' | 'priority'>('newest');
+  const [showRepairAssignModal, setShowRepairAssignModal] = useState(false);
+  const [selectedTechnicianId, setSelectedTechnicianId] = useState<string>('anyone');
+  const [repairAssignClaim, setRepairAssignClaim] = useState<WarrantyClaimRecord | null>(null);
+  const [replacementSentToast, setReplacementSentToast] = useState('');
 
-  const canManage = session?.role === 'system_owner' || session?.role === 'store_owner' || session?.role === 'manager';
+  const activeRole = effectiveRole || session?.role || '';
+  const canManage = activeRole === 'system_owner' || activeRole === 'store_owner' || activeRole === 'manager';
 
   const filteredClaims = useMemo(() => {
     let list = warrantyClaims.filter(c => {
@@ -95,14 +106,93 @@ const WarrantyManagement: React.FC = () => {
   }, [warrantyClaims, statusFilter, typeFilter, search, sortBy]);
 
   const handleStatusTransition = (claim: WarrantyClaimRecord, newStatus: ClaimStatus) => {
-    const operatorName = session?.name || session?.email || 'Unknown';
+    if (!canManage) return;
+
+    if (newStatus === 'In Repair') {
+      setRepairAssignClaim(claim);
+      setSelectedTechnicianId('anyone');
+      setShowRepairAssignModal(true);
+      return;
+    }
+
+    const operatorName = session?.user?.name || session?.user?.email || 'Unknown';
     const newHistory = [
       ...claim.statusHistory,
       { status: newStatus, date: new Date().toISOString(), by: operatorName, note: transitionNote || undefined },
     ];
-    updateWarrantyClaim(claim.id, { status: newStatus, statusHistory: newHistory });
-    setSelectedClaim({ ...claim, status: newStatus, statusHistory: newHistory });
+    const updates: Partial<WarrantyClaimRecord> = { status: newStatus, statusHistory: newHistory };
+
+    updateWarrantyClaim(claim.id, updates);
+    setSelectedClaim({ ...claim, ...updates });
     setTransitionNote('');
+  };
+
+  const handleRepairAssign = () => {
+    if (!repairAssignClaim || !canManage) return;
+    const operatorName = session?.user?.name || session?.user?.email || 'Unknown';
+    const tech = selectedTechnicianId === 'anyone' ? null : AVAILABLE_TECHNICIANS.find(t => t.id === selectedTechnicianId);
+    const assignNote = tech
+      ? `${transitionNote ? transitionNote + ' — ' : ''}Assigned to ${tech.name} for warranty repair`
+      : `${transitionNote ? transitionNote + ' — ' : ''}Sent to general technician pool for warranty repair`;
+
+    const newHistory = [
+      ...repairAssignClaim.statusHistory,
+      { status: 'In Repair', date: new Date().toISOString(), by: operatorName, note: assignNote },
+    ];
+
+    const repairTicketId = `wr-${Date.now()}`;
+    const repairTicketNumber = `WR-${repairAssignClaim.ticketNumber.replace('WC-', '')}`;
+
+    addWarrantyRepairTicket({
+      id: repairTicketId,
+      ticketNumber: repairTicketNumber,
+      customerId: repairAssignClaim.customerId,
+      customerName: repairAssignClaim.customerName,
+      device: repairAssignClaim.itemName,
+      issue: `Warranty Repair: ${repairAssignClaim.reason}`,
+      status: tech ? 'In Progress' : 'Pending',
+      priority: 'High',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      estimatedCost: 0,
+      technicianId: tech?.id,
+      technicianName: tech?.name || 'Unassigned (Pool)',
+      diagnosticNotes: `Warranty claim ${repairAssignClaim.ticketNumber} — ${repairAssignClaim.notes}`,
+      history: [
+        { id: `h-${Date.now()}`, action: 'Created from warranty claim', performedBy: operatorName, timestamp: new Date().toISOString(), details: `Linked to warranty ${repairAssignClaim.ticketNumber}` },
+      ],
+    });
+
+    const updates: Partial<WarrantyClaimRecord> = {
+      status: 'In Repair',
+      statusHistory: newHistory,
+      linkedRepairId: repairTicketId,
+      assignedTechnicianId: tech?.id || undefined,
+      assignedTechnicianName: tech?.name || 'General Pool',
+    };
+
+    updateWarrantyClaim(repairAssignClaim.id, updates);
+    setSelectedClaim({ ...repairAssignClaim, ...updates });
+    setTransitionNote('');
+    setShowRepairAssignModal(false);
+    setRepairAssignClaim(null);
+  };
+
+  const handleSendReplacementToPOS = (claim: WarrantyClaimRecord) => {
+    if (claim.replacementSentToPOS || !canManage) return;
+    const originalOrder = completedOrders.find(o => o.id === claim.originalOrderId);
+    const originalItem = originalOrder?.items.find(i => i.id === claim.itemId);
+    addPendingReplacement({
+      warrantyClaimId: claim.id,
+      itemName: claim.itemName,
+      customerName: claim.customerName,
+      customerId: claim.customerId,
+      originalPrice: originalItem?.unitPrice || 0,
+    });
+    updateWarrantyClaim(claim.id, { replacementSentToPOS: true });
+    setSelectedClaim({ ...claim, replacementSentToPOS: true });
+    setReplacementSentToast(`Replacement for "${claim.itemName}" sent to POS`);
+    setTimeout(() => setReplacementSentToast(''), 3000);
   };
 
   const activeCount = warrantyClaims.filter(c => !['Completed', 'Rejected'].includes(c.status)).length;
@@ -378,6 +468,49 @@ const WarrantyManagement: React.FC = () => {
                   </div>
                 </div>
 
+                {selectedClaim.linkedRepairId && (
+                  <div className="bg-indigo-50 rounded-2xl p-4 border border-indigo-200 flex items-center gap-3">
+                    <span className="material-symbols-outlined text-indigo-600">build</span>
+                    <div className="flex-1">
+                      <p className="text-xs font-black text-indigo-700">Linked Repair Ticket</p>
+                      <p className="text-[10px] text-indigo-600">Assigned to: {selectedClaim.assignedTechnicianName || 'General Pool'}</p>
+                      <p className="text-[10px] text-indigo-500 mt-0.5">This repair appears in the Repairs queue. When the technician marks it complete, update this claim to Completed.</p>
+                    </div>
+                  </div>
+                )}
+
+                {selectedClaim.status === 'Replacement Pending' && canManage && (
+                  <div className="bg-purple-50 rounded-2xl p-4 border border-purple-200">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <span className="material-symbols-outlined text-purple-600">shopping_cart</span>
+                        <div>
+                          <p className="text-xs font-black text-purple-700">Replacement Transaction</p>
+                          <p className="text-[10px] text-purple-600">
+                            {selectedClaim.replacementSentToPOS
+                              ? 'Replacement has been sent to POS. Complete the zero-charge transaction there.'
+                              : 'Send this replacement to POS to create a zero-charge transaction for the customer.'}
+                          </p>
+                        </div>
+                      </div>
+                      {!selectedClaim.replacementSentToPOS && (
+                        <button
+                          onClick={() => handleSendReplacementToPOS(selectedClaim)}
+                          className="px-4 py-2.5 bg-purple-600 text-white rounded-xl font-black text-xs uppercase tracking-widest hover:bg-purple-700 transition-all active:scale-95 flex items-center gap-2"
+                        >
+                          <span className="material-symbols-outlined text-sm">send</span>Send to POS
+                        </button>
+                      )}
+                      {selectedClaim.replacementSentToPOS && (
+                        <span className="text-[10px] font-black text-purple-600 bg-purple-100 px-3 py-1.5 rounded-lg flex items-center gap-1">
+                          <span className="material-symbols-outlined text-xs">check</span>Sent
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[10px] text-slate-500 mt-2 italic">Note: This is a simulated local flow. In production, POS integration would handle this automatically via backend.</p>
+                  </div>
+                )}
+
                 {canManage && ALLOWED_TRANSITIONS[selectedClaim.status].length > 0 && (
                   <div className="bg-teal-50 rounded-2xl p-5 border border-teal-200">
                     <p className="text-[10px] font-black text-teal-600 uppercase tracking-widest mb-3">Update Claim Status</p>
@@ -393,6 +526,8 @@ const WarrantyManagement: React.FC = () => {
                               ? 'Describe review findings, approval reason, or rejection rationale...'
                               : selectedClaim.status === 'Approved'
                               ? 'Note the repair plan or replacement details...'
+                              : selectedClaim.status === 'In Repair'
+                              ? 'Note repair completion details...'
                               : 'Add a note about this decision...'
                           }
                         />
@@ -432,7 +567,86 @@ const WarrantyManagement: React.FC = () => {
             </motion.div>
           </motion.div>
         )}
+
+        {showRepairAssignModal && repairAssignClaim && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[120] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-md w-full p-8 ghost-border">
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="text-xl font-black text-primary tracking-tight">Assign Warranty Repair</h3>
+                <button onClick={() => { setShowRepairAssignModal(false); setRepairAssignClaim(null); }} className="text-slate-400 hover:text-primary">
+                  <span className="material-symbols-outlined">close</span>
+                </button>
+              </div>
+
+              <div className="space-y-4">
+                <div className="bg-indigo-50 rounded-2xl p-4 border border-indigo-200">
+                  <p className="text-[10px] font-black text-indigo-600 uppercase tracking-widest mb-1">Warranty Claim</p>
+                  <p className="text-sm font-bold text-indigo-800">{repairAssignClaim.ticketNumber}</p>
+                  <p className="text-xs text-indigo-600">{repairAssignClaim.itemName} — {repairAssignClaim.reason}</p>
+                  <p className="text-xs text-indigo-500">{repairAssignClaim.customerName}</p>
+                </div>
+
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Assign To</label>
+                  <div className="space-y-2">
+                    <button
+                      onClick={() => setSelectedTechnicianId('anyone')}
+                      className={`w-full flex items-center gap-3 p-3 rounded-xl border transition-all ${selectedTechnicianId === 'anyone' ? 'border-primary bg-primary/5 ring-2 ring-primary/20' : 'border-slate-200 hover:bg-slate-50'}`}
+                    >
+                      <div className="w-8 h-8 bg-slate-200 rounded-full flex items-center justify-center">
+                        <span className="material-symbols-outlined text-sm text-slate-600">group</span>
+                      </div>
+                      <div className="text-left">
+                        <p className="text-sm font-bold">General Pool</p>
+                        <p className="text-[10px] text-slate-500">Any available technician can pick this up</p>
+                      </div>
+                    </button>
+                    {AVAILABLE_TECHNICIANS.map(tech => (
+                      <button
+                        key={tech.id}
+                        onClick={() => setSelectedTechnicianId(tech.id)}
+                        className={`w-full flex items-center gap-3 p-3 rounded-xl border transition-all ${selectedTechnicianId === tech.id ? 'border-primary bg-primary/5 ring-2 ring-primary/20' : 'border-slate-200 hover:bg-slate-50'}`}
+                      >
+                        <div className="w-8 h-8 bg-indigo-100 rounded-full flex items-center justify-center text-xs font-black text-indigo-700">
+                          {tech.name.split(' ').map(n => n[0]).join('')}
+                        </div>
+                        <p className="text-sm font-bold">{tech.name}</p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Repair Note (optional)</label>
+                  <textarea
+                    value={transitionNote}
+                    onChange={(e) => setTransitionNote(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm min-h-[60px] focus:ring-2 focus:ring-primary/20 focus:outline-none"
+                    placeholder="Add context for the technician..."
+                  />
+                </div>
+
+                <button
+                  onClick={handleRepairAssign}
+                  className="w-full py-4 bg-primary text-white rounded-2xl font-black uppercase tracking-widest hover:bg-primary/90 transition-all active:scale-95 flex items-center justify-center gap-2"
+                >
+                  <span className="material-symbols-outlined text-sm">build</span>
+                  Create Repair Ticket & Assign
+                </button>
+
+                <p className="text-[10px] text-slate-400 text-center italic">This will create a linked repair ticket visible in Repair Management</p>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
       </AnimatePresence>
+
+      {replacementSentToast && (
+        <div className="fixed bottom-8 right-8 z-[200] bg-emerald-500 text-white px-6 py-3 rounded-2xl shadow-xl font-bold text-sm flex items-center gap-2 animate-in slide-in-from-bottom-2">
+          <span className="material-symbols-outlined text-sm">check_circle</span>
+          {replacementSentToast}
+        </div>
+      )}
     </PageShell>
   );
 };

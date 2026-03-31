@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useMemo } from 'react';
-import { Customer, HeldOrder, CartItem, PaymentMethod, Discount } from '../types';
+import { Customer, HeldOrder, CartItem, PaymentMethod, Discount, RepairTicket } from '../types';
 
 export interface StockItem {
   id: string;
@@ -88,6 +88,11 @@ export interface WarrantyClaimRecord {
   originalNotes?: string;
   createdAt: string;
   processedBy: string;
+  linkedRepairId?: string;
+  assignedTechnicianId?: string;
+  assignedTechnicianName?: string;
+  replacementSentToPOS?: boolean;
+  replacementOrderId?: string;
 }
 
 export interface POSOperator {
@@ -125,6 +130,12 @@ interface StoreLocalStateContextType {
   updateWarrantyClaim: (id: string, updates: Partial<WarrantyClaimRecord>) => void;
   posOperator: POSOperator | null;
   setPosOperator: (op: POSOperator | null) => void;
+  warrantyRepairTickets: RepairTicket[];
+  addWarrantyRepairTicket: (ticket: RepairTicket) => void;
+  updateWarrantyRepairTicket: (id: string, updates: Partial<RepairTicket>) => void;
+  pendingReplacements: { warrantyClaimId: string; itemName: string; customerName: string; customerId: string; originalPrice: number }[];
+  addPendingReplacement: (r: { warrantyClaimId: string; itemName: string; customerName: string; customerId: string; originalPrice: number }) => void;
+  removePendingReplacement: (warrantyClaimId: string) => void;
 }
 
 const SEED_CUSTOMERS: Customer[] = [
@@ -261,6 +272,8 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const [refundRecords, setRefundRecords] = useState<RefundRecord[]>([]);
   const [warrantyClaims, setWarrantyClaims] = useState<WarrantyClaimRecord[]>(SEED_WARRANTY_CLAIMS);
   const [posOperator, setPosOperatorState] = useState<POSOperator | null>(SEED_POS_OPERATORS[0]);
+  const [warrantyRepairTickets, setWarrantyRepairTickets] = useState<RepairTicket[]>([]);
+  const [pendingReplacements, setPendingReplacements] = useState<{ warrantyClaimId: string; itemName: string; customerName: string; customerId: string; originalPrice: number }[]>([]);
 
   const addCustomer = useCallback((c: Customer) => {
     setCustomers(prev => [...prev, c]);
@@ -329,6 +342,25 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
     setPosOperatorState(op);
   }, []);
 
+  const addWarrantyRepairTicket = useCallback((ticket: RepairTicket) => {
+    setWarrantyRepairTickets(prev => [ticket, ...prev]);
+  }, []);
+
+  const updateWarrantyRepairTicket = useCallback((id: string, updates: Partial<RepairTicket>) => {
+    setWarrantyRepairTickets(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t));
+  }, []);
+
+  const addPendingReplacement = useCallback((r: { warrantyClaimId: string; itemName: string; customerName: string; customerId: string; originalPrice: number }) => {
+    setPendingReplacements(prev => {
+      if (prev.some(p => p.warrantyClaimId === r.warrantyClaimId)) return prev;
+      return [...prev, r];
+    });
+  }, []);
+
+  const removePendingReplacement = useCallback((warrantyClaimId: string) => {
+    setPendingReplacements(prev => prev.filter(r => r.warrantyClaimId !== warrantyClaimId));
+  }, []);
+
   return (
     <StoreLocalStateContext.Provider value={{
       customers, addCustomer, updateCustomer,
@@ -340,6 +372,8 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
       refundRecords, addRefundRecord,
       warrantyClaims, addWarrantyClaim, updateWarrantyClaim,
       posOperator, setPosOperator,
+      warrantyRepairTickets, addWarrantyRepairTicket, updateWarrantyRepairTicket,
+      pendingReplacements, addPendingReplacement, removePendingReplacement,
     }}>
       {children}
     </StoreLocalStateContext.Provider>

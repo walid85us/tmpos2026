@@ -28,8 +28,8 @@ const POINTS_VALUE_RATIO = 0.01;
 
 export const POS: React.FC = () => {
   const location = useLocation();
-  const { canAccess, session } = useAccess();
-  const { customers: sharedCustomers, addCustomer, updateCustomer, stockItems: sharedStockItems, addStockItem, updateStockItem: updateStockItemCtx, approvedStockItems, pendingStockItems, heldOrders, addHeldOrder, removeHeldOrder, suggestiveSalesItems, addSuggestiveSaleItem, removeSuggestiveSaleItem, draftCart, setDraftCart, clearDraftCart, completedOrders, addCompletedOrder, updateCompletedOrder, refundRecords, addRefundRecord, warrantyClaims, addWarrantyClaim, posOperator, setPosOperator } = useStoreLocalState();
+  const { canAccess, session, setPosOperatorRole, effectiveRole: accessEffectiveRole } = useAccess();
+  const { customers: sharedCustomers, addCustomer, updateCustomer, stockItems: sharedStockItems, addStockItem, updateStockItem: updateStockItemCtx, approvedStockItems, pendingStockItems, heldOrders, addHeldOrder, removeHeldOrder, suggestiveSalesItems, addSuggestiveSaleItem, removeSuggestiveSaleItem, draftCart, setDraftCart, clearDraftCart, completedOrders, addCompletedOrder, updateCompletedOrder, refundRecords, addRefundRecord, warrantyClaims, addWarrantyClaim, updateWarrantyClaim: updateWarrantyClaimCtx, posOperator, setPosOperator, pendingReplacements, removePendingReplacement } = useStoreLocalState();
   const derivedSuggestiveItems = approvedStockItems.filter(s => s.isSuggestiveSale).map(s => ({ id: s.id, name: s.name, price: s.price }));
   const OPERATOR_ROLE_MAP: Record<string, string> = { 'Manager': 'manager', 'Sales Associate': 'sales_staff', 'Technician': 'technician', 'Store Owner': 'store_owner' };
   const effectiveRole = posOperator ? (OPERATOR_ROLE_MAP[posOperator.role] || 'sales_staff') : (session?.role || '');
@@ -49,6 +49,12 @@ export const POS: React.FC = () => {
   const canFileWarranty = hasEffectivePerm('warranties');
   const canAddStock = hasInventoryPermission;
   const canManageSuggestive = hasEffectivePerm('suggestive_sales');
+
+  useEffect(() => {
+    const mappedRole = posOperator ? (OPERATOR_ROLE_MAP[posOperator.role] || 'sales_staff') : null;
+    setPosOperatorRole(mappedRole);
+  }, [posOperator, setPosOperatorRole]);
+
   const [cart, setCart] = useState<CartItem[]>(draftCart.cart);
   const [payments, setPayments] = useState<PaymentMethod[]>(draftCart.payments);
   const [discounts, setDiscounts] = useState<Discount[]>(draftCart.discounts);
@@ -144,6 +150,7 @@ export const POS: React.FC = () => {
   const [warrantySuccess, setWarrantySuccess] = useState(false);
   const [ordersSearch, setOrdersSearch] = useState('');
   const [ordersSelectedOrder, setOrdersSelectedOrder] = useState<CompletedOrder | null>(null);
+  const [activeReplacementClaimId, setActiveReplacementClaimId] = useState<string | null>(null);
   const [isAddMethodModalOpen, setIsAddMethodModalOpen] = useState(false);
   const [specialPartName, setSpecialPartName] = useState('');
   const [specialPartPrice, setSpecialPartPrice] = useState('');
@@ -215,6 +222,7 @@ export const POS: React.FC = () => {
     setCashRoundingMode('exact');
     clearDraftCart();
     setIsSuccess(false);
+    setActiveReplacementClaimId(null);
   };
 
   const subtotal = cart.reduce((acc, item) => acc + item.price * (item.qty || 1), 0);
@@ -363,6 +371,22 @@ export const POS: React.FC = () => {
   const [finalTotal, setFinalTotal] = useState(0);
   const [finalTxId, setFinalTxId] = useState('');
 
+  const handleLoadReplacement = (replacement: typeof pendingReplacements[0]) => {
+    const customer = sharedCustomers.find(c => c.id === replacement.customerId);
+    if (customer) setSelectedCustomer(customer);
+    const replacementItem: CartItem = {
+      id: `repl-${Date.now()}`,
+      name: `Warranty Replacement: ${replacement.itemName}`,
+      description: `Warranty replacement — zero charge`,
+      price: 0,
+      qty: 1,
+      type: 'product' as any,
+      icon: 'swap_horiz',
+    };
+    setCart([replacementItem]);
+    setActiveReplacementClaimId(replacement.warrantyClaimId);
+  };
+
   const handleFinalize = async () => {
     if (!selectedCustomer) {
       setCustomerValidationError('Customer information is mandatory for this transaction.');
@@ -429,6 +453,19 @@ export const POS: React.FC = () => {
         lastVisit: new Date().toISOString().split('T')[0],
       });
       setSelectedCustomer(prev => prev ? { ...prev, loyaltyPoints: newPoints, totalSpent: (prev.totalSpent || 0) + total } : prev);
+    }
+
+    if (activeReplacementClaimId) {
+      updateWarrantyClaimCtx(activeReplacementClaimId, {
+        status: 'Completed',
+        replacementOrderId: newOrder.id,
+        statusHistory: (() => {
+          const claim = warrantyClaims.find(wc => wc.id === activeReplacementClaimId);
+          return [...(claim?.statusHistory || []), { status: 'Completed', date: new Date().toISOString(), by: posOperator?.name || 'POS Operator', note: `Replacement transaction completed — ${invNum}` }];
+        })(),
+      });
+      removePendingReplacement(activeReplacementClaimId);
+      setActiveReplacementClaimId(null);
     }
 
     setIsProcessing(false);
@@ -659,6 +696,37 @@ export const POS: React.FC = () => {
           </button>
         </div>
       </header>
+
+      {pendingReplacements.length > 0 && !activeReplacementClaimId && (
+        <div className="bg-purple-50 border border-purple-200 rounded-2xl p-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <span className="material-symbols-outlined text-purple-600">swap_horiz</span>
+            <div>
+              <p className="text-xs font-black text-purple-700">Pending Warranty Replacement{pendingReplacements.length > 1 ? 's' : ''}</p>
+              <p className="text-[10px] text-purple-600">{pendingReplacements.map(r => `${r.itemName} for ${r.customerName}`).join('; ')}</p>
+            </div>
+          </div>
+          <div className="flex gap-2">
+            {pendingReplacements.map(r => (
+              <button
+                key={r.warrantyClaimId}
+                onClick={() => handleLoadReplacement(r)}
+                className="px-3 py-2 bg-purple-600 text-white rounded-xl text-xs font-black uppercase tracking-wider hover:bg-purple-700 transition-all active:scale-95"
+              >
+                Load: {r.itemName}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {activeReplacementClaimId && (
+        <div className="bg-purple-100 border border-purple-300 rounded-2xl p-3 flex items-center gap-3">
+          <span className="material-symbols-outlined text-purple-700 text-lg">verified_user</span>
+          <p className="text-xs font-black text-purple-800">Warranty Replacement Transaction — Finalize to complete the warranty claim. Zero charge to customer.</p>
+          <p className="text-[10px] text-purple-600 italic ml-auto">Simulated local flow — production will integrate with backend</p>
+        </div>
+      )}
 
       <div className="grid grid-cols-12 gap-8">
         <div className="col-span-12 lg:col-span-5 space-y-6">
@@ -1389,14 +1457,24 @@ export const POS: React.FC = () => {
                       </div>
                     ))}
                   </div>
-                  {ordersSelectedOrder.status === 'Paid' && (
+                  {ordersSelectedOrder.status === 'Paid' && (canProcessRefund || canFileWarranty) && (
                     <div className="flex gap-3">
-                      <button onClick={() => { setIsPreviousOrdersOpen(false); setOrdersSelectedOrder(null); setIsRefundModalOpen(true); setRefundSearch(ordersSelectedOrder.invoiceNumber); setRefundSelectedOrder(ordersSelectedOrder); setRefundStep('detail'); }} className="flex-1 py-3 bg-rose-50 text-rose-600 rounded-2xl font-black text-xs uppercase tracking-widest border border-rose-200 hover:bg-rose-100 transition-all flex items-center justify-center gap-2">
-                        <span className="material-symbols-outlined text-sm">keyboard_return</span>Initiate Refund
-                      </button>
-                      <button onClick={() => { setIsPreviousOrdersOpen(false); setOrdersSelectedOrder(null); setIsWarrantyModalOpen(true); setWarrantySearch(ordersSelectedOrder.invoiceNumber); setWarrantySelectedOrder(ordersSelectedOrder); setWarrantyStep('select'); }} className="flex-1 py-3 bg-teal-50 text-teal-600 rounded-2xl font-black text-xs uppercase tracking-widest border border-teal-200 hover:bg-teal-100 transition-all flex items-center justify-center gap-2">
-                        <span className="material-symbols-outlined text-sm">verified_user</span>Warranty Claim
-                      </button>
+                      {canProcessRefund && (
+                        <button onClick={() => { setIsPreviousOrdersOpen(false); setOrdersSelectedOrder(null); setIsRefundModalOpen(true); setRefundSearch(ordersSelectedOrder.invoiceNumber); setRefundSelectedOrder(ordersSelectedOrder); setRefundStep('detail'); }} className="flex-1 py-3 bg-rose-50 text-rose-600 rounded-2xl font-black text-xs uppercase tracking-widest border border-rose-200 hover:bg-rose-100 transition-all flex items-center justify-center gap-2">
+                          <span className="material-symbols-outlined text-sm">keyboard_return</span>Initiate Refund
+                        </button>
+                      )}
+                      {canFileWarranty && (
+                        <button onClick={() => { setIsPreviousOrdersOpen(false); setOrdersSelectedOrder(null); setIsWarrantyModalOpen(true); setWarrantySearch(ordersSelectedOrder.invoiceNumber); setWarrantySelectedOrder(ordersSelectedOrder); setWarrantyStep('select'); }} className="flex-1 py-3 bg-teal-50 text-teal-600 rounded-2xl font-black text-xs uppercase tracking-widest border border-teal-200 hover:bg-teal-100 transition-all flex items-center justify-center gap-2">
+                          <span className="material-symbols-outlined text-sm">verified_user</span>Warranty Claim
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  {ordersSelectedOrder.status === 'Paid' && !canProcessRefund && !canFileWarranty && (
+                    <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200 text-center">
+                      <span className="material-symbols-outlined text-slate-400 text-lg">lock</span>
+                      <p className="text-xs font-bold text-slate-400 mt-1">Your current role does not have permission to initiate refunds or warranty claims</p>
                     </div>
                   )}
                 </div>
