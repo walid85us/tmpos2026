@@ -9,7 +9,7 @@ import {
   HeldOrder, 
   Customer 
 } from '../types';
-import { useStoreLocalState } from '../context/StoreLocalState';
+import { useStoreLocalState, SEED_POS_OPERATORS, type CompletedOrder, type CompletedOrderItem } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
 import ContextualHelp from './ContextualHelp';
 
@@ -28,7 +28,8 @@ const POINTS_VALUE_RATIO = 0.01;
 export const POS: React.FC = () => {
   const location = useLocation();
   const { canAccess, session } = useAccess();
-  const { customers: sharedCustomers, addCustomer, updateCustomer, stockItems: sharedStockItems, addStockItem, approvedStockItems, pendingStockItems, heldOrders, addHeldOrder, removeHeldOrder, suggestiveSalesItems, addSuggestiveSaleItem, removeSuggestiveSaleItem, draftCart, setDraftCart, clearDraftCart } = useStoreLocalState();
+  const { customers: sharedCustomers, addCustomer, updateCustomer, stockItems: sharedStockItems, addStockItem, updateStockItem: updateStockItemCtx, approvedStockItems, pendingStockItems, heldOrders, addHeldOrder, removeHeldOrder, suggestiveSalesItems, addSuggestiveSaleItem, removeSuggestiveSaleItem, draftCart, setDraftCart, clearDraftCart, completedOrders, addCompletedOrder, updateCompletedOrder, refundRecords, addRefundRecord, warrantyClaims, addWarrantyClaim, posOperator, setPosOperator } = useStoreLocalState();
+  const derivedSuggestiveItems = approvedStockItems.filter(s => s.isSuggestiveSale).map(s => ({ id: s.id, name: s.name, price: s.price }));
   const hasInventoryPermission = (() => {
     if (!session) return false;
     if (session.role === 'system_owner' || session.role === 'store_owner' || session.role === 'manager') return true;
@@ -110,6 +111,26 @@ export const POS: React.FC = () => {
   const [isDepositModalOpen, setIsDepositModalOpen] = useState(false);
   const [depositAmount, setDepositAmount] = useState('');
   const [depositReason, setDepositReason] = useState('');
+  const [isSwitchUserOpen, setIsSwitchUserOpen] = useState(false);
+  const [switchPinInput, setSwitchPinInput] = useState('');
+  const [switchTarget, setSwitchTarget] = useState<typeof SEED_POS_OPERATORS[0] | null>(null);
+  const [switchError, setSwitchError] = useState('');
+  const [refundSearch, setRefundSearch] = useState('');
+  const [refundSelectedOrder, setRefundSelectedOrder] = useState<CompletedOrder | null>(null);
+  const [refundItems, setRefundItems] = useState<Record<string, number>>({});
+  const [refundReason, setRefundReason] = useState('');
+  const [refundMethod, setRefundMethod] = useState('Original Payment Method');
+  const [refundStep, setRefundStep] = useState<'search' | 'detail' | 'confirm'>('search');
+  const [refundSuccess, setRefundSuccess] = useState(false);
+  const [warrantySearch, setWarrantySearch] = useState('');
+  const [warrantySelectedOrder, setWarrantySelectedOrder] = useState<CompletedOrder | null>(null);
+  const [warrantySelectedItem, setWarrantySelectedItem] = useState<CompletedOrderItem | null>(null);
+  const [warrantyReason, setWarrantyReason] = useState('');
+  const [warrantyNotes, setWarrantyNotes] = useState('');
+  const [warrantyStep, setWarrantyStep] = useState<'search' | 'select' | 'claim'>('search');
+  const [warrantySuccess, setWarrantySuccess] = useState(false);
+  const [ordersSearch, setOrdersSearch] = useState('');
+  const [ordersSelectedOrder, setOrdersSelectedOrder] = useState<CompletedOrder | null>(null);
   const [isAddMethodModalOpen, setIsAddMethodModalOpen] = useState(false);
   const [specialPartName, setSpecialPartName] = useState('');
   const [specialPartPrice, setSpecialPartPrice] = useState('');
@@ -226,8 +247,12 @@ export const POS: React.FC = () => {
     } else {
       const stockItem = approvedStockItems.find(si => si.id === item.id);
       if (stockItem) {
-        const inCartQty = cart.filter(ci => ci.id.startsWith(item.id + '-') || ci.id === item.id).reduce((sum, ci) => sum + (ci.qty || 1), 0);
-        if (inCartQty >= stockItem.qty) {
+        const existingCartItem = cart.find(ci => ci.type === 'product' && ((ci as any).stockItemId === item.id));
+        const inCartQty = cart.filter(ci => ci.type === 'product' && ((ci as any).stockItemId === item.id)).reduce((sum, ci) => sum + (ci.qty || 1), 0);
+        if (inCartQty >= stockItem.qty) return;
+        if (existingCartItem) {
+          setCart(cart.map(ci => ci.id === existingCartItem.id ? { ...ci, qty: (ci.qty || 1) + 1 } : ci));
+          setIsAddItemModalOpen(false);
           return;
         }
       }
@@ -333,10 +358,40 @@ export const POS: React.FC = () => {
     }
     setCustomerValidationError('');
     setIsProcessing(true);
+    const invNum = `INV-${(1000 + completedOrders.length + 1)}`;
     const txId = `TX-${Date.now().toString().slice(-5)}`;
     setFinalTotal(total);
-    setFinalTxId(txId);
+    setFinalTxId(invNum);
     await new Promise(resolve => setTimeout(resolve, 2000));
+
+    const completedItems: CompletedOrderItem[] = cart.map(ci => ({
+      id: ci.id,
+      name: ci.name || ci.description || 'Item',
+      qty: ci.qty || 1,
+      unitPrice: ci.price,
+      type: (ci.type as any) || 'product',
+      stockItemId: (ci as any).stockItemId,
+      warrantyPeriod: ci.type === 'repair' ? '90 days' : ci.type === 'product' ? '30 days' : undefined,
+    }));
+
+    const newOrder: CompletedOrder = {
+      id: `ord-${Date.now()}`,
+      invoiceNumber: invNum,
+      customerId: selectedCustomer.id,
+      customerName: selectedCustomer.name,
+      customerPhone: selectedCustomer.phone || '',
+      customerEmail: selectedCustomer.email || '',
+      items: completedItems,
+      subtotal,
+      discountTotal: discountTotal + cashRoundingDiscount,
+      tax,
+      total: parseFloat((total - cashRoundingDiscount).toFixed(2)),
+      payments: payments.map(p => ({ method: p.method, amount: p.locked ? (cardAutoAmount ?? 0) : (p.amount || 0) })),
+      status: 'Paid',
+      createdAt: new Date().toISOString(),
+      operatorName: posOperator?.name || 'Unknown',
+    };
+    addCompletedOrder(newOrder);
 
     if (selectedCustomer && selectedCustomer.id !== 'walk-in') {
       const pointsEarned = Math.floor(total * 10);
@@ -358,6 +413,7 @@ export const POS: React.FC = () => {
     setCart([]);
     setDiscounts([]);
     setPayments([]);
+    setCashRoundingMode('exact');
     clearDraftCart();
   };
 
@@ -514,6 +570,16 @@ export const POS: React.FC = () => {
             <span className="text-[10px] uppercase tracking-[0.2em] text-secondary font-extrabold mb-1 block">Transaction ID: #TRX-99210</span>
             <h2 className="text-3xl font-extrabold text-primary tracking-tight font-headline">Checkout & Tender</h2>
           </div>
+          <div className="h-12 w-px bg-slate-200"></div>
+          {posOperator && (
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-teal-50 rounded-xl border border-teal-100">
+              <div className="w-8 h-8 bg-teal-600 rounded-full flex items-center justify-center text-white text-xs font-black">{posOperator.name.split(' ').map(n => n[0]).join('')}</div>
+              <div className="text-left">
+                <p className="text-[10px] font-black text-teal-800 uppercase tracking-widest leading-none">{posOperator.name}</p>
+                <p className="text-[9px] font-bold text-teal-500">{posOperator.role}</p>
+              </div>
+            </div>
+          )}
           <div className="h-12 w-px bg-slate-200"></div>
           <button 
             onClick={() => setIsShiftModalOpen(true)}
@@ -761,7 +827,14 @@ export const POS: React.FC = () => {
                           {([['exact', 'Exact'], ['up', 'Round Up'], ['down', 'Round Down']] as const).map(([mode, label]) => (
                             <button
                               key={mode}
-                              onClick={() => setCashRoundingMode(mode)}
+                              onClick={() => {
+                                setCashRoundingMode(mode);
+                                if (mode === 'exact') {
+                                  const otherTotal = payments.filter(pm => pm.id !== p.id).reduce((sum, pm) => sum + (pm.locked ? (cardAutoAmount ?? 0) : (pm.amount || 0)), 0);
+                                  const exactOwed = parseFloat((total - otherTotal).toFixed(2));
+                                  if (exactOwed > 0) setPayments(payments.map(pm => pm.id === p.id ? { ...pm, amount: exactOwed } : pm));
+                                }
+                              }}
                               className={`text-[10px] font-black uppercase tracking-widest px-3 py-1.5 rounded-xl transition-all ${cashRoundingMode === mode ? (mode === 'exact' ? 'bg-white text-slate-700 shadow-sm' : 'bg-lime-100 text-lime-700 shadow-sm') : 'text-slate-400 hover:text-slate-600'}`}
                             >
                               {label}
@@ -837,7 +910,7 @@ export const POS: React.FC = () => {
                   {isProcessing ? <span>PROCESSING...</span> : <span>FINALIZE SALE</span>}
                 </button>
                 <div className="grid grid-cols-2 gap-2">
-                  <button onClick={() => setIsPinModalOpen(true)} className="bg-slate-100 hover:bg-slate-200 rounded-xl flex flex-col items-center justify-center gap-2 transition-all group">
+                  <button onClick={() => { setIsSwitchUserOpen(true); setSwitchPinInput(''); setSwitchTarget(null); setSwitchError(''); }} className="bg-slate-100 hover:bg-slate-200 rounded-xl flex flex-col items-center justify-center gap-2 transition-all group">
                     <span className="material-symbols-outlined text-primary group-hover:scale-110 transition-transform">switch_account</span>
                     <span className="text-[10px] font-bold uppercase tracking-tighter">Switch User</span>
                   </button>
@@ -890,7 +963,7 @@ export const POS: React.FC = () => {
               <p className="text-2xl font-black text-primary mb-8">${finalTotal.toFixed(2)}</p>
               <div className="space-y-3">
                 <button 
-                  onClick={() => { setIsSuccess(false); setSelectedCustomer(null); }}
+                  onClick={() => { setIsSuccess(false); setSelectedCustomer(null); setCashRoundingMode('exact'); }}
                   className="w-full py-4 bg-primary text-white rounded-2xl font-black uppercase tracking-widest shadow-lg active:scale-95 transition-transform"
                 >
                   New Transaction
@@ -1024,13 +1097,126 @@ export const POS: React.FC = () => {
 
         {isWarrantyModalOpen && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[110] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
-            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-lg w-full p-8 ghost-border">
-              <h3 className="text-2xl font-black text-primary mb-8">Warranty Claim</h3>
-              <div className="space-y-6">
-                <input className="w-full bg-slate-50 border-none rounded-2xl px-4 py-4 text-sm font-bold" placeholder="Invoice # or Serial #" type="text" />
-                <textarea className="w-full bg-slate-50 border-none rounded-2xl px-4 py-4 text-sm font-medium min-h-[100px]" placeholder="Reason for claim..."></textarea>
-                <button onClick={() => setIsWarrantyModalOpen(false)} className="w-full py-5 bg-secondary text-white rounded-2xl font-black uppercase">Process Claim</button>
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-2xl w-full p-8 ghost-border max-h-[90vh] overflow-y-auto">
+              <div className="flex justify-between items-center mb-8">
+                <h3 className="text-2xl font-black text-primary tracking-tight">Warranty Claim</h3>
+                <button onClick={() => { setIsWarrantyModalOpen(false); setWarrantyStep('search'); setWarrantySearch(''); setWarrantySelectedOrder(null); setWarrantySelectedItem(null); setWarrantyReason(''); setWarrantyNotes(''); setWarrantySuccess(false); }} className="text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
               </div>
+
+              {warrantySuccess ? (
+                <div className="py-12 text-center">
+                  <div className="w-20 h-20 bg-lime-100 text-lime-600 rounded-full flex items-center justify-center mx-auto mb-6">
+                    <span className="material-symbols-outlined text-4xl" style={{fontVariationSettings: "'FILL' 1"}}>verified_user</span>
+                  </div>
+                  <h4 className="text-xl font-black text-primary mb-2">Warranty Claim Filed</h4>
+                  <p className="text-sm text-slate-500 mb-6">A warranty ticket has been created and assigned.</p>
+                  <button onClick={() => { setIsWarrantyModalOpen(false); setWarrantyStep('search'); setWarrantySearch(''); setWarrantySelectedOrder(null); setWarrantySelectedItem(null); setWarrantyReason(''); setWarrantyNotes(''); setWarrantySuccess(false); }} className="px-8 py-3 bg-primary text-white rounded-2xl font-black uppercase tracking-widest">Done</button>
+                </div>
+              ) : warrantyStep === 'search' ? (
+                <div className="space-y-4">
+                  <div className="relative">
+                    <span className="absolute left-4 top-1/2 -translate-y-1/2 material-symbols-outlined text-slate-400 text-sm">search</span>
+                    <input value={warrantySearch} onChange={(e) => setWarrantySearch(e.target.value)} className="w-full bg-slate-50 border-none rounded-2xl pl-11 pr-4 py-4 text-sm font-bold focus:ring-secondary" placeholder="Search by invoice #, customer name, or phone..." />
+                  </div>
+                  <div className="space-y-2 max-h-[50vh] overflow-y-auto pr-1">
+                    {completedOrders.filter(o => o.status === 'Paid' || o.status === 'Partially Refunded').filter(o => {
+                      if (!warrantySearch.trim()) return true;
+                      const q = warrantySearch.toLowerCase();
+                      return o.invoiceNumber.toLowerCase().includes(q) || o.customerName.toLowerCase().includes(q) || o.customerPhone.includes(q);
+                    }).map(o => (
+                      <button key={o.id} onClick={() => { setWarrantySelectedOrder(o); setWarrantyStep('select'); }} className="w-full p-4 bg-slate-50 hover:bg-secondary hover:text-white rounded-2xl text-left transition-all group">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <p className="font-bold">{o.invoiceNumber}</p>
+                              <span className="text-[9px] font-black px-2 py-0.5 rounded bg-lime-100 text-lime-700 group-hover:bg-white/20 group-hover:text-white uppercase">{o.status}</span>
+                            </div>
+                            <p className="text-xs opacity-60">{o.customerName} &bull; {new Date(o.createdAt).toLocaleDateString()}</p>
+                          </div>
+                          <span className="material-symbols-outlined text-slate-300 group-hover:text-white/60">chevron_right</span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : warrantyStep === 'select' && warrantySelectedOrder ? (
+                <div className="space-y-4">
+                  <button onClick={() => { setWarrantyStep('search'); setWarrantySelectedOrder(null); }} className="text-xs font-bold text-secondary flex items-center gap-1 hover:underline">
+                    <span className="material-symbols-outlined text-sm">arrow_back</span>Back to search
+                  </button>
+                  <div className="p-4 bg-slate-50 rounded-2xl">
+                    <p className="font-bold text-sm">{warrantySelectedOrder.invoiceNumber} — {warrantySelectedOrder.customerName}</p>
+                    <p className="text-xs text-slate-500">{new Date(warrantySelectedOrder.createdAt).toLocaleDateString()}</p>
+                  </div>
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Select Warranty-Eligible Item</p>
+                  <div className="space-y-2">
+                    {warrantySelectedOrder.items.filter(i => i.warrantyPeriod).map(item => (
+                      <button key={item.id} onClick={() => { setWarrantySelectedItem(item); setWarrantyStep('claim'); }} className="w-full p-4 bg-slate-50 hover:bg-teal-50 hover:border-teal-200 rounded-2xl text-left transition-all border border-slate-100 flex items-center justify-between">
+                        <div>
+                          <p className="font-bold text-sm">{item.name}</p>
+                          <p className="text-xs text-slate-500">Qty: {item.qty} &bull; ${item.unitPrice.toFixed(2)} &bull; Warranty: {item.warrantyPeriod}</p>
+                        </div>
+                        <span className="material-symbols-outlined text-slate-300">chevron_right</span>
+                      </button>
+                    ))}
+                    {warrantySelectedOrder.items.filter(i => i.warrantyPeriod).length === 0 && (
+                      <div className="py-8 text-center">
+                        <p className="text-sm font-bold text-slate-400">No warranty-eligible items on this order</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : warrantyStep === 'claim' && warrantySelectedOrder && warrantySelectedItem ? (
+                <div className="space-y-4">
+                  <button onClick={() => { setWarrantyStep('select'); setWarrantySelectedItem(null); setWarrantyReason(''); setWarrantyNotes(''); }} className="text-xs font-bold text-secondary flex items-center gap-1 hover:underline">
+                    <span className="material-symbols-outlined text-sm">arrow_back</span>Back to items
+                  </button>
+                  <div className="p-4 bg-teal-50 rounded-2xl border border-teal-100">
+                    <p className="font-bold text-sm text-teal-800">{warrantySelectedItem.name}</p>
+                    <p className="text-xs text-teal-600">Order {warrantySelectedOrder.invoiceNumber} &bull; Warranty: {warrantySelectedItem.warrantyPeriod}</p>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Reason for Claim *</label>
+                    <select value={warrantyReason} onChange={(e) => setWarrantyReason(e.target.value)} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary">
+                      <option value="">Select reason...</option>
+                      <option>Defective product</option>
+                      <option>Manufacturing fault</option>
+                      <option>Screen malfunction</option>
+                      <option>Battery issue</option>
+                      <option>Connectivity problem</option>
+                      <option>Other</option>
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Additional Notes</label>
+                    <textarea value={warrantyNotes} onChange={(e) => setWarrantyNotes(e.target.value)} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-medium min-h-[80px] focus:ring-secondary" placeholder="Describe the issue..." />
+                  </div>
+                  <button disabled={!warrantyReason} onClick={() => {
+                    const ticketNum = `WC-${Date.now().toString().slice(-6)}`;
+                    addWarrantyClaim({
+                      id: `wc-${Date.now()}`,
+                      ticketNumber: ticketNum,
+                      originalOrderId: warrantySelectedOrder.id,
+                      invoiceNumber: warrantySelectedOrder.invoiceNumber,
+                      customerName: warrantySelectedOrder.customerName,
+                      customerId: warrantySelectedOrder.customerId,
+                      itemName: warrantySelectedItem.name,
+                      itemId: warrantySelectedItem.id,
+                      warrantyType: warrantySelectedItem.type === 'repair' ? 'service' : 'part',
+                      originalDate: warrantySelectedOrder.createdAt,
+                      warrantyPeriod: warrantySelectedItem.warrantyPeriod || '30 days',
+                      reason: warrantyReason,
+                      notes: warrantyNotes,
+                      status: 'Open',
+                      createdAt: new Date().toISOString(),
+                      processedBy: posOperator?.name || 'Unknown',
+                    });
+                    setWarrantySuccess(true);
+                  }} className="w-full py-5 bg-secondary text-white rounded-2xl font-black uppercase tracking-widest shadow-lg active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed">
+                    File Warranty Claim
+                  </button>
+                </div>
+              ) : null}
             </motion.div>
           </motion.div>
         )}
@@ -1088,32 +1274,102 @@ export const POS: React.FC = () => {
 
         {isPreviousOrdersOpen && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[110] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
-            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-4xl w-full p-8 ghost-border">
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-4xl w-full p-8 ghost-border max-h-[90vh] overflow-y-auto">
               <div className="flex justify-between items-center mb-8">
-                <h3 className="text-2xl font-black text-primary tracking-tight">Previous Orders</h3>
-                <button onClick={() => setIsPreviousOrdersOpen(false)} className="text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+                <h3 className="text-2xl font-black text-primary tracking-tight">Order History</h3>
+                <button onClick={() => { setIsPreviousOrdersOpen(false); setOrdersSearch(''); setOrdersSelectedOrder(null); }} className="text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
               </div>
-              <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-2">
-                {[
-                  { id: 'INV-1001', customer: 'Alexander Wright', date: '2026-03-19', total: 189.00, status: 'Paid' },
-                  { id: 'INV-1002', customer: 'Sarah Jenkins', date: '2026-03-18', total: 45.50, status: 'Refunded' },
-                ].map(order => (
-                  <div key={order.id} className="flex items-center justify-between p-6 bg-slate-50 rounded-3xl border border-slate-100 hover:bg-white hover:shadow-lg transition-all">
+
+              {ordersSelectedOrder ? (
+                <div className="space-y-6">
+                  <button onClick={() => setOrdersSelectedOrder(null)} className="text-xs font-bold text-secondary flex items-center gap-1 hover:underline">
+                    <span className="material-symbols-outlined text-sm">arrow_back</span>Back to list
+                  </button>
+                  <div className="flex items-center justify-between p-6 bg-slate-50 rounded-2xl">
                     <div>
                       <div className="flex items-center gap-2">
-                        <p className="font-bold text-slate-900">{order.id}</p>
-                        <span className={`text-[9px] font-black px-2 py-0.5 rounded uppercase ${order.status === 'Paid' ? 'bg-lime-100 text-lime-700' : 'bg-red-100 text-red-700'}`}>{order.status}</span>
+                        <h4 className="text-lg font-black text-primary">{ordersSelectedOrder.invoiceNumber}</h4>
+                        <span className={`text-[9px] font-black px-2 py-0.5 rounded uppercase ${ordersSelectedOrder.status === 'Paid' ? 'bg-lime-100 text-lime-700' : ordersSelectedOrder.status === 'Fully Refunded' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>{ordersSelectedOrder.status}</span>
                       </div>
-                      <p className="text-xs text-slate-500">{order.customer} • {order.date}</p>
+                      <p className="text-sm text-slate-500">{ordersSelectedOrder.customerName} &bull; {ordersSelectedOrder.customerPhone}</p>
+                      <p className="text-xs text-slate-400">{new Date(ordersSelectedOrder.createdAt).toLocaleString()} &bull; Operator: {ordersSelectedOrder.operatorName}</p>
                     </div>
-                    <div className="flex items-center gap-4">
-                      <p className="font-black text-primary">${order.total.toFixed(2)}</p>
-                      <button className="p-2 hover:bg-slate-100 rounded-lg transition-colors"><span className="material-symbols-outlined text-slate-400">print</span></button>
-                      <button className="p-2 hover:bg-slate-100 rounded-lg transition-colors"><span className="material-symbols-outlined text-slate-400">visibility</span></button>
+                    <p className="text-2xl font-black text-primary">${ordersSelectedOrder.total.toFixed(2)}</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Line Items</p>
+                    <div className="space-y-2">
+                      {ordersSelectedOrder.items.map(item => (
+                        <div key={item.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl">
+                          <div>
+                            <p className="font-bold text-sm">{item.name}</p>
+                            <p className="text-xs text-slate-500">Qty: {item.qty} × ${item.unitPrice.toFixed(2)}{item.warrantyPeriod ? ` • Warranty: ${item.warrantyPeriod}` : ''}</p>
+                          </div>
+                          <p className="font-bold text-sm">${(item.qty * item.unitPrice).toFixed(2)}</p>
+                        </div>
+                      ))}
                     </div>
                   </div>
-                ))}
-              </div>
+                  <div className="grid grid-cols-2 gap-4 p-4 bg-slate-50 rounded-2xl">
+                    <div><span className="text-[10px] font-black text-slate-400 uppercase block">Subtotal</span><span className="font-bold">${ordersSelectedOrder.subtotal.toFixed(2)}</span></div>
+                    <div><span className="text-[10px] font-black text-slate-400 uppercase block">Discount</span><span className="font-bold text-lime-600">-${ordersSelectedOrder.discountTotal.toFixed(2)}</span></div>
+                    <div><span className="text-[10px] font-black text-slate-400 uppercase block">Tax</span><span className="font-bold">${ordersSelectedOrder.tax.toFixed(2)}</span></div>
+                    <div><span className="text-[10px] font-black text-slate-400 uppercase block">Total</span><span className="font-black text-primary text-lg">${ordersSelectedOrder.total.toFixed(2)}</span></div>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Payments</p>
+                    {ordersSelectedOrder.payments.map((pay, i) => (
+                      <div key={i} className="flex items-center justify-between p-2 bg-slate-50 rounded-lg mb-1">
+                        <span className="text-sm font-bold">{pay.method}</span>
+                        <span className="text-sm font-bold">${pay.amount.toFixed(2)}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {ordersSelectedOrder.status === 'Paid' && (
+                    <div className="flex gap-3">
+                      <button onClick={() => { setIsPreviousOrdersOpen(false); setOrdersSelectedOrder(null); setIsRefundModalOpen(true); setRefundSearch(ordersSelectedOrder.invoiceNumber); setRefundSelectedOrder(ordersSelectedOrder); setRefundStep('detail'); }} className="flex-1 py-3 bg-rose-50 text-rose-600 rounded-2xl font-black text-xs uppercase tracking-widest border border-rose-200 hover:bg-rose-100 transition-all flex items-center justify-center gap-2">
+                        <span className="material-symbols-outlined text-sm">keyboard_return</span>Initiate Refund
+                      </button>
+                      <button onClick={() => { setIsPreviousOrdersOpen(false); setOrdersSelectedOrder(null); setIsWarrantyModalOpen(true); setWarrantySearch(ordersSelectedOrder.invoiceNumber); setWarrantySelectedOrder(ordersSelectedOrder); setWarrantyStep('select'); }} className="flex-1 py-3 bg-teal-50 text-teal-600 rounded-2xl font-black text-xs uppercase tracking-widest border border-teal-200 hover:bg-teal-100 transition-all flex items-center justify-center gap-2">
+                        <span className="material-symbols-outlined text-sm">verified_user</span>Warranty Claim
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="relative">
+                    <span className="absolute left-4 top-1/2 -translate-y-1/2 material-symbols-outlined text-slate-400 text-sm">search</span>
+                    <input value={ordersSearch} onChange={(e) => setOrdersSearch(e.target.value)} className="w-full bg-slate-50 border-none rounded-2xl pl-11 pr-4 py-4 text-sm font-bold focus:ring-secondary" placeholder="Search by invoice #, customer, phone..." />
+                  </div>
+                  <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-2">
+                    {completedOrders.filter(o => {
+                      if (!ordersSearch.trim()) return true;
+                      const q = ordersSearch.toLowerCase();
+                      return o.invoiceNumber.toLowerCase().includes(q) || o.customerName.toLowerCase().includes(q) || o.customerPhone.includes(q);
+                    }).map(order => (
+                      <button key={order.id} onClick={() => setOrdersSelectedOrder(order)} className="w-full flex items-center justify-between p-6 bg-slate-50 rounded-3xl border border-slate-100 hover:bg-white hover:shadow-lg transition-all text-left">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <p className="font-bold text-slate-900">{order.invoiceNumber}</p>
+                            <span className={`text-[9px] font-black px-2 py-0.5 rounded uppercase ${order.status === 'Paid' ? 'bg-lime-100 text-lime-700' : order.status === 'Fully Refunded' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>{order.status}</span>
+                          </div>
+                          <p className="text-xs text-slate-500">{order.customerName} &bull; {new Date(order.createdAt).toLocaleDateString()}</p>
+                        </div>
+                        <div className="flex items-center gap-4">
+                          <p className="font-black text-primary">${order.total.toFixed(2)}</p>
+                          <span className="material-symbols-outlined text-slate-300">chevron_right</span>
+                        </div>
+                      </button>
+                    ))}
+                    {completedOrders.length === 0 && (
+                      <div className="py-12 text-center">
+                        <p className="text-sm font-bold text-slate-400">No completed orders yet</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </motion.div>
           </motion.div>
         )}
@@ -1216,13 +1472,13 @@ export const POS: React.FC = () => {
                   )}
                 </div>
                 <div className="flex flex-wrap gap-3">
-                  {suggestiveSalesItems.map((s) => (
+                  {derivedSuggestiveItems.map((s) => (
                     <button key={s.id} onClick={() => handleAddSuggestiveItem(s.name, s.price)} className="flex items-center gap-3 px-4 py-2 bg-lime-50 rounded-xl border border-lime-100 hover:bg-lime-100 transition-all active:scale-95">
                       <span className="material-symbols-outlined text-lime-600 text-sm">add_shopping_cart</span>
                       <span className="text-xs font-bold text-lime-700">{s.name} - ${s.price.toFixed(2)}</span>
                     </button>
                   ))}
-                  {suggestiveSalesItems.length === 0 && <p className="text-xs text-slate-300 italic">No suggestive sales configured</p>}
+                  {derivedSuggestiveItems.length === 0 && <p className="text-xs text-slate-300 italic">No suggestive sales configured</p>}
                 </div>
               </div>
             </motion.div>
@@ -1430,10 +1686,184 @@ export const POS: React.FC = () => {
 
         {isRefundModalOpen && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[110] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
-            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-lg w-full p-8 ghost-border">
-              <h3 className="text-2xl font-black text-primary mb-8">Refund / Exchange</h3>
-              <input className="w-full bg-slate-50 border-none rounded-2xl px-4 py-4 text-sm font-bold mb-6" placeholder="Invoice #" type="text" />
-              <button onClick={() => setIsRefundModalOpen(false)} className="w-full py-4 bg-primary text-white rounded-2xl font-black uppercase">Search</button>
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-2xl w-full p-8 ghost-border max-h-[90vh] overflow-y-auto">
+              <div className="flex justify-between items-center mb-8">
+                <h3 className="text-2xl font-black text-primary tracking-tight">Refund / Exchange</h3>
+                <button onClick={() => { setIsRefundModalOpen(false); setRefundStep('search'); setRefundSearch(''); setRefundSelectedOrder(null); setRefundItems({}); setRefundReason(''); setRefundMethod('Original Payment Method'); setRefundSuccess(false); }} className="text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+              </div>
+
+              {refundSuccess ? (
+                <div className="py-12 text-center">
+                  <div className="w-20 h-20 bg-lime-100 text-lime-600 rounded-full flex items-center justify-center mx-auto mb-6">
+                    <span className="material-symbols-outlined text-4xl" style={{fontVariationSettings: "'FILL' 1"}}>check_circle</span>
+                  </div>
+                  <h4 className="text-xl font-black text-primary mb-2">Refund Processed</h4>
+                  <p className="text-sm text-slate-500 mb-6">The refund has been recorded and applied.</p>
+                  <button onClick={() => { setIsRefundModalOpen(false); setRefundStep('search'); setRefundSearch(''); setRefundSelectedOrder(null); setRefundItems({}); setRefundReason(''); setRefundMethod('Original Payment Method'); setRefundSuccess(false); }} className="px-8 py-3 bg-primary text-white rounded-2xl font-black uppercase tracking-widest">Done</button>
+                </div>
+              ) : refundStep === 'search' ? (
+                <div className="space-y-4">
+                  <div className="relative">
+                    <span className="absolute left-4 top-1/2 -translate-y-1/2 material-symbols-outlined text-slate-400 text-sm">search</span>
+                    <input value={refundSearch} onChange={(e) => setRefundSearch(e.target.value)} className="w-full bg-slate-50 border-none rounded-2xl pl-11 pr-4 py-4 text-sm font-bold focus:ring-secondary" placeholder="Search by invoice #, customer name, or phone..." />
+                  </div>
+                  <div className="space-y-2 max-h-[50vh] overflow-y-auto pr-1">
+                    {completedOrders.filter(o => o.status !== 'Fully Refunded').filter(o => {
+                      if (!refundSearch.trim()) return true;
+                      const q = refundSearch.toLowerCase();
+                      return o.invoiceNumber.toLowerCase().includes(q) || o.customerName.toLowerCase().includes(q) || o.customerPhone.includes(q);
+                    }).map(o => (
+                      <button key={o.id} onClick={() => { setRefundSelectedOrder(o); setRefundStep('detail'); setRefundItems({}); }} className="w-full p-4 bg-slate-50 hover:bg-secondary hover:text-white rounded-2xl text-left transition-all group">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <p className="font-bold">{o.invoiceNumber}</p>
+                              <span className="text-[9px] font-black px-2 py-0.5 rounded bg-lime-100 text-lime-700 group-hover:bg-white/20 group-hover:text-white uppercase">{o.status}</span>
+                            </div>
+                            <p className="text-xs opacity-60">{o.customerName} &bull; ${o.total.toFixed(2)} &bull; {new Date(o.createdAt).toLocaleDateString()}</p>
+                          </div>
+                          <span className="material-symbols-outlined text-slate-300 group-hover:text-white/60">chevron_right</span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : refundStep === 'detail' && refundSelectedOrder ? (
+                <div className="space-y-4">
+                  <button onClick={() => { setRefundStep('search'); setRefundSelectedOrder(null); setRefundItems({}); }} className="text-xs font-bold text-secondary flex items-center gap-1 hover:underline">
+                    <span className="material-symbols-outlined text-sm">arrow_back</span>Back to search
+                  </button>
+                  <div className="p-4 bg-slate-50 rounded-2xl">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="font-bold text-sm">{refundSelectedOrder.invoiceNumber} — {refundSelectedOrder.customerName}</p>
+                        <p className="text-xs text-slate-500">{new Date(refundSelectedOrder.createdAt).toLocaleDateString()} &bull; Total: ${refundSelectedOrder.total.toFixed(2)}</p>
+                      </div>
+                    </div>
+                  </div>
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Select Items to Refund</p>
+                  <div className="space-y-2">
+                    {refundSelectedOrder.items.map(item => {
+                      const maxRefundable = item.qty - (item.refundedQty || 0);
+                      const selected = refundItems[item.id] || 0;
+                      return (
+                        <div key={item.id} className={`p-4 rounded-2xl border transition-all ${selected > 0 ? 'bg-rose-50 border-rose-200' : 'bg-slate-50 border-slate-100'}`}>
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <p className="font-bold text-sm">{item.name}</p>
+                              <p className="text-xs text-slate-500">${item.unitPrice.toFixed(2)} × {item.qty}{item.refundedQty ? ` (${item.refundedQty} already refunded)` : ''}</p>
+                            </div>
+                            {maxRefundable > 0 ? (
+                              <div className="flex items-center gap-2">
+                                <button onClick={() => setRefundItems({ ...refundItems, [item.id]: Math.max(0, selected - 1) })} className="w-8 h-8 bg-white rounded-lg flex items-center justify-center text-slate-400 hover:text-primary border"><span className="material-symbols-outlined text-sm">remove</span></button>
+                                <span className="w-6 text-center font-bold text-sm">{selected}</span>
+                                <button onClick={() => setRefundItems({ ...refundItems, [item.id]: Math.min(maxRefundable, selected + 1) })} className="w-8 h-8 bg-white rounded-lg flex items-center justify-center text-slate-400 hover:text-primary border"><span className="material-symbols-outlined text-sm">add</span></button>
+                              </div>
+                            ) : (
+                              <span className="text-[9px] font-black text-slate-400 uppercase">Fully refunded</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {(() => {
+                    const entries = Object.entries(refundItems) as [string, number][];
+                    const refundTotal = entries.reduce((sum, [itemId, qty]) => {
+                      const item = refundSelectedOrder.items.find(i => i.id === itemId);
+                      return sum + (item ? item.unitPrice * qty : 0);
+                    }, 0);
+                    const hasSelection = (Object.values(refundItems) as number[]).some(q => q > 0);
+                    return hasSelection ? (
+                      <div className="p-4 bg-rose-50 rounded-2xl border border-rose-200">
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-bold text-rose-700">Refund Amount</span>
+                          <span className="text-xl font-black text-rose-700">${refundTotal.toFixed(2)}</span>
+                        </div>
+                      </div>
+                    ) : null;
+                  })()}
+                  <button disabled={!(Object.values(refundItems) as number[]).some(q => q > 0)} onClick={() => setRefundStep('confirm')} className="w-full py-4 bg-rose-500 text-white rounded-2xl font-black uppercase tracking-widest shadow-lg active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed">Continue to Refund</button>
+                </div>
+              ) : refundStep === 'confirm' && refundSelectedOrder ? (
+                <div className="space-y-4">
+                  <button onClick={() => setRefundStep('detail')} className="text-xs font-bold text-secondary flex items-center gap-1 hover:underline">
+                    <span className="material-symbols-outlined text-sm">arrow_back</span>Back to items
+                  </button>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Reason for Refund *</label>
+                    <select value={refundReason} onChange={(e) => setRefundReason(e.target.value)} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary">
+                      <option value="">Select reason...</option>
+                      <option>Customer dissatisfied</option>
+                      <option>Wrong item sold</option>
+                      <option>Defective product</option>
+                      <option>Price adjustment</option>
+                      <option>Duplicate transaction</option>
+                      <option>Other</option>
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Refund Method</label>
+                    <select value={refundMethod} onChange={(e) => setRefundMethod(e.target.value)} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary">
+                      <option>Original Payment Method</option>
+                      <option>Store Credit</option>
+                      <option>Cash</option>
+                    </select>
+                  </div>
+                  {(() => {
+                    const entries2 = Object.entries(refundItems) as [string, number][];
+                    const refundTotal = entries2.reduce((sum, [itemId, qty]) => {
+                      const item = refundSelectedOrder.items.find(i => i.id === itemId);
+                      return sum + (item ? item.unitPrice * qty : 0);
+                    }, 0);
+                    const refundItemsList = entries2.filter(([, qty]) => qty > 0).map(([itemId, qty]) => {
+                      const item = refundSelectedOrder.items.find(i => i.id === itemId)!;
+                      return { itemId, name: item.name, qty, amount: item.unitPrice * qty };
+                    });
+                    return (
+                      <>
+                        <div className="p-4 bg-rose-50 rounded-2xl border border-rose-200">
+                          <p className="text-[10px] font-black text-rose-400 uppercase tracking-widest mb-2">Refund Summary</p>
+                          {refundItemsList.map(ri => (
+                            <div key={ri.itemId} className="flex justify-between text-sm">
+                              <span>{ri.name} × {ri.qty}</span>
+                              <span className="font-bold">${ri.amount.toFixed(2)}</span>
+                            </div>
+                          ))}
+                          <div className="flex justify-between text-lg font-black text-rose-700 mt-2 pt-2 border-t border-rose-200">
+                            <span>Total Refund</span>
+                            <span>${refundTotal.toFixed(2)}</span>
+                          </div>
+                        </div>
+                        <button disabled={!refundReason} onClick={() => {
+                          addRefundRecord({
+                            id: `ref-${Date.now()}`,
+                            originalOrderId: refundSelectedOrder.id,
+                            invoiceNumber: refundSelectedOrder.invoiceNumber,
+                            customerName: refundSelectedOrder.customerName,
+                            items: refundItemsList,
+                            totalRefunded: refundTotal,
+                            reason: refundReason,
+                            method: refundMethod,
+                            processedBy: posOperator?.name || 'Unknown',
+                            createdAt: new Date().toISOString(),
+                          });
+                          const updatedItems = refundSelectedOrder.items.map(item => {
+                            const refQty = refundItems[item.id] || 0;
+                            return refQty > 0 ? { ...item, refundedQty: (item.refundedQty || 0) + refQty } : item;
+                          });
+                          const allFullyRefunded = updatedItems.every(item => (item.refundedQty || 0) >= item.qty);
+                          updateCompletedOrder(refundSelectedOrder.id, {
+                            items: updatedItems,
+                            status: allFullyRefunded ? 'Fully Refunded' : 'Partially Refunded',
+                          });
+                          setRefundSuccess(true);
+                        }} className="w-full py-5 bg-rose-500 text-white rounded-2xl font-black uppercase tracking-widest shadow-lg active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed">Process Refund</button>
+                      </>
+                    );
+                  })()}
+                </div>
+              ) : null}
             </motion.div>
           </motion.div>
         )}
@@ -1790,6 +2220,66 @@ export const POS: React.FC = () => {
             </motion.div>
           </motion.div>
         )}
+
+        {isSwitchUserOpen && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[160] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-md w-full p-8 ghost-border">
+              <div className="flex justify-between items-center mb-8">
+                <h3 className="text-2xl font-black text-primary tracking-tight">Switch Operator</h3>
+                <button onClick={() => { setIsSwitchUserOpen(false); setSwitchTarget(null); setSwitchPinInput(''); setSwitchError(''); }} className="text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+              </div>
+
+              {!switchTarget ? (
+                <div className="space-y-3">
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Select Operator</p>
+                  {SEED_POS_OPERATORS.filter(op => op.id !== posOperator?.id).map(op => (
+                    <button key={op.id} onClick={() => { setSwitchTarget(op); setSwitchPinInput(''); setSwitchError(''); }} className="w-full p-4 bg-slate-50 hover:bg-secondary hover:text-white rounded-2xl text-left transition-all group flex items-center gap-4">
+                      <div className="w-10 h-10 bg-teal-100 text-teal-700 rounded-full flex items-center justify-center font-black text-xs group-hover:bg-white/20 group-hover:text-white transition-all">{op.name.split(' ').map(n => n[0]).join('')}</div>
+                      <div>
+                        <p className="font-bold">{op.name}</p>
+                        <p className="text-xs opacity-60">{op.role}</p>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="space-y-6">
+                  <button onClick={() => { setSwitchTarget(null); setSwitchPinInput(''); setSwitchError(''); }} className="text-xs font-bold text-secondary flex items-center gap-1 hover:underline">
+                    <span className="material-symbols-outlined text-sm">arrow_back</span>Back to operators
+                  </button>
+                  <div className="p-4 bg-teal-50 rounded-2xl border border-teal-100 flex items-center gap-3">
+                    <div className="w-10 h-10 bg-teal-600 text-white rounded-full flex items-center justify-center font-black text-xs">{switchTarget.name.split(' ').map(n => n[0]).join('')}</div>
+                    <div>
+                      <p className="font-bold text-sm text-teal-800">{switchTarget.name}</p>
+                      <p className="text-xs text-teal-600">{switchTarget.role}</p>
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Enter PIN</label>
+                    <input value={switchPinInput} onChange={(e) => { setSwitchPinInput(e.target.value.replace(/\D/g, '').slice(0, 4)); setSwitchError(''); }} className="w-full bg-slate-50 border-none rounded-2xl px-6 py-4 text-2xl font-black text-primary text-center tracking-[0.5em] focus:ring-secondary" placeholder="••••" type="password" maxLength={4} autoFocus />
+                    {switchError && (
+                      <p className="text-xs font-bold text-rose-500 ml-4 flex items-center gap-1">
+                        <span className="material-symbols-outlined text-xs">error</span>{switchError}
+                      </p>
+                    )}
+                  </div>
+                  <button disabled={switchPinInput.length < 4} onClick={() => {
+                    if (switchPinInput === switchTarget.pin) {
+                      setPosOperator(switchTarget);
+                      setIsSwitchUserOpen(false);
+                      setSwitchTarget(null);
+                      setSwitchPinInput('');
+                      setSwitchError('');
+                    } else {
+                      setSwitchError('Incorrect PIN. Please try again.');
+                      setSwitchPinInput('');
+                    }
+                  }} className="w-full py-5 bg-secondary text-white rounded-2xl font-black uppercase tracking-widest shadow-lg active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed">Authenticate & Switch</button>
+                </div>
+              )}
+            </motion.div>
+          </motion.div>
+        )}
       </AnimatePresence>
 
       {/* Customer Terminal Simulation */}
@@ -1823,18 +2313,18 @@ export const POS: React.FC = () => {
               </button>
             </div>
             <div className="p-6 space-y-4 max-h-[50vh] overflow-y-auto">
-              {suggestiveSalesItems.map((item) => (
+              {derivedSuggestiveItems.map((item) => (
                 <div key={item.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl">
                   <div>
                     <p className="text-sm font-bold text-slate-900">{item.name}</p>
                     <p className="text-xs text-secondary font-black">${item.price.toFixed(2)}</p>
                   </div>
-                  <button onClick={() => removeSuggestiveSaleItem(item.id)} className="text-slate-300 hover:text-red-500 transition-colors">
+                  <button onClick={() => updateStockItemCtx(item.id, { isSuggestiveSale: false })} className="text-slate-300 hover:text-red-500 transition-colors">
                     <span className="material-symbols-outlined text-lg">delete</span>
                   </button>
                 </div>
               ))}
-              {suggestiveSalesItems.length === 0 && (
+              {derivedSuggestiveItems.length === 0 && (
                 <p className="text-center text-sm text-slate-300 py-4">No suggestive sale items configured</p>
               )}
             </div>
@@ -1862,7 +2352,18 @@ export const POS: React.FC = () => {
                   onClick={() => {
                     const price = parseFloat(newSugPrice);
                     if (newSugName.trim() && price > 0) {
-                      addSuggestiveSaleItem({ id: `sug-${Date.now()}`, name: newSugName.trim(), price });
+                      addStockItem({
+                        id: `stk-sug-${Date.now()}`,
+                        name: newSugName.trim(),
+                        sku: `SUG-${Date.now().toString().slice(-6)}`,
+                        qty: 999,
+                        cost: 0,
+                        price,
+                        category: 'Accessories',
+                        addedAt: new Date().toISOString(),
+                        status: 'approved',
+                        isSuggestiveSale: true,
+                      });
                       setNewSugName('');
                       setNewSugPrice('');
                     }

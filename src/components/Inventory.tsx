@@ -7,8 +7,13 @@ import ContextualHelp from './ContextualHelp';
 
 const Inventory: React.FC = () => {
   const { approvedStockItems, pendingStockItems, addStockItem, updateStockItem } = useStoreLocalState();
-  const { canAccess } = useAccess();
-  const hasInventoryPermission = canAccess('inventory');
+  const { canAccess, session } = useAccess();
+  const hasInventoryPermission = (() => {
+    if (!session) return false;
+    if (session.role === 'system_owner' || session.role === 'store_owner' || session.role === 'manager') return true;
+    if (session.role === 'technician') return true;
+    return false;
+  })();
   const [activeTab, setActiveTab] = useState<string>('inventory');
   const [searchQuery, setSearchQuery] = useState('');
   const [isAddProductModalOpen, setIsAddProductModalOpen] = useState(false);
@@ -58,6 +63,7 @@ const Inventory: React.FC = () => {
 
   const tabs = [
     { id: 'inventory', label: 'Inventory', icon: 'inventory_2' },
+    { id: 'suggestive', label: 'Suggestive Sales', icon: 'lightbulb' },
     { id: 'trade-in', label: 'Trade-In', icon: 'swap_horiz' },
     { id: 'refurb', label: 'Refurbishment', icon: 'build_circle' },
     { id: 'transfer', label: 'Transfers', icon: 'local_shipping' },
@@ -601,6 +607,50 @@ const Inventory: React.FC = () => {
         transition={{ duration: 0.3 }}
       >
         {activeTab === 'inventory' && renderInventory()}
+        {activeTab === 'suggestive' && (
+          <div className="space-y-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-black text-primary">Suggestive Sales Items</h3>
+                <p className="text-xs text-slate-400 mt-1">Toggle items to appear as quick-add suggestions during POS checkout</p>
+              </div>
+            </div>
+            <div className="space-y-3">
+              {approvedStockItems.map(item => (
+                <div key={item.id} className="flex items-center justify-between p-5 bg-white rounded-2xl ghost-border shadow-sm hover:shadow-md transition-all">
+                  <div className="flex items-center gap-4">
+                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${item.isSuggestiveSale ? 'bg-lime-100 text-lime-700' : 'bg-slate-100 text-slate-400'}`}>
+                      <span className="material-symbols-outlined text-lg">lightbulb</span>
+                    </div>
+                    <div>
+                      <p className="font-bold text-sm text-slate-900">{item.name}</p>
+                      <p className="text-xs text-slate-500">{item.sku} &bull; {item.category} &bull; ${item.price.toFixed(2)} &bull; {item.qty} in stock</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => updateStockItem(item.id, { isSuggestiveSale: !item.isSuggestiveSale })}
+                    className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors ${item.isSuggestiveSale ? 'bg-lime-500' : 'bg-slate-200'}`}
+                  >
+                    <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-md transition-transform ${item.isSuggestiveSale ? 'translate-x-6' : 'translate-x-1'}`} />
+                  </button>
+                </div>
+              ))}
+              {approvedStockItems.length === 0 && (
+                <div className="py-12 text-center">
+                  <p className="text-sm font-bold text-slate-400">No approved stock items</p>
+                  <p className="text-xs text-slate-300 mt-1">Add items to inventory first</p>
+                </div>
+              )}
+            </div>
+            <div className="p-4 bg-teal-50 rounded-2xl border border-teal-100">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="material-symbols-outlined text-teal-600 text-sm">info</span>
+                <span className="text-[10px] font-black text-teal-700 uppercase tracking-widest">How It Works</span>
+              </div>
+              <p className="text-xs text-teal-600">Enabled items appear as suggestive sale prompts in the POS checkout flow, encouraging add-on sales. Customers see these recommendations before finalizing their purchase.</p>
+            </div>
+          </div>
+        )}
         {activeTab === 'trade-in' && renderTradeIn()}
         {activeTab === 'refurb' && renderRefurb()}
         {activeTab === 'transfer' && renderTransfers()}

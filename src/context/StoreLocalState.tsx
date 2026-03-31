@@ -11,6 +11,7 @@ export interface StockItem {
   category: string;
   addedAt: string;
   status: 'approved' | 'pending_approval' | 'rejected';
+  isSuggestiveSale?: boolean;
 }
 
 export interface SuggestiveSaleItem {
@@ -24,6 +25,74 @@ export interface DraftCart {
   selectedCustomer: Customer | null;
   payments: PaymentMethod[];
   discounts: Discount[];
+}
+
+export interface CompletedOrderItem {
+  id: string;
+  name: string;
+  qty: number;
+  unitPrice: number;
+  type: 'product' | 'repair' | 'special' | 'deposit';
+  stockItemId?: string;
+  warrantyPeriod?: string;
+  refundedQty?: number;
+}
+
+export interface CompletedOrder {
+  id: string;
+  invoiceNumber: string;
+  customerId: string;
+  customerName: string;
+  customerPhone: string;
+  customerEmail: string;
+  items: CompletedOrderItem[];
+  subtotal: number;
+  discountTotal: number;
+  tax: number;
+  total: number;
+  payments: { method: string; amount: number }[];
+  status: 'Paid' | 'Partially Refunded' | 'Fully Refunded';
+  createdAt: string;
+  operatorName: string;
+}
+
+export interface RefundRecord {
+  id: string;
+  originalOrderId: string;
+  invoiceNumber: string;
+  customerName: string;
+  items: { itemId: string; name: string; qty: number; amount: number }[];
+  totalRefunded: number;
+  reason: string;
+  method: string;
+  processedBy: string;
+  createdAt: string;
+}
+
+export interface WarrantyClaimRecord {
+  id: string;
+  ticketNumber: string;
+  originalOrderId: string;
+  invoiceNumber: string;
+  customerName: string;
+  customerId: string;
+  itemName: string;
+  itemId: string;
+  warrantyType: 'service' | 'part';
+  originalDate: string;
+  warrantyPeriod: string;
+  reason: string;
+  notes: string;
+  status: 'Open' | 'In Progress' | 'Resolved' | 'Rejected';
+  createdAt: string;
+  processedBy: string;
+}
+
+export interface POSOperator {
+  id: string;
+  name: string;
+  role: string;
+  pin: string;
 }
 
 interface StoreLocalStateContextType {
@@ -44,6 +113,16 @@ interface StoreLocalStateContextType {
   draftCart: DraftCart;
   setDraftCart: (draft: DraftCart) => void;
   clearDraftCart: () => void;
+  completedOrders: CompletedOrder[];
+  addCompletedOrder: (order: CompletedOrder) => void;
+  updateCompletedOrder: (id: string, updates: Partial<CompletedOrder>) => void;
+  refundRecords: RefundRecord[];
+  addRefundRecord: (record: RefundRecord) => void;
+  warrantyClaims: WarrantyClaimRecord[];
+  addWarrantyClaim: (claim: WarrantyClaimRecord) => void;
+  updateWarrantyClaim: (id: string, updates: Partial<WarrantyClaimRecord>) => void;
+  posOperator: POSOperator | null;
+  setPosOperator: (op: POSOperator | null) => void;
 }
 
 const SEED_CUSTOMERS: Customer[] = [
@@ -55,9 +134,9 @@ const SEED_CUSTOMERS: Customer[] = [
 
 const SEED_STOCK_ITEMS: StockItem[] = [
   { id: 'stk-001', name: 'iPhone 13 Screen', sku: 'IP13-SCR-001', qty: 12, cost: 45.00, price: 89.00, category: 'Parts', addedAt: '2026-03-20T10:00:00Z', status: 'approved' },
-  { id: 'stk-002', name: 'USB-C Charging Cable', sku: 'USB-C-CBL-01', qty: 50, cost: 3.50, price: 12.99, category: 'Accessories', addedAt: '2026-03-20T10:00:00Z', status: 'approved' },
+  { id: 'stk-002', name: 'USB-C Charging Cable', sku: 'USB-C-CBL-01', qty: 50, cost: 3.50, price: 12.99, category: 'Accessories', addedAt: '2026-03-20T10:00:00Z', status: 'approved', isSuggestiveSale: true },
   { id: 'stk-003', name: 'Samsung S21 Battery', sku: 'SAM-S21-BAT', qty: 8, cost: 22.00, price: 45.00, category: 'Parts', addedAt: '2026-03-20T10:00:00Z', status: 'approved' },
-  { id: 'stk-004', name: 'Tempered Glass Protector', sku: 'TG-UNIV-001', qty: 100, cost: 2.00, price: 9.99, category: 'Accessories', addedAt: '2026-03-20T10:00:00Z', status: 'approved' },
+  { id: 'stk-004', name: 'Tempered Glass Protector', sku: 'TG-UNIV-001', qty: 100, cost: 2.00, price: 9.99, category: 'Accessories', addedAt: '2026-03-20T10:00:00Z', status: 'approved', isSuggestiveSale: true },
   { id: 'stk-005', name: 'iPad Air 5 Digitizer', sku: 'IPAD-A5-DIG', qty: 4, cost: 65.00, price: 129.00, category: 'Parts', addedAt: '2026-03-20T10:00:00Z', status: 'approved' },
 ];
 
@@ -65,6 +144,57 @@ const SEED_SUGGESTIVE_SALES: SuggestiveSaleItem[] = [
   { id: 'sug-1', name: 'Tempered Glass', price: 9.99 },
   { id: 'sug-2', name: 'Protective Case', price: 24.99 },
 ];
+
+const SEED_COMPLETED_ORDERS: CompletedOrder[] = [
+  {
+    id: 'ord-001', invoiceNumber: 'INV-1001', customerId: 'c1', customerName: 'Alexander Wright', customerPhone: '555-0123', customerEmail: 'alex@example.com',
+    items: [
+      { id: 'oi-1', name: 'iPhone 13 Screen Repair', qty: 1, unitPrice: 189.00, type: 'repair', warrantyPeriod: '90 days' },
+      { id: 'oi-2', name: 'Tempered Glass Protector', qty: 1, unitPrice: 9.99, type: 'product', stockItemId: 'stk-004', warrantyPeriod: '30 days' },
+    ],
+    subtotal: 198.99, discountTotal: 0, tax: 16.42, total: 215.41,
+    payments: [{ method: 'Card Terminal', amount: 215.41 }],
+    status: 'Paid', createdAt: '2026-03-19T14:30:00Z', operatorName: 'Sarah J.',
+  },
+  {
+    id: 'ord-002', invoiceNumber: 'INV-1002', customerId: 'c2', customerName: 'Sarah Jenkins', customerPhone: '555-0456', customerEmail: 'sarah@example.com',
+    items: [
+      { id: 'oi-3', name: 'USB-C Charging Cable', qty: 2, unitPrice: 12.99, type: 'product', stockItemId: 'stk-002', warrantyPeriod: '30 days' },
+      { id: 'oi-4', name: 'Samsung S21 Battery', qty: 1, unitPrice: 45.00, type: 'product', stockItemId: 'stk-003', warrantyPeriod: '30 days' },
+    ],
+    subtotal: 70.98, discountTotal: 7.10, tax: 5.27, total: 69.15,
+    payments: [{ method: 'Cash', amount: 70.00 }],
+    status: 'Paid', createdAt: '2026-03-18T11:15:00Z', operatorName: 'Mike R.',
+  },
+  {
+    id: 'ord-003', invoiceNumber: 'INV-1003', customerId: 'c3', customerName: 'Mike Rodriguez', customerPhone: '555-0789', customerEmail: 'mike@example.com',
+    items: [
+      { id: 'oi-5', name: 'Battery Replacement Service', qty: 1, unitPrice: 79.00, type: 'repair', warrantyPeriod: '90 days' },
+    ],
+    subtotal: 79.00, discountTotal: 0, tax: 6.52, total: 85.52,
+    payments: [{ method: 'Card Terminal', amount: 85.52 }],
+    status: 'Paid', createdAt: '2026-03-15T09:45:00Z', operatorName: 'Sarah J.',
+  },
+  {
+    id: 'ord-004', invoiceNumber: 'INV-1004', customerId: 'c4', customerName: 'Emma Chen', customerPhone: '555-0321', customerEmail: 'emma@example.com',
+    items: [
+      { id: 'oi-6', name: 'iPad Air 5 Digitizer', qty: 1, unitPrice: 129.00, type: 'product', stockItemId: 'stk-005', warrantyPeriod: '30 days' },
+      { id: 'oi-7', name: 'Charging Port Repair', qty: 1, unitPrice: 99.00, type: 'repair', warrantyPeriod: '90 days' },
+    ],
+    subtotal: 228.00, discountTotal: 22.80, tax: 16.93, total: 222.13,
+    payments: [{ method: 'Cash', amount: 100.00 }, { method: 'Card Terminal', amount: 122.13 }],
+    status: 'Paid', createdAt: '2026-03-12T16:20:00Z', operatorName: 'Alexander W.',
+  },
+];
+
+const SEED_POS_OPERATORS: POSOperator[] = [
+  { id: 'op-1', name: 'Sarah Johnson', role: 'Manager', pin: '1234' },
+  { id: 'op-2', name: 'Mike Torres', role: 'Sales Associate', pin: '5678' },
+  { id: 'op-3', name: 'Alex Kim', role: 'Technician', pin: '9012' },
+  { id: 'op-4', name: 'Dana Lee', role: 'Sales Associate', pin: '3456' },
+];
+
+export { SEED_POS_OPERATORS };
 
 const EMPTY_DRAFT: DraftCart = { cart: [], selectedCustomer: null, payments: [], discounts: [] };
 
@@ -76,6 +206,10 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const [heldOrders, setHeldOrders] = useState<HeldOrder[]>([]);
   const [suggestiveSalesItems, setSuggestiveSalesItems] = useState<SuggestiveSaleItem[]>(SEED_SUGGESTIVE_SALES);
   const [draftCart, setDraftCartState] = useState<DraftCart>(EMPTY_DRAFT);
+  const [completedOrders, setCompletedOrders] = useState<CompletedOrder[]>(SEED_COMPLETED_ORDERS);
+  const [refundRecords, setRefundRecords] = useState<RefundRecord[]>([]);
+  const [warrantyClaims, setWarrantyClaims] = useState<WarrantyClaimRecord[]>([]);
+  const [posOperator, setPosOperatorState] = useState<POSOperator | null>(SEED_POS_OPERATORS[0]);
 
   const addCustomer = useCallback((c: Customer) => {
     setCustomers(prev => [...prev, c]);
@@ -120,8 +254,42 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
     setDraftCartState(EMPTY_DRAFT);
   }, []);
 
+  const addCompletedOrder = useCallback((order: CompletedOrder) => {
+    setCompletedOrders(prev => [order, ...prev]);
+  }, []);
+
+  const updateCompletedOrder = useCallback((id: string, updates: Partial<CompletedOrder>) => {
+    setCompletedOrders(prev => prev.map(o => o.id === id ? { ...o, ...updates } : o));
+  }, []);
+
+  const addRefundRecord = useCallback((record: RefundRecord) => {
+    setRefundRecords(prev => [record, ...prev]);
+  }, []);
+
+  const addWarrantyClaim = useCallback((claim: WarrantyClaimRecord) => {
+    setWarrantyClaims(prev => [claim, ...prev]);
+  }, []);
+
+  const updateWarrantyClaim = useCallback((id: string, updates: Partial<WarrantyClaimRecord>) => {
+    setWarrantyClaims(prev => prev.map(wc => wc.id === id ? { ...wc, ...updates } : wc));
+  }, []);
+
+  const setPosOperator = useCallback((op: POSOperator | null) => {
+    setPosOperatorState(op);
+  }, []);
+
   return (
-    <StoreLocalStateContext.Provider value={{ customers, addCustomer, updateCustomer, stockItems, addStockItem, updateStockItem, approvedStockItems, pendingStockItems, heldOrders, addHeldOrder, removeHeldOrder, suggestiveSalesItems, addSuggestiveSaleItem, removeSuggestiveSaleItem, draftCart, setDraftCart, clearDraftCart }}>
+    <StoreLocalStateContext.Provider value={{
+      customers, addCustomer, updateCustomer,
+      stockItems, addStockItem, updateStockItem, approvedStockItems, pendingStockItems,
+      heldOrders, addHeldOrder, removeHeldOrder,
+      suggestiveSalesItems, addSuggestiveSaleItem, removeSuggestiveSaleItem,
+      draftCart, setDraftCart, clearDraftCart,
+      completedOrders, addCompletedOrder, updateCompletedOrder,
+      refundRecords, addRefundRecord,
+      warrantyClaims, addWarrantyClaim, updateWarrantyClaim,
+      posOperator, setPosOperator,
+    }}>
       {children}
     </StoreLocalStateContext.Provider>
   );
