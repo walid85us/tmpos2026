@@ -27,13 +27,13 @@ const POINTS_VALUE_RATIO = 0.01;
 
 export const POS: React.FC = () => {
   const location = useLocation();
-  const { canAccess, session, setPosOperatorRole, effectiveRole, checkPermission, getPermissionLevel, supervisorRefundAuth, requestSupervisorRefundAuth, clearSupervisorRefundAuth } = useAccess();
+  const { canAccess, session, setPosOperatorRole, effectiveRole, checkPermission, checkSubPermission, getPermissionLevel, supervisorRefundAuth, requestSupervisorRefundAuth, clearSupervisorRefundAuth } = useAccess();
   const { customers: sharedCustomers, addCustomer, updateCustomer, stockItems: sharedStockItems, addStockItem, updateStockItem: updateStockItemCtx, approvedStockItems, pendingStockItems, heldOrders, addHeldOrder, removeHeldOrder, suggestiveSalesItems, addSuggestiveSaleItem, removeSuggestiveSaleItem, draftCart, setDraftCart, clearDraftCart, completedOrders, addCompletedOrder, updateCompletedOrder, refundRecords, addRefundRecord, warrantyClaims, addWarrantyClaim, updateWarrantyClaim: updateWarrantyClaimCtx, posOperator, setPosOperator, pendingReplacements, removePendingReplacement } = useStoreLocalState();
   const derivedSuggestiveItems = approvedStockItems.filter(s => s.isSuggestiveSale).map(s => ({ id: s.id, name: s.name, price: s.price }));
   const OPERATOR_ROLE_MAP: Record<string, string> = { 'Manager': 'manager', 'Sales Associate': 'sales_staff', 'Technician': 'technician', 'Store Owner': 'store_owner' };
   const isOwnerOrManager = effectiveRole === 'system_owner' || effectiveRole === 'store_owner' || effectiveRole === 'manager';
   const hasInventoryPermission = checkPermission('inventory', 'manage');
-  const canProcessRefund = checkPermission('refunds', 'create') || (supervisorRefundAuth?.active ?? false);
+  const canProcessRefund = checkSubPermission('process_refunds') || (supervisorRefundAuth?.active ?? false);
   const canFileWarranty = checkPermission('warranties', 'create');
   const canAddStock = checkPermission('inventory', 'create');
   const canManageSuggestive = checkPermission('suggestive_sales', 'manage');
@@ -1032,7 +1032,7 @@ export const POS: React.FC = () => {
                   }} className="bg-slate-100 hover:bg-slate-200 rounded-xl flex flex-col items-center justify-center gap-2 transition-all group" title={!canProcessRefund ? 'Supervisor authorization required for refunds' : ''}>
                     <span className="material-symbols-outlined text-primary group-hover:scale-110 transition-transform">keyboard_return</span>
                     <span className="text-[10px] font-bold uppercase tracking-tighter">Refund</span>
-                    {!checkPermission('refunds', 'create') && !supervisorRefundAuth?.active && (
+                    {!checkSubPermission('process_refunds') && !supervisorRefundAuth?.active && (
                       <span className="material-symbols-outlined text-amber-500 text-[10px]">lock</span>
                     )}
                   </button>
@@ -1482,7 +1482,7 @@ export const POS: React.FC = () => {
                         }
                       }} className="flex-1 py-3 bg-rose-50 text-rose-600 rounded-2xl font-black text-xs uppercase tracking-widest border border-rose-200 hover:bg-rose-100 transition-all flex items-center justify-center gap-2">
                         <span className="material-symbols-outlined text-sm">keyboard_return</span>Initiate Refund
-                        {!checkPermission('refunds', 'create') && !supervisorRefundAuth?.active && <span className="material-symbols-outlined text-amber-500 text-[10px] ml-1">lock</span>}
+                        {!checkSubPermission('process_refunds') && !supervisorRefundAuth?.active && <span className="material-symbols-outlined text-amber-500 text-[10px] ml-1">lock</span>}
                       </button>
                       {canFileWarranty && (
                         <button onClick={() => { setIsPreviousOrdersOpen(false); setOrdersSelectedOrder(null); setIsWarrantyModalOpen(true); setWarrantySearch(ordersSelectedOrder.invoiceNumber); setWarrantySelectedOrder(ordersSelectedOrder); setWarrantyStep('select'); }} className="flex-1 py-3 bg-teal-50 text-teal-600 rounded-2xl font-black text-xs uppercase tracking-widest border border-teal-200 hover:bg-teal-100 transition-all flex items-center justify-center gap-2">

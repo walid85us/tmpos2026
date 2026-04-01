@@ -391,6 +391,7 @@ export interface EmployeeRole {
   id: string;
   name: string;
   permissions: Record<string, PermissionLevel> | string[];
+  subPermissions?: Record<string, boolean>;
   description?: string;
 }
 

@@ -1,0 +1,170 @@
+Run one final narrow correction pass only for:
+Store Permissions Matrix – Module Access and Administrative Sub-Permission Architecture
+
+This is still inside the current workstream:
+Store Dashboard & POS Refinement
+
+Do not start any new workstream.
+Do not redesign the UI.
+Do not broaden scope beyond permission-page architecture, sub-permission semantics, and enforcement consistency.
+Preserve the current design baseline exactly.
+Preserve auth, preview mode, RBAC, lifecycle gating, plan entitlement gating, and platform/store hierarchy.
+
+Act as:
+Principal RBAC / Access-Control Architect
++ Principal Permission-System Designer
++ Principal Repair/POS Product Architect
++ Principal React/TypeScript Engineer
++ Principal UX Workflow Designer
++ Principal QA Auditor
++ Principal Side Auditor & Systems Thinker
+
+This is a strict permission-architecture completion pass.
+Do not do shallow fixes.
+Do not patch one screen only.
+Fix the remaining structural issue:
+
+Administrative Actions must behave as true sub-permissions under their related Module Access.
+
+Core requirement:
+The Store Owner must be able to grant access to a module while still denying specific sensitive actions inside that module.
+
+Example:
+If Store Owner gives Manager Module Access to Employees / Team at Manage or Full Access,
+the Store Owner must still be able to deny specific sub-actions such as:
+- Manage Employees
+- Manage Attendance
+- Create Role
+- Edit Role
+- Manage Role Permissions
+- Assign Roles
+- Assign Manager Role
+- Approve Requests
+- Manage Compensation
+and any other related admin actions
+
+If one of those sub-permissions is Denied, the user must NOT be able to do that action even if they still have general module access.
+
+Required fixes:
+
+1) Re-architect Administrative Actions as true sub-permissions of Module Access
+Current issue:
+- Module Access and Administrative Permissions are shown separately
+- but they are not behaving like a real parent/child relationship
+- Store Owner cannot reliably use sub-permissions to narrow what a role can do inside an allowed module
+
+Fix:
+- make Administrative Actions true sub-permissions tied to their related Module Access domain
+- Module Access grants entry to the area/surface
+- Administrative Actions further restrict or allow sensitive actions inside that module
+- a user may have module access but still be denied specific sub-actions
+- this must be true everywhere in the app, not just in the permission page UI
+
+2) Define and enforce parent/child permission rules
+Implement these rules globally:
+
+A. Parent rule
+- If Module Access is None:
+  all related Administrative Actions must be effectively unavailable/inactive/denied
+  user cannot access the module or any sub-actions
+
+B. View-only rule
+- If Module Access is View only:
+  user may view the module where intended
+  but cannot perform create/edit/manage/approve sub-actions unless explicitly and intentionally supported
+  in most cases, related admin sub-actions should be unavailable/inactive
+
+C. Higher module access rule
+- If Module Access is Create / Edit / Manage / Approve / Full Access:
+  user may enter the module at that level
+  but each Administrative Action must still be separately enforceable as Granted or Denied
+- Denied sub-action must block the action even if parent module access is high
+
+D. No implicit bypass rule
+- Parent module access must not silently override denied sub-permissions
+- A high module level does not automatically grant every sub-action
+- Store Owner control over sub-actions must be real and enforceable
+
+3) Align the permission page UI to show this relationship clearly
+Current issue:
+- the relationship between Module Access and Administrative Actions is still not clear enough
+
+Fix:
+- refine the permission page so Administrative Actions are visually and logically understood as sub-permissions of their related module
+- keep the current design baseline, but improve grouping/labels/helper text/indentation/section logic as needed
+- it should be obvious that:
+  - Module Access = access to the area
+  - Administrative Actions = specific sensitive abilities within that area
+- if the parent module access makes a sub-permission irrelevant, show that clearly and honestly
+
+4) Enforce sub-permissions across actual app behavior
+Current issue:
+- even if matrix values look correct, actions may still leak through behavior
+
+Fix:
+- audit and enforce Administrative Actions as sub-permissions across all relevant entry points
+- if a sub-permission is Denied, the action must be blocked everywhere
+
+Example domains to re-check:
+- Employees / Team
+  - Manage Employees
+  - Manage Attendance
+  - Create Role
+  - Edit Role
+  - Manage Role Permissions
+  - Assign Roles
+  - Assign Manager Role
+  - Approve Requests
+  - Manage Compensation
+- Warranty Management
+- Refund-related sensitive actions
+- Inventory sensitive actions
+- Suggestive Sales if governed
+- any other module in the permission page that has specialized admin actions
+
+5) Make sub-permission behavior trustworthy for Store Owner
+Fix:
+- Store Owner must be able to:
+  - grant module access
+  - then selectively deny or grant sensitive sub-actions inside that module
+- this must work for Manager and all other roles
+- the permission page must accurately reflect this capability
+- actual in-app behavior must match what Store Owner configured
+
+6) Preserve the already-working global permission hierarchy
+Do not break:
+- permission dropdown order
+- Store Owner permission-page semantics
+- global hierarchy model:
+  None / View only / Create / Edit / Manage / Approve / Full Access
+- Warranty hierarchy
+- Refund hierarchy + supervisor escalation
+- Inventory/Add Stock hierarchy
+- menu/page/action parity
+- permission refresh after matrix changes
+- preview-mode global role sync
+- POS active-role sync after navigation
+- warranty flows
+- refund flows
+- Quick Add Stock approval-to-inventory path
+- direct Add to Inventory where truly allowed
+- SKU/barcode lookup
+- POS draft persistence
+- New Sale reset
+- and all other already-working Store Dashboard & POS Refinement flows
+
+7) Output format after implementation
+After implementation, return only:
+1. What changed
+2. Exact files changed in this pass
+3. How Administrative Actions now work as sub-permissions under Module Access
+4. The parent/child rules now enforced globally
+5. Which modules/sub-actions were realigned
+6. Any known limitations still intentionally left unchanged
+7. A short implementation verification summary
+
+Important:
+- Do not claim final QA closure on behalf of the user
+- Do not mark the workstream complete yet
+- The user will perform the final manual QA
+- Stop after the report and wait for user testing feedback

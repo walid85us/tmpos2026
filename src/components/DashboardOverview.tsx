@@ -690,7 +690,7 @@ function StoreActivationPanel() {
 }
 
 export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => void }) {
-  const { session, canAccess, effectiveRole, checkPermission } = useAccess();
+  const { session, canAccess, effectiveRole, checkPermission, checkSubPermission } = useAccess();
   const navigate = useNavigate();
   const { addCustomer, addStockItem, updateStockItem, stockItems: sharedStockItems, approvedStockItems, pendingStockItems, heldOrders, removeHeldOrder } = useStoreLocalState();
   const hasInventoryPermission = checkPermission('inventory', 'manage');
@@ -774,7 +774,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
   return (
     <div className="space-y-8">
       {session?.role === 'store_owner' && <StoreActivationPanel />}
-      {checkPermission('inventory', 'approve') && <ApprovalQueue />}
+      {checkSubPermission('approve_inventory') && <ApprovalQueue />}
       <header className="flex items-end justify-between">
         <div>
           <span className="text-[10px] uppercase tracking-[0.2em] text-secondary font-extrabold mb-1 block">Operational Overview</span>
@@ -832,7 +832,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
         ))}
       </div>
 
-      {hasInventoryPermission && pendingStockItems.length > 0 && (
+      {checkSubPermission('approve_inventory') && pendingStockItems.length > 0 && (
         <div className="bg-amber-50 border border-amber-200 rounded-[2rem] p-6 space-y-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">

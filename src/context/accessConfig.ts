@@ -45,18 +45,40 @@ export const adminPermissions = [
   'approve_requests',
 ];
 
-export const ADMIN_ACTION_LEVEL_MAP: { id: string; label: string; requiredDomain: string; requiredLevel: PermissionLevel; description: string }[] = [
-  { id: 'assign_roles', label: 'Assign Roles', requiredDomain: 'employees', requiredLevel: 'edit', description: 'Assign roles to employees' },
-  { id: 'assign_same_role', label: 'Assign Same-Level Role', requiredDomain: 'employees', requiredLevel: 'edit', description: 'Assign a role at the same level' },
-  { id: 'manage_attendance', label: 'Manage Attendance', requiredDomain: 'employees', requiredLevel: 'edit', description: 'Manage time tracking and attendance' },
-  { id: 'manage_employees', label: 'Manage Employees', requiredDomain: 'employees', requiredLevel: 'manage', description: 'Add, edit, and remove employees' },
-  { id: 'create_roles', label: 'Create Roles', requiredDomain: 'employees', requiredLevel: 'manage', description: 'Create new roles' },
-  { id: 'edit_roles', label: 'Edit Roles', requiredDomain: 'employees', requiredLevel: 'manage', description: 'Edit existing roles' },
-  { id: 'manage_role_permissions', label: 'Manage Role Permissions', requiredDomain: 'employees', requiredLevel: 'manage', description: 'Modify permissions for roles' },
-  { id: 'assign_manager_role', label: 'Assign Manager Role', requiredDomain: 'employees', requiredLevel: 'manage', description: 'Assign the Manager role' },
-  { id: 'manage_compensation', label: 'Manage Compensation', requiredDomain: 'employees', requiredLevel: 'manage', description: 'Manage pay rates and commissions' },
-  { id: 'approve_requests', label: 'Approve Requests', requiredDomain: 'employees', requiredLevel: 'approve', description: 'Approve employee and role requests' },
+export interface SubPermissionDef {
+  id: string;
+  label: string;
+  parentDomain: string;
+  minModuleLevel: PermissionLevel;
+  defaultLevel: PermissionLevel;
+  description: string;
+}
+
+export const SUB_PERMISSIONS: SubPermissionDef[] = [
+  { id: 'manage_employees', label: 'Manage Employees', parentDomain: 'employees', minModuleLevel: 'view', defaultLevel: 'manage', description: 'Add, edit, and remove employees' },
+  { id: 'manage_attendance', label: 'Manage Attendance', parentDomain: 'employees', minModuleLevel: 'view', defaultLevel: 'manage', description: 'Manage time tracking and attendance' },
+  { id: 'create_roles', label: 'Create Roles', parentDomain: 'employees', minModuleLevel: 'view', defaultLevel: 'manage', description: 'Create new store roles' },
+  { id: 'edit_roles', label: 'Edit Roles', parentDomain: 'employees', minModuleLevel: 'view', defaultLevel: 'manage', description: 'Edit existing roles' },
+  { id: 'manage_role_permissions', label: 'Manage Role Permissions', parentDomain: 'employees', minModuleLevel: 'view', defaultLevel: 'manage', description: 'Modify permissions for roles' },
+  { id: 'assign_roles', label: 'Assign Roles', parentDomain: 'employees', minModuleLevel: 'view', defaultLevel: 'manage', description: 'Assign roles to employees' },
+  { id: 'assign_manager_role', label: 'Assign Manager Role', parentDomain: 'employees', minModuleLevel: 'view', defaultLevel: 'manage', description: 'Assign the Manager role' },
+  { id: 'approve_requests', label: 'Approve Requests', parentDomain: 'employees', minModuleLevel: 'view', defaultLevel: 'approve', description: 'Approve employee and role requests' },
+  { id: 'manage_compensation', label: 'Manage Compensation', parentDomain: 'employees', minModuleLevel: 'view', defaultLevel: 'manage', description: 'Manage pay rates and commissions' },
+  { id: 'approve_inventory', label: 'Approve Inventory Requests', parentDomain: 'inventory', minModuleLevel: 'view', defaultLevel: 'approve', description: 'Approve stock additions and adjustments' },
+  { id: 'manage_warranty_claims', label: 'Manage Warranty Claims', parentDomain: 'warranties', minModuleLevel: 'view', defaultLevel: 'manage', description: 'Process and resolve warranty claims' },
+  { id: 'process_refunds', label: 'Process Refunds', parentDomain: 'refunds', minModuleLevel: 'view', defaultLevel: 'create', description: 'Initiate and process customer refunds' },
+  { id: 'approve_refunds', label: 'Approve Refunds', parentDomain: 'refunds', minModuleLevel: 'view', defaultLevel: 'approve', description: 'Approve refund requests' },
 ];
+
+export const ADMIN_ACTION_LEVEL_MAP = SUB_PERMISSIONS;
+
+export function getSubPermissionsForDomain(domainId: string): SubPermissionDef[] {
+  return SUB_PERMISSIONS.filter(sp => sp.parentDomain === domainId);
+}
+
+export function getDomainsWithSubPermissions(): string[] {
+  return [...new Set(SUB_PERMISSIONS.map(sp => sp.parentDomain))];
+}
 
 export const platformRoles = [
   { id: 'system_owner', name: 'System Owner', permissions: ['all'], description: 'Full platform access' },
@@ -95,6 +117,21 @@ export const tenantRoles: EmployeeRole[] = [
       integrations: 'manage',
       widgets: 'manage',
     } as Record<string, PermissionLevel>,
+    subPermissions: {
+      manage_employees: true,
+      manage_attendance: true,
+      create_roles: true,
+      edit_roles: true,
+      manage_role_permissions: true,
+      assign_roles: true,
+      assign_manager_role: false,
+      approve_requests: false,
+      manage_compensation: true,
+      approve_inventory: false,
+      manage_warranty_claims: true,
+      process_refunds: true,
+      approve_refunds: true,
+    },
     description: 'Store management access'
   },
   {
@@ -120,6 +157,21 @@ export const tenantRoles: EmployeeRole[] = [
       integrations: 'none',
       widgets: 'none',
     } as Record<string, PermissionLevel>,
+    subPermissions: {
+      manage_employees: false,
+      manage_attendance: false,
+      create_roles: false,
+      edit_roles: false,
+      manage_role_permissions: false,
+      assign_roles: false,
+      assign_manager_role: false,
+      approve_requests: false,
+      manage_compensation: false,
+      approve_inventory: false,
+      manage_warranty_claims: false,
+      process_refunds: false,
+      approve_refunds: false,
+    },
     description: 'Repair and parts access'
   },
   {
@@ -145,6 +197,21 @@ export const tenantRoles: EmployeeRole[] = [
       integrations: 'none',
       widgets: 'none',
     } as Record<string, PermissionLevel>,
+    subPermissions: {
+      manage_employees: false,
+      manage_attendance: false,
+      create_roles: false,
+      edit_roles: false,
+      manage_role_permissions: false,
+      assign_roles: false,
+      assign_manager_role: false,
+      approve_requests: false,
+      manage_compensation: false,
+      approve_inventory: false,
+      manage_warranty_claims: false,
+      process_refunds: false,
+      approve_refunds: false,
+    },
     description: 'Sales and customer access'
   },
 ];

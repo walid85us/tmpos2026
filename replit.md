@@ -28,7 +28,8 @@ The frontend is built with React 19, TypeScript, Vite 6, and Tailwind CSS v4, fo
 
 ## Technical Implementations & Feature Specifications
 
--   **Authentication & Access Control**: Leverages Firebase Authentication with platform-level and tenant-specific roles. A hierarchical permission model (7 levels) across various domains is enforced by `AccessGuard`.
+-   **Authentication & Access Control**: Leverages Firebase Authentication with platform-level and tenant-specific roles. A hierarchical permission model (7 levels: none < view < create < edit < manage < approve < full) across various domains is enforced by `AccessGuard`.
+-   **Sub-Permissions System**: Administrative actions (manage employees, approve inventory, process refunds, etc.) are independently toggleable per role as sub-permissions. Defined in `SUB_PERMISSIONS` array in `accessConfig.ts` with `parentDomain`, `minModuleLevel` (view), and `defaultLevel`. Enforced via `checkSubPermission(actionId)` in `AccessContext`. N/A when module access is `none`; otherwise Granted/Denied independently. Store Owner always has all sub-permissions.
 -   **Tenant Management & Provisioning**: Comprehensive workflow for tenant lifecycle, including provisioning, subscriptions, feature overrides, billing, domain management, usage tracking, and audit logging.
 -   **Point of Sale (POS)**: Full-featured POS including cart management, payments (cash, card), tax calculation, discounts, customer management (inline creation, loyalty points), repair intake, and held orders. Supports `autoQuickCheckIn`, `openHeldOrders`, `autoRepairItem`, `addToCart`, and `resumeHeldOrderId` via location state. Features quick add stock, operator switching with RBAC, refund workflows, and warranty claims. Cash rounding options are available.
 -   **Employee Management**: Manages employees, roles, time tracking, and payroll with granular permissions.
@@ -42,7 +43,7 @@ The frontend is built with React 19, TypeScript, Vite 6, and Tailwind CSS v4, fo
 -   **POS Cart Merge**: Automatically merges identical inventory items into a single cart line.
 -   **POS Finalize**: Creates `CompletedOrder` records and decrements stock quantities.
 -   **Stock Count Integrity**: Cart displays remaining stock with visual indicators; editing items enforces stock limits.
--   **Store Permissions Matrix**: Interactive matrix in `EmployeesPermissionsPage` for role-domain permission level configuration, linked to `accessConfig.ts`.
+-   **Store Permissions Matrix**: Interactive matrix in `EmployeesPermissionsPage` for role-domain permission level configuration with nested sub-permission toggle rows (└ prefixed), linked to `accessConfig.ts`. Sub-permissions show Granted/Denied buttons when module access >= view, N/A when none.
 -   **Supervisor Refund Authorization**: Allows unauthorized operators to request supervisor approval for refunds via PIN.
 -   **UI Feedback**: Consistent visual feedback for successful saves (e.g., button text swap, temporary `bg-emerald-500` class).
 -   **Modal Pattern**: Consistent `AnimatePresence`-based modals with fixed overlays, `backdrop-blur-md`, `motion.div` animations, and `rounded-[3rem]` styling.

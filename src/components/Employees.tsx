@@ -6,7 +6,7 @@ import {
   EmployeeCommission, EmployeePayroll 
 } from '../types';
 import { useAccess } from '../context/AccessContext';
-import { planFeatures, PERMISSION_DOMAINS, PERMISSION_HIERARCHY, ADMIN_ACTION_LEVEL_MAP, meetsPermissionLevel } from '../context/accessConfig';
+import { planFeatures, PERMISSION_DOMAINS, PERMISSION_HIERARCHY, SUB_PERMISSIONS, getSubPermissionsForDomain, getDomainsWithSubPermissions, meetsPermissionLevel } from '../context/accessConfig';
 import PendingApproval from './PendingApproval';
 
 const MOCK_EMPLOYEES: Employee[] = [
@@ -79,7 +79,7 @@ const LEVEL_COLORS: Record<string, string> = {
 };
 
 export default function Employees() {
-  const { session, tenant, setPreviewTenant, isPreviewModeEnabled, tenantRolesState = [], addTenantRole, updateTenantRole, canAccess, checkPermission } = useAccess();
+  const { session, tenant, setPreviewTenant, isPreviewModeEnabled, tenantRolesState = [], addTenantRole, updateTenantRole, updateTenantRoleSubPermission, canAccess, checkPermission, checkSubPermission } = useAccess();
   const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<'list' | 'time' | 'roles' | 'permissions' | 'activity' | 'payroll'>('list');
   const [employees, setEmployees] = useState<Employee[]>(MOCK_EMPLOYEES);
@@ -125,7 +125,7 @@ export default function Employees() {
   const [showClockInPicker, setShowClockInPicker] = useState(false);
   const [showClockOutPicker, setShowClockOutPicker] = useState(false);
 
-  const [newRole, setNewRole] = useState<{ name: string; description: string; status: string; permissions: Record<string, string> }>({ name: '', description: '', status: 'active', permissions: {} });
+  const [newRole, setNewRole] = useState<{ name: string; description: string; status: string; permissions: Record<string, string>; subPermissions: Record<string, boolean> }>({ name: '', description: '', status: 'active', permissions: {}, subPermissions: {} });
 
   const isOwnerOrManager = session?.role === 'store_owner' || session?.role === 'system_owner' || session?.role === 'manager';
   const isManager = session?.role === 'manager';
@@ -236,8 +236,8 @@ export default function Employees() {
     const commissionRate = Number(formData.get('commissionRate')) || 0;
 
     const needsApproval = roleId === 'store_owner' || 
-      (roleId === 'manager' && !checkPermission('employees', 'manage')) ||
-      (!checkPermission('employees', 'edit'));
+      (roleId === 'manager' && !checkSubPermission('assign_manager_role')) ||
+      (!checkSubPermission('manage_employees'));
 
     if (needsApproval && session?.role !== 'store_owner' && session?.role !== 'system_owner') {
       setPendingRequests(prev => [...prev, { 
@@ -316,7 +316,7 @@ export default function Employees() {
     if (!newRole.name.trim()) return;
     const roleId = newRole.name.toLowerCase().replace(/\s+/g, '_');
 
-    if (!checkPermission('employees', 'manage') && session?.role !== 'store_owner' && session?.role !== 'system_owner') {
+    if (!checkSubPermission('create_roles') && session?.role !== 'store_owner' && session?.role !== 'system_owner') {
       setPendingRequests(prev => [...prev, { 
         id: Date.now(), 
         employee: 'System', 
@@ -327,11 +327,11 @@ export default function Employees() {
       }]);
       showToast('Role creation request submitted for approval.', 'info');
     } else {
-      addTenantRole({ id: roleId, name: newRole.name, permissions: newRole.permissions, description: newRole.description || 'Custom role' });
+      addTenantRole({ id: roleId, name: newRole.name, permissions: newRole.permissions, subPermissions: newRole.subPermissions, description: newRole.description || 'Custom role' });
       logActivity('system', session?.user?.name || 'Store Owner', 'Created Role', `Created new store role: ${newRole.name}`);
       showToast(`Role "${newRole.name}" created successfully.`);
     }
-    setNewRole({ name: '', description: '', status: 'active', permissions: {} });
+    setNewRole({ name: '', description: '', status: 'active', permissions: {}, subPermissions: {} });
     setShowCreateRoleModal(false);
   };
 
@@ -418,7 +418,7 @@ export default function Employees() {
   const [showBreakPicker, setShowBreakPicker] = useState(false);
   const [showEndBreakPicker, setShowEndBreakPicker] = useState(false);
 
-  const canManageAttendance = isOwner || checkPermission('employees', 'edit');
+  const canManageAttendance = isOwner || checkSubPermission('manage_attendance');
 
   const handleStartBreak = () => {
     if (canManageAttendance) {
@@ -488,7 +488,7 @@ export default function Employees() {
 
   const renderEmployeeList = () => (
     <div className="space-y-6">
-      {(isOwner || checkPermission('employees', 'approve')) && (
+      {(isOwner || checkSubPermission('approve_requests')) && (
         <PendingApproval 
           requests={pendingRequests} 
           onApprove={handleApprove} 
@@ -508,7 +508,7 @@ export default function Employees() {
             onChange={(e) => setSearchQuery(e.target.value)}
           />
         </div>
-        {(isOwner || checkPermission('employees', 'manage')) && (
+        {(isOwner || checkSubPermission('manage_employees')) && (
           <button 
             onClick={() => setShowAddModal(true)}
             className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2"
@@ -522,7 +522,7 @@ export default function Employees() {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {filteredEmployees.map((emp) => {
           const isStoreOwner = emp.roleId === 'store_owner';
-          const canManage = session?.role === 'system_owner' || session?.role === 'store_owner' || (checkPermission('employees', 'manage') && !isStoreOwner && emp.roleId !== 'manager');
+          const canManage = session?.role === 'system_owner' || session?.role === 'store_owner' || (checkSubPermission('manage_employees') && !isStoreOwner && emp.roleId !== 'manager');
 
           return (
             <motion.div 
@@ -783,14 +783,28 @@ export default function Employees() {
     return role.permissions?.[domainId] || 'none';
   };
 
+  const resolveSubPermGranted = (role: any, actionId: string, parentDomainId: string, minModuleLevel: string, defaultLevel: string): 'granted' | 'denied' | 'na' => {
+    const parentLevel = resolveRoleLevel(role, parentDomainId);
+    const parentIdx = PERMISSION_HIERARCHY.indexOf(parentLevel as any);
+    const minIdx = PERMISSION_HIERARCHY.indexOf(minModuleLevel as any);
+    if (parentIdx < minIdx) return 'na';
+
+    if (role.subPermissions && actionId in role.subPermissions) {
+      return role.subPermissions[actionId] ? 'granted' : 'denied';
+    }
+
+    const defaultIdx = PERMISSION_HIERARCHY.indexOf(defaultLevel as any);
+    return parentIdx >= defaultIdx ? 'granted' : 'denied';
+  };
+
   const renderPermissions = () => {
-    const isStoreOwnerViewing = session?.role === 'store_owner' || session?.role === 'system_owner';
+    const domainsWithSubs = getDomainsWithSubPermissions();
 
     return (
       <div className="space-y-8 mt-8">
         <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm">
           <h2 className="text-2xl font-black text-primary tracking-tight mb-2">Store Permissions Matrix</h2>
-          <p className="text-slate-500 text-sm font-medium mb-6">Configure which roles have access to specific store features. Each level includes all capabilities of lower levels.</p>
+          <p className="text-slate-500 text-sm font-medium mb-6">Configure module access and sensitive sub-actions per role. Module Access controls entry; Sub-Permissions control specific actions within each module and can be independently denied.</p>
 
           <div className="flex flex-wrap gap-1.5 mb-6 p-3 bg-slate-50 rounded-2xl border border-slate-100">
             {PERMISSION_HIERARCHY.map((level, i) => (
@@ -805,7 +819,7 @@ export default function Employees() {
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="border-b border-slate-100">
-                  <th className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest w-48">Module</th>
+                  <th className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest w-56">Module / Action</th>
                   {tenantRolesState.map(role => (
                     <th key={role.id} className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center min-w-[130px]">
                       {role.name}
@@ -817,55 +831,103 @@ export default function Employees() {
                 </tr>
               </thead>
               <tbody>
-                <tr className="bg-slate-50/80">
-                  <td colSpan={tenantRolesState.length + 1} className="px-4 py-2.5 text-[10px] font-black text-primary uppercase tracking-widest">
-                    <span className="flex items-center gap-2">
-                      <span className="material-symbols-outlined text-xs">apps</span>
-                      Module Access
-                    </span>
-                    <span className="block text-[9px] font-medium text-slate-400 normal-case tracking-normal mt-0.5">Controls access to each module area. "View Only" grants read access; higher levels grant more actions.</span>
-                  </td>
-                </tr>
                 {PERMISSION_DOMAINS.map(domain => {
                   const sortedLevels = PERMISSION_HIERARCHY.filter(l => domain.levels.includes(l));
+                  const domainSubs = getSubPermissionsForDomain(domain.id);
+                  const hasSubs = domainSubs.length > 0;
+
                   return (
-                    <tr key={domain.id} className="border-b border-slate-50 hover:bg-slate-50/50 transition-colors">
-                      <td className="px-4 py-3">
-                        <span className="text-sm font-bold text-slate-700">{domain.label}</span>
-                      </td>
-                      {tenantRolesState.map(role => {
-                        const currentLevel = resolveRoleLevel(role, domain.id);
-                        const isStoreOwnerRole = role.id === 'store_owner';
-                        const isLocked = isStoreOwnerRole || (session?.role === 'manager' && (role.id === 'manager' || !checkPermission('employees', 'manage')));
-                        return (
-                          <td key={role.id} className="px-4 py-3 text-center">
-                            {isStoreOwnerRole ? (
-                              <span className={`inline-block text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg border ${LEVEL_COLORS['full']}`}>
-                                Full Access
-                              </span>
-                            ) : (
-                              <select
-                                disabled={isLocked}
-                                value={currentLevel}
-                                onChange={(e) => {
-                                  if (isLocked) return;
-                                  const newLevel = e.target.value;
-                                  const newPermissions = Array.isArray(role.permissions)
-                                    ? { ...role.permissions.reduce((acc: any, p: string) => ({ ...acc, [p]: 'full' }), {}), [domain.id]: newLevel }
-                                    : { ...role.permissions, [domain.id]: newLevel };
-                                  updateTenantRole(role.id, newPermissions as any);
-                                }}
-                                className={`text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg border cursor-pointer appearance-none text-center transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${LEVEL_COLORS[currentLevel] || LEVEL_COLORS['none']}`}
-                              >
-                                {sortedLevels.map(level => (
-                                  <option key={level} value={level}>{LEVEL_LABELS[level]}</option>
-                                ))}
-                              </select>
-                            )}
+                    <React.Fragment key={domain.id}>
+                      <tr className={`border-b border-slate-50 hover:bg-slate-50/50 transition-colors ${hasSubs ? 'bg-slate-50/30' : ''}`}>
+                        <td className="px-4 py-3">
+                          <span className="text-sm font-bold text-slate-700 flex items-center gap-2">
+                            {domain.label}
+                            {hasSubs && <span className="text-[8px] font-black text-indigo-500 uppercase tracking-widest bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100">+Sub-Perms</span>}
+                          </span>
+                        </td>
+                        {tenantRolesState.map(role => {
+                          const currentLevel = resolveRoleLevel(role, domain.id);
+                          const isStoreOwnerRole = role.id === 'store_owner';
+                          const isLocked = isStoreOwnerRole || (session?.role === 'manager' && (role.id === 'manager' || !checkSubPermission('manage_role_permissions')));
+                          return (
+                            <td key={role.id} className="px-4 py-3 text-center">
+                              {isStoreOwnerRole ? (
+                                <span className={`inline-block text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg border ${LEVEL_COLORS['full']}`}>
+                                  Full Access
+                                </span>
+                              ) : (
+                                <select
+                                  disabled={isLocked}
+                                  value={currentLevel}
+                                  onChange={(e) => {
+                                    if (isLocked) return;
+                                    const newLevel = e.target.value;
+                                    const newPermissions = Array.isArray(role.permissions)
+                                      ? { ...role.permissions.reduce((acc: any, p: string) => ({ ...acc, [p]: 'full' }), {}), [domain.id]: newLevel }
+                                      : { ...role.permissions, [domain.id]: newLevel };
+                                    updateTenantRole(role.id, newPermissions as any);
+                                  }}
+                                  className={`text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg border cursor-pointer appearance-none text-center transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${LEVEL_COLORS[currentLevel] || LEVEL_COLORS['none']}`}
+                                >
+                                  {sortedLevels.map(level => (
+                                    <option key={level} value={level}>{LEVEL_LABELS[level]}</option>
+                                  ))}
+                                </select>
+                              )}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                      {domainSubs.map(sub => (
+                        <tr key={sub.id} className="border-b border-slate-50/50 bg-white hover:bg-slate-50/30 transition-colors">
+                          <td className="pl-10 pr-4 py-2.5">
+                            <span className="text-xs font-bold text-slate-500 flex items-center gap-1.5">
+                              <span className="text-slate-300">└</span>
+                              {sub.label}
+                            </span>
+                            <span className="block text-[9px] text-slate-400 font-medium mt-0.5 ml-4">
+                              Default at {LEVEL_LABELS[sub.defaultLevel]}+ · Requires {domain.label} access
+                            </span>
                           </td>
-                        );
-                      })}
-                    </tr>
+                          {tenantRolesState.map(role => {
+                            const isStoreOwnerRole = role.id === 'store_owner';
+                            const isLocked = isStoreOwnerRole || (session?.role === 'manager' && (role.id === 'manager' || !checkSubPermission('manage_role_permissions')));
+                            const status = isStoreOwnerRole ? 'granted' : resolveSubPermGranted(role, sub.id, sub.parentDomain, sub.minModuleLevel, sub.defaultLevel);
+
+                            return (
+                              <td key={role.id} className="px-4 py-2.5 text-center">
+                                {isStoreOwnerRole ? (
+                                  <span className="inline-flex items-center gap-1 px-2 py-1 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-lg text-[9px] font-black uppercase tracking-widest">
+                                    <span className="material-symbols-outlined text-[10px]">check_circle</span>
+                                    Allowed
+                                  </span>
+                                ) : status === 'na' ? (
+                                  <span className="inline-flex items-center gap-1 px-2 py-1 bg-slate-50 text-slate-300 border border-slate-100 rounded-lg text-[9px] font-black uppercase tracking-widest">
+                                    N/A
+                                  </span>
+                                ) : (
+                                  <button
+                                    disabled={isLocked}
+                                    onClick={() => {
+                                      if (isLocked) return;
+                                      updateTenantRoleSubPermission(role.id, sub.id, status !== 'granted');
+                                    }}
+                                    className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest border transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
+                                      status === 'granted'
+                                        ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
+                                        : 'bg-red-50 text-red-500 border-red-200 hover:bg-red-100'
+                                    }`}
+                                  >
+                                    <span className="material-symbols-outlined text-[10px]">{status === 'granted' ? 'check_circle' : 'block'}</span>
+                                    {status === 'granted' ? 'Granted' : 'Denied'}
+                                  </button>
+                                )}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </React.Fragment>
                   );
                 })}
               </tbody>
@@ -873,68 +935,11 @@ export default function Employees() {
           </div>
         </div>
 
-        <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm">
-          <h2 className="text-lg font-black text-primary tracking-tight mb-2">Administrative Actions</h2>
-          <p className="text-slate-500 text-sm font-medium mb-6">Higher-risk employee management actions. These are governed by the <strong>Employees / Team</strong> permission level above — not editable separately.</p>
-
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse">
-              <thead>
-                <tr className="border-b border-slate-100">
-                  <th className="px-4 py-3 text-[10px] font-black text-slate-400 uppercase tracking-widest w-48">Action</th>
-                  <th className="px-4 py-3 text-[10px] font-black text-slate-400 uppercase tracking-widest w-24">Requires</th>
-                  {tenantRolesState.map(role => (
-                    <th key={role.id} className="px-4 py-3 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center min-w-[110px]">{role.name}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {ADMIN_ACTION_LEVEL_MAP.map(action => {
-                  return (
-                    <tr key={action.id} className="border-b border-slate-50 hover:bg-slate-50/50 transition-colors">
-                      <td className="px-4 py-3">
-                        <span className="text-sm font-bold text-slate-700">{action.label}</span>
-                        <span className="block text-[10px] text-slate-400 font-medium mt-0.5">{action.description}</span>
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className={`inline-block text-[9px] font-black uppercase tracking-wider px-2 py-1 rounded border ${LEVEL_COLORS[action.requiredLevel]}`}>
-                          {LEVEL_LABELS[action.requiredLevel]}
-                        </span>
-                      </td>
-                      {tenantRolesState.map(role => {
-                        const employeesLevel = resolveRoleLevel(role, action.requiredDomain);
-                        const levelIndex = PERMISSION_HIERARCHY.indexOf(employeesLevel as any);
-                        const requiredIndex = PERMISSION_HIERARCHY.indexOf(action.requiredLevel);
-                        const granted = levelIndex >= requiredIndex;
-                        return (
-                          <td key={role.id} className="px-4 py-3 text-center">
-                            {granted ? (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-lg text-[10px] font-black uppercase tracking-widest">
-                                <span className="material-symbols-outlined text-xs">check_circle</span>
-                                Allowed
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-red-50 text-red-400 border border-red-100 rounded-lg text-[10px] font-black uppercase tracking-widest">
-                                <span className="material-symbols-outlined text-xs">block</span>
-                                Denied
-                              </span>
-                            )}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="mt-4 p-4 bg-amber-50/50 border border-amber-100 rounded-2xl">
-            <p className="text-[11px] font-bold text-amber-700 flex items-center gap-2">
-              <span className="material-symbols-outlined text-sm">info</span>
-              Administrative actions are derived from the Employees / Team permission level. To change admin capabilities, adjust the Employees / Team level in the Module Access table above.
-            </p>
-          </div>
+        <div className="mt-4 p-4 bg-indigo-50/50 border border-indigo-100 rounded-2xl">
+          <p className="text-[11px] font-bold text-indigo-700 flex items-center gap-2">
+            <span className="material-symbols-outlined text-sm">info</span>
+            Sub-permissions are sensitive actions within a module. Even with high module access, the Store Owner can deny specific sub-actions per role. If module access is below the required level, sub-permissions show as N/A.
+          </p>
         </div>
       </div>
     );
@@ -944,10 +949,10 @@ export default function Employees() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-black text-primary tracking-tight">Roles & Permissions</h2>
-        {(isOwner || checkPermission('employees', 'manage')) && (
+        {(isOwner || checkSubPermission('create_roles')) && (
           <button 
             onClick={() => {
-              setNewRole({ name: '', description: '', status: 'active', permissions: {} });
+              setNewRole({ name: '', description: '', status: 'active', permissions: {}, subPermissions: {} });
               setShowCreateRoleModal(true);
             }}
             className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2"
@@ -995,7 +1000,7 @@ export default function Employees() {
                         </span>
                       ))}
               </div>
-              {(isOwner || checkPermission('employees', 'manage')) && !isLocked && (
+              {(isOwner || checkSubPermission('manage_role_permissions')) && !isLocked && (
                 <button 
                   onClick={() => setActiveTab('permissions')}
                   className="w-full py-3 bg-slate-50 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-slate-100 transition-colors"
@@ -1055,7 +1060,7 @@ export default function Employees() {
             { id: 'list', label: 'Employees', icon: 'group' },
             { id: 'time', label: 'Time Tracking', icon: 'schedule' },
             { id: 'roles', label: 'Roles', icon: 'security' },
-            ...((isOwner || checkPermission('employees', 'manage')) ? [{ id: 'permissions', label: 'Permissions', icon: 'key' }] : []),
+            ...((isOwner || checkSubPermission('manage_role_permissions')) ? [{ id: 'permissions', label: 'Permissions', icon: 'key' }] : []),
             { id: 'activity', label: 'Activity Log', icon: 'history' },
             { id: 'payroll', label: 'Payroll', icon: 'payments' }
           ].map((tab) => (
@@ -1086,7 +1091,7 @@ export default function Employees() {
           {activeTab === 'list' && renderEmployeeList()}
           {activeTab === 'time' && renderTimeLogs()}
           {activeTab === 'roles' && renderRoles()}
-          {activeTab === 'permissions' && (isOwner || checkPermission('employees', 'manage')) && renderPermissions()}
+          {activeTab === 'permissions' && (isOwner || checkSubPermission('manage_role_permissions')) && renderPermissions()}
           {activeTab === 'activity' && renderActivityLog()}
           {activeTab === 'payroll' && (
             <div className="bg-white/80 backdrop-blur-xl p-12 rounded-[3rem] border border-slate-200 flex flex-col items-center justify-center text-center">
@@ -1161,7 +1166,7 @@ export default function Employees() {
                       <select name="role" defaultValue={editingEmployee?.roleId} required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700">
                         {tenantRolesState.filter(r => {
                           if (r.id === 'store_owner') return false;
-                          if (r.id === 'manager' && !checkPermission('employees', 'manage') && !isOwner) return false;
+                          if (r.id === 'manager' && !checkSubPermission('assign_manager_role') && !isOwner) return false;
                           return true;
                         }).map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
                       </select>
@@ -1302,24 +1307,57 @@ export default function Employees() {
                   </select>
                 </div>
                 <div className="space-y-3">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Module Permissions</label>
-                  <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Module Permissions & Sub-Actions</label>
+                  <div className="space-y-1">
                     {PERMISSION_DOMAINS.map(domain => {
                       const sortedLevels = PERMISSION_HIERARCHY.filter(l => domain.levels.includes(l));
                       const currentLevel = newRole.permissions[domain.id] || 'none';
+                      const domainSubs = getSubPermissionsForDomain(domain.id);
                       return (
-                        <div key={domain.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-200">
-                          <span className="text-xs font-bold text-slate-700">{domain.label}</span>
-                          <select
-                            value={currentLevel}
-                            onChange={(e) => setNewRolePermLevel(domain.id, e.target.value)}
-                            className={`text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg border cursor-pointer appearance-none text-center transition-colors ${LEVEL_COLORS[currentLevel] || LEVEL_COLORS['none']}`}
-                          >
-                            {sortedLevels.map(level => (
-                              <option key={level} value={level}>{LEVEL_LABELS[level]}</option>
-                            ))}
-                          </select>
-                        </div>
+                        <React.Fragment key={domain.id}>
+                          <div className={`flex items-center justify-between p-3 rounded-xl border border-slate-200 ${domainSubs.length > 0 ? 'bg-slate-100' : 'bg-slate-50'}`}>
+                            <span className="text-xs font-bold text-slate-700">{domain.label}</span>
+                            <select
+                              value={currentLevel}
+                              onChange={(e) => setNewRolePermLevel(domain.id, e.target.value)}
+                              className={`text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg border cursor-pointer appearance-none text-center transition-colors ${LEVEL_COLORS[currentLevel] || LEVEL_COLORS['none']}`}
+                            >
+                              {sortedLevels.map(level => (
+                                <option key={level} value={level}>{LEVEL_LABELS[level]}</option>
+                              ))}
+                            </select>
+                          </div>
+                          {domainSubs.map(sub => {
+                            const parentIdx = PERMISSION_HIERARCHY.indexOf(currentLevel as any);
+                            const minIdx = PERMISSION_HIERARCHY.indexOf(sub.minModuleLevel);
+                            const isActive = parentIdx >= minIdx;
+                            const defaultIdx = PERMISSION_HIERARCHY.indexOf(sub.defaultLevel);
+                            const isGranted = newRole.subPermissions[sub.id] ?? (isActive && parentIdx >= defaultIdx);
+                            return (
+                              <div key={sub.id} className={`flex items-center justify-between pl-8 pr-3 py-2 rounded-lg border ml-4 ${isActive ? 'bg-white border-slate-200' : 'bg-slate-50/50 border-slate-100'}`}>
+                                <span className={`text-[11px] font-bold flex items-center gap-1.5 ${isActive ? 'text-slate-600' : 'text-slate-300'}`}>
+                                  <span className="text-slate-300">└</span>
+                                  {sub.label}
+                                </span>
+                                {!isActive ? (
+                                  <span className="text-[9px] font-black text-slate-300 uppercase tracking-widest">N/A</span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => setNewRole(prev => ({ ...prev, subPermissions: { ...prev.subPermissions, [sub.id]: !isGranted } }))}
+                                    className={`text-[9px] font-black uppercase tracking-widest px-2 py-1 rounded border transition-colors ${
+                                      isGranted
+                                        ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                        : 'bg-red-50 text-red-500 border-red-200'
+                                    }`}
+                                  >
+                                    {isGranted ? 'Granted' : 'Denied'}
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </React.Fragment>
                       );
                     })}
                   </div>
@@ -1327,7 +1365,7 @@ export default function Employees() {
 
                 <div className="bg-amber-50 p-4 rounded-2xl border border-amber-200">
                   <p className="text-[10px] font-black text-amber-800 uppercase tracking-widest">
-                    Store Owner role cannot be created here. Only subordinate roles can be defined. Admin actions are derived from the Employees / Team permission level.
+                    Store Owner role cannot be created here. Only subordinate roles can be defined. Sub-actions can be individually denied even when module access is granted.
                   </p>
                 </div>
               </div>

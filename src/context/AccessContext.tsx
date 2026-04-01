@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback, Rea
 import { onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
 import { auth, db } from '../firebase';
-import { Role, Plan, AccountStatus, platformRoles as initialPlatformRoles, tenantRoles as initialTenantRoles, planFeatures, adminPermissions, PERMISSION_HIERARCHY, meetsPermissionLevel, PERMISSION_DOMAINS } from './accessConfig';
+import { Role, Plan, AccountStatus, platformRoles as initialPlatformRoles, tenantRoles as initialTenantRoles, planFeatures, adminPermissions, PERMISSION_HIERARCHY, meetsPermissionLevel, PERMISSION_DOMAINS, SUB_PERMISSIONS } from './accessConfig';
 import { EmployeeRole, PermissionLevel } from '../types';
 
 interface Session {
@@ -76,6 +76,8 @@ interface AccessContextType {
   hasPermission: (perm: string) => boolean;
   getPermissionLevel: (domain: string) => PermissionLevel;
   checkPermission: (domain: string, requiredLevel: PermissionLevel) => boolean;
+  checkSubPermission: (actionId: string) => boolean;
+  updateTenantRoleSubPermission: (roleId: string, actionId: string, granted: boolean) => void;
   supervisorRefundAuth: { active: boolean; supervisorName: string } | null;
   requestSupervisorRefundAuth: (supervisorId: string, pin: string) => boolean;
   clearSupervisorRefundAuth: () => void;
@@ -197,6 +199,34 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     return meetsPermissionLevel(actual, requiredLevel);
   }, [getPermissionLevel]);
 
+  const checkSubPermission = useCallback((actionId: string): boolean => {
+    if (!session) return false;
+    if (effectiveRole === 'system_owner' || effectiveRole === 'store_owner') return true;
+
+    const actionDef = SUB_PERMISSIONS.find(sp => sp.id === actionId);
+    if (!actionDef) return false;
+
+    const parentLevel = getPermissionLevel(actionDef.parentDomain);
+    if (!meetsPermissionLevel(parentLevel, actionDef.minModuleLevel)) return false;
+
+    const roleConfig = tenantRolesState.find(r => r.id === effectiveRole);
+    if (!roleConfig) return false;
+
+    if (roleConfig.subPermissions && actionId in roleConfig.subPermissions) {
+      return roleConfig.subPermissions[actionId];
+    }
+
+    return meetsPermissionLevel(parentLevel, actionDef.defaultLevel);
+  }, [session, effectiveRole, tenantRolesState, getPermissionLevel]);
+
+  const updateTenantRoleSubPermission = (roleId: string, actionId: string, granted: boolean) => {
+    setTenantRolesState(prev => prev.map(r => {
+      if (r.id !== roleId) return r;
+      const existing = r.subPermissions || {};
+      return { ...r, subPermissions: { ...existing, [actionId]: granted } };
+    }));
+  };
+
   const canAccess = (feature: string) => {
     if (!session) return false;
 
@@ -270,6 +300,7 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     if (!supervisorRole) return false;
     const refundLevel = resolvePermissionLevel(supervisorRole, 'refunds');
     if (!meetsPermissionLevel(refundLevel, 'approve')) return false;
+    if (supervisorRole.subPermissions && supervisorRole.subPermissions['approve_refunds'] === false) return false;
     const names: Record<string, string> = { store_owner: 'Store Owner', manager: 'Manager' };
     setSupervisorRefundAuth({ active: true, supervisorName: names[supervisorId] || supervisorRole.name });
     return true;
@@ -306,6 +337,8 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       hasPermission,
       getPermissionLevel,
       checkPermission,
+      checkSubPermission,
+      updateTenantRoleSubPermission,
       supervisorRefundAuth,
       requestSupervisorRefundAuth,
       clearSupervisorRefundAuth
