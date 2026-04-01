@@ -126,6 +126,8 @@ export default function Employees() {
   const [showClockOutPicker, setShowClockOutPicker] = useState(false);
 
   const [newRole, setNewRole] = useState<{ name: string; description: string; status: string; permissions: Record<string, string>; subPermissions: Record<string, boolean> }>({ name: '', description: '', status: 'active', permissions: {}, subPermissions: {} });
+  const [expandedMatrixDomains, setExpandedMatrixDomains] = useState<Set<string>>(new Set());
+  const [expandedCreateDomains, setExpandedCreateDomains] = useState<Set<string>>(new Set());
 
   const isOwnerOrManager = session?.role === 'store_owner' || session?.role === 'system_owner' || session?.role === 'manager';
   const isManager = session?.role === 'manager';
@@ -840,9 +842,24 @@ export default function Employees() {
                     <React.Fragment key={domain.id}>
                       <tr className={`border-b border-slate-50 hover:bg-slate-50/50 transition-colors ${hasSubs ? 'bg-slate-50/30' : ''}`}>
                         <td className="px-4 py-3">
-                          <span className="text-sm font-bold text-slate-700 flex items-center gap-2">
+                          <span
+                            className={`text-sm font-bold text-slate-700 flex items-center gap-2 ${hasSubs ? 'cursor-pointer select-none' : ''}`}
+                            onClick={() => {
+                              if (!hasSubs) return;
+                              setExpandedMatrixDomains(prev => {
+                                const next = new Set(prev);
+                                next.has(domain.id) ? next.delete(domain.id) : next.add(domain.id);
+                                return next;
+                              });
+                            }}
+                          >
                             {domain.label}
-                            {hasSubs && <span className="text-[8px] font-black text-indigo-500 uppercase tracking-widest bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100">+Sub-Perms</span>}
+                            {hasSubs && (
+                              <span className="inline-flex items-center gap-1 text-[8px] font-black text-indigo-500 uppercase tracking-widest bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100">
+                                <span className="material-symbols-outlined text-[10px] transition-transform" style={{ transform: expandedMatrixDomains.has(domain.id) ? 'rotate(90deg)' : 'rotate(0deg)' }}>chevron_right</span>
+                                {domainSubs.length} Sub-Perms
+                              </span>
+                            )}
                           </span>
                         </td>
                         {tenantRolesState.map(role => {
@@ -878,7 +895,7 @@ export default function Employees() {
                           );
                         })}
                       </tr>
-                      {domainSubs.map(sub => (
+                      {expandedMatrixDomains.has(domain.id) && domainSubs.map(sub => (
                         <tr key={sub.id} className="border-b border-slate-50/50 bg-white hover:bg-slate-50/30 transition-colors">
                           <td className="pl-10 pr-4 py-2.5">
                             <span className="text-xs font-bold text-slate-500 flex items-center gap-1.5">
@@ -1316,7 +1333,25 @@ export default function Employees() {
                       return (
                         <React.Fragment key={domain.id}>
                           <div className={`flex items-center justify-between p-3 rounded-xl border border-slate-200 ${domainSubs.length > 0 ? 'bg-slate-100' : 'bg-slate-50'}`}>
-                            <span className="text-xs font-bold text-slate-700">{domain.label}</span>
+                            <span
+                              className={`text-xs font-bold text-slate-700 flex items-center gap-2 ${domainSubs.length > 0 ? 'cursor-pointer select-none' : ''}`}
+                              onClick={() => {
+                                if (domainSubs.length === 0) return;
+                                setExpandedCreateDomains(prev => {
+                                  const next = new Set(prev);
+                                  next.has(domain.id) ? next.delete(domain.id) : next.add(domain.id);
+                                  return next;
+                                });
+                              }}
+                            >
+                              {domainSubs.length > 0 && (
+                                <span className="material-symbols-outlined text-[12px] text-indigo-400 transition-transform" style={{ transform: expandedCreateDomains.has(domain.id) ? 'rotate(90deg)' : 'rotate(0deg)' }}>chevron_right</span>
+                              )}
+                              {domain.label}
+                              {domainSubs.length > 0 && (
+                                <span className="text-[8px] font-black text-indigo-500 uppercase tracking-widest bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100">{domainSubs.length}</span>
+                              )}
+                            </span>
                             <select
                               value={currentLevel}
                               onChange={(e) => setNewRolePermLevel(domain.id, e.target.value)}
@@ -1327,7 +1362,7 @@ export default function Employees() {
                               ))}
                             </select>
                           </div>
-                          {domainSubs.map(sub => {
+                          {expandedCreateDomains.has(domain.id) && domainSubs.map(sub => {
                             const parentIdx = PERMISSION_HIERARCHY.indexOf(currentLevel as any);
                             const minIdx = PERMISSION_HIERARCHY.indexOf(sub.minModuleLevel);
                             const isActive = parentIdx >= minIdx;

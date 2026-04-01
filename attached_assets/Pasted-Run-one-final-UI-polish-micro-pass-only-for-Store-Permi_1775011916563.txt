@@ -1,0 +1,63 @@
+Run one final UI polish micro-pass only for:
+Store Permissions Matrix – Sub-Permissions Expand/Collapse Interaction
+
+This is still inside the current workstream:
+Store Dashboard & POS Refinement
+
+Do not start any new workstream.
+Do not redesign the UI.
+Do not broaden scope beyond this one interaction refinement.
+Preserve the current design baseline exactly.
+Preserve auth, preview mode, RBAC, lifecycle gating, plan entitlement gating, platform/store hierarchy, and the newly working permission hierarchy/sub-permission logic.
+
+Act as:
+Principal RBAC / Access-Control Architect
++ Principal Permission-System Designer
++ Principal React/TypeScript Engineer
++ Principal UX Workflow Designer
++ Principal QA Auditor
++ Principal Side Auditor & Systems Thinker
+
+This is a UI polish completion pass only.
+Do not change business logic.
+Do not change permission hierarchy rules.
+Do not change enforcement behavior.
+Only refine the interaction for Sub-Permissions visibility.
+
+Required fix:
+
+1) Make Sub-Permissions expandable/collapsible in role creation/editing
+Current issue:
+- the permission logic is now correct
+- but Sub-Perms should be easier to use in the permission UI
+
+Required behavior:
+- In role creation/editing, Sub-Permissions should support expand/collapse
+- User should be able to expand/collapse by clicking:
+  - the “Sub-Perms” label/section header
+  and/or
+  - the main related permission row/card/header
+- Keep the interaction intuitive and consistent
+- Show a clear visual indicator such as chevron/caret/arrow for expanded vs collapsed state
+- Default behavior should remain practical and easy to scan
+- Preserve the current design baseline exactly
+
+Important constraints:
+- Do not break the newly working parent/child permission logic
+- Do not break Module Access vs Administrative Sub-Permission behavior
+- Do not break permission refresh behavior
+- Do not change role enforcement or actual permission outcomes
+- This is interaction polish only
+
+After implementation, return only:
+1. What changed
+2. Exact files changed
+3. How Sub-Permissions expand/collapse now works
+4. Any known limitations intentionally left unchanged
+5. A short implementation verification summary
+
+Important:
+- Do not claim final QA closure on behalf of the user
+- Do not mark the workstream complete yet
+- The user will perform the final manual QA
+- Stop after the report and wait for user testing feedback
