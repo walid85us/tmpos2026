@@ -1,0 +1,162 @@
+Customers, Invoices & Services Improvements — Isolation Workstream
+
+Read `replit.md` and `Ref.txt` first and treat them as source-of-truth constraints before making any changes.
+
+You are continuing an existing multi-tenant repair/POS SaaS app. Do not redesign the product. Do not reopen completed workstreams unless a dependency forces a narrow correction required for this workstream only.
+
+Expert-role stack
+- Principal SaaS Product Architect for multi-tenant repair/POS workflows
+- Staff React 19 + TypeScript + Vite engineer
+- Firebase / Firestore data-model and state-flow architect
+- Auth / RBAC / lifecycle gating specialist
+- UX systems designer preserving an existing premium glassmorphism design baseline
+- QA-minded refactor auditor
+- Side auditor and systems thinker at all times
+
+Operating posture
+- Act as a side auditor and systems thinker throughout.
+- Audit ripple effects before editing.
+- Prefer coherent foundational improvements over shallow fixes.
+- Keep scope narrow and isolated to this workstream.
+- Preserve the current design baseline exactly.
+- Preserve auth, preview mode, RBAC, lifecycle gating, and platform/store hierarchy.
+- Preserve tenant isolation and store scoping.
+- Reuse existing patterns for cards, tables, modals, drawers, toasts, motion, spacing, typography, and visual language.
+- Do not make changes to folder `Z`.
+- Do not make changes to file `Y`.
+- Keep all other task plans as planning drafts only.
+
+Current context you must honor
+- This is a multi-tenant repair/POS SaaS app in Replit with Firebase/Firestore.
+- Completed workstreams:
+  1. Platform Command Center & Commercial Plan System
+  2. Tenant Management & Provisioning
+  3. Store Dashboard & POS Refinement
+- Store Dashboard & POS Refinement is complete and approved.
+- `replit.md` is the architecture / baseline truth.
+- `Ref.txt` is the operational / product reference.
+- Existing flows already include CRM/customer records, POS inline customer management, completed orders, held orders, refund records, warranty claims, order lookup, and shared local/mock store state. Extend those instead of creating parallel systems.
+
+Workstream to complete now
+Customers, Invoices & Services Improvements
+
+Primary objective
+Strengthen the shared customer master, invoice lifecycle foundation, and service catalog / service line foundations that current POS, refunds, warranty, orders, and future repair refinements depend on — without changing the visual baseline or breaking existing completed workstreams.
+
+Architecture constraints
+- Use the existing React 19 + TypeScript + Vite + Tailwind + Firebase stack.
+- Extend existing shared state patterns first, especially the current store-scoped local/mock state and existing app context patterns, instead of introducing a competing architecture.
+- Respect the current AccessGuard / permission model / sub-permission style. Only add minimal new permission hooks if absolutely necessary for this workstream.
+- Keep preview/demo/mock behavior fully usable even if backend persistence is incomplete or partially mocked.
+- Maintain consistent routing and component conventions already present in the project.
+- Maintain accessibility and keyboard navigability for forms, rows, drawers, and modals.
+
+Scope — implement these improvements only
+
+1) Customers foundation improvements
+Audit the current customer data model and customer touchpoints across CRM, POS inline creation/selection, completed orders, invoice association, and service-related flows.
+
+Implement a stronger shared customer foundation that:
+- preserves existing customer functionality
+- improves customer search and selection by practical real-world fields such as name, phone, email, tags/labels if already supported, and linked order history where appropriate
+- adds safer reusable create/edit flows usable from CRM, POS, and invoice contexts
+- introduces duplicate-aware behavior or warnings where appropriate instead of silently creating obvious duplicate customers
+- improves the customer detail/profile experience with a clean summary of the most useful linked information already supported by the app or added in this workstream, such as recent orders, invoices, payments, services, notes, labels, loyalty-related info, and custom fields if they can be added cleanly in-scope
+- keeps all customer records store-scoped and tenant-safe
+
+Important:
+Do not turn this into a giant CRM expansion. Focus on strengthening the foundation and making customer-linked flows coherent and reliable.
+
+2) Invoices foundation improvements
+Create or strengthen an invoice management flow that fits the current app architecture and current order/POS model rather than fighting it.
+
+Implement an invoice center that:
+- is store-scoped and tenant-safe
+- supports invoice listing with useful search/filter/status patterns
+- supports a detailed invoice view / drawer / modal that matches the existing design system
+- supports creating and editing invoices
+- supports adding or editing the linked customer safely
+- supports line items in a way that cleanly handles both inventory/product items and service items
+- computes subtotal, tax, discount, balance due, and totals coherently using the project’s current calculation conventions and existing POS/order assumptions
+- supports payment status tracking such as unpaid / partially paid / paid, and refund-aware handling where relevant
+- supports payment history / payment records in a clean data structure
+- supports a manual add-payment flow without corrupting existing POS completed-order behavior
+- uses safe, non-destructive placeholders or preview actions for send/print/download actions if real delivery pipelines do not yet exist
+
+Important:
+Do not rewrite POS finalize or completed-order architecture unless a narrow compatibility correction is truly required.
+Do not expand into accounting integrations, recurring billing, mail-in, or full collections workflows in this workstream.
+
+3) Services foundation improvements
+Strengthen service management as a reusable catalog / line-item foundation for invoices and later repair refinements.
+
+Implement or improve a service catalog flow that:
+- supports service categories and service entries
+- supports core service configuration fields needed for operational use, such as service name, category, status, base price, optional duration, optional warranty-related metadata, and optional internal/flag note style metadata where appropriate
+- clearly distinguishes service items from inventory/product items in both data shape and UI behavior
+- provides a reusable service picker / selector that can be used in invoice-related flows and is structured for reuse in future repair/POS refinements
+- preserves existing repair-related behavior and does not prematurely expand into the full Repairs Module Deep Refinement
+
+Important:
+Do not build the full repair module overhaul here.
+Do not blend inventory and service concepts in a way that causes data confusion.
+
+4) Integration and non-regression requirements
+Make sure the following continue to work after your changes:
+- existing POS inline customer flows
+- completed orders / order lookup behavior
+- held orders behavior
+- refund workflows
+- warranty claim workflows
+- current auth / preview / RBAC behavior
+- current tenant/store hierarchy and lifecycle gating
+- current dashboard/store baseline visuals and interactions
+
+5) Documentation
+Update `replit.md` so it accurately reflects:
+- any new or expanded customer, invoice, or service entities
+- any new or expanded shared state flow
+- any new reusable components or route surfaces
+- any minimal permission additions
+- any important design or behavior decisions introduced in this workstream
+
+Implementation guidance
+- Start by reading existing code and identifying the current customer, order, invoice-like, and service-related types/state/routes/components.
+- Reuse and extend existing structures wherever possible.
+- Keep visual design identical to the current baseline.
+- Use consistent modal/drawer feedback, toasts, save states, and empty states.
+- Keep type safety strong.
+- Avoid dead code, one-off hacks, and duplicate state paths.
+- Seed only the minimum necessary mock/demo data to make the new flows testable in preview.
+- Avoid superficial placeholders except where a real external integration is intentionally deferred and clearly labeled.
+
+Explicit non-goals for this workstream
+- No broad redesign
+- No Repairs Module Deep Refinement
+- No inventory/supply chain overhaul
+- No estimates/leads/inquiries expansion
+- No widgets/public API/integration expansion
+- No commercial plan / provisioning rework
+- No broad accounting subsystem
+- No reopening finished workstreams beyond narrow dependency-safe corrections
+
+Definition of done
+This workstream is done only if:
+- the app still loads cleanly
+- customers, invoices, and services improvements are navigable and testable in preview
+- data relationships are coherent and store-scoped
+- existing completed workstreams remain intact
+- there are no obvious regressions in POS/customer/order/refund/warranty flows
+- there are no TypeScript-breaking changes
+- `replit.md` is updated to match the new reality
+
+Required final response format from you
+Return your completion report in this exact structure:
+
+1. Files Changed
+2. What Was Implemented
+3. State / Data Model Changes
+4. Permission / Access Changes
+5. Non-Regressions Confirmed
+6. Known Non-Goals / Deferred Items
+7. Manual QA Focus Areas for Me to Test

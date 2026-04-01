@@ -191,14 +191,40 @@ export interface RepairTicket {
   customFields?: Record<string, string>;
 }
 
+export interface CustomerNote {
+  id: string;
+  text: string;
+  date: string;
+  flagged: boolean;
+}
+
+export interface CustomerAsset {
+  id: string;
+  model: string;
+  serial: string;
+  type: string;
+}
+
 export interface Customer {
   id: string;
   name: string;
   email: string;
   phone: string;
+  phoneLabel?: string;
+  address?: string;
   totalSpent: number;
   lastVisit: string;
   loyaltyPoints?: number;
+  tier?: 'Platinum' | 'Gold' | 'Silver' | 'Bronze';
+  group?: string;
+  tags?: string[];
+  notes?: CustomerNote[];
+  assets?: CustomerAsset[];
+  customFields?: { label: string; value: string }[];
+  gdprCompliant?: boolean;
+  campaignerStatus?: 'Subscribed' | 'Unsubscribed' | 'Pending';
+  thirdPartyBilling?: boolean;
+  createdAt?: string;
 }
 
 export interface Sale {
@@ -288,6 +314,7 @@ export interface Invoice {
     type: 'product' | 'repair' | 'service' 
   }[];
   subtotal: number;
+  discount: number;
   tax: number;
   total: number;
   amountPaid: number;
