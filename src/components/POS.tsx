@@ -15,6 +15,27 @@ import ContextualHelp from './ContextualHelp';
 
 const TAX_RATE = 0.0825;
 
+const parseWarrantyPeriod = (period: string): number => {
+  const match = period.match(/(\d+)\s*(day|week|month|year)s?/i);
+  if (!match) return 0;
+  const num = parseInt(match[1]);
+  switch (match[2].toLowerCase()) {
+    case 'day': return num;
+    case 'week': return num * 7;
+    case 'month': return num * 30;
+    case 'year': return num * 365;
+    default: return 0;
+  }
+};
+
+const isWarrantyActive = (orderDate: string, warrantyPeriod: string): boolean => {
+  const days = parseWarrantyPeriod(warrantyPeriod);
+  if (days <= 0) return false;
+  const orderMs = new Date(orderDate).getTime();
+  const expiryMs = orderMs + days * 24 * 60 * 60 * 1000;
+  return Date.now() < expiryMs;
+};
+
 const PROMO_CODES: Record<string, { name: string; type: 'percent' | 'fixed'; value: number }> = {
   'SAVE10': { name: '10% Off (SAVE10)', type: 'percent', value: 10 },
   'SAVE20': { name: '20% Off (SAVE20)', type: 'percent', value: 20 },
@@ -35,6 +56,7 @@ export const POS: React.FC = () => {
   const hasInventoryPermission = checkPermission('inventory', 'manage');
   const canProcessRefund = checkSubPermission('process_refunds') || (supervisorRefundAuth?.active ?? false);
   const canFileWarranty = checkPermission('warranties', 'create');
+  const canProcessExpiredWarranty = checkSubPermission('process_expired_warranty');
   const canAddStock = checkPermission('inventory', 'create');
   const canManageSuggestive = checkPermission('suggestive_sales', 'manage');
   const inventoryLevel = getPermissionLevel('inventory');
@@ -107,6 +129,7 @@ export const POS: React.FC = () => {
   const [repairDetails, setRepairDetails] = useState({
     imei: '',
     serialNumber: '',
+    deviceName: '',
     passcode: '',
     network: '',
     patternLock: '',
@@ -142,6 +165,9 @@ export const POS: React.FC = () => {
   const [warrantyNotes, setWarrantyNotes] = useState('');
   const [warrantyStep, setWarrantyStep] = useState<'search' | 'select' | 'claim'>('search');
   const [warrantySuccess, setWarrantySuccess] = useState(false);
+  const [warrantyExpiredOverride, setWarrantyExpiredOverride] = useState(false);
+  const [warrantyExpiredPin, setWarrantyExpiredPin] = useState('');
+  const [warrantyExpiredPinError, setWarrantyExpiredPinError] = useState('');
   const [ordersSearch, setOrdersSearch] = useState('');
   const [ordersSelectedOrder, setOrdersSelectedOrder] = useState<CompletedOrder | null>(null);
   const [activeReplacementClaimId, setActiveReplacementClaimId] = useState<string | null>(null);
@@ -159,8 +185,11 @@ export const POS: React.FC = () => {
   const locationHandled = useRef(false);
   useEffect(() => {
     if (locationHandled.current) return;
-    const state = location.state as { autoQuickCheckIn?: boolean; openHeldOrders?: boolean; autoRepairItem?: CartItem; addToCart?: CartItem; resumeHeldOrderId?: string } | null;
+    const state = location.state as { autoQuickCheckIn?: boolean; openHeldOrders?: boolean; autoRepairItem?: CartItem; addToCart?: CartItem; resumeHeldOrderId?: string; selectedCustomer?: Customer } | null;
     if (!state) return;
+    if (state.selectedCustomer) {
+      setSelectedCustomer(state.selectedCustomer);
+    }
     if (state.autoQuickCheckIn) {
       locationHandled.current = true;
       const quickRepair: CartItem = {
@@ -278,8 +307,8 @@ export const POS: React.FC = () => {
 
   const finalizeRepairDetails = () => {
     if (pendingRepairItem) {
-      if (!repairDetails.imei || !repairDetails.passcode || !repairDetails.network) {
-        setRepairValidationError('IMEI, Passcode, and Network are mandatory for repair tickets.');
+      if (!repairDetails.imei || !repairDetails.passcode || !repairDetails.network || !repairDetails.deviceName) {
+        setRepairValidationError('Device Name, IMEI, Passcode, and Network are mandatory for repair tickets.');
         return;
       }
       setRepairValidationError('');
@@ -292,6 +321,7 @@ export const POS: React.FC = () => {
       setRepairDetails({
         imei: '',
         serialNumber: '',
+        deviceName: '',
         passcode: '',
         network: '',
         patternLock: '',
@@ -1234,7 +1264,7 @@ export const POS: React.FC = () => {
             <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-2xl w-full p-8 ghost-border max-h-[90vh] overflow-y-auto">
               <div className="flex justify-between items-center mb-8">
                 <h3 className="text-2xl font-black text-primary tracking-tight">Warranty Claim</h3>
-                <button onClick={() => { setIsWarrantyModalOpen(false); setWarrantyStep('search'); setWarrantySearch(''); setWarrantySelectedOrder(null); setWarrantySelectedItem(null); setWarrantyReason(''); setWarrantyNotes(''); setWarrantySuccess(false); }} className="text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+                <button onClick={() => { setIsWarrantyModalOpen(false); setWarrantyStep('search'); setWarrantySearch(''); setWarrantySelectedOrder(null); setWarrantySelectedItem(null); setWarrantyReason(''); setWarrantyNotes(''); setWarrantySuccess(false); setWarrantyExpiredOverride(false); setWarrantyExpiredPin(''); setWarrantyExpiredPinError(''); }} className="text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
               </div>
 
               {warrantySuccess ? (
@@ -1244,7 +1274,7 @@ export const POS: React.FC = () => {
                   </div>
                   <h4 className="text-xl font-black text-primary mb-2">Warranty Claim Filed</h4>
                   <p className="text-sm text-slate-500 mb-6">A warranty ticket has been created and assigned.</p>
-                  <button onClick={() => { setIsWarrantyModalOpen(false); setWarrantyStep('search'); setWarrantySearch(''); setWarrantySelectedOrder(null); setWarrantySelectedItem(null); setWarrantyReason(''); setWarrantyNotes(''); setWarrantySuccess(false); }} className="px-8 py-3 bg-primary text-white rounded-2xl font-black uppercase tracking-widest">Done</button>
+                  <button onClick={() => { setIsWarrantyModalOpen(false); setWarrantyStep('search'); setWarrantySearch(''); setWarrantySelectedOrder(null); setWarrantySelectedItem(null); setWarrantyReason(''); setWarrantyNotes(''); setWarrantySuccess(false); setWarrantyExpiredOverride(false); setWarrantyExpiredPin(''); setWarrantyExpiredPinError(''); }} className="px-8 py-3 bg-primary text-white rounded-2xl font-black uppercase tracking-widest">Done</button>
                 </div>
               ) : warrantyStep === 'search' ? (
                 <div className="space-y-4">
@@ -1284,15 +1314,35 @@ export const POS: React.FC = () => {
                   </div>
                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Select Warranty-Eligible Item</p>
                   <div className="space-y-2">
-                    {warrantySelectedOrder.items.filter(i => i.warrantyPeriod).map(item => (
-                      <button key={item.id} onClick={() => { setWarrantySelectedItem(item); setWarrantyStep('claim'); }} className="w-full p-4 bg-slate-50 hover:bg-teal-50 hover:border-teal-200 rounded-2xl text-left transition-all border border-slate-100 flex items-center justify-between">
-                        <div>
-                          <p className="font-bold text-sm">{item.name}</p>
-                          <p className="text-xs text-slate-500">Qty: {item.qty} &bull; ${item.unitPrice.toFixed(2)} &bull; Warranty: {item.warrantyPeriod}</p>
-                        </div>
-                        <span className="material-symbols-outlined text-slate-300">chevron_right</span>
-                      </button>
-                    ))}
+                    {warrantySelectedOrder.items.filter(i => i.warrantyPeriod).map(item => {
+                      const active = isWarrantyActive(warrantySelectedOrder.createdAt, item.warrantyPeriod!);
+                      const expired = !active;
+                      return (
+                        <button key={item.id} onClick={() => {
+                          if (expired && !canProcessExpiredWarranty) {
+                            setWarrantySelectedItem(item);
+                            setWarrantyExpiredOverride(false);
+                            setWarrantyExpiredPin('');
+                            setWarrantyExpiredPinError('');
+                            setWarrantyStep('claim');
+                            return;
+                          }
+                          setWarrantyExpiredOverride(expired && canProcessExpiredWarranty);
+                          setWarrantySelectedItem(item);
+                          setWarrantyStep('claim');
+                        }} className={`w-full p-4 rounded-2xl text-left transition-all border flex items-center justify-between ${expired ? 'bg-rose-50 border-rose-200 hover:bg-rose-100' : 'bg-slate-50 hover:bg-teal-50 hover:border-teal-200 border-slate-100'}`}>
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <p className="font-bold text-sm">{item.name}</p>
+                              {expired && <span className="px-2 py-0.5 bg-rose-100 text-rose-600 text-[8px] font-black uppercase rounded">Expired</span>}
+                              {active && <span className="px-2 py-0.5 bg-emerald-100 text-emerald-600 text-[8px] font-black uppercase rounded">Active</span>}
+                            </div>
+                            <p className="text-xs text-slate-500">Qty: {item.qty} &bull; ${item.unitPrice.toFixed(2)} &bull; Warranty: {item.warrantyPeriod}</p>
+                          </div>
+                          <span className="material-symbols-outlined text-slate-300">chevron_right</span>
+                        </button>
+                      );
+                    })}
                     {warrantySelectedOrder.items.filter(i => i.warrantyPeriod).length === 0 && (
                       <div className="py-8 text-center">
                         <p className="text-sm font-bold text-slate-400">No warranty-eligible items on this order</p>
@@ -1300,18 +1350,53 @@ export const POS: React.FC = () => {
                     )}
                   </div>
                 </div>
-              ) : warrantyStep === 'claim' && warrantySelectedOrder && warrantySelectedItem ? (
+              ) : warrantyStep === 'claim' && warrantySelectedOrder && warrantySelectedItem ? (() => {
+                const itemExpired = !isWarrantyActive(warrantySelectedOrder.createdAt, warrantySelectedItem.warrantyPeriod!);
+                const canProceed = !itemExpired || warrantyExpiredOverride;
+                return (
                 <div className="space-y-4">
-                  <button onClick={() => { setWarrantyStep('select'); setWarrantySelectedItem(null); setWarrantyReason(''); setWarrantyNotes(''); }} className="text-xs font-bold text-secondary flex items-center gap-1 hover:underline">
+                  <button onClick={() => { setWarrantyStep('select'); setWarrantySelectedItem(null); setWarrantyReason(''); setWarrantyNotes(''); setWarrantyExpiredOverride(false); setWarrantyExpiredPin(''); setWarrantyExpiredPinError(''); }} className="text-xs font-bold text-secondary flex items-center gap-1 hover:underline">
                     <span className="material-symbols-outlined text-sm">arrow_back</span>Back to items
                   </button>
-                  <div className="p-4 bg-teal-50 rounded-2xl border border-teal-100">
-                    <p className="font-bold text-sm text-teal-800">{warrantySelectedItem.name}</p>
-                    <p className="text-xs text-teal-600">Order {warrantySelectedOrder.invoiceNumber} &bull; Warranty: {warrantySelectedItem.warrantyPeriod}</p>
+                  <div className={`p-4 rounded-2xl border ${itemExpired ? 'bg-rose-50 border-rose-200' : 'bg-teal-50 border-teal-100'}`}>
+                    <div className="flex items-center gap-2">
+                      <p className={`font-bold text-sm ${itemExpired ? 'text-rose-800' : 'text-teal-800'}`}>{warrantySelectedItem.name}</p>
+                      {itemExpired && <span className="px-2 py-0.5 bg-rose-100 text-rose-600 text-[8px] font-black uppercase rounded">Warranty Expired</span>}
+                    </div>
+                    <p className={`text-xs ${itemExpired ? 'text-rose-600' : 'text-teal-600'}`}>Order {warrantySelectedOrder.invoiceNumber} &bull; Warranty: {warrantySelectedItem.warrantyPeriod}</p>
                   </div>
+                  {itemExpired && !warrantyExpiredOverride && (
+                    <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl space-y-3">
+                      <div className="flex items-center gap-2">
+                        <span className="material-symbols-outlined text-amber-600 text-sm">warning</span>
+                        <p className="text-xs font-black text-amber-700 uppercase tracking-widest">Warranty Period Expired</p>
+                      </div>
+                      <p className="text-[10px] font-bold text-amber-600">This item's warranty has expired. A supervisor PIN is required to file a claim on expired warranty items.</p>
+                      <div className="flex gap-2">
+                        <input type="password" value={warrantyExpiredPin} onChange={(e) => { setWarrantyExpiredPin(e.target.value); setWarrantyExpiredPinError(''); }} className="flex-1 bg-white border border-amber-200 rounded-xl px-4 py-2 text-sm font-bold focus:ring-amber-400" placeholder="Supervisor PIN" maxLength={4} />
+                        <button onClick={() => {
+                          const supervisor = SEED_POS_OPERATORS.find(op => op.pin === warrantyExpiredPin && op.role === 'Manager');
+                          if (supervisor) {
+                            setWarrantyExpiredOverride(true);
+                            setWarrantyExpiredPinError('');
+                          } else {
+                            setWarrantyExpiredPinError('Invalid supervisor PIN');
+                          }
+                        }} className="px-4 py-2 bg-amber-500 text-white rounded-xl text-xs font-black uppercase">Authorize</button>
+                      </div>
+                      {warrantyExpiredPinError && <p className="text-[10px] font-bold text-rose-600">{warrantyExpiredPinError}</p>}
+                      {!canProcessExpiredWarranty && <p className="text-[10px] font-bold text-rose-500">Your current role does not have permission to process expired warranties.</p>}
+                    </div>
+                  )}
+                  {itemExpired && warrantyExpiredOverride && (
+                    <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center gap-2">
+                      <span className="material-symbols-outlined text-emerald-600 text-sm">check_circle</span>
+                      <p className="text-[10px] font-black text-emerald-700 uppercase tracking-widest">Supervisor override granted — expired warranty claim authorized</p>
+                    </div>
+                  )}
                   <div className="space-y-1">
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Reason for Claim *</label>
-                    <select value={warrantyReason} onChange={(e) => setWarrantyReason(e.target.value)} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary">
+                    <select value={warrantyReason} onChange={(e) => setWarrantyReason(e.target.value)} disabled={!canProceed} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold focus:ring-secondary disabled:opacity-40">
                       <option value="">Select reason...</option>
                       <option>Defective product</option>
                       <option>Manufacturing fault</option>
@@ -1323,18 +1408,18 @@ export const POS: React.FC = () => {
                   </div>
                   <div className="space-y-1">
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Additional Notes</label>
-                    <textarea value={warrantyNotes} onChange={(e) => setWarrantyNotes(e.target.value)} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-medium min-h-[80px] focus:ring-secondary" placeholder="Describe the issue..." />
+                    <textarea value={warrantyNotes} onChange={(e) => setWarrantyNotes(e.target.value)} disabled={!canProceed} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-medium min-h-[80px] focus:ring-secondary disabled:opacity-40" placeholder="Describe the issue..." />
                   </div>
                   <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200">
                     <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Warranty Details</p>
                     <div className="grid grid-cols-2 gap-2 text-xs">
                       <div><span className="text-slate-400">Type:</span> <span className="font-bold text-primary">{warrantySelectedItem.type === 'repair' ? 'Service Warranty' : 'Part Warranty'}</span></div>
-                      <div><span className="text-slate-400">Period:</span> <span className="font-bold text-primary">{warrantySelectedItem.warrantyPeriod}</span></div>
+                      <div><span className="text-slate-400">Period:</span> <span className={`font-bold ${itemExpired ? 'text-rose-500' : 'text-primary'}`}>{warrantySelectedItem.warrantyPeriod}{itemExpired ? ' (Expired)' : ''}</span></div>
                       <div><span className="text-slate-400">Purchased:</span> <span className="font-bold text-primary">{new Date(warrantySelectedOrder.createdAt).toLocaleDateString()}</span></div>
                       <div><span className="text-slate-400">Operator:</span> <span className="font-bold text-primary">{warrantySelectedOrder.operatorName}</span></div>
                     </div>
                   </div>
-                  <button disabled={!warrantyReason} onClick={() => {
+                  <button disabled={!warrantyReason || !canProceed} onClick={() => {
                     const ticketNum = `WC-${Date.now().toString().slice(-6)}`;
                     const now = new Date().toISOString();
                     const operator = posOperator?.name || 'Unknown';
@@ -1363,7 +1448,8 @@ export const POS: React.FC = () => {
                     File Warranty Claim
                   </button>
                 </div>
-              ) : null}
+                );
+              })() : null}
             </motion.div>
           </motion.div>
         )}
@@ -1652,6 +1738,10 @@ export const POS: React.FC = () => {
               </div>
               <div className="grid grid-cols-2 gap-6 mb-8">
                 <div className="space-y-4">
+                  <div>
+                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1 block">Device Name *</label>
+                    <input value={repairDetails.deviceName} onChange={(e) => setRepairDetails({...repairDetails, deviceName: e.target.value})} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold" placeholder="e.g. iPhone 15 Pro, Samsung S24" type="text" />
+                  </div>
                   <div>
                     <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1 block">Device Identity</label>
                     <input value={repairDetails.imei} onChange={(e) => setRepairDetails({...repairDetails, imei: e.target.value})} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold" placeholder="IMEI Number" type="text" />

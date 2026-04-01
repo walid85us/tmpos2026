@@ -1,0 +1,205 @@
+Customers, Invoices, Loyalty & Warranty — Narrow QA Correction Pass 2
+
+Read `replit.md` and `Ref.txt` first and treat them as source-of-truth constraints before making any changes.
+
+This is NOT a redesign and NOT a new workstream.
+This is a narrow correction pass based only on the remaining QA gaps after the first correction pass.
+
+Expert-role stack
+- Principal SaaS Product Architect for multi-tenant repair/POS workflows
+- Staff React 19 + TypeScript + Vite engineer
+- Firebase / Firestore data-model and state-flow architect
+- Auth / RBAC / lifecycle gating specialist
+- UX systems designer preserving the existing premium glassmorphism baseline
+- Payment workflow and receipt-print architect
+- QA-driven refactor auditor
+- Side auditor and systems thinker at all times
+
+Operating posture
+- Act as a side auditor and systems thinker throughout.
+- Audit ripple effects before editing.
+- Fix only the remaining failed or partial QA items deeply and coherently.
+- Preserve current design baseline exactly.
+- Preserve auth, preview mode, RBAC, lifecycle gating, and platform/store hierarchy.
+- Preserve tenant isolation and store scoping.
+- Do not reopen completed workstreams except for narrow compatibility-safe fixes required by this pass.
+- Reuse existing modal/drawer/table/toast/motion/print/action-menu patterns.
+- Do not make changes to folder `Z`.
+- Do not make changes to file `Y`.
+
+Remaining QA corrections to implement
+
+A) Customer action flow completion
+1. Start New Sale from customer action menu/profile must preselect the customer
+- when user clicks Start New Sale from a customer row action or customer profile action
+- open POS with that exact customer already attached and visible in the sale context
+- do not require re-searching for the customer inside POS
+- make sure the carryover works both from list row actions and profile actions
+
+2. Create Ticket from customer action menu/profile must preselect the customer
+- when user clicks Create Ticket from a customer row action or customer profile action
+- open the repair intake / ticket creation flow with that exact customer already attached
+- do not require re-searching for the customer
+- add Device Name as a required visible field in the repair intake form
+- keep this aligned with current intake/ticket architecture and future repair refinement path
+
+3. Remove customer profile photo completely
+- remove customer profile photo UI entirely where it is currently unnecessary
+- keep the profile cleaner and centered around customer name and operational data
+
+B) Loyalty management completion
+1. Build a real loyalty management foundation inside customer management
+- the current surface is insufficient
+- create a proper loyalty management area so store owners can create, maintain, and operate the loyalty program
+- this must be practical, not decorative
+
+2. Replit must study this reference before implementing
+- visit and learn from:
+  https://help.repairdesk.co/portal/en/kb/articles/how-to-use-the-repairdesk-loyalty-program
+
+3. Implement loyalty management with this scope
+- add a loyalty management area in the store/customer domain where authorized store users can:
+  - enable/disable the loyalty program for the store if the feature is available
+  - define how customers accumulate points
+  - create and maintain loyalty tiers
+  - set tier names
+  - set minimum point thresholds for tiers
+  - set status active/inactive
+  - add simple notes/description if useful
+- add customer loyalty views where authorized users can:
+  - see current point balance
+  - see current tier
+  - manually adjust points with reason logging if appropriate for current architecture
+  - see tier progress in a clean way
+- align with current customer/POS behavior so customer purchases can feed loyalty accumulation cleanly
+- do not turn this into a giant campaign/marketing subsystem
+
+4. Add loyalty to Plans & Features
+- integrate Loyalty Management into the existing Platform Command Center / Commercial Plan System / Plans & Features area
+- make it a plan-gated feature the system owner can offer or withhold per plan
+- tenant/store loyalty settings and usage must respect the plan feature gate
+- if loyalty is disabled by plan, store users should see a clear gated/locked state rather than broken UI
+
+C) Duplicate override refinement
+- if a user tries to create a duplicate customer and the duplicate check finds an existing customer with matching identifying details:
+  - the override action should update/merge into the existing record instead of creating a needless duplicate
+- only allow creating a separate new customer through override when both phone and email are different from the existing record
+- define and implement clear duplicate resolution rules
+- keep this safe and understandable in the UI
+
+D) Interaction history parity
+- in customer Interaction History, the Orders tab should behave similarly to Invoices
+- order references should be clickable
+- opening an order from history should use the same in-app overlay/modal/drawer logic as invoices where appropriate
+- keep navigation and UX consistent
+
+E) POS invoice payment tightening
+1. Restrict invoice payment methods in the invoice-payment-through-POS flow
+- remove miscellaneous/other payment methods from the invoice bridge flow
+- allow only:
+  - Cash
+  - Credit/Debit Card via payment terminal
+
+2. Terminal-confirmed payment state
+- for Credit/Debit Card via payment terminal:
+  - do not mark invoice as paid
+  - do not close payment successfully
+  - do not finalize invoice payment history
+  until payment terminal confirmation is received
+- implement a clean payment terminal adapter/state machine for the invoice POS bridge:
+  - pending_terminal
+  - terminal_confirmed
+  - terminal_failed
+  - cancelled
+- keep preview/demo mode functional by providing a clearly labeled mock terminal confirmation path
+- when backend/live terminal integration is added later, this flow must be ready to plug in without rewriting UI/state logic
+
+3. Partial and full payments
+- partial payment via cash or confirmed terminal must update remaining balance correctly
+- full payment must only close the invoice when final payment is confirmed
+- payment history must remain accurate and ordered
+
+F) Invoice print and delivery tightening
+1. Print must not print the entire webpage
+- replace current behavior if it is still using page-level browser print
+- implement invoice-only printing behavior
+- support:
+  - professional printable invoice/PDF layout
+  - receipt-printer output through connected printer/store configuration when appropriate
+- printing must target invoice content only, not the entire application page
+
+2. Email and SMS/share actions must remain backend-ready
+- keep the current staged UI behavior if backend service is not live
+- make the architecture explicitly backend-ready for later activation
+- preserve clear user messaging that live delivery requires backend service configuration
+- for SMS/share payment link:
+  - keep a stable share/payment link structure
+  - keep preview/copy/send-prep flow safe and clear
+
+G) Warranty processing refinement in POS
+1. Warranty-eligible records only
+- when starting a warranty process in POS, only show invoices/services/order lines that actually include warranty coverage
+- non-warranty services or lines must not appear in the warranty-start selection flow
+
+2. Expired warranty blocking
+- if warranty is expired, the standard user must not be able to proceed
+
+3. Expired warranty exception sub-permission
+- add a dedicated warranty-related sub-permission for processing expired warranty exceptions
+- integrate this into the existing sub-permission architecture cleanly
+
+4. Supervisor PIN flow for expired warranty exception
+- if the current operator lacks the expired-warranty-exception sub-permission:
+  - require supervisor/authorized PIN approval
+  - only allow users with the proper permission to authorize
+- after authorization, allow the exception flow and log it cleanly in the UX/state model if appropriate
+
+Required design and behavior rules
+- Use only in-app modals/drawers/menus/flows for corrected behaviors
+- Preserve the current premium glassmorphism design baseline exactly
+- Maintain keyboard accessibility and clear save/error/blocked states
+- Keep state paths unified
+- Avoid duplicate parallel systems
+- Ensure all corrected flows work in preview/demo mode
+- Maintain store scoping and tenant safety
+- Keep type safety strong
+- Update `replit.md` for all final corrections introduced by this pass
+
+Non-goals
+- No broad redesign
+- No full external terminal/email/SMS gateway implementation if backend is not already live
+- No repair module overhaul
+- No accounting subsystem expansion
+- No unrelated reopening of earlier approved workstreams
+
+Definition of done
+This correction pass is done only if:
+- Start New Sale always preselects the chosen customer
+- Create Ticket always preselects the chosen customer and includes Device Name in intake
+- customer profile photo is removed
+- loyalty management exists as a real store-manageable foundation
+- loyalty is feature-gated in Plans & Features
+- duplicate override rules behave as specified
+- customer Orders history behaves like Invoices history
+- invoice POS payment bridge supports only Cash and Terminal Card
+- invoice payment is not finalized until terminal confirmation
+- invoice print outputs invoice-only printable content or receipt-printer output
+- SMS/email/share remain backend-ready
+- warranty start flow shows only warranty-eligible items
+- expired warranty is blocked unless allowed by sub-permission or supervisor PIN approval
+- no regressions are introduced in POS, invoices, customers, refunds, warranty claims, auth, preview mode, RBAC, or store hierarchy
+- `replit.md` is updated to reflect all corrections
+
+Required final response format
+Return your completion report in exactly this structure:
+
+1. Files Changed
+2. Corrections Implemented
+3. Loyalty Management Design
+4. Plans & Features Integration
+5. Duplicate Resolution Rules
+6. POS Invoice Payment Terminal Flow
+7. Warranty Exception Permission Flow
+8. Print / Delivery Behavior
+9. Non-Regressions Confirmed
+10. Manual QA Retest Areas

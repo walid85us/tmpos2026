@@ -98,6 +98,29 @@ export interface WarrantyClaimRecord {
   repairReturnOrderId?: string;
 }
 
+export interface LoyaltyTier {
+  id: string;
+  name: string;
+  minPoints: number;
+  status: 'active' | 'inactive';
+  description?: string;
+}
+
+export interface LoyaltyProgramConfig {
+  enabled: boolean;
+  pointsPerDollar: number;
+  tiers: LoyaltyTier[];
+}
+
+export interface LoyaltyAdjustment {
+  id: string;
+  customerId: string;
+  adjustment: number;
+  reason: string;
+  adjustedBy: string;
+  timestamp: string;
+}
+
 export interface POSOperator {
   id: string;
   name: string;
@@ -152,6 +175,10 @@ interface StoreLocalStateContextType {
   updateServiceCategory: (id: string, updates: Partial<RepairCategory>) => void;
   deleteServiceCategory: (id: string) => void;
   findDuplicateCustomers: (name: string, email: string, phone: string) => Customer[];
+  loyaltyConfig: LoyaltyProgramConfig;
+  updateLoyaltyConfig: (updates: Partial<LoyaltyProgramConfig>) => void;
+  loyaltyAdjustments: LoyaltyAdjustment[];
+  addLoyaltyAdjustment: (adj: LoyaltyAdjustment) => void;
 }
 
 const SEED_CUSTOMERS: Customer[] = [
@@ -225,6 +252,17 @@ const SEED_POS_OPERATORS: POSOperator[] = [
 ];
 
 export { SEED_POS_OPERATORS };
+
+const SEED_LOYALTY_CONFIG: LoyaltyProgramConfig = {
+  enabled: true,
+  pointsPerDollar: 10,
+  tiers: [
+    { id: 'lt-1', name: 'Bronze', minPoints: 0, status: 'active', description: 'Entry tier for all customers' },
+    { id: 'lt-2', name: 'Silver', minPoints: 500, status: 'active', description: 'Unlocked at 500 points' },
+    { id: 'lt-3', name: 'Gold', minPoints: 2000, status: 'active', description: 'Unlocked at 2000 points' },
+    { id: 'lt-4', name: 'Platinum', minPoints: 5000, status: 'active', description: 'Top tier at 5000 points' },
+  ],
+};
 
 const SEED_WARRANTY_CLAIMS: WarrantyClaimRecord[] = [
   {
@@ -356,6 +394,8 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const [invoices, setInvoices] = useState<Invoice[]>(SEED_INVOICES);
   const [services, setServices] = useState<RepairService[]>(SEED_SERVICES);
   const [serviceCategories, setServiceCategories] = useState<RepairCategory[]>(SEED_SERVICE_CATEGORIES);
+  const [loyaltyConfig, setLoyaltyConfig] = useState<LoyaltyProgramConfig>(SEED_LOYALTY_CONFIG);
+  const [loyaltyAdjustments, setLoyaltyAdjustments] = useState<LoyaltyAdjustment[]>([]);
 
   const prevSessionRoleRef = useRef(session?.role);
   useEffect(() => {
@@ -487,14 +527,20 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
     setServiceCategories(prev => prev.filter(c => c.id !== id));
   }, []);
 
+  const updateLoyaltyConfig = useCallback((updates: Partial<LoyaltyProgramConfig>) => {
+    setLoyaltyConfig(prev => ({ ...prev, ...updates }));
+  }, []);
+
+  const addLoyaltyAdjustment = useCallback((adj: LoyaltyAdjustment) => {
+    setLoyaltyAdjustments(prev => [adj, ...prev]);
+  }, []);
+
   const findDuplicateCustomers = useCallback((name: string, email: string, phone: string) => {
-    const n = name.trim().toLowerCase();
     const e = email.trim().toLowerCase();
     const p = phone.trim();
     return customers.filter(c => {
       if (e && c.email.toLowerCase() === e) return true;
       if (p && c.phone === p) return true;
-      if (n && c.name.toLowerCase() === n) return true;
       return false;
     });
   }, [customers]);
@@ -516,6 +562,8 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
       services, addService, updateService, deleteService,
       serviceCategories, addServiceCategory, updateServiceCategory, deleteServiceCategory,
       findDuplicateCustomers,
+      loyaltyConfig, updateLoyaltyConfig,
+      loyaltyAdjustments, addLoyaltyAdjustment,
     }}>
       {children}
     </StoreLocalStateContext.Provider>

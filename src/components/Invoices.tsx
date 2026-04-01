@@ -44,6 +44,7 @@ export default function Invoices() {
 
   const [paymentAmount, setPaymentAmount] = useState(0);
   const [paymentMethod, setPaymentMethod] = useState('Cash');
+  const [terminalState, setTerminalState] = useState<'idle' | 'pending_terminal' | 'confirmed' | 'failed' | 'cancelled'>('idle');
 
   const [emailForm, setEmailForm] = useState({ to: '', subject: '', body: '' });
   const [smsBody, setSmsBody] = useState('');
@@ -201,6 +202,7 @@ export default function Invoices() {
 
   const handleApplyPayment = useCallback(() => {
     if (!detailInvoice || paymentAmount <= 0) return;
+    if (paymentMethod === 'Card Terminal' && terminalState !== 'confirmed') return;
     const newPaid = detailInvoice.amountPaid + paymentAmount;
     const newBalance = Math.max(0, Math.round((detailInvoice.total - newPaid) * 100) / 100);
     const newStatus: Invoice['status'] = newBalance <= 0 ? 'Paid' : 'Partially Paid';
@@ -213,7 +215,16 @@ export default function Invoices() {
     setShowPaymentModal(false);
     setPaymentAmount(0);
     setPaymentMethod('Cash');
-  }, [detailInvoice, paymentAmount, paymentMethod, updateInvoice]);
+    setTerminalState('idle');
+  }, [detailInvoice, paymentAmount, paymentMethod, terminalState, updateInvoice]);
+
+  const handleTerminalSend = useCallback(() => {
+    if (paymentAmount <= 0) return;
+    setTerminalState('pending_terminal');
+    setTimeout(() => {
+      setTerminalState('confirmed');
+    }, 3000);
+  }, [paymentAmount]);
 
   const addLineItem = (setter: typeof setNewInv) => setter(prev => ({ ...prev, items: [...prev.items, { name: '', quantity: 1, price: 0, type: 'product' as const }] }));
   const removeLineItem = (setter: typeof setNewInv, idx: number) => setter(prev => ({ ...prev, items: prev.items.filter((_, i) => i !== idx) }));
@@ -774,16 +785,65 @@ export default function Invoices() {
                 </div>
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4 mb-2 block">Payment Method</label>
-                  <div className="grid grid-cols-3 gap-2">
-                    {['Cash', 'Credit Card', 'Debit Card', 'Bank Transfer', 'Check', 'Other'].map(m => (
-                      <button key={m} onClick={() => setPaymentMethod(m)}
-                        className={`py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${paymentMethod === m ? 'bg-primary text-white shadow-lg shadow-primary/20' : 'bg-slate-50 text-slate-500 border border-slate-200 hover:bg-slate-100'}`}>
+                  <div className="grid grid-cols-2 gap-3">
+                    {['Cash', 'Card Terminal'].map(m => (
+                      <button key={m} onClick={() => { setPaymentMethod(m); setTerminalState('idle'); }}
+                        className={`py-4 rounded-xl text-xs font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 ${paymentMethod === m ? 'bg-primary text-white shadow-lg shadow-primary/20' : 'bg-slate-50 text-slate-500 border border-slate-200 hover:bg-slate-100'}`}>
+                        <span className="material-symbols-outlined text-sm">{m === 'Cash' ? 'payments' : 'credit_card'}</span>
                         {m}
                       </button>
                     ))}
                   </div>
                 </div>
-                <button onClick={handleApplyPayment} disabled={paymentAmount <= 0}
+                {paymentMethod === 'Card Terminal' && (
+                  <div className="space-y-3">
+                    {terminalState === 'idle' && (
+                      <button onClick={handleTerminalSend} disabled={paymentAmount <= 0}
+                        className="w-full py-4 bg-secondary text-white font-black text-sm rounded-2xl shadow-lg uppercase tracking-widest hover:bg-secondary/90 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
+                        <span className="material-symbols-outlined text-sm">send</span>
+                        Send ${paymentAmount.toFixed(2)} to Terminal
+                      </button>
+                    )}
+                    {terminalState === 'pending_terminal' && (
+                      <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl text-center space-y-2">
+                        <div className="w-10 h-10 bg-amber-100 rounded-full flex items-center justify-center mx-auto animate-pulse">
+                          <span className="material-symbols-outlined text-amber-600">credit_card</span>
+                        </div>
+                        <p className="text-sm font-black text-amber-700">Waiting for Terminal...</p>
+                        <p className="text-[10px] font-bold text-amber-500">Customer is completing payment on the card terminal</p>
+                        <button onClick={() => setTerminalState('cancelled')} className="px-6 py-2 bg-amber-100 text-amber-700 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-amber-200 transition-all">Cancel</button>
+                      </div>
+                    )}
+                    {terminalState === 'confirmed' && (
+                      <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center gap-3">
+                        <span className="material-symbols-outlined text-emerald-600">check_circle</span>
+                        <div>
+                          <p className="text-sm font-black text-emerald-700">Terminal Payment Confirmed</p>
+                          <p className="text-[10px] font-bold text-emerald-500">${paymentAmount.toFixed(2)} authorized</p>
+                        </div>
+                      </div>
+                    )}
+                    {terminalState === 'failed' && (
+                      <div className="p-4 bg-rose-50 border border-rose-200 rounded-2xl space-y-2">
+                        <div className="flex items-center gap-2">
+                          <span className="material-symbols-outlined text-rose-600">error</span>
+                          <p className="text-sm font-black text-rose-700">Terminal Payment Failed</p>
+                        </div>
+                        <button onClick={() => setTerminalState('idle')} className="px-6 py-2 bg-rose-100 text-rose-700 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-rose-200 transition-all">Retry</button>
+                      </div>
+                    )}
+                    {terminalState === 'cancelled' && (
+                      <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-2">
+                        <div className="flex items-center gap-2">
+                          <span className="material-symbols-outlined text-slate-500">cancel</span>
+                          <p className="text-sm font-black text-slate-600">Terminal Payment Cancelled</p>
+                        </div>
+                        <button onClick={() => setTerminalState('idle')} className="px-6 py-2 bg-slate-100 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-slate-200 transition-all">Try Again</button>
+                      </div>
+                    )}
+                  </div>
+                )}
+                <button onClick={handleApplyPayment} disabled={paymentAmount <= 0 || (paymentMethod === 'Card Terminal' && terminalState !== 'confirmed')}
                   className="w-full py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed">
                   Apply Payment — ${paymentAmount.toFixed(2)}
                 </button>

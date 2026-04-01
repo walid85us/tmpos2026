@@ -172,6 +172,7 @@ export const featureMatrix = [
   { id: 'api', name: 'API Access', planAvailability: { essential: false, growth: false, advanced: true } as Record<string, boolean>, source: 'inherited' as const, lifecycle: 'implemented' as FeatureLifecycle },
   { id: 'domains', name: 'Custom Domains', planAvailability: { essential: false, growth: false, advanced: true } as Record<string, boolean>, source: 'custom' as const, lifecycle: 'implemented' as FeatureLifecycle },
   { id: 'whitelabel', name: 'White-Label Branding', planAvailability: { essential: false, growth: false, advanced: true } as Record<string, boolean>, source: 'custom' as const, lifecycle: 'deprecated' as FeatureLifecycle },
+  { id: 'loyalty_management', name: 'Loyalty Management', planAvailability: { essential: false, growth: true, advanced: true } as Record<string, boolean>, source: 'inherited' as const, lifecycle: 'implemented' as FeatureLifecycle },
   { id: 'ai_diagnostics', name: 'AI Diagnostics', planAvailability: { essential: false, growth: false, advanced: false } as Record<string, boolean>, source: 'custom' as const, lifecycle: 'planned' as FeatureLifecycle },
   { id: 'voice_assistant', name: 'Voice Assistant', planAvailability: { essential: false, growth: false, advanced: false } as Record<string, boolean>, source: 'custom' as const, lifecycle: 'draft' as FeatureLifecycle },
 ];

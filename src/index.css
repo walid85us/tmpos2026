@@ -40,3 +40,20 @@
 .ghost-border {
   border: 1px solid rgba(191, 200, 198, 0.15);
 }
+
+@media print {
+  body * {
+    visibility: hidden !important;
+  }
+  #printable-invoice,
+  #printable-invoice * {
+    visibility: visible !important;
+  }
+  #printable-invoice {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    padding: 2rem;
+  }
+}

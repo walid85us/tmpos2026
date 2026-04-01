@@ -68,6 +68,7 @@ export const SUB_PERMISSIONS: SubPermissionDef[] = [
   { id: 'manage_warranty_claims', label: 'Manage Warranty Claims', parentDomain: 'warranties', minModuleLevel: 'view', defaultLevel: 'manage', description: 'Process and resolve warranty claims' },
   { id: 'process_refunds', label: 'Process Refunds', parentDomain: 'refunds', minModuleLevel: 'view', defaultLevel: 'create', description: 'Initiate and process customer refunds' },
   { id: 'approve_refunds', label: 'Approve Refunds', parentDomain: 'refunds', minModuleLevel: 'view', defaultLevel: 'approve', description: 'Approve refund requests' },
+  { id: 'process_expired_warranty', label: 'Process Expired Warranty', parentDomain: 'warranties', minModuleLevel: 'view', defaultLevel: 'manage', description: 'Allow processing of warranty claims on expired warranty items' },
 ];
 
 export const ADMIN_ACTION_LEVEL_MAP = SUB_PERMISSIONS;
@@ -131,6 +132,7 @@ export const tenantRoles: EmployeeRole[] = [
       manage_warranty_claims: true,
       process_refunds: true,
       approve_refunds: true,
+      process_expired_warranty: true,
     },
     description: 'Store management access'
   },
@@ -171,6 +173,7 @@ export const tenantRoles: EmployeeRole[] = [
       manage_warranty_claims: false,
       process_refunds: false,
       approve_refunds: false,
+      process_expired_warranty: false,
     },
     description: 'Repair and parts access'
   },
@@ -211,6 +214,7 @@ export const tenantRoles: EmployeeRole[] = [
       manage_warranty_claims: false,
       process_refunds: false,
       approve_refunds: false,
+      process_expired_warranty: false,
     },
     description: 'Sales and customer access'
   },
@@ -220,8 +224,8 @@ export const roles = [...platformRoles, ...tenantRoles];
 
 export const planFeatures: Record<Plan, string[]> = {
   starter: ['dashboard', 'sales', 'customers', 'invoices', 'support'],
-  growth: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'employees', 'warranties', 'suggestive_sales', 'refunds'],
-  advanced: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'employees', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'warranties', 'suggestive_sales', 'refunds'],
+  growth: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'employees', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management'],
+  advanced: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'employees', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management'],
 };
 
 export const permissions = PERMISSION_DOMAINS;

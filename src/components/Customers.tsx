@@ -1,14 +1,18 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
-import { useStoreLocalState } from '../context/StoreLocalState';
+import { useStoreLocalState, type LoyaltyTier } from '../context/StoreLocalState';
+import { useAccess } from '../context/AccessContext';
 import type { Customer, Invoice } from '../types';
+import type { CompletedOrder } from '../context/StoreLocalState';
 
 type CustomerView = 'list' | 'profile';
 type HistoryTab = 'orders' | 'invoices';
 
 export default function Customers() {
-  const { customers, addCustomer, updateCustomer, completedOrders, invoices, findDuplicateCustomers } = useStoreLocalState();
+  const { customers, addCustomer, updateCustomer, completedOrders, invoices, findDuplicateCustomers, loyaltyConfig, updateLoyaltyConfig, loyaltyAdjustments, addLoyaltyAdjustment } = useStoreLocalState();
+  const { canAccess } = useAccess();
+  const hasLoyalty = canAccess('loyalty_management');
   const navigate = useNavigate();
   const [view, setView] = useState<CustomerView>('list');
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
@@ -35,6 +39,17 @@ export default function Customers() {
   const [loyaltyForm, setLoyaltyForm] = useState({ tier: 'Bronze' as Customer['tier'], points: 0 });
 
   const [invoiceDetailData, setInvoiceDetailData] = useState<Invoice | null>(null);
+  const [orderDetailData, setOrderDetailData] = useState<CompletedOrder | null>(null);
+
+  const [showLoyaltyConfig, setShowLoyaltyConfig] = useState(false);
+  const [loyaltyPointsPerDollar, setLoyaltyPointsPerDollar] = useState(loyaltyConfig.pointsPerDollar);
+  const [loyaltyEnabled, setLoyaltyEnabled] = useState(loyaltyConfig.enabled);
+  const [editTier, setEditTier] = useState<LoyaltyTier | null>(null);
+  const [newTierForm, setNewTierForm] = useState({ name: '', minPoints: '', description: '' });
+
+  const [showAdjustPoints, setShowAdjustPoints] = useState(false);
+  const [adjustAmount, setAdjustAmount] = useState('');
+  const [adjustReason, setAdjustReason] = useState('');
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -82,11 +97,28 @@ export default function Customers() {
     const next = { ...newCustomerForm, [field]: value };
     setNewCustomerForm(next);
     setDuplicateOverride(false);
-    if (field === 'email' || field === 'phone' || field === 'firstName' || field === 'lastName') {
-      const fullName = `${next.firstName} ${next.lastName}`.trim();
-      const dupes = findDuplicateCustomers(fullName, next.email, next.phone);
+    if (field === 'email' || field === 'phone') {
+      const dupes = findDuplicateCustomers('', next.email, next.phone);
       setDuplicateWarning(dupes);
     }
+  };
+
+  const handleMergeIntoExisting = (existing: Customer) => {
+    const updates: Partial<Customer> = {};
+    const formName = `${newCustomerForm.firstName} ${newCustomerForm.lastName}`.trim();
+    if (newCustomerForm.email && newCustomerForm.email !== existing.email) updates.email = newCustomerForm.email;
+    if (newCustomerForm.phone && newCustomerForm.phone !== existing.phone) updates.phone = newCustomerForm.phone;
+    if (formName && formName !== existing.name) updates.name = formName;
+    if (newCustomerForm.phoneLabel && newCustomerForm.phoneLabel !== existing.phoneLabel) updates.phoneLabel = newCustomerForm.phoneLabel;
+    if (newCustomerForm.group && newCustomerForm.group !== existing.group) updates.group = newCustomerForm.group;
+    if (Object.keys(updates).length > 0) {
+      updateCustomer(existing.id, updates);
+    }
+    setNewCustomerForm({ firstName: '', lastName: '', email: '', phone: '', phoneLabel: 'Mobile', group: 'Retail' });
+    setDuplicateWarning([]);
+    setDuplicateOverride(false);
+    setShowNewCustomerModal(false);
+    handleCustomerClick({ ...existing, ...updates });
   };
 
   const handleCreateCustomer = () => {
@@ -207,9 +239,6 @@ export default function Customers() {
     }
   };
 
-  const avatarUrl = (c: Customer) =>
-    `https://i.pravatar.cc/100?img=${Math.abs(c.id.split('').reduce((a, ch) => a + ch.charCodeAt(0), 0)) % 70}`;
-
   const renderListView = () => (
     <div className="space-y-8">
       <header className="flex items-end justify-between">
@@ -236,6 +265,15 @@ export default function Customers() {
               type="text"
             />
           </div>
+          {hasLoyalty && (
+          <button
+            onClick={() => { setShowLoyaltyConfig(true); setLoyaltyEnabled(loyaltyConfig.enabled); setLoyaltyPointsPerDollar(loyaltyConfig.pointsPerDollar); }}
+            className="bg-white text-primary px-6 py-2.5 rounded-xl font-black text-xs uppercase tracking-widest border border-slate-200 shadow-sm hover:bg-slate-50 transition-all flex items-center gap-2"
+          >
+            <span className="material-symbols-outlined text-sm">loyalty</span>
+            Loyalty Settings
+          </button>
+          )}
           <button
             onClick={() => { setShowNewCustomerModal(true); setDuplicateOverride(false); setDuplicateWarning([]); }}
             className="bg-primary text-white px-8 py-2.5 rounded-xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 active:scale-95 transition-all"
@@ -477,12 +515,18 @@ export default function Customers() {
               </div>
             </section>
 
+            {hasLoyalty && (
             <section className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
               <div className="flex items-center justify-between mb-6">
                 <h3 className="text-sm font-black text-primary uppercase tracking-widest">Loyalty Program</h3>
-                <button onClick={openLoyaltyEdit} className="text-[10px] font-black text-primary uppercase tracking-widest hover:underline flex items-center gap-1">
-                  <span className="material-symbols-outlined text-xs">edit</span> Manage
-                </button>
+                <div className="flex items-center gap-2">
+                  <button onClick={() => setShowAdjustPoints(true)} className="text-[10px] font-black text-secondary uppercase tracking-widest hover:underline flex items-center gap-1">
+                    <span className="material-symbols-outlined text-xs">tune</span> Adjust
+                  </button>
+                  <button onClick={openLoyaltyEdit} className="text-[10px] font-black text-primary uppercase tracking-widest hover:underline flex items-center gap-1">
+                    <span className="material-symbols-outlined text-xs">edit</span> Manage
+                  </button>
+                </div>
               </div>
               <div className="space-y-4">
                 <div className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100">
@@ -516,6 +560,7 @@ export default function Customers() {
                 </div>
               </div>
             </section>
+            )}
 
             <section className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
               <div className="flex items-center justify-between mb-6">
@@ -619,8 +664,10 @@ export default function Customers() {
                     </thead>
                     <tbody className="divide-y divide-slate-50">
                       {customerOrders.map((order) => (
-                        <tr key={order.id} className="hover:bg-slate-50/50 transition-colors">
-                          <td className="p-6 text-xs font-black text-primary">{order.invoiceNumber}</td>
+                        <tr key={order.id} onClick={() => setOrderDetailData(order)} className="hover:bg-slate-50/50 transition-colors cursor-pointer">
+                          <td className="p-6">
+                            <button onClick={(e) => { e.stopPropagation(); setOrderDetailData(order); }} className="text-xs font-black text-primary hover:underline">{order.invoiceNumber}</button>
+                          </td>
                           <td className="p-6 text-xs font-bold text-slate-600">{order.items.map(i => i.name).join(', ')}</td>
                           <td className="p-6 text-xs font-medium text-slate-500">{new Date(order.createdAt).toLocaleDateString()}</td>
                           <td className="p-6 text-xs font-black text-primary">${order.total.toFixed(2)}</td>
@@ -712,17 +759,25 @@ export default function Customers() {
                 <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-2xl">
                   <div className="flex items-center gap-2 mb-2">
                     <span className="material-symbols-outlined text-amber-600 text-sm">warning</span>
-                    <span className="text-xs font-black text-amber-700 uppercase tracking-widest">Possible Duplicate Detected</span>
+                    <span className="text-xs font-black text-amber-700 uppercase tracking-widest">Matching Customer Found</span>
                   </div>
-                  <p className="text-[10px] font-bold text-amber-600 mb-2">The following existing customers match the information you entered:</p>
+                  <p className="text-[10px] font-bold text-amber-600 mb-2">A customer with this phone or email already exists. You can merge into the existing record or create a new one if both phone and email are different.</p>
                   {duplicateWarning.map(d => (
-                    <div key={d.id} className="flex items-center gap-2 py-1.5 px-3 bg-amber-100/50 rounded-lg mb-1">
-                      <span className="material-symbols-outlined text-amber-500 text-xs">person</span>
-                      <span className="text-xs font-bold text-amber-700">{d.name}</span>
-                      <span className="text-[10px] text-amber-500">•</span>
-                      <span className="text-[10px] text-amber-600">{d.email}</span>
-                      <span className="text-[10px] text-amber-500">•</span>
-                      <span className="text-[10px] text-amber-600">{d.phone}</span>
+                    <div key={d.id} className="flex items-center justify-between py-2 px-3 bg-amber-100/50 rounded-lg mb-1">
+                      <div className="flex items-center gap-2">
+                        <span className="material-symbols-outlined text-amber-500 text-xs">person</span>
+                        <span className="text-xs font-bold text-amber-700">{d.name}</span>
+                        <span className="text-[10px] text-amber-500">&bull;</span>
+                        <span className="text-[10px] text-amber-600">{d.email}</span>
+                        <span className="text-[10px] text-amber-500">&bull;</span>
+                        <span className="text-[10px] text-amber-600">{d.phone}</span>
+                      </div>
+                      <button
+                        onClick={() => handleMergeIntoExisting(d)}
+                        className="px-3 py-1 bg-primary text-white text-[9px] font-black uppercase tracking-widest rounded-lg hover:bg-primary/90 transition-colors"
+                      >
+                        Merge
+                      </button>
                     </div>
                   ))}
                   {!duplicateOverride && (
@@ -1002,6 +1057,239 @@ export default function Customers() {
                   <button onClick={handleSaveLoyalty} className="flex-1 py-3 bg-primary text-white font-black text-xs rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all">
                     Save
                   </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {orderDetailData && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[110] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[3rem] shadow-2xl max-w-2xl w-full overflow-hidden max-h-[85vh] flex flex-col">
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50 shrink-0">
+                <div>
+                  <h3 className="text-2xl font-black text-primary tracking-tight">{orderDetailData.invoiceNumber}</h3>
+                  <div className="flex items-center gap-3 mt-1">
+                    <span className="px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg bg-emerald-100 text-emerald-600">{orderDetailData.status}</span>
+                    <span className="text-xs font-bold text-slate-400">{new Date(orderDetailData.createdAt).toLocaleString()}</span>
+                  </div>
+                </div>
+                <button onClick={() => setOrderDetailData(null)} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-slate-400">close</span>
+                </button>
+              </div>
+              <div className="p-8 overflow-y-auto flex-1 space-y-6">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Customer</p>
+                    <p className="text-sm font-black text-primary mt-1">{orderDetailData.customerName}</p>
+                    <p className="text-[10px] font-bold text-slate-400 mt-0.5">{orderDetailData.customerPhone}</p>
+                  </div>
+                  <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Operator</p>
+                    <p className="text-sm font-black text-primary mt-1">{orderDetailData.operatorName}</p>
+                  </div>
+                </div>
+                <div>
+                  <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Items</h4>
+                  <div className="space-y-2">
+                    {orderDetailData.items.map(item => (
+                      <div key={item.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-100">
+                        <div className="flex items-center gap-3">
+                          <span className={`px-2 py-0.5 rounded text-[8px] font-black uppercase ${item.type === 'repair' ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-600'}`}>{item.type}</span>
+                          <span className="text-sm font-bold text-slate-700">{item.name}</span>
+                        </div>
+                        <div className="text-right">
+                          <span className="text-xs font-bold text-slate-400">{item.qty} × ${item.unitPrice.toFixed(2)}</span>
+                          <span className="ml-3 text-sm font-black text-primary">${(item.qty * item.unitPrice).toFixed(2)}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="pt-4 border-t border-slate-100 space-y-2">
+                  <div className="flex justify-between text-sm"><span className="text-slate-500 font-bold">Subtotal</span><span className="font-black text-slate-900">${orderDetailData.subtotal.toFixed(2)}</span></div>
+                  {orderDetailData.discountTotal > 0 && (
+                    <div className="flex justify-between text-sm"><span className="text-emerald-500 font-bold">Discount</span><span className="font-black text-emerald-600">-${orderDetailData.discountTotal.toFixed(2)}</span></div>
+                  )}
+                  <div className="flex justify-between text-sm"><span className="text-slate-500 font-bold">Tax</span><span className="font-black text-slate-900">${orderDetailData.tax.toFixed(2)}</span></div>
+                  <div className="flex justify-between text-lg pt-2 border-t border-slate-100"><span className="font-black text-primary">Total</span><span className="font-black text-primary">${orderDetailData.total.toFixed(2)}</span></div>
+                </div>
+                {orderDetailData.payments.length > 0 && (
+                  <div>
+                    <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Payments</h4>
+                    <div className="space-y-2">
+                      {orderDetailData.payments.map((pay, idx) => (
+                        <div key={idx} className="flex items-center justify-between p-3 bg-emerald-50 rounded-xl border border-emerald-100">
+                          <div className="flex items-center gap-2">
+                            <span className="material-symbols-outlined text-emerald-600 text-sm">check_circle</span>
+                            <span className="text-sm font-black text-emerald-700">${pay.amount.toFixed(2)}</span>
+                            <span className="text-[10px] font-bold text-emerald-500 uppercase">{pay.method}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showAdjustPoints && selectedCustomer && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[110] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[3rem] shadow-2xl max-w-md w-full p-8">
+              <div className="flex justify-between items-center mb-8">
+                <div>
+                  <h3 className="text-2xl font-black text-primary tracking-tight">Adjust Points</h3>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">{selectedCustomer.name}</p>
+                </div>
+                <button onClick={() => { setShowAdjustPoints(false); setAdjustAmount(''); setAdjustReason(''); }} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-slate-400">close</span>
+                </button>
+              </div>
+              <div className="space-y-5">
+                <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 text-center">
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Current Balance</p>
+                  <p className="text-3xl font-black text-primary mt-1">{selectedCustomer.loyaltyPoints ?? 0}</p>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Adjustment (negative to deduct) *</label>
+                  <input type="number" value={adjustAmount} onChange={(e) => setAdjustAmount(e.target.value)} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20" placeholder="e.g. 100 or -50" />
+                </div>
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Reason *</label>
+                  <select value={adjustReason} onChange={(e) => setAdjustReason(e.target.value)} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20 appearance-none">
+                    <option value="">Select reason...</option>
+                    <option>Goodwill credit</option>
+                    <option>Data correction</option>
+                    <option>Promotion bonus</option>
+                    <option>Refund adjustment</option>
+                    <option>Manual deduction</option>
+                    <option>Other</option>
+                  </select>
+                </div>
+                <div className="flex gap-4 pt-4">
+                  <button onClick={() => { setShowAdjustPoints(false); setAdjustAmount(''); setAdjustReason(''); }} className="flex-1 py-3 bg-slate-100 text-slate-600 font-black text-xs rounded-2xl uppercase tracking-widest hover:bg-slate-200 transition-all">Cancel</button>
+                  <button disabled={!adjustAmount || !adjustReason || parseInt(adjustAmount) === 0} onClick={() => {
+                    const adj = parseInt(adjustAmount) || 0;
+                    const newPoints = Math.max(0, (selectedCustomer.loyaltyPoints ?? 0) + adj);
+                    updateCustomer(selectedCustomer.id, { loyaltyPoints: newPoints });
+                    setSelectedCustomer(prev => prev ? { ...prev, loyaltyPoints: newPoints } : null);
+                    addLoyaltyAdjustment({ id: `la-${Date.now()}`, customerId: selectedCustomer.id, adjustment: adj, reason: adjustReason, adjustedBy: 'Current User', timestamp: new Date().toISOString() });
+                    setShowAdjustPoints(false); setAdjustAmount(''); setAdjustReason('');
+                  }} className="flex-1 py-3 bg-primary text-white font-black text-xs rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all disabled:opacity-50">Apply</button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showLoyaltyConfig && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[110] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[3rem] shadow-2xl max-w-2xl w-full overflow-hidden max-h-[85vh] flex flex-col">
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50 shrink-0">
+                <h3 className="text-2xl font-black text-primary tracking-tight">Loyalty Program Settings</h3>
+                <button onClick={() => setShowLoyaltyConfig(false)} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-slate-400">close</span>
+                </button>
+              </div>
+              <div className="p-8 overflow-y-auto flex-1 space-y-6">
+                <div className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                  <div>
+                    <p className="text-sm font-black text-primary">Program Status</p>
+                    <p className="text-[10px] font-bold text-slate-400">Enable or disable the loyalty program</p>
+                  </div>
+                  <button onClick={() => { setLoyaltyEnabled(!loyaltyEnabled); updateLoyaltyConfig({ enabled: !loyaltyEnabled }); }} className={`px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${loyaltyEnabled ? 'bg-emerald-500 text-white' : 'bg-slate-200 text-slate-500'}`}>
+                    {loyaltyEnabled ? 'Enabled' : 'Disabled'}
+                  </button>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Points Per Dollar Spent</label>
+                  <div className="flex gap-3 items-center">
+                    <input type="number" value={loyaltyPointsPerDollar} onChange={(e) => setLoyaltyPointsPerDollar(parseInt(e.target.value) || 0)} className="w-32 bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20" min="0" />
+                    <button onClick={() => updateLoyaltyConfig({ pointsPerDollar: loyaltyPointsPerDollar })} className="px-4 py-3 bg-primary text-white rounded-xl text-xs font-black uppercase">Save</button>
+                  </div>
+                </div>
+                <div>
+                  <div className="flex items-center justify-between mb-3">
+                    <h4 className="text-sm font-black text-primary uppercase tracking-widest">Tiers</h4>
+                  </div>
+                  <div className="space-y-2">
+                    {loyaltyConfig.tiers.map(tier => (
+                      <div key={tier.id} className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <p className="text-sm font-black text-primary">{tier.name}</p>
+                            <span className={`px-2 py-0.5 rounded text-[8px] font-black uppercase ${tier.status === 'active' ? 'bg-emerald-100 text-emerald-600' : 'bg-slate-200 text-slate-500'}`}>{tier.status}</span>
+                          </div>
+                          <p className="text-[10px] font-bold text-slate-400">{tier.minPoints} pts minimum{tier.description ? ` — ${tier.description}` : ''}</p>
+                        </div>
+                        <div className="flex gap-2">
+                          <button onClick={() => setEditTier(tier)} className="p-2 bg-white rounded-xl border border-slate-200 text-slate-400 hover:text-primary transition-all">
+                            <span className="material-symbols-outlined text-sm">edit</span>
+                          </button>
+                          <button onClick={() => {
+                            const updated = loyaltyConfig.tiers.map(t => t.id === tier.id ? { ...t, status: t.status === 'active' ? 'inactive' as const : 'active' as const } : t);
+                            updateLoyaltyConfig({ tiers: updated });
+                          }} className="p-2 bg-white rounded-xl border border-slate-200 text-slate-400 hover:text-primary transition-all">
+                            <span className="material-symbols-outlined text-sm">{tier.status === 'active' ? 'toggle_on' : 'toggle_off'}</span>
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-4 p-4 bg-primary/5 rounded-2xl border border-primary/10">
+                    <p className="text-[10px] font-black text-primary uppercase tracking-widest mb-3">Add Tier</p>
+                    <div className="grid grid-cols-3 gap-3">
+                      <input value={newTierForm.name} onChange={(e) => setNewTierForm(prev => ({ ...prev, name: e.target.value }))} className="bg-white border-none rounded-xl px-4 py-2 text-sm font-bold" placeholder="Tier Name" />
+                      <input type="number" value={newTierForm.minPoints} onChange={(e) => setNewTierForm(prev => ({ ...prev, minPoints: e.target.value }))} className="bg-white border-none rounded-xl px-4 py-2 text-sm font-bold" placeholder="Min Points" />
+                      <button disabled={!newTierForm.name.trim() || !newTierForm.minPoints} onClick={() => {
+                        const newTier: LoyaltyTier = { id: `lt-${Date.now()}`, name: newTierForm.name.trim(), minPoints: parseInt(newTierForm.minPoints) || 0, status: 'active', description: newTierForm.description || undefined };
+                        updateLoyaltyConfig({ tiers: [...loyaltyConfig.tiers, newTier].sort((a, b) => a.minPoints - b.minPoints) });
+                        setNewTierForm({ name: '', minPoints: '', description: '' });
+                      }} className="py-2 bg-primary text-white rounded-xl text-xs font-black uppercase disabled:opacity-40">Add</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {editTier && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[120] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[3rem] shadow-2xl max-w-md w-full p-8">
+              <h3 className="text-2xl font-black text-primary tracking-tight mb-6">Edit Tier</h3>
+              <div className="space-y-4">
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Name</label>
+                  <input value={editTier.name} onChange={(e) => setEditTier(prev => prev ? { ...prev, name: e.target.value } : null)} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold" />
+                </div>
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Min Points</label>
+                  <input type="number" value={editTier.minPoints} onChange={(e) => setEditTier(prev => prev ? { ...prev, minPoints: parseInt(e.target.value) || 0 } : null)} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold" />
+                </div>
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Description</label>
+                  <input value={editTier.description || ''} onChange={(e) => setEditTier(prev => prev ? { ...prev, description: e.target.value } : null)} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold" />
+                </div>
+                <div className="flex gap-4 pt-4">
+                  <button onClick={() => setEditTier(null)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-black text-xs rounded-2xl uppercase tracking-widest">Cancel</button>
+                  <button onClick={() => {
+                    if (!editTier) return;
+                    const updated = loyaltyConfig.tiers.map(t => t.id === editTier.id ? editTier : t).sort((a, b) => a.minPoints - b.minPoints);
+                    updateLoyaltyConfig({ tiers: updated });
+                    setEditTier(null);
+                  }} className="flex-1 py-3 bg-primary text-white font-black text-xs rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest">Save</button>
                 </div>
               </div>
             </motion.div>
