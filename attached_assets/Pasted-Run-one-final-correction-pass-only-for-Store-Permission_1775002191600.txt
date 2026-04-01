@@ -1,0 +1,154 @@
+Run one final correction pass only for:
+Store Permissions Matrix Alignment, Hierarchy Ordering, and Admin-Permission Enforcement
+
+This is still inside the current workstream:
+Store Dashboard & POS Refinement
+
+Do not start any new workstream.
+Do not redesign the UI.
+Do not broaden scope beyond permission page alignment, hierarchy ordering, and enforcement consistency.
+Preserve the current design baseline exactly.
+Preserve auth, preview mode, RBAC, lifecycle gating, plan entitlement gating, and platform/store hierarchy.
+
+Act as:
+Principal RBAC / Access-Control Architect
++ Principal Permission-System Designer
++ Principal Repair/POS Product Architect
++ Principal React/TypeScript Engineer
++ Principal UX Workflow Designer
++ Principal QA Auditor
++ Principal Side Auditor & Systems Thinker
+
+This is a strict permission-matrix alignment pass.
+Do not do shallow fixes.
+Do not patch only one button.
+Fix the permission page semantics and the real enforcement behind it so the matrix matches actual behavior.
+
+Critical goal:
+The Store Permissions page must become trustworthy.
+What the matrix says must match what the role can actually do.
+
+Required fixes:
+
+1) Fix permission hierarchy ordering everywhere in the permission UI
+Current issue:
+- the dropdown/list order is wrong because Approve appears before Manage
+
+Fix:
+- standardize the permission hierarchy order everywhere in the permission page/UI as:
+  - None
+  - View only
+  - Create
+  - Edit
+  - Manage
+  - Approve
+  - Full Access
+- this order must be used consistently in all permission selectors, displays, and related summaries
+- do not leave mixed ordering in different parts of the UI
+
+2) Re-align Module Access with Administrative Permissions
+Current issue:
+- Module Access and Administrative Permissions do not match actual behavior
+- example: Manager may have Employee Management module access and Admin permissions marked Denied, but can still create roles or do related actions
+- Store Owner matrix values may also appear as None/Denied even though actual access exists
+
+Fix:
+- audit the relationship between:
+  - Module Access
+  - Administrative Permissions
+  - actual in-app behavior
+- make the matrix coherent so that displayed values and real enforcement align
+
+Required alignment rule:
+- Module Access controls access to the module/surface itself
+- Administrative Permissions control specialized higher-risk actions inside that module
+- a role must not be able to perform an administrative action if the Administrative Permission is denied, even if they can access the module
+- being able to access a module does NOT automatically grant admin powers inside it
+
+Examples to correct:
+- Employee Management module access vs:
+  - create roles
+  - edit roles
+  - manage role permissions
+  - assign roles
+  - assign manager role
+  - approve requests
+  - manage compensation
+  - other related admin actions
+- Warranty Management / Suggestive Sales / Refund / Inventory / other governed modules where similar mismatch may exist
+
+3) Store Owner permission page semantics must be corrected
+Current issue:
+- for Store Owner, the permission page may show Module Access as None and Administrative Permissions as Denied even though Store Owner effectively has access
+
+Fix:
+- refine the permission page so Store Owner’s displayed permissions reflect the real system/store-owner assignment model
+- if Store Owner is system-governed / protected / implicit, the UI must represent that honestly
+- do not show obviously false “None” / “Denied” states if the Store Owner actually has authority
+- if some permissions are inherited, protected, or non-editable for Store Owner, label that clearly and accurately
+- preserve the existing governance rules for Store Owner identity/protection
+
+4) Enforce Administrative Permissions for real
+Current issue:
+- some users can still perform admin actions even when those admin permissions show Denied
+
+Fix:
+- audit and correct enforcement of Administrative Permissions across the app
+- actions that must obey admin permissions include, where applicable:
+  - create roles
+  - edit roles
+  - manage role permissions
+  - assign roles
+  - assign manager role
+  - approve requests
+  - manage compensation
+  - employee/admin governance actions
+  - any equivalent high-risk operational/admin actions elsewhere in the app
+- if an admin permission is denied, the action must be blocked consistently from all entry points
+- if granted, it must work consistently
+- no hidden bypass via modal, detail page, alternate route, or quick action
+
+5) Make Module Access and Administrative Permissions understandable in UI
+Fix:
+- make the permission page clearer so it is obvious that:
+  - Module Access = access to the area/module
+  - Administrative Permissions = advanced/sensitive actions inside that area
+- do not redesign heavily, but refine wording, labels, helper text, or grouping as needed so the logic is understandable
+- keep current design baseline
+
+6) Preserve global hierarchy logic already working
+Do not break:
+- global permission hierarchy model
+- None / View only / Create / Edit / Manage / Approve / Full Access behavior
+- Warranty hierarchy
+- Refund hierarchy and supervisor escalation
+- Inventory/Add Stock hierarchy
+- menu/page/action parity
+- permission refresh after role/permission changes
+- preview-mode global role sync
+- POS active-role sync after navigation
+- warranty flows
+- refund flows
+- Quick Add Stock approval-to-inventory path
+- direct Add to Inventory where truly allowed
+- SKU/barcode lookup
+- POS draft persistence
+- New Sale reset
+- and all other already-working Store Dashboard & POS Refinement flows
+
+7) Output format after implementation
+After implementation, return only:
+1. What changed
+2. Exact files changed in this pass
+3. How the permission hierarchy ordering was standardized
+4. How Module Access and Administrative Permissions are now aligned
+5. How Store Owner permission-page semantics now work
+6. Which admin actions are now explicitly enforced by Administrative Permissions
+7. Any known limitations still intentionally left unchanged
+8. A short implementation verification summary
+
+Important:
+- Do not claim final QA closure on behalf of the user
+- Do not mark the workstream complete yet
+- The user will perform the final manual QA
+- Stop after the report and wait for user testing feedback

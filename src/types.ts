@@ -385,7 +385,7 @@ export interface RMA {
   trackingNumber?: string;
 }
 
-export type PermissionLevel = 'none' | 'view' | 'create' | 'edit' | 'approve' | 'manage' | 'full';
+export type PermissionLevel = 'none' | 'view' | 'create' | 'edit' | 'manage' | 'approve' | 'full';
 
 export interface EmployeeRole {
   id: string;

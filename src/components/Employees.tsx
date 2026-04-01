@@ -6,7 +6,7 @@ import {
   EmployeeCommission, EmployeePayroll 
 } from '../types';
 import { useAccess } from '../context/AccessContext';
-import { planFeatures } from '../context/accessConfig';
+import { planFeatures, PERMISSION_DOMAINS, PERMISSION_HIERARCHY, ADMIN_ACTION_LEVEL_MAP, meetsPermissionLevel } from '../context/accessConfig';
 import PendingApproval from './PendingApproval';
 
 const MOCK_EMPLOYEES: Employee[] = [
@@ -58,39 +58,25 @@ const MOCK_ACTIVITY_LOGS: EmployeeActivityLog[] = [
   { id: 'al2', employeeId: 'e2', employeeName: 'Sarah Jenkins', action: 'Update Ticket', details: 'Updated status of Ticket #1001 to Completed', timestamp: '2024-03-20 10:15' }
 ];
 
-const storeModuleFeatures = [
-  { id: 'sales', name: 'Point of Sale' },
-  { id: 'repairs', name: 'Repairs & Tickets' },
-  { id: 'inventory', name: 'Inventory Management' },
-  { id: 'customers', name: 'Customer Directory' },
-  { id: 'employees', name: 'Employee Management' },
-  { id: 'invoices', name: 'Invoices & Billing' },
-  { id: 'services', name: 'Services Catalog' },
-  { id: 'reports', name: 'Reporting & Analytics' },
-  { id: 'prospects', name: 'Prospects & Leads' },
-  { id: 'marketing', name: 'Marketing Tools' },
-  { id: 'integrations', name: 'Integrations' },
-  { id: 'widgets', name: 'Widgets' },
-  { id: 'settings', name: 'Store Settings' },
-  { id: 'support', name: 'Support Center' },
-  { id: 'warranties', name: 'Warranty Management' },
-  { id: 'suggestive_sales', name: 'Suggestive Sales' },
-];
+const LEVEL_LABELS: Record<string, string> = {
+  none: 'None',
+  view: 'View Only',
+  create: 'Create',
+  edit: 'Edit',
+  manage: 'Manage',
+  approve: 'Approve',
+  full: 'Full Access',
+};
 
-const storeAdminFeatures = [
-  { id: 'manage_employees', name: 'Manage Employees' },
-  { id: 'create_roles', name: 'Create Roles' },
-  { id: 'edit_roles', name: 'Edit Roles' },
-  { id: 'manage_role_permissions', name: 'Manage Role Permissions' },
-  { id: 'assign_roles', name: 'Assign Roles' },
-  { id: 'assign_same_role', name: 'Assign Same-Level Role' },
-  { id: 'assign_manager_role', name: 'Assign Manager Role' },
-  { id: 'manage_attendance', name: 'Manage Attendance' },
-  { id: 'manage_compensation', name: 'Manage Compensation' },
-  { id: 'approve_requests', name: 'Approve Requests' },
-];
-
-const storeFeatures = [...storeModuleFeatures, ...storeAdminFeatures];
+const LEVEL_COLORS: Record<string, string> = {
+  none: 'bg-slate-100 text-slate-400 border-slate-200',
+  view: 'bg-sky-50 text-sky-700 border-sky-200',
+  create: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  edit: 'bg-amber-50 text-amber-700 border-amber-200',
+  manage: 'bg-violet-50 text-violet-700 border-violet-200',
+  approve: 'bg-orange-50 text-orange-700 border-orange-200',
+  full: 'bg-teal-50 text-teal-700 border-teal-200',
+};
 
 export default function Employees() {
   const { session, tenant, setPreviewTenant, isPreviewModeEnabled, tenantRolesState = [], addTenantRole, updateTenantRole, canAccess, checkPermission } = useAccess();
@@ -139,7 +125,7 @@ export default function Employees() {
   const [showClockInPicker, setShowClockInPicker] = useState(false);
   const [showClockOutPicker, setShowClockOutPicker] = useState(false);
 
-  const [newRole, setNewRole] = useState({ name: '', description: '', status: 'active' as string, permissions: [] as string[] });
+  const [newRole, setNewRole] = useState<{ name: string; description: string; status: string; permissions: Record<string, string> }>({ name: '', description: '', status: 'active', permissions: {} });
 
   const isOwnerOrManager = session?.role === 'store_owner' || session?.role === 'system_owner' || session?.role === 'manager';
   const isManager = session?.role === 'manager';
@@ -345,16 +331,14 @@ export default function Employees() {
       logActivity('system', session?.user?.name || 'Store Owner', 'Created Role', `Created new store role: ${newRole.name}`);
       showToast(`Role "${newRole.name}" created successfully.`);
     }
-    setNewRole({ name: '', description: '', status: 'active', permissions: [] });
+    setNewRole({ name: '', description: '', status: 'active', permissions: {} });
     setShowCreateRoleModal(false);
   };
 
-  const togglePermission = (permId: string) => {
+  const setNewRolePermLevel = (domainId: string, level: string) => {
     setNewRole(prev => ({
       ...prev,
-      permissions: prev.permissions.includes(permId)
-        ? prev.permissions.filter(p => p !== permId)
-        : [...prev.permissions, permId]
+      permissions: { ...prev.permissions, [domainId]: level }
     }));
   };
 
@@ -787,102 +771,174 @@ export default function Employees() {
     </div>
   );
 
-  const getPermissionLevel = (role: any, featureId: string): string => {
+  const resolveRoleLevel = (role: any, domainId: string): string => {
     if (Array.isArray(role.permissions)) {
       if (role.permissions.includes('all')) return 'full';
-      if (role.permissions.includes(featureId)) return 'full';
-      if (role.permissions.includes(`${featureId}_read`)) return 'view';
+      if (role.permissions.includes(domainId)) return 'full';
+      if (role.permissions.includes(`${domainId}_read`)) return 'view';
       return 'none';
     }
+    if (role.permissions?.['_grant'] === 'full') return 'full';
     if (role.permissions?.['all'] === 'full') return 'full';
-    return role.permissions?.[featureId] || 'none';
+    return role.permissions?.[domainId] || 'none';
   };
 
-  const renderPermissionRow = (feature: { id: string; name: string }, isAdminPerm: boolean) => (
-    <tr key={feature.id} className="border-b border-slate-50">
-      <td className="px-4 py-4 text-sm font-bold text-slate-700">{feature.name}</td>
-      {tenantRolesState.map(role => {
-        const currentLevel = getPermissionLevel(role, feature.id);
-        const isLocked = role.id === 'store_owner' || (session?.role === 'manager' && (role.id === 'manager' || !checkPermission('employees', 'manage')));
-        return (
-          <td key={role.id} className="px-4 py-4 text-center">
-            {isAdminPerm ? (
-              <select
-                disabled={isLocked}
-                value={currentLevel === 'none' ? 'off' : 'on'}
-                onChange={(e) => {
-                  if (isLocked) return;
-                  const newVal = e.target.value === 'on' ? 'full' : 'none';
-                  const newPermissions = Array.isArray(role.permissions) 
-                    ? (newVal === 'full' 
-                        ? [...role.permissions.filter(p => p !== feature.id), feature.id]
-                        : role.permissions.filter(p => p !== feature.id))
-                    : { ...role.permissions, [feature.id]: newVal };
-                  updateTenantRole(role.id, newPermissions as any);
-                }}
-                className="text-xs font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 focus:ring-2 focus:ring-primary/20 focus:outline-none disabled:opacity-50"
-              >
-                <option value="off">Denied</option>
-                <option value="on">Granted</option>
-              </select>
-            ) : (
-              <select
-                disabled={isLocked}
-                value={currentLevel}
-                onChange={(e) => {
-                  if (isLocked) return;
-                  const newLevel = e.target.value;
-                  const newPermissions = Array.isArray(role.permissions) 
-                    ? { ...role.permissions.reduce((acc: any, p: string) => ({ ...acc, [p]: 'full' }), {}), [feature.id]: newLevel }
-                    : { ...role.permissions, [feature.id]: newLevel };
-                  updateTenantRole(role.id, newPermissions as any);
-                }}
-                className="text-xs font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 focus:ring-2 focus:ring-primary/20 focus:outline-none disabled:opacity-50"
-              >
-                <option value="none">None</option>
-                <option value="view">View Only</option>
-                <option value="create">Create</option>
-                <option value="edit">Edit</option>
-                <option value="approve">Approve</option>
-                <option value="manage">Manage</option>
-                <option value="full">Full Access</option>
-              </select>
-            )}
-          </td>
-        );
-      })}
-    </tr>
-  );
+  const renderPermissions = () => {
+    const isStoreOwnerViewing = session?.role === 'store_owner' || session?.role === 'system_owner';
 
-  const renderPermissions = () => (
-    <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm mt-8">
-      <h2 className="text-2xl font-black text-primary tracking-tight mb-6">Store Permissions Matrix</h2>
-      <p className="text-slate-500 text-sm font-medium mb-8">Configure which roles have access to specific store features and administrative actions.</p>
-      
-      <div className="overflow-x-auto">
-        <table className="w-full text-left border-collapse">
-          <thead>
-            <tr className="border-b border-slate-100">
-              <th className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Feature</th>
-              {tenantRolesState.map(role => (
-                <th key={role.id} className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">{role.name}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            <tr className="bg-slate-50/80">
-              <td colSpan={tenantRolesState.length + 1} className="px-4 py-3 text-[10px] font-black text-primary uppercase tracking-widest">Module Access</td>
-            </tr>
-            {storeModuleFeatures.map(feature => renderPermissionRow(feature, false))}
-            <tr className="bg-slate-50/80">
-              <td colSpan={tenantRolesState.length + 1} className="px-4 py-3 text-[10px] font-black text-primary uppercase tracking-widest">Administrative Permissions</td>
-            </tr>
-            {storeAdminFeatures.map(feature => renderPermissionRow(feature, true))}
-          </tbody>
-        </table>
+    return (
+      <div className="space-y-8 mt-8">
+        <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm">
+          <h2 className="text-2xl font-black text-primary tracking-tight mb-2">Store Permissions Matrix</h2>
+          <p className="text-slate-500 text-sm font-medium mb-6">Configure which roles have access to specific store features. Each level includes all capabilities of lower levels.</p>
+
+          <div className="flex flex-wrap gap-1.5 mb-6 p-3 bg-slate-50 rounded-2xl border border-slate-100">
+            {PERMISSION_HIERARCHY.map((level, i) => (
+              <span key={level} className="flex items-center gap-1">
+                <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border ${LEVEL_COLORS[level]}`}>{LEVEL_LABELS[level]}</span>
+                {i < PERMISSION_HIERARCHY.length - 1 && <span className="text-slate-300 text-[10px]">→</span>}
+              </span>
+            ))}
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-slate-100">
+                  <th className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest w-48">Module</th>
+                  {tenantRolesState.map(role => (
+                    <th key={role.id} className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center min-w-[130px]">
+                      {role.name}
+                      {role.id === 'store_owner' && (
+                        <span className="block text-[8px] text-amber-500 normal-case tracking-normal font-bold mt-0.5">System Protected</span>
+                      )}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                <tr className="bg-slate-50/80">
+                  <td colSpan={tenantRolesState.length + 1} className="px-4 py-2.5 text-[10px] font-black text-primary uppercase tracking-widest">
+                    <span className="flex items-center gap-2">
+                      <span className="material-symbols-outlined text-xs">apps</span>
+                      Module Access
+                    </span>
+                    <span className="block text-[9px] font-medium text-slate-400 normal-case tracking-normal mt-0.5">Controls access to each module area. "View Only" grants read access; higher levels grant more actions.</span>
+                  </td>
+                </tr>
+                {PERMISSION_DOMAINS.map(domain => {
+                  const sortedLevels = PERMISSION_HIERARCHY.filter(l => domain.levels.includes(l));
+                  return (
+                    <tr key={domain.id} className="border-b border-slate-50 hover:bg-slate-50/50 transition-colors">
+                      <td className="px-4 py-3">
+                        <span className="text-sm font-bold text-slate-700">{domain.label}</span>
+                      </td>
+                      {tenantRolesState.map(role => {
+                        const currentLevel = resolveRoleLevel(role, domain.id);
+                        const isStoreOwnerRole = role.id === 'store_owner';
+                        const isLocked = isStoreOwnerRole || (session?.role === 'manager' && (role.id === 'manager' || !checkPermission('employees', 'manage')));
+                        return (
+                          <td key={role.id} className="px-4 py-3 text-center">
+                            {isStoreOwnerRole ? (
+                              <span className={`inline-block text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg border ${LEVEL_COLORS['full']}`}>
+                                Full Access
+                              </span>
+                            ) : (
+                              <select
+                                disabled={isLocked}
+                                value={currentLevel}
+                                onChange={(e) => {
+                                  if (isLocked) return;
+                                  const newLevel = e.target.value;
+                                  const newPermissions = Array.isArray(role.permissions)
+                                    ? { ...role.permissions.reduce((acc: any, p: string) => ({ ...acc, [p]: 'full' }), {}), [domain.id]: newLevel }
+                                    : { ...role.permissions, [domain.id]: newLevel };
+                                  updateTenantRole(role.id, newPermissions as any);
+                                }}
+                                className={`text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg border cursor-pointer appearance-none text-center transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${LEVEL_COLORS[currentLevel] || LEVEL_COLORS['none']}`}
+                              >
+                                {sortedLevels.map(level => (
+                                  <option key={level} value={level}>{LEVEL_LABELS[level]}</option>
+                                ))}
+                              </select>
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm">
+          <h2 className="text-lg font-black text-primary tracking-tight mb-2">Administrative Actions</h2>
+          <p className="text-slate-500 text-sm font-medium mb-6">Higher-risk employee management actions. These are governed by the <strong>Employees / Team</strong> permission level above — not editable separately.</p>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-slate-100">
+                  <th className="px-4 py-3 text-[10px] font-black text-slate-400 uppercase tracking-widest w-48">Action</th>
+                  <th className="px-4 py-3 text-[10px] font-black text-slate-400 uppercase tracking-widest w-24">Requires</th>
+                  {tenantRolesState.map(role => (
+                    <th key={role.id} className="px-4 py-3 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center min-w-[110px]">{role.name}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {ADMIN_ACTION_LEVEL_MAP.map(action => {
+                  return (
+                    <tr key={action.id} className="border-b border-slate-50 hover:bg-slate-50/50 transition-colors">
+                      <td className="px-4 py-3">
+                        <span className="text-sm font-bold text-slate-700">{action.label}</span>
+                        <span className="block text-[10px] text-slate-400 font-medium mt-0.5">{action.description}</span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className={`inline-block text-[9px] font-black uppercase tracking-wider px-2 py-1 rounded border ${LEVEL_COLORS[action.requiredLevel]}`}>
+                          {LEVEL_LABELS[action.requiredLevel]}
+                        </span>
+                      </td>
+                      {tenantRolesState.map(role => {
+                        const employeesLevel = resolveRoleLevel(role, action.requiredDomain);
+                        const levelIndex = PERMISSION_HIERARCHY.indexOf(employeesLevel as any);
+                        const requiredIndex = PERMISSION_HIERARCHY.indexOf(action.requiredLevel);
+                        const granted = levelIndex >= requiredIndex;
+                        return (
+                          <td key={role.id} className="px-4 py-3 text-center">
+                            {granted ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-lg text-[10px] font-black uppercase tracking-widest">
+                                <span className="material-symbols-outlined text-xs">check_circle</span>
+                                Allowed
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-red-50 text-red-400 border border-red-100 rounded-lg text-[10px] font-black uppercase tracking-widest">
+                                <span className="material-symbols-outlined text-xs">block</span>
+                                Denied
+                              </span>
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="mt-4 p-4 bg-amber-50/50 border border-amber-100 rounded-2xl">
+            <p className="text-[11px] font-bold text-amber-700 flex items-center gap-2">
+              <span className="material-symbols-outlined text-sm">info</span>
+              Administrative actions are derived from the Employees / Team permission level. To change admin capabilities, adjust the Employees / Team level in the Module Access table above.
+            </p>
+          </div>
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   const renderRoles = () => (
     <div className="space-y-6">
@@ -891,7 +947,7 @@ export default function Employees() {
         {(isOwner || checkPermission('employees', 'manage')) && (
           <button 
             onClick={() => {
-              setNewRole({ name: '', description: '', status: 'active', permissions: [] });
+              setNewRole({ name: '', description: '', status: 'active', permissions: {} });
               setShowCreateRoleModal(true);
             }}
             className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2"
@@ -931,13 +987,13 @@ export default function Employees() {
                         {p}
                       </span>
                     ))
-                  : Object.entries(role.permissions).map(([k, v]) => (
-                      v !== 'none' && (
-                        <span key={k} className="px-2 py-1 bg-slate-100 text-slate-500 text-[8px] font-black uppercase tracking-widest rounded-md">
-                          {k}: {v}
+                  : (role.permissions as Record<string, string>)['_grant'] === 'full'
+                    ? <span className="px-2 py-1 bg-teal-50 text-teal-700 border border-teal-200 text-[8px] font-black uppercase tracking-widest rounded-md">Full System Access</span>
+                    : Object.entries(role.permissions as Record<string, string>).filter(([k, v]) => v !== 'none' && k !== '_grant').map(([k, v]) => (
+                        <span key={k} className={`px-2 py-1 text-[8px] font-black uppercase tracking-widest rounded-md border ${LEVEL_COLORS[v] || LEVEL_COLORS['none']}`}>
+                          {k}: {LEVEL_LABELS[v] || v}
                         </span>
-                      )
-                    ))}
+                      ))}
               </div>
               {(isOwner || checkPermission('employees', 'manage')) && !isLocked && (
                 <button 
@@ -1246,55 +1302,32 @@ export default function Employees() {
                   </select>
                 </div>
                 <div className="space-y-3">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Module Access</label>
-                  <div className="grid grid-cols-2 gap-3">
-                    {storeModuleFeatures.map(feature => (
-                      <label 
-                        key={feature.id}
-                        className={`flex items-center gap-3 p-4 rounded-2xl border cursor-pointer transition-all ${
-                          newRole.permissions.includes(feature.id)
-                            ? 'bg-primary/5 border-primary/20'
-                            : 'bg-slate-50 border-slate-200 hover:border-slate-300'
-                        }`}
-                      >
-                        <input 
-                          type="checkbox"
-                          checked={newRole.permissions.includes(feature.id)}
-                          onChange={() => togglePermission(feature.id)}
-                          className="w-4 h-4 text-primary rounded border-slate-300 focus:ring-primary"
-                        />
-                        <span className="text-xs font-bold text-slate-700">{feature.name}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-                <div className="space-y-3">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Administrative Permissions</label>
-                  <div className="grid grid-cols-2 gap-3">
-                    {storeAdminFeatures.map(feature => (
-                      <label 
-                        key={feature.id}
-                        className={`flex items-center gap-3 p-4 rounded-2xl border cursor-pointer transition-all ${
-                          newRole.permissions.includes(feature.id)
-                            ? 'bg-indigo-50 border-indigo-200'
-                            : 'bg-slate-50 border-slate-200 hover:border-slate-300'
-                        }`}
-                      >
-                        <input 
-                          type="checkbox"
-                          checked={newRole.permissions.includes(feature.id)}
-                          onChange={() => togglePermission(feature.id)}
-                          className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
-                        />
-                        <span className="text-xs font-bold text-slate-700">{feature.name}</span>
-                      </label>
-                    ))}
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Module Permissions</label>
+                  <div className="space-y-2">
+                    {PERMISSION_DOMAINS.map(domain => {
+                      const sortedLevels = PERMISSION_HIERARCHY.filter(l => domain.levels.includes(l));
+                      const currentLevel = newRole.permissions[domain.id] || 'none';
+                      return (
+                        <div key={domain.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-200">
+                          <span className="text-xs font-bold text-slate-700">{domain.label}</span>
+                          <select
+                            value={currentLevel}
+                            onChange={(e) => setNewRolePermLevel(domain.id, e.target.value)}
+                            className={`text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg border cursor-pointer appearance-none text-center transition-colors ${LEVEL_COLORS[currentLevel] || LEVEL_COLORS['none']}`}
+                          >
+                            {sortedLevels.map(level => (
+                              <option key={level} value={level}>{LEVEL_LABELS[level]}</option>
+                            ))}
+                          </select>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
 
                 <div className="bg-amber-50 p-4 rounded-2xl border border-amber-200">
                   <p className="text-[10px] font-black text-amber-800 uppercase tracking-widest">
-                    Store Owner role cannot be created here. Only subordinate roles can be defined.
+                    Store Owner role cannot be created here. Only subordinate roles can be defined. Admin actions are derived from the Employees / Team permission level.
                   </p>
                 </div>
               </div>

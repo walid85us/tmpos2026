@@ -1,8 +1,8 @@
-# Project Overview
+# Overview
 
-This project is a multi-tenant SaaS platform frontend, built to deliver a comprehensive business management solution. It enables store owners and their teams to manage various aspects of their operations, including point-of-sale (POS), employee management, customer relationship management (CRM), inventory, reporting, and marketing. The platform supports multiple tenants, each with their own configurations and data, and incorporates robust authentication and access control mechanisms.
+This project is a multi-tenant SaaS platform frontend designed to be a comprehensive business management solution. It empowers store owners and their teams to manage point-of-sale (POS), employee management, customer relationships (CRM), inventory, reporting, and marketing. The platform supports multiple tenants, each with unique configurations and data, and includes robust authentication and access control.
 
-The business vision is to provide a scalable and customizable SaaS offering for small to medium-sized businesses, simplifying their day-to-day operations and empowering them with insights and automation. It aims to capture market share by offering a feature-rich, user-friendly, and highly configurable platform.
+The business vision is to provide a scalable, customizable, and feature-rich SaaS offering for small to medium-sized businesses, streamlining operations and providing valuable insights and automation.
 
 # User Preferences
 
@@ -16,64 +16,49 @@ Do not make changes to the file `Y`.
 
 ## Frontend
 
-The frontend is built with React 19, TypeScript, Vite 6, and Tailwind CSS v4, focusing on a modern, responsive, and highly interactive user experience.
+The frontend is built with React 19, TypeScript, Vite 6, and Tailwind CSS v4, focusing on a modern, responsive, and interactive user experience.
 
 ## UI/UX Decisions
 
-- **Design System**: Employs a consistent design language with `rounded-[2.5rem]` or `rounded-[3rem]` cards, a `bg-white/80 backdrop-blur-xl` glass effect, and a primary color theme with a `ghost-border` utility.
-- **Typography**: Uses `font-black uppercase tracking-widest` for labels to maintain a clear and bold aesthetic.
-- **Animations**: Integrates `motion/react` (Framer Motion) for smooth UI transitions and interactions.
-- **Notifications**: Utilizes toast notifications for user feedback instead of disruptive `alert()` calls.
-- **Accessibility**: Form inputs have `label`/`id` pairs, table rows are keyboard-navigable, and modal dialogs follow semantic accessibility guidelines.
+-   **Design System**: Consistent design language with `rounded-[2.5rem]` or `rounded-[3rem]` cards, `bg-white/80 backdrop-blur-xl` glass effect, and a primary color theme with a `ghost-border` utility.
+-   **Typography**: Uses `font-black uppercase tracking-widest` for labels.
+-   **Animations**: Integrates `motion/react` (Framer Motion) for smooth UI transitions.
+-   **Notifications**: Utilizes toast notifications for user feedback.
+-   **Accessibility**: Semantic accessibility for form inputs, keyboard-navigable table rows, and modal dialogs.
 
 ## Technical Implementations & Feature Specifications
 
-- **Authentication & Access Control**: Leverages Firebase Authentication. The platform supports both platform-level roles (e.g., `system_owner`, `support_admin`) and tenant-specific roles (e.g., `store_owner`, `manager`, `technician`, `sales_staff`). Access is gated by `AccessGuard` based on `allowedUserTypes` and feature checks. **Hierarchical Permission Model**: Permissions use a 7-level hierarchy (`none < view < create < edit < manage < approve < full`) across permission domains (sales, inventory, repairs, warranties, customers, refunds, employees, etc.). `checkPermission(domain, level)` checks if the user's level meets the required level. `canAccess(feature)` checks for `view`+ level (module-level sidebar/route access). `getPermissionLevel(domain)` returns the exact level. Tenant roles define permissions as `Record<string, PermissionLevel>`. Store owner uses `_grant: 'full'` sentinel for universal access. Admin permissions bypass plan-gating.
-- **Tenant Management & Provisioning**: Features a comprehensive workflow for tenant lifecycle management, including provisioning, subscription handling, feature overrides, billing (invoices, credits, refunds), domain management, usage tracking, and audit logging. A `DevSessionSwitcher` allows for testing various tenant scenarios (active, trial, invited, suspended, etc.).
-- **Point of Sale (POS)**: A full-featured POS system including cart management, payments, repair intake, held orders (shared state), tax calculation (8.25%), discount application, customer management (inline creation, walk-in), and customer-linked loyalty points redemption (min 100pts, 1pt=$0.01, 10pts earned per $1 spent).
-- **Employee Management**: Functionality for managing employees, roles, time tracking (check-in/out, breaks), and payroll. Granular permissions control employee actions and visibility of sensitive data.
-- **CRM**: Customer list, profiles, and new customer creation. `Customer` interface includes `loyaltyPoints?: number`.
-- **Reporting**: Dashboard with various reports utilizing Recharts for data visualization.
-- **Onboarding**: A multi-step onboarding process for new tenants, including plan selection, pre-configured settings, and an activation checklist. The `StoreActivationPanel` provides a unified view of the tenant's lifecycle, domain readiness, and onboarding progress, with status-aware banners.
-- **Data Flow**: `StoreLocalState.tsx` manages shared local mock state for customers, stock items, held orders, completed orders, refund records, warranty claims, and POS operators. `StockItem` has `cost`, `price`, `status`, and `isSuggestiveSale` fields. Seeded with 5 real items (all approved). Customer seeds include `loyaltyPoints`. `CompletedOrder` tracks full invoice data with line items, payments, warranty periods, and refund tracking. `RefundRecord` and `WarrantyClaimRecord` support full refund/warranty workflows. `POSOperator` supports PIN-based operator switching. Context provides CRUD methods for all entities.
-- **Dashboard Quick Actions**: Quick Intake opens a repair intake modal directly on the dashboard (not navigation). Print Label uses inventory-backed search with type-aware preview. Scan QR searches inventory with exact SKU match priority + partial name fallback, navigates to POS with `addToCart` state. Add Stock has dual buttons: "Add to Cart" (navigates to POS with item) + permission-aware "Add to Inventory"/"Submit for Approval". Held Orders opens a dashboard modal listing shared held orders; selecting one navigates to POS with `resumeHeldOrderId`.
-- **POS Location State**: Supports `autoQuickCheckIn`, `openHeldOrders`, `autoRepairItem`, `addToCart`, and `resumeHeldOrderId`. Repair Intake modal has visible X close button.
-- **POS Quick Add Stock**: Two buttons always visible — "Add to Cart" (cart-only, no inventory entry) and permission-aware "Add to Inventory" (owner/manager) or "Submit for Approval" (staff).
-- **POS Payment Flow**: Payments start empty (no ghost methods). Users add Cash or Card via "Add Method" modal. Card auto-computes exact remaining balance (derived, not state-driven, disabled input). Cash is manual entry. Finalize requires: cart not empty, payments added, remaining ≤ 0.005 tolerance. Total uses `toFixed(2)` rounding to prevent floating-point drift. Change due shown for cash overpayment.
-- **Loyalty Points Flow**: Points display uses customer's actual `loyaltyPoints` (not random). Redeem Points button disabled without customer or with <100pts. Points earned preview shown in order summary. On finalize, customer points updated in shared state (earned - redeemed).
-- **Inventory Page**: Uses `StoreLocalState` as its single source of truth. Displays `approvedStockItems` in the inventory table and `pendingStockItems` in a separate approval section (visible to owners/managers). "Add Product" modal writes to StoreLocalState with permission-aware status (approved for owners/managers, pending_approval for staff). No disconnected local mock data.
-- **POS Catalog**: Add Item modal has repair services as base items + all products from approvedStockItems only (no hardcoded product entries). Exact SKU match prioritized. Category filter defaults to "All Categories" matching dropdown option values.
-- **POS Cash Rounding**: 3-mode (Exact/Round Up/Round Down) toggle below Cash payment input. Exact mode auto-resets cash to exact owed value. Round Down applies a discount for the fractional difference. Card payments stay exact-only.
-- **POS Switch User**: Operator list → PIN verification → sets `posOperator` in shared state. Current operator shown in POS header with initials badge. Operators seeded with 4 entries. Dev/preview mode shows PIN hint for QA testing. **RBAC-enforced**: switched operator's role resolves to `tenantRoles` permission set — Sales Associate loses Refund/AddStock/Warranty; Technician gains Inventory+Warranties but loses Refund; Manager/Owner has full access. Header shows "Limited Access" for non-manager roles.
-- **POS Refund Workflow**: Multi-step modal: search orders by invoice/customer/phone → select line items with qty controls → reason selection → method choice (Original/Store Credit/Cash) → creates `RefundRecord` and updates `CompletedOrder` status (Partially/Fully Refunded). Shows original payment method context and card terminal simulation notice.
-- **POS Warranty Claim**: Multi-step modal: search orders → select warranty-eligible items (those with `warrantyPeriod`) → reason + notes + warranty details panel (type, period, purchase date, operator) → generates warranty ticket with `Submitted` status and `statusHistory`. Service warranty auto-carries original repair notes.
-- **Warranty Management Page**: Dedicated `/warranties` route with full claim lifecycle management. Searchable/filterable claim queue with statuses: Submitted → Under Review → Approved/Rejected → In Repair / Replacement Pending → Completed. Detail modal shows customer, invoice reference, original order, claim reason, warranty expiry date + expired warning, claim priority (High/Medium/Normal based on age + expiry proximity), status history & audit trail with resolution notes, and status transition actions (owner/manager only) with context-sensitive note placeholders. Summary stats: Total, Active, Awaiting Review, In Progress, Resolved. Sort by Newest/Oldest/Priority. Seeded with 3 sample claims. Accessible to store_owner, manager, and technician roles in growth/advanced plans. **Warranty-to-Repair**: "In Repair" transitions show technician assignment modal (specific tech or general pool); creates repair ticket in shared state (`warrantyRepairTickets`); completing the repair auto-completes the linked warranty claim. **Warranty Replacement-to-POS**: "Replacement Pending" claims can be sent to POS via "Send to POS" button; creates zero-cost cart item in POS; finalizing the replacement order marks warranty claim Completed. Idempotent — prevents duplicate pending replacements. Mutation handlers enforce `canManage` permission internally, not just UI-level.
-- **RBAC Operator Bridge**: `AccessContext.effectiveRole` bridges POS operator switching to the full permission system. When a POS operator is switched, `posOperatorRole` is set and `effectiveRole` resolves to it for tenant users. This causes sidebar navigation, dashboard quick actions, module access, and permission-gated buttons to automatically reflect the switched operator's role. `posOperatorRole` is cleared on logout, auth state change, and preview mode disable to prevent stale elevation.
-- **POS Orders Lookup**: Searchable order history from `completedOrders`, detailed invoice view with line items/payments/totals, action buttons to initiate refund or warranty claim directly from order detail.
-- **POS Cart Merge**: Adding same inventory item to cart merges into existing line (increments qty) rather than creating duplicate entries. Stock enforcement still applies.
-- **POS Finalize → CompletedOrder**: On finalize, creates a `CompletedOrder` record with all line items, payments, warranty periods, operator name. Stock quantities are decremented from inventory on sale completion.
-- **Stock Count Integrity**: Cart displays remaining available stock per inventory-backed line item (color-coded: green/amber/red). Edit item modal enforces stock ceiling with disabled increment. Add Item grid shows 0-available items as disabled. Out-of-stock items remain visible but cannot be added.
-- **Inventory Suggestive Sales Tab**: New "Suggestive Sales" tab in Inventory page with "Active Suggestive Items" section (edit + delete actions per item), full inventory toggle list, and active count badge. Edit Suggestive Item modal allows updating name, price, category, and removing from suggestive sales. Add Product modal includes "Mark as Suggestive Sale" toggle. POS derives suggestive items from `approvedStockItems.filter(isSuggestiveSale)` (unified source of truth).
-- **Inventory Out-of-Stock Visibility**: Stock column shows tiered indicators: red "Out of Stock" badge with block icon for qty=0, red bar + "Low" label for qty≤3, orange bar for qty≤10, green bar for qty>10. Zero-stock items remain visible in the listing.
-- **Store Permissions Matrix**: Interactive role × domain × level matrix in EmployeesPermissionsPage. Each cell is a dropdown selecting the permission level for that role-domain combination. Connected to `accessConfig.ts` role definitions and plan feature gates. Hierarchy legend shown for reference.
-- **Supervisor Refund Authorization**: POS operators without `refunds:create` permission can request supervisor authorization. Opens a modal to select supervisor role and enter 4-digit PIN (hardcoded `1234` for demo). Successful auth temporarily elevates refund access until the refund is completed or cancelled. Auth is cleared on cancel, refund completion, preview mode switch, and preview disable.
-- **Save Feedback**: A consistent pattern of button text swap and a temporary `bg-emerald-500` class indicates successful saves.
-- **Modal Pattern**: Modals utilize `AnimatePresence`, fixed overlays with `backdrop-blur-md`, and `motion.div` for scaling and Y-axis animations, with `rounded-[3rem]` styling.
+-   **Authentication & Access Control**: Leverages Firebase Authentication with platform-level and tenant-specific roles. A hierarchical permission model (7 levels) across various domains is enforced by `AccessGuard`.
+-   **Tenant Management & Provisioning**: Comprehensive workflow for tenant lifecycle, including provisioning, subscriptions, feature overrides, billing, domain management, usage tracking, and audit logging.
+-   **Point of Sale (POS)**: Full-featured POS including cart management, payments (cash, card), tax calculation, discounts, customer management (inline creation, loyalty points), repair intake, and held orders. Supports `autoQuickCheckIn`, `openHeldOrders`, `autoRepairItem`, `addToCart`, and `resumeHeldOrderId` via location state. Features quick add stock, operator switching with RBAC, refund workflows, and warranty claims. Cash rounding options are available.
+-   **Employee Management**: Manages employees, roles, time tracking, and payroll with granular permissions.
+-   **CRM**: Customer list, profiles, and creation with loyalty points integration.
+-   **Reporting**: Dashboard with data visualizations using Recharts.
+-   **Onboarding**: Multi-step onboarding for new tenants, including plan selection, pre-configured settings, and an activation checklist via `StoreActivationPanel`.
+-   **Data Flow**: `StoreLocalState.tsx` manages shared local mock state for customers, stock items, held orders, completed orders, refund records, warranty claims, and POS operators.
+-   **Dashboard Quick Actions**: Includes Quick Intake (repair), Print Label, Scan QR (inventory search), Add Stock (to cart/inventory), and Held Orders (resume).
+-   **Inventory Management**: Displays `approvedStockItems` and `pendingStockItems`. "Add Product" modal supports permission-aware status. Features suggestive sales and tiered stock visibility indicators.
+-   **POS Orders Lookup**: Searchable order history with detailed invoice view, enabling direct refund or warranty claim actions.
+-   **POS Cart Merge**: Automatically merges identical inventory items into a single cart line.
+-   **POS Finalize**: Creates `CompletedOrder` records and decrements stock quantities.
+-   **Stock Count Integrity**: Cart displays remaining stock with visual indicators; editing items enforces stock limits.
+-   **Store Permissions Matrix**: Interactive matrix in `EmployeesPermissionsPage` for role-domain permission level configuration, linked to `accessConfig.ts`.
+-   **Supervisor Refund Authorization**: Allows unauthorized operators to request supervisor approval for refunds via PIN.
+-   **UI Feedback**: Consistent visual feedback for successful saves (e.g., button text swap, temporary `bg-emerald-500` class).
+-   **Modal Pattern**: Consistent `AnimatePresence`-based modals with fixed overlays, `backdrop-blur-md`, `motion.div` animations, and `rounded-[3rem]` styling.
 
 ## System Design Choices
 
-- **Routing**: Implemented using React Router v7.
-- **State Management**: Context API is used for global state such as `AccessContext` for authentication sessions, tenant resolution, and role management. Local state is used extensively within components.
-- **Firebase Integration**: Firebase Firestore serves as the backend database, with security rules defined in `firestore.rules`. Firebase Authentication handles user authentication.
-- **AI Integration**: The Gemini API is integrated for AI features.
-- **Configuration**: `firebase-applet-config.json` stores Firebase project configuration, and `firebase-blueprint.json` defines the Firestore data model schema.
-- **Vite Configuration**: `vite.config.ts` includes a critical `server.watch.ignored` setting to prevent reload loops during development.
+-   **Routing**: React Router v7.
+-   **State Management**: Context API for global state (e.g., `AccessContext`); extensive local component state.
+-   **Firebase Integration**: Firebase Firestore for backend data and Firebase Authentication for user management.
+-   **AI Integration**: Gemini API for AI features.
+-   **Configuration**: `firebase-applet-config.json` for Firebase project config, `firebase-blueprint.json` for Firestore schema.
+-   **Vite Configuration**: `vite.config.ts` includes `server.watch.ignored` to prevent reload loops.
 
 # External Dependencies
 
-- **Firebase**:
-    - **Firestore**: Backend database for data storage.
-    - **Authentication**: User authentication and authorization.
-- **Google AI Studio / Gemini API**: Integrated via `@google/genai` for AI functionalities.
-- **Recharts**: Used for rendering charts and data visualizations in reports.
-- **Framer Motion**: Integrated via `motion/react` for animations.
+-   **Firebase**: Firestore (database) and Authentication.
+-   **Google AI Studio / Gemini API**: Integrated via `@google/genai` for AI functionalities.
+-   **Recharts**: For charts and data visualizations.
+-   **Framer Motion**: Integrated via `motion.react` for UI animations.
