@@ -328,12 +328,12 @@ const SEED_SERVICE_CATEGORIES: RepairCategory[] = [
 ];
 
 const SEED_SERVICES: RepairService[] = [
-  { id: 's1', name: 'iPhone 13 Screen Replacement', categoryId: 'cat1', categoryName: 'Smartphones', price: 129.99, cost: 45.00, estimatedTime: 45, flagNotes: 'Handle OLED with care. Check FaceID after repair.', status: 'Active', sku: 'SRV-IP13-SCR' },
-  { id: 's2', name: 'MacBook Air M1 Battery Replacement', categoryId: 'cat2', categoryName: 'Laptops', price: 199.99, cost: 80.00, estimatedTime: 60, status: 'Active', sku: 'SRV-MBA-BAT' },
-  { id: 's3', name: 'iPad Pro 11 Charging Port Repair', categoryId: 'cat3', categoryName: 'Tablets', price: 89.99, cost: 15.00, estimatedTime: 90, flagNotes: 'Requires micro-soldering.', status: 'Active', sku: 'SRV-IPP-CHG' },
-  { id: 's4', name: 'iPhone 15 Pro Screen Replacement', categoryId: 'cat1', categoryName: 'Smartphones', price: 249.99, cost: 95.00, estimatedTime: 50, flagNotes: 'Dynamic Island alignment critical.', status: 'Active', sku: 'SRV-IP15P-SCR' },
-  { id: 's5', name: 'PS5 HDMI Port Repair', categoryId: 'cat4', categoryName: 'Game Consoles', price: 149.99, cost: 25.00, estimatedTime: 120, flagNotes: 'Micro-soldering required. Test with 4K output.', status: 'Active', sku: 'SRV-PS5-HDMI' },
-  { id: 's6', name: 'Samsung S21 Battery Replacement', categoryId: 'cat1', categoryName: 'Smartphones', price: 79.99, cost: 22.00, estimatedTime: 40, status: 'Active', sku: 'SRV-SS21-BAT' },
+  { id: 's1', name: 'iPhone 13 Screen Replacement', categoryId: 'cat1', categoryName: 'Smartphones', price: 129.99, cost: 45.00, estimatedTime: 45, flagNotes: 'Handle OLED with care. Check FaceID after repair.', status: 'Active', sku: 'SRV-IP13-SCR', warrantyPeriod: '90 days', warrantyType: 'labor' },
+  { id: 's2', name: 'MacBook Air M1 Battery Replacement', categoryId: 'cat2', categoryName: 'Laptops', price: 199.99, cost: 80.00, estimatedTime: 60, status: 'Active', sku: 'SRV-MBA-BAT', warrantyPeriod: '180 days', warrantyType: 'parts-and-labor' },
+  { id: 's3', name: 'iPad Pro 11 Charging Port Repair', categoryId: 'cat3', categoryName: 'Tablets', price: 89.99, cost: 15.00, estimatedTime: 90, flagNotes: 'Requires micro-soldering.', status: 'Active', sku: 'SRV-IPP-CHG', warrantyPeriod: '90 days', warrantyType: 'labor' },
+  { id: 's4', name: 'iPhone 15 Pro Screen Replacement', categoryId: 'cat1', categoryName: 'Smartphones', price: 249.99, cost: 95.00, estimatedTime: 50, flagNotes: 'Dynamic Island alignment critical.', status: 'Active', sku: 'SRV-IP15P-SCR', warrantyPeriod: '90 days', warrantyType: 'parts-and-labor' },
+  { id: 's5', name: 'PS5 HDMI Port Repair', categoryId: 'cat4', categoryName: 'Game Consoles', price: 149.99, cost: 25.00, estimatedTime: 120, flagNotes: 'Micro-soldering required. Test with 4K output.', status: 'Active', sku: 'SRV-PS5-HDMI', warrantyPeriod: '30 days', warrantyType: 'labor' },
+  { id: 's6', name: 'Samsung S21 Battery Replacement', categoryId: 'cat1', categoryName: 'Smartphones', price: 79.99, cost: 22.00, estimatedTime: 40, status: 'Active', sku: 'SRV-SS21-BAT', warrantyPeriod: '90 days', warrantyType: 'parts-and-labor' },
 ];
 
 const EMPTY_DRAFT: DraftCart = { cart: [], selectedCustomer: null, payments: [], discounts: [] };

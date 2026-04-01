@@ -343,11 +343,12 @@ export interface RepairService {
   categoryName: string;
   price: number;
   cost?: number;
-  estimatedTime?: number; // in minutes
+  estimatedTime?: number;
   flagNotes?: string;
   image?: string;
   sku?: string;
   warrantyPeriod?: string;
+  warrantyType?: 'none' | 'labor' | 'parts-and-labor';
   taxId?: string;
   status: 'Active' | 'Inactive';
 }

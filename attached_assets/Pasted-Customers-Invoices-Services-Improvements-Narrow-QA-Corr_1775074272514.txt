@@ -1,0 +1,213 @@
+Customers, Invoices & Services Improvements — Narrow QA Correction Pass
+
+Read `replit.md` and `Ref.txt` first and treat them as source-of-truth constraints before making any changes.
+
+This is NOT a redesign and NOT a new workstream.
+This is a narrow correction pass based on manual QA failures from the completed Customers, Invoices & Services Improvements workstream.
+
+Expert-role stack
+- Principal SaaS Product Architect for multi-tenant repair/POS workflows
+- Staff React 19 + TypeScript + Vite engineer
+- Firebase / Firestore data-model and state-flow architect
+- Auth / RBAC / lifecycle gating specialist
+- UX systems designer preserving the existing premium glassmorphism baseline
+- QA-driven refactor auditor
+- Side auditor and systems thinker at all times
+
+Operating posture
+- Act as a side auditor and systems thinker throughout.
+- Audit ripple effects before editing.
+- Fix the failed UX and workflow gaps deeply and coherently, not with shallow patches.
+- Preserve current design baseline exactly.
+- Preserve auth, preview mode, RBAC, lifecycle gating, and platform/store hierarchy.
+- Preserve tenant isolation and store scoping.
+- Do not reopen completed workstreams except for narrow dependency-safe corrections required by this pass.
+- Reuse existing modal/drawer/table/toast/motion patterns.
+- Do not make changes to folder `Z`.
+- Do not make changes to file `Y`.
+
+Current QA findings you must fix
+
+A) Customers corrections
+1. Customer edit flow is weak:
+- currently clicking the action button routes to the customer profile page
+- replace or improve this so the customer action flow supports an in-app action menu and modal-driven edit experience
+- from the customer row action button, user should be able to:
+  - View Customer
+  - Edit Customer
+  - Start New Sale for this Customer
+  - Create Ticket for this Customer
+- Edit Customer should open a proper in-app modal or drawer, not force navigation away
+- preserve customer profile page, but do not use it as the only path for editing
+- remove unnecessary customer profile photo UI if it exists and is not truly needed
+
+2. Loyalty management is missing:
+- add a clear place in the customer area or customer profile to manage loyalty program/tier data
+- do not build a massive loyalty subsystem
+- implement a clean foundation that allows:
+  - loyalty tier display
+  - points or balance display if current model supports it
+  - simple edit/update surface for loyalty tier / loyalty settings in customer context
+- keep it consistent with existing customer/POS loyalty behavior already present in the app
+
+3. Duplicate customer flow improvement:
+- if duplicate-aware warning is triggered during customer creation:
+  - disable the primary Create Customer action by default
+  - show the duplicate warning clearly
+  - provide an explicit override action such as:
+    - Create Anyway
+    - Confirm Duplicate Override
+  - make the override deliberate, visually secondary, and auditable in UX terms
+
+4. Customer linked history improvement:
+- in customer profile/history, make invoice numbers clickable
+- clicking an invoice number should open invoice details in an in-app modal/drawer overlay if possible, not force a disruptive route change
+
+B) Invoice corrections
+1. Invoice list / action UX is weak:
+- from invoice listing, clicking an invoice row or action should open the invoice details in an in-app modal/drawer overlay matching the current design system
+- invoice details view should expose actions clearly within the same overlay experience
+
+2. Add Payment workflow must be stronger:
+- when user clicks Add Payment from the invoice area, route into the POS payment experience in a controlled way
+- implement a bridge flow so invoice payment can be processed through POS using the linked invoice data
+- the flow should:
+  - open POS with the invoice context loaded
+  - clearly show invoice number, customer, due amount, prior payments, and remaining balance
+  - allow store staff to take a balance payment or full payment
+  - update invoice payment history and status cleanly after POS payment completes
+- do this without corrupting the existing completed-order architecture
+- if a narrow adapter layer is needed between invoice records and POS payment UI, build it cleanly
+
+3. Invoice actions need staged real behavior:
+- Print:
+  - if the app already has a printer/store config pattern, route print through that pattern
+  - otherwise provide a clean printable invoice view and browser print fallback
+  - do not leave this as a dead or fake action
+- Email:
+  - support a proper invoice email action flow in-app
+  - if real email backend is not fully wired, implement a structured send dialog / preview / queued-send UX that is safe and clearly labeled
+- SMS payment link:
+  - add a clean SMS action for invoice sharing/payment request
+  - if real SMS/payment gateway is not fully wired, implement a safe staged architecture:
+    - generate a stable invoice share/payment link structure
+    - show SMS preview content
+    - allow copy/send-preview flow
+    - clearly separate real delivery from preview if backend delivery is not yet present
+- Online payment:
+  - do not fake a full payment gateway if none exists
+  - implement the UI/data contract foundation for an online pay link tied to invoice balance
+  - keep this architecture-ready for later integration
+
+4. Invoice edit capability is missing:
+- add Edit Invoice under the invoice action menu/button
+- support editing appropriate invoice details safely
+- align edit behavior with all other QA notes from this correction pass
+- invoice edit must support:
+  - customer update
+  - line item management
+  - service/product distinction
+  - recalculation of totals
+  - preserved payment history integrity
+- prevent editing fields that should become locked after certain payment states if needed; use clear UX rules
+
+5. Product line item entry improvement:
+- when adding product/inventory line items to invoice, use a proper searchable inventory lookup
+- implement it as a search-first selector, not a weak static picker
+- preserve store scoping and inventory distinctions
+
+6. Service line item issue:
+- service and repair should not appear as the same undifferentiated list if the current app conceptually separates them
+- audit the current data model and create a cleaner picker structure
+- clearly distinguish:
+  - inventory/product items
+  - service catalog items
+  - repair-related items or workflows if separately modeled
+- avoid user confusion while still preserving future repair expansion paths
+
+C) Services corrections
+1. Service warranty linkage is incomplete:
+- add a clean warranty configuration option to service setup/edit
+- design a practical workflow for service warranty that fits the current app and future warranty handling
+- support a service being:
+  - no warranty
+  - standalone service warranty
+  - optionally part of a broader product/device warranty context if your current architecture supports that cleanly
+- do not create a giant warranty engine here
+- implement a strong, reusable foundation with clear data fields and UI rules
+
+2. Service deletion behavior is weak:
+- remove browser-native confirm dialogs for deleting services
+- replace with an in-app modal using the project’s established modal pattern
+- before allowing deletion, perform dependency checks against actual current app data structures
+- if the service is referenced by active work such as:
+  - unpaid invoices
+  - open tickets / repair items / service jobs if such records exist in current model
+  - other still-active dependent records
+  then do NOT allow deletion
+- instead show:
+  - why deletion is blocked
+  - a list of linked records using that service
+  - record identifiers such as invoice number / ticket number
+  - status of those linked records
+- allow deletion only when it is safe based on the project’s actual model
+- if soft-delete / inactive-state is the better fit, implement that cleanly instead of hard delete where appropriate
+
+Required design and behavior rules
+- Use only in-app modals/drawers/menus for these corrected workflows
+- Preserve the current premium glassmorphism design system exactly
+- Maintain keyboard accessibility and clear feedback states
+- Keep state paths unified; do not create duplicate parallel systems
+- Ensure all new actions work in preview/demo mode
+- Maintain store scoping and tenant safety everywhere
+- Keep type safety strong and avoid hacks
+
+Implementation intent
+This correction pass should produce a tighter operational workflow:
+- customer row actions become usable and modal-driven
+- customer loyalty management becomes visible and editable at a foundation level
+- duplicate customer creation becomes safer
+- invoice details become overlay-driven and easier to act on
+- invoice payment moves through POS cleanly
+- invoice print/email/SMS/share actions become structured and non-dead
+- invoice editing becomes possible and safe
+- product/service selection becomes clearer and more searchable
+- service warranty becomes configurable
+- service deletion becomes dependency-aware and app-native
+
+Non-goals
+- No broad redesign
+- No full external email/SMS/payment gateway build if not already present
+- No repair module overhaul
+- No accounting subsystem expansion
+- No reopening earlier approved workstreams except narrow required compatibility fixes
+
+Definition of done
+This correction pass is done only if:
+- customer row action workflow is modal-driven and operational
+- customer edit works cleanly
+- loyalty management is surfaced at a usable foundation level
+- duplicate override flow is safer
+- invoice row/detail experience is overlay-based and operational
+- Add Payment bridges correctly into POS invoice payment flow
+- invoice print/email/SMS/share actions are structured and non-dead
+- invoice editing works safely
+- product line item picker is searchable
+- service/product/repair selection is clearer and no longer confusing
+- service warranty fields exist and work coherently
+- service deletion uses an in-app dependency-aware modal
+- no regressions are introduced in POS, refunds, warranty claims, order lookup, held orders, auth, preview mode, RBAC, or store hierarchy
+- `replit.md` is updated to reflect all corrections
+
+Required final response format
+Return your completion report in exactly this structure:
+
+1. Files Changed
+2. Corrections Implemented
+3. Workflow Decisions Made
+4. State / Data Model Adjustments
+5. Dependency / Deletion Rules Added
+6. POS / Invoice Bridge Behavior
+7. Non-Regressions Confirmed
+8. Deferred External Integrations
+9. Manual QA Retest Areas

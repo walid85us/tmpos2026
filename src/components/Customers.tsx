@@ -1,13 +1,15 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState } from '../context/StoreLocalState';
-import type { Customer } from '../types';
+import type { Customer, Invoice } from '../types';
 
 type CustomerView = 'list' | 'profile';
 type HistoryTab = 'orders' | 'invoices';
 
 export default function Customers() {
   const { customers, addCustomer, updateCustomer, completedOrders, invoices, findDuplicateCustomers } = useStoreLocalState();
+  const navigate = useNavigate();
   const [view, setView] = useState<CustomerView>('list');
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -15,6 +17,34 @@ export default function Customers() {
   const [historyTab, setHistoryTab] = useState<HistoryTab>('orders');
   const [duplicateWarning, setDuplicateWarning] = useState<Customer[]>([]);
   const [newCustomerForm, setNewCustomerForm] = useState({ firstName: '', lastName: '', email: '', phone: '', phoneLabel: 'Mobile', group: 'Retail' });
+  const [duplicateOverride, setDuplicateOverride] = useState(false);
+
+  const [actionMenuId, setActionMenuId] = useState<string | null>(null);
+  const actionMenuRef = useRef<HTMLDivElement>(null);
+
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editForm, setEditForm] = useState({
+    name: '', email: '', phone: '', phoneLabel: 'Mobile', group: 'Retail',
+    tier: 'Bronze' as Customer['tier'], loyaltyPoints: 0,
+    address: '', tags: '', gdprCompliant: true,
+    campaignerStatus: 'Pending' as 'Subscribed' | 'Unsubscribed' | 'Pending',
+    thirdPartyBilling: false,
+  });
+
+  const [showLoyaltyEdit, setShowLoyaltyEdit] = useState(false);
+  const [loyaltyForm, setLoyaltyForm] = useState({ tier: 'Bronze' as Customer['tier'], points: 0 });
+
+  const [invoiceDetailData, setInvoiceDetailData] = useState<Invoice | null>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (actionMenuRef.current && !actionMenuRef.current.contains(e.target as Node)) {
+        setActionMenuId(null);
+      }
+    };
+    if (actionMenuId) document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [actionMenuId]);
 
   const filteredCustomers = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
@@ -51,6 +81,7 @@ export default function Customers() {
   const handleFormChange = (field: string, value: string) => {
     const next = { ...newCustomerForm, [field]: value };
     setNewCustomerForm(next);
+    setDuplicateOverride(false);
     if (field === 'email' || field === 'phone' || field === 'firstName' || field === 'lastName') {
       const fullName = `${next.firstName} ${next.lastName}`.trim();
       const dupes = findDuplicateCustomers(fullName, next.email, next.phone);
@@ -60,6 +91,7 @@ export default function Customers() {
 
   const handleCreateCustomer = () => {
     if (!newCustomerForm.firstName.trim() || !newCustomerForm.lastName.trim()) return;
+    if (duplicateWarning.length > 0 && !duplicateOverride) return;
     const newCust: Customer = {
       id: `c${Date.now()}`,
       name: `${newCustomerForm.firstName} ${newCustomerForm.lastName}`,
@@ -83,6 +115,7 @@ export default function Customers() {
     addCustomer(newCust);
     setNewCustomerForm({ firstName: '', lastName: '', email: '', phone: '', phoneLabel: 'Mobile', group: 'Retail' });
     setDuplicateWarning([]);
+    setDuplicateOverride(false);
     setShowNewCustomerModal(false);
   };
 
@@ -92,11 +125,84 @@ export default function Customers() {
     setView('profile');
   };
 
+  const openEditModal = (customer: Customer) => {
+    setEditForm({
+      name: customer.name,
+      email: customer.email,
+      phone: customer.phone,
+      phoneLabel: customer.phoneLabel || 'Mobile',
+      group: customer.group || 'Retail',
+      tier: customer.tier || 'Bronze',
+      loyaltyPoints: customer.loyaltyPoints ?? 0,
+      address: customer.address || '',
+      tags: (customer.tags || []).join(', '),
+      gdprCompliant: customer.gdprCompliant ?? true,
+      campaignerStatus: customer.campaignerStatus || 'Pending',
+      thirdPartyBilling: customer.thirdPartyBilling ?? false,
+    });
+    setSelectedCustomer(customer);
+    setShowEditModal(true);
+    setActionMenuId(null);
+  };
+
+  const handleSaveEdit = () => {
+    if (!selectedCustomer || !editForm.name.trim()) return;
+    const updates: Partial<Customer> = {
+      name: editForm.name,
+      email: editForm.email,
+      phone: editForm.phone,
+      phoneLabel: editForm.phoneLabel,
+      group: editForm.group,
+      tier: editForm.tier,
+      loyaltyPoints: editForm.loyaltyPoints,
+      address: editForm.address || undefined,
+      tags: editForm.tags.split(',').map(t => t.trim()).filter(Boolean),
+      gdprCompliant: editForm.gdprCompliant,
+      campaignerStatus: editForm.campaignerStatus,
+      thirdPartyBilling: editForm.thirdPartyBilling,
+    };
+    updateCustomer(selectedCustomer.id, updates);
+    setSelectedCustomer(prev => prev ? { ...prev, ...updates } : null);
+    setShowEditModal(false);
+  };
+
+  const handleStartSale = (customer: Customer) => {
+    setActionMenuId(null);
+    navigate('/sales', { state: { selectedCustomer: customer } });
+  };
+
+  const handleCreateTicket = (customer: Customer) => {
+    setActionMenuId(null);
+    navigate('/sales', { state: { autoQuickCheckIn: true, selectedCustomer: customer } });
+  };
+
+  const openLoyaltyEdit = () => {
+    if (!selectedCustomer) return;
+    setLoyaltyForm({ tier: selectedCustomer.tier || 'Bronze', points: selectedCustomer.loyaltyPoints ?? 0 });
+    setShowLoyaltyEdit(true);
+  };
+
+  const handleSaveLoyalty = () => {
+    if (!selectedCustomer) return;
+    updateCustomer(selectedCustomer.id, { tier: loyaltyForm.tier, loyaltyPoints: loyaltyForm.points });
+    setSelectedCustomer(prev => prev ? { ...prev, tier: loyaltyForm.tier, loyaltyPoints: loyaltyForm.points } : null);
+    setShowLoyaltyEdit(false);
+  };
+
   const getTierStyle = (tier?: string) => {
     switch (tier) {
       case 'Platinum': return 'bg-primary text-white';
       case 'Gold': return 'bg-amber-100 text-amber-800';
       case 'Silver': return 'bg-slate-200 text-slate-700';
+      default: return 'bg-slate-100 text-slate-600';
+    }
+  };
+
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case 'Paid': return 'bg-emerald-100 text-emerald-600';
+      case 'Partially Paid': return 'bg-amber-100 text-amber-600';
+      case 'Overdue': return 'bg-rose-100 text-rose-600';
       default: return 'bg-slate-100 text-slate-600';
     }
   };
@@ -131,7 +237,7 @@ export default function Customers() {
             />
           </div>
           <button
-            onClick={() => setShowNewCustomerModal(true)}
+            onClick={() => { setShowNewCustomerModal(true); setDuplicateOverride(false); setDuplicateWarning([]); }}
             className="bg-primary text-white px-8 py-2.5 rounded-xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 active:scale-95 transition-all"
           >
             + New Customer
@@ -179,8 +285,8 @@ export default function Customers() {
               >
                 <td className="p-6">
                   <div className="flex items-center gap-4">
-                    <div className="w-12 h-12 rounded-2xl bg-slate-100 overflow-hidden border-2 border-white shadow-sm">
-                      <img src={avatarUrl(customer)} alt="avatar" className="w-full h-full object-cover" />
+                    <div className="w-12 h-12 rounded-2xl bg-slate-100 overflow-hidden border-2 border-white shadow-sm flex items-center justify-center">
+                      <span className="material-symbols-outlined text-2xl text-primary/40">person</span>
                     </div>
                     <div>
                       <p className="font-black text-primary tracking-tight">{customer.name}</p>
@@ -211,10 +317,45 @@ export default function Customers() {
                 <td className="p-6">
                   <span className="font-black text-primary">${customer.totalSpent.toFixed(2)}</span>
                 </td>
-                <td className="p-6 text-right">
-                  <button className="p-2 bg-slate-50 text-slate-400 rounded-xl group-hover:bg-primary group-hover:text-white transition-all">
-                    <span className="material-symbols-outlined text-sm">arrow_forward</span>
+                <td className="p-6 text-right relative">
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setActionMenuId(actionMenuId === customer.id ? null : customer.id); }}
+                    className="p-2 bg-slate-50 text-slate-400 rounded-xl group-hover:bg-primary group-hover:text-white transition-all"
+                  >
+                    <span className="material-symbols-outlined text-sm">more_vert</span>
                   </button>
+                  {actionMenuId === customer.id && (
+                    <div ref={actionMenuRef} className="absolute right-6 top-14 z-50 w-56 bg-white rounded-2xl shadow-2xl border border-slate-200 py-2 animate-in fade-in slide-in-from-top-2">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleCustomerClick(customer); setActionMenuId(null); }}
+                        className="w-full flex items-center gap-3 px-5 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50 transition-colors"
+                      >
+                        <span className="material-symbols-outlined text-sm text-primary">visibility</span>
+                        View Customer
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); openEditModal(customer); }}
+                        className="w-full flex items-center gap-3 px-5 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50 transition-colors"
+                      >
+                        <span className="material-symbols-outlined text-sm text-primary">edit</span>
+                        Edit Customer
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleStartSale(customer); }}
+                        className="w-full flex items-center gap-3 px-5 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50 transition-colors"
+                      >
+                        <span className="material-symbols-outlined text-sm text-emerald-600">point_of_sale</span>
+                        Start New Sale
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleCreateTicket(customer); }}
+                        className="w-full flex items-center gap-3 px-5 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50 transition-colors"
+                      >
+                        <span className="material-symbols-outlined text-sm text-amber-600">confirmation_number</span>
+                        Create Ticket
+                      </button>
+                    </div>
+                  )}
                 </td>
               </tr>
             ))}
@@ -258,10 +399,25 @@ export default function Customers() {
             </div>
           </div>
           <div className="flex gap-4">
-            <button className="px-6 py-2.5 bg-white text-primary border border-slate-200 rounded-xl font-black text-xs uppercase tracking-widest shadow-sm hover:bg-slate-50 transition-all">
+            <button
+              onClick={() => openEditModal(selectedCustomer)}
+              className="px-6 py-2.5 bg-white text-primary border border-slate-200 rounded-xl font-black text-xs uppercase tracking-widest shadow-sm hover:bg-slate-50 transition-all flex items-center gap-2"
+            >
+              <span className="material-symbols-outlined text-sm">edit</span>
               Edit Profile
             </button>
-            <button className="px-6 py-2.5 bg-primary text-white rounded-xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 active:scale-95 transition-all">
+            <button
+              onClick={() => handleStartSale(selectedCustomer)}
+              className="px-6 py-2.5 bg-emerald-500 text-white rounded-xl font-black text-xs uppercase tracking-widest shadow-lg shadow-emerald-500/20 active:scale-95 transition-all flex items-center gap-2"
+            >
+              <span className="material-symbols-outlined text-sm">point_of_sale</span>
+              New Sale
+            </button>
+            <button
+              onClick={() => handleCreateTicket(selectedCustomer)}
+              className="px-6 py-2.5 bg-primary text-white rounded-xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 active:scale-95 transition-all flex items-center gap-2"
+            >
+              <span className="material-symbols-outlined text-sm">confirmation_number</span>
               Create Ticket
             </button>
           </div>
@@ -271,8 +427,8 @@ export default function Customers() {
           <div className="lg:col-span-4 space-y-8">
             <section className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
               <div className="flex items-center gap-6 mb-8">
-                <div className="w-20 h-20 rounded-[2rem] bg-slate-100 overflow-hidden border-4 border-white shadow-lg">
-                  <img src={avatarUrl(selectedCustomer)} alt="avatar" className="w-full h-full object-cover" />
+                <div className="w-20 h-20 rounded-[2rem] bg-primary/5 flex items-center justify-center border-4 border-white shadow-lg">
+                  <span className="material-symbols-outlined text-4xl text-primary/40">person</span>
                 </div>
                 <div>
                   <span className={`px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-tighter ${getTierStyle(selectedCustomer.tier)}`}>
@@ -317,6 +473,46 @@ export default function Customers() {
                 <div className="space-y-1">
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Total Spent</label>
                   <p className="text-lg font-black text-primary">${selectedCustomer.totalSpent.toFixed(2)}</p>
+                </div>
+              </div>
+            </section>
+
+            <section className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-sm font-black text-primary uppercase tracking-widest">Loyalty Program</h3>
+                <button onClick={openLoyaltyEdit} className="text-[10px] font-black text-primary uppercase tracking-widest hover:underline flex items-center gap-1">
+                  <span className="material-symbols-outlined text-xs">edit</span> Manage
+                </button>
+              </div>
+              <div className="space-y-4">
+                <div className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Current Tier</span>
+                  <span className={`px-3 py-1 rounded-lg text-[9px] font-black uppercase tracking-tighter ${getTierStyle(selectedCustomer.tier)}`}>
+                    {selectedCustomer.tier || 'Bronze'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Points Balance</span>
+                  <span className="text-lg font-black text-primary">{selectedCustomer.loyaltyPoints ?? 0}</span>
+                </div>
+                <div className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Next Tier</span>
+                  <span className="text-xs font-bold text-slate-500">
+                    {selectedCustomer.tier === 'Platinum' ? 'Max Tier Reached' :
+                     selectedCustomer.tier === 'Gold' ? 'Platinum (5000 pts)' :
+                     selectedCustomer.tier === 'Silver' ? 'Gold (2000 pts)' : 'Silver (500 pts)'}
+                  </span>
+                </div>
+                <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
+                  <div
+                    className="h-full bg-primary rounded-full transition-all"
+                    style={{
+                      width: `${Math.min(100, ((selectedCustomer.loyaltyPoints ?? 0) / (
+                        selectedCustomer.tier === 'Gold' ? 5000 :
+                        selectedCustomer.tier === 'Silver' ? 2000 : 500
+                      )) * 100)}%`
+                    }}
+                  />
                 </div>
               </div>
             </section>
@@ -454,18 +650,20 @@ export default function Customers() {
                     </thead>
                     <tbody className="divide-y divide-slate-50">
                       {customerInvoices.map((inv) => (
-                        <tr key={inv.id} className="hover:bg-slate-50/50 transition-colors">
-                          <td className="p-6 text-xs font-black text-primary">{inv.invoiceNumber}</td>
+                        <tr key={inv.id} className="hover:bg-slate-50/50 transition-colors cursor-pointer" onClick={() => setInvoiceDetailData(inv)}>
+                          <td className="p-6">
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setInvoiceDetailData(inv); }}
+                              className="text-xs font-black text-primary hover:underline"
+                            >
+                              {inv.invoiceNumber}
+                            </button>
+                          </td>
                           <td className="p-6 text-xs font-bold text-slate-600">{inv.items.map(i => i.name).join(', ')}</td>
                           <td className="p-6 text-xs font-medium text-slate-500">{inv.createdAt}</td>
                           <td className="p-6 text-xs font-black text-primary">${inv.total.toFixed(2)}</td>
                           <td className="p-6 text-right">
-                            <span className={`px-2 py-1 rounded-lg text-[8px] font-black uppercase tracking-widest ${
-                              inv.status === 'Paid' ? 'bg-emerald-100 text-emerald-600' :
-                              inv.status === 'Overdue' ? 'bg-rose-100 text-rose-600' :
-                              inv.status === 'Partially Paid' ? 'bg-amber-100 text-amber-600' :
-                              'bg-slate-100 text-slate-600'
-                            }`}>
+                            <span className={`px-2 py-1 rounded-lg text-[8px] font-black uppercase tracking-widest ${getStatusColor(inv.status)}`}>
                               {inv.status}
                             </span>
                           </td>
@@ -505,7 +703,7 @@ export default function Customers() {
             <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[2.5rem] shadow-2xl max-w-lg w-full p-8 ghost-border">
               <div className="flex justify-between items-center mb-8">
                 <h3 className="text-2xl font-black text-primary tracking-tight">New Customer</h3>
-                <button onClick={() => { setShowNewCustomerModal(false); setDuplicateWarning([]); }} className="text-slate-400 hover:text-primary transition-colors">
+                <button onClick={() => { setShowNewCustomerModal(false); setDuplicateWarning([]); setDuplicateOverride(false); }} className="text-slate-400 hover:text-primary transition-colors">
                   <span className="material-symbols-outlined">close</span>
                 </button>
               </div>
@@ -514,11 +712,32 @@ export default function Customers() {
                 <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-2xl">
                   <div className="flex items-center gap-2 mb-2">
                     <span className="material-symbols-outlined text-amber-600 text-sm">warning</span>
-                    <span className="text-xs font-black text-amber-700 uppercase tracking-widest">Possible Duplicate</span>
+                    <span className="text-xs font-black text-amber-700 uppercase tracking-widest">Possible Duplicate Detected</span>
                   </div>
+                  <p className="text-[10px] font-bold text-amber-600 mb-2">The following existing customers match the information you entered:</p>
                   {duplicateWarning.map(d => (
-                    <p key={d.id} className="text-xs font-bold text-amber-600">{d.name} — {d.email} — {d.phone}</p>
+                    <div key={d.id} className="flex items-center gap-2 py-1.5 px-3 bg-amber-100/50 rounded-lg mb-1">
+                      <span className="material-symbols-outlined text-amber-500 text-xs">person</span>
+                      <span className="text-xs font-bold text-amber-700">{d.name}</span>
+                      <span className="text-[10px] text-amber-500">•</span>
+                      <span className="text-[10px] text-amber-600">{d.email}</span>
+                      <span className="text-[10px] text-amber-500">•</span>
+                      <span className="text-[10px] text-amber-600">{d.phone}</span>
+                    </div>
                   ))}
+                  {!duplicateOverride && (
+                    <button
+                      onClick={() => setDuplicateOverride(true)}
+                      className="mt-3 px-4 py-2 bg-amber-100 border border-amber-300 text-amber-700 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-amber-200 transition-colors"
+                    >
+                      I understand — Create Anyway
+                    </button>
+                  )}
+                  {duplicateOverride && (
+                    <p className="mt-2 text-[10px] font-black text-emerald-600 uppercase tracking-widest flex items-center gap-1">
+                      <span className="material-symbols-outlined text-xs">check_circle</span> Duplicate override confirmed
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -585,12 +804,292 @@ export default function Customers() {
                     <option>Walk-in</option>
                   </select>
                 </div>
-                <button
-                  onClick={handleCreateCustomer}
-                  disabled={!newCustomerForm.firstName.trim() || !newCustomerForm.lastName.trim()}
-                  className="w-full py-4 bg-primary text-white font-black text-xs rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  Create Customer
+                {duplicateWarning.length > 0 && !duplicateOverride ? (
+                  <button
+                    disabled
+                    className="w-full py-4 bg-slate-300 text-white font-black text-xs rounded-2xl uppercase tracking-widest cursor-not-allowed"
+                  >
+                    Resolve Duplicate to Continue
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleCreateCustomer}
+                    disabled={!newCustomerForm.firstName.trim() || !newCustomerForm.lastName.trim()}
+                    className="w-full py-4 bg-primary text-white font-black text-xs rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Create Customer
+                  </button>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showEditModal && selectedCustomer && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[110] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[3rem] shadow-2xl max-w-2xl w-full overflow-hidden max-h-[90vh] flex flex-col">
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50 shrink-0">
+                <div>
+                  <h3 className="text-2xl font-black text-primary tracking-tight">Edit Customer</h3>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">{selectedCustomer.id}</p>
+                </div>
+                <button onClick={() => setShowEditModal(false)} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-slate-400">close</span>
+                </button>
+              </div>
+              <div className="p-8 space-y-5 overflow-y-auto flex-1">
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Full Name *</label>
+                  <input
+                    value={editForm.name}
+                    onChange={(e) => setEditForm(prev => ({ ...prev, name: e.target.value }))}
+                    className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Email</label>
+                    <input
+                      value={editForm.email}
+                      onChange={(e) => setEditForm(prev => ({ ...prev, email: e.target.value }))}
+                      className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20"
+                      type="email"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Phone</label>
+                    <input
+                      value={editForm.phone}
+                      onChange={(e) => setEditForm(prev => ({ ...prev, phone: e.target.value }))}
+                      className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-3 gap-4">
+                  <div>
+                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Phone Label</label>
+                    <select
+                      value={editForm.phoneLabel}
+                      onChange={(e) => setEditForm(prev => ({ ...prev, phoneLabel: e.target.value }))}
+                      className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20 appearance-none"
+                    >
+                      <option>Mobile</option><option>Home</option><option>Work</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Group</label>
+                    <select
+                      value={editForm.group}
+                      onChange={(e) => setEditForm(prev => ({ ...prev, group: e.target.value }))}
+                      className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20 appearance-none"
+                    >
+                      <option>Retail</option><option>VIP Corporate</option><option>Wholesale</option><option>Walk-in</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Campaigner</label>
+                    <select
+                      value={editForm.campaignerStatus}
+                      onChange={(e) => setEditForm(prev => ({ ...prev, campaignerStatus: e.target.value as any }))}
+                      className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20 appearance-none"
+                    >
+                      <option>Subscribed</option><option>Unsubscribed</option><option>Pending</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Loyalty Tier</label>
+                    <select
+                      value={editForm.tier}
+                      onChange={(e) => setEditForm(prev => ({ ...prev, tier: e.target.value as any }))}
+                      className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20 appearance-none"
+                    >
+                      <option>Bronze</option><option>Silver</option><option>Gold</option><option>Platinum</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Loyalty Points</label>
+                    <input
+                      type="number"
+                      value={editForm.loyaltyPoints}
+                      onChange={(e) => setEditForm(prev => ({ ...prev, loyaltyPoints: parseInt(e.target.value) || 0 }))}
+                      className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Address</label>
+                  <input
+                    value={editForm.address}
+                    onChange={(e) => setEditForm(prev => ({ ...prev, address: e.target.value }))}
+                    className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20"
+                    placeholder="Street, City, State, ZIP"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Tags (comma-separated)</label>
+                  <input
+                    value={editForm.tags}
+                    onChange={(e) => setEditForm(prev => ({ ...prev, tags: e.target.value }))}
+                    className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20"
+                    placeholder="VIP, Corporate, Bulk..."
+                  />
+                </div>
+                <div className="flex gap-6">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={editForm.gdprCompliant} onChange={(e) => setEditForm(prev => ({ ...prev, gdprCompliant: e.target.checked }))} className="w-4 h-4 rounded border-slate-300 text-primary focus:ring-primary" />
+                    <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">GDPR Compliant</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={editForm.thirdPartyBilling} onChange={(e) => setEditForm(prev => ({ ...prev, thirdPartyBilling: e.target.checked }))} className="w-4 h-4 rounded border-slate-300 text-primary focus:ring-primary" />
+                    <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Third-Party Billing</span>
+                  </label>
+                </div>
+              </div>
+              <div className="p-8 border-t border-slate-100 flex justify-end gap-4 shrink-0">
+                <button onClick={() => setShowEditModal(false)} className="px-8 py-3 bg-slate-100 text-slate-600 font-black text-xs rounded-2xl uppercase tracking-widest hover:bg-slate-200 transition-all">
+                  Cancel
+                </button>
+                <button onClick={handleSaveEdit} disabled={!editForm.name.trim()} className="px-8 py-3 bg-primary text-white font-black text-xs rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all disabled:opacity-50">
+                  Save Changes
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showLoyaltyEdit && selectedCustomer && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[110] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[3rem] shadow-2xl max-w-md w-full p-8">
+              <div className="flex justify-between items-center mb-8">
+                <div>
+                  <h3 className="text-2xl font-black text-primary tracking-tight">Manage Loyalty</h3>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">{selectedCustomer.name}</p>
+                </div>
+                <button onClick={() => setShowLoyaltyEdit(false)} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-slate-400">close</span>
+                </button>
+              </div>
+              <div className="space-y-5">
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Tier</label>
+                  <select
+                    value={loyaltyForm.tier}
+                    onChange={(e) => setLoyaltyForm(prev => ({ ...prev, tier: e.target.value as Customer['tier'] }))}
+                    className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20 appearance-none"
+                  >
+                    <option>Bronze</option><option>Silver</option><option>Gold</option><option>Platinum</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Points Balance</label>
+                  <input
+                    type="number"
+                    value={loyaltyForm.points}
+                    onChange={(e) => setLoyaltyForm(prev => ({ ...prev, points: parseInt(e.target.value) || 0 }))}
+                    className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20"
+                  />
+                </div>
+                <div className="flex gap-4 pt-4">
+                  <button onClick={() => setShowLoyaltyEdit(false)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-black text-xs rounded-2xl uppercase tracking-widest hover:bg-slate-200 transition-all">
+                    Cancel
+                  </button>
+                  <button onClick={handleSaveLoyalty} className="flex-1 py-3 bg-primary text-white font-black text-xs rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all">
+                    Save
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {invoiceDetailData && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[110] flex items-center justify-center bg-primary/40 backdrop-blur-md p-4">
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} className="bg-white rounded-[3rem] shadow-2xl max-w-2xl w-full overflow-hidden max-h-[85vh] flex flex-col">
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50 shrink-0">
+                <div>
+                  <h3 className="text-2xl font-black text-primary tracking-tight">{invoiceDetailData.invoiceNumber}</h3>
+                  <div className="flex items-center gap-3 mt-1">
+                    <span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg ${getStatusColor(invoiceDetailData.status)}`}>
+                      {invoiceDetailData.status}
+                    </span>
+                    <span className="text-xs font-bold text-slate-400">{invoiceDetailData.createdAt}</span>
+                  </div>
+                </div>
+                <button onClick={() => setInvoiceDetailData(null)} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-slate-400">close</span>
+                </button>
+              </div>
+              <div className="p-8 overflow-y-auto flex-1 space-y-6">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Customer</p>
+                    <p className="text-sm font-black text-primary mt-1">{invoiceDetailData.customerName}</p>
+                    {invoiceDetailData.customerEmail && <p className="text-[10px] font-bold text-slate-400 mt-0.5">{invoiceDetailData.customerEmail}</p>}
+                  </div>
+                  <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Balance Due</p>
+                    <p className="text-xl font-black text-rose-500 mt-1">${invoiceDetailData.balance.toFixed(2)}</p>
+                  </div>
+                </div>
+                <div>
+                  <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Line Items</h4>
+                  <div className="space-y-2">
+                    {invoiceDetailData.items.map(item => (
+                      <div key={item.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-100">
+                        <div className="flex items-center gap-3">
+                          <span className={`px-2 py-0.5 rounded text-[8px] font-black uppercase ${
+                            item.type === 'repair' ? 'bg-blue-100 text-blue-700' :
+                            item.type === 'service' ? 'bg-violet-100 text-violet-700' :
+                            'bg-slate-100 text-slate-600'
+                          }`}>{item.type}</span>
+                          <span className="text-sm font-bold text-slate-700">{item.name}</span>
+                        </div>
+                        <div className="text-right">
+                          <span className="text-xs font-bold text-slate-400">{item.quantity} × ${item.price.toFixed(2)}</span>
+                          <span className="ml-3 text-sm font-black text-primary">${(item.quantity * item.price).toFixed(2)}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="pt-4 border-t border-slate-100 space-y-2">
+                  <div className="flex justify-between text-sm"><span className="text-slate-500 font-bold">Subtotal</span><span className="font-black text-slate-900">${invoiceDetailData.subtotal.toFixed(2)}</span></div>
+                  {invoiceDetailData.discount > 0 && (
+                    <div className="flex justify-between text-sm"><span className="text-emerald-500 font-bold">Discount</span><span className="font-black text-emerald-600">-${invoiceDetailData.discount.toFixed(2)}</span></div>
+                  )}
+                  <div className="flex justify-between text-sm"><span className="text-slate-500 font-bold">Tax</span><span className="font-black text-slate-900">${invoiceDetailData.tax.toFixed(2)}</span></div>
+                  <div className="flex justify-between text-lg pt-2 border-t border-slate-100"><span className="font-black text-primary">Total</span><span className="font-black text-primary">${invoiceDetailData.total.toFixed(2)}</span></div>
+                </div>
+                {invoiceDetailData.paymentHistory.length > 0 && (
+                  <div>
+                    <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Payment History</h4>
+                    <div className="space-y-2">
+                      {invoiceDetailData.paymentHistory.map(pay => (
+                        <div key={pay.id} className="flex items-center justify-between p-3 bg-emerald-50 rounded-xl border border-emerald-100">
+                          <div className="flex items-center gap-2">
+                            <span className="material-symbols-outlined text-emerald-600 text-sm">check_circle</span>
+                            <span className="text-sm font-black text-emerald-700">${pay.amount.toFixed(2)}</span>
+                            <span className="text-[10px] font-bold text-emerald-500 uppercase">{pay.method}</span>
+                          </div>
+                          <span className="text-[10px] font-bold text-slate-400">{pay.timestamp}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="p-6 border-t border-slate-100 flex justify-end shrink-0">
+                <button onClick={() => { setInvoiceDetailData(null); navigate('/invoices'); }} className="px-6 py-2.5 bg-primary text-white rounded-xl font-black text-xs uppercase tracking-widest shadow-lg shadow-primary/20 hover:bg-primary/90 active:scale-95 transition-all flex items-center gap-2">
+                  <span className="material-symbols-outlined text-sm">receipt_long</span>
+                  Open in Invoices
                 </button>
               </div>
             </motion.div>
