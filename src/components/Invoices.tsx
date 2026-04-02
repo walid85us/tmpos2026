@@ -6,7 +6,8 @@ import type { Invoice, RepairService } from '../types';
 
 export default function Invoices() {
   const { invoices, addInvoice, updateInvoice, customers, services, serviceCategories, approvedStockItems } = useStoreLocalState();
-  const { checkPermission } = useAccess();
+  const { checkPermission, checkSubPermission } = useAccess();
+  const canReopenInvoice = checkSubPermission('reopen_invoice');
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('All');
 
@@ -45,6 +46,7 @@ export default function Invoices() {
   const [paymentAmount, setPaymentAmount] = useState(0);
   const [paymentMethod, setPaymentMethod] = useState('Cash');
   const [terminalState, setTerminalState] = useState<'idle' | 'pending_terminal' | 'confirmed' | 'failed' | 'cancelled'>('idle');
+  const [cashConfirmPending, setCashConfirmPending] = useState(false);
 
   const [emailForm, setEmailForm] = useState({ to: '', subject: '', body: '' });
   const [smsBody, setSmsBody] = useState('');
@@ -203,6 +205,10 @@ export default function Invoices() {
   const handleApplyPayment = useCallback(() => {
     if (!detailInvoice || paymentAmount <= 0) return;
     if (paymentMethod === 'Card Terminal' && terminalState !== 'confirmed') return;
+    if (paymentMethod === 'Cash' && !cashConfirmPending) {
+      setCashConfirmPending(true);
+      return;
+    }
     const newPaid = detailInvoice.amountPaid + paymentAmount;
     const newBalance = Math.max(0, Math.round((detailInvoice.total - newPaid) * 100) / 100);
     const newStatus: Invoice['status'] = newBalance <= 0 ? 'Paid' : 'Partially Paid';
@@ -216,13 +222,24 @@ export default function Invoices() {
     setPaymentAmount(0);
     setPaymentMethod('Cash');
     setTerminalState('idle');
-  }, [detailInvoice, paymentAmount, paymentMethod, terminalState, updateInvoice]);
+    setCashConfirmPending(false);
+  }, [detailInvoice, paymentAmount, paymentMethod, terminalState, cashConfirmPending, updateInvoice]);
+
+  const handleReopenInvoice = useCallback(() => {
+    if (!detailInvoice || !canReopenInvoice) return;
+    updateInvoice(detailInvoice.id, { status: 'Unpaid' });
+    setDetailInvoice(prev => prev ? { ...prev, status: 'Unpaid' } : null);
+  }, [detailInvoice, canReopenInvoice, updateInvoice]);
+
+  const terminalTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleTerminalSend = useCallback(() => {
     if (paymentAmount <= 0) return;
     setTerminalState('pending_terminal');
-    setTimeout(() => {
-      setTerminalState('confirmed');
+    if (terminalTimerRef.current) clearTimeout(terminalTimerRef.current);
+    terminalTimerRef.current = setTimeout(() => {
+      setTerminalState(prev => prev === 'pending_terminal' ? 'confirmed' : prev);
+      terminalTimerRef.current = null;
     }, 3000);
   }, [paymentAmount]);
 
@@ -622,6 +639,12 @@ export default function Invoices() {
                       </button>
                     </>
                   )}
+                  {canReopenInvoice && (detailInvoice.status === 'Paid' || detailInvoice.status === 'Cancelled') && (
+                    <button onClick={handleReopenInvoice}
+                      className="px-4 py-2 bg-amber-500 text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-amber-500/20 hover:bg-amber-600 active:scale-95 transition-all flex items-center gap-1.5">
+                      <span className="material-symbols-outlined text-sm">lock_open</span> Reopen Invoice
+                    </button>
+                  )}
                   <button onClick={() => setShowPrintModal(true)}
                     className="px-4 py-2 bg-white text-slate-600 border border-slate-200 rounded-xl font-black text-[10px] uppercase tracking-widest shadow-sm hover:bg-slate-50 transition-all flex items-center gap-1.5">
                     <span className="material-symbols-outlined text-sm">print</span> Print
@@ -723,7 +746,7 @@ export default function Invoices() {
       <AnimatePresence>
         {showPaymentModal && detailInvoice && (
           <div className="fixed inset-0 z-[60] flex items-center justify-center p-6">
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => { setShowPaymentModal(false); setTerminalState('idle'); setPaymentAmount(0); setPaymentMethod('Cash'); }} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => { setShowPaymentModal(false); setTerminalState('idle'); setPaymentAmount(0); setPaymentMethod('Cash'); setCashConfirmPending(false); }} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
             <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }}
               className="relative w-full max-w-lg bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden">
               <div className="p-8 border-b border-slate-100 bg-slate-50/50">
@@ -732,7 +755,7 @@ export default function Invoices() {
                     <h3 className="text-2xl font-black text-primary tracking-tight">Process Payment</h3>
                     <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Invoice: {detailInvoice.invoiceNumber}</p>
                   </div>
-                  <button onClick={() => { setShowPaymentModal(false); setTerminalState('idle'); setPaymentAmount(0); setPaymentMethod('Cash'); }} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <button onClick={() => { setShowPaymentModal(false); setTerminalState('idle'); setPaymentAmount(0); setPaymentMethod('Cash'); setCashConfirmPending(false); }} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
                     <span className="material-symbols-outlined text-slate-400">close</span>
                   </button>
                 </div>
@@ -811,16 +834,22 @@ export default function Invoices() {
                         </div>
                         <p className="text-sm font-black text-amber-700">Waiting for Terminal...</p>
                         <p className="text-[10px] font-bold text-amber-500">Customer is completing payment on the card terminal</p>
-                        <button onClick={() => setTerminalState('cancelled')} className="px-6 py-2 bg-amber-100 text-amber-700 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-amber-200 transition-all">Cancel</button>
+                        <button onClick={() => { if (terminalTimerRef.current) { clearTimeout(terminalTimerRef.current); terminalTimerRef.current = null; } setTerminalState('cancelled'); }} className="px-6 py-2 bg-amber-100 text-amber-700 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-amber-200 transition-all">Cancel</button>
                       </div>
                     )}
                     {terminalState === 'confirmed' && (
-                      <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center gap-3">
-                        <span className="material-symbols-outlined text-emerald-600">check_circle</span>
-                        <div>
-                          <p className="text-sm font-black text-emerald-700">Terminal Payment Confirmed</p>
-                          <p className="text-[10px] font-bold text-emerald-500">${paymentAmount.toFixed(2)} authorized</p>
+                      <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl space-y-2">
+                        <div className="flex items-center gap-3">
+                          <span className="material-symbols-outlined text-emerald-600">check_circle</span>
+                          <div>
+                            <p className="text-sm font-black text-emerald-700">Terminal Payment Confirmed</p>
+                            <p className="text-[10px] font-bold text-emerald-500">${paymentAmount.toFixed(2)} authorized</p>
+                          </div>
                         </div>
+                        <button onClick={() => setTerminalState('idle')}
+                          className="px-6 py-2 bg-rose-100 text-rose-700 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-rose-200 transition-all">
+                          Cancel / Reject
+                        </button>
                       </div>
                     )}
                     {terminalState === 'failed' && (
@@ -843,7 +872,26 @@ export default function Invoices() {
                     )}
                   </div>
                 )}
-                <button onClick={handleApplyPayment} disabled={paymentAmount <= 0 || (paymentMethod === 'Card Terminal' && terminalState !== 'confirmed')}
+                {cashConfirmPending && paymentMethod === 'Cash' && (
+                  <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl space-y-3">
+                    <div className="flex items-center gap-2">
+                      <span className="material-symbols-outlined text-amber-600">warning</span>
+                      <p className="text-sm font-black text-amber-700">Confirm Cash Received</p>
+                    </div>
+                    <p className="text-xs font-bold text-amber-600">Have you received ${paymentAmount.toFixed(2)} in cash from the customer?</p>
+                    <div className="flex gap-2">
+                      <button onClick={handleApplyPayment}
+                        className="flex-1 py-2.5 bg-emerald-500 text-white font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-emerald-600 active:scale-95 transition-all">
+                        Yes, Cash Received
+                      </button>
+                      <button onClick={() => setCashConfirmPending(false)}
+                        className="flex-1 py-2.5 bg-slate-100 text-slate-600 font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-slate-200 transition-all">
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+                <button onClick={handleApplyPayment} disabled={paymentAmount <= 0 || (paymentMethod === 'Card Terminal' && terminalState !== 'confirmed') || cashConfirmPending}
                   className="w-full py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed">
                   Apply Payment — ${paymentAmount.toFixed(2)}
                 </button>
@@ -939,6 +987,22 @@ export default function Invoices() {
                         </div>
                       ))}
                     </div>
+                  </div>
+                )}
+                {(detailInvoice.notes || detailInvoice.terms) && (
+                  <div className="mt-6 pt-4 border-t border-slate-200 grid grid-cols-2 gap-6 text-xs">
+                    {detailInvoice.notes && (
+                      <div>
+                        <p className="font-black text-slate-400 text-[8px] uppercase tracking-widest mb-1">Notes</p>
+                        <p className="text-slate-600">{detailInvoice.notes}</p>
+                      </div>
+                    )}
+                    {detailInvoice.terms && (
+                      <div>
+                        <p className="font-black text-slate-400 text-[8px] uppercase tracking-widest mb-1">Terms & Conditions</p>
+                        <p className="text-slate-600">{detailInvoice.terms}</p>
+                      </div>
+                    )}
                   </div>
                 )}
                 <div className="mt-8 pt-4 border-t border-slate-100 text-center">

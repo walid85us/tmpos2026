@@ -60,21 +60,39 @@
     left: 0;
     top: 0;
     width: 100%;
-    padding: 2.5rem 3rem;
+    padding: 2rem 2.5rem;
     background: white !important;
-    font-size: 11pt;
+    font-size: 10pt;
+    line-height: 1.4;
   }
   #printable-invoice table {
     border-collapse: collapse;
     width: 100%;
+    page-break-inside: avoid;
   }
   #printable-invoice table th,
   #printable-invoice table td {
     border-bottom: 1px solid #e2e8f0;
-    padding: 8px 4px;
+    padding: 6px 4px;
+  }
+  #printable-invoice table thead th {
+    border-bottom: 2px solid #003633;
+    font-size: 8pt;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  #printable-invoice .rounded-2xl,
+  #printable-invoice .rounded-xl,
+  #printable-invoice .rounded-lg {
+    border-radius: 0 !important;
+    border: 1px solid #cbd5e1 !important;
+    background: #f8fafc !important;
+  }
+  #printable-invoice h2 {
+    font-size: 18pt;
   }
   @page {
-    margin: 0.75in;
+    margin: 0.6in 0.75in;
     size: letter;
   }
 }

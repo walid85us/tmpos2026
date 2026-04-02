@@ -1,0 +1,194 @@
+Customers, Loyalty, Payments, Print & Warranty — Narrow QA Correction Pass 4
+
+Read `replit.md` and `Ref.txt` first and treat them as source-of-truth constraints before making any changes.
+
+This is NOT a redesign and NOT a new workstream.
+This is a narrow correction pass based only on the remaining QA failures and partial failures after the prior correction pass.
+
+Expert-role stack
+- Principal SaaS Product Architect for multi-tenant repair/POS workflows
+- Staff React 19 + TypeScript + Vite engineer
+- Firebase / Firestore data-model and state-flow architect
+- Auth / RBAC / lifecycle gating specialist
+- UX systems designer preserving the existing premium glassmorphism baseline
+- Payment state-machine / terminal flow architect
+- Print/document-output architect
+- QA-driven refactor auditor
+- Side auditor and systems thinker at all times
+
+Operating posture
+- Act as a side auditor and systems thinker throughout.
+- Audit ripple effects before editing.
+- Fix only the remaining failed or partial QA items deeply and coherently.
+- Preserve current design baseline exactly.
+- Preserve auth, preview mode, RBAC, lifecycle gating, and platform/store hierarchy.
+- Preserve tenant isolation and store scoping.
+- Reuse the existing modal/drawer/table/toast/permission/sub-permission patterns.
+- Do not reopen completed workstreams except for narrow compatibility-safe fixes required by this pass.
+- Do not make changes to folder `Z`.
+- Do not make changes to file `Y`.
+
+Remaining corrections to implement
+
+A) Customer list cleanup parity
+1. Customer list row/header placeholder cleanup
+- the customer profile placeholder/photo space was only partially cleaned up
+- implement the same cleanup logic in the customer page list/table/card rows
+- remove any empty avatar/icon/photo placeholder space there as well
+- reflow layout cleanly so the customer list shows only useful operational information
+
+B) Loyalty permission behavior
+1. Loyalty management sub-permission must actually work
+- the loyalty-related sub-permission exists, but granting it to Manager does not expose working loyalty controls correctly
+- fix the permission wiring so that:
+  - if user has the loyalty sub-permission under Customers, they can access and use loyalty management functions appropriate to their role
+  - if user does not have the loyalty sub-permission, they can still view customer profile if allowed by broader customer permissions, but they must not be able to edit loyalty tier or loyalty points
+- implement clear read-only vs editable behavior for loyalty controls in customer profile and loyalty management surfaces
+- keep Store Owner behavior consistent with current permission rules
+
+2. Loyalty edit controls in customer profile
+- when permission is granted:
+  - loyalty tier dropdown and loyalty points controls must be editable
+- when permission is not granted:
+  - loyalty tier dropdown and loyalty points controls must be disabled or read-only
+  - no broken controls or misleading edit affordances
+
+C) Loyalty Plans & Features enforcement
+1. Plan gating must actually block store access
+- the feature state persistence improved, but store owner can still access loyalty management even when the feature is disabled for the tenant’s plan
+- fix the runtime feature enforcement so that:
+  - if Loyalty Management is disabled for the active plan, store-side loyalty management access is blocked
+  - store owner and store staff should see a clear gated/locked or unavailable state, not a working management screen
+- preserve a distinction between:
+  - platform/system owner managing plan definitions in Platform Command Center
+  - tenant/store users consuming only features enabled for their plan
+
+D) Duplicate detection hardening
+1. Duplicate check must also consider customer name
+- current duplicate logic must be extended so warnings can also trigger from strong same-name matches, in addition to phone/email logic
+- do this carefully to avoid excessive false positives
+- design a sensible matching rule such as:
+  - strong exact or normalized full-name match plus one supporting signal if available
+  - still keep phone/email as strongest identifiers
+- preserve the previously approved merge/update behavior and separate-new-customer rules
+
+E) Invoice terminal flow completion
+1. Explicit Cancel / Reject button after terminal confirmation
+- once Card Terminal payment reaches the terminal-confirmed step and Apply Payment is shown:
+  - add an explicit Cancel / Reject button next to Apply Payment
+  - clicking Cancel / Reject must:
+    - discard that pending terminal confirmation
+    - return user to invoice details or restartable state
+    - require starting the terminal flow over again if they want to retry
+- do not rely only on closing the modal with X
+
+2. Terminal state reset and testability
+- keep close-window-equals-cancel behavior
+- add explicit UI states so cancelled/rejected terminal flow can be tested directly
+- ensure cancelled/rejected flow clears stale terminal-confirmed state and does not leave accidental payment-ready UI behind
+
+F) Cash payment confirmation and controlled reopen
+1. Cash payment confirmation
+- when user applies a cash payment, show an explicit confirmation step that cash was received
+- this should be in-app, clear, and intentional
+- only after confirmation should the cash payment finalize
+
+2. Reopen invoice after cash payment
+- if cash payment was confirmed by mistake, authorized users must have a controlled way to reopen the invoice
+- add a dedicated sub-permission under the Invoice module for reopening invoices after cash payment confirmation
+- if current operator lacks this permission, require approval flow / supervisor authorization as appropriate to current app patterns
+- reopening must be controlled, auditable in UX/state terms, and must not silently corrupt payment history
+
+G) Invoice print output final refinement
+1. Fix the remaining print issue
+- the invoice layout improved visually, but it still fails the real acceptance requirement
+- audit what is still wrong in the print output and fix it fully
+- likely issues to inspect and solve:
+  - print scaling
+  - excess whitespace
+  - page positioning
+  - page-break/page-size CSS
+  - invoice container width/centering
+  - header/body/footer spacing
+  - PDF/full-page rendering vs receipt rendering separation
+- the final print result must feel like a true professional business invoice
+
+2. Output modes
+- if printing as PDF/full page:
+  - render a polished full-page invoice with correct spacing and density
+- if printing to receipt printer:
+  - render a true receipt-style narrow format
+- do not let one format inherit broken layout assumptions from the other
+- do not print surrounding app chrome or sparse unusable output
+
+H) Warranty listing and expired warranty testing fix
+1. Warranty-start listing must include expired covered items
+- when starting a warranty process:
+  - include warranty-covered active items
+  - include warranty-covered expired items
+  - exclude non-warranty items
+- expired items must be clearly labeled as expired
+
+2. Ensure expired items are actually testable
+- the current build is not surfacing expired warranty items for testing
+- audit the data/query/filter logic and fix it so expired warranty-covered records are returned correctly
+- if preview/demo/mock data needs adjustment to make expired warranty scenarios testable, seed the minimum clean data necessary
+
+3. Normal-user expired warranty block
+- once expired warranty items are visible:
+  - normal users without exception permission must be blocked from proceeding
+  - messaging must clearly explain expired warranty status
+
+4. Existing expired-warranty exception flow
+- keep the expired warranty exception sub-permission already added
+- keep supervisor PIN approval flow
+- make sure both can be fully exercised now that expired warranty items are visible in the list
+
+Required design and behavior rules
+- Use only in-app modals/drawers/menus/flows for corrected behaviors
+- Preserve the current premium glassmorphism design baseline exactly
+- Maintain keyboard accessibility and clear blocked/save/error states
+- Keep state paths unified
+- Avoid duplicate parallel systems
+- Ensure all corrected flows work in preview/demo mode
+- Maintain store scoping and tenant safety
+- Keep type safety strong
+- Update `replit.md` for all final corrections introduced by this pass
+
+Non-goals
+- No broad redesign
+- No full live payment terminal/email/SMS backend implementation if backend is not yet active
+- No repair module overhaul
+- No unrelated reopening of earlier approved workstreams
+
+Definition of done
+This correction pass is done only if:
+- customer list placeholder/photo space is fully removed
+- loyalty sub-permission works correctly for non-owner roles
+- loyalty edit controls are permission-aware in customer profile
+- loyalty plan gating blocks store-side access when disabled by plan
+- duplicate warning also works for name-based duplicate scenarios with sensible rules
+- terminal-confirmed state has explicit Cancel / Reject next to Apply Payment
+- cancelled/rejected terminal states reset cleanly
+- cash payment requires clear received-cash confirmation
+- invoice reopen after cash payment is controlled by a dedicated invoice sub-permission / approval path
+- invoice print output is fully professional and target-aware
+- expired warranty-covered items appear for testing
+- normal users are blocked on expired warranty
+- expired warranty permission and supervisor approval can be tested end to end
+- no regressions are introduced in POS, invoices, loyalty, customers, warranty, auth, preview mode, RBAC, or store hierarchy
+- `replit.md` is updated to reflect all corrections
+
+Required final response format
+Return your completion report in exactly this structure:
+
+1. Files Changed
+2. Corrections Implemented
+3. Loyalty Permission and Plan-Gating Fixes
+4. Duplicate Detection Logic
+5. Terminal / Cash Payment Workflow Changes
+6. Invoice Reopen Permission Flow
+7. Invoice Print Output Fixes
+8. Warranty Listing and Exception Flow
+9. Non-Regressions Confirmed
+10. Manual QA Retest Areas

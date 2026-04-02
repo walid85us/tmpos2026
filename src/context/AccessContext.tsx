@@ -254,7 +254,20 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       const normalizedFeature = feature === 'supply-chain' ? 'supply_chain' : feature;
 
       if (!isAdminPerm && activated) {
-        const features = planFeatures[tenant.plan];
+        let features = planFeatures[tenant.plan];
+        try {
+          const storedFeatures = sessionStorage.getItem('features_data');
+          if (storedFeatures) {
+            const parsed = JSON.parse(storedFeatures);
+            const planEntry = parsed.find((f: { planId: string }) => f.planId === tenant.plan);
+            if (planEntry && Array.isArray(planEntry.features)) {
+              const enabledIds = planEntry.features
+                .filter((f: { enabled: boolean }) => f.enabled)
+                .map((f: { id: string }) => f.id);
+              features = enabledIds;
+            }
+          }
+        } catch {}
         if (!features.includes(feature)) return false;
       }
 

@@ -98,8 +98,9 @@ export default function Customers() {
     const next = { ...newCustomerForm, [field]: value };
     setNewCustomerForm(next);
     setDuplicateOverride(false);
-    if (field === 'email' || field === 'phone') {
-      const dupes = findDuplicateCustomers('', next.email, next.phone);
+    if (field === 'email' || field === 'phone' || field === 'firstName' || field === 'lastName') {
+      const fullName = `${next.firstName} ${next.lastName}`.trim();
+      const dupes = findDuplicateCustomers(fullName, next.email, next.phone);
       setDuplicateWarning(dupes);
     }
   };
@@ -186,14 +187,16 @@ export default function Customers() {
       phone: editForm.phone,
       phoneLabel: editForm.phoneLabel,
       group: editForm.group,
-      tier: editForm.tier,
-      loyaltyPoints: editForm.loyaltyPoints,
       address: editForm.address || undefined,
       tags: editForm.tags.split(',').map(t => t.trim()).filter(Boolean),
       gdprCompliant: editForm.gdprCompliant,
       campaignerStatus: editForm.campaignerStatus,
       thirdPartyBilling: editForm.thirdPartyBilling,
     };
+    if (canManageLoyalty) {
+      updates.tier = editForm.tier;
+      updates.loyaltyPoints = editForm.loyaltyPoints;
+    }
     updateCustomer(selectedCustomer.id, updates);
     setSelectedCustomer(prev => prev ? { ...prev, ...updates } : null);
     setShowEditModal(false);
@@ -324,9 +327,6 @@ export default function Customers() {
               >
                 <td className="p-6">
                   <div className="flex items-center gap-4">
-                    <div className="w-12 h-12 rounded-2xl bg-slate-100 overflow-hidden border-2 border-white shadow-sm flex items-center justify-center">
-                      <span className="material-symbols-outlined text-2xl text-primary/40">person</span>
-                    </div>
                     <div>
                       <p className="font-black text-primary tracking-tight">{customer.name}</p>
                       <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{customer.id}</p>
@@ -966,7 +966,8 @@ export default function Customers() {
                     <select
                       value={editForm.tier}
                       onChange={(e) => setEditForm(prev => ({ ...prev, tier: e.target.value as any }))}
-                      className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20 appearance-none"
+                      disabled={!canManageLoyalty}
+                      className={`w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20 appearance-none ${!canManageLoyalty ? 'opacity-50 cursor-not-allowed' : ''}`}
                     >
                       {loyaltyConfig.tiers.filter(t => t.status === 'active').map(t => (
                         <option key={t.id} value={t.name}>{t.name}</option>
@@ -975,6 +976,7 @@ export default function Customers() {
                         <option value={editForm.tier}>{editForm.tier} (inactive)</option>
                       )}
                     </select>
+                    {!canManageLoyalty && <p className="text-[9px] text-amber-500 font-bold mt-1">Requires Manage Loyalty permission</p>}
                   </div>
                   <div>
                     <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Loyalty Points</label>
@@ -982,8 +984,10 @@ export default function Customers() {
                       type="number"
                       value={editForm.loyaltyPoints}
                       onChange={(e) => setEditForm(prev => ({ ...prev, loyaltyPoints: parseInt(e.target.value) || 0 }))}
-                      className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20"
+                      disabled={!canManageLoyalty}
+                      className={`w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20 ${!canManageLoyalty ? 'opacity-50 cursor-not-allowed' : ''}`}
                     />
+                    {!canManageLoyalty && <p className="text-[9px] text-amber-500 font-bold mt-1">Requires Manage Loyalty permission</p>}
                   </div>
                 </div>
                 <div>

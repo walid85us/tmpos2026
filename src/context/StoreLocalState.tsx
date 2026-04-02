@@ -246,6 +246,26 @@ const SEED_COMPLETED_ORDERS: CompletedOrder[] = [
     payments: [{ method: 'Cash', amount: 100.00 }, { method: 'Card Terminal', amount: 122.13 }],
     status: 'Paid', createdAt: '2026-03-12T16:20:00Z', operatorName: 'Alexander W.',
   },
+  {
+    id: 'ord-005', invoiceNumber: 'INV-1005', customerId: 'c1', customerName: 'Alexander Wright', customerPhone: '555-0123', customerEmail: 'alex@example.com',
+    items: [
+      { id: 'oi-8', name: 'iPhone 12 Back Glass Repair', qty: 1, unitPrice: 149.00, type: 'repair', warrantyPeriod: '90 days' },
+      { id: 'oi-9', name: 'Lightning Cable', qty: 1, unitPrice: 14.99, type: 'product', warrantyPeriod: '30 days' },
+    ],
+    subtotal: 163.99, discountTotal: 0, tax: 13.53, total: 177.52,
+    payments: [{ method: 'Cash', amount: 177.52 }],
+    status: 'Paid', createdAt: '2025-11-15T10:30:00Z', operatorName: 'Sarah J.',
+  },
+  {
+    id: 'ord-006', invoiceNumber: 'INV-1006', customerId: 'c3', customerName: 'Mike Rodriguez', customerPhone: '555-0789', customerEmail: 'mike@example.com',
+    items: [
+      { id: 'oi-10', name: 'Samsung Galaxy S20 Screen Replacement', qty: 1, unitPrice: 179.00, type: 'repair', warrantyPeriod: '90 days' },
+      { id: 'oi-11', name: 'Wireless Charger Pad', qty: 1, unitPrice: 29.99, type: 'product', warrantyPeriod: '30 days' },
+    ],
+    subtotal: 208.99, discountTotal: 0, tax: 17.24, total: 226.23,
+    payments: [{ method: 'Card Terminal', amount: 226.23 }],
+    status: 'Paid', createdAt: '2025-10-20T14:00:00Z', operatorName: 'Mike R.',
+  },
 ];
 
 const SEED_POS_OPERATORS: POSOperator[] = [
@@ -542,9 +562,17 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const findDuplicateCustomers = useCallback((name: string, email: string, phone: string) => {
     const e = email.trim().toLowerCase();
     const p = phone.trim();
+    const n = name.trim().toLowerCase().replace(/\s+/g, ' ');
     return customers.filter(c => {
       if (e && c.email.toLowerCase() === e) return true;
       if (p && c.phone === p) return true;
+      if (n && n.length >= 3) {
+        const cn = c.name.trim().toLowerCase().replace(/\s+/g, ' ');
+        if (cn === n) {
+          if (e || p) return true;
+          if (!e && !p) return true;
+        }
+      }
       return false;
     });
   }, [customers]);
