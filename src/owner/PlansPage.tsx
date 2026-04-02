@@ -4,9 +4,9 @@ import { motion, AnimatePresence } from 'motion/react';
 import { plans as initialPlans, featureMatrix as initialFeatures, addOns as initialAddOns } from './mockData';
 import type { FeatureLifecycle, AddOnLifecycle } from './mockData';
 
-type PlanData = typeof initialPlans[0];
+type PlanData = Omit<typeof initialPlans[0], 'status'> & { status: 'active' | 'archived' };
 type FeatureData = { id: string; name: string; planAvailability: Record<string, boolean>; source: 'inherited' | 'custom'; lifecycle: FeatureLifecycle };
-type AddOnData = typeof initialAddOns[0];
+type AddOnData = Omit<typeof initialAddOns[0], 'status'> & { status: 'active' | 'archived' };
 
 const LIFECYCLE_ORDER: FeatureLifecycle[] = ['draft', 'planned', 'in_development', 'implemented', 'deprecated', 'archived'];
 const ADDON_LIFECYCLE_ORDER: AddOnLifecycle[] = ['draft', 'planned', 'in_development', 'active', 'deprecated', 'archived'];
@@ -53,9 +53,19 @@ const PlansPage: React.FC = () => {
     setActiveTab(tab);
     setSearchParams({ tab });
   };
-  const [plansData, setPlansData] = useState([...initialPlans]);
-  const [featuresData, setFeaturesData] = useState<FeatureData[]>([...initialFeatures]);
-  const [addOnsData, setAddOnsData] = useState([...initialAddOns]);
+  const [plansData, setPlansData] = useState(() => {
+    try { const saved = sessionStorage.getItem('plans_data'); return saved ? JSON.parse(saved) : [...initialPlans]; } catch { return [...initialPlans]; }
+  });
+  const [featuresData, setFeaturesData] = useState<FeatureData[]>(() => {
+    try { const saved = sessionStorage.getItem('features_data'); return saved ? JSON.parse(saved) : [...initialFeatures]; } catch { return [...initialFeatures]; }
+  });
+  const [addOnsData, setAddOnsData] = useState(() => {
+    try { const saved = sessionStorage.getItem('addons_data'); return saved ? JSON.parse(saved) : [...initialAddOns]; } catch { return [...initialAddOns]; }
+  });
+
+  useEffect(() => { try { sessionStorage.setItem('plans_data', JSON.stringify(plansData)); } catch {} }, [plansData]);
+  useEffect(() => { try { sessionStorage.setItem('features_data', JSON.stringify(featuresData)); } catch {} }, [featuresData]);
+  useEffect(() => { try { sessionStorage.setItem('addons_data', JSON.stringify(addOnsData)); } catch {} }, [addOnsData]);
   const [showPlanModal, setShowPlanModal] = useState(false);
   const [editingPlan, setEditingPlan] = useState<PlanData | null>(null);
   const [showArchiveConfirm, setShowArchiveConfirm] = useState<string | null>(null);
@@ -95,10 +105,13 @@ const PlansPage: React.FC = () => {
       id: editingPlan?.id || planForm.name.toLowerCase().replace(/\s+/g, '-'),
       name: planForm.name,
       price: Number(planForm.price),
+      annualPrice: editingPlan?.annualPrice ?? Math.round(Number(planForm.price) * 10),
+      annualDiscount: editingPlan?.annualDiscount ?? { type: 'percentage' as const, value: 17 },
+      savingsLabel: editingPlan?.savingsLabel ?? 'Save 17%',
       features: planForm.features.split(',').map(f => f.trim()).filter(Boolean),
       limits: { seats: Number(planForm.seats), locations: Number(planForm.locations) },
       billingCycle: planForm.billingCycle,
-      status: editingPlan?.status || 'active',
+      status: editingPlan?.status || 'active' as const,
     };
     if (editingPlan) {
       setPlansData(prev => prev.map(p => p.id === editingPlan.id ? newPlan : p));

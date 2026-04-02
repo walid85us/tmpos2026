@@ -11,8 +11,9 @@ type HistoryTab = 'orders' | 'invoices';
 
 export default function Customers() {
   const { customers, addCustomer, updateCustomer, completedOrders, invoices, findDuplicateCustomers, loyaltyConfig, updateLoyaltyConfig, loyaltyAdjustments, addLoyaltyAdjustment } = useStoreLocalState();
-  const { canAccess } = useAccess();
+  const { canAccess, checkSubPermission } = useAccess();
   const hasLoyalty = canAccess('loyalty_management');
+  const canManageLoyalty = checkSubPermission('manage_loyalty');
   const navigate = useNavigate();
   const [view, setView] = useState<CustomerView>('list');
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
@@ -45,7 +46,7 @@ export default function Customers() {
   const [loyaltyPointsPerDollar, setLoyaltyPointsPerDollar] = useState(loyaltyConfig.pointsPerDollar);
   const [loyaltyEnabled, setLoyaltyEnabled] = useState(loyaltyConfig.enabled);
   const [editTier, setEditTier] = useState<LoyaltyTier | null>(null);
-  const [newTierForm, setNewTierForm] = useState({ name: '', minPoints: '', description: '' });
+  const [newTierForm, setNewTierForm] = useState({ name: '', minPoints: '', description: '', privileges: '' });
 
   const [showAdjustPoints, setShowAdjustPoints] = useState(false);
   const [adjustAmount, setAdjustAmount] = useState('');
@@ -265,7 +266,7 @@ export default function Customers() {
               type="text"
             />
           </div>
-          {hasLoyalty && (
+          {hasLoyalty && canManageLoyalty && (
           <button
             onClick={() => { setShowLoyaltyConfig(true); setLoyaltyEnabled(loyaltyConfig.enabled); setLoyaltyPointsPerDollar(loyaltyConfig.pointsPerDollar); }}
             className="bg-white text-primary px-6 py-2.5 rounded-xl font-black text-xs uppercase tracking-widest border border-slate-200 shadow-sm hover:bg-slate-50 transition-all flex items-center gap-2"
@@ -464,15 +465,16 @@ export default function Customers() {
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
           <div className="lg:col-span-4 space-y-8">
             <section className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
-              <div className="flex items-center gap-6 mb-8">
-                <div className="w-20 h-20 rounded-[2rem] bg-primary/5 flex items-center justify-center border-4 border-white shadow-lg">
-                  <span className="material-symbols-outlined text-4xl text-primary/40">person</span>
-                </div>
-                <div>
-                  <span className={`px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-tighter ${getTierStyle(selectedCustomer.tier)}`}>
+              <div className="mb-6">
+                <h3 className="text-lg font-black text-primary tracking-tight">{selectedCustomer.name}</h3>
+                <div className="flex items-center gap-3 mt-2">
+                  <span className={`px-2.5 py-0.5 rounded text-[9px] font-black uppercase tracking-tighter ${getTierStyle(selectedCustomer.tier)}`}>
                     {selectedCustomer.tier || 'Bronze'} Tier
                   </span>
-                  <p className="text-xl font-black text-primary mt-1">{selectedCustomer.loyaltyPoints ?? 0} <span className="text-xs text-slate-400 font-bold uppercase tracking-widest">Points</span></p>
+                  {hasLoyalty && <span className="text-sm font-black text-primary">{selectedCustomer.loyaltyPoints ?? 0} <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">pts</span></span>}
+                  {hasLoyalty && !loyaltyConfig.enabled && (
+                    <span className="px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-tighter bg-amber-100 text-amber-600">Program Paused</span>
+                  )}
                 </div>
               </div>
 
@@ -520,12 +522,16 @@ export default function Customers() {
               <div className="flex items-center justify-between mb-6">
                 <h3 className="text-sm font-black text-primary uppercase tracking-widest">Loyalty Program</h3>
                 <div className="flex items-center gap-2">
-                  <button onClick={() => setShowAdjustPoints(true)} className="text-[10px] font-black text-secondary uppercase tracking-widest hover:underline flex items-center gap-1">
-                    <span className="material-symbols-outlined text-xs">tune</span> Adjust
-                  </button>
-                  <button onClick={openLoyaltyEdit} className="text-[10px] font-black text-primary uppercase tracking-widest hover:underline flex items-center gap-1">
-                    <span className="material-symbols-outlined text-xs">edit</span> Manage
-                  </button>
+                  {canManageLoyalty && (
+                    <button onClick={() => setShowAdjustPoints(true)} className="text-[10px] font-black text-secondary uppercase tracking-widest hover:underline flex items-center gap-1">
+                      <span className="material-symbols-outlined text-xs">tune</span> Adjust
+                    </button>
+                  )}
+                  {canManageLoyalty && (
+                    <button onClick={openLoyaltyEdit} className="text-[10px] font-black text-primary uppercase tracking-widest hover:underline flex items-center gap-1">
+                      <span className="material-symbols-outlined text-xs">edit</span> Manage
+                    </button>
+                  )}
                 </div>
               </div>
               <div className="space-y-4">
@@ -962,7 +968,12 @@ export default function Customers() {
                       onChange={(e) => setEditForm(prev => ({ ...prev, tier: e.target.value as any }))}
                       className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20 appearance-none"
                     >
-                      <option>Bronze</option><option>Silver</option><option>Gold</option><option>Platinum</option>
+                      {loyaltyConfig.tiers.filter(t => t.status === 'active').map(t => (
+                        <option key={t.id} value={t.name}>{t.name}</option>
+                      ))}
+                      {editForm.tier && !loyaltyConfig.tiers.some(t => t.status === 'active' && t.name === editForm.tier) && (
+                        <option value={editForm.tier}>{editForm.tier} (inactive)</option>
+                      )}
                     </select>
                   </div>
                   <div>
@@ -1031,6 +1042,12 @@ export default function Customers() {
                 </button>
               </div>
               <div className="space-y-5">
+                {!loyaltyConfig.enabled && (
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-2xl flex items-center gap-2">
+                    <span className="material-symbols-outlined text-amber-500 text-sm">warning</span>
+                    <p className="text-[10px] font-black text-amber-600 uppercase tracking-widest">Loyalty program is currently disabled — points are frozen</p>
+                  </div>
+                )}
                 <div>
                   <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Tier</label>
                   <select
@@ -1038,7 +1055,12 @@ export default function Customers() {
                     onChange={(e) => setLoyaltyForm(prev => ({ ...prev, tier: e.target.value as Customer['tier'] }))}
                     className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20 appearance-none"
                   >
-                    <option>Bronze</option><option>Silver</option><option>Gold</option><option>Platinum</option>
+                    {loyaltyConfig.tiers.filter(t => t.status === 'active').map(t => (
+                      <option key={t.id} value={t.name}>{t.name} ({t.minPoints} pts)</option>
+                    ))}
+                    {selectedCustomer && !loyaltyConfig.tiers.some(t => t.status === 'active' && t.name === selectedCustomer.tier) && selectedCustomer.tier && (
+                      <option value={selectedCustomer.tier}>{selectedCustomer.tier} (inactive tier - current)</option>
+                    )}
                   </select>
                 </div>
                 <div>
@@ -1048,7 +1070,9 @@ export default function Customers() {
                     value={loyaltyForm.points}
                     onChange={(e) => setLoyaltyForm(prev => ({ ...prev, points: parseInt(e.target.value) || 0 }))}
                     className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20"
+                    disabled={!loyaltyConfig.enabled}
                   />
+                  {!loyaltyConfig.enabled && <p className="text-[9px] font-bold text-amber-500 mt-1 ml-1">Points frozen while program is disabled</p>}
                 </div>
                 <div className="flex gap-4 pt-4">
                   <button onClick={() => setShowLoyaltyEdit(false)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-black text-xs rounded-2xl uppercase tracking-widest hover:bg-slate-200 transition-all">
@@ -1230,6 +1254,13 @@ export default function Customers() {
                             <span className={`px-2 py-0.5 rounded text-[8px] font-black uppercase ${tier.status === 'active' ? 'bg-emerald-100 text-emerald-600' : 'bg-slate-200 text-slate-500'}`}>{tier.status}</span>
                           </div>
                           <p className="text-[10px] font-bold text-slate-400">{tier.minPoints} pts minimum{tier.description ? ` — ${tier.description}` : ''}</p>
+                          {(tier.privileges || []).length > 0 && (
+                            <div className="flex flex-wrap gap-1 mt-1">
+                              {tier.privileges!.map((p, i) => (
+                                <span key={i} className="text-[8px] font-bold bg-primary/5 text-primary/70 px-1.5 py-0.5 rounded">{p}</span>
+                              ))}
+                            </div>
+                          )}
                         </div>
                         <div className="flex gap-2">
                           <button onClick={() => setEditTier(tier)} className="p-2 bg-white rounded-xl border border-slate-200 text-slate-400 hover:text-primary transition-all">
@@ -1247,14 +1278,19 @@ export default function Customers() {
                   </div>
                   <div className="mt-4 p-4 bg-primary/5 rounded-2xl border border-primary/10">
                     <p className="text-[10px] font-black text-primary uppercase tracking-widest mb-3">Add Tier</p>
-                    <div className="grid grid-cols-3 gap-3">
-                      <input value={newTierForm.name} onChange={(e) => setNewTierForm(prev => ({ ...prev, name: e.target.value }))} className="bg-white border-none rounded-xl px-4 py-2 text-sm font-bold" placeholder="Tier Name" />
-                      <input type="number" value={newTierForm.minPoints} onChange={(e) => setNewTierForm(prev => ({ ...prev, minPoints: e.target.value }))} className="bg-white border-none rounded-xl px-4 py-2 text-sm font-bold" placeholder="Min Points" />
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-2 gap-3">
+                        <input value={newTierForm.name} onChange={(e) => setNewTierForm(prev => ({ ...prev, name: e.target.value }))} className="bg-white border-none rounded-xl px-4 py-2 text-sm font-bold" placeholder="Tier Name" />
+                        <input type="number" value={newTierForm.minPoints} onChange={(e) => setNewTierForm(prev => ({ ...prev, minPoints: e.target.value }))} className="bg-white border-none rounded-xl px-4 py-2 text-sm font-bold" placeholder="Min Points" />
+                      </div>
+                      <input value={newTierForm.description} onChange={(e) => setNewTierForm(prev => ({ ...prev, description: e.target.value }))} className="w-full bg-white border-none rounded-xl px-4 py-2 text-sm font-bold" placeholder="Description" />
+                      <input value={newTierForm.privileges} onChange={(e) => setNewTierForm(prev => ({ ...prev, privileges: e.target.value }))} className="w-full bg-white border-none rounded-xl px-4 py-2 text-sm font-bold" placeholder="Privileges (comma-separated)" />
                       <button disabled={!newTierForm.name.trim() || !newTierForm.minPoints} onClick={() => {
-                        const newTier: LoyaltyTier = { id: `lt-${Date.now()}`, name: newTierForm.name.trim(), minPoints: parseInt(newTierForm.minPoints) || 0, status: 'active', description: newTierForm.description || undefined };
+                        const privs = newTierForm.privileges.split(',').map(p => p.trim()).filter(Boolean);
+                        const newTier: LoyaltyTier = { id: `lt-${Date.now()}`, name: newTierForm.name.trim(), minPoints: parseInt(newTierForm.minPoints) || 0, status: 'active', description: newTierForm.description || undefined, privileges: privs.length > 0 ? privs : undefined };
                         updateLoyaltyConfig({ tiers: [...loyaltyConfig.tiers, newTier].sort((a, b) => a.minPoints - b.minPoints) });
-                        setNewTierForm({ name: '', minPoints: '', description: '' });
-                      }} className="py-2 bg-primary text-white rounded-xl text-xs font-black uppercase disabled:opacity-40">Add</button>
+                        setNewTierForm({ name: '', minPoints: '', description: '', privileges: '' });
+                      }} className="w-full py-2 bg-primary text-white rounded-xl text-xs font-black uppercase disabled:opacity-40">Add Tier</button>
                     </div>
                   </div>
                 </div>
@@ -1281,6 +1317,10 @@ export default function Customers() {
                 <div>
                   <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Description</label>
                   <input value={editTier.description || ''} onChange={(e) => setEditTier(prev => prev ? { ...prev, description: e.target.value } : null)} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold" />
+                </div>
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Privileges (comma-separated)</label>
+                  <input value={(editTier.privileges || []).join(', ')} onChange={(e) => setEditTier(prev => prev ? { ...prev, privileges: e.target.value.split(',').map(p => p.trim()).filter(Boolean) } : null)} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold" placeholder="e.g. 5% off repairs, Free diagnostics" />
                 </div>
                 <div className="flex gap-4 pt-4">
                   <button onClick={() => setEditTier(null)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-black text-xs rounded-2xl uppercase tracking-widest">Cancel</button>

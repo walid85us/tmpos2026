@@ -723,7 +723,7 @@ export default function Invoices() {
       <AnimatePresence>
         {showPaymentModal && detailInvoice && (
           <div className="fixed inset-0 z-[60] flex items-center justify-center p-6">
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowPaymentModal(false)} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => { setShowPaymentModal(false); setTerminalState('idle'); setPaymentAmount(0); setPaymentMethod('Cash'); }} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
             <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }}
               className="relative w-full max-w-lg bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden">
               <div className="p-8 border-b border-slate-100 bg-slate-50/50">
@@ -732,7 +732,7 @@ export default function Invoices() {
                     <h3 className="text-2xl font-black text-primary tracking-tight">Process Payment</h3>
                     <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Invoice: {detailInvoice.invoiceNumber}</p>
                   </div>
-                  <button onClick={() => setShowPaymentModal(false)} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                  <button onClick={() => { setShowPaymentModal(false); setTerminalState('idle'); setPaymentAmount(0); setPaymentMethod('Cash'); }} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
                     <span className="material-symbols-outlined text-slate-400">close</span>
                   </button>
                 </div>
@@ -874,26 +874,78 @@ export default function Invoices() {
                 </button>
               </div>
               <div className="p-8 overflow-y-auto flex-1 print-area" id="printable-invoice">
-                <div className="text-center mb-6">
-                  <h2 className="text-xl font-black text-primary">INVOICE</h2>
-                  <p className="text-sm font-bold text-slate-500">{detailInvoice.invoiceNumber}</p>
+                <div className="flex justify-between items-start mb-8 pb-6 border-b-2 border-primary">
+                  <div>
+                    <h2 className="text-3xl font-black text-primary tracking-tight">INVOICE</h2>
+                    <p className="text-sm font-bold text-slate-400 mt-1">{detailInvoice.invoiceNumber}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-xl font-black text-primary">RepairHub</p>
+                    <p className="text-xs text-slate-400 font-bold mt-1">Professional Repair Services</p>
+                  </div>
                 </div>
-                <div className="grid grid-cols-2 gap-6 mb-6 text-sm">
-                  <div><p className="font-black text-slate-400 text-[10px] uppercase tracking-widest mb-1">Bill To</p><p className="font-bold">{detailInvoice.customerName}</p>{detailInvoice.customerEmail && <p className="text-slate-500">{detailInvoice.customerEmail}</p>}{detailInvoice.customerPhone && <p className="text-slate-500">{detailInvoice.customerPhone}</p>}</div>
-                  <div className="text-right"><p className="font-black text-slate-400 text-[10px] uppercase tracking-widest mb-1">Invoice Details</p><p className="text-slate-600">Date: {detailInvoice.createdAt}</p><p className="text-slate-600">Due: {detailInvoice.dueDate}</p><p className="font-bold text-primary">Status: {detailInvoice.status}</p></div>
+                <div className="grid grid-cols-2 gap-8 mb-8">
+                  <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 print:bg-white print:border-slate-300">
+                    <p className="font-black text-slate-400 text-[9px] uppercase tracking-widest mb-2">Bill To</p>
+                    <p className="font-black text-slate-900 text-sm">{detailInvoice.customerName}</p>
+                    {detailInvoice.customerEmail && <p className="text-xs text-slate-500 mt-0.5">{detailInvoice.customerEmail}</p>}
+                    {detailInvoice.customerPhone && <p className="text-xs text-slate-500">{detailInvoice.customerPhone}</p>}
+                  </div>
+                  <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 text-right print:bg-white print:border-slate-300">
+                    <p className="font-black text-slate-400 text-[9px] uppercase tracking-widest mb-2">Invoice Details</p>
+                    <p className="text-xs text-slate-600"><span className="font-bold">Issue Date:</span> {detailInvoice.createdAt}</p>
+                    <p className="text-xs text-slate-600"><span className="font-bold">Due Date:</span> {detailInvoice.dueDate}</p>
+                    <p className="text-xs font-black text-primary mt-1">Status: {detailInvoice.status}</p>
+                  </div>
                 </div>
-                <table className="w-full text-sm mb-6"><thead><tr className="border-b-2 border-slate-200"><th className="py-2 text-left font-black text-slate-400 text-[10px] uppercase">Item</th><th className="py-2 text-center font-black text-slate-400 text-[10px] uppercase">Qty</th><th className="py-2 text-right font-black text-slate-400 text-[10px] uppercase">Price</th><th className="py-2 text-right font-black text-slate-400 text-[10px] uppercase">Total</th></tr></thead>
-                  <tbody>{detailInvoice.items.map(it => (<tr key={it.id} className="border-b border-slate-100"><td className="py-2 font-bold">{it.name}</td><td className="py-2 text-center">{it.quantity}</td><td className="py-2 text-right">${it.price.toFixed(2)}</td><td className="py-2 text-right font-bold">${(it.quantity * it.price).toFixed(2)}</td></tr>))}</tbody>
+                <table className="w-full text-sm mb-8">
+                  <thead>
+                    <tr className="border-b-2 border-primary/20">
+                      <th className="py-3 text-left font-black text-primary text-[10px] uppercase tracking-widest">Description</th>
+                      <th className="py-3 text-center font-black text-primary text-[10px] uppercase tracking-widest w-20">Qty</th>
+                      <th className="py-3 text-right font-black text-primary text-[10px] uppercase tracking-widest w-28">Unit Price</th>
+                      <th className="py-3 text-right font-black text-primary text-[10px] uppercase tracking-widest w-28">Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {detailInvoice.items.map((it, idx) => (
+                      <tr key={it.id} className={idx % 2 === 0 ? 'bg-slate-50/50 print:bg-slate-50' : ''}>
+                        <td className="py-3 px-1 font-bold text-slate-900">{it.name}</td>
+                        <td className="py-3 text-center text-slate-600">{it.quantity}</td>
+                        <td className="py-3 text-right text-slate-600">${it.price.toFixed(2)}</td>
+                        <td className="py-3 text-right font-bold text-slate-900">${(it.quantity * it.price).toFixed(2)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
                 </table>
-                <div className="border-t-2 border-slate-200 pt-4 space-y-1 text-sm text-right">
-                  <p>Subtotal: <span className="font-bold">${detailInvoice.subtotal.toFixed(2)}</span></p>
-                  {detailInvoice.discount > 0 && <p>Discount: <span className="font-bold text-emerald-600">-${detailInvoice.discount.toFixed(2)}</span></p>}
-                  <p>Tax: <span className="font-bold">${detailInvoice.tax.toFixed(2)}</span></p>
-                  <p className="text-lg font-black text-primary pt-2 border-t border-slate-200">Total: ${detailInvoice.total.toFixed(2)}</p>
-                  {detailInvoice.balance > 0 && <p className="text-rose-600 font-black">Balance Due: ${detailInvoice.balance.toFixed(2)}</p>}
+                <div className="flex justify-end">
+                  <div className="w-72 space-y-2 text-sm">
+                    <div className="flex justify-between py-1"><span className="text-slate-500">Subtotal</span><span className="font-bold">${detailInvoice.subtotal.toFixed(2)}</span></div>
+                    {detailInvoice.discount > 0 && <div className="flex justify-between py-1"><span className="text-slate-500">Discount</span><span className="font-bold text-emerald-600">-${detailInvoice.discount.toFixed(2)}</span></div>}
+                    <div className="flex justify-between py-1"><span className="text-slate-500">Tax</span><span className="font-bold">${detailInvoice.tax.toFixed(2)}</span></div>
+                    <div className="flex justify-between py-2 border-t-2 border-primary/20 mt-2"><span className="font-black text-primary text-base">Total</span><span className="font-black text-primary text-base">${detailInvoice.total.toFixed(2)}</span></div>
+                    {detailInvoice.amountPaid > 0 && <div className="flex justify-between py-1"><span className="text-emerald-600 font-bold">Amount Paid</span><span className="font-bold text-emerald-600">${detailInvoice.amountPaid.toFixed(2)}</span></div>}
+                    {detailInvoice.balance > 0 && <div className="flex justify-between py-2 bg-rose-50 px-3 rounded-xl print:bg-rose-50"><span className="font-black text-rose-600">Balance Due</span><span className="font-black text-rose-600">${detailInvoice.balance.toFixed(2)}</span></div>}
+                  </div>
+                </div>
+                {detailInvoice.paymentHistory.length > 0 && (
+                  <div className="mt-8 pt-6 border-t border-slate-200">
+                    <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-3">Payment History</p>
+                    <div className="space-y-1">
+                      {detailInvoice.paymentHistory.map(p => (
+                        <div key={p.id} className="flex justify-between text-xs px-3 py-2 bg-slate-50 rounded-lg print:bg-white print:border print:border-slate-200">
+                          <span className="font-bold text-slate-600">${p.amount.toFixed(2)} via {p.method}</span>
+                          <span className="text-slate-400">{p.timestamp}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div className="mt-8 pt-4 border-t border-slate-100 text-center">
+                  <p className="text-[9px] text-slate-300 font-bold uppercase tracking-widest">Thank you for your business</p>
                 </div>
               </div>
-              <div className="p-6 border-t border-slate-100 flex justify-end gap-4 shrink-0">
+              <div className="p-6 border-t border-slate-100 flex justify-end gap-4 shrink-0 no-print">
                 <button onClick={() => setShowPrintModal(false)} className="px-6 py-3 bg-slate-100 text-slate-600 font-black text-xs rounded-2xl uppercase tracking-widest">Cancel</button>
                 <button onClick={() => window.print()} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all flex items-center gap-2">
                   <span className="material-symbols-outlined text-sm">print</span> Print Invoice

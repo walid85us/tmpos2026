@@ -123,6 +123,7 @@ export const POS: React.FC = () => {
   const [editingItem, setEditingItem] = useState<CartItem | null>(null);
   const [editPrice, setEditPrice] = useState(0);
   const [editQty, setEditQty] = useState(1);
+  const [editRepairDetails, setEditRepairDetails] = useState({ deviceName: '', imei: '', serialNumber: '', passcode: '', network: '' });
 
   // Pending Repair State
   const [pendingRepairItem, setPendingRepairItem] = useState<CartItem | null>(null);
@@ -434,6 +435,7 @@ export const POS: React.FC = () => {
       type: (ci.type as any) || 'product',
       stockItemId: (ci as any).stockItemId,
       warrantyPeriod: ci.type === 'repair' ? '90 days' : ci.type === 'product' ? '30 days' : undefined,
+      ...(ci.type === 'repair' ? { deviceName: (ci as any).deviceName, imei: ci.imei, serialNumber: ci.serialNumber } : {}),
     }));
 
     const newOrder: CompletedOrder = {
@@ -524,6 +526,15 @@ export const POS: React.FC = () => {
     setEditingItem(item);
     setEditPrice(item.price);
     setEditQty(item.qty || 1);
+    if (item.type === 'repair') {
+      setEditRepairDetails({
+        deviceName: (item as any).deviceName || '',
+        imei: item.imei || '',
+        serialNumber: item.serialNumber || '',
+        passcode: item.passcode || '',
+        network: (item as any).network || '',
+      });
+    }
     setIsEditItemModalOpen(true);
   };
 
@@ -539,7 +550,14 @@ export const POS: React.FC = () => {
           if (qty < 1) qty = 1;
         }
       }
-      setCart(cart.map(i => i.id === editingItem.id ? { ...i, price: editPrice, qty } : i));
+      const repairUpdates = editingItem.type === 'repair' ? {
+        deviceName: editRepairDetails.deviceName,
+        imei: editRepairDetails.imei,
+        serialNumber: editRepairDetails.serialNumber,
+        passcode: editRepairDetails.passcode,
+        network: editRepairDetails.network,
+      } : {};
+      setCart(cart.map(i => i.id === editingItem.id ? { ...i, price: editPrice, qty, ...repairUpdates } : i));
       setIsEditItemModalOpen(false);
       setEditingItem(null);
     }
@@ -799,6 +817,7 @@ export const POS: React.FC = () => {
                         <p className="text-xs text-slate-500 mt-1">{item.description}</p>
                         {item.type === 'repair' && (
                           <div className="flex flex-wrap gap-2 mt-1.5">
+                            {(item as any).deviceName && <span className="text-[9px] font-black bg-primary/10 text-primary px-1.5 py-0.5 rounded uppercase tracking-tighter">{(item as any).deviceName}</span>}
                             {item.imei && <span className="text-[9px] font-black bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded uppercase tracking-tighter">IMEI: {item.imei}</span>}
                             {item.serialNumber && <span className="text-[9px] font-black bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded uppercase tracking-tighter">SN: {item.serialNumber}</span>}
                             {item.passcode && <span className="text-[9px] font-black bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded uppercase tracking-tighter">PIN: {item.passcode}</span>}
@@ -1233,6 +1252,37 @@ export const POS: React.FC = () => {
                     );
                   })()}
                 </div>
+                {editingItem?.type === 'repair' && (
+                  <div className="space-y-3 p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                    <p className="text-[10px] font-black text-primary uppercase tracking-widest">Device Details</p>
+                    <div>
+                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1 block">Device Name</label>
+                      <input value={editRepairDetails.deviceName} onChange={(e) => setEditRepairDetails(prev => ({ ...prev, deviceName: e.target.value }))} className="w-full bg-white border-none rounded-xl px-4 py-2.5 text-sm font-bold" placeholder="e.g. iPhone 15 Pro" />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1 block">IMEI</label>
+                        <input value={editRepairDetails.imei} onChange={(e) => setEditRepairDetails(prev => ({ ...prev, imei: e.target.value }))} className="w-full bg-white border-none rounded-xl px-4 py-2.5 text-sm font-bold" placeholder="IMEI" />
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1 block">Serial #</label>
+                        <input value={editRepairDetails.serialNumber} onChange={(e) => setEditRepairDetails(prev => ({ ...prev, serialNumber: e.target.value }))} className="w-full bg-white border-none rounded-xl px-4 py-2.5 text-sm font-bold" placeholder="Serial" />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1 block">Passcode</label>
+                        <input value={editRepairDetails.passcode} onChange={(e) => setEditRepairDetails(prev => ({ ...prev, passcode: e.target.value }))} className="w-full bg-white border-none rounded-xl px-4 py-2.5 text-sm font-bold" placeholder="PIN" />
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1 block">Network</label>
+                        <select value={editRepairDetails.network} onChange={(e) => setEditRepairDetails(prev => ({ ...prev, network: e.target.value }))} className="w-full bg-white border-none rounded-xl px-4 py-2.5 text-sm font-bold">
+                          <option value="">Select</option><option>AT&T</option><option>T-Mobile</option><option>Verizon</option><option>Sprint</option><option>Unlocked</option><option>Other</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+                )}
                 <button onClick={saveEditedItem} className="w-full py-5 bg-secondary text-white rounded-2xl font-black uppercase tracking-widest shadow-lg active:scale-95 transition-all">Update Item</button>
               </div>
             </motion.div>

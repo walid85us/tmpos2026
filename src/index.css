@@ -45,15 +45,36 @@
   body * {
     visibility: hidden !important;
   }
+  .no-print, .no-print * {
+    display: none !important;
+  }
   #printable-invoice,
   #printable-invoice * {
     visibility: visible !important;
+    color-adjust: exact !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
   }
   #printable-invoice {
     position: absolute;
     left: 0;
     top: 0;
     width: 100%;
-    padding: 2rem;
+    padding: 2.5rem 3rem;
+    background: white !important;
+    font-size: 11pt;
+  }
+  #printable-invoice table {
+    border-collapse: collapse;
+    width: 100%;
+  }
+  #printable-invoice table th,
+  #printable-invoice table td {
+    border-bottom: 1px solid #e2e8f0;
+    padding: 8px 4px;
+  }
+  @page {
+    margin: 0.75in;
+    size: letter;
   }
 }

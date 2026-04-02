@@ -1,0 +1,213 @@
+Customers, Loyalty, Invoice Print & Warranty — Narrow QA Correction Pass 3
+
+Read `replit.md` and `Ref.txt` first and treat them as source-of-truth constraints before making any changes.
+
+This is NOT a redesign and NOT a new workstream.
+This is a narrow correction pass based only on the remaining QA gaps after the prior correction pass.
+
+Expert-role stack
+- Principal SaaS Product Architect for multi-tenant repair/POS workflows
+- Staff React 19 + TypeScript + Vite engineer
+- Firebase / Firestore data-model and state-flow architect
+- Auth / RBAC / lifecycle gating specialist
+- UX systems designer preserving the existing premium glassmorphism baseline
+- Print/document-output workflow architect
+- QA-driven refactor auditor
+- Side auditor and systems thinker at all times
+
+Operating posture
+- Act as a side auditor and systems thinker throughout.
+- Audit ripple effects before editing.
+- Fix only the remaining failed or partial QA items deeply and coherently.
+- Preserve current design baseline exactly.
+- Preserve auth, preview mode, RBAC, lifecycle gating, and platform/store hierarchy.
+- Preserve tenant isolation and store scoping.
+- Reuse the existing modal/drawer/table/toast/permission/sub-permission patterns.
+- Do not reopen completed workstreams except for narrow compatibility-safe fixes required by this pass.
+- Do not make changes to folder `Z`.
+- Do not make changes to file `Y`.
+
+Remaining corrections to implement
+
+A) Repair intake / order summary refinement
+1. Device Name visibility in intake summary
+- the Device Name entered during repair intake must appear in the resulting order summary / intake summary
+- it must not disappear after entry
+
+2. Editable device details after add
+- once a device/intake item is added, clicking it should allow editing the intake/device details
+- not just editing price
+- support editing at least the key intake details already captured, including Device Name
+- keep this aligned with the current intake/order architecture and future repair refinement path
+
+B) Customer profile cleanup
+1. Remove customer photo space entirely
+- the customer photo is already removed, but the empty placeholder/icon space remains
+- remove that space completely
+- reflow the header/layout cleanly so only useful customer identity data remains
+
+C) Loyalty management fixes and expansion
+Replit must study this reference before implementing:
+https://help.repairdesk.co/portal/en/kb/articles/how-to-use-the-repairdesk-loyalty-program
+
+1. Loyalty tier list sync
+- when a new loyalty tier is created, it must appear in the customer profile Loyalty Tier dropdown immediately and consistently
+- inactive tiers must not appear as selectable tiers in normal customer assignment flows
+- if a customer is already assigned to a now-inactive tier, preserve historical assignment data safely but do not offer that tier for new selection unless rules explicitly allow it
+
+2. Loyalty sub-permission
+- add a dedicated loyalty-related sub-permission under the Customers module in the Store Permissions Matrix
+- use the existing sub-permission architecture cleanly
+- this sub-permission should govern loyalty program/tier administration actions
+- keep Store Owner behavior consistent with current permission rules
+
+3. Loyalty program disable behavior
+- when the loyalty program is disabled for a store/tenant context:
+  - customers must not earn new points
+  - customers must not spend/redeem points
+  - existing points balances must remain preserved
+  - existing tier assignments must remain preserved
+- the loyalty UI should clearly show that the program is disabled rather than behaving as active
+- do not destroy historical loyalty data when disabled
+- when re-enabled, preserved points/tier data should still be available
+
+4. Tier features and privileges
+- extend the loyalty tier model so each tier can include features/privileges
+- keep this practical and foundational, not overbuilt
+- support a manageable structure such as:
+  - tier name
+  - minimum points threshold
+  - active/inactive
+  - description/notes
+  - privileges/features list
+- allow store owner/admin to create and maintain these privileges cleanly in the loyalty management area
+
+5. Customer loyalty views
+- customer profile should reflect correct active tier choices
+- loyalty tier dropdown should only show valid/selectable tiers
+- preserved disabled-program state should be clear to the user
+
+D) Loyalty Plans & Features persistence bug
+1. Fix plan-gating persistence
+- Loyalty Management appears in Platform Command Center / Plans & Features but the enabled/disabled state is not persisting correctly across page navigation
+- fix the actual persistence/state-sync issue
+- ensure if the feature is disabled for a plan, it stays disabled after switching pages, refreshing, or revisiting
+- tenant/store gated behavior must reflect the real saved state
+
+E) Duplicate detection regression fix
+1. Duplicate warning must work again
+- the duplicate warning is currently not appearing
+- restore and harden duplicate detection according to the previously approved rules:
+  - warn clearly when matching identifying details are found
+  - support merge/update into existing record where appropriate
+  - only allow a separate new customer when both phone and email are different
+- make the logic reliable and testable
+
+F) Invoice terminal payment cancel/reject flow
+1. Terminal payment cancellation path
+- in the invoice POS bridge when Card Terminal is selected and payment is sent:
+  - before final apply/finalize, there must also be an explicit Cancel / Reject path
+  - cancelling or rejecting must reset the terminal payment state
+  - cancelling must not charge the customer
+  - cancelling must not apply payment to the invoice
+
+2. Close-screen-is-cancel behavior
+- if the Process Payment screen is closed before final completion, treat it as cancelled
+- reset pending terminal state appropriately
+- do not leave stale confirmed-looking UI behind
+
+3. Keep state machine clean
+- maintain or refine the terminal adapter/state machine to clearly support:
+  - pending_terminal
+  - terminal_confirmed
+  - terminal_failed
+  - cancelled
+- invoice payment must only finalize after true confirmation and explicit apply/finalize logic
+
+G) Invoice print output refinement
+1. Professional invoice output
+- current invoice-only printing is still not acceptable
+- build a professional printable invoice output
+- if output target is PDF/full page:
+  - render a proper full-page business invoice layout
+  - include structured invoice header, billing block, line items, totals, payment status, and professional spacing/layout
+- if receipt printer is selected/configured:
+  - render a receipt-style narrow format appropriate for receipt printers
+- printing must adapt based on store printer configuration or chosen print target
+- do not print the full webpage
+- do not print a sparse/minimal broken layout
+
+H) Warranty start and expired-warranty exception refinement
+1. Show warranty-covered items, including expired
+- when starting a warranty process in POS:
+  - show only items that actually have warranty coverage
+  - exclude non-warranty items
+  - BUT include both:
+    - active warranty items
+    - expired warranty items
+- expired warranty items must be visibly labeled as expired
+
+2. Block normal users on expired warranty
+- a normal user without exception permission must be blocked from proceeding on expired warranty items
+- show clear expired-warranty messaging
+
+3. Expired warranty exception sub-permission
+- add/fix a dedicated sub-permission for expired warranty exception handling if not already correctly wired
+- integrate it into the existing sub-permission architecture and UI
+
+4. Supervisor PIN approval flow
+- if operator lacks expired-warranty-exception permission:
+  - require supervisor/authorized PIN approval
+  - only a user with the proper permission can approve
+- after valid approval, allow the expired warranty exception flow to proceed
+- keep it auditable in state/UX terms where appropriate
+
+Required design and behavior rules
+- Use only in-app modals/drawers/menus/flows for corrected behaviors
+- Preserve the current premium glassmorphism design baseline exactly
+- Maintain keyboard accessibility and clear blocked/save/error states
+- Keep state paths unified
+- Avoid duplicate parallel systems
+- Ensure all corrected flows work in preview/demo mode
+- Maintain store scoping and tenant safety
+- Keep type safety strong
+- Update `replit.md` for all final corrections introduced by this pass
+
+Non-goals
+- No broad redesign
+- No full live terminal/email/SMS backend integration if backend is not yet active
+- No repair module overhaul
+- No unrelated reopening of earlier approved workstreams
+
+Definition of done
+This correction pass is done only if:
+- Device Name shows in order/intake summary and can be edited after add
+- customer photo placeholder space is fully removed
+- new loyalty tiers appear correctly in customer loyalty assignment UI
+- inactive tiers do not behave like active selectable tiers
+- loyalty has a Customers sub-permission
+- disabled loyalty program preserves points/tier but blocks earn/spend
+- tier privileges/features are manageable
+- Loyalty Management plan gating persists correctly across page switches and refresh
+- duplicate warning and merge rules work again
+- terminal cancel/reject and close-to-cancel behavior work correctly
+- invoice print output is professional and target-aware (PDF/full-page vs receipt)
+- warranty start shows only warranty-covered items, including expired ones
+- normal users are blocked on expired warranty
+- expired warranty exception permission and supervisor PIN approval work
+- no regressions are introduced in POS, invoices, loyalty, customers, warranty, auth, preview mode, RBAC, or store hierarchy
+- `replit.md` is updated to reflect all corrections
+
+Required final response format
+Return your completion report in exactly this structure:
+
+1. Files Changed
+2. Corrections Implemented
+3. Loyalty Model Decisions
+4. Plans & Features Persistence Fix
+5. Duplicate Detection / Merge Rules
+6. Terminal Cancel / Reject Flow
+7. Invoice Print Output Design
+8. Warranty Exception Flow
+9. Non-Regressions Confirmed
+10. Manual QA Retest Areas

@@ -37,6 +37,9 @@ export interface CompletedOrderItem {
   stockItemId?: string;
   warrantyPeriod?: string;
   refundedQty?: number;
+  deviceName?: string;
+  imei?: string;
+  serialNumber?: string;
 }
 
 export interface CompletedOrder {
@@ -104,6 +107,7 @@ export interface LoyaltyTier {
   minPoints: number;
   status: 'active' | 'inactive';
   description?: string;
+  privileges?: string[];
 }
 
 export interface LoyaltyProgramConfig {
@@ -257,10 +261,10 @@ const SEED_LOYALTY_CONFIG: LoyaltyProgramConfig = {
   enabled: true,
   pointsPerDollar: 10,
   tiers: [
-    { id: 'lt-1', name: 'Bronze', minPoints: 0, status: 'active', description: 'Entry tier for all customers' },
-    { id: 'lt-2', name: 'Silver', minPoints: 500, status: 'active', description: 'Unlocked at 500 points' },
-    { id: 'lt-3', name: 'Gold', minPoints: 2000, status: 'active', description: 'Unlocked at 2000 points' },
-    { id: 'lt-4', name: 'Platinum', minPoints: 5000, status: 'active', description: 'Top tier at 5000 points' },
+    { id: 'lt-1', name: 'Bronze', minPoints: 0, status: 'active', description: 'Entry tier for all customers', privileges: ['Earn points on purchases'] },
+    { id: 'lt-2', name: 'Silver', minPoints: 500, status: 'active', description: 'Unlocked at 500 points', privileges: ['Earn points on purchases', '5% off repairs'] },
+    { id: 'lt-3', name: 'Gold', minPoints: 2000, status: 'active', description: 'Unlocked at 2000 points', privileges: ['Earn points on purchases', '10% off repairs', 'Priority service'] },
+    { id: 'lt-4', name: 'Platinum', minPoints: 5000, status: 'active', description: 'Top tier at 5000 points', privileges: ['Earn points on purchases', '15% off repairs', 'Priority service', 'Free diagnostics'] },
   ],
 };
 

@@ -69,6 +69,7 @@ export const SUB_PERMISSIONS: SubPermissionDef[] = [
   { id: 'process_refunds', label: 'Process Refunds', parentDomain: 'refunds', minModuleLevel: 'view', defaultLevel: 'create', description: 'Initiate and process customer refunds' },
   { id: 'approve_refunds', label: 'Approve Refunds', parentDomain: 'refunds', minModuleLevel: 'view', defaultLevel: 'approve', description: 'Approve refund requests' },
   { id: 'process_expired_warranty', label: 'Process Expired Warranty', parentDomain: 'warranties', minModuleLevel: 'view', defaultLevel: 'manage', description: 'Allow processing of warranty claims on expired warranty items' },
+  { id: 'manage_loyalty', label: 'Manage Loyalty Program', parentDomain: 'customers', minModuleLevel: 'view', defaultLevel: 'manage', description: 'Administer loyalty program settings, tiers, and point adjustments' },
 ];
 
 export const ADMIN_ACTION_LEVEL_MAP = SUB_PERMISSIONS;
