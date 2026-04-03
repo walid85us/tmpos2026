@@ -259,16 +259,26 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
           const storedFeatures = sessionStorage.getItem('features_data');
           if (storedFeatures) {
             const parsed = JSON.parse(storedFeatures);
-            const planEntry = parsed.find((f: { planId: string }) => f.planId === tenant.plan);
-            if (planEntry && Array.isArray(planEntry.features)) {
-              const enabledIds = planEntry.features
-                .filter((f: { enabled: boolean }) => f.enabled)
-                .map((f: { id: string }) => f.id);
-              features = enabledIds;
+            const planKey = tenant.plan === 'starter' ? 'essential' : tenant.plan;
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              if (parsed[0].planAvailability) {
+                const enabledIds = parsed
+                  .filter((f: { planAvailability?: Record<string, boolean> }) => f.planAvailability?.[planKey])
+                  .map((f: { id: string }) => f.id);
+                features = enabledIds;
+              } else {
+                const planEntry = parsed.find((f: { planId: string }) => f.planId === tenant.plan);
+                if (planEntry && Array.isArray(planEntry.features)) {
+                  const enabledIds = planEntry.features
+                    .filter((f: { enabled: boolean }) => f.enabled)
+                    .map((f: { id: string }) => f.id);
+                  features = enabledIds;
+                }
+              }
             }
           }
         } catch {}
-        if (!features.includes(feature)) return false;
+        if (!features.includes(feature) && !features.includes(normalizedFeature)) return false;
       }
 
       if (effectiveRole === 'store_owner') return true;

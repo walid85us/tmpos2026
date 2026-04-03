@@ -48,48 +48,67 @@
   .no-print, .no-print * {
     display: none !important;
   }
-  #printable-invoice,
-  #printable-invoice * {
+  #print-surface,
+  #print-surface * {
     visibility: visible !important;
     color-adjust: exact !important;
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
   }
-  #printable-invoice {
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: 100%;
-    padding: 2rem 2.5rem;
+  #print-surface {
+    position: fixed !important;
+    left: 0 !important;
+    top: 0 !important;
+    width: 100% !important;
+    height: auto !important;
+    z-index: 999999 !important;
+    overflow: visible !important;
     background: white !important;
     font-size: 10pt;
     line-height: 1.4;
   }
-  #printable-invoice table {
+  #print-surface.print-fullpage {
+    padding: 0.25in 0;
+  }
+  #print-surface.print-receipt {
+    width: 80mm !important;
+    padding: 4mm;
+    font-size: 8pt;
+    line-height: 1.3;
+  }
+  #print-surface table {
     border-collapse: collapse;
     width: 100%;
     page-break-inside: avoid;
   }
-  #printable-invoice table th,
-  #printable-invoice table td {
+  #print-surface table th,
+  #print-surface table td {
     border-bottom: 1px solid #e2e8f0;
     padding: 6px 4px;
   }
-  #printable-invoice table thead th {
+  #print-surface table thead th {
     border-bottom: 2px solid #003633;
     font-size: 8pt;
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
-  #printable-invoice .rounded-2xl,
-  #printable-invoice .rounded-xl,
-  #printable-invoice .rounded-lg {
+  #print-surface .rounded-2xl,
+  #print-surface .rounded-xl,
+  #print-surface .rounded-lg {
     border-radius: 0 !important;
     border: 1px solid #cbd5e1 !important;
     background: #f8fafc !important;
   }
-  #printable-invoice h2 {
+  #print-surface h2 {
     font-size: 18pt;
+  }
+  #print-surface.print-receipt h2 {
+    font-size: 12pt;
+  }
+  #print-surface.print-receipt table th,
+  #print-surface.print-receipt table td {
+    padding: 3px 2px;
+    font-size: 8pt;
   }
   @page {
     margin: 0.6in 0.75in;

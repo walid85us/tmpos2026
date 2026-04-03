@@ -69,7 +69,8 @@ export const SUB_PERMISSIONS: SubPermissionDef[] = [
   { id: 'process_refunds', label: 'Process Refunds', parentDomain: 'refunds', minModuleLevel: 'view', defaultLevel: 'create', description: 'Initiate and process customer refunds' },
   { id: 'approve_refunds', label: 'Approve Refunds', parentDomain: 'refunds', minModuleLevel: 'view', defaultLevel: 'approve', description: 'Approve refund requests' },
   { id: 'process_expired_warranty', label: 'Process Expired Warranty', parentDomain: 'warranties', minModuleLevel: 'view', defaultLevel: 'manage', description: 'Allow processing of warranty claims on expired warranty items' },
-  { id: 'manage_loyalty', label: 'Manage Loyalty Program', parentDomain: 'customers', minModuleLevel: 'view', defaultLevel: 'manage', description: 'Administer loyalty program settings, tiers, and point adjustments' },
+  { id: 'loyalty_customer_edit', label: 'Edit Customer Loyalty', parentDomain: 'customers', minModuleLevel: 'view', defaultLevel: 'edit', description: 'Edit customer loyalty tier and points' },
+  { id: 'loyalty_settings_manage', label: 'Manage Loyalty Settings', parentDomain: 'customers', minModuleLevel: 'view', defaultLevel: 'manage', description: 'Configure loyalty program settings, tiers, and privileges' },
   { id: 'reopen_invoice', label: 'Reopen Invoice', parentDomain: 'invoices', minModuleLevel: 'view', defaultLevel: 'manage', description: 'Reopen a paid or cancelled invoice for further editing' },
 ];
 
@@ -135,6 +136,9 @@ export const tenantRoles: EmployeeRole[] = [
       process_refunds: true,
       approve_refunds: true,
       process_expired_warranty: true,
+      loyalty_customer_edit: true,
+      loyalty_settings_manage: true,
+      reopen_invoice: true,
     },
     description: 'Store management access'
   },
@@ -176,6 +180,9 @@ export const tenantRoles: EmployeeRole[] = [
       process_refunds: false,
       approve_refunds: false,
       process_expired_warranty: false,
+      loyalty_customer_edit: false,
+      loyalty_settings_manage: false,
+      reopen_invoice: false,
     },
     description: 'Repair and parts access'
   },
@@ -217,6 +224,9 @@ export const tenantRoles: EmployeeRole[] = [
       process_refunds: false,
       approve_refunds: false,
       process_expired_warranty: false,
+      loyalty_customer_edit: false,
+      loyalty_settings_manage: false,
+      reopen_invoice: false,
     },
     description: 'Sales and customer access'
   },

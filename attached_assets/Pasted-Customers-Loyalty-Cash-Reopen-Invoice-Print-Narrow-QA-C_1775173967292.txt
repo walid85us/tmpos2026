@@ -1,0 +1,161 @@
+Customers, Loyalty, Cash Reopen & Invoice Print — Narrow QA Correction Pass 5
+
+Read `replit.md` and `Ref.txt` first and treat them as source-of-truth constraints before making any changes.
+
+This is NOT a redesign and NOT a new workstream.
+This is a narrow correction pass based only on the remaining QA failures after the prior correction pass.
+
+Expert-role stack
+- Principal SaaS Product Architect for multi-tenant repair/POS workflows
+- Staff React 19 + TypeScript + Vite engineer
+- Firebase / Firestore data-model and state-flow architect
+- Auth / RBAC / lifecycle gating specialist
+- UX systems designer preserving the existing premium glassmorphism baseline
+- Print/document-output architect
+- QA-driven refactor auditor
+- Side auditor and systems thinker at all times
+
+Operating posture
+- Act as a side auditor and systems thinker throughout.
+- Audit ripple effects before editing.
+- Fix only the remaining failed or partial QA items deeply and coherently.
+- Preserve current design baseline exactly.
+- Preserve auth, preview mode, RBAC, lifecycle gating, and platform/store hierarchy.
+- Preserve tenant isolation and store scoping.
+- Reuse the existing modal/drawer/table/toast/permission/sub-permission patterns.
+- Do not reopen completed workstreams except for narrow compatibility-safe fixes required by this pass.
+- Do not make changes to folder `Z`.
+- Do not make changes to file `Y`.
+
+Remaining corrections to implement
+
+A) Loyalty feature plan-gating enforcement is still incomplete
+1. Store-side loyalty access must be blocked when the active plan disables the feature
+- the feature toggle persistence improved, but Store Owner can still access loyalty settings even when Loyalty Management is disabled for the active plan
+- fix actual runtime enforcement, not just the saved flag
+- if Loyalty Management is disabled by the tenant’s active plan:
+  - store-side loyalty management/settings must be blocked
+  - customer loyalty edit controls must be blocked
+  - loyalty admin surfaces should show a clear locked/gated state instead of remaining usable
+- preserve historical loyalty data safely
+- preserve distinction between:
+  - platform/system owner configuring plans/features
+  - tenant/store users consuming only features enabled for their plan
+
+2. Split loyalty permissions cleanly if needed
+- current QA indicates another sub-permission may be needed for loyalty settings vs loyalty customer edits
+- audit the current loyalty permission model and implement the cleanest minimal structure
+- preferred model if needed:
+  - loyalty_customer_edit or equivalent for editing customer loyalty fields
+  - loyalty_settings_manage or equivalent for editing store loyalty settings / tiers / privileges
+- keep this under Customers module or the most appropriate existing permission structure
+- keep Store Owner behavior consistent unless blocked by plan gating
+- plan gating must take precedence over store-side permissions
+
+B) Cash-payment invoice reopen UX and authorization flow
+1. Reopen Invoice button behavior for cash payments only
+- when an invoice was finalized via cash payment:
+  - show a Reopen Invoice action
+- if current user has the reopen-cash-invoice permission granted:
+  - show the button in green
+  - use an open-lock icon
+  - clicking it should proceed through the controlled reopen flow directly
+- if current user is denied:
+  - still show the Reopen Invoice action
+  - use the current locked/orange-style authorization button pattern
+  - clicking it must open the supervisor PIN approval modal
+  - this approval flow should mirror the current supervisor authorization style already used in refund processing
+
+2. Card-paid invoices must not use this reopen flow
+- if payment was made by card, do not show the cash reopen behavior
+- card-paid invoices should continue to follow the existing refund process already in place
+- do not mix reopen-cash workflow with card refund workflow
+
+3. Permission and approval flow consistency
+- keep the reopen-after-cash-payment sub-permission already added under Invoices
+- if user lacks permission:
+  - supervisor/authorized PIN approval must be required
+  - only an authorized user with that reopen permission can approve
+- keep the UX/state model aligned with the current refund authorization pattern already present in the app
+
+C) Invoice print pipeline still broken at actual print time
+1. Fix the real print rendering, not just the preview modal
+- current preview/modal invoice looks correct, but when clicking Print the actual printed output loses the invoice details and shows only sparse header content
+- audit the full print pipeline end to end and fix the actual printable DOM/render target
+- likely root causes to investigate and solve:
+  - wrong print target node
+  - print-specific CSS hiding invoice detail sections
+  - portal/modal content not being cloned or mounted correctly for print
+  - asynchronous render timing before window.print
+  - print media query conflict
+  - container height/overflow clipping
+  - page-scale/page-break/layout CSS stripping content
+  - rendering a different template for print than for preview
+
+2. Single source of truth for invoice print content
+- the exact invoice details visible in the print preview modal must also be what gets printed
+- do not maintain a broken separate sparse print template unless fully necessary
+- if separate full-page PDF and receipt templates exist, both must be populated from the same invoice data source
+
+3. Full-page invoice output
+- when printing full-page/PDF invoice:
+  - include all invoice details shown in preview:
+    - invoice header
+    - customer billing block
+    - invoice details block
+    - line items
+    - subtotal/tax/total/payment status
+  - ensure layout is professional and correctly positioned on page
+
+4. Receipt-printer output
+- receipt-printer format must also render actual invoice details, not empty/sparse output
+- ensure receipt mode uses a proper narrow template with the same data fidelity
+
+5. Print testability
+- make the print flow testable in preview/demo mode
+- if needed, add a clear internal print-render container or hidden print surface that is guaranteed to mount complete data before printing
+- avoid printing app chrome, modal shell, or sparse placeholder markup
+
+Required design and behavior rules
+- Use only in-app modals/drawers/menus/flows for corrected behaviors
+- Preserve the current premium glassmorphism design baseline exactly for on-screen UI
+- Print output may use document-appropriate professional layout but must remain visually consistent and polished
+- Maintain keyboard accessibility and clear blocked/save/error states
+- Keep state paths unified
+- Avoid duplicate parallel systems
+- Ensure corrected flows work in preview/demo mode
+- Maintain store scoping and tenant safety
+- Keep type safety strong
+- Update `replit.md` for all final corrections introduced by this pass
+
+Non-goals
+- No broad redesign
+- No unrelated reopening of earlier approved workstreams
+- No full live external payment/email/SMS backend build if backend is not yet active
+- No repair module overhaul
+
+Definition of done
+This correction pass is done only if:
+- loyalty management is truly blocked store-side when disabled by active plan
+- loyalty permissions are cleanly split or correctly enforced as needed
+- cash-paid invoices show the correct reopen authorization UX
+- granted users see green open-lock Reopen Invoice action
+- denied users see locked/orange authorization path that mirrors refund supervisor approval
+- card-paid invoices continue to use refund flow, not cash reopen flow
+- print preview and actual printed output show the same complete invoice details
+- full-page invoice print is complete and professional
+- receipt-printer print is complete and data-rich
+- no regressions are introduced in loyalty, invoice payments, refunds, RBAC, auth, preview mode, or store hierarchy
+- `replit.md` is updated to reflect all corrections
+
+Required final response format
+Return your completion report in exactly this structure:
+
+1. Files Changed
+2. Corrections Implemented
+3. Loyalty Gating and Permission Decisions
+4. Cash Reopen Authorization Flow
+5. Print Pipeline Root Cause and Fix
+6. Full-Page vs Receipt Print Output
+7. Non-Regressions Confirmed
+8. Manual QA Retest Areas

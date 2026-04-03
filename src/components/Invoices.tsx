@@ -1,7 +1,8 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { useStoreLocalState } from '../context/StoreLocalState';
+import { useStoreLocalState, SEED_POS_OPERATORS } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
+import { tenantRoles } from '../context/accessConfig';
 import type { Invoice, RepairService } from '../types';
 
 export default function Invoices() {
@@ -47,6 +48,11 @@ export default function Invoices() {
   const [paymentMethod, setPaymentMethod] = useState('Cash');
   const [terminalState, setTerminalState] = useState<'idle' | 'pending_terminal' | 'confirmed' | 'failed' | 'cancelled'>('idle');
   const [cashConfirmPending, setCashConfirmPending] = useState(false);
+
+  const [reopenPinModal, setReopenPinModal] = useState(false);
+  const [reopenPin, setReopenPin] = useState('');
+  const [reopenPinError, setReopenPinError] = useState('');
+  const [printMode, setPrintMode] = useState<'fullpage' | 'receipt'>('fullpage');
 
   const [emailForm, setEmailForm] = useState({ to: '', subject: '', body: '' });
   const [smsBody, setSmsBody] = useState('');
@@ -225,11 +231,39 @@ export default function Invoices() {
     setCashConfirmPending(false);
   }, [detailInvoice, paymentAmount, paymentMethod, terminalState, cashConfirmPending, updateInvoice]);
 
+  const isCashPaidInvoice = useCallback((inv: Invoice | null): boolean => {
+    if (!inv) return false;
+    if (inv.paymentHistory.length === 0) return false;
+    return inv.paymentHistory.every(p => p.method === 'Cash');
+  }, []);
+
   const handleReopenInvoice = useCallback(() => {
-    if (!detailInvoice || !canReopenInvoice) return;
-    updateInvoice(detailInvoice.id, { status: 'Unpaid' });
-    setDetailInvoice(prev => prev ? { ...prev, status: 'Unpaid' } : null);
-  }, [detailInvoice, canReopenInvoice, updateInvoice]);
+    if (!detailInvoice) return;
+    const total = detailInvoice.items.reduce((s, i) => s + i.price * i.quantity, 0);
+    const discount = detailInvoice.discount || 0;
+    const subtotal = total - discount;
+    const tax = subtotal * 0.08;
+    const grandTotal = subtotal + tax;
+    updateInvoice(detailInvoice.id, { status: 'Unpaid', amountPaid: 0, balance: grandTotal });
+    setDetailInvoice(prev => prev ? { ...prev, status: 'Unpaid', amountPaid: 0, balance: grandTotal } : null);
+    setReopenPinModal(false);
+    setReopenPin('');
+    setReopenPinError('');
+  }, [detailInvoice, updateInvoice]);
+
+  const handleReopenPinSubmit = useCallback(() => {
+    const supervisor = SEED_POS_OPERATORS.find(op => op.pin === reopenPin && op.role === 'Manager');
+    if (!supervisor) {
+      setReopenPinError('Invalid supervisor PIN');
+      return;
+    }
+    const roleDef = tenantRoles.find(r => r.id === 'manager');
+    if (roleDef && roleDef.subPermissions && !roleDef.subPermissions.reopen_invoice) {
+      setReopenPinError('Supervisor role does not have reopen permission');
+      return;
+    }
+    handleReopenInvoice();
+  }, [reopenPin, handleReopenInvoice]);
 
   const terminalTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -639,10 +673,16 @@ export default function Invoices() {
                       </button>
                     </>
                   )}
-                  {canReopenInvoice && (detailInvoice.status === 'Paid' || detailInvoice.status === 'Cancelled') && (
+                  {(detailInvoice.status === 'Paid' || detailInvoice.status === 'Cancelled') && isCashPaidInvoice(detailInvoice) && canReopenInvoice && (
                     <button onClick={handleReopenInvoice}
-                      className="px-4 py-2 bg-amber-500 text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-amber-500/20 hover:bg-amber-600 active:scale-95 transition-all flex items-center gap-1.5">
+                      className="px-4 py-2 bg-emerald-500 text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-emerald-500/20 hover:bg-emerald-600 active:scale-95 transition-all flex items-center gap-1.5">
                       <span className="material-symbols-outlined text-sm">lock_open</span> Reopen Invoice
+                    </button>
+                  )}
+                  {(detailInvoice.status === 'Paid' || detailInvoice.status === 'Cancelled') && isCashPaidInvoice(detailInvoice) && !canReopenInvoice && (
+                    <button onClick={() => { setReopenPinModal(true); setReopenPin(''); setReopenPinError(''); }}
+                      className="px-4 py-2 bg-amber-500 text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-amber-500/20 hover:bg-amber-600 active:scale-95 transition-all flex items-center gap-1.5">
+                      <span className="material-symbols-outlined text-sm">lock</span> Reopen Invoice
                     </button>
                   )}
                   <button onClick={() => setShowPrintModal(true)}
@@ -909,6 +949,141 @@ export default function Invoices() {
         {showEditModal && renderInvoiceFormModal(editInv, setEditInv, editInvTotals, handleSaveEdit, () => setShowEditModal(false), 'Edit Invoice', 'Save Changes')}
       </AnimatePresence>
 
+      {detailInvoice && (
+        <div id="print-surface" className={printMode === 'receipt' ? 'print-receipt' : 'print-fullpage'} style={{ position: 'fixed', left: '-9999px', top: 0, width: printMode === 'receipt' ? '80mm' : '100%', background: 'white' }}>
+          {printMode === 'receipt' ? (
+            <div style={{ padding: '4mm', fontFamily: 'monospace, sans-serif' }}>
+              <div style={{ textAlign: 'center', borderBottom: '1px dashed #333', paddingBottom: '8px', marginBottom: '8px' }}>
+                <h2 style={{ fontSize: '14pt', fontWeight: 900, margin: 0, color: '#003633' }}>RepairHub</h2>
+                <p style={{ fontSize: '8pt', margin: '2px 0 0', color: '#666' }}>Professional Repair Services</p>
+              </div>
+              <div style={{ fontSize: '8pt', marginBottom: '6px' }}>
+                <p style={{ fontWeight: 700, margin: 0 }}>{detailInvoice.invoiceNumber}</p>
+                <p style={{ margin: '2px 0', color: '#666' }}>Date: {detailInvoice.createdAt}</p>
+                <p style={{ margin: '2px 0', fontWeight: 700 }}>{detailInvoice.customerName}</p>
+                {detailInvoice.customerPhone && <p style={{ margin: '2px 0', color: '#666' }}>{detailInvoice.customerPhone}</p>}
+              </div>
+              <div style={{ borderTop: '1px dashed #333', borderBottom: '1px dashed #333', padding: '4px 0', margin: '6px 0' }}>
+                {detailInvoice.items.map((it) => (
+                  <div key={it.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '8pt', padding: '2px 0' }}>
+                    <span>{it.quantity}x {it.name}</span>
+                    <span style={{ fontWeight: 700 }}>${(it.quantity * it.price).toFixed(2)}</span>
+                  </div>
+                ))}
+              </div>
+              <div style={{ fontSize: '8pt', marginBottom: '6px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}><span>Subtotal</span><span>${detailInvoice.subtotal.toFixed(2)}</span></div>
+                {detailInvoice.discount > 0 && <div style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}><span>Discount</span><span>-${detailInvoice.discount.toFixed(2)}</span></div>}
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}><span>Tax</span><span>${detailInvoice.tax.toFixed(2)}</span></div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderTop: '1px solid #333', fontWeight: 900, fontSize: '10pt' }}><span>TOTAL</span><span>${detailInvoice.total.toFixed(2)}</span></div>
+                {detailInvoice.amountPaid > 0 && <div style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}><span>Paid</span><span>${detailInvoice.amountPaid.toFixed(2)}</span></div>}
+                {detailInvoice.balance > 0 && <div style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0', fontWeight: 900 }}><span>Balance Due</span><span>${detailInvoice.balance.toFixed(2)}</span></div>}
+              </div>
+              {detailInvoice.paymentHistory.length > 0 && (
+                <div style={{ borderTop: '1px dashed #333', paddingTop: '4px', marginTop: '4px', fontSize: '7pt' }}>
+                  {detailInvoice.paymentHistory.map(p => (
+                    <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '1px 0' }}>
+                      <span>${p.amount.toFixed(2)} {p.method}</span>
+                      <span style={{ color: '#666' }}>{p.timestamp.slice(0, 10)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div style={{ textAlign: 'center', marginTop: '10px', paddingTop: '6px', borderTop: '1px dashed #333', fontSize: '7pt', color: '#999' }}>
+                Thank you for your business
+              </div>
+            </div>
+          ) : (
+            <div style={{ padding: '0 2.5rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '2rem', paddingBottom: '1.5rem', borderBottom: '2px solid #003633' }}>
+                <div>
+                  <h2 style={{ fontSize: '24pt', fontWeight: 900, color: '#003633', margin: 0, letterSpacing: '-0.02em' }}>INVOICE</h2>
+                  <p style={{ fontSize: '10pt', fontWeight: 700, color: '#94a3b8', marginTop: '4px' }}>{detailInvoice.invoiceNumber}</p>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <p style={{ fontSize: '16pt', fontWeight: 900, color: '#003633', margin: 0 }}>RepairHub</p>
+                  <p style={{ fontSize: '9pt', color: '#94a3b8', fontWeight: 700, marginTop: '4px' }}>Professional Repair Services</p>
+                </div>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem', marginBottom: '2rem' }}>
+                <div style={{ padding: '1rem', background: '#f8fafc', border: '1px solid #e2e8f0' }}>
+                  <p style={{ fontWeight: 900, color: '#94a3b8', fontSize: '7pt', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '6px' }}>Bill To</p>
+                  <p style={{ fontWeight: 900, color: '#0f172a', fontSize: '11pt' }}>{detailInvoice.customerName}</p>
+                  {detailInvoice.customerEmail && <p style={{ fontSize: '9pt', color: '#64748b', marginTop: '2px' }}>{detailInvoice.customerEmail}</p>}
+                  {detailInvoice.customerPhone && <p style={{ fontSize: '9pt', color: '#64748b' }}>{detailInvoice.customerPhone}</p>}
+                </div>
+                <div style={{ padding: '1rem', background: '#f8fafc', border: '1px solid #e2e8f0', textAlign: 'right' }}>
+                  <p style={{ fontWeight: 900, color: '#94a3b8', fontSize: '7pt', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '6px' }}>Invoice Details</p>
+                  <p style={{ fontSize: '9pt', color: '#475569' }}><span style={{ fontWeight: 700 }}>Issue Date:</span> {detailInvoice.createdAt}</p>
+                  <p style={{ fontSize: '9pt', color: '#475569' }}><span style={{ fontWeight: 700 }}>Due Date:</span> {detailInvoice.dueDate}</p>
+                  <p style={{ fontSize: '9pt', fontWeight: 900, color: '#003633', marginTop: '4px' }}>Status: {detailInvoice.status}</p>
+                </div>
+              </div>
+              <table style={{ width: '100%', fontSize: '10pt', borderCollapse: 'collapse', marginBottom: '2rem' }}>
+                <thead>
+                  <tr style={{ borderBottom: '2px solid rgba(0,54,51,0.2)' }}>
+                    <th style={{ padding: '8px 4px', textAlign: 'left', fontWeight: 900, color: '#003633', fontSize: '8pt', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Description</th>
+                    <th style={{ padding: '8px 4px', textAlign: 'center', fontWeight: 900, color: '#003633', fontSize: '8pt', textTransform: 'uppercase', letterSpacing: '0.05em', width: '60px' }}>Qty</th>
+                    <th style={{ padding: '8px 4px', textAlign: 'right', fontWeight: 900, color: '#003633', fontSize: '8pt', textTransform: 'uppercase', letterSpacing: '0.05em', width: '90px' }}>Unit Price</th>
+                    <th style={{ padding: '8px 4px', textAlign: 'right', fontWeight: 900, color: '#003633', fontSize: '8pt', textTransform: 'uppercase', letterSpacing: '0.05em', width: '90px' }}>Amount</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {detailInvoice.items.map((it, idx) => (
+                    <tr key={it.id} style={{ background: idx % 2 === 0 ? '#f8fafc' : 'transparent', borderBottom: '1px solid #e2e8f0' }}>
+                      <td style={{ padding: '8px 4px', fontWeight: 700, color: '#0f172a' }}>{it.name}</td>
+                      <td style={{ padding: '8px 4px', textAlign: 'center', color: '#475569' }}>{it.quantity}</td>
+                      <td style={{ padding: '8px 4px', textAlign: 'right', color: '#475569' }}>${it.price.toFixed(2)}</td>
+                      <td style={{ padding: '8px 4px', textAlign: 'right', fontWeight: 700, color: '#0f172a' }}>${(it.quantity * it.price).toFixed(2)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                <div style={{ width: '280px', fontSize: '10pt' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}><span style={{ color: '#64748b' }}>Subtotal</span><span style={{ fontWeight: 700 }}>${detailInvoice.subtotal.toFixed(2)}</span></div>
+                  {detailInvoice.discount > 0 && <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}><span style={{ color: '#64748b' }}>Discount</span><span style={{ fontWeight: 700, color: '#059669' }}>-${detailInvoice.discount.toFixed(2)}</span></div>}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}><span style={{ color: '#64748b' }}>Tax</span><span style={{ fontWeight: 700 }}>${detailInvoice.tax.toFixed(2)}</span></div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderTop: '2px solid rgba(0,54,51,0.2)', marginTop: '8px' }}><span style={{ fontWeight: 900, color: '#003633', fontSize: '12pt' }}>Total</span><span style={{ fontWeight: 900, color: '#003633', fontSize: '12pt' }}>${detailInvoice.total.toFixed(2)}</span></div>
+                  {detailInvoice.amountPaid > 0 && <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}><span style={{ color: '#059669', fontWeight: 700 }}>Amount Paid</span><span style={{ fontWeight: 700, color: '#059669' }}>${detailInvoice.amountPaid.toFixed(2)}</span></div>}
+                  {detailInvoice.balance > 0 && <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 8px', background: '#fff1f2', borderRadius: '8px' }}><span style={{ fontWeight: 900, color: '#e11d48' }}>Balance Due</span><span style={{ fontWeight: 900, color: '#e11d48' }}>${detailInvoice.balance.toFixed(2)}</span></div>}
+                </div>
+              </div>
+              {detailInvoice.paymentHistory.length > 0 && (
+                <div style={{ marginTop: '2rem', paddingTop: '1.5rem', borderTop: '1px solid #e2e8f0' }}>
+                  <p style={{ fontSize: '7pt', fontWeight: 900, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '8px' }}>Payment History</p>
+                  {detailInvoice.paymentHistory.map(p => (
+                    <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9pt', padding: '4px 8px', background: '#f8fafc', border: '1px solid #e2e8f0', marginBottom: '2px' }}>
+                      <span style={{ fontWeight: 700, color: '#475569' }}>${p.amount.toFixed(2)} via {p.method}</span>
+                      <span style={{ color: '#94a3b8' }}>{p.timestamp}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {(detailInvoice.notes || detailInvoice.terms) && (
+                <div style={{ marginTop: '1.5rem', paddingTop: '1rem', borderTop: '1px solid #e2e8f0', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem', fontSize: '9pt' }}>
+                  {detailInvoice.notes && (
+                    <div>
+                      <p style={{ fontWeight: 900, color: '#94a3b8', fontSize: '7pt', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '4px' }}>Notes</p>
+                      <p style={{ color: '#475569' }}>{detailInvoice.notes}</p>
+                    </div>
+                  )}
+                  {detailInvoice.terms && (
+                    <div>
+                      <p style={{ fontWeight: 900, color: '#94a3b8', fontSize: '7pt', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '4px' }}>Terms & Conditions</p>
+                      <p style={{ color: '#475569' }}>{detailInvoice.terms}</p>
+                    </div>
+                  )}
+                </div>
+              )}
+              <div style={{ marginTop: '2rem', paddingTop: '1rem', borderTop: '1px solid #f1f5f9', textAlign: 'center' }}>
+                <p style={{ fontSize: '7pt', color: '#cbd5e1', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Thank you for your business</p>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       <AnimatePresence>
         {showPrintModal && detailInvoice && (
           <div className="fixed inset-0 z-[60] flex items-center justify-center p-6">
@@ -921,99 +1096,158 @@ export default function Invoices() {
                   <span className="material-symbols-outlined text-slate-400">close</span>
                 </button>
               </div>
-              <div className="p-8 overflow-y-auto flex-1 print-area" id="printable-invoice">
-                <div className="flex justify-between items-start mb-8 pb-6 border-b-2 border-primary">
-                  <div>
-                    <h2 className="text-3xl font-black text-primary tracking-tight">INVOICE</h2>
-                    <p className="text-sm font-bold text-slate-400 mt-1">{detailInvoice.invoiceNumber}</p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-xl font-black text-primary">RepairHub</p>
-                    <p className="text-xs text-slate-400 font-bold mt-1">Professional Repair Services</p>
-                  </div>
+              <div className="p-8 overflow-y-auto flex-1">
+                <div className="flex gap-3 mb-6">
+                  <button onClick={() => setPrintMode('fullpage')} className={`flex-1 py-3 rounded-2xl font-black text-xs uppercase tracking-widest transition-all flex items-center justify-center gap-2 ${printMode === 'fullpage' ? 'bg-primary text-white shadow-lg shadow-primary/20' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>
+                    <span className="material-symbols-outlined text-sm">description</span> Full Page
+                  </button>
+                  <button onClick={() => setPrintMode('receipt')} className={`flex-1 py-3 rounded-2xl font-black text-xs uppercase tracking-widest transition-all flex items-center justify-center gap-2 ${printMode === 'receipt' ? 'bg-primary text-white shadow-lg shadow-primary/20' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>
+                    <span className="material-symbols-outlined text-sm">receipt_long</span> Receipt
+                  </button>
                 </div>
-                <div className="grid grid-cols-2 gap-8 mb-8">
-                  <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 print:bg-white print:border-slate-300">
-                    <p className="font-black text-slate-400 text-[9px] uppercase tracking-widest mb-2">Bill To</p>
-                    <p className="font-black text-slate-900 text-sm">{detailInvoice.customerName}</p>
-                    {detailInvoice.customerEmail && <p className="text-xs text-slate-500 mt-0.5">{detailInvoice.customerEmail}</p>}
-                    {detailInvoice.customerPhone && <p className="text-xs text-slate-500">{detailInvoice.customerPhone}</p>}
-                  </div>
-                  <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 text-right print:bg-white print:border-slate-300">
-                    <p className="font-black text-slate-400 text-[9px] uppercase tracking-widest mb-2">Invoice Details</p>
-                    <p className="text-xs text-slate-600"><span className="font-bold">Issue Date:</span> {detailInvoice.createdAt}</p>
-                    <p className="text-xs text-slate-600"><span className="font-bold">Due Date:</span> {detailInvoice.dueDate}</p>
-                    <p className="text-xs font-black text-primary mt-1">Status: {detailInvoice.status}</p>
-                  </div>
-                </div>
-                <table className="w-full text-sm mb-8">
-                  <thead>
-                    <tr className="border-b-2 border-primary/20">
-                      <th className="py-3 text-left font-black text-primary text-[10px] uppercase tracking-widest">Description</th>
-                      <th className="py-3 text-center font-black text-primary text-[10px] uppercase tracking-widest w-20">Qty</th>
-                      <th className="py-3 text-right font-black text-primary text-[10px] uppercase tracking-widest w-28">Unit Price</th>
-                      <th className="py-3 text-right font-black text-primary text-[10px] uppercase tracking-widest w-28">Amount</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {detailInvoice.items.map((it, idx) => (
-                      <tr key={it.id} className={idx % 2 === 0 ? 'bg-slate-50/50 print:bg-slate-50' : ''}>
-                        <td className="py-3 px-1 font-bold text-slate-900">{it.name}</td>
-                        <td className="py-3 text-center text-slate-600">{it.quantity}</td>
-                        <td className="py-3 text-right text-slate-600">${it.price.toFixed(2)}</td>
-                        <td className="py-3 text-right font-bold text-slate-900">${(it.quantity * it.price).toFixed(2)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                <div className="flex justify-end">
-                  <div className="w-72 space-y-2 text-sm">
-                    <div className="flex justify-between py-1"><span className="text-slate-500">Subtotal</span><span className="font-bold">${detailInvoice.subtotal.toFixed(2)}</span></div>
-                    {detailInvoice.discount > 0 && <div className="flex justify-between py-1"><span className="text-slate-500">Discount</span><span className="font-bold text-emerald-600">-${detailInvoice.discount.toFixed(2)}</span></div>}
-                    <div className="flex justify-between py-1"><span className="text-slate-500">Tax</span><span className="font-bold">${detailInvoice.tax.toFixed(2)}</span></div>
-                    <div className="flex justify-between py-2 border-t-2 border-primary/20 mt-2"><span className="font-black text-primary text-base">Total</span><span className="font-black text-primary text-base">${detailInvoice.total.toFixed(2)}</span></div>
-                    {detailInvoice.amountPaid > 0 && <div className="flex justify-between py-1"><span className="text-emerald-600 font-bold">Amount Paid</span><span className="font-bold text-emerald-600">${detailInvoice.amountPaid.toFixed(2)}</span></div>}
-                    {detailInvoice.balance > 0 && <div className="flex justify-between py-2 bg-rose-50 px-3 rounded-xl print:bg-rose-50"><span className="font-black text-rose-600">Balance Due</span><span className="font-black text-rose-600">${detailInvoice.balance.toFixed(2)}</span></div>}
-                  </div>
-                </div>
-                {detailInvoice.paymentHistory.length > 0 && (
-                  <div className="mt-8 pt-6 border-t border-slate-200">
-                    <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-3">Payment History</p>
-                    <div className="space-y-1">
-                      {detailInvoice.paymentHistory.map(p => (
-                        <div key={p.id} className="flex justify-between text-xs px-3 py-2 bg-slate-50 rounded-lg print:bg-white print:border print:border-slate-200">
-                          <span className="font-bold text-slate-600">${p.amount.toFixed(2)} via {p.method}</span>
-                          <span className="text-slate-400">{p.timestamp}</span>
+                <div className={`border border-slate-200 rounded-2xl overflow-hidden ${printMode === 'receipt' ? 'max-w-[320px] mx-auto' : ''}`}>
+                  <div className={`bg-white p-6 ${printMode === 'receipt' ? 'text-xs' : ''}`}>
+                    <div className={`flex justify-between items-start mb-4 pb-3 border-b-2 border-primary ${printMode === 'receipt' ? 'flex-col items-center text-center' : ''}`}>
+                      <div>
+                        <h2 className={`font-black text-primary tracking-tight ${printMode === 'receipt' ? 'text-lg' : 'text-2xl'}`}>
+                          {printMode === 'receipt' ? 'RepairHub' : 'INVOICE'}
+                        </h2>
+                        <p className="text-[10px] font-bold text-slate-400 mt-0.5">{detailInvoice.invoiceNumber}</p>
+                      </div>
+                      {printMode !== 'receipt' && (
+                        <div className="text-right">
+                          <p className="text-lg font-black text-primary">RepairHub</p>
+                          <p className="text-[10px] text-slate-400 font-bold mt-0.5">Professional Repair Services</p>
                         </div>
-                      ))}
+                      )}
+                    </div>
+                    <div className={`${printMode === 'receipt' ? 'space-y-1 mb-3' : 'grid grid-cols-2 gap-6 mb-6'}`}>
+                      <div className={`${printMode === 'receipt' ? '' : 'p-3 bg-slate-50 rounded-xl border border-slate-100'}`}>
+                        {printMode !== 'receipt' && <p className="font-black text-slate-400 text-[8px] uppercase tracking-widest mb-1">Bill To</p>}
+                        <p className={`font-black text-slate-900 ${printMode === 'receipt' ? 'text-xs' : 'text-sm'}`}>{detailInvoice.customerName}</p>
+                        {detailInvoice.customerPhone && <p className="text-[10px] text-slate-500">{detailInvoice.customerPhone}</p>}
+                      </div>
+                      <div className={`${printMode === 'receipt' ? 'text-[10px] text-slate-500' : 'p-3 bg-slate-50 rounded-xl border border-slate-100 text-right'}`}>
+                        {printMode !== 'receipt' && <p className="font-black text-slate-400 text-[8px] uppercase tracking-widest mb-1">Invoice Details</p>}
+                        <p className="text-[10px] text-slate-600">Date: {detailInvoice.createdAt}</p>
+                        <p className="text-[10px] text-slate-600">Due: {detailInvoice.dueDate}</p>
+                      </div>
+                    </div>
+                    <div className={`${printMode === 'receipt' ? 'border-t border-dashed border-slate-300 pt-2 mb-2' : 'mb-6'}`}>
+                      {printMode === 'receipt' ? (
+                        detailInvoice.items.map((it) => (
+                          <div key={it.id} className="flex justify-between text-[10px] py-0.5">
+                            <span>{it.quantity}x {it.name}</span>
+                            <span className="font-bold">${(it.quantity * it.price).toFixed(2)}</span>
+                          </div>
+                        ))
+                      ) : (
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="border-b-2 border-primary/20">
+                              <th className="py-2 text-left font-black text-primary text-[9px] uppercase tracking-widest">Description</th>
+                              <th className="py-2 text-center font-black text-primary text-[9px] uppercase tracking-widest w-16">Qty</th>
+                              <th className="py-2 text-right font-black text-primary text-[9px] uppercase tracking-widest w-24">Price</th>
+                              <th className="py-2 text-right font-black text-primary text-[9px] uppercase tracking-widest w-24">Amount</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {detailInvoice.items.map((it, idx) => (
+                              <tr key={it.id} className={idx % 2 === 0 ? 'bg-slate-50/50' : ''}>
+                                <td className="py-2 px-1 font-bold text-slate-900 text-xs">{it.name}</td>
+                                <td className="py-2 text-center text-slate-600 text-xs">{it.quantity}</td>
+                                <td className="py-2 text-right text-slate-600 text-xs">${it.price.toFixed(2)}</td>
+                                <td className="py-2 text-right font-bold text-slate-900 text-xs">${(it.quantity * it.price).toFixed(2)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
+                    </div>
+                    <div className={`${printMode === 'receipt' ? 'border-t border-dashed border-slate-300 pt-2 text-[10px]' : 'flex justify-end'}`}>
+                      <div className={`${printMode === 'receipt' ? '' : 'w-64 text-sm'} space-y-1`}>
+                        <div className="flex justify-between py-0.5"><span className="text-slate-500">Subtotal</span><span className="font-bold">${detailInvoice.subtotal.toFixed(2)}</span></div>
+                        {detailInvoice.discount > 0 && <div className="flex justify-between py-0.5"><span className="text-slate-500">Discount</span><span className="font-bold text-emerald-600">-${detailInvoice.discount.toFixed(2)}</span></div>}
+                        <div className="flex justify-between py-0.5"><span className="text-slate-500">Tax</span><span className="font-bold">${detailInvoice.tax.toFixed(2)}</span></div>
+                        <div className={`flex justify-between py-1 border-t border-primary/20 mt-1 ${printMode === 'receipt' ? 'text-xs' : 'text-base'}`}><span className="font-black text-primary">Total</span><span className="font-black text-primary">${detailInvoice.total.toFixed(2)}</span></div>
+                        {detailInvoice.amountPaid > 0 && <div className="flex justify-between py-0.5"><span className="text-emerald-600 font-bold">Paid</span><span className="font-bold text-emerald-600">${detailInvoice.amountPaid.toFixed(2)}</span></div>}
+                        {detailInvoice.balance > 0 && <div className="flex justify-between py-1 bg-rose-50 px-2 rounded-lg"><span className="font-black text-rose-600">Balance</span><span className="font-black text-rose-600">${detailInvoice.balance.toFixed(2)}</span></div>}
+                      </div>
+                    </div>
+                    {detailInvoice.paymentHistory.length > 0 && (
+                      <div className={`mt-4 pt-3 ${printMode === 'receipt' ? 'border-t border-dashed border-slate-300' : 'border-t border-slate-200'}`}>
+                        <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-2">Payment History</p>
+                        {detailInvoice.paymentHistory.map(p => (
+                          <div key={p.id} className="flex justify-between text-[10px] py-0.5">
+                            <span className="font-bold text-slate-600">${p.amount.toFixed(2)} {p.method}</span>
+                            <span className="text-slate-400">{p.timestamp.slice(0, 10)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {printMode !== 'receipt' && (detailInvoice.notes || detailInvoice.terms) && (
+                      <div className="mt-4 pt-3 border-t border-slate-200 grid grid-cols-2 gap-4 text-[10px]">
+                        {detailInvoice.notes && <div><p className="font-black text-slate-400 text-[7px] uppercase tracking-widest mb-1">Notes</p><p className="text-slate-600">{detailInvoice.notes}</p></div>}
+                        {detailInvoice.terms && <div><p className="font-black text-slate-400 text-[7px] uppercase tracking-widest mb-1">Terms</p><p className="text-slate-600">{detailInvoice.terms}</p></div>}
+                      </div>
+                    )}
+                    <div className={`mt-4 pt-2 ${printMode === 'receipt' ? 'border-t border-dashed border-slate-300' : 'border-t border-slate-100'} text-center`}>
+                      <p className="text-[8px] text-slate-300 font-bold uppercase tracking-widest">Thank you for your business</p>
                     </div>
                   </div>
-                )}
-                {(detailInvoice.notes || detailInvoice.terms) && (
-                  <div className="mt-6 pt-4 border-t border-slate-200 grid grid-cols-2 gap-6 text-xs">
-                    {detailInvoice.notes && (
-                      <div>
-                        <p className="font-black text-slate-400 text-[8px] uppercase tracking-widest mb-1">Notes</p>
-                        <p className="text-slate-600">{detailInvoice.notes}</p>
-                      </div>
-                    )}
-                    {detailInvoice.terms && (
-                      <div>
-                        <p className="font-black text-slate-400 text-[8px] uppercase tracking-widest mb-1">Terms & Conditions</p>
-                        <p className="text-slate-600">{detailInvoice.terms}</p>
-                      </div>
-                    )}
-                  </div>
-                )}
-                <div className="mt-8 pt-4 border-t border-slate-100 text-center">
-                  <p className="text-[9px] text-slate-300 font-bold uppercase tracking-widest">Thank you for your business</p>
                 </div>
               </div>
               <div className="p-6 border-t border-slate-100 flex justify-end gap-4 shrink-0 no-print">
                 <button onClick={() => setShowPrintModal(false)} className="px-6 py-3 bg-slate-100 text-slate-600 font-black text-xs rounded-2xl uppercase tracking-widest">Cancel</button>
                 <button onClick={() => window.print()} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all flex items-center gap-2">
-                  <span className="material-symbols-outlined text-sm">print</span> Print Invoice
+                  <span className="material-symbols-outlined text-sm">print</span> {printMode === 'receipt' ? 'Print Receipt' : 'Print Invoice'}
                 </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {reopenPinModal && detailInvoice && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-6">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setReopenPinModal(false)} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
+            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-md bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden">
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-amber-50/50">
+                <div>
+                  <h3 className="text-xl font-black text-amber-700 tracking-tight flex items-center gap-2">
+                    <span className="material-symbols-outlined text-amber-500">lock</span> Supervisor Authorization
+                  </h3>
+                  <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest mt-1">Reopen Cash Invoice · {detailInvoice.invoiceNumber}</p>
+                </div>
+                <button onClick={() => setReopenPinModal(false)} className="w-10 h-10 rounded-full hover:bg-amber-100 flex items-center justify-center transition-colors">
+                  <span className="material-symbols-outlined text-amber-400">close</span>
+                </button>
+              </div>
+              <div className="p-8 space-y-5">
+                <div className="p-4 bg-amber-50 rounded-2xl border border-amber-200">
+                  <p className="text-xs font-bold text-amber-700">You do not have permission to reopen invoices. A supervisor must approve this action by entering their PIN.</p>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5 block">Supervisor PIN</label>
+                  <input
+                    type="password"
+                    value={reopenPin}
+                    onChange={(e) => { setReopenPin(e.target.value); setReopenPinError(''); }}
+                    className="w-full bg-slate-50 border border-amber-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-amber-400/40"
+                    placeholder="Enter 4-digit PIN"
+                    maxLength={4}
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleReopenPinSubmit(); }}
+                  />
+                  {reopenPinError && <p className="text-[10px] font-bold text-rose-600 mt-1">{reopenPinError}</p>}
+                </div>
+                <div className="flex gap-3">
+                  <button onClick={() => setReopenPinModal(false)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-black text-xs rounded-2xl uppercase tracking-widest">Cancel</button>
+                  <button onClick={handleReopenPinSubmit} className="flex-1 py-3 bg-amber-500 text-white font-black text-xs rounded-2xl shadow-lg shadow-amber-500/20 uppercase tracking-widest hover:bg-amber-600 active:scale-95 transition-all flex items-center justify-center gap-1.5">
+                    <span className="material-symbols-outlined text-sm">verified_user</span> Authorize Reopen
+                  </button>
+                </div>
               </div>
             </motion.div>
           </div>

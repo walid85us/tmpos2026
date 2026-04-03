@@ -13,7 +13,8 @@ export default function Customers() {
   const { customers, addCustomer, updateCustomer, completedOrders, invoices, findDuplicateCustomers, loyaltyConfig, updateLoyaltyConfig, loyaltyAdjustments, addLoyaltyAdjustment } = useStoreLocalState();
   const { canAccess, checkSubPermission } = useAccess();
   const hasLoyalty = canAccess('loyalty_management');
-  const canManageLoyalty = checkSubPermission('manage_loyalty');
+  const canEditCustomerLoyalty = hasLoyalty && checkSubPermission('loyalty_customer_edit');
+  const canManageLoyaltySettings = hasLoyalty && checkSubPermission('loyalty_settings_manage');
   const navigate = useNavigate();
   const [view, setView] = useState<CustomerView>('list');
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
@@ -193,7 +194,7 @@ export default function Customers() {
       campaignerStatus: editForm.campaignerStatus,
       thirdPartyBilling: editForm.thirdPartyBilling,
     };
-    if (canManageLoyalty) {
+    if (canEditCustomerLoyalty) {
       updates.tier = editForm.tier;
       updates.loyaltyPoints = editForm.loyaltyPoints;
     }
@@ -269,7 +270,7 @@ export default function Customers() {
               type="text"
             />
           </div>
-          {hasLoyalty && canManageLoyalty && (
+          {hasLoyalty && canManageLoyaltySettings && (
           <button
             onClick={() => { setShowLoyaltyConfig(true); setLoyaltyEnabled(loyaltyConfig.enabled); setLoyaltyPointsPerDollar(loyaltyConfig.pointsPerDollar); }}
             className="bg-white text-primary px-6 py-2.5 rounded-xl font-black text-xs uppercase tracking-widest border border-slate-200 shadow-sm hover:bg-slate-50 transition-all flex items-center gap-2"
@@ -277,6 +278,12 @@ export default function Customers() {
             <span className="material-symbols-outlined text-sm">loyalty</span>
             Loyalty Settings
           </button>
+          )}
+          {!hasLoyalty && (
+          <div className="flex items-center gap-2 px-4 py-2.5 bg-amber-50 border border-amber-200 rounded-xl">
+            <span className="material-symbols-outlined text-sm text-amber-500">lock</span>
+            <span className="text-[10px] font-black text-amber-600 uppercase tracking-widest">Loyalty — Upgrade Plan</span>
+          </div>
           )}
           <button
             onClick={() => { setShowNewCustomerModal(true); setDuplicateOverride(false); setDuplicateWarning([]); }}
@@ -522,12 +529,12 @@ export default function Customers() {
               <div className="flex items-center justify-between mb-6">
                 <h3 className="text-sm font-black text-primary uppercase tracking-widest">Loyalty Program</h3>
                 <div className="flex items-center gap-2">
-                  {canManageLoyalty && (
+                  {canEditCustomerLoyalty && (
                     <button onClick={() => setShowAdjustPoints(true)} className="text-[10px] font-black text-secondary uppercase tracking-widest hover:underline flex items-center gap-1">
                       <span className="material-symbols-outlined text-xs">tune</span> Adjust
                     </button>
                   )}
-                  {canManageLoyalty && (
+                  {canEditCustomerLoyalty && (
                     <button onClick={openLoyaltyEdit} className="text-[10px] font-black text-primary uppercase tracking-widest hover:underline flex items-center gap-1">
                       <span className="material-symbols-outlined text-xs">edit</span> Manage
                     </button>
@@ -966,8 +973,8 @@ export default function Customers() {
                     <select
                       value={editForm.tier}
                       onChange={(e) => setEditForm(prev => ({ ...prev, tier: e.target.value as any }))}
-                      disabled={!canManageLoyalty}
-                      className={`w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20 appearance-none ${!canManageLoyalty ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      disabled={!canEditCustomerLoyalty}
+                      className={`w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20 appearance-none ${!canEditCustomerLoyalty ? 'opacity-50 cursor-not-allowed' : ''}`}
                     >
                       {loyaltyConfig.tiers.filter(t => t.status === 'active').map(t => (
                         <option key={t.id} value={t.name}>{t.name}</option>
@@ -976,7 +983,7 @@ export default function Customers() {
                         <option value={editForm.tier}>{editForm.tier} (inactive)</option>
                       )}
                     </select>
-                    {!canManageLoyalty && <p className="text-[9px] text-amber-500 font-bold mt-1">Requires Manage Loyalty permission</p>}
+                    {!canEditCustomerLoyalty && <p className="text-[9px] text-amber-500 font-bold mt-1">{!hasLoyalty ? 'Loyalty not available on current plan' : 'Requires Edit Customer Loyalty permission'}</p>}
                   </div>
                   <div>
                     <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Loyalty Points</label>
@@ -984,10 +991,10 @@ export default function Customers() {
                       type="number"
                       value={editForm.loyaltyPoints}
                       onChange={(e) => setEditForm(prev => ({ ...prev, loyaltyPoints: parseInt(e.target.value) || 0 }))}
-                      disabled={!canManageLoyalty}
-                      className={`w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20 ${!canManageLoyalty ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      disabled={!canEditCustomerLoyalty}
+                      className={`w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20 ${!canEditCustomerLoyalty ? 'opacity-50 cursor-not-allowed' : ''}`}
                     />
-                    {!canManageLoyalty && <p className="text-[9px] text-amber-500 font-bold mt-1">Requires Manage Loyalty permission</p>}
+                    {!canEditCustomerLoyalty && <p className="text-[9px] text-amber-500 font-bold mt-1">{!hasLoyalty ? 'Loyalty not available on current plan' : 'Requires Edit Customer Loyalty permission'}</p>}
                   </div>
                 </div>
                 <div>
