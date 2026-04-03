@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useMemo, useEffect, useRef } from 'react';
-import { Customer, HeldOrder, CartItem, PaymentMethod, Discount, RepairTicket, Invoice, RepairService, RepairCategory } from '../types';
+import { Customer, HeldOrder, CartItem, PaymentMethod, Discount, RepairTicket, Invoice, RepairService, RepairCategory, DocumentTemplate } from '../types';
 import { useAccess } from './AccessContext';
 
 export interface StockItem {
@@ -183,6 +183,9 @@ interface StoreLocalStateContextType {
   updateLoyaltyConfig: (updates: Partial<LoyaltyProgramConfig>) => void;
   loyaltyAdjustments: LoyaltyAdjustment[];
   addLoyaltyAdjustment: (adj: LoyaltyAdjustment) => void;
+  documentTemplates: DocumentTemplate[];
+  updateDocumentTemplate: (id: string, updates: Partial<DocumentTemplate>) => void;
+  resetDocumentTemplate: (id: string) => void;
 }
 
 const SEED_CUSTOMERS: Customer[] = [
@@ -398,6 +401,104 @@ const SEED_SERVICES: RepairService[] = [
   { id: 's6', name: 'Samsung S21 Battery Replacement', categoryId: 'cat1', categoryName: 'Smartphones', price: 79.99, cost: 22.00, estimatedTime: 40, status: 'Active', sku: 'SRV-SS21-BAT', warrantyPeriod: '90 days', warrantyType: 'parts-and-labor' },
 ];
 
+const DEFAULT_TEMPLATES: DocumentTemplate[] = [
+  {
+    id: 'tmpl-invoice', type: 'invoice', name: 'Invoice Template', isDefault: true, updatedAt: new Date().toISOString(),
+    content: `<div style="font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto;">
+<div style="display: flex; justify-content: space-between; border-bottom: 2px solid {{brandColor}}; padding-bottom: 16px; margin-bottom: 24px;">
+<div><h1 style="color: {{brandColor}}; margin: 0;">INVOICE</h1><p style="color: #94a3b8;">{{invoiceNumber}}</p></div>
+<div style="text-align: right;"><h2 style="color: {{brandColor}}; margin: 0;">{{storeName}}</h2><p style="color: #94a3b8;">{{storeTagline}}</p></div>
+</div>
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 24px;">
+<div style="background: #f8fafc; padding: 16px; border: 1px solid #e2e8f0;"><p style="font-weight: 700; color: #94a3b8; font-size: 10px; text-transform: uppercase;">Bill To</p><p style="font-weight: 700;">{{customerName}}</p><p style="color: #64748b;">{{customerEmail}}</p><p style="color: #64748b;">{{customerPhone}}</p></div>
+<div style="background: #f8fafc; padding: 16px; border: 1px solid #e2e8f0; text-align: right;"><p style="font-weight: 700; color: #94a3b8; font-size: 10px; text-transform: uppercase;">Details</p><p>Issue: {{createdAt}}</p><p>Due: {{dueDate}}</p><p style="font-weight: 700; color: {{brandColor}};">Status: {{status}}</p></div>
+</div>
+{{lineItems}}
+<div style="display: flex; justify-content: flex-end;"><div style="width: 280px;">
+<div style="display: flex; justify-content: space-between; padding: 4px 0;"><span>Subtotal</span><span>{{subtotal}}</span></div>
+{{#if discount}}<div style="display: flex; justify-content: space-between; padding: 4px 0;"><span>Discount</span><span>-{{discount}}</span></div>{{/if}}
+<div style="display: flex; justify-content: space-between; padding: 4px 0;"><span>Tax</span><span>{{tax}}</span></div>
+<div style="display: flex; justify-content: space-between; padding: 8px 0; border-top: 2px solid {{brandColor}}; font-weight: 900; font-size: 14pt;"><span>Total</span><span>{{total}}</span></div>
+</div></div>
+{{#if notes}}<div style="margin-top: 24px; border-top: 1px solid #e2e8f0; padding-top: 16px;"><p style="font-weight: 700; color: #94a3b8; font-size: 10px; text-transform: uppercase;">Notes</p><p>{{notes}}</p></div>{{/if}}
+{{#if terms}}<div style="margin-top: 12px;"><p style="font-weight: 700; color: #94a3b8; font-size: 10px; text-transform: uppercase;">Terms</p><p>{{terms}}</p></div>{{/if}}
+<div style="text-align: center; margin-top: 32px; padding-top: 16px; border-top: 1px solid #f1f5f9; color: #cbd5e1; font-size: 10px;">Thank you for your business</div>
+</div>`,
+  },
+  {
+    id: 'tmpl-ticket', type: 'ticket', name: 'Repair Ticket', isDefault: true, updatedAt: new Date().toISOString(),
+    content: `<div style="font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto;">
+<div style="background: {{brandColor}}; color: white; padding: 16px 24px; display: flex; justify-content: space-between;">
+<div><h1 style="margin: 0; font-size: 18pt;">REPAIR TICKET</h1><p style="margin: 4px 0 0; opacity: 0.8;">{{ticketNumber}}</p></div>
+<div style="text-align: right;"><h2 style="margin: 0;">{{storeName}}</h2><p style="margin: 4px 0 0; opacity: 0.8;">{{storeTagline}}</p></div>
+</div>
+<div style="padding: 24px;">
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 24px;">
+<div><p style="font-weight: 700; color: #94a3b8; font-size: 10px; text-transform: uppercase;">Customer</p><p style="font-weight: 700;">{{customerName}}</p><p style="color: #64748b;">{{customerPhone}}</p></div>
+<div><p style="font-weight: 700; color: #94a3b8; font-size: 10px; text-transform: uppercase;">Device</p><p style="font-weight: 700;">{{deviceName}}</p><p style="color: #64748b;">IMEI: {{imei}}</p></div>
+</div>
+<div style="background: #f8fafc; padding: 16px; border: 1px solid #e2e8f0; margin-bottom: 16px;"><p style="font-weight: 700; color: #94a3b8; font-size: 10px; text-transform: uppercase;">Issue Description</p><p>{{issueDescription}}</p></div>
+<div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px;">
+<div><p style="font-weight: 700; color: #94a3b8; font-size: 10px; text-transform: uppercase;">Priority</p><p style="font-weight: 700;">{{priority}}</p></div>
+<div><p style="font-weight: 700; color: #94a3b8; font-size: 10px; text-transform: uppercase;">Est. Time</p><p style="font-weight: 700;">{{estimatedTime}}</p></div>
+<div><p style="font-weight: 700; color: #94a3b8; font-size: 10px; text-transform: uppercase;">Technician</p><p style="font-weight: 700;">{{technicianName}}</p></div>
+</div>
+</div></div>`,
+  },
+  {
+    id: 'tmpl-label', type: 'label', name: 'Inventory Label', isDefault: true, updatedAt: new Date().toISOString(),
+    content: `<div style="font-family: monospace; width: 60mm; padding: 4mm; border: 1px solid #333;">
+<div style="text-align: center; border-bottom: 1px dashed #333; padding-bottom: 4px; margin-bottom: 4px;">
+<p style="font-weight: 900; font-size: 10pt; margin: 0;">{{storeName}}</p>
+</div>
+<p style="font-weight: 700; font-size: 9pt; margin: 4px 0;">{{itemName}}</p>
+<p style="font-size: 8pt; color: #666; margin: 2px 0;">SKU: {{sku}}</p>
+<p style="font-weight: 900; font-size: 14pt; margin: 6px 0;">{{price}}</p>
+<p style="font-size: 7pt; color: #999; margin: 2px 0;">Category: {{category}}</p>
+</div>`,
+  },
+  {
+    id: 'tmpl-receipt', type: 'receipt', name: 'Sales Receipt', isDefault: true, updatedAt: new Date().toISOString(),
+    content: `<div style="font-family: monospace; width: 80mm; padding: 4mm;">
+<div style="text-align: center; border-bottom: 1px dashed #333; padding-bottom: 8px; margin-bottom: 8px;">
+<h2 style="font-size: 14pt; font-weight: 900; margin: 0; color: {{brandColor}};">{{storeName}}</h2>
+<p style="font-size: 8pt; margin: 2px 0 0; color: #666;">{{storeTagline}}</p>
+</div>
+<div style="font-size: 8pt; margin-bottom: 6px;">
+<p style="font-weight: 700; margin: 0;">{{receiptNumber}}</p>
+<p style="margin: 2px 0; color: #666;">Date: {{date}}</p>
+<p style="margin: 2px 0; font-weight: 700;">{{customerName}}</p>
+</div>
+{{lineItems}}
+<div style="font-size: 8pt;">
+<div style="display: flex; justify-content: space-between;"><span>Subtotal</span><span>{{subtotal}}</span></div>
+<div style="display: flex; justify-content: space-between;"><span>Tax</span><span>{{tax}}</span></div>
+<div style="display: flex; justify-content: space-between; border-top: 1px solid #333; font-weight: 900; font-size: 10pt; padding-top: 4px;"><span>TOTAL</span><span>{{total}}</span></div>
+<div style="display: flex; justify-content: space-between; padding-top: 2px;"><span>Paid</span><span>{{amountPaid}}</span></div>
+</div>
+<div style="text-align: center; margin-top: 10px; border-top: 1px dashed #333; padding-top: 6px; font-size: 7pt; color: #999;">Thank you for your business</div>
+</div>`,
+  },
+  {
+    id: 'tmpl-estimate', type: 'estimate', name: 'Price Estimate', isDefault: true, updatedAt: new Date().toISOString(),
+    content: `<div style="font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto;">
+<div style="display: flex; justify-content: space-between; border-bottom: 2px solid {{brandColor}}; padding-bottom: 16px; margin-bottom: 24px;">
+<div><h1 style="color: {{brandColor}}; margin: 0;">ESTIMATE</h1><p style="color: #94a3b8;">{{estimateNumber}}</p></div>
+<div style="text-align: right;"><h2 style="color: {{brandColor}}; margin: 0;">{{storeName}}</h2><p style="color: #94a3b8;">{{storeTagline}}</p></div>
+</div>
+<div style="margin-bottom: 24px;"><p style="font-weight: 700; color: #94a3b8; font-size: 10px; text-transform: uppercase;">Prepared For</p><p style="font-weight: 700;">{{customerName}}</p><p style="color: #64748b;">{{customerEmail}}</p></div>
+<div style="background: #fffbeb; border: 1px solid #fcd34d; padding: 12px; margin-bottom: 24px; font-size: 10pt; color: #92400e;">This estimate is valid for 30 days from the date of issue.</div>
+{{lineItems}}
+<div style="display: flex; justify-content: flex-end;"><div style="width: 280px;">
+<div style="display: flex; justify-content: space-between; padding: 4px 0;"><span>Subtotal</span><span>{{subtotal}}</span></div>
+<div style="display: flex; justify-content: space-between; padding: 4px 0;"><span>Est. Tax</span><span>{{tax}}</span></div>
+<div style="display: flex; justify-content: space-between; padding: 8px 0; border-top: 2px solid {{brandColor}}; font-weight: 900; font-size: 14pt;"><span>Est. Total</span><span>{{total}}</span></div>
+</div></div>
+<div style="text-align: center; margin-top: 32px; color: #cbd5e1; font-size: 10px;">This is an estimate only. Final pricing may vary.</div>
+</div>`,
+  },
+];
+
 const EMPTY_DRAFT: DraftCart = { cart: [], selectedCustomer: null, payments: [], discounts: [] };
 
 const StoreLocalStateContext = createContext<StoreLocalStateContextType | null>(null);
@@ -420,6 +521,18 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const [serviceCategories, setServiceCategories] = useState<RepairCategory[]>(SEED_SERVICE_CATEGORIES);
   const [loyaltyConfig, setLoyaltyConfig] = useState<LoyaltyProgramConfig>(SEED_LOYALTY_CONFIG);
   const [loyaltyAdjustments, setLoyaltyAdjustments] = useState<LoyaltyAdjustment[]>([]);
+  const [documentTemplates, setDocumentTemplates] = useState<DocumentTemplate[]>(DEFAULT_TEMPLATES);
+
+  const updateDocumentTemplate = useCallback((id: string, updates: Partial<DocumentTemplate>) => {
+    setDocumentTemplates(prev => prev.map(t => t.id === id ? { ...t, ...updates, isDefault: false, updatedAt: new Date().toISOString() } : t));
+  }, []);
+
+  const resetDocumentTemplate = useCallback((id: string) => {
+    const defaultTmpl = DEFAULT_TEMPLATES.find(t => t.id === id);
+    if (defaultTmpl) {
+      setDocumentTemplates(prev => prev.map(t => t.id === id ? { ...defaultTmpl, updatedAt: new Date().toISOString() } : t));
+    }
+  }, []);
 
   const prevSessionRoleRef = useRef(session?.role);
   useEffect(() => {
@@ -596,6 +709,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
       findDuplicateCustomers,
       loyaltyConfig, updateLoyaltyConfig,
       loyaltyAdjustments, addLoyaltyAdjustment,
+      documentTemplates, updateDocumentTemplate, resetDocumentTemplate,
     }}>
       {children}
     </StoreLocalStateContext.Provider>

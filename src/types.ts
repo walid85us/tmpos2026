@@ -333,6 +333,15 @@ export interface Invoice {
     timestamp: string;
     transactionId?: string;
   }[];
+  statusHistory?: {
+    id: string;
+    action: 'created' | 'paid' | 'partially_paid' | 'reopened' | 'cancelled' | 'reopened_supervisor';
+    fromStatus: string;
+    toStatus: string;
+    timestamp: string;
+    actor?: string;
+    note?: string;
+  }[];
   remindersSent: number;
 }
 
@@ -542,3 +551,20 @@ export type View =
   | 'mail-in'
   | 'settings' 
   | 'support';
+
+export type TemplateType = 'invoice' | 'ticket' | 'label' | 'receipt' | 'estimate';
+
+export interface TemplateMacro {
+  tag: string;
+  label: string;
+  category: string;
+}
+
+export interface DocumentTemplate {
+  id: string;
+  type: TemplateType;
+  name: string;
+  content: string;
+  isDefault: boolean;
+  updatedAt: string;
+}

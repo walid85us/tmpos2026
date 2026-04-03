@@ -1,10 +1,24 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { useStoreLocalState } from '../context/StoreLocalState';
+import TemplateEditor from './TemplateEditor';
+import type { DocumentTemplate } from '../types';
 
 type SettingsTab = 'config' | 'hardware' | 'language';
 
 export default function Settings() {
   const [activeTab, setActiveTab] = useState<SettingsTab>('config');
+  const { documentTemplates, updateDocumentTemplate, resetDocumentTemplate } = useStoreLocalState();
+  const [editingTemplate, setEditingTemplate] = useState<DocumentTemplate | null>(null);
+
+  useEffect(() => {
+    if (editingTemplate) {
+      const fresh = documentTemplates.find(t => t.id === editingTemplate.id);
+      if (fresh && fresh.content !== editingTemplate.content) {
+        setEditingTemplate(fresh);
+      }
+    }
+  }, [documentTemplates]);
 
   const renderConfig = () => (
     <div className="space-y-12 pb-20">
@@ -552,21 +566,29 @@ export default function Settings() {
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {[
-            { id: 'invoice', label: 'Invoice Template', icon: 'receipt_long' },
-            { id: 'ticket', label: 'Repair Ticket', icon: 'build_circle' },
-            { id: 'label', label: 'Inventory Label', icon: 'label' },
-            { id: 'receipt', label: 'Sales Receipt', icon: 'payments' },
-            { id: 'estimate', label: 'Price Estimate', icon: 'request_quote' }
-          ].map((tmpl) => (
-            <div key={tmpl.id} className="bg-white/80 backdrop-blur-xl p-8 rounded-[2.5rem] border border-slate-200 shadow-sm group hover:shadow-md transition-all">
-              <div className="w-12 h-12 bg-slate-50 rounded-2xl flex items-center justify-center text-primary mb-6 group-hover:bg-primary group-hover:text-white transition-colors">
-                <span className="material-symbols-outlined text-2xl">{tmpl.icon}</span>
+            { id: 'tmpl-invoice', label: 'Invoice Template', icon: 'receipt_long' },
+            { id: 'tmpl-ticket', label: 'Repair Ticket', icon: 'build_circle' },
+            { id: 'tmpl-label', label: 'Inventory Label', icon: 'label' },
+            { id: 'tmpl-receipt', label: 'Sales Receipt', icon: 'payments' },
+            { id: 'tmpl-estimate', label: 'Price Estimate', icon: 'request_quote' }
+          ].map((tmpl) => {
+            const templateData = documentTemplates.find(t => t.id === tmpl.id);
+            return (
+              <div key={tmpl.id} className="bg-white/80 backdrop-blur-xl p-8 rounded-[2.5rem] border border-slate-200 shadow-sm group hover:shadow-md transition-all">
+                <div className="w-12 h-12 bg-slate-50 rounded-2xl flex items-center justify-center text-primary mb-6 group-hover:bg-primary group-hover:text-white transition-colors">
+                  <span className="material-symbols-outlined text-2xl">{tmpl.icon}</span>
+                </div>
+                <h4 className="text-lg font-black text-primary mb-1">{tmpl.label}</h4>
+                <div className="flex items-center gap-2 mb-6">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Customize layout & fields</p>
+                  {templateData && !templateData.isDefault && (
+                    <span className="px-1.5 py-0.5 bg-primary/10 text-primary text-[7px] font-black uppercase tracking-widest rounded">Modified</span>
+                  )}
+                </div>
+                <button onClick={() => templateData && setEditingTemplate(templateData)} className="w-full py-3 bg-slate-100 text-primary text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary hover:text-white transition-all">Edit Template</button>
               </div>
-              <h4 className="text-lg font-black text-primary mb-1">{tmpl.label}</h4>
-              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-6">Customize layout & fields</p>
-              <button className="w-full py-3 bg-slate-100 text-primary text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary hover:text-white transition-all">Edit Template</button>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </section>
     </div>
@@ -617,6 +639,22 @@ export default function Settings() {
           {activeTab === 'hardware' && renderHardware()}
           {activeTab === 'language' && renderLanguage()}
         </motion.div>
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {editingTemplate && (
+          <TemplateEditor
+            template={editingTemplate}
+            onSave={(content) => {
+              updateDocumentTemplate(editingTemplate.id, { content });
+              setEditingTemplate(prev => prev ? { ...prev, content, isDefault: false, updatedAt: new Date().toISOString() } : null);
+            }}
+            onReset={() => {
+              resetDocumentTemplate(editingTemplate.id);
+            }}
+            onClose={() => setEditingTemplate(null)}
+          />
+        )}
       </AnimatePresence>
     </div>
   );

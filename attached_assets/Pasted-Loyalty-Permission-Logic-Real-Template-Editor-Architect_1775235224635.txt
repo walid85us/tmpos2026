@@ -1,0 +1,252 @@
+Loyalty Permission Logic & Real Template Editor Architecture — Narrow QA Correction Pass 7
+
+Read `replit.md` and `Ref.txt` first and treat them as source-of-truth constraints before making any changes.
+
+This is NOT a redesign and NOT a new workstream.
+This is a narrow correction pass based only on the remaining QA failures.
+
+MANDATORY REFERENCE RESEARCH — DO THIS FIRST
+Before implementing anything related to template management, you must visit and read these references completely, extract the product behavior, editing flow, preview/reset model, tag/macro concepts, label-template concepts, and template types, then implement the system in our app architecture accordingly:
+
+1. How can I customize my invoice, ticket label, receipt, and estimate templates
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-customize-my-invoice-ticket-label-receipt-and-estimate-templates
+
+2. Editing Inventory Label Template
+https://help.repairdesk.co/portal/en/kb/articles/editing-inventory-label-template
+
+3. Label Templates
+https://help.repairdesk.co/portal/en/kb/articles/label-template
+
+Important:
+- Do not just skim these links.
+- Read them fully and extract the actual product behaviors and UX patterns.
+- Use them as behavioral reference for the template-management system.
+- Do NOT blindly copy RepairDesk.
+- Adapt the ideas into our existing app architecture, design baseline, RBAC model, store scoping, feature-gating model, and current multi-tenant structure.
+
+Expert-role stack
+- Principal SaaS Product Architect for multi-tenant repair/POS workflows
+- Staff React 19 + TypeScript + Vite engineer
+- Firebase / Firestore data-model and state-flow architect
+- Auth / RBAC / lifecycle gating specialist
+- Senior template editor / document-output architect
+- Print/PDF pipeline architect
+- QA-driven refactor auditor
+- Side auditor and systems thinker at all times
+
+Operating posture
+- Act as a side auditor and systems thinker throughout.
+- Audit ripple effects before editing.
+- Fix only the remaining failed QA items deeply and coherently.
+- Preserve current design baseline exactly.
+- Preserve auth, preview mode, RBAC, lifecycle gating, and platform/store hierarchy.
+- Preserve tenant isolation and store scoping.
+- Reuse existing modal/drawer/table/toast/permission/sub-permission patterns.
+- Do not reopen completed workstreams except for narrow compatibility-safe fixes required by this pass.
+- Do not make changes to folder `Z`.
+- Do not make changes to file `Y`.
+
+Remaining corrections to implement
+
+A) Loyalty permission logic must be rebuilt cleanly
+Current behavior is wrong because users are seeing “Loyalty — Upgrade Plan” when the real problem is permission logic, not plan gating.
+
+Implement this exact decision model:
+
+1. Precedence order
+- First: active plan feature gate
+- Second: role/module permission
+- Third: loyalty-specific sub-permissions
+
+2. Correct plan-gate behavior
+- If Loyalty Management is disabled by the active plan:
+  - all store-side loyalty surfaces must be gated for all store users
+  - it is acceptable to show an “Upgrade Plan” / plan-gated state
+- If Loyalty Management is enabled by the active plan:
+  - DO NOT show “Upgrade Plan” to store users
+  - instead use permission-based behavior only
+
+3. Correct permission split
+Implement or fix two distinct loyalty permissions:
+- Edit Customer Loyalty
+  - controls editing loyalty tier / points within customer profile
+- Manage Loyalty Settings
+  - controls access to loyalty settings / tiers / privileges / program configuration
+
+4. Correct UI behavior when plan is enabled
+- If user has Edit Customer Loyalty only:
+  - they can edit loyalty tier / points in customer profile
+  - they cannot access/manage loyalty settings
+  - Loyalty Settings button must not appear
+- If user has Manage Loyalty Settings only:
+  - they can access loyalty settings/tier management
+  - customer profile loyalty edit controls should remain read-only unless Edit Customer Loyalty is also granted
+- If user has both:
+  - they can do both
+- If user has neither:
+  - no Upgrade Plan message
+  - no settings-management access
+  - customer loyalty fields are read-only/disabled
+
+5. Remove false “Upgrade Plan” states
+- Audit every place showing “Loyalty — Upgrade Plan”
+- Show that only when the active plan truly disables the feature
+- Never show it as a substitute for permission denial
+
+B) Real Template Editor architecture under Store Setup
+Use the three mandatory references above as the behavioral reference for this section.
+
+1. Replace non-working placeholder section
+- The current “Document Template Customization” section is not truly functional
+- Replace it with a real working Template Editor foundation
+
+2. Template types to support now
+Implement working template management for:
+- Invoice Template
+- Sales Receipt Template
+- Repair Ticket Template
+- Price Estimate Template
+- Inventory Label Template
+
+3. Template list screen
+Create a proper Template Editor list screen under Store Setup / Customization with:
+- template name/type
+- output mode or size where relevant
+- status/default marker
+- Action menu with:
+  - Preview
+  - Edit
+  - Reset to Default
+
+4. Working preview behavior
+- Preview must render a real document preview using the actual template data model
+- not a dead placeholder
+- support preview for:
+  - full-page invoice
+  - receipt
+  - repair ticket
+  - estimate
+  - inventory label
+
+5. Working edit behavior
+Build a real editor that supports:
+- WYSIWYG/body editing for common business users
+- available tags / placeholders panel
+- insert/remove/reorder supported blocks
+- source/code mode for advanced HTML/CSS editing
+- save
+- reset to default
+
+6. Template data model
+Implement a practical template model with:
+- template id
+- template type
+- store scope
+- default vs customized state
+- html/template body
+- style/custom CSS fields if appropriate
+- supported tags registry by template type
+- visible sections / block settings
+- branding fields such as logo/header/footer text
+- print target mode where relevant:
+  - full-page
+  - receipt
+  - label
+
+7. Tag/macro system
+Build a clean tag system for this app inspired by the reference behavior.
+Support a practical tag set such as:
+- store fields
+- customer fields
+- invoice fields
+- totals
+- due date/status
+- line items
+- notes/footer
+- generated datetime stamp
+- payment latest action / latest payment method
+- device/ticket fields where relevant
+- label/item fields where relevant
+
+8. Reset behavior
+- Reset to Default must actually restore the default template cleanly
+- not just visually pretend
+
+9. Store logo and branding
+- make store logo management actually work
+- owner can upload/change/remove logo
+- owner can configure header/footer business text
+- output must reflect saved branding
+
+10. Store scoping
+- templates must be store-scoped and tenant-safe
+- different stores can have different templates if current architecture supports it
+
+C) Final print pipeline correction
+1. No browser artifacts in final output
+- full-page and receipt outputs still must not show browser header/footer artifacts like date, title, URL, page count
+- do not depend on fragile raw browser print behavior for final professional output
+- move to a dedicated printable document / controlled PDF-style print surface if needed
+
+2. Same data in preview and final output
+- preview and final output must use the same data source/template
+- no sparse print-only fallback template
+
+3. Customer-facing payment display rule
+- printed invoice/receipt should not show full payment history
+- show only:
+  - latest action
+  - latest payment method
+
+D) Invoice details history and reopen/revenue logic
+1. Invoice details history
+- invoice details window must clearly record:
+  - reopened
+  - cancelled
+  - reopened after cash payment
+  - supervisor-authorized reopen where applicable
+
+2. Operational revenue logic
+- reopened/cancelled cash-payment invoices must not remain treated as final settled operational revenue
+- reflect the reopened/cancelled state coherently in invoice/payment status logic without building a full accounting subsystem
+
+Required design and behavior rules
+- Preserve the current premium glassmorphism design baseline exactly for on-screen UI
+- Document output may use a more formal invoice/receipt/ticket/label layout, but must stay polished and consistent
+- Maintain keyboard accessibility and clear blocked/save/error states
+- Keep state paths unified
+- Avoid duplicate parallel systems
+- Ensure corrected flows work in preview/demo mode
+- Maintain store scoping and tenant safety
+- Keep type safety strong
+- Update `replit.md` for all final corrections introduced by this pass
+
+Definition of done
+This correction pass is done only if:
+- loyalty no longer shows false Upgrade Plan states when the plan is actually enabled
+- Edit Customer Loyalty and Manage Loyalty Settings behave exactly as specified
+- Loyalty Settings button disappears when settings permission is denied
+- Template Editor under Store Setup is fully functional, not placeholder-only
+- Preview/Edit/Reset work for supported document types
+- tag/macro insertion works
+- source/custom-code mode works safely
+- store logo/branding actually work
+- full-page and receipt outputs are clean and free of browser artifacts
+- printed customer-facing docs show only latest payment action/method, not full payment history
+- invoice details history clearly shows reopened/cancelled states
+- reopened cash invoices are not treated as final settled operational revenue
+- no regressions are introduced in loyalty, templates, invoices, RBAC, auth, preview mode, or store hierarchy
+- `replit.md` is updated to reflect all corrections
+
+Required final response format
+Return your completion report in exactly this structure:
+
+1. Files Changed
+2. Corrections Implemented
+3. Loyalty Permission Decision Logic
+4. Template Editor Architecture
+5. Tag/Macro System
+6. Print/PDF Pipeline Fix
+7. Invoice History and Revenue Logic
+8. Non-Regressions Confirmed
+9. Manual QA Retest Areas

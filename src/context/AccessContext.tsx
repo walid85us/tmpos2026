@@ -307,6 +307,9 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
 
       if (effectiveRole === 'store_owner') return true;
 
+      const isPermissionDomain = PERMISSION_DOMAINS.some(d => d.id === normalizedFeature);
+      if (!isPermissionDomain) return true;
+
       const level = getPermissionLevel(normalizedFeature);
       return meetsPermissionLevel(level, 'view');
     }

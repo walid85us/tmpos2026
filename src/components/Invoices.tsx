@@ -161,6 +161,14 @@ export default function Invoices() {
       notes: newInv.notes || undefined, terms: newInv.terms || undefined,
       isRecurring: newInv.isRecurring || undefined, recurringInterval: newInv.isRecurring ? newInv.recurringInterval : undefined,
       paymentHistory: [], remindersSent: 0,
+      statusHistory: [{
+        id: `sh-${Date.now()}`,
+        action: 'created',
+        fromStatus: '',
+        toStatus: 'Unpaid',
+        timestamp: new Date().toISOString(),
+        note: 'Invoice created',
+      }],
     };
     addInvoice(inv);
     resetNewInv();
@@ -219,11 +227,21 @@ export default function Invoices() {
     const newBalance = Math.max(0, Math.round((detailInvoice.total - newPaid) * 100) / 100);
     const newStatus: Invoice['status'] = newBalance <= 0 ? 'Paid' : 'Partially Paid';
     const payment = { id: `pay-${Date.now()}`, amount: paymentAmount, method: paymentMethod, timestamp: new Date().toISOString().replace('T', ' ').slice(0, 16) };
+    const statusEntry = {
+      id: `sh-${Date.now()}`,
+      action: (newBalance <= 0 ? 'paid' : 'partially_paid') as 'paid' | 'partially_paid',
+      fromStatus: detailInvoice.status,
+      toStatus: newStatus,
+      timestamp: new Date().toISOString(),
+      note: `$${paymentAmount.toFixed(2)} via ${paymentMethod}`,
+    };
+    const updatedStatusHistory = [...(detailInvoice.statusHistory || []), statusEntry];
     updateInvoice(detailInvoice.id, {
       amountPaid: Math.round(newPaid * 100) / 100, balance: newBalance, status: newStatus,
       paymentHistory: [...detailInvoice.paymentHistory, payment],
+      statusHistory: updatedStatusHistory,
     });
-    setDetailInvoice(prev => prev ? { ...prev, amountPaid: Math.round(newPaid * 100) / 100, balance: newBalance, status: newStatus, paymentHistory: [...prev.paymentHistory, payment] } : null);
+    setDetailInvoice(prev => prev ? { ...prev, amountPaid: Math.round(newPaid * 100) / 100, balance: newBalance, status: newStatus, paymentHistory: [...prev.paymentHistory, payment], statusHistory: updatedStatusHistory } : null);
     setShowPaymentModal(false);
     setPaymentAmount(0);
     setPaymentMethod('Cash');
@@ -237,15 +255,25 @@ export default function Invoices() {
     return inv.paymentHistory.every(p => p.method === 'Cash');
   }, []);
 
-  const handleReopenInvoice = useCallback(() => {
+  const handleReopenInvoice = useCallback((supervisorName?: string) => {
     if (!detailInvoice) return;
     const total = detailInvoice.items.reduce((s, i) => s + i.price * i.quantity, 0);
     const discount = detailInvoice.discount || 0;
     const subtotal = total - discount;
     const tax = subtotal * 0.08;
     const grandTotal = subtotal + tax;
-    updateInvoice(detailInvoice.id, { status: 'Unpaid', amountPaid: 0, balance: grandTotal });
-    setDetailInvoice(prev => prev ? { ...prev, status: 'Unpaid', amountPaid: 0, balance: grandTotal } : null);
+    const historyEntry = {
+      id: `sh-${Date.now()}`,
+      action: (supervisorName ? 'reopened_supervisor' : 'reopened') as 'reopened' | 'reopened_supervisor',
+      fromStatus: detailInvoice.status,
+      toStatus: 'Unpaid',
+      timestamp: new Date().toISOString(),
+      actor: supervisorName || 'Current User',
+      note: supervisorName ? `Supervisor authorization by ${supervisorName}` : 'Invoice reopened for editing',
+    };
+    const updatedHistory = [...(detailInvoice.statusHistory || []), historyEntry];
+    updateInvoice(detailInvoice.id, { status: 'Unpaid', amountPaid: 0, balance: grandTotal, statusHistory: updatedHistory });
+    setDetailInvoice(prev => prev ? { ...prev, status: 'Unpaid', amountPaid: 0, balance: grandTotal, statusHistory: updatedHistory } : null);
     setReopenPinModal(false);
     setReopenPin('');
     setReopenPinError('');
@@ -262,7 +290,7 @@ export default function Invoices() {
       setReopenPinError('Supervisor role does not have reopen permission');
       return;
     }
-    handleReopenInvoice();
+    handleReopenInvoice(supervisor.name);
   }, [reopenPin, handleReopenInvoice]);
 
   const terminalTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -674,7 +702,7 @@ export default function Invoices() {
                     </>
                   )}
                   {(detailInvoice.status === 'Paid' || detailInvoice.status === 'Cancelled') && isCashPaidInvoice(detailInvoice) && canReopenInvoice && (
-                    <button onClick={handleReopenInvoice}
+                    <button onClick={() => handleReopenInvoice()}
                       className="px-4 py-2 bg-emerald-500 text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-emerald-500/20 hover:bg-emerald-600 active:scale-95 transition-all flex items-center gap-1.5">
                       <span className="material-symbols-outlined text-sm">lock_open</span> Reopen Invoice
                     </button>
@@ -773,6 +801,27 @@ export default function Invoices() {
                       <div className="p-6 bg-slate-50 rounded-[2rem] border border-slate-100">
                         <h4 className="text-sm font-black text-primary uppercase tracking-widest mb-2">Notes</h4>
                         <p className="text-xs font-medium text-slate-600 leading-relaxed">{detailInvoice.notes}</p>
+                      </div>
+                    )}
+                    {(detailInvoice.statusHistory || []).length > 0 && (
+                      <div className="p-6 bg-slate-50 rounded-[2rem] border border-slate-100">
+                        <h4 className="text-sm font-black text-primary uppercase tracking-widest mb-3">Status History</h4>
+                        <div className="space-y-2">
+                          {(detailInvoice.statusHistory || []).slice().reverse().map(sh => (
+                            <div key={sh.id} className="p-3 bg-white rounded-xl border border-slate-100">
+                              <div className="flex items-center gap-2 mb-1">
+                                <span className={`w-2 h-2 rounded-full ${sh.action === 'paid' ? 'bg-emerald-500' : sh.action === 'reopened_supervisor' || sh.action === 'reopened' ? 'bg-amber-500' : sh.action === 'cancelled' ? 'bg-rose-500' : 'bg-blue-500'}`} />
+                                <span className="text-[10px] font-black uppercase tracking-widest text-slate-700">
+                                  {sh.action.replace(/_/g, ' ')}
+                                </span>
+                              </div>
+                              <p className="text-[9px] font-bold text-slate-400">{sh.fromStatus} → {sh.toStatus}</p>
+                              {sh.note && <p className="text-[9px] font-medium text-slate-500 mt-1">{sh.note}</p>}
+                              {sh.actor && <p className="text-[9px] font-bold text-slate-400 mt-0.5">by {sh.actor}</p>}
+                              <p className="text-[8px] font-medium text-slate-300 mt-1">{new Date(sh.timestamp).toLocaleString()}</p>
+                            </div>
+                          ))}
+                        </div>
                       </div>
                     )}
                   </div>
@@ -979,16 +1028,17 @@ export default function Invoices() {
                 {detailInvoice.amountPaid > 0 && <div style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}><span>Paid</span><span>${detailInvoice.amountPaid.toFixed(2)}</span></div>}
                 {detailInvoice.balance > 0 && <div style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0', fontWeight: 900 }}><span>Balance Due</span><span>${detailInvoice.balance.toFixed(2)}</span></div>}
               </div>
-              {detailInvoice.paymentHistory.length > 0 && (
-                <div style={{ borderTop: '1px dashed #333', paddingTop: '4px', marginTop: '4px', fontSize: '7pt' }}>
-                  {detailInvoice.paymentHistory.map(p => (
-                    <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '1px 0' }}>
-                      <span>${p.amount.toFixed(2)} {p.method}</span>
-                      <span style={{ color: '#666' }}>{p.timestamp.slice(0, 10)}</span>
+              {detailInvoice.paymentHistory.length > 0 && (() => {
+                const latest = detailInvoice.paymentHistory[detailInvoice.paymentHistory.length - 1];
+                return (
+                  <div style={{ borderTop: '1px dashed #333', paddingTop: '4px', marginTop: '4px', fontSize: '7pt' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '1px 0' }}>
+                      <span>Paid: ${latest.amount.toFixed(2)} via {latest.method}</span>
+                      <span style={{ color: '#666' }}>{latest.timestamp.slice(0, 10)}</span>
                     </div>
-                  ))}
-                </div>
-              )}
+                  </div>
+                );
+              })()}
               <div style={{ textAlign: 'center', marginTop: '10px', paddingTop: '6px', borderTop: '1px dashed #333', fontSize: '7pt', color: '#999' }}>
                 Thank you for your business
               </div>
@@ -1049,17 +1099,18 @@ export default function Invoices() {
                   {detailInvoice.balance > 0 && <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 8px', background: '#fff1f2', borderRadius: '8px' }}><span style={{ fontWeight: 900, color: '#e11d48' }}>Balance Due</span><span style={{ fontWeight: 900, color: '#e11d48' }}>${detailInvoice.balance.toFixed(2)}</span></div>}
                 </div>
               </div>
-              {detailInvoice.paymentHistory.length > 0 && (
-                <div style={{ marginTop: '2rem', paddingTop: '1.5rem', borderTop: '1px solid #e2e8f0' }}>
-                  <p style={{ fontSize: '7pt', fontWeight: 900, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '8px' }}>Payment History</p>
-                  {detailInvoice.paymentHistory.map(p => (
-                    <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9pt', padding: '4px 8px', background: '#f8fafc', border: '1px solid #e2e8f0', marginBottom: '2px' }}>
-                      <span style={{ fontWeight: 700, color: '#475569' }}>${p.amount.toFixed(2)} via {p.method}</span>
-                      <span style={{ color: '#94a3b8' }}>{p.timestamp}</span>
+              {detailInvoice.paymentHistory.length > 0 && (() => {
+                const latest = detailInvoice.paymentHistory[detailInvoice.paymentHistory.length - 1];
+                return (
+                  <div style={{ marginTop: '2rem', paddingTop: '1.5rem', borderTop: '1px solid #e2e8f0' }}>
+                    <p style={{ fontSize: '7pt', fontWeight: 900, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '8px' }}>Payment Information</p>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9pt', padding: '4px 8px', background: '#f8fafc', border: '1px solid #e2e8f0' }}>
+                      <span style={{ fontWeight: 700, color: '#475569' }}>${latest.amount.toFixed(2)} via {latest.method}</span>
+                      <span style={{ color: '#94a3b8' }}>{latest.timestamp}</span>
                     </div>
-                  ))}
-                </div>
-              )}
+                  </div>
+                );
+              })()}
               {(detailInvoice.notes || detailInvoice.terms) && (
                 <div style={{ marginTop: '1.5rem', paddingTop: '1rem', borderTop: '1px solid #e2e8f0', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem', fontSize: '9pt' }}>
                   {detailInvoice.notes && (
@@ -1174,17 +1225,18 @@ export default function Invoices() {
                         {detailInvoice.balance > 0 && <div className="flex justify-between py-1 bg-rose-50 px-2 rounded-lg"><span className="font-black text-rose-600">Balance</span><span className="font-black text-rose-600">${detailInvoice.balance.toFixed(2)}</span></div>}
                       </div>
                     </div>
-                    {detailInvoice.paymentHistory.length > 0 && (
-                      <div className={`mt-4 pt-3 ${printMode === 'receipt' ? 'border-t border-dashed border-slate-300' : 'border-t border-slate-200'}`}>
-                        <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-2">Payment History</p>
-                        {detailInvoice.paymentHistory.map(p => (
-                          <div key={p.id} className="flex justify-between text-[10px] py-0.5">
-                            <span className="font-bold text-slate-600">${p.amount.toFixed(2)} {p.method}</span>
-                            <span className="text-slate-400">{p.timestamp.slice(0, 10)}</span>
+                    {detailInvoice.paymentHistory.length > 0 && (() => {
+                      const latest = detailInvoice.paymentHistory[detailInvoice.paymentHistory.length - 1];
+                      return (
+                        <div className={`mt-4 pt-3 ${printMode === 'receipt' ? 'border-t border-dashed border-slate-300' : 'border-t border-slate-200'}`}>
+                          <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-2">Latest Payment</p>
+                          <div className="flex justify-between text-[10px] py-0.5">
+                            <span className="font-bold text-slate-600">${latest.amount.toFixed(2)} via {latest.method}</span>
+                            <span className="text-slate-400">{latest.timestamp.slice(0, 10)}</span>
                           </div>
-                        ))}
-                      </div>
-                    )}
+                        </div>
+                      );
+                    })()}
                     {printMode !== 'receipt' && (detailInvoice.notes || detailInvoice.terms) && (
                       <div className="mt-4 pt-3 border-t border-slate-200 grid grid-cols-2 gap-4 text-[10px]">
                         {detailInvoice.notes && <div><p className="font-black text-slate-400 text-[7px] uppercase tracking-widest mb-1">Notes</p><p className="text-slate-600">{detailInvoice.notes}</p></div>}
