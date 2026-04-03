@@ -4,9 +4,11 @@ import { useStoreLocalState, SEED_POS_OPERATORS } from '../context/StoreLocalSta
 import { useAccess } from '../context/AccessContext';
 import { tenantRoles } from '../context/accessConfig';
 import type { Invoice, RepairService } from '../types';
+// @ts-ignore
+import html2pdf from 'html2pdf.js';
 
 export default function Invoices() {
-  const { invoices, addInvoice, updateInvoice, customers, services, serviceCategories, approvedStockItems } = useStoreLocalState();
+  const { invoices, addInvoice, updateInvoice, customers, services, serviceCategories, approvedStockItems, storeBranding } = useStoreLocalState();
   const { checkPermission, checkSubPermission } = useAccess();
   const canReopenInvoice = checkSubPermission('reopen_invoice');
   const [searchQuery, setSearchQuery] = useState('');
@@ -53,6 +55,8 @@ export default function Invoices() {
   const [reopenPin, setReopenPin] = useState('');
   const [reopenPinError, setReopenPinError] = useState('');
   const [printMode, setPrintMode] = useState<'fullpage' | 'receipt'>('fullpage');
+  const [pdfGenerating, setPdfGenerating] = useState(false);
+  const pdfContentRef = useRef<HTMLDivElement>(null);
 
   const [emailForm, setEmailForm] = useState({ to: '', subject: '', body: '' });
   const [smsBody, setSmsBody] = useState('');
@@ -292,6 +296,30 @@ export default function Invoices() {
     }
     handleReopenInvoice(supervisor.name);
   }, [reopenPin, handleReopenInvoice]);
+
+  const generatePdf = useCallback(async () => {
+    if (!pdfContentRef.current || !detailInvoice) return;
+    setPdfGenerating(true);
+    try {
+      const isReceipt = printMode === 'receipt';
+      const opt = {
+        margin: isReceipt ? [2, 2, 2, 2] : [10, 15, 10, 15],
+        filename: `${detailInvoice.invoiceNumber}${isReceipt ? '-receipt' : ''}.pdf`,
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, useCORS: true, logging: false },
+        jsPDF: {
+          unit: 'mm',
+          format: isReceipt ? [80, 200] : 'letter',
+          orientation: 'portrait' as const,
+        },
+      };
+      await html2pdf().set(opt).from(pdfContentRef.current).save();
+    } catch (err) {
+      console.error('PDF generation failed:', err);
+    } finally {
+      setPdfGenerating(false);
+    }
+  }, [detailInvoice, printMode]);
 
   const terminalTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -999,10 +1027,15 @@ export default function Invoices() {
       </AnimatePresence>
 
       {detailInvoice && (
-        <div id="print-surface" className={printMode === 'receipt' ? 'print-receipt' : 'print-fullpage'} style={{ position: 'fixed', left: '-9999px', top: 0, width: printMode === 'receipt' ? '80mm' : '100%', background: 'white' }}>
+        <div ref={pdfContentRef} id="print-surface" className={printMode === 'receipt' ? 'print-receipt' : 'print-fullpage'} style={{ position: 'fixed', left: '-9999px', top: 0, width: printMode === 'receipt' ? '80mm' : '210mm', background: 'white' }}>
           {printMode === 'receipt' ? (
             <div style={{ padding: '4mm', fontFamily: 'monospace, sans-serif' }}>
               <div style={{ textAlign: 'center', borderBottom: '1px dashed #333', paddingBottom: '8px', marginBottom: '8px' }}>
+                {storeBranding.logoUrl && (
+                  <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '6px' }}>
+                    <img src={storeBranding.logoUrl} alt="Logo" style={{ maxHeight: '32px', maxWidth: '60mm', objectFit: 'contain' }} />
+                  </div>
+                )}
                 <h2 style={{ fontSize: '14pt', fontWeight: 900, margin: 0, color: '#003633' }}>RepairHub</h2>
                 <p style={{ fontSize: '8pt', margin: '2px 0 0', color: '#666' }}>Professional Repair Services</p>
               </div>
@@ -1045,6 +1078,11 @@ export default function Invoices() {
             </div>
           ) : (
             <div style={{ padding: '0 2.5rem' }}>
+              {storeBranding.logoUrl && (
+                <div style={{ display: 'flex', justifyContent: storeBranding.logoPlacement === 'top-left' ? 'flex-start' : storeBranding.logoPlacement === 'top-center' ? 'center' : 'flex-end', marginBottom: '12px' }}>
+                  <img src={storeBranding.logoUrl} alt="Logo" style={{ maxHeight: '48px', maxWidth: '200px', objectFit: 'contain' }} />
+                </div>
+              )}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '2rem', paddingBottom: '1.5rem', borderBottom: '2px solid #003633' }}>
                 <div>
                   <h2 style={{ fontSize: '24pt', fontWeight: 900, color: '#003633', margin: 0, letterSpacing: '-0.02em' }}>INVOICE</h2>
@@ -1158,6 +1196,11 @@ export default function Invoices() {
                 </div>
                 <div className={`border border-slate-200 rounded-2xl overflow-hidden ${printMode === 'receipt' ? 'max-w-[320px] mx-auto' : ''}`}>
                   <div className={`bg-white p-6 ${printMode === 'receipt' ? 'text-xs' : ''}`}>
+                    {storeBranding.logoUrl && (
+                      <div className={`mb-3 flex ${printMode === 'receipt' ? 'justify-center' : storeBranding.logoPlacement === 'top-left' ? 'justify-start' : storeBranding.logoPlacement === 'top-center' ? 'justify-center' : 'justify-end'}`}>
+                        <img src={storeBranding.logoUrl} alt="Logo" className="max-h-8 max-w-[120px] object-contain" />
+                      </div>
+                    )}
                     <div className={`flex justify-between items-start mb-4 pb-3 border-b-2 border-primary ${printMode === 'receipt' ? 'flex-col items-center text-center' : ''}`}>
                       <div>
                         <h2 className={`font-black text-primary tracking-tight ${printMode === 'receipt' ? 'text-lg' : 'text-2xl'}`}>
@@ -1251,8 +1294,9 @@ export default function Invoices() {
               </div>
               <div className="p-6 border-t border-slate-100 flex justify-end gap-4 shrink-0 no-print">
                 <button onClick={() => setShowPrintModal(false)} className="px-6 py-3 bg-slate-100 text-slate-600 font-black text-xs rounded-2xl uppercase tracking-widest">Cancel</button>
-                <button onClick={() => window.print()} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all flex items-center gap-2">
-                  <span className="material-symbols-outlined text-sm">print</span> {printMode === 'receipt' ? 'Print Receipt' : 'Print Invoice'}
+                <button onClick={generatePdf} disabled={pdfGenerating} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all flex items-center gap-2 disabled:opacity-50">
+                  <span className="material-symbols-outlined text-sm">{pdfGenerating ? 'hourglass_empty' : 'picture_as_pdf'}</span>
+                  {pdfGenerating ? 'Generating...' : printMode === 'receipt' ? 'Download Receipt PDF' : 'Download Invoice PDF'}
                 </button>
               </div>
             </motion.div>

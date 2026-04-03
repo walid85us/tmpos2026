@@ -1,0 +1,165 @@
+Template Editor Interaction & Pure PDF Output — Narrow QA Correction Pass 8
+
+Read `replit.md` and `Ref.txt` first and treat them as source-of-truth constraints before making any changes.
+
+Also keep using these template-management references as behavioral guidance:
+1. How can I customize my invoice, ticket label, receipt, and estimate templates
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-customize-my-invoice-ticket-label-receipt-and-estimate-templates
+
+2. Editing Inventory Label Template
+https://help.repairdesk.co/portal/en/kb/articles/editing-inventory-label-template
+
+3. Label Templates
+https://help.repairdesk.co/portal/en/kb/articles/label-template
+
+This is NOT a redesign and NOT a new workstream.
+This is a narrow correction pass based only on the remaining QA failures.
+
+Expert-role stack
+- Principal SaaS Product Architect for multi-tenant repair/POS workflows
+- Staff React 19 + TypeScript + Vite engineer
+- Firebase / Firestore data-model and state-flow architect
+- Senior template editor / document-output architect
+- PDF/receipt rendering architect
+- QA-driven refactor auditor
+- Side auditor and systems thinker at all times
+
+Operating posture
+- Act as a side auditor and systems thinker throughout.
+- Audit ripple effects before editing.
+- Fix only the remaining failed QA items deeply and coherently.
+- Preserve current design baseline exactly.
+- Preserve auth, preview mode, RBAC, lifecycle gating, and platform/store hierarchy.
+- Preserve tenant isolation and store scoping.
+- Reuse existing modal/drawer/table/toast patterns.
+- Do not reopen completed workstreams except for narrow compatibility-safe fixes required by this pass.
+- Do not make changes to folder `Z`.
+- Do not make changes to file `Y`.
+
+Remaining corrections to implement
+
+A) Reset to Default must be real and visible
+1. Add a real Reset option in the Template Editor action flow
+- there is currently no usable Reset option
+- each template must have a visible Reset to Default action
+- Reset must:
+  - restore the default template body
+  - restore default tag/block selection state
+  - restore default branding/layout settings for that template
+  - require confirmation before applying
+- after reset, preview must immediately reflect the default template again
+
+B) Tag/macro interaction must become toggle-based and preview-aware
+1. Current behavior is wrong
+- clicking an available tag currently appends it to the bottom of the invoice
+- that is not acceptable
+
+2. Required behavior
+- available tags/macros must behave like interactive toggle chips/items
+- first click:
+  - adds/enables the tag in the template/preview
+- second click:
+  - removes/disables that same tag from the template/preview
+- when a tag is active/used:
+  - it must be visually highlighted/colored so the store owner knows it is selected
+- when inactive:
+  - it must return to normal unselected state
+
+3. Placement behavior
+- tags must appear in the correct template region/block they belong to
+- not dumped at the bottom of the document
+- if the editor uses sections/blocks, the tag must be inserted into the selected/appropriate block
+- preview must update live when tags are toggled on/off
+
+4. Two-way preview sync
+- if a tag is removed from preview/template, its tag chip must de-highlight
+- if a tag is added again, its chip must re-highlight
+- the tag list and preview must stay synchronized
+
+C) Store logo upload and interactive preview placement
+1. Add real logo upload/change/remove
+- current branding flow lacks real logo upload
+- owner must be able to:
+  - upload logo
+  - replace logo
+  - remove logo
+- changes must save and persist correctly per store
+
+2. Interactive preview placement
+- make the preview section interactive enough that store owner can choose where the logo appears in the invoice
+- provide practical placement options such as:
+  - top left
+  - top center
+  - top right
+  - header beside store name if appropriate
+- selecting logo placement must update preview immediately
+- keep this practical and stable, not an overbuilt design tool
+
+3. Branding persistence
+- saved logo and placement must appear in:
+  - preview
+  - final full-page PDF output
+  - receipt output where appropriate
+
+D) Replace browser print with pure app-generated PDF / controlled output
+1. Full-page invoice output
+- final invoice output must no longer depend on the browser print window for the primary document path
+- when user chooses Print Invoice from template/invoice flow, the system should generate a pure app-controlled PDF-style document output
+- do not rely on browser headers/footers settings
+- do not let computer print window inject browser artifacts
+- final output must be clean and professional by default
+
+2. Receipt output
+- receipt output must also use a controlled output path
+- if actual printer integration is not live, generate a clean printer-ready receipt document/PDF preview/output without browser artifacts
+
+3. Output architecture
+- preview and final output must use the same template data and branding data
+- do not maintain a broken print-only fallback
+- if needed, create a dedicated document-render surface for:
+  - full-page invoice PDF
+  - receipt output
+- ensure output is complete, data-rich, and artifact-free
+
+4. User behavior
+- from invoice details, Print should open or generate the app-controlled final document output
+- not the raw browser print page with URL/date/title/page markers
+- from there, the user can download, print, or continue based on the app-controlled document flow
+
+Required design and behavior rules
+- Preserve the current premium glassmorphism design baseline exactly for on-screen UI
+- Final document output may use a formal document layout, but must stay polished and business-ready
+- Maintain keyboard accessibility and clear blocked/save/error states
+- Keep state paths unified
+- Avoid duplicate parallel systems
+- Ensure corrected flows work in preview/demo mode
+- Maintain store scoping and tenant safety
+- Keep type safety strong
+- Update `replit.md` for all final corrections introduced by this pass
+
+Definition of done
+This correction pass is done only if:
+- Reset to Default exists and actually restores defaults
+- tags/macros toggle on first click and off on second click
+- selected tags are visibly highlighted
+- tags update the correct preview region instead of dumping at the bottom
+- logo upload/change/remove works
+- logo placement can be chosen interactively in preview
+- preview and final output stay in sync
+- Print Invoice uses a pure app-controlled PDF/document output path
+- full-page output has no browser artifacts
+- receipt output also has no browser artifacts
+- no regressions are introduced in templates, branding, invoices, print output, preview mode, auth, or store hierarchy
+- `replit.md` is updated to reflect all corrections
+
+Required final response format
+Return your completion report in exactly this structure:
+
+1. Files Changed
+2. Corrections Implemented
+3. Reset and Tag Interaction Design
+4. Logo Upload and Placement Design
+5. PDF / Controlled Output Pipeline
+6. Preview-to-Output Consistency
+7. Non-Regressions Confirmed
+8. Manual QA Retest Areas

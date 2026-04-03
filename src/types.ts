@@ -568,3 +568,10 @@ export interface DocumentTemplate {
   isDefault: boolean;
   updatedAt: string;
 }
+
+export type LogoPlacement = 'top-left' | 'top-center' | 'top-right';
+
+export interface StoreBranding {
+  logoUrl: string | null;
+  logoPlacement: LogoPlacement;
+}

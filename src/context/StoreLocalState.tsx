@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useMemo, useEffect, useRef } from 'react';
-import { Customer, HeldOrder, CartItem, PaymentMethod, Discount, RepairTicket, Invoice, RepairService, RepairCategory, DocumentTemplate } from '../types';
+import { Customer, HeldOrder, CartItem, PaymentMethod, Discount, RepairTicket, Invoice, RepairService, RepairCategory, DocumentTemplate, StoreBranding, LogoPlacement } from '../types';
 import { useAccess } from './AccessContext';
 
 export interface StockItem {
@@ -186,6 +186,8 @@ interface StoreLocalStateContextType {
   documentTemplates: DocumentTemplate[];
   updateDocumentTemplate: (id: string, updates: Partial<DocumentTemplate>) => void;
   resetDocumentTemplate: (id: string) => void;
+  storeBranding: StoreBranding;
+  updateStoreBranding: (updates: Partial<StoreBranding>) => void;
 }
 
 const SEED_CUSTOMERS: Customer[] = [
@@ -522,6 +524,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const [loyaltyConfig, setLoyaltyConfig] = useState<LoyaltyProgramConfig>(SEED_LOYALTY_CONFIG);
   const [loyaltyAdjustments, setLoyaltyAdjustments] = useState<LoyaltyAdjustment[]>([]);
   const [documentTemplates, setDocumentTemplates] = useState<DocumentTemplate[]>(DEFAULT_TEMPLATES);
+  const [storeBranding, setStoreBranding] = useState<StoreBranding>({ logoUrl: null, logoPlacement: 'top-left' });
 
   const updateDocumentTemplate = useCallback((id: string, updates: Partial<DocumentTemplate>) => {
     setDocumentTemplates(prev => prev.map(t => t.id === id ? { ...t, ...updates, isDefault: false, updatedAt: new Date().toISOString() } : t));
@@ -532,6 +535,10 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
     if (defaultTmpl) {
       setDocumentTemplates(prev => prev.map(t => t.id === id ? { ...defaultTmpl, updatedAt: new Date().toISOString() } : t));
     }
+  }, []);
+
+  const updateStoreBranding = useCallback((updates: Partial<StoreBranding>) => {
+    setStoreBranding(prev => ({ ...prev, ...updates }));
   }, []);
 
   const prevSessionRoleRef = useRef(session?.role);
@@ -710,6 +717,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
       loyaltyConfig, updateLoyaltyConfig,
       loyaltyAdjustments, addLoyaltyAdjustment,
       documentTemplates, updateDocumentTemplate, resetDocumentTemplate,
+      storeBranding, updateStoreBranding,
     }}>
       {children}
     </StoreLocalStateContext.Provider>

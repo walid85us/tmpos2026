@@ -8,7 +8,7 @@ type SettingsTab = 'config' | 'hardware' | 'language';
 
 export default function Settings() {
   const [activeTab, setActiveTab] = useState<SettingsTab>('config');
-  const { documentTemplates, updateDocumentTemplate, resetDocumentTemplate } = useStoreLocalState();
+  const { documentTemplates, updateDocumentTemplate, resetDocumentTemplate, storeBranding, updateStoreBranding } = useStoreLocalState();
   const [editingTemplate, setEditingTemplate] = useState<DocumentTemplate | null>(null);
 
   useEffect(() => {
@@ -651,8 +651,14 @@ export default function Settings() {
             }}
             onReset={() => {
               resetDocumentTemplate(editingTemplate.id);
+              updateStoreBranding({ logoUrl: null, logoPlacement: 'top-left' });
             }}
             onClose={() => setEditingTemplate(null)}
+            logoUrl={storeBranding.logoUrl}
+            logoPlacement={storeBranding.logoPlacement}
+            onLogoUpload={(dataUrl) => updateStoreBranding({ logoUrl: dataUrl })}
+            onLogoRemove={() => updateStoreBranding({ logoUrl: null })}
+            onLogoPlacementChange={(placement) => updateStoreBranding({ logoPlacement: placement })}
           />
         )}
       </AnimatePresence>
