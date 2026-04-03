@@ -254,7 +254,8 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       const normalizedFeature = feature === 'supply-chain' ? 'supply_chain' : feature;
 
       if (!isAdminPerm && activated) {
-        let features = planFeatures[tenant.plan];
+        const baselineFeatures = planFeatures[tenant.plan] || [];
+        let features = [...baselineFeatures];
         try {
           const storedFeatures = sessionStorage.getItem('features_data');
           if (storedFeatures) {
@@ -262,17 +263,40 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
             const planKey = tenant.plan === 'starter' ? 'essential' : tenant.plan;
             if (Array.isArray(parsed) && parsed.length > 0) {
               if (parsed[0].planAvailability) {
+                const matrixIds = new Set(parsed.map((f: { id: string }) => f.id));
                 const enabledIds = parsed
                   .filter((f: { planAvailability?: Record<string, boolean> }) => f.planAvailability?.[planKey])
                   .map((f: { id: string }) => f.id);
-                features = enabledIds;
+                const enabledSet = new Set(enabledIds);
+                features = baselineFeatures.filter(f => {
+                  const normalizedF = f === 'supply-chain' ? 'supply_chain' : f;
+                  if (matrixIds.has(f) || matrixIds.has(normalizedF)) {
+                    return enabledSet.has(f) || enabledSet.has(normalizedF);
+                  }
+                  return true;
+                });
+                enabledIds.forEach((id: string) => {
+                  if (!features.includes(id)) features.push(id);
+                });
               } else {
-                const planEntry = parsed.find((f: { planId: string }) => f.planId === tenant.plan);
+                const legacyPlanKey = tenant.plan === 'starter' ? 'essential' : tenant.plan;
+                const planEntry = parsed.find((f: { planId: string }) => f.planId === tenant.plan || f.planId === legacyPlanKey);
                 if (planEntry && Array.isArray(planEntry.features)) {
+                  const matrixIds = new Set(planEntry.features.map((f: { id: string }) => f.id));
                   const enabledIds = planEntry.features
                     .filter((f: { enabled: boolean }) => f.enabled)
                     .map((f: { id: string }) => f.id);
-                  features = enabledIds;
+                  const enabledSet = new Set(enabledIds);
+                  features = baselineFeatures.filter(f => {
+                    const normalizedF = f === 'supply-chain' ? 'supply_chain' : f;
+                    if (matrixIds.has(f) || matrixIds.has(normalizedF)) {
+                      return enabledSet.has(f) || enabledSet.has(normalizedF);
+                    }
+                    return true;
+                  });
+                  enabledIds.forEach((id: string) => {
+                    if (!features.includes(id)) features.push(id);
+                  });
                 }
               }
             }

@@ -1,0 +1,154 @@
+Platform Command Center → Store Sidebar Major Navigation Bug — Emergency Narrow Correction Pass
+
+Read `replit.md` and `Ref.txt` first and treat them as source-of-truth constraints before making any changes.
+
+This is NOT a redesign and NOT a new workstream.
+This is an emergency narrow correction pass for a major navigation bug that is blocking reliable QA.
+
+Critical issue to fix
+When any feature is enabled or disabled in Platform Command Center for an active plan, then switching to Store Owner mode causes the left sidebar/navigation to change incorrectly.
+
+Observed behavior:
+- before change, the store sidebar shows the full expected module set
+- after toggling a plan feature, the store sidebar collapses to an incorrect reduced set
+- this is happening with unrelated features too, not just the feature being changed
+
+This is a major bug because plan feature gating is corrupting global store navigation instead of only affecting the intended feature/module.
+
+Expert-role stack
+- Principal SaaS Product Architect for multi-tenant repair/POS workflows
+- Staff React 19 + TypeScript + Vite engineer
+- Firebase / Firestore data-model and state-flow architect
+- Auth / RBAC / lifecycle gating specialist
+- Navigation/state synchronization architect
+- UX systems designer preserving the existing premium glassmorphism baseline
+- QA-driven refactor auditor
+- Side auditor and systems thinker at all times
+
+Operating posture
+- Act as a side auditor and systems thinker throughout.
+- Audit ripple effects before editing.
+- Fix only this navigation / feature-gating corruption issue deeply and coherently.
+- Preserve current design baseline exactly.
+- Preserve auth, preview mode, RBAC, lifecycle gating, and platform/store hierarchy.
+- Preserve tenant isolation and store scoping.
+- Reuse the existing modal/drawer/table/toast/permission patterns.
+- Do not reopen completed workstreams except for narrow compatibility-safe fixes required by this pass.
+- Do not make changes to folder `Z`.
+- Do not make changes to file `Y`.
+
+Root problem you must investigate and fix
+The active plan feature state is likely mutating or incorrectly filtering the store-side navigation model.
+
+You must audit and fix the full chain:
+- plan feature source of truth
+- active plan resolution
+- tenant/store feature resolution
+- any feature override layer
+- any role/access filtering layer
+- side menu generation logic
+- page switching / mode switching between Platform Command Center and Store Owner
+- cached or memoized navigation state
+- default feature normalization
+- missing-key behavior
+- hidden vs disabled behavior
+
+Likely failure modes to audit
+Do not assume only one cause. Inspect and fix the real one.
+
+Possible failure modes include:
+- the sidebar is built from a filtered feature object where missing keys are treated as false
+- unrelated modules are dropped when one feature flag changes
+- feature gating is mutating the base navigation config object instead of deriving a clean computed view
+- platform-plan state is leaking into store-side navigation state incorrectly
+- store-side sidebar is using stale or partial active-plan data
+- undefined feature flags are being interpreted as disabled instead of default-available
+- an AND/OR bug is combining plan gating and role/module permissions incorrectly
+- switching pages is causing the app to rebuild the sidebar from an incomplete feature map
+- sidebar sections are being conditionally rendered from the wrong source after plan edits
+- plan changes are reusing a reduced navigation array and persisting it across view switches
+
+Required fix behavior
+
+A) Navigation must be stable
+1. The store sidebar must not collapse or lose unrelated modules when a single feature is changed in Platform Command Center.
+2. Only the specific module(s) or feature surface(s) truly governed by the changed plan feature may change behavior.
+3. Unrelated modules must remain untouched.
+4. Sidebar order must remain stable and deterministic.
+
+B) Clean feature gating rules
+1. Build or refactor to a clean single source of truth for store navigation derivation.
+2. Navigation rendering must use a normalized feature map with explicit defaults.
+3. Missing feature keys must not silently disable unrelated modules.
+4. Plan gating, tenant/store overrides, role permissions, and sub-permissions must each have clear precedence and must not corrupt one another.
+
+C) Correct sidebar behavior
+For each sidebar item, the app must decide in a stable and explicit way whether it is:
+- fully available
+- visible but locked/gated
+- hidden only if the product intentionally wants hidden behavior for that exact feature
+
+Do not let one disabled feature cause broad sidebar pruning.
+
+D) Platform vs store separation
+1. Platform Command Center / plan-editing state must not directly mutate store-side base navigation config.
+2. Store Owner mode must derive its sidebar from the resolved active plan + tenant/store + role state fresh and safely.
+3. Switching between platform mode and store mode must not leak reduced nav state.
+
+E) Non-regression requirements
+After the fix:
+- Dashboard must still show
+- Sales must still show if not specifically gated
+- Repairs must still show if not specifically gated
+- Inventory must still show if not specifically gated
+- Customers must still show if not specifically gated
+- Employees must still show if not specifically gated
+- Warranties must still show if not specifically gated
+- Invoices must still show if not specifically gated
+- Services must still show if not specifically gated
+- Supply Chain must still show if not specifically gated
+- Prospects must still show if not specifically gated
+- Marketing must still show if not specifically gated
+- Reports must still show if not specifically gated
+- Integrations must still show if not specifically gated
+- Widgets must still show if not specifically gated
+- Settings/Support behavior must remain coherent
+- Any intentionally gated module must be the only one affected
+
+F) Engineering requirements
+1. Do not patch this with fragile one-off conditions.
+2. Refactor toward:
+- a canonical sidebar config
+- a canonical normalized feature map
+- a pure derived navigation function
+- explicit gating rules
+3. Prevent mutation of shared navigation arrays/objects.
+4. Add defensive guards for undefined/partial feature states.
+5. Add enough testable logic so future feature toggles cannot break unrelated menu items again.
+
+G) UX requirements
+1. Preserve current sidebar design baseline exactly.
+2. Preserve icons, spacing, and overall visual structure.
+3. Only availability/gating behavior should change where appropriate, not the visual system.
+
+Definition of done
+This correction pass is done only if:
+- toggling any one feature in Platform Command Center no longer corrupts the store sidebar
+- unrelated menu items remain stable
+- active plan changes affect only intended modules/features
+- switching between platform mode and store mode does not leak reduced navigation state
+- sidebar order remains stable
+- no regressions are introduced in auth, preview mode, RBAC, store hierarchy, or existing workstreams
+- `replit.md` is updated to document the final navigation/feature-gating resolution logic if this bug required architectural clarification
+
+Required final response format
+Return your completion report in exactly this structure:
+
+1. Files Changed
+2. Root Cause Found
+3. Navigation / Feature-Gating Fix
+4. State Synchronization Fix
+5. Modules Verified Unaffected
+6. Intended Gated Behavior Confirmed
+7. Non-Regressions Confirmed
+8. Manual QA Retest Areas
