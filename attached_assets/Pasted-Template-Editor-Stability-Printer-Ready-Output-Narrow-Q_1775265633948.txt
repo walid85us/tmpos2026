@@ -1,0 +1,192 @@
+Template Editor Stability & Printer-Ready Output — Narrow QA Correction Pass 9
+
+Read `replit.md` and `Ref.txt` first and treat them as source-of-truth constraints before making any changes.
+
+Also keep using these references as behavioral guidance for template management:
+1. How can I customize my invoice, ticket label, receipt, and estimate templates
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-customize-my-invoice-ticket-label-receipt-and-estimate-templates
+
+2. Editing Inventory Label Template
+https://help.repairdesk.co/portal/en/kb/articles/editing-inventory-label-template
+
+3. Label Templates
+https://help.repairdesk.co/portal/en/kb/articles/label-template
+
+This is NOT a redesign and NOT a new workstream.
+This is a narrow correction pass based only on the remaining QA failures.
+
+Expert-role stack
+- Principal SaaS Product Architect for multi-tenant repair/POS workflows
+- Staff React 19 + TypeScript + Vite engineer
+- Firebase / Firestore data-model and state-flow architect
+- Senior template editor / print-layout architect
+- Printer-routing / document-output architect
+- QA-driven refactor auditor
+- Side auditor and systems thinker at all times
+
+Operating posture
+- Act as a side auditor and systems thinker throughout.
+- Audit ripple effects before editing.
+- Fix only the remaining failed QA items deeply and coherently.
+- Preserve current design baseline exactly.
+- Preserve auth, preview mode, RBAC, lifecycle gating, and platform/store hierarchy.
+- Preserve tenant isolation and store scoping.
+- Reuse existing modal/drawer/table/toast patterns.
+- Do not reopen completed workstreams except for narrow compatibility-safe fixes required by this pass.
+- Do not make changes to folder `Z`.
+- Do not make changes to file `Y`.
+
+Remaining corrections to implement
+
+A) Reset to Default must truly restore the template
+1. Current behavior is broken
+- Reset confirmation appears, but no actual reset happens
+
+2. Required behavior
+- Reset to Default must restore the true default state for that template, including:
+  - default tag set
+  - default tag positions
+  - default enabled/disabled sections
+  - default branding/layout placement rules for that template type
+  - default template body/source
+- after reset:
+  - preview must immediately refresh
+  - saved customized state must be replaced by the default state
+  - reopening the editor must still show the default state
+
+3. Engineering requirement
+- do not fake reset by only clearing local UI state
+- restore from a canonical default template definition for that template type
+- make reset deterministic and repeatable
+
+B) Tag system must become position-stable and non-destructive
+1. Current behavior is corrupting the template
+- when a tag is removed and re-added, it comes back in a random position
+- repeated clicks corrupt layout and invoice structure
+- preview/template synchronization breaks
+
+2. Required model
+- treat tags as anchored fields/slots within a structured template region system
+- each supported tag must belong to a canonical region/slot
+- re-adding a removed tag must restore it to its original region and intended order
+- clicking tags must never corrupt the template structure
+
+3. Required tag behavior
+- first click:
+  - enable/show the tag in its assigned region
+- second click:
+  - disable/hide the tag from that same region
+- re-enable:
+  - restore it to the exact same region and order position it originally belongs to
+- do not append tags at the bottom
+- do not reinsert tags into random places
+- do not let one tag toggle reorder unrelated tags
+
+4. Stable ordering rules
+- define deterministic ordering per region for all supported tags
+- preserve that order across:
+  - toggle off/on
+  - save
+  - preview reopen
+  - reset
+- the editor must render from structured template state, not from fragile string concatenation/appending
+
+5. Preview synchronization
+- preview must remain synchronized with the tag selection state at all times
+- toggling a tag off removes it from the correct region only
+- toggling it back on restores it to the same region and order
+- the template must remain valid and visually stable after repeated toggles
+
+C) Final output must be printer-ready, not forced file download
+1. Current behavior is wrong
+- the system now downloads invoice/receipt PDF
+- user requirement is not “download PDF first”
+- the action should open/route to printing based on configured output behavior
+
+2. Required full-page output behavior
+- when user clicks Print Invoice from invoice details:
+  - the app must generate the final controlled document output
+  - then route into a print action appropriate for the configured full-page printer behavior
+  - do not make download the primary action
+- user may still have a secondary Download PDF option if appropriate, but Print must remain the primary print action
+
+3. Required receipt / thermal printer behavior
+- when receipt/thermal printer output is configured in Store Setup:
+  - the print action must route to the receipt-style printer-ready output
+  - not a generic downloaded file as the primary behavior
+- if live hardware printing is not fully wired yet:
+  - open a controlled printer-ready print surface/dialog that is formatted for the configured output type
+  - do not fall back to raw browser page print with artifacts
+  - do not make download the only path
+
+4. Store Setup printer-config awareness
+- print behavior must respect configured output mode from Store Setup where applicable
+- full-page invoice print and receipt/thermal print must behave as distinct output flows
+- output choice must come from the app’s print configuration logic, not random fallback behavior
+
+5. Clean final output
+- full-page and receipt outputs must remain artifact-free
+- no browser header/footer artifacts
+- no sparse/broken output
+- final output must match the stabilized preview/template state
+
+D) Preview-to-output consistency must be exact
+1. Current behavior is not reliable
+- because tag toggling corrupts the template, preview and final output diverge
+
+2. Required behavior
+- preview and final output must come from the same structured template state
+- if a tag is visible in preview, it must appear in the same place in final output
+- if a tag is hidden in preview, it must be hidden in final output
+- logo, branding, and layout choices must also match exactly
+
+Engineering requirements
+- Refactor template editor state away from brittle append/remove string logic
+- Use a structured template schema with:
+  - regions
+  - ordered slots
+  - tag enable/disable state
+  - deterministic serialization
+- Reset must restore that schema from defaults
+- Preview and final output must render from the same source-of-truth template state
+- Print actions must branch by configured output type:
+  - full-page printer flow
+  - receipt/thermal printer flow
+- Download may remain optional, but not the primary Print behavior
+
+Required design and behavior rules
+- Preserve the current premium glassmorphism design baseline exactly for on-screen UI
+- Final document output may use a formal invoice/receipt layout, but must stay polished and business-ready
+- Maintain keyboard accessibility and clear blocked/save/error states
+- Keep state paths unified
+- Avoid duplicate parallel systems
+- Ensure corrected flows work in preview/demo mode
+- Maintain store scoping and tenant safety
+- Keep type safety strong
+- Update `replit.md` for all final corrections introduced by this pass
+
+Definition of done
+This correction pass is done only if:
+- Reset to Default actually restores the default template
+- removing and re-adding any tag restores it to the same original position
+- tag toggling no longer corrupts the invoice template
+- preview remains synchronized and structurally stable after repeated toggles
+- Print Invoice no longer uses forced file download as the main behavior
+- printing routes according to configured output type from Store Setup
+- full-page output is printer-ready and clean
+- receipt/thermal output is printer-ready and clean
+- preview and final output match exactly
+- no regressions are introduced in templates, branding, invoices, print output, preview mode, auth, or store hierarchy
+- `replit.md` is updated to reflect all corrections
+
+Required final response format
+Return your completion report in exactly this structure:
+
+1. Files Changed
+2. Corrections Implemented
+3. Reset and Default-State Fix
+4. Tag Region/Ordering Stability Fix
+5. Printer Routing / Output Behavior
+6. Preview-to-Output Consistency
+7. Non-Regressions Confirmed
+8. Manual QA Retest Areas

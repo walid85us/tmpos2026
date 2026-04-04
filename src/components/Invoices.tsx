@@ -1294,9 +1294,13 @@ export default function Invoices() {
               </div>
               <div className="p-6 border-t border-slate-100 flex justify-end gap-4 shrink-0 no-print">
                 <button onClick={() => setShowPrintModal(false)} className="px-6 py-3 bg-slate-100 text-slate-600 font-black text-xs rounded-2xl uppercase tracking-widest">Cancel</button>
-                <button onClick={generatePdf} disabled={pdfGenerating} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all flex items-center gap-2 disabled:opacity-50">
-                  <span className="material-symbols-outlined text-sm">{pdfGenerating ? 'hourglass_empty' : 'picture_as_pdf'}</span>
-                  {pdfGenerating ? 'Generating...' : printMode === 'receipt' ? 'Download Receipt PDF' : 'Download Invoice PDF'}
+                <button onClick={generatePdf} disabled={pdfGenerating} className="px-6 py-3 bg-slate-200 text-slate-700 font-black text-xs rounded-2xl uppercase tracking-widest hover:bg-slate-300 active:scale-95 transition-all flex items-center gap-2 disabled:opacity-50">
+                  <span className="material-symbols-outlined text-sm">{pdfGenerating ? 'hourglass_empty' : 'download'}</span>
+                  {pdfGenerating ? 'Generating...' : 'Download PDF'}
+                </button>
+                <button onClick={() => window.print()} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all flex items-center gap-2">
+                  <span className="material-symbols-outlined text-sm">print</span>
+                  {printMode === 'receipt' ? 'Print Receipt' : 'Print Invoice'}
                 </button>
               </div>
             </motion.div>

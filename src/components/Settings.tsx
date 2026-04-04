@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState } from '../context/StoreLocalState';
 import TemplateEditor from './TemplateEditor';
 import type { DocumentTemplate } from '../types';
+import { buildTemplateHtml, getDefaultEnabledTags } from '../utils/templateBuilder';
 
 type SettingsTab = 'config' | 'hardware' | 'language';
 
@@ -645,13 +646,16 @@ export default function Settings() {
         {editingTemplate && (
           <TemplateEditor
             template={editingTemplate}
-            onSave={(content) => {
-              updateDocumentTemplate(editingTemplate.id, { content });
-              setEditingTemplate(prev => prev ? { ...prev, content, isDefault: false, updatedAt: new Date().toISOString() } : null);
+            onSave={(content, enabledTags) => {
+              updateDocumentTemplate(editingTemplate.id, { content, enabledTags });
+              setEditingTemplate(prev => prev ? { ...prev, content, enabledTags, isDefault: false, updatedAt: new Date().toISOString() } : null);
             }}
             onReset={() => {
               resetDocumentTemplate(editingTemplate.id);
               updateStoreBranding({ logoUrl: null, logoPlacement: 'top-left' });
+              const defaultTags = getDefaultEnabledTags(editingTemplate.type);
+              const defaultContent = buildTemplateHtml(editingTemplate.type, defaultTags);
+              setEditingTemplate(prev => prev ? { ...prev, content: defaultContent, enabledTags: defaultTags, isDefault: true, updatedAt: new Date().toISOString() } : null);
             }}
             onClose={() => setEditingTemplate(null)}
             logoUrl={storeBranding.logoUrl}

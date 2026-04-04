@@ -565,6 +565,7 @@ export interface DocumentTemplate {
   type: TemplateType;
   name: string;
   content: string;
+  enabledTags: string[];
   isDefault: boolean;
   updatedAt: string;
 }

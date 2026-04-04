@@ -1,87 +1,7 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import type { DocumentTemplate, TemplateType, TemplateMacro, LogoPlacement } from '../types';
-
-const TAG_REGION_MAP: Record<string, string> = {
-  'Store': 'header',
-  'Document': 'header',
-  'Customer': 'billing',
-  'Items': 'body',
-  'Device': 'body',
-  'Repair': 'body',
-  'Item': 'body',
-  'Totals': 'totals',
-  'Extra': 'footer',
-};
-
-const TEMPLATE_MACROS: Record<TemplateType, TemplateMacro[]> = {
-  invoice: [
-    { tag: '{{storeName}}', label: 'Store Name', category: 'Store' },
-    { tag: '{{storeTagline}}', label: 'Store Tagline', category: 'Store' },
-    { tag: '{{brandColor}}', label: 'Brand Color', category: 'Store' },
-    { tag: '{{invoiceNumber}}', label: 'Invoice Number', category: 'Document' },
-    { tag: '{{createdAt}}', label: 'Issue Date', category: 'Document' },
-    { tag: '{{dueDate}}', label: 'Due Date', category: 'Document' },
-    { tag: '{{status}}', label: 'Status', category: 'Document' },
-    { tag: '{{customerName}}', label: 'Customer Name', category: 'Customer' },
-    { tag: '{{customerEmail}}', label: 'Customer Email', category: 'Customer' },
-    { tag: '{{customerPhone}}', label: 'Customer Phone', category: 'Customer' },
-    { tag: '{{lineItems}}', label: 'Line Items Table', category: 'Items' },
-    { tag: '{{subtotal}}', label: 'Subtotal', category: 'Totals' },
-    { tag: '{{discount}}', label: 'Discount', category: 'Totals' },
-    { tag: '{{tax}}', label: 'Tax', category: 'Totals' },
-    { tag: '{{total}}', label: 'Total', category: 'Totals' },
-    { tag: '{{notes}}', label: 'Notes', category: 'Extra' },
-    { tag: '{{terms}}', label: 'Terms', category: 'Extra' },
-  ],
-  ticket: [
-    { tag: '{{storeName}}', label: 'Store Name', category: 'Store' },
-    { tag: '{{storeTagline}}', label: 'Store Tagline', category: 'Store' },
-    { tag: '{{brandColor}}', label: 'Brand Color', category: 'Store' },
-    { tag: '{{ticketNumber}}', label: 'Ticket Number', category: 'Document' },
-    { tag: '{{customerName}}', label: 'Customer Name', category: 'Customer' },
-    { tag: '{{customerPhone}}', label: 'Customer Phone', category: 'Customer' },
-    { tag: '{{deviceName}}', label: 'Device Name', category: 'Device' },
-    { tag: '{{imei}}', label: 'IMEI/Serial', category: 'Device' },
-    { tag: '{{issueDescription}}', label: 'Issue Description', category: 'Repair' },
-    { tag: '{{priority}}', label: 'Priority', category: 'Repair' },
-    { tag: '{{estimatedTime}}', label: 'Est. Time', category: 'Repair' },
-    { tag: '{{technicianName}}', label: 'Technician', category: 'Repair' },
-  ],
-  label: [
-    { tag: '{{storeName}}', label: 'Store Name', category: 'Store' },
-    { tag: '{{itemName}}', label: 'Item Name', category: 'Item' },
-    { tag: '{{sku}}', label: 'SKU', category: 'Item' },
-    { tag: '{{price}}', label: 'Price', category: 'Item' },
-    { tag: '{{category}}', label: 'Category', category: 'Item' },
-    { tag: '{{barcode}}', label: 'Barcode', category: 'Item' },
-  ],
-  receipt: [
-    { tag: '{{storeName}}', label: 'Store Name', category: 'Store' },
-    { tag: '{{storeTagline}}', label: 'Store Tagline', category: 'Store' },
-    { tag: '{{brandColor}}', label: 'Brand Color', category: 'Store' },
-    { tag: '{{receiptNumber}}', label: 'Receipt Number', category: 'Document' },
-    { tag: '{{date}}', label: 'Date', category: 'Document' },
-    { tag: '{{customerName}}', label: 'Customer Name', category: 'Customer' },
-    { tag: '{{lineItems}}', label: 'Line Items', category: 'Items' },
-    { tag: '{{subtotal}}', label: 'Subtotal', category: 'Totals' },
-    { tag: '{{tax}}', label: 'Tax', category: 'Totals' },
-    { tag: '{{total}}', label: 'Total', category: 'Totals' },
-    { tag: '{{amountPaid}}', label: 'Amount Paid', category: 'Totals' },
-  ],
-  estimate: [
-    { tag: '{{storeName}}', label: 'Store Name', category: 'Store' },
-    { tag: '{{storeTagline}}', label: 'Store Tagline', category: 'Store' },
-    { tag: '{{brandColor}}', label: 'Brand Color', category: 'Store' },
-    { tag: '{{estimateNumber}}', label: 'Estimate Number', category: 'Document' },
-    { tag: '{{customerName}}', label: 'Customer Name', category: 'Customer' },
-    { tag: '{{customerEmail}}', label: 'Customer Email', category: 'Customer' },
-    { tag: '{{lineItems}}', label: 'Line Items', category: 'Items' },
-    { tag: '{{subtotal}}', label: 'Subtotal', category: 'Totals' },
-    { tag: '{{tax}}', label: 'Est. Tax', category: 'Totals' },
-    { tag: '{{total}}', label: 'Est. Total', category: 'Totals' },
-  ],
-};
+import type { DocumentTemplate, LogoPlacement } from '../types';
+import { getSlots, buildTemplateHtml, getDefaultEnabledTags } from '../utils/templateBuilder';
 
 const SAMPLE_DATA: Record<string, string> = {
   '{{storeName}}': 'RepairHub',
@@ -124,7 +44,7 @@ const SAMPLE_DATA: Record<string, string> = {
 
 interface TemplateEditorProps {
   template: DocumentTemplate;
-  onSave: (content: string) => void;
+  onSave: (content: string, enabledTags: string[]) => void;
   onReset: () => void;
   onClose: () => void;
   logoUrl: string | null;
@@ -135,6 +55,7 @@ interface TemplateEditorProps {
 }
 
 export default function TemplateEditor({ template, onSave, onReset, onClose, logoUrl, logoPlacement, onLogoUpload, onLogoRemove, onLogoPlacementChange }: TemplateEditorProps) {
+  const [enabledTags, setEnabledTags] = useState<Set<string>>(new Set(template.enabledTags));
   const [content, setContent] = useState(template.content);
   const [mode, setMode] = useState<'visual' | 'source'>('visual');
   const [showMacros, setShowMacros] = useState(true);
@@ -142,36 +63,26 @@ export default function TemplateEditor({ template, onSave, onReset, onClose, log
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [savedFeedback, setSavedFeedback] = useState(false);
   const [activePanel, setActivePanel] = useState<'tags' | 'branding'>('tags');
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
+    setEnabledTags(new Set(template.enabledTags));
     setContent(template.content);
     setHasChanges(false);
-  }, [template.id, template.content]);
+  }, [template.id, template.content, template.enabledTags]);
 
-  const macros = useMemo(() => TEMPLATE_MACROS[template.type] || [], [template.type]);
-  const macroCategories = useMemo(() => {
-    const cats = new Map<string, TemplateMacro[]>();
-    macros.forEach(m => {
-      const list = cats.get(m.category) || [];
-      list.push(m);
-      cats.set(m.category, list);
+  const slots = useMemo(() => getSlots(template.type), [template.type]);
+
+  const slotCategories = useMemo(() => {
+    const cats = new Map<string, typeof slots>();
+    slots.forEach(s => {
+      const list = cats.get(s.category) || [];
+      list.push(s);
+      cats.set(s.category, list);
     });
     return cats;
-  }, [macros]);
-
-  const activeTags = useMemo(() => {
-    const active = new Set<string>();
-    macros.forEach(m => {
-      if (m.tag === '{{brandColor}}') return;
-      const conditionalPattern = new RegExp(`\\{\\{#if\\s+${m.tag.replace(/[{}]/g, '').replace(/[.*+?^$|()[\]\\]/g, '\\$&')}\\}\\}`);
-      if (content.includes(m.tag) || conditionalPattern.test(content)) {
-        active.add(m.tag);
-      }
-    });
-    return active;
-  }, [content, macros]);
+  }, [slots]);
 
   const previewHtml = useMemo(() => {
     let html = content;
@@ -191,122 +102,30 @@ export default function TemplateEditor({ template, onSave, onReset, onClose, log
     return html;
   }, [content, logoUrl, logoPlacement]);
 
-  const handleContentChange = useCallback((newContent: string) => {
+  const toggleTag = useCallback((tag: string) => {
+    const next = new Set(enabledTags);
+    if (next.has(tag)) {
+      next.delete(tag);
+    } else {
+      next.add(tag);
+    }
+    setEnabledTags(next);
+    const newContent = buildTemplateHtml(template.type, Array.from(next));
+    setContent(newContent);
+    setHasChanges(true);
+  }, [template.type, enabledTags]);
+
+  const handleSourceChange = useCallback((newContent: string) => {
     setContent(newContent);
     setHasChanges(true);
   }, []);
 
-  const REGION_WRAPPERS: Record<string, { before: string; after: string }> = useMemo(() => ({
-    header: {
-      before: '<div style="margin-bottom: 8px;">',
-      after: '</div>'
-    },
-    billing: {
-      before: '<div style="margin-bottom: 8px;">',
-      after: '</div>'
-    },
-    body: {
-      before: '',
-      after: ''
-    },
-    totals: {
-      before: '<div style="display: flex; justify-content: space-between; padding: 4px 0;">',
-      after: '</div>'
-    },
-    footer: {
-      before: '<div style="margin-top: 12px; border-top: 1px solid #e2e8f0; padding-top: 12px;">',
-      after: '</div>'
-    },
-  }), []);
-
-  const toggleTag = useCallback((macro: TemplateMacro) => {
-    if (macro.tag === '{{brandColor}}') return;
-
-    const isActive = activeTags.has(macro.tag);
-
-    if (isActive) {
-      let newContent = content;
-      const conditionalKey = macro.tag.replace(/[{}]/g, '');
-      const conditionalRegex = new RegExp(`\\{\\{#if\\s+${conditionalKey.replace(/[.*+?^$|()[\]\\]/g, '\\$&')}\\}\\}[\\s\\S]*?\\{\\{\\/if\\}\\}\\n?`, 'g');
-      newContent = newContent.replace(conditionalRegex, '');
-
-      const region = TAG_REGION_MAP[macro.category] || 'body';
-      const wrapper = REGION_WRAPPERS[region];
-      if (wrapper.before) {
-        const wrappedTag = `${wrapper.before}<span style="font-weight: 700;">${macro.label}:</span> ${macro.tag}${wrapper.after}\n`;
-        newContent = newContent.replace(wrappedTag, '');
-      }
-
-      const lineRegex = new RegExp(`[^\\n]*${macro.tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\\n]*\\n?`, 'g');
-      newContent = newContent.replace(lineRegex, '');
-
-      newContent = newContent.replace(/\n{3,}/g, '\n\n');
-      handleContentChange(newContent);
-    } else {
-      if (mode === 'source' && textareaRef.current) {
-        const ta = textareaRef.current;
-        const start = ta.selectionStart;
-        const end = ta.selectionEnd;
-        const region = TAG_REGION_MAP[macro.category] || 'body';
-        const wrapper = REGION_WRAPPERS[region];
-        let insertion: string;
-        if (macro.category === 'Extra') {
-          const key = macro.tag.replace(/[{}]/g, '');
-          insertion = `{{#if ${key}}}${wrapper.before}<p style="font-weight: 700; color: #94a3b8; font-size: 10px; text-transform: uppercase;">${macro.label}</p><p>${macro.tag}</p>${wrapper.after}{{/if}}\n`;
-        } else if (macro.tag === '{{lineItems}}') {
-          insertion = `${macro.tag}\n`;
-        } else {
-          insertion = `${wrapper.before}<span style="font-weight: 700;">${macro.label}:</span> ${macro.tag}${wrapper.after}\n`;
-        }
-        const newContent = content.substring(0, start) + insertion + content.substring(end);
-        handleContentChange(newContent);
-        setTimeout(() => {
-          ta.focus();
-          ta.setSelectionRange(start + insertion.length, start + insertion.length);
-        }, 0);
-      } else {
-        const region = TAG_REGION_MAP[macro.category] || 'body';
-        const wrapper = REGION_WRAPPERS[region];
-        let insertion: string;
-        if (macro.category === 'Extra') {
-          const key = macro.tag.replace(/[{}]/g, '');
-          insertion = `\n{{#if ${key}}}${wrapper.before}<p style="font-weight: 700; color: #94a3b8; font-size: 10px; text-transform: uppercase;">${macro.label}</p><p>${macro.tag}</p>${wrapper.after}{{/if}}`;
-        } else if (macro.tag === '{{lineItems}}') {
-          insertion = `\n${macro.tag}`;
-        } else {
-          insertion = `\n${wrapper.before}<span style="font-weight: 700;">${macro.label}:</span> ${macro.tag}${wrapper.after}`;
-        }
-
-        const closingDivIndex = content.lastIndexOf('</div>');
-        let insertionPoint = closingDivIndex;
-
-        if (region === 'header') {
-          const headerEnd = content.indexOf('</div>', content.indexOf('</div>') + 1);
-          insertionPoint = headerEnd > 0 ? headerEnd : closingDivIndex;
-        } else if (region === 'totals') {
-          const totalsMarker = content.lastIndexOf('Total');
-          if (totalsMarker > 0) {
-            const nextDiv = content.indexOf('</div>', totalsMarker);
-            insertionPoint = nextDiv > 0 ? nextDiv + 6 : closingDivIndex;
-          }
-        } else if (region === 'footer') {
-          insertionPoint = closingDivIndex;
-        }
-
-        if (insertionPoint < 0) insertionPoint = content.length;
-
-        const newContent = content.substring(0, insertionPoint) + insertion + content.substring(insertionPoint);
-        handleContentChange(newContent);
-      }
-    }
-  }, [content, activeTags, mode, handleContentChange, REGION_WRAPPERS]);
-
   const handleSave = useCallback(() => {
-    onSave(content);
+    onSave(content, Array.from(enabledTags));
     setHasChanges(false);
     setSavedFeedback(true);
     setTimeout(() => setSavedFeedback(false), 2000);
-  }, [content, onSave]);
+  }, [content, enabledTags, onSave]);
 
   const handleReset = useCallback(() => {
     onReset();
@@ -382,7 +201,7 @@ export default function TemplateEditor({ template, onSave, onReset, onClose, log
                 <textarea
                   ref={textareaRef}
                   value={content}
-                  onChange={(e) => handleContentChange(e.target.value)}
+                  onChange={(e) => handleSourceChange(e.target.value)}
                   className="w-full h-full font-mono text-sm text-slate-800 bg-slate-50 border border-slate-200 rounded-2xl p-6 resize-none focus:outline-none focus:ring-2 focus:ring-primary/20"
                   spellCheck={false}
                 />
@@ -407,29 +226,25 @@ export default function TemplateEditor({ template, onSave, onReset, onClose, log
 
                 {activePanel === 'tags' ? (
                   <div className="p-4 flex-1 overflow-y-auto">
-                    <p className="text-[9px] font-medium text-slate-400 mb-4">Toggle tags on/off. Active tags are highlighted and appear in the template.</p>
-                    {Array.from(macroCategories.entries()).map(([category, items]) => (
+                    <p className="text-[9px] font-medium text-slate-400 mb-4">Toggle tags on/off. Active tags are highlighted. Toggling regenerates the template with tags in their correct positions.</p>
+                    {Array.from(slotCategories.entries()).map(([category, items]) => (
                       <div key={category} className="mb-4">
                         <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-2">{category}</p>
                         <div className="flex flex-wrap gap-1.5">
-                          {items.map(macro => {
-                            const isActive = activeTags.has(macro.tag);
-                            const isBrandColor = macro.tag === '{{brandColor}}';
+                          {items.map(slot => {
+                            const isActive = enabledTags.has(slot.tag);
                             return (
                               <button
-                                key={macro.tag}
-                                onClick={() => toggleTag(macro)}
-                                disabled={isBrandColor}
+                                key={slot.tag}
+                                onClick={() => toggleTag(slot.tag)}
                                 className={`px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all border ${
-                                  isBrandColor
-                                    ? 'bg-slate-50 text-slate-300 border-slate-100 cursor-default'
-                                    : isActive
-                                    ? 'bg-primary text-white border-primary shadow-sm shadow-primary/20'
-                                    : 'bg-white text-slate-500 border-slate-200 hover:border-primary/40 hover:text-primary'
+                                  isActive
+                                  ? 'bg-primary text-white border-primary shadow-sm shadow-primary/20'
+                                  : 'bg-white text-slate-500 border-slate-200 hover:border-primary/40 hover:text-primary'
                                 }`}
                               >
-                                {macro.label}
-                                {isActive && !isBrandColor && (
+                                {slot.label}
+                                {isActive && (
                                   <span className="ml-1 opacity-70">✓</span>
                                 )}
                               </button>
