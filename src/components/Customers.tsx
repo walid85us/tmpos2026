@@ -3,14 +3,14 @@ import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState, type LoyaltyTier } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
-import type { Customer, Invoice } from '../types';
+import type { Customer, Invoice, RepairTicket } from '../types';
 import type { CompletedOrder } from '../context/StoreLocalState';
 
 type CustomerView = 'list' | 'profile';
-type HistoryTab = 'orders' | 'invoices';
+type HistoryTab = 'orders' | 'invoices' | 'repairs';
 
 export default function Customers() {
-  const { customers, addCustomer, updateCustomer, completedOrders, invoices, findDuplicateCustomers, loyaltyConfig, updateLoyaltyConfig, loyaltyAdjustments, addLoyaltyAdjustment } = useStoreLocalState();
+  const { customers, addCustomer, updateCustomer, completedOrders, invoices, repairTickets, warrantyRepairTickets, findDuplicateCustomers, loyaltyConfig, updateLoyaltyConfig, loyaltyAdjustments, addLoyaltyAdjustment } = useStoreLocalState();
   const { canAccess, checkSubPermission } = useAccess();
   const hasLoyalty = canAccess('loyalty_management');
   const canEditCustomerLoyalty = hasLoyalty && checkSubPermission('loyalty_customer_edit');
@@ -94,6 +94,12 @@ export default function Customers() {
     if (!selectedCustomer) return [];
     return invoices.filter(inv => inv.customerId === selectedCustomer.id);
   }, [selectedCustomer, invoices]);
+
+  const customerRepairTickets = useMemo(() => {
+    if (!selectedCustomer) return [];
+    const allRepairs = [...repairTickets, ...warrantyRepairTickets];
+    return allRepairs.filter(t => t.customerId === selectedCustomer.id);
+  }, [selectedCustomer, repairTickets, warrantyRepairTickets]);
 
   const handleFormChange = (field: string, value: string) => {
     const next = { ...newCustomerForm, [field]: value };
@@ -661,6 +667,12 @@ export default function Customers() {
                   >
                     Invoices ({customerInvoices.length})
                   </button>
+                  <button
+                    onClick={() => setHistoryTab('repairs')}
+                    className={`text-[10px] font-black uppercase tracking-widest pb-1 transition-colors ${historyTab === 'repairs' ? 'text-primary border-b-2 border-primary' : 'text-slate-400 hover:text-primary'}`}
+                  >
+                    Repairs ({customerRepairTickets.length})
+                  </button>
                 </div>
               </div>
               <div className="p-0">
@@ -731,6 +743,47 @@ export default function Customers() {
                       ))}
                       {customerInvoices.length === 0 && (
                         <tr><td colSpan={5} className="p-8 text-center text-xs text-slate-400 italic">No invoices found for this customer.</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                )}
+                {historyTab === 'repairs' && (
+                  <table className="w-full text-left border-collapse">
+                    <thead className="bg-slate-50/50">
+                      <tr>
+                        <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Ticket #</th>
+                        <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Device</th>
+                        <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Issue</th>
+                        <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Date</th>
+                        <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Cost</th>
+                        <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-50">
+                      {customerRepairTickets.map((ticket) => (
+                        <tr key={ticket.id} className="hover:bg-slate-50/50 transition-colors">
+                          <td className="p-6">
+                            <span className="text-xs font-black text-primary">{ticket.ticketNumber}</span>
+                            {ticket.isWarrantyRepair && <span className="ml-1 text-[8px] font-black bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded uppercase">Warranty</span>}
+                          </td>
+                          <td className="p-6 text-xs font-bold text-slate-600">{ticket.device}</td>
+                          <td className="p-6 text-xs font-medium text-slate-500 truncate max-w-[200px]">{ticket.issue}</td>
+                          <td className="p-6 text-xs font-medium text-slate-500">{new Date(ticket.createdAt).toLocaleDateString()}</td>
+                          <td className="p-6 text-xs font-black text-primary">${ticket.estimatedCost.toFixed(2)}</td>
+                          <td className="p-6 text-right">
+                            <span className={`px-2 py-1 rounded-lg text-[8px] font-black uppercase tracking-widest ${
+                              ticket.status === 'Completed' || ticket.status === 'Delivered' ? 'bg-emerald-100 text-emerald-600' :
+                              ticket.status === 'Cancelled' ? 'bg-red-100 text-red-600' :
+                              ticket.status === 'In Progress' ? 'bg-primary/10 text-primary' :
+                              'bg-amber-100 text-amber-600'
+                            }`}>
+                              {ticket.status}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                      {customerRepairTickets.length === 0 && (
+                        <tr><td colSpan={6} className="p-8 text-center text-xs text-slate-400 italic">No repair tickets found for this customer.</td></tr>
                       )}
                     </tbody>
                   </table>

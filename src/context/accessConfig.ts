@@ -72,6 +72,7 @@ export const SUB_PERMISSIONS: SubPermissionDef[] = [
   { id: 'loyalty_customer_edit', label: 'Edit Customer Loyalty', parentDomain: 'customers', minModuleLevel: 'view', defaultLevel: 'edit', description: 'Edit customer loyalty tier and points' },
   { id: 'loyalty_settings_manage', label: 'Manage Loyalty Settings', parentDomain: 'customers', minModuleLevel: 'view', defaultLevel: 'manage', description: 'Configure loyalty program settings, tiers, and privileges' },
   { id: 'reopen_invoice', label: 'Reopen Invoice', parentDomain: 'invoices', minModuleLevel: 'view', defaultLevel: 'manage', description: 'Reopen a paid or cancelled invoice for further editing' },
+  { id: 'assign_technician', label: 'Assign Technician', parentDomain: 'repairs', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Assign or reassign technicians to repair tickets' },
 ];
 
 export const ADMIN_ACTION_LEVEL_MAP = SUB_PERMISSIONS;
@@ -139,6 +140,7 @@ export const tenantRoles: EmployeeRole[] = [
       loyalty_customer_edit: true,
       loyalty_settings_manage: true,
       reopen_invoice: true,
+      assign_technician: true,
     },
     description: 'Store management access'
   },
@@ -183,6 +185,7 @@ export const tenantRoles: EmployeeRole[] = [
       loyalty_customer_edit: false,
       loyalty_settings_manage: false,
       reopen_invoice: false,
+      assign_technician: false,
     },
     description: 'Repair and parts access'
   },
@@ -227,6 +230,7 @@ export const tenantRoles: EmployeeRole[] = [
       loyalty_customer_edit: false,
       loyalty_settings_manage: false,
       reopen_invoice: false,
+      assign_technician: false,
     },
     description: 'Sales and customer access'
   },

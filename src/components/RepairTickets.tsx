@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useCallback, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
-import { RepairTicket, RepairTicketStatus, TicketComment, RepairServiceLineItem } from '../types';
+import { RepairTicket, RepairTicketStatus, TicketComment, RepairServiceLineItem, Invoice } from '../types';
 import { useStoreLocalState, SEED_POS_OPERATORS } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
 import ContextualHelp from './ContextualHelp';
@@ -76,11 +77,14 @@ export default function RepairTickets() {
     warrantyRepairTickets, updateWarrantyRepairTicket,
     warrantyClaims, updateWarrantyClaim,
     customers, services, serviceCategories, approvedStockItems,
+    invoices, addInvoice,
   } = useStoreLocalState();
+  const navigate = useNavigate();
   const { checkPermission, checkSubPermission } = useAccess();
   const canCreateTickets = checkPermission('repairs', 'create');
   const canEditTickets = checkPermission('repairs', 'edit');
   const canManageTickets = checkPermission('repairs', 'manage');
+  const canAssignTechnician = checkSubPermission('assign_technician');
 
   const allTickets = useMemo(() => [...repairTickets, ...warrantyRepairTickets], [repairTickets, warrantyRepairTickets]);
 
@@ -231,6 +235,39 @@ export default function RepairTickets() {
     setIsNewTicketModalOpen(false);
   }, [newForm, selectedServices, estimatedTotal, allTickets.length, addRepairTicket]);
 
+  const generateRepairInvoice = useCallback((ticket: RepairTicket) => {
+    if (ticket.linkedInvoiceId) return;
+    const now = new Date().toISOString();
+    const serviceItems = (ticket.serviceLineItems || []).map(sli => ({
+      id: `inv-item-${sli.id}`, name: sli.name, quantity: 1, price: sli.price, type: 'service' as const,
+    }));
+    const partItems = (ticket.partsUsed || []).map(p => ({
+      id: `inv-item-${p.itemId}`, name: p.name, quantity: p.quantity, price: p.price, type: 'repair' as const,
+    }));
+    const allItems = [...serviceItems, ...partItems];
+    if (allItems.length === 0) return;
+    const subtotal = allItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
+    const tax = Math.round(subtotal * 0.08 * 100) / 100;
+    const total = subtotal + tax;
+    const invNum = `INV-R-${(1000 + invoices.length + 1)}`;
+    const invoiceId = `inv-repair-${Date.now()}`;
+    const invoice: Invoice = {
+      id: invoiceId, invoiceNumber: invNum,
+      customerId: ticket.customerId, customerName: ticket.customerName,
+      customerEmail: ticket.customerEmail, customerPhone: ticket.customerPhone,
+      items: allItems, subtotal, discount: 0, tax, total,
+      amountPaid: 0, balance: total,
+      status: 'Unpaid', createdAt: now,
+      dueDate: new Date(Date.now() + 30 * 86400000).toISOString(),
+      notes: `Repair invoice for ${ticket.ticketNumber} — ${ticket.device}`,
+      paymentHistory: [],
+      statusHistory: [{ id: `sh-${Date.now()}`, action: 'created', fromStatus: '', toStatus: 'Unpaid', timestamp: now, actor: 'System', note: `Auto-generated from completed repair ${ticket.ticketNumber}` }],
+      remindersSent: 0,
+    };
+    addInvoice(invoice);
+    return invoiceId;
+  }, [invoices.length, addInvoice]);
+
   const handleStatusChange = useCallback((id: string, newStatus: RepairTicketStatus) => {
     if (!canEditTickets) return;
     const now = new Date().toISOString();
@@ -243,6 +280,13 @@ export default function RepairTickets() {
       updatedAt: now,
       history: [...(ticket.history || []), { id: `h-${Date.now()}`, action: `Status → ${newStatus}`, performedBy: 'Current User', timestamp: now }],
     };
+    if (newStatus === 'Completed' && !ticket.linkedInvoiceId) {
+      const invoiceId = generateRepairInvoice(ticket);
+      if (invoiceId) {
+        updates.linkedInvoiceId = invoiceId;
+        updates.history = [...(updates.history || []), { id: `h-${Date.now()}-inv`, action: 'Invoice generated', performedBy: 'System', timestamp: now }];
+      }
+    }
     const isWarranty = warrantyRepairTickets.some(wt => wt.id === id);
     if (isWarranty) {
       updateWarrantyRepairTicket(id, updates);
@@ -261,9 +305,10 @@ export default function RepairTickets() {
     if (selectedTicket?.id === id) {
       setSelectedTicket(prev => prev ? { ...prev, ...updates } : null);
     }
-  }, [canEditTickets, allTickets, warrantyRepairTickets, warrantyClaims, updateRepairTicket, updateWarrantyRepairTicket, updateWarrantyClaim, selectedTicket]);
+  }, [canEditTickets, allTickets, warrantyRepairTickets, warrantyClaims, updateRepairTicket, updateWarrantyRepairTicket, updateWarrantyClaim, selectedTicket, generateRepairInvoice]);
 
   const handleAssignTechnician = useCallback((ticketId: string, techId: string, techName: string) => {
+    if (!canAssignTechnician) return;
     const now = new Date().toISOString();
     const ticket = allTickets.find(t => t.id === ticketId);
     if (!ticket) return;
@@ -275,7 +320,7 @@ export default function RepairTickets() {
     if (isWarranty) updateWarrantyRepairTicket(ticketId, updates);
     else updateRepairTicket(ticketId, updates);
     if (selectedTicket?.id === ticketId) setSelectedTicket(prev => prev ? { ...prev, ...updates } : null);
-  }, [allTickets, warrantyRepairTickets, updateRepairTicket, updateWarrantyRepairTicket, selectedTicket]);
+  }, [canAssignTechnician, allTickets, warrantyRepairTickets, updateRepairTicket, updateWarrantyRepairTicket, selectedTicket]);
 
   const handleAddComment = useCallback(() => {
     if (!selectedTicket || !commentText.trim()) return;
@@ -606,25 +651,23 @@ export default function RepairTickets() {
                             <option value={selectedTicket.status}>{selectedTicket.status}</option>
                             {VALID_TRANSITIONS[selectedTicket.status].map(s => <option key={s} value={s}>{s}</option>)}
                           </select>
-                          <div className="flex gap-1.5 flex-wrap mt-1">
-                            {VALID_TRANSITIONS[selectedTicket.status].map(s => (
-                              <button key={s} onClick={() => handleStatusChange(selectedTicket.id, s)} disabled={!canEditTickets}
-                                className={`px-2.5 py-1 rounded-lg text-[9px] font-black uppercase tracking-wider transition-all disabled:opacity-50 ${STATUS_COLORS[s]} hover:opacity-80`}>
-                                <span className="material-symbols-outlined text-[10px] mr-0.5 align-middle">{STATUS_ICONS[s]}</span> {s}
-                              </button>
-                            ))}
-                          </div>
                         </div>
                         <div className="space-y-2">
                           <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Assigned Technician</label>
-                          <select value={selectedTicket.technicianId || ''} onChange={e => {
-                            const tech = technicians.find(t => t.id === e.target.value);
-                            if (tech) handleAssignTechnician(selectedTicket.id, tech.id, tech.name);
-                          }} disabled={!canEditTickets}
-                            className="w-full bg-slate-50 border-none rounded-2xl px-5 py-3.5 text-sm font-bold focus:ring-secondary shadow-inner disabled:opacity-50">
-                            <option value="">Unassigned</option>
-                            {technicians.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-                          </select>
+                          {canAssignTechnician ? (
+                            <select value={selectedTicket.technicianId || ''} onChange={e => {
+                              const tech = technicians.find(t => t.id === e.target.value);
+                              if (tech) handleAssignTechnician(selectedTicket.id, tech.id, tech.name);
+                            }} disabled={!canEditTickets}
+                              className="w-full bg-slate-50 border-none rounded-2xl px-5 py-3.5 text-sm font-bold focus:ring-secondary shadow-inner disabled:opacity-50">
+                              <option value="">Unassigned</option>
+                              {technicians.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                            </select>
+                          ) : (
+                            <p className="bg-slate-50 rounded-2xl px-5 py-3.5 text-sm font-bold text-slate-600 shadow-inner">
+                              {selectedTicket.technicianName || <span className="text-slate-400 italic">Unassigned</span>}
+                            </p>
+                          )}
                         </div>
                       </div>
 
@@ -1011,11 +1054,40 @@ export default function RepairTickets() {
                 <div className="flex items-center gap-4">
                   <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase ${STATUS_COLORS[selectedTicket.status]}`}>{selectedTicket.status}</span>
                   {formSaved && <span className="text-[10px] font-black text-lime-600 uppercase tracking-widest animate-pulse">Saved</span>}
+                  {selectedTicket.linkedInvoiceId && (
+                    <span className="text-[10px] font-black text-emerald-600 uppercase tracking-widest flex items-center gap-1">
+                      <span className="material-symbols-outlined text-xs">receipt_long</span> Invoice Generated
+                    </span>
+                  )}
                 </div>
-                <button onClick={() => setIsDetailModalOpen(false)}
-                  className="px-8 py-3 bg-white text-slate-500 border border-slate-200 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-50 transition-all">
-                  Close
-                </button>
+                <div className="flex items-center gap-3">
+                  {(selectedTicket.status === 'Completed' || selectedTicket.status === 'Delivered') && selectedTicket.linkedInvoiceId && (
+                    <button onClick={() => {
+                      const repairItems = [
+                        ...(selectedTicket.serviceLineItems || []).map(sli => ({
+                          id: sli.serviceId, name: sli.name, price: sli.price, quantity: 1, type: 'service' as const,
+                        })),
+                        ...(selectedTicket.partsUsed || []).map(p => ({
+                          id: p.itemId, name: p.name, price: p.price, quantity: p.quantity, type: 'part' as const,
+                        })),
+                      ];
+                      setIsDetailModalOpen(false);
+                      navigate('/sales', { state: {
+                        autoRepairItem: repairItems[0] ? { id: repairItems[0].id, name: `Repair: ${selectedTicket.ticketNumber} — ${selectedTicket.device}`, price: ticketTotal, type: 'repair' } : undefined,
+                        selectedCustomer: { id: selectedTicket.customerId, name: selectedTicket.customerName, phone: selectedTicket.customerPhone, email: selectedTicket.customerEmail },
+                        linkedRepairTicketId: selectedTicket.id,
+                        linkedInvoiceId: selectedTicket.linkedInvoiceId,
+                      }});
+                    }}
+                      className="px-6 py-3 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-lg active:scale-95 transition-all flex items-center gap-2">
+                      <span className="material-symbols-outlined text-sm">point_of_sale</span> Send to POS
+                    </button>
+                  )}
+                  <button onClick={() => setIsDetailModalOpen(false)}
+                    className="px-8 py-3 bg-white text-slate-500 border border-slate-200 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-50 transition-all">
+                    Close
+                  </button>
+                </div>
               </div>
             </motion.div>
           </div>
@@ -1161,7 +1233,7 @@ export default function RepairTickets() {
                     {showServiceDropdown && serviceMatches.length > 0 && (
                       <div className="absolute top-full left-0 right-0 mt-1 bg-white rounded-2xl shadow-2xl border border-slate-200 z-20 max-h-48 overflow-y-auto">
                         {serviceMatches.map(s => (
-                          <button key={s.id} onClick={() => handleToggleService(s.id)}
+                          <button key={s.id} onClick={() => { handleToggleService(s.id); setShowServiceDropdown(false); setServiceSearch(''); }}
                             className={`w-full text-left p-3 hover:bg-slate-50 transition-all flex justify-between items-center border-b border-slate-50 last:border-0 ${newForm.selectedServiceIds.includes(s.id) ? 'bg-primary/5' : ''}`}>
                             <div className="flex items-center gap-2">
                               {newForm.selectedServiceIds.includes(s.id) && <span className="material-symbols-outlined text-primary text-sm">check_circle</span>}
@@ -1200,16 +1272,18 @@ export default function RepairTickets() {
                       <option value="Low">Low</option><option value="Medium">Medium</option><option value="High">High</option><option value="Rush">Rush</option>
                     </select>
                   </div>
-                  <div className="space-y-2">
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Assign Technician</label>
-                    <select value={newForm.technicianId} onChange={e => {
-                      const tech = technicians.find(t => t.id === e.target.value);
-                      setNewForm(prev => ({ ...prev, technicianId: e.target.value, technicianName: tech?.name || '' }));
-                    }} className="w-full bg-slate-50 border-none rounded-2xl px-5 py-3.5 text-sm font-bold focus:ring-secondary shadow-inner">
-                      <option value="">Unassigned</option>
-                      {technicians.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-                    </select>
-                  </div>
+                  {canAssignTechnician && (
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Assign Technician</label>
+                      <select value={newForm.technicianId} onChange={e => {
+                        const tech = technicians.find(t => t.id === e.target.value);
+                        setNewForm(prev => ({ ...prev, technicianId: e.target.value, technicianName: tech?.name || '' }));
+                      }} className="w-full bg-slate-50 border-none rounded-2xl px-5 py-3.5 text-sm font-bold focus:ring-secondary shadow-inner">
+                        <option value="">Unassigned</option>
+                        {technicians.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                      </select>
+                    </div>
+                  )}
                   <div className="space-y-2">
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Storage Location</label>
                     <input type="text" value={newForm.location} onChange={e => setNewForm(prev => ({ ...prev, location: e.target.value }))} placeholder="e.g. Shelf A-1"

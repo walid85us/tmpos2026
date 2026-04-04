@@ -1,0 +1,143 @@
+Repairs Module Deep Refinement — Narrow QA Correction Pass 1
+
+Read `replit.md` and `Ref.txt` first and treat them as source-of-truth constraints before making any changes.
+
+This is NOT a redesign and NOT a new workstream.
+This is a narrow correction pass based only on the remaining QA failures from Repairs Module Deep Refinement.
+
+Expert-role stack
+- Principal SaaS Product Architect for multi-tenant repair/POS workflows
+- Staff React 19 + TypeScript + Vite engineer
+- Firebase / Firestore data-model and state-flow architect
+- Auth / RBAC / lifecycle gating specialist
+- Repair workflow architect
+- POS / invoice workflow architect
+- QA-driven refactor auditor
+- Side auditor and systems thinker at all times
+
+Operating posture
+- Act as a side auditor and systems thinker throughout.
+- Audit ripple effects before editing.
+- Fix only the remaining failed or partial QA items deeply and coherently.
+- Preserve current design baseline exactly.
+- Preserve auth, preview mode, RBAC, lifecycle gating, and platform/store hierarchy.
+- Preserve tenant isolation and store scoping.
+- Reuse existing modal/drawer/table/toast/permission/sub-permission patterns.
+- Do not reopen completed workstreams except for narrow compatibility-safe fixes required by this pass.
+- Do not make changes to folder `Z`.
+- Do not make changes to file `Y`.
+
+Remaining corrections to implement
+
+A) Repair service dropdown behavior in create repair ticket
+1. Current issue
+- in Create Repair Ticket, the repair service dropdown/list does not disappear/close correctly after selecting a repair service
+- it should behave like the working repair services linkage flow already behaving correctly elsewhere
+
+2. Required behavior
+- when a repair service is selected in Create Repair Ticket:
+  - the dropdown/list must close cleanly
+  - the selected service must remain applied
+  - there must be no lingering open dropdown state
+- align its behavior with the cleaner existing flow already seen in point 11 QA
+
+B) Ticket status workflow must use one clear dropdown update model
+1. Current issue
+- workflow status currently shows as mixed buttons/chips/actions
+- user wants status management to be only a dropdown-based selection/update flow
+
+2. Required behavior
+- replace the current visible status-action chip/button pattern for repair workflow status updates with one clean dropdown control
+- status should be selectable and updateable from a single dropdown flow
+- keep the status values coherent with the ticket lifecycle already implemented
+- update listing and detail views consistently after a status change
+- do not keep duplicate competing status controls in the same workflow area
+
+C) Assigned Technician permission and auto-assignment logic
+1. Add repair sub-permission
+- add a dedicated sub-permission under the Repairs module for changing Assigned Technician
+- integrate it into the existing sub-permission architecture and Store Permissions Matrix cleanly
+
+2. Auto-assign logic
+- when a technician creates a repair ticket themselves, the Assigned Technician should automatically default to that same technician
+
+3. Edit restrictions
+- only users with the new Assigned Technician permission can change/reassign the Assigned Technician
+- users without that permission must not be able to change it
+- blocked states must be clean, not broken or misleading
+
+D) Completed repair to POS payment / invoice conversion flow
+1. Completed repair action
+- once a repair ticket is marked Completed, there must be a clear button/action to add the ticket to POS for payment
+
+2. Invoice creation rule
+- once the repair is marked Completed, an invoice should be created for that completed repair in the appropriate current architecture-compatible way
+- keep this coherent with the existing invoices foundation already completed
+- do not break the current invoice model
+
+3. POS payment routing
+- from the completed repair ticket, the user must be able to send/add the repair to POS for payment
+- the flow must be intentional and operational, not a placeholder
+
+E) Customer profile / Interaction History integration
+1. Orders tab integration
+- once a repair ticket is marked Completed and the invoice is created, it should appear in the customer profile under Interaction History within the Orders tab
+
+2. Status display
+- in that customer profile Orders view, it should show the status as unpaid until payment is completed
+
+3. POS access from customer profile side
+- from that completed-unpaid repair/invoice record in customer profile Orders, it should also be possible to process/add it to POS for payment
+- keep this coherent with the completed repair ticket payment flow so both entry points behave consistently
+
+F) Consistency and non-regression requirements
+1. Do not break:
+- existing repair intake creation
+- repair listing/detail view
+- repair services linkage
+- parts/inventory linkage
+- notes/diagnostics/history
+- current customers/invoices/services/POS/warranty flows
+
+2. Keep store scoping and tenant safety intact everywhere.
+
+3. Update `replit.md` so it reflects:
+- the Assigned Technician sub-permission
+- auto-assignment behavior
+- completed repair to invoice/POS flow
+- customer Interaction History orders integration for completed repairs
+
+Required design and behavior rules
+- Preserve the current premium glassmorphism design baseline exactly
+- Maintain keyboard accessibility and clear blocked/save/error states
+- Keep state paths unified
+- Avoid duplicate parallel systems
+- Ensure corrected flows work in preview/demo mode
+- Maintain store scoping and tenant safety
+- Keep type safety strong
+
+Definition of done
+This correction pass is done only if:
+- repair service dropdown closes cleanly after selection during repair ticket creation
+- ticket status is managed through one clean dropdown flow
+- Assigned Technician sub-permission exists and works
+- technicians auto-assign to themselves when they create a repair ticket
+- only authorized users can change Assigned Technician
+- completed repair has a clear add-to-POS/payment action
+- completed repair creates/links invoice coherently
+- completed repair shows in customer Interaction History / Orders as unpaid until paid
+- both repair details and customer profile Orders can route the completed unpaid repair to POS for payment
+- no regressions are introduced in repairs, customers, invoices, POS, services, or warranty
+- `replit.md` is updated to reflect all corrections
+
+Required final response format
+Return your completion report in exactly this structure:
+
+1. Files Changed
+2. Corrections Implemented
+3. Assigned Technician Permission Logic
+4. Completed Repair to Invoice/POS Flow
+5. Customer Interaction History Integration
+6. Non-Regressions Confirmed
+7. Known Deferred Items
+8. Manual QA Retest Areas
