@@ -157,6 +157,8 @@ const WarrantyManagement: React.FC = () => {
       technicianId: tech?.id,
       technicianName: tech?.name || 'Unassigned (Pool)',
       diagnosticNotes: `Warranty claim ${repairAssignClaim.ticketNumber} — ${repairAssignClaim.notes}`,
+      isWarrantyRepair: true,
+      linkedWarrantyClaimId: repairAssignClaim.id,
       history: [
         { id: `h-${Date.now()}`, action: 'Created from warranty claim', performedBy: operatorName, timestamp: new Date().toISOString(), details: `Linked to warranty ${repairAssignClaim.ticketNumber}` },
       ],

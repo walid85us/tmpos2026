@@ -1,0 +1,229 @@
+Repairs Module Deep Refinement — Isolation Workstream
+
+Read `replit.md` and `Ref.txt` first and treat them as source-of-truth constraints before making any changes.
+
+MANDATORY REFERENCE RESEARCH — DO THIS FIRST
+
+Before implementing anything in the Repairs Module, you must visit and read the following references carefully and completely. These are not optional. Extract the real operational workflows, ticket lifecycle patterns, intake requirements, repair-category logic, parts/warranty handling, technician assignment behavior, attachments/history expectations, customer-linking behavior, repair-services structure, tracker ideas, and broader repair-module concepts.
+
+Use these references as deep behavioral research input, then merge them with our current app architecture and improve beyond them. Do NOT copy RepairDesk blindly. Instead:
+- preserve our existing architecture, design baseline, RBAC model, store scoping, feature-gating model, and current multi-tenant structure
+- use the references to understand the operational depth required
+- modernize and improve the repair workflows beyond what RepairDesk provides where appropriate
+- design something stronger for current market expectations, modern UX, cleaner workflows, and better daily usability for store teams
+
+Mandatory references to read fully:
+1. https://help.repairdesk.co/portal/en/kb/articles/closing-a-repair-ticket-in-pos
+2. https://help.repairdesk.co/portal/en/kb/articles/how-to-process-the-warranty-claim-for-a-repair-part
+3. https://help.repairdesk.co/portal/en/kb/articles/how-to-enable-repair-categories-on-pos
+4. https://help.repairdesk.co/portal/en/kb/articles/how-to-make-it-compulsory-to-add-network-device-location-and-passcode-while-making-repair-ticket-28-1-2025
+5. https://help.repairdesk.co/portal/en/kb/articles/repair-module-configuration-28-1-2025
+6. https://help.repairdesk.co/portal/en/kb/articles/how-to-create-a-repair-ticket
+7. https://help.repairdesk.co/portal/en/kb/articles/how-can-i-export-repair-tickets-to-excel-format-30-4-2025
+8. https://help.repairdesk.co/portal/en/kb/articles/how-to-delete-a-repair-ticket
+9. https://help.repairdesk.co/portal/en/kb/articles/how-can-i-add-repair-device-details-on-new-ticket
+10. https://help.repairdesk.co/portal/en/kb/articles/how-can-i-link-inventory-parts-with-ticket-repair-item
+11. https://help.repairdesk.co/portal/en/kb/articles/how-to-make-it-compulsory-to-add-pre-post-repair-device-conditions
+12. https://help.repairdesk.co/portal/en/kb/articles/how-to-upload-attachments-on-repair-ticket
+13. https://help.repairdesk.co/portal/en/kb/articles/how-to-re-assign-repair-ticket-to-a-technician
+14. https://help.repairdesk.co/portal/en/kb/articles/enter-pin-before-an-employee-can-create-repair-ticket
+15. https://help.repairdesk.co/portal/en/kb/articles/how-can-i-process-warranty-claim-for-repair-parts
+16. https://help.repairdesk.co/portal/en/kb/articles/how-to-copy-the-original-ticket-notes-into-the-warranty-repair-ticket
+17. https://help.repairdesk.co/portal/en/kb/articles/how-to-add-a-new-repair-line-item-to-an-existing-ticket
+18. https://help.repairdesk.co/portal/en/kb/articles/how-to-add-a-new-repair-part-process-a-warranty-claim-for-a-repair-part
+19. https://help.repairdesk.co/portal/en/kb/articles/how-to-add-device-pre-post-repair-condition-12-8-2025
+20. https://help.repairdesk.co/portal/en/kb/articles/how-can-i-export-repair-tickets-to-excel-format
+21. https://help.repairdesk.co/portal/en/kb/articles/manage-repair-categories
+22. https://help.repairdesk.co/portal/en/kb/articles/repair-services
+23. https://help.repairdesk.co/portal/en/kb/articles/bulk-repair-services-price-editor
+24. https://help.repairdesk.co/portal/en/kb/articles/how-to-set-warranty-for-a-repair-service
+25. https://help.repairdesk.co/portal/en/kb/articles/how-to-set-warranty-for-a-repair-part
+26. https://help.repairdesk.co/portal/en/kb/articles/repair-tracker-widget
+27. https://help.repairdesk.co/portal/en/kb/articles/how-to-link-customer-tickets-in-repair-desk-connect
+28. https://help.repairdesk.co/portal/en/kb/articles/editing-and-adding-a-repair-service
+29. https://help.repairdesk.co/portal/en/kb/articles/module-configurations-setup-for-repair-categories-brands-models-and-issues
+30. https://help.repairdesk.co/portal/en/kb/articles/rd-repair-price-calculator
+31. https://help.repairdesk.co/portal/en/kb/articles/mail-in-repair-suite
+32. https://help.repairdesk.co/portal/en/kb/articles/mail-in-repair-tracker
+
+Important:
+- Do not just skim these links.
+- Read them fully and extract the actual workflows, field requirements, lifecycle rules, and operational patterns.
+- Use them as deep behavioral reference for this Repairs Module workstream.
+- Then improve on them with stronger modern UX, cleaner status flow, better technician workflow, better ticket detail structure, stronger permission awareness, and stronger repair-to-service/invoice/warranty consistency.
+- Build something better than a direct clone.
+
+You are continuing an existing multi-tenant repair/POS SaaS app. Do not redesign the product. Do not reopen completed workstreams unless a dependency forces a narrow correction required for this workstream only.
+
+Completed workstreams
+1. Platform Command Center & Commercial Plan System
+2. Tenant Management & Provisioning
+3. Store Dashboard & POS Refinement
+4. Customers, Invoices & Services Improvements
+
+This new workstream starts now:
+Repairs Module Deep Refinement
+
+Expert-role stack
+- Principal SaaS Product Architect for multi-tenant repair/POS workflows
+- Staff React 19 + TypeScript + Vite engineer
+- Firebase / Firestore data-model and state-flow architect
+- Auth / RBAC / lifecycle gating specialist
+- UX systems designer preserving the existing premium glassmorphism design baseline
+- Repair operations workflow architect
+- QA-driven refactor auditor
+- Side auditor and systems thinker at all times
+
+Operating posture
+- Act as a side auditor and systems thinker throughout.
+- Audit ripple effects before editing.
+- Prefer coherent foundational improvements over shallow patches.
+- Keep scope narrow and isolated to this workstream.
+- Preserve the current design baseline exactly.
+- Preserve auth, preview mode, RBAC, lifecycle gating, and platform/store hierarchy.
+- Preserve tenant isolation and store scoping.
+- Reuse existing patterns for cards, tables, modals, drawers, toasts, motion, spacing, typography, and visual language.
+- Do not make changes to folder `Z`.
+- Do not make changes to file `Y`.
+- Keep all other task plans as planning drafts only.
+
+Current context you must honor
+- This is a multi-tenant repair/POS SaaS app in Replit with Firebase/Firestore.
+- `replit.md` is the architecture / baseline truth.
+- `Ref.txt` is the operational / product reference.
+- Existing foundations already completed include:
+  - platform commercial plans and feature gating
+  - tenant/store provisioning
+  - store dashboard and POS refinement
+  - customers, invoices, services, loyalty, warranty permission flow, invoice templates, and document output foundations
+- Existing customer, invoice, service, POS, refund, warranty, and document flows must remain intact.
+
+Primary objective
+Deeply refine the Repairs Module so it becomes operationally strong, consistent, permission-aware, and ready for daily use by store teams, without redesigning the app or breaking existing completed workstreams.
+
+Architecture constraints
+- Use the existing React 19 + TypeScript + Vite + Tailwind + Firebase stack.
+- Extend existing shared state and route/component patterns instead of introducing a competing architecture.
+- Respect current AccessGuard / permission model / sub-permission style.
+- Only add minimal new permission hooks or sub-permissions if truly needed for repair workflows.
+- Keep preview/demo/mock behavior fully usable even if backend persistence is incomplete or partially mocked.
+- Maintain accessibility and keyboard navigability for forms, rows, drawers, and modals.
+- Keep data store-scoped and tenant-safe everywhere.
+
+Scope — implement these improvements only
+
+A) Repair intake and ticket creation refinement
+1. Strengthen repair intake flow so it feels production-ready.
+2. Ensure required operational fields are handled cleanly, such as:
+- customer
+- device name
+- device category/type if supported
+- brand / model if supported by current app structure
+- issue/problem description
+- intake notes
+- serial / IMEI / passcode / device condition fields where the current architecture supports them cleanly
+3. Make ticket creation UX clear, structured, and fast for front-desk use.
+4. Preserve any current POS/quick-intake bridges already built.
+
+B) Ticket lifecycle and status workflow
+1. Create or refine a clear ticket lifecycle model.
+2. Support meaningful repair statuses such as intake / diagnosed / in progress / waiting for parts / ready / completed / delivered / cancelled, adapting to existing project patterns.
+3. Ensure status transitions feel intentional and visible in ticket details and listing views.
+4. Add guardrails so status changes do not feel random or inconsistent.
+
+C) Repair ticket detail experience
+1. Build or refine a strong repair ticket details surface using the current modal/drawer/detail pattern.
+2. The detail experience should make it easy to review:
+- customer info
+- device info
+- ticket status
+- assigned technician
+- services/repair line items
+- parts/inventory linkage where already supported
+- notes / diagnostics / internal comments
+- financial summary where relevant
+- history / audit-style events if possible within scope
+3. Make the repair ticket detail surface feel operational, not placeholder-like.
+
+D) Technician assignment and workflow ownership
+1. Support technician assignment / reassignment in a clean way.
+2. Make ownership visible in ticket listings and ticket details.
+3. Keep permission behavior coherent.
+4. If needed, add only minimal permission-aware controls for assignment actions.
+
+E) Repair line items, services, and parts linkage
+1. Strengthen the relationship between repair tickets and service catalog items.
+2. Allow repair tickets to include service line items cleanly.
+3. Where current architecture supports it, allow parts/inventory linkage without causing confusion between:
+- service items
+- parts
+- inventory products
+4. Do not turn this into a full inventory overhaul.
+
+F) Notes, diagnostics, attachments, and history
+1. Improve ticket notes and diagnostics handling.
+2. Distinguish clearly where appropriate between:
+- customer-facing notes
+- technician/internal notes
+- diagnostics/findings
+3. Add attachment support only if it can be done cleanly within the current architecture.
+4. Add a useful history/timeline/event trail if practical in-scope.
+
+G) Ticket listing and search usability
+1. Improve repair ticket listing experience.
+2. Support useful search/filter patterns such as ticket number, customer, device, status, assigned technician, or recent activity where appropriate.
+3. Keep the listing aligned with the existing app’s table/list design language.
+
+H) Financial and workflow consistency
+1. Keep repairs coherent with existing invoice, service, POS, warranty, and customer foundations.
+2. Ensure repair-to-invoice / repair-to-service / repair-to-warranty relationships behave logically.
+3. Do not break the current invoice, warranty, refund, or POS flows.
+
+I) Permission and approval awareness
+1. Respect current RBAC/sub-permission architecture.
+2. Add only minimal repair-related sub-permissions if truly needed.
+3. Keep unauthorized actions blocked cleanly, not through broken dead ends.
+
+J) Documentation
+Update `replit.md` so it accurately reflects:
+- new or refined repair entities
+- ticket lifecycle/status model
+- assignment/ownership behavior
+- notes/diagnostics/history structure
+- any permission additions
+- any important repair workflow decisions introduced in this workstream
+
+Explicit non-goals for this workstream
+- No broad redesign
+- No full inventory/supply chain overhaul
+- No commercial plan system rework
+- No tenant/provisioning rework
+- No full accounting subsystem
+- No broad CRM expansion
+- No widget/public API/integration expansion
+- No unrelated reopening of earlier approved workstreams
+
+Definition of done
+This workstream is done only if:
+- repair intake is cleaner and more operational
+- repair ticket listing and details are navigable and useful in preview
+- ticket lifecycle/status flow is coherent
+- technician assignment works cleanly
+- repair service/parts linkage is clearer
+- notes/diagnostics/history are materially improved
+- repairs remain coherent with customers, invoices, services, POS, and warranty foundations
+- there are no obvious regressions in completed workstreams
+- there are no TypeScript-breaking changes
+- `replit.md` is updated to match the new reality
+
+Required final response format from you
+Return your completion report in this exact structure:
+
+1. Files Changed
+2. What Was Implemented
+3. Ticket Lifecycle / Workflow Decisions
+4. State / Data Model Changes
+5. Permission / Access Changes
+6. Non-Regressions Confirmed
+7. Known Non-Goals / Deferred Items
+8. Manual QA Focus Areas for Me to Test

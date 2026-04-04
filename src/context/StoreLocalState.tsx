@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useMemo, useEffect, useRef } from 'react';
-import { Customer, HeldOrder, CartItem, PaymentMethod, Discount, RepairTicket, Invoice, RepairService, RepairCategory, DocumentTemplate, StoreBranding, LogoPlacement } from '../types';
+import { Customer, HeldOrder, CartItem, PaymentMethod, Discount, RepairTicket, RepairTicketStatus, Invoice, RepairService, RepairCategory, DocumentTemplate, StoreBranding, LogoPlacement } from '../types';
 import { useAccess } from './AccessContext';
 import { buildTemplateHtml, getDefaultEnabledTags } from '../utils/templateBuilder';
 
@@ -161,6 +161,10 @@ interface StoreLocalStateContextType {
   updateWarrantyClaim: (id: string, updates: Partial<WarrantyClaimRecord>) => void;
   posOperator: POSOperator | null;
   setPosOperator: (op: POSOperator | null) => void;
+  repairTickets: RepairTicket[];
+  addRepairTicket: (ticket: RepairTicket) => void;
+  updateRepairTicket: (id: string, updates: Partial<RepairTicket>) => void;
+  deleteRepairTicket: (id: string) => void;
   warrantyRepairTickets: RepairTicket[];
   addWarrantyRepairTicket: (ticket: RepairTicket) => void;
   updateWarrantyRepairTicket: (id: string, updates: Partial<RepairTicket>) => void;
@@ -404,6 +408,90 @@ const SEED_SERVICES: RepairService[] = [
   { id: 's6', name: 'Samsung S21 Battery Replacement', categoryId: 'cat1', categoryName: 'Smartphones', price: 79.99, cost: 22.00, estimatedTime: 40, status: 'Active', sku: 'SRV-SS21-BAT', warrantyPeriod: '90 days', warrantyType: 'parts-and-labor' },
 ];
 
+const SEED_REPAIR_TICKETS: RepairTicket[] = [
+  {
+    id: 'rt-1', ticketNumber: 'T-1001', customerId: 'c1', customerName: 'Alexander Wright', customerPhone: '(555) 012-3456', customerEmail: 'alexander.wright@example.com',
+    device: 'iPhone 14 Pro', deviceCategory: 'Smartphones', brand: 'Apple', model: '14 Pro', issue: 'Screen Replacement',
+    status: 'In Progress', priority: 'High', createdAt: '2026-03-15T10:00:00Z', updatedAt: '2026-03-15T10:00:00Z',
+    estimatedCost: 249, technicianId: 'op-3', technicianName: 'Alex Kim', location: 'Shelf A-1',
+    diagnosticNotes: 'Screen is cracked, digitizer unresponsive. FaceID seems intact.',
+    intakeNotes: 'Customer dropped phone from 2nd floor balcony. Needs ASAP.',
+    preRepairCondition: ['Cracked Screen', 'Scratched Frame', 'Power On'],
+    imei: '351234567890123', network: 'Verizon',
+    serviceLineItems: [{ id: 'sli-1', serviceId: 's4', name: 'iPhone 15 Pro Screen Replacement', price: 249.99, cost: 95.00, warrantyPeriod: '90 days' }],
+    history: [
+      { id: 'h1', action: 'Ticket Created', performedBy: 'System', timestamp: '2026-03-15T10:00:00Z' },
+      { id: 'h2', action: 'Assigned to Alex Kim', performedBy: 'Admin', timestamp: '2026-03-15T10:05:00Z' },
+      { id: 'h3', action: 'Status → In Progress', performedBy: 'Alex Kim', timestamp: '2026-03-15T11:00:00Z' }
+    ],
+    comments: [
+      { id: 'com1', authorId: 'op-3', authorName: 'Alex Kim', text: 'Part ordered from primary supplier. ETA 2 days.', createdAt: '2026-03-15T11:00:00Z', isInternal: true },
+      { id: 'com2', authorId: 'op-1', authorName: 'Admin', text: 'Customer called — needs phone by Friday.', createdAt: '2026-03-15T14:00:00Z', isInternal: false }
+    ]
+  },
+  {
+    id: 'rt-2', ticketNumber: 'T-1002', customerId: 'c2', customerName: 'Sarah Jenkins', customerPhone: '(555) 987-6543',
+    device: 'MacBook Air M2', deviceCategory: 'Laptops', brand: 'Apple', model: 'Air M2', issue: 'Liquid Damage Assessment',
+    status: 'Diagnosed', priority: 'Medium', createdAt: '2026-03-16T14:30:00Z', updatedAt: '2026-03-17T09:00:00Z',
+    estimatedCost: 450, technicianId: 'op-2', technicianName: 'Jamie Torres', location: 'Shelf B-2',
+    diagnosticNotes: 'Liquid indicator triggered on logic board. Corrosion on I/O flex. Keyboard unresponsive intermittently.',
+    intakeNotes: 'Spilled coffee on keyboard yesterday. Was working intermittently.',
+    preRepairCondition: ['Liquid Indicator Triggered', 'Keyboard Intermittent', 'Power On'],
+    serialNumber: 'FVFH92X1Q6',
+    serviceLineItems: [{ id: 'sli-2', serviceId: 's2', name: 'MacBook Air M1 Battery Replacement', price: 199.99, cost: 80.00, warrantyPeriod: '180 days' }],
+    history: [
+      { id: 'h4', action: 'Ticket Created', performedBy: 'System', timestamp: '2026-03-16T14:30:00Z' },
+      { id: 'h5', action: 'Assigned to Jamie Torres', performedBy: 'Admin', timestamp: '2026-03-16T14:35:00Z' },
+      { id: 'h6', action: 'Status → Diagnosed', performedBy: 'Jamie Torres', timestamp: '2026-03-17T09:00:00Z', details: 'Logic board corrosion found — needs ultrasonic cleaning and possibly replacement.' }
+    ]
+  },
+  {
+    id: 'rt-3', ticketNumber: 'T-1003', customerId: 'c3', customerName: 'Michael Chen', customerPhone: '(555) 456-7890',
+    device: 'iPad Pro 12.9', deviceCategory: 'Tablets', brand: 'Apple', model: 'Pro 12.9 M2', issue: 'Battery Service',
+    status: 'Awaiting Parts', priority: 'Rush', createdAt: '2026-03-18T09:15:00Z', updatedAt: '2026-03-18T15:00:00Z',
+    estimatedCost: 129, isRushJob: true, technicianId: 'op-3', technicianName: 'Alex Kim', location: 'Repair Bench 3',
+    diagnosticNotes: 'Battery health at 72%. Swelling detected — replaced immediately. OEM part on backorder.',
+    preRepairCondition: ['Battery Swelling', 'Slow Performance', 'Power On'],
+    serialNumber: 'DLXP2YFJ1G',
+    serviceLineItems: [{ id: 'sli-3', serviceId: 's3', name: 'iPad Pro 11 Charging Port Repair', price: 89.99, cost: 15.00, warrantyPeriod: '90 days' }],
+    history: [
+      { id: 'h7', action: 'Ticket Created', performedBy: 'System', timestamp: '2026-03-18T09:15:00Z' },
+      { id: 'h8', action: 'Status → Awaiting Parts', performedBy: 'Alex Kim', timestamp: '2026-03-18T15:00:00Z', details: 'OEM battery on backorder. ETA 3-5 business days.' }
+    ]
+  },
+  {
+    id: 'rt-4', ticketNumber: 'T-1004', customerId: 'c4', customerName: 'Emma Watson', customerPhone: '(555) 321-0987',
+    device: 'Samsung S23 Ultra', deviceCategory: 'Smartphones', brand: 'Samsung', model: 'S23 Ultra', issue: 'Back Glass Replacement',
+    status: 'Ready for Pickup', priority: 'Low', createdAt: '2026-03-19T11:20:00Z', updatedAt: '2026-03-19T16:45:00Z',
+    estimatedCost: 89, actualCost: 75, technicianId: 'op-3', technicianName: 'Alex Kim', location: 'Ready Bin 4',
+    diagnosticNotes: 'Back glass shattered. Replaced with OEM part. Adhesive cured. Wireless charging tested OK.',
+    preRepairCondition: ['Cracked Back Glass', 'Power On', 'Cosmetic Only'],
+    postRepairCondition: ['New Back Glass', 'Wireless Charging OK', 'Adhesive Cured'],
+    imei: '352567890123456', network: 'T-Mobile',
+    serviceLineItems: [{ id: 'sli-4', serviceId: 's6', name: 'Samsung S21 Battery Replacement', price: 79.99, cost: 22.00, warrantyPeriod: '90 days' }],
+    partsUsed: [{ itemId: 'stk-1', name: 'Samsung S23 Back Glass OEM', price: 35.00, quantity: 1 }],
+    history: [
+      { id: 'h9', action: 'Ticket Created', performedBy: 'System', timestamp: '2026-03-19T11:20:00Z' },
+      { id: 'h10', action: 'Assigned to Alex Kim', performedBy: 'Admin', timestamp: '2026-03-19T11:25:00Z' },
+      { id: 'h11', action: 'Status → In Progress', performedBy: 'Alex Kim', timestamp: '2026-03-19T12:00:00Z' },
+      { id: 'h12', action: 'Part Added: Samsung S23 Back Glass OEM', performedBy: 'Alex Kim', timestamp: '2026-03-19T13:00:00Z' },
+      { id: 'h13', action: 'Status → Ready for Pickup', performedBy: 'Alex Kim', timestamp: '2026-03-19T16:45:00Z' }
+    ]
+  },
+  {
+    id: 'rt-5', ticketNumber: 'T-1005', customerId: 'c1', customerName: 'Alexander Wright',
+    device: 'PS5 Console', deviceCategory: 'Game Consoles', brand: 'Sony', model: 'PS5 Disc Edition', issue: 'HDMI Port Not Working',
+    status: 'Pending', priority: 'Medium', createdAt: '2026-03-20T10:00:00Z', updatedAt: '2026-03-20T10:00:00Z',
+    estimatedCost: 149.99, location: 'Intake Shelf',
+    intakeNotes: 'No video output. Audio works through headset. Customer suspects HDMI port damage.',
+    preRepairCondition: ['No Video Output', 'Power On', 'Audio OK'],
+    serialNumber: 'CFI-1215A-78901',
+    history: [
+      { id: 'h14', action: 'Ticket Created', performedBy: 'System', timestamp: '2026-03-20T10:00:00Z' }
+    ]
+  }
+];
+
 function makeDefaultTemplate(id: string, type: import('../types').TemplateType, name: string): DocumentTemplate {
   const enabledTags = getDefaultEnabledTags(type);
   return {
@@ -440,6 +528,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const [refundRecords, setRefundRecords] = useState<RefundRecord[]>([]);
   const [warrantyClaims, setWarrantyClaims] = useState<WarrantyClaimRecord[]>(SEED_WARRANTY_CLAIMS);
   const [posOperator, setPosOperatorState] = useState<POSOperator | null>(null);
+  const [repairTickets, setRepairTickets] = useState<RepairTicket[]>(SEED_REPAIR_TICKETS);
   const [warrantyRepairTickets, setWarrantyRepairTickets] = useState<RepairTicket[]>([]);
   const [pendingReplacements, setPendingReplacements] = useState<{ warrantyClaimId: string; itemName: string; customerName: string; customerId: string; originalPrice: number; type?: 'replacement' | 'repair_return' }[]>([]);
   const [invoices, setInvoices] = useState<Invoice[]>(SEED_INVOICES);
@@ -540,6 +629,18 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
     setPosOperatorState(op);
   }, []);
 
+  const addRepairTicket = useCallback((ticket: RepairTicket) => {
+    setRepairTickets(prev => [ticket, ...prev]);
+  }, []);
+
+  const updateRepairTicket = useCallback((id: string, updates: Partial<RepairTicket>) => {
+    setRepairTickets(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t));
+  }, []);
+
+  const deleteRepairTicket = useCallback((id: string) => {
+    setRepairTickets(prev => prev.filter(t => t.id !== id));
+  }, []);
+
   const addWarrantyRepairTicket = useCallback((ticket: RepairTicket) => {
     setWarrantyRepairTickets(prev => [ticket, ...prev]);
   }, []);
@@ -632,6 +733,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
       refundRecords, addRefundRecord,
       warrantyClaims, addWarrantyClaim, updateWarrantyClaim,
       posOperator, setPosOperator,
+      repairTickets, addRepairTicket, updateRepairTicket, deleteRepairTicket,
       warrantyRepairTickets, addWarrantyRepairTicket, updateWarrantyRepairTicket,
       pendingReplacements, addPendingReplacement, removePendingReplacement,
       invoices, addInvoice, updateInvoice, deleteInvoice,

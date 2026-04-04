@@ -154,14 +154,30 @@ export interface TicketHistory {
   details?: string;
 }
 
+export type RepairTicketStatus = 'Pending' | 'Diagnosed' | 'In Progress' | 'Awaiting Parts' | 'Ready for Pickup' | 'Completed' | 'Delivered' | 'Cancelled';
+
+export interface RepairServiceLineItem {
+  id: string;
+  serviceId: string;
+  name: string;
+  price: number;
+  cost: number;
+  warrantyPeriod?: string;
+}
+
 export interface RepairTicket {
   id: string;
   ticketNumber: string;
   customerId: string;
   customerName: string;
+  customerPhone?: string;
+  customerEmail?: string;
   device: string;
+  deviceCategory?: string;
+  brand?: string;
+  model?: string;
   issue: string;
-  status: 'Pending' | 'In Progress' | 'Completed' | 'Delivered' | 'Cancelled' | 'Awaiting Parts';
+  status: RepairTicketStatus;
   priority: 'Low' | 'Medium' | 'High' | 'Rush';
   createdAt: string;
   updatedAt: string;
@@ -171,11 +187,14 @@ export interface RepairTicket {
   technicianId?: string;
   technicianName?: string;
   location?: string;
+  intakeNotes?: string;
   diagnosticNotes?: string;
+  internalNotes?: string;
   preRepairCondition?: string[];
   postRepairCondition?: string[];
   attachments?: TicketAttachment[];
   comments?: TicketComment[];
+  serviceLineItems?: RepairServiceLineItem[];
   partsUsed?: { itemId: string; name: string; price: number; quantity: number }[];
   billableHours?: number;
   isRushJob?: boolean;
@@ -189,6 +208,9 @@ export interface RepairTicket {
   storeLocationId?: string;
   history?: TicketHistory[];
   customFields?: Record<string, string>;
+  linkedInvoiceId?: string;
+  linkedWarrantyClaimId?: string;
+  isWarrantyRepair?: boolean;
 }
 
 export interface CustomerNote {
