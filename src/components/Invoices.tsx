@@ -4,11 +4,10 @@ import { useStoreLocalState, SEED_POS_OPERATORS } from '../context/StoreLocalSta
 import { useAccess } from '../context/AccessContext';
 import { tenantRoles } from '../context/accessConfig';
 import type { Invoice, RepairService } from '../types';
-// @ts-ignore
-import html2pdf from 'html2pdf.js';
+import { renderTemplate, buildLineItemsHtml, buildReceiptLineItemsHtml } from '../utils/templateBuilder';
 
 export default function Invoices() {
-  const { invoices, addInvoice, updateInvoice, customers, services, serviceCategories, approvedStockItems, storeBranding } = useStoreLocalState();
+  const { invoices, addInvoice, updateInvoice, customers, services, serviceCategories, approvedStockItems, storeBranding, documentTemplates } = useStoreLocalState();
   const { checkPermission, checkSubPermission } = useAccess();
   const canReopenInvoice = checkSubPermission('reopen_invoice');
   const [searchQuery, setSearchQuery] = useState('');
@@ -55,8 +54,7 @@ export default function Invoices() {
   const [reopenPin, setReopenPin] = useState('');
   const [reopenPinError, setReopenPinError] = useState('');
   const [printMode, setPrintMode] = useState<'fullpage' | 'receipt'>('fullpage');
-  const [pdfGenerating, setPdfGenerating] = useState(false);
-  const pdfContentRef = useRef<HTMLDivElement>(null);
+  const printSurfaceRef = useRef<HTMLDivElement>(null);
 
   const [emailForm, setEmailForm] = useState({ to: '', subject: '', body: '' });
   const [smsBody, setSmsBody] = useState('');
@@ -297,29 +295,74 @@ export default function Invoices() {
     handleReopenInvoice(supervisor.name);
   }, [reopenPin, handleReopenInvoice]);
 
-  const generatePdf = useCallback(async () => {
-    if (!pdfContentRef.current || !detailInvoice) return;
-    setPdfGenerating(true);
-    try {
-      const isReceipt = printMode === 'receipt';
-      const opt = {
-        margin: isReceipt ? [2, 2, 2, 2] : [10, 15, 10, 15],
-        filename: `${detailInvoice.invoiceNumber}${isReceipt ? '-receipt' : ''}.pdf`,
-        image: { type: 'jpeg', quality: 0.98 },
-        html2canvas: { scale: 2, useCORS: true, logging: false },
-        jsPDF: {
-          unit: 'mm',
-          format: isReceipt ? [80, 200] : 'letter',
-          orientation: 'portrait' as const,
-        },
-      };
-      await html2pdf().set(opt).from(pdfContentRef.current).save();
-    } catch (err) {
-      console.error('PDF generation failed:', err);
-    } finally {
-      setPdfGenerating(false);
+  const brandColor = '#003633';
+
+  const renderedInvoiceHtml = useMemo(() => {
+    if (!detailInvoice) return '';
+    const invoiceTemplate = documentTemplates.find(t => t.type === 'invoice');
+    if (!invoiceTemplate) return '';
+    const latestPay = detailInvoice.paymentHistory.length > 0 ? detailInvoice.paymentHistory[detailInvoice.paymentHistory.length - 1] : null;
+    const data: Record<string, string> = {
+      '{{storeName}}': 'RepairHub',
+      '{{storeTagline}}': 'Professional Repair Services',
+      '{{brandColor}}': brandColor,
+      '{{invoiceNumber}}': detailInvoice.invoiceNumber,
+      '{{createdAt}}': detailInvoice.createdAt,
+      '{{dueDate}}': detailInvoice.dueDate,
+      '{{status}}': detailInvoice.status,
+      '{{customerName}}': detailInvoice.customerName,
+      '{{customerEmail}}': detailInvoice.customerEmail || '',
+      '{{customerPhone}}': detailInvoice.customerPhone || '',
+      '{{lineItems}}': buildLineItemsHtml(detailInvoice.items, brandColor),
+      '{{subtotal}}': `$${detailInvoice.subtotal.toFixed(2)}`,
+      '{{discount}}': detailInvoice.discount > 0 ? `$${detailInvoice.discount.toFixed(2)}` : '',
+      '{{tax}}': `$${detailInvoice.tax.toFixed(2)}`,
+      '{{total}}': `$${detailInvoice.total.toFixed(2)}`,
+      '{{amountPaid}}': detailInvoice.amountPaid > 0 ? `$${detailInvoice.amountPaid.toFixed(2)}` : '',
+      '{{balance}}': detailInvoice.balance > 0 ? `$${detailInvoice.balance.toFixed(2)}` : '',
+      '{{latestPaymentAmount}}': latestPay ? `$${latestPay.amount.toFixed(2)}` : '',
+      '{{latestPaymentMethod}}': latestPay ? latestPay.method : '',
+      '{{latestPaymentDate}}': latestPay ? latestPay.timestamp.slice(0, 10) : '',
+      '{{notes}}': detailInvoice.notes || '',
+      '{{terms}}': detailInvoice.terms || '',
+    };
+    let html = renderTemplate(invoiceTemplate.content, data);
+    if (storeBranding.logoUrl) {
+      const justify = storeBranding.logoPlacement === 'top-left' ? 'flex-start' : storeBranding.logoPlacement === 'top-center' ? 'center' : 'flex-end';
+      html = `<div style="display: flex; justify-content: ${justify}; margin-bottom: 12px;"><img src="${storeBranding.logoUrl}" alt="Logo" style="max-height: 48px; max-width: 200px; object-fit: contain;" /></div>` + html;
     }
-  }, [detailInvoice, printMode]);
+    return html;
+  }, [detailInvoice, documentTemplates, storeBranding, brandColor]);
+
+  const renderedReceiptHtml = useMemo(() => {
+    if (!detailInvoice) return '';
+    const receiptTemplate = documentTemplates.find(t => t.type === 'receipt');
+    if (!receiptTemplate) return '';
+    const latestPayment = detailInvoice.paymentHistory.length > 0 ? detailInvoice.paymentHistory[detailInvoice.paymentHistory.length - 1] : null;
+    const data: Record<string, string> = {
+      '{{storeName}}': 'RepairHub',
+      '{{storeTagline}}': 'Professional Repair Services',
+      '{{brandColor}}': brandColor,
+      '{{receiptNumber}}': detailInvoice.invoiceNumber,
+      '{{date}}': detailInvoice.createdAt,
+      '{{customerName}}': detailInvoice.customerName,
+      '{{customerPhone}}': detailInvoice.customerPhone || '',
+      '{{lineItems}}': buildReceiptLineItemsHtml(detailInvoice.items),
+      '{{subtotal}}': `$${detailInvoice.subtotal.toFixed(2)}`,
+      '{{tax}}': `$${detailInvoice.tax.toFixed(2)}`,
+      '{{total}}': `$${detailInvoice.total.toFixed(2)}`,
+      '{{amountPaid}}': `$${detailInvoice.amountPaid.toFixed(2)}`,
+      '{{balance}}': detailInvoice.balance > 0 ? `$${detailInvoice.balance.toFixed(2)}` : '',
+      '{{latestPaymentAmount}}': latestPayment ? `$${latestPayment.amount.toFixed(2)}` : '',
+      '{{latestPaymentMethod}}': latestPayment ? latestPayment.method : '',
+      '{{latestPaymentDate}}': latestPayment ? latestPayment.timestamp.slice(0, 10) : '',
+    };
+    let html = renderTemplate(receiptTemplate.content, data);
+    if (storeBranding.logoUrl) {
+      html = `<div style="display: flex; justify-content: center; margin-bottom: 6px;"><img src="${storeBranding.logoUrl}" alt="Logo" style="max-height: 32px; max-width: 60mm; object-fit: contain;" /></div>` + html;
+    }
+    return html;
+  }, [detailInvoice, documentTemplates, storeBranding, brandColor]);
 
   const terminalTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -1027,149 +1070,8 @@ export default function Invoices() {
       </AnimatePresence>
 
       {detailInvoice && (
-        <div ref={pdfContentRef} id="print-surface" className={printMode === 'receipt' ? 'print-receipt' : 'print-fullpage'} style={{ position: 'fixed', left: '-9999px', top: 0, width: printMode === 'receipt' ? '80mm' : '210mm', background: 'white' }}>
-          {printMode === 'receipt' ? (
-            <div style={{ padding: '4mm', fontFamily: 'monospace, sans-serif' }}>
-              <div style={{ textAlign: 'center', borderBottom: '1px dashed #333', paddingBottom: '8px', marginBottom: '8px' }}>
-                {storeBranding.logoUrl && (
-                  <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '6px' }}>
-                    <img src={storeBranding.logoUrl} alt="Logo" style={{ maxHeight: '32px', maxWidth: '60mm', objectFit: 'contain' }} />
-                  </div>
-                )}
-                <h2 style={{ fontSize: '14pt', fontWeight: 900, margin: 0, color: '#003633' }}>RepairHub</h2>
-                <p style={{ fontSize: '8pt', margin: '2px 0 0', color: '#666' }}>Professional Repair Services</p>
-              </div>
-              <div style={{ fontSize: '8pt', marginBottom: '6px' }}>
-                <p style={{ fontWeight: 700, margin: 0 }}>{detailInvoice.invoiceNumber}</p>
-                <p style={{ margin: '2px 0', color: '#666' }}>Date: {detailInvoice.createdAt}</p>
-                <p style={{ margin: '2px 0', fontWeight: 700 }}>{detailInvoice.customerName}</p>
-                {detailInvoice.customerPhone && <p style={{ margin: '2px 0', color: '#666' }}>{detailInvoice.customerPhone}</p>}
-              </div>
-              <div style={{ borderTop: '1px dashed #333', borderBottom: '1px dashed #333', padding: '4px 0', margin: '6px 0' }}>
-                {detailInvoice.items.map((it) => (
-                  <div key={it.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '8pt', padding: '2px 0' }}>
-                    <span>{it.quantity}x {it.name}</span>
-                    <span style={{ fontWeight: 700 }}>${(it.quantity * it.price).toFixed(2)}</span>
-                  </div>
-                ))}
-              </div>
-              <div style={{ fontSize: '8pt', marginBottom: '6px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}><span>Subtotal</span><span>${detailInvoice.subtotal.toFixed(2)}</span></div>
-                {detailInvoice.discount > 0 && <div style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}><span>Discount</span><span>-${detailInvoice.discount.toFixed(2)}</span></div>}
-                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}><span>Tax</span><span>${detailInvoice.tax.toFixed(2)}</span></div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderTop: '1px solid #333', fontWeight: 900, fontSize: '10pt' }}><span>TOTAL</span><span>${detailInvoice.total.toFixed(2)}</span></div>
-                {detailInvoice.amountPaid > 0 && <div style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}><span>Paid</span><span>${detailInvoice.amountPaid.toFixed(2)}</span></div>}
-                {detailInvoice.balance > 0 && <div style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0', fontWeight: 900 }}><span>Balance Due</span><span>${detailInvoice.balance.toFixed(2)}</span></div>}
-              </div>
-              {detailInvoice.paymentHistory.length > 0 && (() => {
-                const latest = detailInvoice.paymentHistory[detailInvoice.paymentHistory.length - 1];
-                return (
-                  <div style={{ borderTop: '1px dashed #333', paddingTop: '4px', marginTop: '4px', fontSize: '7pt' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '1px 0' }}>
-                      <span>Paid: ${latest.amount.toFixed(2)} via {latest.method}</span>
-                      <span style={{ color: '#666' }}>{latest.timestamp.slice(0, 10)}</span>
-                    </div>
-                  </div>
-                );
-              })()}
-              <div style={{ textAlign: 'center', marginTop: '10px', paddingTop: '6px', borderTop: '1px dashed #333', fontSize: '7pt', color: '#999' }}>
-                Thank you for your business
-              </div>
-            </div>
-          ) : (
-            <div style={{ padding: '0 2.5rem' }}>
-              {storeBranding.logoUrl && (
-                <div style={{ display: 'flex', justifyContent: storeBranding.logoPlacement === 'top-left' ? 'flex-start' : storeBranding.logoPlacement === 'top-center' ? 'center' : 'flex-end', marginBottom: '12px' }}>
-                  <img src={storeBranding.logoUrl} alt="Logo" style={{ maxHeight: '48px', maxWidth: '200px', objectFit: 'contain' }} />
-                </div>
-              )}
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '2rem', paddingBottom: '1.5rem', borderBottom: '2px solid #003633' }}>
-                <div>
-                  <h2 style={{ fontSize: '24pt', fontWeight: 900, color: '#003633', margin: 0, letterSpacing: '-0.02em' }}>INVOICE</h2>
-                  <p style={{ fontSize: '10pt', fontWeight: 700, color: '#94a3b8', marginTop: '4px' }}>{detailInvoice.invoiceNumber}</p>
-                </div>
-                <div style={{ textAlign: 'right' }}>
-                  <p style={{ fontSize: '16pt', fontWeight: 900, color: '#003633', margin: 0 }}>RepairHub</p>
-                  <p style={{ fontSize: '9pt', color: '#94a3b8', fontWeight: 700, marginTop: '4px' }}>Professional Repair Services</p>
-                </div>
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem', marginBottom: '2rem' }}>
-                <div style={{ padding: '1rem', background: '#f8fafc', border: '1px solid #e2e8f0' }}>
-                  <p style={{ fontWeight: 900, color: '#94a3b8', fontSize: '7pt', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '6px' }}>Bill To</p>
-                  <p style={{ fontWeight: 900, color: '#0f172a', fontSize: '11pt' }}>{detailInvoice.customerName}</p>
-                  {detailInvoice.customerEmail && <p style={{ fontSize: '9pt', color: '#64748b', marginTop: '2px' }}>{detailInvoice.customerEmail}</p>}
-                  {detailInvoice.customerPhone && <p style={{ fontSize: '9pt', color: '#64748b' }}>{detailInvoice.customerPhone}</p>}
-                </div>
-                <div style={{ padding: '1rem', background: '#f8fafc', border: '1px solid #e2e8f0', textAlign: 'right' }}>
-                  <p style={{ fontWeight: 900, color: '#94a3b8', fontSize: '7pt', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '6px' }}>Invoice Details</p>
-                  <p style={{ fontSize: '9pt', color: '#475569' }}><span style={{ fontWeight: 700 }}>Issue Date:</span> {detailInvoice.createdAt}</p>
-                  <p style={{ fontSize: '9pt', color: '#475569' }}><span style={{ fontWeight: 700 }}>Due Date:</span> {detailInvoice.dueDate}</p>
-                  <p style={{ fontSize: '9pt', fontWeight: 900, color: '#003633', marginTop: '4px' }}>Status: {detailInvoice.status}</p>
-                </div>
-              </div>
-              <table style={{ width: '100%', fontSize: '10pt', borderCollapse: 'collapse', marginBottom: '2rem' }}>
-                <thead>
-                  <tr style={{ borderBottom: '2px solid rgba(0,54,51,0.2)' }}>
-                    <th style={{ padding: '8px 4px', textAlign: 'left', fontWeight: 900, color: '#003633', fontSize: '8pt', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Description</th>
-                    <th style={{ padding: '8px 4px', textAlign: 'center', fontWeight: 900, color: '#003633', fontSize: '8pt', textTransform: 'uppercase', letterSpacing: '0.05em', width: '60px' }}>Qty</th>
-                    <th style={{ padding: '8px 4px', textAlign: 'right', fontWeight: 900, color: '#003633', fontSize: '8pt', textTransform: 'uppercase', letterSpacing: '0.05em', width: '90px' }}>Unit Price</th>
-                    <th style={{ padding: '8px 4px', textAlign: 'right', fontWeight: 900, color: '#003633', fontSize: '8pt', textTransform: 'uppercase', letterSpacing: '0.05em', width: '90px' }}>Amount</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {detailInvoice.items.map((it, idx) => (
-                    <tr key={it.id} style={{ background: idx % 2 === 0 ? '#f8fafc' : 'transparent', borderBottom: '1px solid #e2e8f0' }}>
-                      <td style={{ padding: '8px 4px', fontWeight: 700, color: '#0f172a' }}>{it.name}</td>
-                      <td style={{ padding: '8px 4px', textAlign: 'center', color: '#475569' }}>{it.quantity}</td>
-                      <td style={{ padding: '8px 4px', textAlign: 'right', color: '#475569' }}>${it.price.toFixed(2)}</td>
-                      <td style={{ padding: '8px 4px', textAlign: 'right', fontWeight: 700, color: '#0f172a' }}>${(it.quantity * it.price).toFixed(2)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                <div style={{ width: '280px', fontSize: '10pt' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}><span style={{ color: '#64748b' }}>Subtotal</span><span style={{ fontWeight: 700 }}>${detailInvoice.subtotal.toFixed(2)}</span></div>
-                  {detailInvoice.discount > 0 && <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}><span style={{ color: '#64748b' }}>Discount</span><span style={{ fontWeight: 700, color: '#059669' }}>-${detailInvoice.discount.toFixed(2)}</span></div>}
-                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}><span style={{ color: '#64748b' }}>Tax</span><span style={{ fontWeight: 700 }}>${detailInvoice.tax.toFixed(2)}</span></div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderTop: '2px solid rgba(0,54,51,0.2)', marginTop: '8px' }}><span style={{ fontWeight: 900, color: '#003633', fontSize: '12pt' }}>Total</span><span style={{ fontWeight: 900, color: '#003633', fontSize: '12pt' }}>${detailInvoice.total.toFixed(2)}</span></div>
-                  {detailInvoice.amountPaid > 0 && <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}><span style={{ color: '#059669', fontWeight: 700 }}>Amount Paid</span><span style={{ fontWeight: 700, color: '#059669' }}>${detailInvoice.amountPaid.toFixed(2)}</span></div>}
-                  {detailInvoice.balance > 0 && <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 8px', background: '#fff1f2', borderRadius: '8px' }}><span style={{ fontWeight: 900, color: '#e11d48' }}>Balance Due</span><span style={{ fontWeight: 900, color: '#e11d48' }}>${detailInvoice.balance.toFixed(2)}</span></div>}
-                </div>
-              </div>
-              {detailInvoice.paymentHistory.length > 0 && (() => {
-                const latest = detailInvoice.paymentHistory[detailInvoice.paymentHistory.length - 1];
-                return (
-                  <div style={{ marginTop: '2rem', paddingTop: '1.5rem', borderTop: '1px solid #e2e8f0' }}>
-                    <p style={{ fontSize: '7pt', fontWeight: 900, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '8px' }}>Payment Information</p>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9pt', padding: '4px 8px', background: '#f8fafc', border: '1px solid #e2e8f0' }}>
-                      <span style={{ fontWeight: 700, color: '#475569' }}>${latest.amount.toFixed(2)} via {latest.method}</span>
-                      <span style={{ color: '#94a3b8' }}>{latest.timestamp}</span>
-                    </div>
-                  </div>
-                );
-              })()}
-              {(detailInvoice.notes || detailInvoice.terms) && (
-                <div style={{ marginTop: '1.5rem', paddingTop: '1rem', borderTop: '1px solid #e2e8f0', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem', fontSize: '9pt' }}>
-                  {detailInvoice.notes && (
-                    <div>
-                      <p style={{ fontWeight: 900, color: '#94a3b8', fontSize: '7pt', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '4px' }}>Notes</p>
-                      <p style={{ color: '#475569' }}>{detailInvoice.notes}</p>
-                    </div>
-                  )}
-                  {detailInvoice.terms && (
-                    <div>
-                      <p style={{ fontWeight: 900, color: '#94a3b8', fontSize: '7pt', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '4px' }}>Terms & Conditions</p>
-                      <p style={{ color: '#475569' }}>{detailInvoice.terms}</p>
-                    </div>
-                  )}
-                </div>
-              )}
-              <div style={{ marginTop: '2rem', paddingTop: '1rem', borderTop: '1px solid #f1f5f9', textAlign: 'center' }}>
-                <p style={{ fontSize: '7pt', color: '#cbd5e1', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Thank you for your business</p>
-              </div>
-            </div>
-          )}
+        <div ref={printSurfaceRef} id="print-surface" className={printMode === 'receipt' ? 'print-receipt' : 'print-fullpage'} style={{ position: 'fixed', left: '-9999px', top: 0, width: printMode === 'receipt' ? '80mm' : '210mm', background: 'white' }}>
+          <div dangerouslySetInnerHTML={{ __html: printMode === 'receipt' ? renderedReceiptHtml : renderedInvoiceHtml }} />
         </div>
       )}
 
@@ -1195,109 +1097,12 @@ export default function Invoices() {
                   </button>
                 </div>
                 <div className={`border border-slate-200 rounded-2xl overflow-hidden ${printMode === 'receipt' ? 'max-w-[320px] mx-auto' : ''}`}>
-                  <div className={`bg-white p-6 ${printMode === 'receipt' ? 'text-xs' : ''}`}>
-                    {storeBranding.logoUrl && (
-                      <div className={`mb-3 flex ${printMode === 'receipt' ? 'justify-center' : storeBranding.logoPlacement === 'top-left' ? 'justify-start' : storeBranding.logoPlacement === 'top-center' ? 'justify-center' : 'justify-end'}`}>
-                        <img src={storeBranding.logoUrl} alt="Logo" className="max-h-8 max-w-[120px] object-contain" />
-                      </div>
-                    )}
-                    <div className={`flex justify-between items-start mb-4 pb-3 border-b-2 border-primary ${printMode === 'receipt' ? 'flex-col items-center text-center' : ''}`}>
-                      <div>
-                        <h2 className={`font-black text-primary tracking-tight ${printMode === 'receipt' ? 'text-lg' : 'text-2xl'}`}>
-                          {printMode === 'receipt' ? 'RepairHub' : 'INVOICE'}
-                        </h2>
-                        <p className="text-[10px] font-bold text-slate-400 mt-0.5">{detailInvoice.invoiceNumber}</p>
-                      </div>
-                      {printMode !== 'receipt' && (
-                        <div className="text-right">
-                          <p className="text-lg font-black text-primary">RepairHub</p>
-                          <p className="text-[10px] text-slate-400 font-bold mt-0.5">Professional Repair Services</p>
-                        </div>
-                      )}
-                    </div>
-                    <div className={`${printMode === 'receipt' ? 'space-y-1 mb-3' : 'grid grid-cols-2 gap-6 mb-6'}`}>
-                      <div className={`${printMode === 'receipt' ? '' : 'p-3 bg-slate-50 rounded-xl border border-slate-100'}`}>
-                        {printMode !== 'receipt' && <p className="font-black text-slate-400 text-[8px] uppercase tracking-widest mb-1">Bill To</p>}
-                        <p className={`font-black text-slate-900 ${printMode === 'receipt' ? 'text-xs' : 'text-sm'}`}>{detailInvoice.customerName}</p>
-                        {detailInvoice.customerPhone && <p className="text-[10px] text-slate-500">{detailInvoice.customerPhone}</p>}
-                      </div>
-                      <div className={`${printMode === 'receipt' ? 'text-[10px] text-slate-500' : 'p-3 bg-slate-50 rounded-xl border border-slate-100 text-right'}`}>
-                        {printMode !== 'receipt' && <p className="font-black text-slate-400 text-[8px] uppercase tracking-widest mb-1">Invoice Details</p>}
-                        <p className="text-[10px] text-slate-600">Date: {detailInvoice.createdAt}</p>
-                        <p className="text-[10px] text-slate-600">Due: {detailInvoice.dueDate}</p>
-                      </div>
-                    </div>
-                    <div className={`${printMode === 'receipt' ? 'border-t border-dashed border-slate-300 pt-2 mb-2' : 'mb-6'}`}>
-                      {printMode === 'receipt' ? (
-                        detailInvoice.items.map((it) => (
-                          <div key={it.id} className="flex justify-between text-[10px] py-0.5">
-                            <span>{it.quantity}x {it.name}</span>
-                            <span className="font-bold">${(it.quantity * it.price).toFixed(2)}</span>
-                          </div>
-                        ))
-                      ) : (
-                        <table className="w-full text-sm">
-                          <thead>
-                            <tr className="border-b-2 border-primary/20">
-                              <th className="py-2 text-left font-black text-primary text-[9px] uppercase tracking-widest">Description</th>
-                              <th className="py-2 text-center font-black text-primary text-[9px] uppercase tracking-widest w-16">Qty</th>
-                              <th className="py-2 text-right font-black text-primary text-[9px] uppercase tracking-widest w-24">Price</th>
-                              <th className="py-2 text-right font-black text-primary text-[9px] uppercase tracking-widest w-24">Amount</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {detailInvoice.items.map((it, idx) => (
-                              <tr key={it.id} className={idx % 2 === 0 ? 'bg-slate-50/50' : ''}>
-                                <td className="py-2 px-1 font-bold text-slate-900 text-xs">{it.name}</td>
-                                <td className="py-2 text-center text-slate-600 text-xs">{it.quantity}</td>
-                                <td className="py-2 text-right text-slate-600 text-xs">${it.price.toFixed(2)}</td>
-                                <td className="py-2 text-right font-bold text-slate-900 text-xs">${(it.quantity * it.price).toFixed(2)}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      )}
-                    </div>
-                    <div className={`${printMode === 'receipt' ? 'border-t border-dashed border-slate-300 pt-2 text-[10px]' : 'flex justify-end'}`}>
-                      <div className={`${printMode === 'receipt' ? '' : 'w-64 text-sm'} space-y-1`}>
-                        <div className="flex justify-between py-0.5"><span className="text-slate-500">Subtotal</span><span className="font-bold">${detailInvoice.subtotal.toFixed(2)}</span></div>
-                        {detailInvoice.discount > 0 && <div className="flex justify-between py-0.5"><span className="text-slate-500">Discount</span><span className="font-bold text-emerald-600">-${detailInvoice.discount.toFixed(2)}</span></div>}
-                        <div className="flex justify-between py-0.5"><span className="text-slate-500">Tax</span><span className="font-bold">${detailInvoice.tax.toFixed(2)}</span></div>
-                        <div className={`flex justify-between py-1 border-t border-primary/20 mt-1 ${printMode === 'receipt' ? 'text-xs' : 'text-base'}`}><span className="font-black text-primary">Total</span><span className="font-black text-primary">${detailInvoice.total.toFixed(2)}</span></div>
-                        {detailInvoice.amountPaid > 0 && <div className="flex justify-between py-0.5"><span className="text-emerald-600 font-bold">Paid</span><span className="font-bold text-emerald-600">${detailInvoice.amountPaid.toFixed(2)}</span></div>}
-                        {detailInvoice.balance > 0 && <div className="flex justify-between py-1 bg-rose-50 px-2 rounded-lg"><span className="font-black text-rose-600">Balance</span><span className="font-black text-rose-600">${detailInvoice.balance.toFixed(2)}</span></div>}
-                      </div>
-                    </div>
-                    {detailInvoice.paymentHistory.length > 0 && (() => {
-                      const latest = detailInvoice.paymentHistory[detailInvoice.paymentHistory.length - 1];
-                      return (
-                        <div className={`mt-4 pt-3 ${printMode === 'receipt' ? 'border-t border-dashed border-slate-300' : 'border-t border-slate-200'}`}>
-                          <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-2">Latest Payment</p>
-                          <div className="flex justify-between text-[10px] py-0.5">
-                            <span className="font-bold text-slate-600">${latest.amount.toFixed(2)} via {latest.method}</span>
-                            <span className="text-slate-400">{latest.timestamp.slice(0, 10)}</span>
-                          </div>
-                        </div>
-                      );
-                    })()}
-                    {printMode !== 'receipt' && (detailInvoice.notes || detailInvoice.terms) && (
-                      <div className="mt-4 pt-3 border-t border-slate-200 grid grid-cols-2 gap-4 text-[10px]">
-                        {detailInvoice.notes && <div><p className="font-black text-slate-400 text-[7px] uppercase tracking-widest mb-1">Notes</p><p className="text-slate-600">{detailInvoice.notes}</p></div>}
-                        {detailInvoice.terms && <div><p className="font-black text-slate-400 text-[7px] uppercase tracking-widest mb-1">Terms</p><p className="text-slate-600">{detailInvoice.terms}</p></div>}
-                      </div>
-                    )}
-                    <div className={`mt-4 pt-2 ${printMode === 'receipt' ? 'border-t border-dashed border-slate-300' : 'border-t border-slate-100'} text-center`}>
-                      <p className="text-[8px] text-slate-300 font-bold uppercase tracking-widest">Thank you for your business</p>
-                    </div>
-                  </div>
+                  <div className={`bg-white p-6 ${printMode === 'receipt' ? 'text-xs' : ''}`}
+                    dangerouslySetInnerHTML={{ __html: printMode === 'receipt' ? renderedReceiptHtml : renderedInvoiceHtml }} />
                 </div>
               </div>
               <div className="p-6 border-t border-slate-100 flex justify-end gap-4 shrink-0 no-print">
                 <button onClick={() => setShowPrintModal(false)} className="px-6 py-3 bg-slate-100 text-slate-600 font-black text-xs rounded-2xl uppercase tracking-widest">Cancel</button>
-                <button onClick={generatePdf} disabled={pdfGenerating} className="px-6 py-3 bg-slate-200 text-slate-700 font-black text-xs rounded-2xl uppercase tracking-widest hover:bg-slate-300 active:scale-95 transition-all flex items-center gap-2 disabled:opacity-50">
-                  <span className="material-symbols-outlined text-sm">{pdfGenerating ? 'hourglass_empty' : 'download'}</span>
-                  {pdfGenerating ? 'Generating...' : 'Download PDF'}
-                </button>
                 <button onClick={() => window.print()} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all flex items-center gap-2">
                   <span className="material-symbols-outlined text-sm">print</span>
                   {printMode === 'receipt' ? 'Print Receipt' : 'Print Invoice'}

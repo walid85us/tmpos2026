@@ -1,0 +1,124 @@
+Template-to-Invoice Print Sync & Invoice Details Cleanup — Narrow QA Correction Pass 10
+
+Read `replit.md` and `Ref.txt` first and treat them as source-of-truth constraints before making any changes.
+
+Also keep using these references as behavioral guidance for template management:
+1. How can I customize my invoice, ticket label, receipt, and estimate templates
+https://help.repairdesk.co/portal/en/kb/articles/how-can-i-customize-my-invoice-ticket-label-receipt-and-estimate-templates
+
+2. Editing Inventory Label Template
+https://help.repairdesk.co/portal/en/kb/articles/editing-inventory-label-template
+
+3. Label Templates
+https://help.repairdesk.co/portal/en/kb/articles/label-template
+
+This is NOT a redesign and NOT a new workstream.
+This is a very narrow correction pass based only on the remaining QA failures.
+
+Expert-role stack
+- Principal SaaS Product Architect for multi-tenant repair/POS workflows
+- Staff React 19 + TypeScript + Vite engineer
+- Firebase / Firestore data-model and state-flow architect
+- Senior template editor / print-layout architect
+- Printer-routing / invoice-output architect
+- QA-driven refactor auditor
+- Side auditor and systems thinker at all times
+
+Operating posture
+- Act as a side auditor and systems thinker throughout.
+- Audit ripple effects before editing.
+- Fix only the remaining failed QA items deeply and coherently.
+- Preserve current design baseline exactly.
+- Preserve auth, preview mode, RBAC, lifecycle gating, and platform/store hierarchy.
+- Preserve tenant isolation and store scoping.
+- Reuse existing modal/drawer/table/toast patterns.
+- Do not reopen completed workstreams except for narrow compatibility-safe fixes required by this pass.
+- Do not make changes to folder `Z`.
+- Do not make changes to file `Y`.
+
+Remaining corrections to implement
+
+A) Template Editor changes must sync into actual invoice-management print flow
+1. Current issue
+- template preview is working
+- tag/layout changes are stable inside Template Editor
+- but those saved template changes are not syncing into the actual Print Invoice flow inside Invoice Management
+
+2. Required behavior
+- the invoice-management Print Invoice action must render from the same saved store-scoped template state used by Template Editor preview
+- when a template is edited and saved, the next Print Invoice action from invoice details must reflect those changes immediately or after the normal expected data refresh path
+- no stale copy
+- no old cached template
+- no separate fallback template
+
+3. Required engineering fix
+- audit the entire chain:
+  - template editor saved state
+  - store-scoped template persistence
+  - template resolution for invoice details
+  - print renderer template lookup
+  - memoized/cached template state
+  - preview renderer vs invoice print renderer
+- remove any split-source behavior where:
+  - preview uses one template source
+  - invoice details print uses another template source
+- both must use the same canonical saved template state
+
+4. Required sync behavior
+- after saving invoice template changes:
+  - template preview must reflect them
+  - invoice details Print Invoice must reflect them
+  - receipt output must reflect them where applicable
+- reloading the invoice details page must still use the latest saved template
+- switching between store contexts must still use the correct store-scoped template
+
+5. No stale template caching
+- if caching exists, invalidate it correctly after template save/reset
+- do not require hidden manual refresh tricks for template changes to appear in invoice printing
+
+B) Remove Download PDF from invoice details
+1. Current issue
+- Download PDF is still present in invoice details
+- user does not want this action there
+
+2. Required behavior
+- remove Download PDF from invoice details UI
+- keep Print Invoice as the primary document action
+- any optional PDF generation/download logic may remain internal if needed for the print pipeline, but it must not appear as a user-facing action in invoice details
+
+3. UX rule
+- invoice details should expose the intended operational actions only
+- do not leave redundant or conflicting document actions in the UI
+
+Required design and behavior rules
+- Preserve the current premium glassmorphism design baseline exactly for on-screen UI
+- Final document output may use a formal invoice/receipt layout, but must stay polished and business-ready
+- Maintain keyboard accessibility and clear save/error states
+- Keep state paths unified
+- Avoid duplicate parallel systems
+- Ensure corrected flows work in preview/demo mode
+- Maintain store scoping and tenant safety
+- Keep type safety strong
+- Update `replit.md` for all final corrections introduced by this pass
+
+Definition of done
+This correction pass is done only if:
+- saving template changes in Template Editor is reflected in actual Print Invoice behavior from invoice details
+- invoice-management print flow uses the same canonical saved template state as Template Editor preview
+- no stale template copy/fallback/cached old template is used
+- store-scoped template behavior remains correct
+- Download PDF is removed from invoice details
+- Print Invoice remains the primary document action
+- no regressions are introduced in templates, invoice printing, branding, preview mode, auth, or store hierarchy
+- `replit.md` is updated to reflect all corrections
+
+Required final response format
+Return your completion report in exactly this structure:
+
+1. Files Changed
+2. Corrections Implemented
+3. Template Sync Root Cause and Fix
+4. Invoice Details Action Cleanup
+5. Preview-to-Invoice Print Consistency
+6. Non-Regressions Confirmed
+7. Manual QA Retest Areas

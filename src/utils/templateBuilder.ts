@@ -306,3 +306,43 @@ export function buildTemplateHtml(type: TemplateType, enabledTags: string[]): st
   if (!builder) return '';
   return builder(new Set(enabledTags));
 }
+
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+const TRUSTED_TAGS = new Set(['{{lineItems}}', '{{brandColor}}']);
+
+export function renderTemplate(content: string, data: Record<string, string>): string {
+  let html = content;
+  html = html.replace(/\{\{#if\s+(\w+)\}\}([\s\S]*?)\{\{\/if\}\}/g, (_match, key, inner) => {
+    const val = data[`{{${key}}}`];
+    return val && val.trim() !== '' && val !== '$0.00' ? inner : '';
+  });
+  Object.entries(data).forEach(([tag, val]) => {
+    const safe = TRUSTED_TAGS.has(tag) ? val : escapeHtml(val);
+    html = html.split(tag).join(safe);
+  });
+  return html;
+}
+
+export function buildLineItemsHtml(items: Array<{ id: string; name: string; quantity: number; price: number }>, brandColor: string): string {
+  if (!items.length) return '';
+  const rows = items.map((it, idx) =>
+    `<tr style="border-bottom: 1px solid #e2e8f0;${idx % 2 === 0 ? ' background: #f8fafc;' : ''}"><td style="padding: 8px 4px; font-weight: 700; color: #0f172a;">${escapeHtml(it.name)}</td><td style="padding: 8px 4px; text-align: center; color: #475569;">${it.quantity}</td><td style="padding: 8px 4px; text-align: right; color: #475569;">$${it.price.toFixed(2)}</td><td style="padding: 8px 4px; text-align: right; font-weight: 700; color: #0f172a;">$${(it.quantity * it.price).toFixed(2)}</td></tr>`
+  ).join('');
+  return `<table style="width: 100%; font-size: 10pt; border-collapse: collapse; margin-bottom: 16px;"><thead><tr style="border-bottom: 2px solid ${brandColor};"><th style="padding: 8px 4px; text-align: left; font-size: 8pt; text-transform: uppercase; font-weight: 900; color: ${brandColor};">Description</th><th style="padding: 8px 4px; text-align: center; font-size: 8pt; text-transform: uppercase; font-weight: 900; color: ${brandColor}; width: 60px;">Qty</th><th style="padding: 8px 4px; text-align: right; font-size: 8pt; text-transform: uppercase; font-weight: 900; color: ${brandColor}; width: 90px;">Price</th><th style="padding: 8px 4px; text-align: right; font-size: 8pt; text-transform: uppercase; font-weight: 900; color: ${brandColor}; width: 90px;">Amount</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+export function buildReceiptLineItemsHtml(items: Array<{ id: string; name: string; quantity: number; price: number }>): string {
+  if (!items.length) return '';
+  const rows = items.map(it =>
+    `<div style="display: flex; justify-content: space-between; font-size: 8pt; padding: 2px 0;"><span>${it.quantity}x ${escapeHtml(it.name)}</span><span style="font-weight: 700;">$${(it.quantity * it.price).toFixed(2)}</span></div>`
+  ).join('');
+  return `<div style="border-top: 1px dashed #333; border-bottom: 1px dashed #333; padding: 4px 0; margin: 6px 0;">${rows}</div>`;
+}
