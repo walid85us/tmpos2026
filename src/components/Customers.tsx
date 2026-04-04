@@ -3,11 +3,28 @@ import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState, type LoyaltyTier } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
-import type { Customer, Invoice, RepairTicket } from '../types';
+import type { Customer, Invoice, RepairTicket, CartItem } from '../types';
 import type { CompletedOrder } from '../context/StoreLocalState';
 
 type CustomerView = 'list' | 'profile';
 type HistoryTab = 'orders' | 'invoices' | 'repairs';
+
+function buildInvoicePosPayload(inv: Invoice) {
+  const invoiceItems: CartItem[] = inv.items.map(item => ({
+    id: item.id,
+    name: item.name,
+    description: `${inv.invoiceNumber} — ${item.name}`,
+    price: item.price,
+    qty: item.quantity,
+    icon: item.type === 'repair' ? 'build' : item.type === 'service' ? 'handyman' : 'inventory_2',
+    type: (item.type === 'service' ? 'repair' : item.type) as CartItem['type'],
+  }));
+  return {
+    invoiceItems,
+    selectedCustomer: { id: inv.customerId, name: inv.customerName, phone: inv.customerPhone, email: inv.customerEmail },
+    linkedInvoiceId: inv.id,
+  };
+}
 
 export default function Customers() {
   const { customers, addCustomer, updateCustomer, completedOrders, invoices, repairTickets, warrantyRepairTickets, findDuplicateCustomers, loyaltyConfig, updateLoyaltyConfig, loyaltyAdjustments, addLoyaltyAdjustment } = useStoreLocalState();
@@ -684,8 +701,7 @@ export default function Customers() {
                         <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Items</th>
                         <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Date</th>
                         <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Amount</th>
-                        <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Status</th>
-                        <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Action</th>
+                        <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Status</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-50">
@@ -697,21 +713,15 @@ export default function Customers() {
                           <td className="p-6 text-xs font-bold text-slate-600">{order.items.map(i => i.name).join(', ')}</td>
                           <td className="p-6 text-xs font-medium text-slate-500">{new Date(order.createdAt).toLocaleDateString()}</td>
                           <td className="p-6 text-xs font-black text-primary">${order.total.toFixed(2)}</td>
-                          <td className="p-6">
+                          <td className="p-6 text-right">
                             <span className="px-2 py-1 bg-emerald-100 text-emerald-600 rounded-lg text-[8px] font-black uppercase tracking-widest">
                               {order.status}
                             </span>
                           </td>
-                          <td className="p-6 text-right">
-                            <button onClick={(e) => { e.stopPropagation(); setOrderDetailData(order); }} className="px-3 py-1.5 bg-primary/10 text-primary rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-primary/20 transition-colors inline-flex items-center gap-1">
-                              <span className="material-symbols-outlined text-xs">visibility</span>
-                              View
-                            </button>
-                          </td>
                         </tr>
                       ))}
                       {customerOrders.length === 0 && (
-                        <tr><td colSpan={6} className="p-8 text-center text-xs text-slate-400 italic">No orders found for this customer.</td></tr>
+                        <tr><td colSpan={5} className="p-8 text-center text-xs text-slate-400 italic">No orders found for this customer.</td></tr>
                       )}
                     </tbody>
                   </table>
@@ -748,25 +758,15 @@ export default function Customers() {
                             </span>
                           </td>
                           <td className="p-6 text-right">
-                            <div className="flex items-center justify-end gap-2">
-                              <button onClick={(e) => { e.stopPropagation(); setInvoiceDetailData(inv); }} className="px-3 py-1.5 bg-primary/10 text-primary rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-primary/20 transition-colors inline-flex items-center gap-1">
-                                <span className="material-symbols-outlined text-xs">visibility</span>
-                                View
-                              </button>
                               {inv.status !== 'Paid' && inv.status !== 'Cancelled' && inv.balance > 0 && (
                                 <button onClick={(e) => {
                                   e.stopPropagation();
-                                  navigate('/sales', { state: {
-                                    autoRepairItem: inv.items[0] ? { id: inv.items[0].id, name: inv.items[0].name, price: inv.balance, type: inv.items[0].type || 'repair' } : undefined,
-                                    selectedCustomer: { id: inv.customerId, name: inv.customerName, phone: inv.customerPhone, email: inv.customerEmail },
-                                    linkedInvoiceId: inv.id,
-                                  }});
+                                  navigate('/sales', { state: buildInvoicePosPayload(inv) });
                                 }} className="px-3 py-1.5 bg-lime-400 text-teal-950 rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-lime-500 transition-colors inline-flex items-center gap-1">
                                   <span className="material-symbols-outlined text-xs">point_of_sale</span>
-                                  Pay
+                                  Send to POS
                                 </button>
                               )}
-                            </div>
                           </td>
                         </tr>
                       ))}
@@ -818,32 +818,15 @@ export default function Customers() {
                             </span>
                           </td>
                           <td className="p-6 text-right">
-                            <div className="flex items-center justify-end gap-2">
-                              {hasViewableInvoice ? (
-                                <button onClick={(e) => { e.stopPropagation(); setInvoiceDetailData(linkedInvoice); }} className="px-3 py-1.5 bg-primary/10 text-primary rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-primary/20 transition-colors inline-flex items-center gap-1">
-                                  <span className="material-symbols-outlined text-xs">receipt_long</span>
-                                  View Invoice
-                                </button>
-                              ) : (
-                                <button onClick={(e) => { e.stopPropagation(); navigate('/repairs'); }} className="px-3 py-1.5 bg-primary/10 text-primary rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-primary/20 transition-colors inline-flex items-center gap-1">
-                                  <span className="material-symbols-outlined text-xs">build</span>
-                                  View
-                                </button>
-                              )}
                               {isUnpaid && linkedInvoice && (
                                 <button onClick={(e) => {
                                   e.stopPropagation();
-                                  navigate('/sales', { state: {
-                                    autoRepairItem: linkedInvoice.items[0] ? { id: linkedInvoice.items[0].id, name: linkedInvoice.items[0].name, price: linkedInvoice.balance, type: 'repair' } : undefined,
-                                    selectedCustomer: { id: ticket.customerId, name: ticket.customerName, phone: ticket.customerPhone, email: ticket.customerEmail },
-                                    linkedInvoiceId: linkedInvoice.id,
-                                  }});
+                                  navigate('/sales', { state: buildInvoicePosPayload(linkedInvoice) });
                                 }} className="px-3 py-1.5 bg-lime-400 text-teal-950 rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-lime-500 transition-colors inline-flex items-center gap-1">
                                   <span className="material-symbols-outlined text-xs">point_of_sale</span>
-                                  Pay
+                                  Send to POS
                                 </button>
                               )}
-                            </div>
                           </td>
                         </tr>
                         );
@@ -1547,13 +1530,9 @@ export default function Customers() {
               <div className="p-6 border-t border-slate-100 flex justify-end gap-3 shrink-0">
                 {invoiceDetailData.status !== 'Paid' && invoiceDetailData.status !== 'Cancelled' && invoiceDetailData.balance > 0 && (
                   <button onClick={() => {
-                    const inv = invoiceDetailData;
+                    const payload = buildInvoicePosPayload(invoiceDetailData);
                     setInvoiceDetailData(null);
-                    navigate('/sales', { state: {
-                      autoRepairItem: inv.items[0] ? { id: inv.items[0].id, name: inv.items[0].name, price: inv.balance, type: 'repair' } : undefined,
-                      selectedCustomer: { id: inv.customerId, name: inv.customerName, phone: inv.customerPhone, email: inv.customerEmail },
-                      linkedInvoiceId: inv.id,
-                    }});
+                    navigate('/sales', { state: payload });
                   }} className="px-6 py-2.5 bg-lime-400 text-teal-950 rounded-xl font-black text-xs uppercase tracking-widest shadow-lg active:scale-95 transition-all flex items-center gap-2">
                     <span className="material-symbols-outlined text-sm">point_of_sale</span>
                     Send to POS

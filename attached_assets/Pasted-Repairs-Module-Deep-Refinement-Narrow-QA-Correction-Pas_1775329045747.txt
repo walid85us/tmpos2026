@@ -1,0 +1,115 @@
+Repairs Module Deep Refinement — Narrow QA Correction Pass 4
+
+Read `replit.md` and `Ref.txt` first and treat them as source-of-truth constraints before making any changes.
+
+This is NOT a redesign and NOT a new workstream.
+This is a narrow correction pass based only on the remaining QA issue from Repairs Module Deep Refinement.
+
+Expert-role stack
+- Principal SaaS Product Architect for multi-tenant repair/POS workflows
+- Staff React 19 + TypeScript + Vite engineer
+- Firebase / Firestore data-model and state-flow architect
+- Auth / RBAC / lifecycle gating specialist
+- Repair workflow architect
+- POS / invoice workflow architect
+- QA-driven refactor auditor
+- Side auditor and systems thinker at all times
+
+Operating posture
+- Act as a side auditor and systems thinker throughout.
+- Audit ripple effects before editing.
+- Fix only the remaining failed QA item deeply and coherently.
+- Preserve current design baseline exactly.
+- Preserve auth, preview mode, RBAC, lifecycle gating, and platform/store hierarchy.
+- Preserve tenant isolation and store scoping.
+- Reuse existing modal/drawer/table/toast/permission/sub-permission patterns.
+- Do not reopen completed workstreams except for narrow compatibility-safe fixes required by this pass.
+- Do not make changes to folder `Z`.
+- Do not make changes to file `Y`.
+
+Remaining corrections to implement
+
+A) Customer Profile invoice-to-POS payment route must match invoice details correctly
+1. Current issue
+- from Customer Profile > Interaction History > Orders, the invoice opens correctly
+- but sending that invoice to POS for payment does not match the correct invoice details inside POS
+- the payment context loaded in POS is not aligned correctly with the selected invoice
+
+2. Required behavior
+- when opening an invoice from Customer Profile > Interaction History > Orders
+- and then choosing the action to send/process it in POS
+- POS must load the exact same invoice context the user was viewing, including:
+  - correct invoice id/number
+  - correct customer
+  - correct line items
+  - correct totals/balance due
+  - correct payment state
+- there must be no mismatch between the invoice details overlay and the POS payment context
+
+3. Required engineering fix
+- audit the full route/context chain:
+  - customer profile Orders record
+  - invoice details view opened from that record
+  - POS routing payload/state
+  - invoice lookup inside POS
+  - any stale or fallback invoice resolution
+- remove any split-source or wrong-id behavior
+- the POS payment route from customer profile must use the same canonical invoice source as the invoice details view
+
+4. Consistency requirement
+- the Customer Profile → Invoice Details → POS flow must match the already-working repair-details payment flow
+- both flows should resolve the same invoice/payment object cleanly
+- do not create two different invoice-routing behaviors
+
+B) Customer Profile Interaction History action simplification
+1. Current UX refinement
+- in Customer Profile > Interaction History, do not show extra icons under the action button for this invoice flow
+- keep the invoice itself clickable for viewing
+- keep the existing Send to POS button for payment
+- simplify the interaction so it is cleaner and less cluttered
+
+2. Required behavior
+- invoice row/invoice number remains the clear click target for viewing details
+- Send to POS remains the clear payment action
+- remove unnecessary icon clutter if currently shown under action controls
+
+C) Non-regression requirements
+1. Do not break:
+- customer profile Orders clickable invoice behavior
+- invoice details overlay/modal/drawer
+- repair-details add-to-POS/payment route
+- invoice creation/linking
+- existing POS payment routing
+- customers/invoices/services/warranty foundations
+
+2. Update `replit.md` so it reflects:
+- final customer profile Orders invoice-to-POS routing behavior
+- final simplified action UX in customer Interaction History
+
+Required design and behavior rules
+- Preserve the current premium glassmorphism design baseline exactly
+- Maintain keyboard accessibility and clear blocked/save/error states
+- Keep state paths unified
+- Avoid duplicate parallel systems
+- Ensure corrected flows work in preview/demo mode
+- Maintain store scoping and tenant safety
+- Keep type safety strong
+
+Definition of done
+This correction pass is done only if:
+- invoice details opened from customer profile route to POS with the correct matching invoice/payment context
+- POS shows the same invoice details the user selected from customer profile
+- customer Interaction History is simplified so the invoice is clickable for view and Send to POS remains the payment action
+- no regressions are introduced in repairs, customers, invoices, POS, services, or warranty
+- `replit.md` is updated to reflect all corrections
+
+Required final response format
+Return your completion report in exactly this structure:
+
+1. Files Changed
+2. Corrections Implemented
+3. Customer Profile to POS Routing Fix
+4. Interaction History UX Simplification
+5. Non-Regressions Confirmed
+6. Known Deferred Items
+7. Manual QA Retest Areas

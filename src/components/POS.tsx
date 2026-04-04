@@ -187,7 +187,7 @@ export const POS: React.FC = () => {
   const pendingLinkedInvoiceId = useRef<string | null>(null);
   useEffect(() => {
     if (locationHandled.current) return;
-    const state = location.state as { autoQuickCheckIn?: boolean; openHeldOrders?: boolean; autoRepairItem?: CartItem; addToCart?: CartItem; resumeHeldOrderId?: string; selectedCustomer?: Customer; linkedInvoiceId?: string } | null;
+    const state = location.state as { autoQuickCheckIn?: boolean; openHeldOrders?: boolean; autoRepairItem?: CartItem; invoiceItems?: CartItem[]; addToCart?: CartItem; resumeHeldOrderId?: string; selectedCustomer?: Customer; linkedInvoiceId?: string } | null;
     if (!state) return;
     if (state.linkedInvoiceId) {
       pendingLinkedInvoiceId.current = state.linkedInvoiceId;
@@ -222,7 +222,12 @@ export const POS: React.FC = () => {
       }
       window.history.replaceState({}, document.title);
     }
-    if (state.autoRepairItem) {
+    if (state.invoiceItems && state.invoiceItems.length > 0) {
+      locationHandled.current = true;
+      const items = state.invoiceItems.map((item, idx) => ({ ...item, id: `${item.id}-${Date.now()}-${idx}` }));
+      setCart(prev => [...prev, ...items]);
+      window.history.replaceState({}, document.title);
+    } else if (state.autoRepairItem) {
       locationHandled.current = true;
       setCart(prev => [...prev, { ...state.autoRepairItem!, id: `${state.autoRepairItem!.id}-${Date.now()}` }]);
       window.history.replaceState({}, document.title);
