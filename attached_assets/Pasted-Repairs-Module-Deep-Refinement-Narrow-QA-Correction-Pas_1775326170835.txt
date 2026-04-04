@@ -1,0 +1,115 @@
+Repairs Module Deep Refinement — Narrow QA Correction Pass 2
+
+Read `replit.md` and `Ref.txt` first and treat them as source-of-truth constraints before making any changes.
+
+This is NOT a redesign and NOT a new workstream.
+This is a narrow correction pass based only on the remaining QA failures from Repairs Module Deep Refinement.
+
+Expert-role stack
+- Principal SaaS Product Architect for multi-tenant repair/POS workflows
+- Staff React 19 + TypeScript + Vite engineer
+- Firebase / Firestore data-model and state-flow architect
+- Auth / RBAC / lifecycle gating specialist
+- Repair workflow architect
+- POS / invoice workflow architect
+- QA-driven refactor auditor
+- Side auditor and systems thinker at all times
+
+Operating posture
+- Act as a side auditor and systems thinker throughout.
+- Audit ripple effects before editing.
+- Fix only the remaining failed or partial QA items deeply and coherently.
+- Preserve current design baseline exactly.
+- Preserve auth, preview mode, RBAC, lifecycle gating, and platform/store hierarchy.
+- Preserve tenant isolation and store scoping.
+- Reuse existing modal/drawer/table/toast/permission/sub-permission patterns.
+- Do not reopen completed workstreams except for narrow compatibility-safe fixes required by this pass.
+- Do not make changes to folder `Z`.
+- Do not make changes to file `Y`.
+
+Remaining corrections to implement
+
+A) Technician auto-assignment on self-created repair ticket
+1. Current issue
+- Assigned Technician sub-permission exists
+- but when a technician creates a repair ticket, the resulting ticket still shows Unassigned
+
+2. Required behavior
+- when a technician creates a repair ticket themselves, Assigned Technician must default automatically to that same technician at ticket creation time
+- this must persist in the saved ticket record, not just appear in temporary UI state
+- after ticket creation, reopening the ticket must still show that technician assigned
+
+3. Required logic
+- auto-assignment should happen only when the creator is a technician-type user or otherwise qualifies under the intended current repair role model
+- preserve manual reassignment rules:
+  - only users with Assigned Technician permission can change it
+- do not break current authorized reassignment behavior
+
+B) Customer profile Orders tab invoice interaction for completed unpaid repairs
+1. Current issue
+- completed unpaid repair/invoice appears in Customer Profile > Interaction History > Orders
+- but the user cannot properly click/open the invoice details first before routing to POS
+- this blocks the expected flow
+
+2. Required behavior
+- in Customer Profile > Interaction History > Orders:
+  - when a completed repair has generated/linked an unpaid invoice
+  - the invoice record must be clickable
+  - opening it must show a proper invoice detail view / overlay / modal / drawer consistent with the existing invoice details pattern
+- do not make the user route blindly without first being able to inspect the invoice
+
+3. Payment routing from customer profile
+- from that invoice detail view opened from customer profile Orders:
+  - there must be a clear action to send/process the invoice in POS for payment
+- this flow must be consistent with the completed repair detail flow already working
+- user should be able to inspect invoice details first, then route to POS
+
+C) Consistency requirements
+1. Keep coherent relationship between:
+- repair ticket
+- linked invoice
+- customer profile Orders entry
+- POS payment flow
+
+2. Do not break:
+- repair detail add-to-POS action
+- invoice creation/linking
+- invoice details behavior
+- existing POS payment routing
+- customers/invoices/services/warranty foundations
+
+3. Update `replit.md` so it reflects:
+- technician self-assignment behavior
+- customer profile Orders invoice interaction for completed unpaid repairs
+- POS routing entry point from customer profile Orders invoice details
+
+Required design and behavior rules
+- Preserve the current premium glassmorphism design baseline exactly
+- Maintain keyboard accessibility and clear blocked/save/error states
+- Keep state paths unified
+- Avoid duplicate parallel systems
+- Ensure corrected flows work in preview/demo mode
+- Maintain store scoping and tenant safety
+- Keep type safety strong
+
+Definition of done
+This correction pass is done only if:
+- technician-created repair tickets auto-assign to the creating technician and persist correctly
+- completed unpaid repair invoices in customer profile Orders are clickable
+- clicking them opens proper invoice details
+- invoice details from customer profile Orders can route to POS for payment
+- the flow is consistent with repair-details payment routing
+- no regressions are introduced in repairs, customers, invoices, POS, services, or warranty
+- `replit.md` is updated to reflect all corrections
+
+Required final response format
+Return your completion report in exactly this structure:
+
+1. Files Changed
+2. Corrections Implemented
+3. Technician Auto-Assignment Fix
+4. Customer Orders Invoice Interaction Fix
+5. POS Routing Consistency
+6. Non-Regressions Confirmed
+7. Known Deferred Items
+8. Manual QA Retest Areas

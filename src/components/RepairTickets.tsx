@@ -77,14 +77,18 @@ export default function RepairTickets() {
     warrantyRepairTickets, updateWarrantyRepairTicket,
     warrantyClaims, updateWarrantyClaim,
     customers, services, serviceCategories, approvedStockItems,
-    invoices, addInvoice,
+    invoices, addInvoice, posOperator,
   } = useStoreLocalState();
   const navigate = useNavigate();
-  const { checkPermission, checkSubPermission } = useAccess();
+  const { checkPermission, checkSubPermission, effectiveRole, session } = useAccess();
   const canCreateTickets = checkPermission('repairs', 'create');
   const canEditTickets = checkPermission('repairs', 'edit');
   const canManageTickets = checkPermission('repairs', 'manage');
   const canAssignTechnician = checkSubPermission('assign_technician');
+
+  const isTechnicianRole = effectiveRole === 'technician';
+  const currentOperatorId = posOperator?.id || session?.user?.id || '';
+  const currentOperatorName = posOperator?.name || session?.user?.name || 'Current User';
 
   const allTickets = useMemo(() => [...repairTickets, ...warrantyRepairTickets], [repairTickets, warrantyRepairTickets]);
 
@@ -208,6 +212,9 @@ export default function RepairTickets() {
       id: `sli-${Date.now()}-${s.id}`,
       serviceId: s.id, name: s.name, price: s.price, cost: s.cost || 0, warrantyPeriod: s.warrantyPeriod,
     }));
+    const autoAssignTech = isTechnicianRole && !newForm.technicianId;
+    const finalTechId = newForm.technicianId || (autoAssignTech ? currentOperatorId : undefined);
+    const finalTechName = newForm.technicianName || (autoAssignTech ? currentOperatorName : undefined);
     const ticket: RepairTicket = {
       id: `rt-${Date.now()}`, ticketNumber: ticketNum,
       customerId: newForm.customerId || `walk-in-${Date.now()}`, customerName: newForm.customerName,
@@ -216,15 +223,15 @@ export default function RepairTickets() {
       issue: newForm.issue, intakeNotes: newForm.intakeNotes,
       status: 'Pending', priority: newForm.priority, isRushJob: newForm.priority === 'Rush',
       createdAt: now, updatedAt: now, estimatedCost: estimatedTotal || 0,
-      technicianId: newForm.technicianId || undefined, technicianName: newForm.technicianName || undefined,
+      technicianId: finalTechId, technicianName: finalTechName,
       location: newForm.location || 'Intake Shelf',
       imei: newForm.imei || undefined, serialNumber: newForm.serialNumber || undefined,
       passcode: newForm.passcode || undefined, network: newForm.network || undefined,
       preRepairCondition: newForm.preRepairCondition.length > 0 ? newForm.preRepairCondition : undefined,
       serviceLineItems: lineItems.length > 0 ? lineItems : undefined,
       history: [
-        { id: `h-${Date.now()}`, action: 'Ticket Created', performedBy: 'Current User', timestamp: now },
-        ...(newForm.technicianName ? [{ id: `h-${Date.now()}-a`, action: `Assigned to ${newForm.technicianName}`, performedBy: 'Current User', timestamp: now }] : []),
+        { id: `h-${Date.now()}`, action: 'Ticket Created', performedBy: currentOperatorName, timestamp: now },
+        ...(finalTechName ? [{ id: `h-${Date.now()}-a`, action: `Assigned to ${finalTechName}${autoAssignTech ? ' (auto)' : ''}`, performedBy: currentOperatorName, timestamp: now }] : []),
       ],
       comments: [],
     };
@@ -233,7 +240,7 @@ export default function RepairTickets() {
     setCustomerSearch('');
     setServiceSearch('');
     setIsNewTicketModalOpen(false);
-  }, [newForm, selectedServices, estimatedTotal, allTickets.length, addRepairTicket]);
+  }, [newForm, selectedServices, estimatedTotal, allTickets.length, addRepairTicket, isTechnicianRole, currentOperatorId, currentOperatorName]);
 
   const generateRepairInvoice = useCallback((ticket: RepairTicket) => {
     if (ticket.linkedInvoiceId) return;
@@ -278,7 +285,7 @@ export default function RepairTickets() {
     const updates: Partial<RepairTicket> = {
       status: newStatus,
       updatedAt: now,
-      history: [...(ticket.history || []), { id: `h-${Date.now()}`, action: `Status → ${newStatus}`, performedBy: 'Current User', timestamp: now }],
+      history: [...(ticket.history || []), { id: `h-${Date.now()}`, action: `Status → ${newStatus}`, performedBy: currentOperatorName, timestamp: now }],
     };
     if (newStatus === 'Completed' && !ticket.linkedInvoiceId) {
       const invoiceId = generateRepairInvoice(ticket);
@@ -314,7 +321,7 @@ export default function RepairTickets() {
     if (!ticket) return;
     const updates: Partial<RepairTicket> = {
       technicianId: techId, technicianName: techName, updatedAt: now,
-      history: [...(ticket.history || []), { id: `h-${Date.now()}`, action: `Assigned to ${techName}`, performedBy: 'Current User', timestamp: now }],
+      history: [...(ticket.history || []), { id: `h-${Date.now()}`, action: `Assigned to ${techName}`, performedBy: currentOperatorName, timestamp: now }],
     };
     const isWarranty = warrantyRepairTickets.some(wt => wt.id === ticketId);
     if (isWarranty) updateWarrantyRepairTicket(ticketId, updates);
@@ -326,12 +333,12 @@ export default function RepairTickets() {
     if (!selectedTicket || !commentText.trim()) return;
     const now = new Date().toISOString();
     const newComment: TicketComment = {
-      id: `c-${Date.now()}`, authorId: 'u1', authorName: 'Current User',
+      id: `c-${Date.now()}`, authorId: currentOperatorId || 'u1', authorName: currentOperatorName,
       text: commentText.trim(), createdAt: now, isInternal: commentIsInternal,
     };
     const updates: Partial<RepairTicket> = {
       comments: [...(selectedTicket.comments || []), newComment],
-      history: [...(selectedTicket.history || []), { id: `h-${Date.now()}`, action: `${commentIsInternal ? 'Internal' : 'Customer'} note added`, performedBy: 'Current User', timestamp: now }],
+      history: [...(selectedTicket.history || []), { id: `h-${Date.now()}`, action: `${commentIsInternal ? 'Internal' : 'Customer'} note added`, performedBy: currentOperatorName, timestamp: now }],
       updatedAt: now,
     };
     const isWarranty = warrantyRepairTickets.some(wt => wt.id === selectedTicket.id);
@@ -351,7 +358,7 @@ export default function RepairTickets() {
       : [...existing, { itemId, name: itemName, price: itemPrice, quantity: 1 }];
     const updates: Partial<RepairTicket> = {
       partsUsed: newParts, updatedAt: now,
-      history: [...(selectedTicket.history || []), { id: `h-${Date.now()}`, action: `Part Added: ${itemName}`, performedBy: 'Current User', timestamp: now }],
+      history: [...(selectedTicket.history || []), { id: `h-${Date.now()}`, action: `Part Added: ${itemName}`, performedBy: currentOperatorName, timestamp: now }],
     };
     const isWarranty = warrantyRepairTickets.some(wt => wt.id === selectedTicket.id);
     if (isWarranty) updateWarrantyRepairTicket(selectedTicket.id, updates);
@@ -370,7 +377,7 @@ export default function RepairTickets() {
     const updates: Partial<RepairTicket> = {
       serviceLineItems: [...existing, newItem], updatedAt: now,
       estimatedCost: (selectedTicket.estimatedCost || 0) + svc.price,
-      history: [...(selectedTicket.history || []), { id: `h-${Date.now()}`, action: `Service Added: ${svc.name}`, performedBy: 'Current User', timestamp: now }],
+      history: [...(selectedTicket.history || []), { id: `h-${Date.now()}`, action: `Service Added: ${svc.name}`, performedBy: currentOperatorName, timestamp: now }],
     };
     const isWarranty = warrantyRepairTickets.some(wt => wt.id === selectedTicket.id);
     if (isWarranty) updateWarrantyRepairTicket(selectedTicket.id, updates);
@@ -386,7 +393,7 @@ export default function RepairTickets() {
     const updates: Partial<RepairTicket> = {
       serviceLineItems: updated, updatedAt: now,
       estimatedCost: Math.max(0, (selectedTicket.estimatedCost || 0) - (removed?.price || 0)),
-      history: [...(selectedTicket.history || []), { id: `h-${Date.now()}`, action: `Service Removed: ${removed?.name || 'Unknown'}`, performedBy: 'Current User', timestamp: now }],
+      history: [...(selectedTicket.history || []), { id: `h-${Date.now()}`, action: `Service Removed: ${removed?.name || 'Unknown'}`, performedBy: currentOperatorName, timestamp: now }],
     };
     const isWarranty = warrantyRepairTickets.some(wt => wt.id === selectedTicket.id);
     if (isWarranty) updateWarrantyRepairTicket(selectedTicket.id, updates);
@@ -401,7 +408,7 @@ export default function RepairTickets() {
     const updated = (selectedTicket.partsUsed || []).filter(p => p.itemId !== itemId);
     const updates: Partial<RepairTicket> = {
       partsUsed: updated, updatedAt: now,
-      history: [...(selectedTicket.history || []), { id: `h-${Date.now()}`, action: `Part Removed: ${removed?.name || 'Unknown'}`, performedBy: 'Current User', timestamp: now }],
+      history: [...(selectedTicket.history || []), { id: `h-${Date.now()}`, action: `Part Removed: ${removed?.name || 'Unknown'}`, performedBy: currentOperatorName, timestamp: now }],
     };
     const isWarranty = warrantyRepairTickets.some(wt => wt.id === selectedTicket.id);
     if (isWarranty) updateWarrantyRepairTicket(selectedTicket.id, updates);

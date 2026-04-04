@@ -1478,7 +1478,21 @@ export default function Customers() {
                   </div>
                 )}
               </div>
-              <div className="p-6 border-t border-slate-100 flex justify-end shrink-0">
+              <div className="p-6 border-t border-slate-100 flex justify-end gap-3 shrink-0">
+                {invoiceDetailData.status !== 'Paid' && invoiceDetailData.status !== 'Cancelled' && invoiceDetailData.balance > 0 && (
+                  <button onClick={() => {
+                    const inv = invoiceDetailData;
+                    setInvoiceDetailData(null);
+                    navigate('/sales', { state: {
+                      autoRepairItem: inv.items[0] ? { id: inv.items[0].id, name: inv.items[0].name, price: inv.balance, type: 'repair' } : undefined,
+                      selectedCustomer: { id: inv.customerId, name: inv.customerName, phone: inv.customerPhone, email: inv.customerEmail },
+                      linkedInvoiceId: inv.id,
+                    }});
+                  }} className="px-6 py-2.5 bg-lime-400 text-teal-950 rounded-xl font-black text-xs uppercase tracking-widest shadow-lg active:scale-95 transition-all flex items-center gap-2">
+                    <span className="material-symbols-outlined text-sm">point_of_sale</span>
+                    Send to POS
+                  </button>
+                )}
                 <button onClick={() => { setInvoiceDetailData(null); navigate('/invoices'); }} className="px-6 py-2.5 bg-primary text-white rounded-xl font-black text-xs uppercase tracking-widest shadow-lg shadow-primary/20 hover:bg-primary/90 active:scale-95 transition-all flex items-center gap-2">
                   <span className="material-symbols-outlined text-sm">receipt_long</span>
                   Open in Invoices
