@@ -1,0 +1,131 @@
+Repairs Module Deep Refinement — Narrow QA Correction Pass 3
+
+Read `replit.md` and `Ref.txt` first and treat them as source-of-truth constraints before making any changes.
+
+This is NOT a redesign and NOT a new workstream.
+This is a narrow correction pass based only on the remaining QA failures from Repairs Module Deep Refinement.
+
+Expert-role stack
+- Principal SaaS Product Architect for multi-tenant repair/POS workflows
+- Staff React 19 + TypeScript + Vite engineer
+- Firebase / Firestore data-model and state-flow architect
+- Auth / RBAC / lifecycle gating specialist
+- Repair workflow architect
+- POS / invoice workflow architect
+- QA-driven refactor auditor
+- Side auditor and systems thinker at all times
+
+Operating posture
+- Act as a side auditor and systems thinker throughout.
+- Audit ripple effects before editing.
+- Fix only the remaining failed QA items deeply and coherently.
+- Preserve current design baseline exactly.
+- Preserve auth, preview mode, RBAC, lifecycle gating, and platform/store hierarchy.
+- Preserve tenant isolation and store scoping.
+- Reuse existing modal/drawer/table/toast/permission/sub-permission patterns.
+- Do not reopen completed workstreams except for narrow compatibility-safe fixes required by this pass.
+- Do not make changes to folder `Z`.
+- Do not make changes to file `Y`.
+
+Remaining corrections to implement
+
+A) Customer Profile > Interaction History > Orders clickable behavior
+1. Current issue
+- completed unpaid repair/invoice records are visible in Customer Profile > Interaction History > Orders
+- but the record is not truly clickable for the intended payment workflow
+- this breaks invoice-to-POS payment routing from customer profile
+
+2. Required behavior
+- each completed unpaid repair/invoice record in Customer Profile > Interaction History > Orders must be clearly clickable
+- do not rely on ambiguous text-only behavior
+- the clickable target should be obvious and intentional:
+  - invoice number and/or row click
+  - or a clear View Invoice action
+- choose the cleanest UX, but make it explicit and reliable
+
+3. Invoice detail opening
+- clicking the record must open the proper invoice details view / overlay / modal / drawer consistent with the existing invoice details pattern
+- do not open a broken or partial surface
+- do not leave the item visually present but functionally dead
+
+B) Customer Profile invoice details must route to POS for payment
+1. Current issue
+- invoice-to-POS payment routing from customer profile is not actually usable end to end
+
+2. Required behavior
+- from the invoice details opened via Customer Profile > Interaction History > Orders:
+  - there must be a clear action to process/send the invoice to POS for payment
+- that action must work operationally
+- POS must open with the correct invoice/payment context loaded
+- this must be consistent with the already-working repair-details payment route
+
+3. Unpaid-only logic
+- the customer profile Orders payment action should appear only when the invoice is still unpaid or otherwise payable under the current workflow rules
+- do not show misleading payment-routing actions for already-paid items unless the existing invoice logic intentionally supports a different state
+
+C) Cross-surface consistency
+1. Keep coherent relationship between:
+- repair ticket completed state
+- linked invoice
+- customer profile Orders entry
+- invoice details view
+- POS payment route
+
+2. Required consistency
+- if a completed repair creates/links an invoice, then:
+  - customer profile Orders must show it coherently
+  - invoice details must open coherently
+  - POS payment routing must work coherently
+- statuses must remain aligned across all surfaces before and after payment
+
+D) UI clarity improvement
+1. Make the customer profile Orders action unmistakable
+- if needed, add a clear CTA such as:
+  - View Invoice
+  - Pay in POS
+- but keep it aligned with the current design baseline
+- avoid ambiguous rows that look static
+
+E) Non-regression requirements
+1. Do not break:
+- repair detail add-to-POS/payment action
+- invoice creation/linking
+- invoice details behavior elsewhere
+- existing POS payment routing
+- customers/invoices/services/warranty foundations
+
+2. Update `replit.md` so it reflects:
+- the final customer profile Orders invoice click behavior
+- the POS payment routing entry point from customer profile invoice details
+- any final rule about unpaid-only action visibility
+
+Required design and behavior rules
+- Preserve the current premium glassmorphism design baseline exactly
+- Maintain keyboard accessibility and clear blocked/save/error states
+- Keep state paths unified
+- Avoid duplicate parallel systems
+- Ensure corrected flows work in preview/demo mode
+- Maintain store scoping and tenant safety
+- Keep type safety strong
+
+Definition of done
+This correction pass is done only if:
+- completed unpaid repair/invoice entries in customer profile Orders are truly clickable
+- clicking them opens proper invoice details
+- invoice details from customer profile can route to POS for payment
+- the flow is reliable and consistent with repair-details payment routing
+- repair / invoice / customer / POS relationship remains coherent end to end
+- no regressions are introduced in repairs, customers, invoices, POS, services, or warranty
+- `replit.md` is updated to reflect all corrections
+
+Required final response format
+Return your completion report in exactly this structure:
+
+1. Files Changed
+2. Corrections Implemented
+3. Customer Orders Click Behavior Fix
+4. POS Routing Fix from Customer Profile
+5. Cross-Surface Consistency Confirmed
+6. Non-Regressions Confirmed
+7. Known Deferred Items
+8. Manual QA Retest Areas

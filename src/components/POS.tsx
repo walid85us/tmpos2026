@@ -49,7 +49,7 @@ const POINTS_VALUE_RATIO = 0.01;
 export const POS: React.FC = () => {
   const location = useLocation();
   const { canAccess, session, setPosOperatorRole, effectiveRole, checkPermission, checkSubPermission, getPermissionLevel, supervisorRefundAuth, requestSupervisorRefundAuth, clearSupervisorRefundAuth } = useAccess();
-  const { customers: sharedCustomers, addCustomer, updateCustomer, stockItems: sharedStockItems, addStockItem, updateStockItem: updateStockItemCtx, approvedStockItems, pendingStockItems, heldOrders, addHeldOrder, removeHeldOrder, suggestiveSalesItems, addSuggestiveSaleItem, removeSuggestiveSaleItem, draftCart, setDraftCart, clearDraftCart, completedOrders, addCompletedOrder, updateCompletedOrder, refundRecords, addRefundRecord, warrantyClaims, addWarrantyClaim, updateWarrantyClaim: updateWarrantyClaimCtx, posOperator, setPosOperator, pendingReplacements, removePendingReplacement } = useStoreLocalState();
+  const { customers: sharedCustomers, addCustomer, updateCustomer, stockItems: sharedStockItems, addStockItem, updateStockItem: updateStockItemCtx, approvedStockItems, pendingStockItems, heldOrders, addHeldOrder, removeHeldOrder, suggestiveSalesItems, addSuggestiveSaleItem, removeSuggestiveSaleItem, draftCart, setDraftCart, clearDraftCart, completedOrders, addCompletedOrder, updateCompletedOrder, refundRecords, addRefundRecord, warrantyClaims, addWarrantyClaim, updateWarrantyClaim: updateWarrantyClaimCtx, posOperator, setPosOperator, pendingReplacements, removePendingReplacement, updateInvoice } = useStoreLocalState();
   const derivedSuggestiveItems = approvedStockItems.filter(s => s.isSuggestiveSale).map(s => ({ id: s.id, name: s.name, price: s.price }));
   const OPERATOR_ROLE_MAP: Record<string, string> = { 'Manager': 'manager', 'Sales Associate': 'sales_staff', 'Technician': 'technician', 'Store Owner': 'store_owner' };
   const isOwnerOrManager = effectiveRole === 'system_owner' || effectiveRole === 'store_owner' || effectiveRole === 'manager';
@@ -184,10 +184,14 @@ export const POS: React.FC = () => {
   const [addStockSuccess, setAddStockSuccess] = useState<string | null>(null);
 
   const locationHandled = useRef(false);
+  const pendingLinkedInvoiceId = useRef<string | null>(null);
   useEffect(() => {
     if (locationHandled.current) return;
-    const state = location.state as { autoQuickCheckIn?: boolean; openHeldOrders?: boolean; autoRepairItem?: CartItem; addToCart?: CartItem; resumeHeldOrderId?: string; selectedCustomer?: Customer } | null;
+    const state = location.state as { autoQuickCheckIn?: boolean; openHeldOrders?: boolean; autoRepairItem?: CartItem; addToCart?: CartItem; resumeHeldOrderId?: string; selectedCustomer?: Customer; linkedInvoiceId?: string } | null;
     if (!state) return;
+    if (state.linkedInvoiceId) {
+      pendingLinkedInvoiceId.current = state.linkedInvoiceId;
+    }
     if (state.selectedCustomer) {
       setSelectedCustomer(state.selectedCustomer);
     }
@@ -456,6 +460,16 @@ export const POS: React.FC = () => {
       operatorName: posOperator?.name || 'Unknown',
     };
     addCompletedOrder(newOrder);
+
+    if (pendingLinkedInvoiceId.current) {
+      const now = new Date().toISOString();
+      updateInvoice(pendingLinkedInvoiceId.current, {
+        status: 'Paid',
+        balance: 0,
+        paymentHistory: [{ id: `pay-${Date.now()}`, amount: total, method: payments[0]?.method || 'Cash', timestamp: now }],
+      });
+      pendingLinkedInvoiceId.current = null;
+    }
 
     completedItems.forEach(ci => {
       const sid = ci.stockItemId;

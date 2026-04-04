@@ -684,7 +684,8 @@ export default function Customers() {
                         <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Items</th>
                         <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Date</th>
                         <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Amount</th>
-                        <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Status</th>
+                        <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Status</th>
+                        <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Action</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-50">
@@ -696,15 +697,21 @@ export default function Customers() {
                           <td className="p-6 text-xs font-bold text-slate-600">{order.items.map(i => i.name).join(', ')}</td>
                           <td className="p-6 text-xs font-medium text-slate-500">{new Date(order.createdAt).toLocaleDateString()}</td>
                           <td className="p-6 text-xs font-black text-primary">${order.total.toFixed(2)}</td>
-                          <td className="p-6 text-right">
+                          <td className="p-6">
                             <span className="px-2 py-1 bg-emerald-100 text-emerald-600 rounded-lg text-[8px] font-black uppercase tracking-widest">
                               {order.status}
                             </span>
                           </td>
+                          <td className="p-6 text-right">
+                            <button onClick={(e) => { e.stopPropagation(); setOrderDetailData(order); }} className="px-3 py-1.5 bg-primary/10 text-primary rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-primary/20 transition-colors inline-flex items-center gap-1">
+                              <span className="material-symbols-outlined text-xs">visibility</span>
+                              View
+                            </button>
+                          </td>
                         </tr>
                       ))}
                       {customerOrders.length === 0 && (
-                        <tr><td colSpan={5} className="p-8 text-center text-xs text-slate-400 italic">No orders found for this customer.</td></tr>
+                        <tr><td colSpan={6} className="p-8 text-center text-xs text-slate-400 italic">No orders found for this customer.</td></tr>
                       )}
                     </tbody>
                   </table>
@@ -717,7 +724,8 @@ export default function Customers() {
                         <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Items</th>
                         <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Date</th>
                         <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Total</th>
-                        <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Status</th>
+                        <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Status</th>
+                        <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Action</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-50">
@@ -734,15 +742,36 @@ export default function Customers() {
                           <td className="p-6 text-xs font-bold text-slate-600">{inv.items.map(i => i.name).join(', ')}</td>
                           <td className="p-6 text-xs font-medium text-slate-500">{inv.createdAt}</td>
                           <td className="p-6 text-xs font-black text-primary">${inv.total.toFixed(2)}</td>
-                          <td className="p-6 text-right">
+                          <td className="p-6">
                             <span className={`px-2 py-1 rounded-lg text-[8px] font-black uppercase tracking-widest ${getStatusColor(inv.status)}`}>
                               {inv.status}
                             </span>
                           </td>
+                          <td className="p-6 text-right">
+                            <div className="flex items-center justify-end gap-2">
+                              <button onClick={(e) => { e.stopPropagation(); setInvoiceDetailData(inv); }} className="px-3 py-1.5 bg-primary/10 text-primary rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-primary/20 transition-colors inline-flex items-center gap-1">
+                                <span className="material-symbols-outlined text-xs">visibility</span>
+                                View
+                              </button>
+                              {inv.status !== 'Paid' && inv.status !== 'Cancelled' && inv.balance > 0 && (
+                                <button onClick={(e) => {
+                                  e.stopPropagation();
+                                  navigate('/sales', { state: {
+                                    autoRepairItem: inv.items[0] ? { id: inv.items[0].id, name: inv.items[0].name, price: inv.balance, type: inv.items[0].type || 'repair' } : undefined,
+                                    selectedCustomer: { id: inv.customerId, name: inv.customerName, phone: inv.customerPhone, email: inv.customerEmail },
+                                    linkedInvoiceId: inv.id,
+                                  }});
+                                }} className="px-3 py-1.5 bg-lime-400 text-teal-950 rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-lime-500 transition-colors inline-flex items-center gap-1">
+                                  <span className="material-symbols-outlined text-xs">point_of_sale</span>
+                                  Pay
+                                </button>
+                              )}
+                            </div>
+                          </td>
                         </tr>
                       ))}
                       {customerInvoices.length === 0 && (
-                        <tr><td colSpan={5} className="p-8 text-center text-xs text-slate-400 italic">No invoices found for this customer.</td></tr>
+                        <tr><td colSpan={6} className="p-8 text-center text-xs text-slate-400 italic">No invoices found for this customer.</td></tr>
                       )}
                     </tbody>
                   </table>
@@ -756,21 +785,29 @@ export default function Customers() {
                         <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Issue</th>
                         <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Date</th>
                         <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Cost</th>
-                        <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Status</th>
+                        <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Status</th>
+                        <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Action</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-50">
-                      {customerRepairTickets.map((ticket) => (
-                        <tr key={ticket.id} className="hover:bg-slate-50/50 transition-colors">
+                      {customerRepairTickets.map((ticket) => {
+                        const isCompletedOrDelivered = ticket.status === 'Completed' || ticket.status === 'Delivered';
+                        const linkedInvoice = ticket.linkedInvoiceId ? invoices.find(inv => inv.id === ticket.linkedInvoiceId) : null;
+                        const hasViewableInvoice = isCompletedOrDelivered && linkedInvoice;
+                        const isUnpaid = hasViewableInvoice && linkedInvoice.status !== 'Paid' && linkedInvoice.status !== 'Cancelled' && linkedInvoice.balance > 0;
+                        return (
+                        <tr key={ticket.id} className="hover:bg-slate-50/50 transition-colors cursor-pointer" onClick={() => {
+                          if (hasViewableInvoice) { setInvoiceDetailData(linkedInvoice); } else { navigate('/repairs'); }
+                        }}>
                           <td className="p-6">
-                            <span className="text-xs font-black text-primary">{ticket.ticketNumber}</span>
+                            <span className="text-xs font-black text-primary hover:underline">{ticket.ticketNumber}</span>
                             {ticket.isWarrantyRepair && <span className="ml-1 text-[8px] font-black bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded uppercase">Warranty</span>}
                           </td>
                           <td className="p-6 text-xs font-bold text-slate-600">{ticket.device}</td>
                           <td className="p-6 text-xs font-medium text-slate-500 truncate max-w-[200px]">{ticket.issue}</td>
                           <td className="p-6 text-xs font-medium text-slate-500">{new Date(ticket.createdAt).toLocaleDateString()}</td>
                           <td className="p-6 text-xs font-black text-primary">${ticket.estimatedCost.toFixed(2)}</td>
-                          <td className="p-6 text-right">
+                          <td className="p-6">
                             <span className={`px-2 py-1 rounded-lg text-[8px] font-black uppercase tracking-widest ${
                               ticket.status === 'Completed' || ticket.status === 'Delivered' ? 'bg-emerald-100 text-emerald-600' :
                               ticket.status === 'Cancelled' ? 'bg-red-100 text-red-600' :
@@ -780,10 +817,39 @@ export default function Customers() {
                               {ticket.status}
                             </span>
                           </td>
+                          <td className="p-6 text-right">
+                            <div className="flex items-center justify-end gap-2">
+                              {hasViewableInvoice ? (
+                                <button onClick={(e) => { e.stopPropagation(); setInvoiceDetailData(linkedInvoice); }} className="px-3 py-1.5 bg-primary/10 text-primary rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-primary/20 transition-colors inline-flex items-center gap-1">
+                                  <span className="material-symbols-outlined text-xs">receipt_long</span>
+                                  View Invoice
+                                </button>
+                              ) : (
+                                <button onClick={(e) => { e.stopPropagation(); navigate('/repairs'); }} className="px-3 py-1.5 bg-primary/10 text-primary rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-primary/20 transition-colors inline-flex items-center gap-1">
+                                  <span className="material-symbols-outlined text-xs">build</span>
+                                  View
+                                </button>
+                              )}
+                              {isUnpaid && linkedInvoice && (
+                                <button onClick={(e) => {
+                                  e.stopPropagation();
+                                  navigate('/sales', { state: {
+                                    autoRepairItem: linkedInvoice.items[0] ? { id: linkedInvoice.items[0].id, name: linkedInvoice.items[0].name, price: linkedInvoice.balance, type: 'repair' } : undefined,
+                                    selectedCustomer: { id: ticket.customerId, name: ticket.customerName, phone: ticket.customerPhone, email: ticket.customerEmail },
+                                    linkedInvoiceId: linkedInvoice.id,
+                                  }});
+                                }} className="px-3 py-1.5 bg-lime-400 text-teal-950 rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-lime-500 transition-colors inline-flex items-center gap-1">
+                                  <span className="material-symbols-outlined text-xs">point_of_sale</span>
+                                  Pay
+                                </button>
+                              )}
+                            </div>
+                          </td>
                         </tr>
-                      ))}
+                        );
+                      })}
                       {customerRepairTickets.length === 0 && (
-                        <tr><td colSpan={6} className="p-8 text-center text-xs text-slate-400 italic">No repair tickets found for this customer.</td></tr>
+                        <tr><td colSpan={7} className="p-8 text-center text-xs text-slate-400 italic">No repair tickets found for this customer.</td></tr>
                       )}
                     </tbody>
                   </table>
