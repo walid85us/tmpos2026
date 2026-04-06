@@ -1,0 +1,49 @@
+Inventory & Supply Chain Improvements — Pre-QA RBAC Gating Correction
+
+Read `replit.md` and the just-completed Inventory & Supply Chain report first.
+
+This is NOT a redesign and NOT a new workstream.
+This is a narrow correction pass before QA.
+
+Problem to fix
+Your completion report explicitly states that the new inventory/supply-chain sub-permissions are defined, but Inventory/SupplyChain UI actions are not yet gated by `checkSubPermission`. That means the workstream is not ready for full QA.
+
+Fix this now.
+
+Required behavior
+Wire actual UI/action gating for the new sub-permissions:
+- adjust_stock
+- manage_transfers
+- manage_purchase_orders
+
+Apply permission-aware gating in the relevant Inventory and Supply Chain surfaces so that:
+- authorized users can perform the intended actions
+- unauthorized users cannot perform them
+- blocked states are clean, visible, and not broken or misleading
+- controls should be hidden or disabled consistently according to current app patterns
+- Store Owner continues to inherit all
+- role defaults already defined must behave correctly in practice
+
+At minimum, gate the relevant actions for:
+1. Stock adjustment flows
+2. Transfer creation / transfer lifecycle actions
+3. Purchase order creation / edit / lifecycle actions
+4. Any receiving/GRN action that should logically depend on purchase-order management if that is how the current architecture is structured
+
+Rules
+- Reuse the existing `checkSubPermission` architecture already used elsewhere in the app
+- Do not create a parallel permission system
+- Preserve current design baseline exactly
+- Preserve store scoping and tenant safety
+- Do not reopen unrelated parts of the workstream
+- Update `replit.md` if needed to reflect the final enforcement behavior
+
+Required final response format
+Return your completion report in exactly this structure:
+
+1. Files Changed
+2. RBAC Gating Implemented
+3. Actions Now Protected by Sub-Permission
+4. Role Behavior Confirmed
+5. Non-Regressions Confirmed
+6. Manual QA Retest Areas

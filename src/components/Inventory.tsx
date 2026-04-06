@@ -18,8 +18,10 @@ const Inventory: React.FC = () => {
     refurbishmentJobs, addRefurbishmentJob, updateRefurbishmentJob,
     suppliers, customers,
   } = useStoreLocalState();
-  const { checkPermission } = useAccess();
+  const { checkPermission, checkSubPermission } = useAccess();
   const hasInventoryPermission = checkPermission('inventory', 'manage');
+  const canAdjustStock = checkSubPermission('adjust_stock');
+  const canManageTransfers = checkSubPermission('manage_transfers');
 
   const [activeTab, setActiveTab] = useState<InventoryTab>('inventory');
   const [searchQuery, setSearchQuery] = useState('');
@@ -368,9 +370,9 @@ const Inventory: React.FC = () => {
                     </td>
                     <td className="px-6 py-5 text-right" onClick={(e) => e.stopPropagation()}>
                       <div className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button onClick={() => { setAdjustItem(product); setAdjustType('increase'); setAdjustQty(''); setAdjustReason(''); setAdjustNotes(''); setShowAdjustModal(true); }} className="p-2 hover:bg-emerald-50 rounded-xl text-slate-400 hover:text-emerald-600" title="Adjust Stock">
+                        {canAdjustStock && <button onClick={() => { setAdjustItem(product); setAdjustType('increase'); setAdjustQty(''); setAdjustReason(''); setAdjustNotes(''); setShowAdjustModal(true); }} className="p-2 hover:bg-emerald-50 rounded-xl text-slate-400 hover:text-emerald-600" title="Adjust Stock">
                           <span className="material-symbols-outlined text-sm">tune</span>
-                        </button>
+                        </button>}
                         <button onClick={() => { setSelectedItem(product); setDetailTab('info'); }} className="p-2 hover:bg-white rounded-xl text-slate-400 hover:text-primary" title="View Details">
                           <span className="material-symbols-outlined text-sm">visibility</span>
                         </button>
@@ -590,9 +592,15 @@ const Inventory: React.FC = () => {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-black text-primary tracking-tight">Inventory Transfers</h2>
-        <button onClick={() => setShowCreateTransfer(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
-          <span className="material-symbols-outlined text-sm">add</span>New Transfer
-        </button>
+        {canManageTransfers ? (
+          <button onClick={() => setShowCreateTransfer(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
+            <span className="material-symbols-outlined text-sm">add</span>New Transfer
+          </button>
+        ) : (
+          <button disabled className="px-6 py-3 bg-slate-200 text-slate-400 font-black text-xs rounded-2xl uppercase tracking-widest flex items-center gap-2 cursor-not-allowed">
+            <span className="material-symbols-outlined text-sm">lock</span>New Transfer
+          </button>
+        )}
       </div>
       <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
         <table className="w-full text-left border-collapse">
@@ -622,9 +630,9 @@ const Inventory: React.FC = () => {
                 <td className="px-6 py-5 text-sm font-bold text-slate-500">{t.requestedBy || '—'}</td>
                 <td className="px-6 py-5 text-right">
                   <div className="flex justify-end gap-2">
-                    {t.status === 'Draft' && <button onClick={() => updateInventoryTransfer(t.id, { status: 'Sent', sentAt: new Date().toISOString() })} className="px-3 py-1.5 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90">Send</button>}
-                    {t.status === 'Sent' && <button onClick={() => updateInventoryTransfer(t.id, { status: 'In Transit' })} className="px-3 py-1.5 bg-amber-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-amber-600">In Transit</button>}
-                    {(t.status === 'Sent' || t.status === 'In Transit') && <button onClick={() => {
+                    {canManageTransfers && t.status === 'Draft' && <button onClick={() => updateInventoryTransfer(t.id, { status: 'Sent', sentAt: new Date().toISOString() })} className="px-3 py-1.5 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90">Send</button>}
+                    {canManageTransfers && t.status === 'Sent' && <button onClick={() => updateInventoryTransfer(t.id, { status: 'In Transit' })} className="px-3 py-1.5 bg-amber-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-amber-600">In Transit</button>}
+                    {canManageTransfers && (t.status === 'Sent' || t.status === 'In Transit') && <button onClick={() => {
                       updateInventoryTransfer(t.id, { status: 'Received', receivedAt: new Date().toISOString() });
                       t.items.forEach(item => {
                         addStockMovement({
@@ -880,7 +888,11 @@ const Inventory: React.FC = () => {
                       </div>
                     )}
                     <div className="flex gap-2 pt-2">
-                      <button onClick={() => { setAdjustItem(selectedItem); setAdjustType('increase'); setAdjustQty(''); setAdjustReason(''); setAdjustNotes(''); setShowAdjustModal(true); }} className="flex-1 py-3 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all">Adjust Stock</button>
+                      {canAdjustStock ? (
+                        <button onClick={() => { setAdjustItem(selectedItem); setAdjustType('increase'); setAdjustQty(''); setAdjustReason(''); setAdjustNotes(''); setShowAdjustModal(true); }} className="flex-1 py-3 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all">Adjust Stock</button>
+                      ) : (
+                        <button disabled className="flex-1 py-3 bg-slate-100 text-slate-400 font-black text-[10px] rounded-xl uppercase tracking-widest cursor-not-allowed flex items-center justify-center gap-1"><span className="material-symbols-outlined text-xs">lock</span>Adjust Stock</button>
+                      )}
                       <button onClick={() => setDetailTab('edit')} className="flex-1 py-3 bg-slate-100 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-slate-200 active:scale-95 transition-all">Edit Item</button>
                     </div>
                   </div>

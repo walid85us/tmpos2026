@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState } from '../context/StoreLocalState';
+import { useAccess } from '../context/AccessContext';
 
 type SupplyTab = 'po' | 'grn' | 'rma' | 'suppliers';
 
@@ -13,6 +14,8 @@ export default function SupplyChain() {
     approvedStockItems, updateStockItem,
     addStockMovement,
   } = useStoreLocalState();
+  const { checkSubPermission } = useAccess();
+  const canManagePOs = checkSubPermission('manage_purchase_orders');
 
   const [activeTab, setActiveTab] = useState<SupplyTab>('po');
   const [searchQuery, setSearchQuery] = useState('');
@@ -83,9 +86,15 @@ export default function SupplyChain() {
             <span className="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 text-sm">search</span>
             <input type="text" placeholder="Search POs..." className="pl-11 pr-6 py-3 bg-white/80 backdrop-blur-xl rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 text-sm font-bold text-slate-900 w-64 shadow-sm" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
           </div>
-          <button onClick={() => setShowCreatePO(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2">
-            <span className="material-symbols-outlined text-sm">add</span>Create Purchase Order
-          </button>
+          {canManagePOs ? (
+            <button onClick={() => setShowCreatePO(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2">
+              <span className="material-symbols-outlined text-sm">add</span>Create Purchase Order
+            </button>
+          ) : (
+            <button disabled className="px-6 py-3 bg-slate-200 text-slate-400 font-black text-xs rounded-2xl uppercase tracking-widest flex items-center gap-2 cursor-not-allowed">
+              <span className="material-symbols-outlined text-sm">lock</span>Create Purchase Order
+            </button>
+          )}
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -133,12 +142,12 @@ export default function SupplyChain() {
                       <button onClick={() => setSelectedPO(selectedPO === po.id ? null : po.id)} className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl transition-colors" title="View Details">
                         <span className="material-symbols-outlined text-sm">visibility</span>
                       </button>
-                      {po.status === 'Draft' && (
+                      {canManagePOs && po.status === 'Draft' && (
                         <button onClick={() => updatePurchaseOrder(po.id, { status: 'Ordered', orderedAt: new Date().toISOString().split('T')[0] })} className="p-2 hover:bg-primary/10 text-primary rounded-xl transition-colors" title="Send Order">
                           <span className="material-symbols-outlined text-sm">send</span>
                         </button>
                       )}
-                      {(po.status === 'Ordered' || po.status === 'Partially Received') && (
+                      {canManagePOs && (po.status === 'Ordered' || po.status === 'Partially Received') && (
                         <button onClick={() => { setShowReceiveModal(po.id); setReceiveQtys({}); }} className="p-2 hover:bg-emerald-50 text-emerald-600 rounded-xl transition-colors" title="Receive Goods">
                           <span className="material-symbols-outlined text-sm">inventory</span>
                         </button>
@@ -250,9 +259,15 @@ export default function SupplyChain() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-black text-primary tracking-tight">RMA Management</h2>
-        <button onClick={() => setShowCreateRMA(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2">
-          <span className="material-symbols-outlined text-sm">add</span>Create RMA
-        </button>
+        {canManagePOs ? (
+          <button onClick={() => setShowCreateRMA(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2">
+            <span className="material-symbols-outlined text-sm">add</span>Create RMA
+          </button>
+        ) : (
+          <button disabled className="px-6 py-3 bg-slate-200 text-slate-400 font-black text-xs rounded-2xl uppercase tracking-widest flex items-center gap-2 cursor-not-allowed">
+            <span className="material-symbols-outlined text-sm">lock</span>Create RMA
+          </button>
+        )}
       </div>
       <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
         <table className="w-full text-left border-collapse">
@@ -278,10 +293,10 @@ export default function SupplyChain() {
                 <td className="px-6 py-5"><span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${getStatusColor(rma.status)}`}>{rma.status}</span></td>
                 <td className="px-6 py-5 text-right">
                   <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    {rma.status === 'Pending' && (
+                    {canManagePOs && rma.status === 'Pending' && (
                       <button onClick={() => updateRMA(rma.id, { status: 'Shipped' })} className="px-3 py-1.5 bg-amber-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-amber-600">Ship</button>
                     )}
-                    {rma.status === 'Shipped' && (
+                    {canManagePOs && rma.status === 'Shipped' && (
                       <>
                         <button onClick={() => {
                           updateRMA(rma.id, { status: 'Refunded' });
@@ -315,9 +330,15 @@ export default function SupplyChain() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-black text-primary tracking-tight">Supplier Directory</h2>
-        <button onClick={() => setShowCreateSupplier(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2">
-          <span className="material-symbols-outlined text-sm">add</span>Add Supplier
-        </button>
+        {canManagePOs ? (
+          <button onClick={() => setShowCreateSupplier(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2">
+            <span className="material-symbols-outlined text-sm">add</span>Add Supplier
+          </button>
+        ) : (
+          <button disabled className="px-6 py-3 bg-slate-200 text-slate-400 font-black text-xs rounded-2xl uppercase tracking-widest flex items-center gap-2 cursor-not-allowed">
+            <span className="material-symbols-outlined text-sm">lock</span>Add Supplier
+          </button>
+        )}
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {suppliers.map(sup => (
