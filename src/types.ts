@@ -6,6 +6,7 @@ export interface CartItem {
   qty?: number;
   icon: string;
   type: 'product' | 'repair' | 'special' | 'deposit';
+  stockItemId?: string;
   imei?: string;
   passcode?: string;
   serialNumber?: string;
@@ -53,6 +54,51 @@ export interface Product {
   description?: string;
 }
 
+export interface Supplier {
+  id: string;
+  name: string;
+  contactName?: string;
+  email?: string;
+  phone?: string;
+  address?: string;
+  website?: string;
+  notes?: string;
+  status: 'Active' | 'Inactive';
+  createdAt: string;
+}
+
+export type StockMovementType =
+  | 'adjustment_increase'
+  | 'adjustment_decrease'
+  | 'sale'
+  | 'refund_restock'
+  | 'repair_consumption'
+  | 'repair_return'
+  | 'transfer_out'
+  | 'transfer_in'
+  | 'receiving'
+  | 'trade_in_conversion'
+  | 'refurbishment_complete'
+  | 'rma_return'
+  | 'initial_stock'
+  | 'count_adjustment';
+
+export interface StockMovement {
+  id: string;
+  stockItemId: string;
+  stockItemName: string;
+  type: StockMovementType;
+  quantityChange: number;
+  previousQty: number;
+  newQty: number;
+  reason?: string;
+  referenceId?: string;
+  referenceType?: 'purchase_order' | 'transfer' | 'repair_ticket' | 'order' | 'rma' | 'count' | 'trade_in' | 'refurbishment';
+  performedBy: string;
+  timestamp: string;
+  notes?: string;
+}
+
 export interface TradeInItem {
   id: string;
   customerId: string;
@@ -61,15 +107,17 @@ export interface TradeInItem {
   imei?: string;
   serialNumber?: string;
   condition: 'Excellent' | 'Good' | 'Fair' | 'Poor' | 'Broken';
+  gradeNotes?: string;
   buybackPrice: number;
   resalePrice?: number;
-  status: 'Pending' | 'In Inventory' | 'Sold' | 'Refurbishing';
+  status: 'Pending' | 'Evaluated' | 'In Inventory' | 'Sold' | 'Refurbishing';
+  movedToInventoryId?: string;
   createdAt: string;
 }
 
 export interface RefurbishmentJob {
   id: string;
-  itemId: string; // Reference to TradeInItem or Product
+  itemId: string;
   itemName: string;
   technicianId: string;
   technicianName: string;
@@ -77,26 +125,35 @@ export interface RefurbishmentJob {
   notes: string;
   partsUsed: { name: string; cost: number }[];
   totalCost: number;
+  estimatedCompletion?: string;
+  resultingProductId?: string;
   createdAt: string;
   completedAt?: string;
 }
 
 export interface InventoryTransfer {
   id: string;
+  transferNumber: string;
   fromStore: string;
   toStore: string;
   items: { productId: string; name: string; quantity: number; isSerialized?: boolean; serials?: string[] }[];
-  status: 'Draft' | 'Sent' | 'Received' | 'Cancelled';
+  status: 'Draft' | 'Sent' | 'In Transit' | 'Received' | 'Cancelled';
+  requestedBy: string;
+  notes?: string;
   createdAt: string;
+  sentAt?: string;
   receivedAt?: string;
 }
 
 export interface InventoryCount {
   id: string;
+  countNumber: string;
   date: string;
-  status: 'In Progress' | 'Completed';
-  items: { productId: string; name: string; expected: number; actual: number; discrepancy: number }[];
+  status: 'In Progress' | 'Completed' | 'Cancelled';
+  items: { productId: string; name: string; sku: string; expected: number; actual: number; discrepancy: number }[];
   performedBy: string;
+  notes?: string;
+  completedAt?: string;
 }
 
 export interface BillPayment {
@@ -333,7 +390,8 @@ export interface Invoice {
     name: string; 
     quantity: number; 
     price: number; 
-    type: 'product' | 'repair' | 'service' 
+    type: 'product' | 'repair' | 'service';
+    stockItemId?: string;
   }[];
   subtotal: number;
   discount: number;
@@ -395,6 +453,7 @@ export interface RepairCategory {
 export interface PurchaseOrderItem {
   productId: string;
   name: string;
+  sku?: string;
   orderedQuantity: number;
   receivedQuantity: number;
   costPrice: number;
@@ -407,12 +466,15 @@ export interface PurchaseOrder {
   poNumber: string;
   supplierId: string;
   supplierName: string;
-  status: 'Draft' | 'Pending' | 'Partially Received' | 'Received' | 'Cancelled';
+  status: 'Draft' | 'Ordered' | 'Partially Received' | 'Received' | 'Cancelled';
   items: PurchaseOrderItem[];
   totalAmount: number;
   createdAt: string;
+  orderedAt?: string;
   expectedDate?: string;
+  receivedDate?: string;
   notes?: string;
+  createdBy?: string;
 }
 
 export interface GoodsReceivedNote {
@@ -420,10 +482,12 @@ export interface GoodsReceivedNote {
   grnNumber: string;
   poId: string;
   poNumber: string;
+  supplierId?: string;
   supplierName: string;
-  items: { productId: string; name: string; quantity: number; serials?: string[] }[];
+  items: { productId: string; name: string; orderedQty?: number; quantity: number; costPrice?: number; serials?: string[] }[];
   receivedAt: string;
   receivedBy: string;
+  notes?: string;
 }
 
 export interface RMAItem {
@@ -437,11 +501,16 @@ export interface RMAItem {
 export interface RMA {
   id: string;
   rmaNumber: string;
+  supplierId?: string;
   supplierName: string;
+  poId?: string;
+  poNumber?: string;
   items: RMAItem[];
   status: 'Pending' | 'Shipped' | 'Refunded' | 'Replaced' | 'Rejected';
   createdAt: string;
   trackingNumber?: string;
+  notes?: string;
+  createdBy?: string;
 }
 
 export type PermissionLevel = 'none' | 'view' | 'create' | 'edit' | 'manage' | 'approve' | 'full';
@@ -469,7 +538,7 @@ export interface Employee {
   payType: 'Hourly' | 'Salary';
   commissionEnabled?: boolean;
   commissionType?: 'flat' | 'percentage';
-  commissionRate?: number; // percentage or flat amount
+  commissionRate?: number;
   is2FAEnabled?: boolean;
   createdAt: string;
   lastLogin?: string;

@@ -49,7 +49,7 @@ const POINTS_VALUE_RATIO = 0.01;
 export const POS: React.FC = () => {
   const location = useLocation();
   const { canAccess, session, setPosOperatorRole, effectiveRole, checkPermission, checkSubPermission, getPermissionLevel, supervisorRefundAuth, requestSupervisorRefundAuth, clearSupervisorRefundAuth } = useAccess();
-  const { customers: sharedCustomers, addCustomer, updateCustomer, stockItems: sharedStockItems, addStockItem, updateStockItem: updateStockItemCtx, approvedStockItems, pendingStockItems, heldOrders, addHeldOrder, removeHeldOrder, suggestiveSalesItems, addSuggestiveSaleItem, removeSuggestiveSaleItem, draftCart, setDraftCart, clearDraftCart, completedOrders, addCompletedOrder, updateCompletedOrder, refundRecords, addRefundRecord, warrantyClaims, addWarrantyClaim, updateWarrantyClaim: updateWarrantyClaimCtx, posOperator, setPosOperator, pendingReplacements, removePendingReplacement, updateInvoice } = useStoreLocalState();
+  const { customers: sharedCustomers, addCustomer, updateCustomer, stockItems: sharedStockItems, addStockItem, updateStockItem: updateStockItemCtx, approvedStockItems, pendingStockItems, heldOrders, addHeldOrder, removeHeldOrder, suggestiveSalesItems, addSuggestiveSaleItem, removeSuggestiveSaleItem, draftCart, setDraftCart, clearDraftCart, completedOrders, addCompletedOrder, updateCompletedOrder, refundRecords, addRefundRecord, warrantyClaims, addWarrantyClaim, updateWarrantyClaim: updateWarrantyClaimCtx, posOperator, setPosOperator, pendingReplacements, removePendingReplacement, updateInvoice, addStockMovement } = useStoreLocalState();
   const derivedSuggestiveItems = approvedStockItems.filter(s => s.isSuggestiveSale).map(s => ({ id: s.id, name: s.name, price: s.price }));
   const OPERATOR_ROLE_MAP: Record<string, string> = { 'Manager': 'manager', 'Sales Associate': 'sales_staff', 'Technician': 'technician', 'Store Owner': 'store_owner' };
   const isOwnerOrManager = effectiveRole === 'system_owner' || effectiveRole === 'store_owner' || effectiveRole === 'manager';
@@ -476,13 +476,31 @@ export const POS: React.FC = () => {
       pendingLinkedInvoiceId.current = null;
     }
 
+    const stockDeductions = new Map<string, { totalQty: number; name: string }>();
     completedItems.forEach(ci => {
       const sid = ci.stockItemId;
       if (sid) {
-        const stockItem = approvedStockItems.find(si => si.id === sid);
-        if (stockItem) {
-          updateStockItemCtx(sid, { qty: Math.max(0, stockItem.qty - (ci.qty || 1)) });
+        const existing = stockDeductions.get(sid);
+        if (existing) {
+          existing.totalQty += (ci.qty || 1);
+        } else {
+          stockDeductions.set(sid, { totalQty: ci.qty || 1, name: ci.name });
         }
+      }
+    });
+    stockDeductions.forEach(({ totalQty, name }, sid) => {
+      const stockItem = approvedStockItems.find(si => si.id === sid);
+      if (stockItem) {
+        const prevQty = stockItem.qty;
+        const newQty = Math.max(0, prevQty - totalQty);
+        updateStockItemCtx(sid, { qty: newQty });
+        addStockMovement({
+          id: `sm-sale-${Date.now()}-${sid}`, stockItemId: sid, stockItemName: name,
+          type: 'sale', quantityChange: -totalQty, previousQty: prevQty, newQty,
+          referenceId: newOrder.id, referenceType: 'order',
+          performedBy: posOperator?.name || 'POS Operator', timestamp: new Date().toISOString(),
+          reason: `Sold in order ${invNum}`,
+        });
       }
     });
 

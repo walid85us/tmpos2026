@@ -73,6 +73,9 @@ export const SUB_PERMISSIONS: SubPermissionDef[] = [
   { id: 'loyalty_settings_manage', label: 'Manage Loyalty Settings', parentDomain: 'customers', minModuleLevel: 'view', defaultLevel: 'manage', description: 'Configure loyalty program settings, tiers, and privileges' },
   { id: 'reopen_invoice', label: 'Reopen Invoice', parentDomain: 'invoices', minModuleLevel: 'view', defaultLevel: 'manage', description: 'Reopen a paid or cancelled invoice for further editing' },
   { id: 'assign_technician', label: 'Assign Technician', parentDomain: 'repairs', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Assign or reassign technicians to repair tickets' },
+  { id: 'adjust_stock', label: 'Adjust Stock', parentDomain: 'inventory', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Increase or decrease stock levels with reason tracking' },
+  { id: 'manage_transfers', label: 'Manage Transfers', parentDomain: 'inventory', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Create and manage inventory transfers between locations' },
+  { id: 'manage_purchase_orders', label: 'Manage Purchase Orders', parentDomain: 'supply_chain', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Create, send, and receive purchase orders from suppliers' },
 ];
 
 export const ADMIN_ACTION_LEVEL_MAP = SUB_PERMISSIONS;
@@ -141,6 +144,9 @@ export const tenantRoles: EmployeeRole[] = [
       loyalty_settings_manage: true,
       reopen_invoice: true,
       assign_technician: true,
+      adjust_stock: true,
+      manage_transfers: true,
+      manage_purchase_orders: true,
     },
     description: 'Store management access'
   },
@@ -186,6 +192,9 @@ export const tenantRoles: EmployeeRole[] = [
       loyalty_settings_manage: false,
       reopen_invoice: false,
       assign_technician: false,
+      adjust_stock: true,
+      manage_transfers: false,
+      manage_purchase_orders: false,
     },
     description: 'Repair and parts access'
   },
@@ -231,6 +240,9 @@ export const tenantRoles: EmployeeRole[] = [
       loyalty_settings_manage: false,
       reopen_invoice: false,
       assign_technician: false,
+      adjust_stock: false,
+      manage_transfers: false,
+      manage_purchase_orders: false,
     },
     description: 'Sales and customer access'
   },

@@ -1,0 +1,276 @@
+Inventory & Supply Chain Improvements — Isolation Workstream
+
+Read `replit.md` and `Ref.txt` first and treat them as source-of-truth constraints before making any changes.
+
+This is NOT a redesign.
+This is a new isolated workstream.
+
+MANDATORY REFERENCE RESEARCH — DO THIS FIRST
+
+Before implementing anything in Inventory & Supply Chain, you must visit and read the following references carefully and completely. These are not optional. Extract the real operational workflows, inventory model expectations, serialized vs non-serialized logic, category/attribute patterns, stock movement rules, trade-in handling, refurbishment ideas, transfer flows, inventory count concepts, purchase order behavior, goods received logic, bill-payment relationships, bundle/gift-card edges where relevant, and RMA/return authorization patterns.
+
+Use these references as deep behavioral research input, then merge them with our current app architecture and improve beyond them. Do NOT copy RepairDesk blindly. Instead:
+- preserve our existing architecture, design baseline, RBAC model, store scoping, feature-gating model, and current multi-tenant structure
+- use the references to understand the operational depth required
+- modernize and improve the workflows beyond what RepairDesk provides where appropriate
+- design something stronger for current market expectations, cleaner inventory flows, better stock visibility, better purchase/receiving controls, and better repair-parts consistency
+
+Mandatory references to read fully
+
+Manage Inventory
+1. https://help.repairdesk.co/portal/en/kb/articles/product-attributes-and-variants
+2. https://help.repairdesk.co/portal/en/kb/articles/inventory-management-revamped
+3. https://help.repairdesk.co/portal/en/kb/articles/manage-serialized-inventory-revamped
+4. https://help.repairdesk.co/portal/en/kb/articles/rd-product-category-tree
+5. https://help.repairdesk.co/portal/en/kb/articles/adding-a-new-item-to-inventory
+6. https://help.repairdesk.co/portal/en/kb/articles/managing-new-handsets-in-inventory
+7. https://help.repairdesk.co/portal/en/kb/articles/importing-multiple-inventory-items
+8. https://help.repairdesk.co/portal/en/kb/articles/bulk-serialized-importing-exporting
+9. https://help.repairdesk.co/portal/en/kb/articles/exporting-inventory
+10. https://help.repairdesk.co/portal/en/kb/articles/updating-or-deleting-an-inventory-item
+11. https://help.repairdesk.co/portal/en/kb/articles/searching-for-any-specific-inventory-item
+12. https://help.repairdesk.co/portal/en/kb/articles/inventory-valuation
+13. https://help.repairdesk.co/portal/en/kb/articles/inventory-adjustment
+14. https://help.repairdesk.co/portal/en/kb/articles/adding-multiple-sku-s
+15. https://help.repairdesk.co/portal/en/kb/articles/auto-generating-sku-upc-code
+16. https://help.repairdesk.co/portal/en/kb/articles/updating-individual-item-price-across-multiple-stores
+17. https://help.repairdesk.co/portal/en/kb/articles/disabling-auto-create-inventory-across-multi-store
+18. https://help.repairdesk.co/portal/en/kb/articles/generating-and-printing-barcode-for-tangible-inventory-items
+19. https://help.repairdesk.co/portal/en/kb/articles/editing-inventory-label-template
+20. https://help.repairdesk.co/portal/en/kb/articles/uploading-pictures-for-inventory-items
+21. https://help.repairdesk.co/portal/en/kb/articles/assigning-tax-to-an-inventory-item
+22. https://help.repairdesk.co/portal/en/kb/articles/hiding-specific-products-on-point-of-sale
+
+Manage Trade-In
+23. https://help.repairdesk.co/portal/en/kb/articles/buyback-trade-in
+24. https://help.repairdesk.co/portal/en/kb/articles/how-to-move-trade-in-items-to-inventory
+25. https://help.repairdesk.co/portal/en/kb/articles/how-to-convert-move-trade-in-item-to-serialized-inventory
+26. https://help.repairdesk.co/portal/en/kb/articles/how-to-process-exchange-against-trade-in-item
+
+Manage Refurbishment
+27. https://help.repairdesk.co/portal/en/kb/articles/refurbishment-module
+
+Transfer Inventory
+28. https://help.repairdesk.co/portal/en/kb/articles/inventory-transfer
+29. https://help.repairdesk.co/portal/en/kb/articles/how-to-transfer-stock-from-one-store-location-to-another
+30. https://help.repairdesk.co/portal/en/kb/articles/inventory-transfer-and-inter-company-invoicing
+31. https://help.repairdesk.co/portal/en/kb/articles/how-to-create-a-transfer-order-using-low-stock-
+32. https://help.repairdesk.co/portal/en/kb/articles/e2-9a-a1-how-to-add-a-serialized-inventory-item-to-transfer-order
+
+Inventory Count
+33. https://help.repairdesk.co/portal/en/kb/articles/inventory-count
+34. https://help.repairdesk.co/portal/en/kb/articles/how-to-count-trade-in-items-under-inventory-count-modul
+
+Manage Miscellaneous Items
+35. https://help.repairdesk.co/portal/en/kb/articles/how-to-use-the-handling-and-convenience-fee-feature
+
+Manage Bill Payments
+36. https://help.repairdesk.co/portal/en/kb/articles/how-to-get-started-with-bill-payments-16-6-2025
+37. https://help.repairdesk.co/portal/en/kb/articles/how-to-process-bill-payment
+38. https://help.repairdesk.co/portal/en/kb/articles/how-to-send-reminders-using-the-campaigner-module
+39. https://help.repairdesk.co/portal/en/kb/articles/how-to-view-payment-history-of-bill-payments-24-6-2025
+
+Manage Gift Cards / Bundles
+40. https://help.repairdesk.co/portal/en/kb/articles/how-to-use-gift-cards-in-repairdesk
+41. https://help.repairdesk.co/portal/en/kb/articles/how-to-use-inventory-service-bundles
+
+Manage Supply Chain / Purchase Orders / GRN / RMA
+42. https://help.repairdesk.co/portal/en/kb/articles/purchase-orders
+43. https://help.repairdesk.co/portal/en/kb/articles/purchase-order-listing-new
+44. https://help.repairdesk.co/portal/en/kb/articles/where-can-i-view-and-manage-all-of-my-purchase-orders
+45. https://help.repairdesk.co/portal/en/kb/articles/how-can-i-edit-an-existing-purchase-order
+46. https://help.repairdesk.co/portal/en/kb/articles/how-can-i-change-the-default-view-of-the-purchase-order-listing
+47. https://help.repairdesk.co/portal/en/kb/articles/goods-received-notes
+48. https://help.repairdesk.co/portal/en/kb/articles/how-does-rma-work
+
+Important:
+- Do not just skim these links.
+- Read them fully and extract the actual workflows, field requirements, movement rules, and operational patterns.
+- Use them as deep behavioral reference for this workstream.
+- Then improve on them with stronger modern UX, cleaner inventory model, better stock visibility, stronger movement auditability, clearer repair-parts handling, and better purchase/receiving foundations.
+- Build something better than a direct clone.
+
+You are continuing an existing multi-tenant repair/POS SaaS app. Do not redesign the product. Do not reopen completed workstreams unless a dependency forces a narrow correction required for this workstream only.
+
+Completed workstreams
+1. Platform Command Center & Commercial Plan System
+2. Tenant Management & Provisioning
+3. Store Dashboard & POS Refinement
+4. Customers, Invoices & Services Improvements
+5. Repairs Module Deep Refinement
+
+This new workstream starts now:
+Inventory & Supply Chain Improvements
+
+Expert-role stack
+- Principal SaaS Product Architect for multi-tenant repair/POS workflows
+- Staff React 19 + TypeScript + Vite engineer
+- Firebase / Firestore data-model and state-flow architect
+- Auth / RBAC / lifecycle gating specialist
+- Inventory and supply-chain workflow architect
+- QA-driven refactor auditor
+- Side auditor and systems thinker at all times
+
+Operating posture
+- Act as a side auditor and systems thinker throughout.
+- Audit ripple effects before editing.
+- Prefer coherent foundational improvements over shallow patches.
+- Keep scope narrow and isolated to this workstream.
+- Preserve the current design baseline exactly.
+- Preserve auth, preview mode, RBAC, lifecycle gating, and platform/store hierarchy.
+- Preserve tenant isolation and store scoping.
+- Reuse existing patterns for cards, tables, modals, drawers, toasts, motion, spacing, typography, and visual language.
+- Do not make changes to folder `Z`.
+- Do not make changes to file `Y`.
+- Keep all other task plans as planning drafts only.
+
+Current context you must honor
+- This is a multi-tenant repair/POS SaaS app in Replit with Firebase/Firestore.
+- `replit.md` is the architecture / baseline truth.
+- `Ref.txt` is the operational / product reference.
+- Existing completed foundations already include:
+  - platform commercial plans and feature gating
+  - tenant/store provisioning
+  - store dashboard and POS refinement
+  - customers, invoices, services, loyalty, warranty permission flow, invoice templates, and document output foundations
+  - repairs module deep refinement
+- Existing customer, invoice, service, POS, refund, warranty, repair, and document flows must remain intact.
+
+Primary objective
+Deeply strengthen the Inventory & Supply Chain foundations so inventory becomes operationally strong, repair-aware, movement-aware, and purchase-aware, without redesigning the app or breaking existing completed workstreams.
+
+Architecture constraints
+- Use the existing React 19 + TypeScript + Vite + Tailwind + Firebase stack.
+- Extend existing shared state and route/component patterns instead of introducing a competing architecture.
+- Respect current AccessGuard / permission model / sub-permission style.
+- Only add minimal new permission hooks or sub-permissions if truly needed for inventory/supply-chain workflows.
+- Keep preview/demo/mock behavior fully usable even if backend persistence is incomplete or partially mocked.
+- Maintain accessibility and keyboard navigability for forms, rows, drawers, and modals.
+- Keep data store-scoped and tenant-safe everywhere.
+
+Scope — implement these improvements only
+
+A) Inventory model cleanup and operational distinction
+1. Strengthen the inventory item model so the system more clearly distinguishes between:
+- standard sellable inventory/products
+- repair parts
+- serialized inventory
+- non-serialized inventory
+- trade-in devices where current architecture supports them cleanly
+- refurbished stock foundations where practical
+2. Do not create confusing overlaps between products, services, repair parts, and ticket-linked parts.
+3. Make the data shape and UI language clearer for store teams.
+
+B) Inventory listing, search, and usability
+1. Improve inventory list usability.
+2. Support more operational search/filter patterns such as SKU, UPC, item name, category, serialized/non-serialized, stock state, hidden-on-POS, repair-part relevance, and low-stock visibility where appropriate.
+3. Keep the listing aligned with the existing app’s design language.
+
+C) Inventory item detail and editing
+1. Refine inventory item details and editing flows.
+2. Support practical fields cleanly, such as:
+- name
+- category
+- SKU / UPC
+- cost / price / tax behavior where current architecture supports it
+- stock quantity
+- serialized vs non-serialized behavior
+- POS visibility
+- repair-part relevance
+- image / barcode / label hooks where practical
+3. Preserve the current design baseline and modal/detail patterns.
+
+D) Stock movement integrity
+1. Introduce or refine a clean stock movement model so the app can track:
+- adjustments
+- transfers
+- receiving
+- repair consumption where supported
+- conversions from trade-in/refurbishment into inventory where practical
+2. Make movement history understandable and useful.
+3. Avoid building a full accounting engine.
+
+E) Repair-parts and inventory linkage
+1. Strengthen the linkage between Repairs and Inventory so parts consumed by repair workflows are coherent.
+2. Clarify how repair parts differ from general sellable items.
+3. Ensure this does not break the Repairs Module workstream already completed.
+
+F) Purchase Order and receiving foundations
+1. Build or refine a solid foundational Purchase Order flow.
+2. Support a practical PO lifecycle such as draft / ordered / partially received / received / cancelled, adapting to current project patterns.
+3. Build or refine Goods Received / receiving behavior in a clean way.
+4. Keep this operational and preview-testable, not placeholder-like.
+
+G) Transfer inventory foundations
+1. Build or strengthen transfer behavior between stores where supported by the current architecture.
+2. Support meaningful transfer states and movement visibility.
+3. Keep store scoping and multi-store logic coherent.
+
+H) Inventory count / adjustment foundations
+1. Improve inventory count / stock adjustment behavior.
+2. Make it possible to understand discrepancies and adjustments cleanly.
+3. Keep it practical and preview-testable.
+
+I) Trade-in / refurbishment / RMA-aware foundations
+1. Add or strengthen foundational handling for:
+- trade-in to inventory conversion
+- refurbishment linkage where practical
+- RMA/return-merchandise foundations where practical
+2. Do not overbuild these into separate giant modules unless the current architecture supports them cleanly.
+3. Prioritize a strong foundation and coherent data paths.
+
+J) Low-stock and operational visibility
+1. Improve low-stock visibility and operational cues.
+2. Support inventory visibility that helps store teams act before shortages affect repair or POS workflows.
+3. Keep it consistent with current dashboard/inventory design patterns.
+
+K) Permissions and approval awareness
+1. Respect the current RBAC/sub-permission architecture.
+2. Add only minimal inventory/supply-chain sub-permissions if truly needed.
+3. Keep unauthorized actions blocked cleanly, not through broken dead ends.
+
+L) Documentation
+Update `replit.md` so it accurately reflects:
+- new or refined inventory entities
+- serialized/non-serialized logic
+- stock movement model
+- purchase order / receiving flow
+- transfer / adjustment behavior
+- repair-parts linkage
+- any permission additions
+- any important workflow decisions introduced in this workstream
+
+Explicit non-goals for this workstream
+- No broad redesign
+- No full accounting subsystem
+- No tenant/provisioning rework
+- No commercial plan system rework
+- No unrelated reopening of earlier approved workstreams
+- No broad CRM expansion
+- No widget/public API/integration expansion
+
+Definition of done
+This workstream is done only if:
+- inventory model distinctions are clearer
+- inventory listing and detail flows are more operational
+- serialized/non-serialized behavior is coherent
+- stock movement foundations are materially improved
+- purchase order and receiving flows are usable in preview
+- transfer / count / adjustment behavior is materially improved
+- repair-parts linkage is clearer and more reliable
+- inventory remains coherent with customers, invoices, services, repairs, POS, and warranty foundations
+- there are no obvious regressions in completed workstreams
+- there are no TypeScript-breaking changes
+- `replit.md` is updated to match the new reality
+
+Required final response format from you
+Return your completion report in this exact structure:
+
+1. Files Changed
+2. What Was Implemented
+3. Inventory / Supply Chain Workflow Decisions
+4. State / Data Model Changes
+5. Permission / Access Changes
+6. Non-Regressions Confirmed
+7. Known Non-Goals / Deferred Items
+8. Manual QA Focus Areas for Me to Test

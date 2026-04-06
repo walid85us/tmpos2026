@@ -29,7 +29,7 @@ export default function Invoices() {
     recurringInterval: 'monthly' as 'monthly' | 'weekly' | 'yearly',
     notes: '',
     terms: '',
-    items: [{ name: '', quantity: 1, price: 0, type: 'product' as 'product' | 'repair' | 'service' }],
+    items: [{ name: '', quantity: 1, price: 0, type: 'product' as 'product' | 'repair' | 'service', stockItemId: undefined as string | undefined }],
     discount: 0,
   });
 
@@ -40,7 +40,7 @@ export default function Invoices() {
     recurringInterval: 'monthly' as 'monthly' | 'weekly' | 'yearly',
     notes: '',
     terms: '',
-    items: [{ name: '', quantity: 1, price: 0, type: 'product' as 'product' | 'repair' | 'service' }],
+    items: [{ name: '', quantity: 1, price: 0, type: 'product' as 'product' | 'repair' | 'service', stockItemId: undefined as string | undefined }],
     discount: 0,
   });
   const [editingInvoiceId, setEditingInvoiceId] = useState('');
@@ -157,7 +157,7 @@ export default function Invoices() {
       id: `inv-${Date.now()}`,
       invoiceNumber: `INV-${new Date().getFullYear()}-${String(invoices.length + 1).padStart(3, '0')}`,
       customerId: customer.id, customerName: customer.name, customerEmail: customer.email, customerPhone: customer.phone,
-      items: validItems.map((it, idx) => ({ id: `ii-${Date.now()}-${idx}`, name: it.name, quantity: it.quantity, price: it.price, type: it.type })),
+      items: validItems.map((it, idx) => ({ id: `ii-${Date.now()}-${idx}`, name: it.name, quantity: it.quantity, price: it.price, type: it.type, ...(it.stockItemId ? { stockItemId: it.stockItemId } : {}) })),
       subtotal, discount: newInv.discount, tax, total, amountPaid: 0, balance: total,
       status: 'Unpaid', createdAt: new Date().toISOString().slice(0, 10), dueDate: newInv.dueDate,
       notes: newInv.notes || undefined, terms: newInv.terms || undefined,
@@ -184,7 +184,7 @@ export default function Invoices() {
       customerId: inv.customerId, dueDate: inv.dueDate,
       isRecurring: inv.isRecurring ?? false, recurringInterval: inv.recurringInterval || 'monthly',
       notes: inv.notes || '', terms: inv.terms || '',
-      items: inv.items.map(it => ({ name: it.name, quantity: it.quantity, price: it.price, type: it.type })),
+      items: inv.items.map(it => ({ name: it.name, quantity: it.quantity, price: it.price, type: it.type, stockItemId: it.stockItemId })),
       discount: inv.discount,
     });
     setEditingInvoiceId(inv.id);
@@ -206,13 +206,13 @@ export default function Invoices() {
     const status: Invoice['status'] = balance <= 0 ? 'Paid' : amountPaid > 0 ? 'Partially Paid' : existing.status === 'Overdue' ? 'Overdue' : 'Unpaid';
     updateInvoice(editingInvoiceId, {
       customerId: customer.id, customerName: customer.name, customerEmail: customer.email, customerPhone: customer.phone,
-      items: validItems.map((it, idx) => ({ id: `ii-${Date.now()}-${idx}`, name: it.name, quantity: it.quantity, price: it.price, type: it.type })),
+      items: validItems.map((it, idx) => ({ id: `ii-${Date.now()}-${idx}`, name: it.name, quantity: it.quantity, price: it.price, type: it.type, ...(it.stockItemId ? { stockItemId: it.stockItemId } : {}) })),
       subtotal, discount: editInv.discount, tax, total, balance, status,
       dueDate: editInv.dueDate, notes: editInv.notes || undefined, terms: editInv.terms || undefined,
       isRecurring: editInv.isRecurring || undefined, recurringInterval: editInv.isRecurring ? editInv.recurringInterval : undefined,
     });
     const updated = { ...existing, customerId: customer.id, customerName: customer.name, customerEmail: customer.email, customerPhone: customer.phone,
-      items: validItems.map((it, idx) => ({ id: `ii-${Date.now()}-${idx}`, name: it.name, quantity: it.quantity, price: it.price, type: it.type })),
+      items: validItems.map((it, idx) => ({ id: `ii-${Date.now()}-${idx}`, name: it.name, quantity: it.quantity, price: it.price, type: it.type, ...(it.stockItemId ? { stockItemId: it.stockItemId } : {}) })),
       subtotal, discount: editInv.discount, tax, total, balance, status, dueDate: editInv.dueDate };
     setDetailInvoice(updated as Invoice);
     setShowEditModal(false);
@@ -376,7 +376,7 @@ export default function Invoices() {
     }, 3000);
   }, [paymentAmount]);
 
-  const addLineItem = (setter: typeof setNewInv) => setter(prev => ({ ...prev, items: [...prev.items, { name: '', quantity: 1, price: 0, type: 'product' as const }] }));
+  const addLineItem = (setter: typeof setNewInv) => setter(prev => ({ ...prev, items: [...prev.items, { name: '', quantity: 1, price: 0, type: 'product' as const, stockItemId: undefined as string | undefined }] }));
   const removeLineItem = (setter: typeof setNewInv, idx: number) => setter(prev => ({ ...prev, items: prev.items.filter((_, i) => i !== idx) }));
   const updateLineItem = (setter: typeof setNewInv, idx: number, field: string, value: string | number) => {
     setter(prev => ({ ...prev, items: prev.items.map((it, i) => i === idx ? { ...it, [field]: value } : it) }));
@@ -396,7 +396,7 @@ export default function Invoices() {
     if (!prod) return;
     setter(prev => ({
       ...prev,
-      items: prev.items.map((it, i) => i === idx ? { ...it, name: prod.name, price: prod.price, type: 'product' as const } : it),
+      items: prev.items.map((it, i) => i === idx ? { ...it, name: prod.name, price: prod.price, type: 'product' as const, stockItemId: prod.id } : it),
     }));
     setActiveProductPickerIdx(null);
     setProductSearch('');

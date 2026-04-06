@@ -18,6 +18,7 @@ function buildInvoicePosPayload(inv: Invoice) {
     qty: item.quantity,
     icon: item.type === 'repair' ? 'build' : item.type === 'service' ? 'handyman' : 'inventory_2',
     type: (item.type === 'service' ? 'repair' : item.type) as CartItem['type'],
+    ...(item.stockItemId ? { stockItemId: item.stockItemId } : {}),
   }));
   return {
     invoiceItems,

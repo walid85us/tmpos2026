@@ -78,6 +78,7 @@ export default function RepairTickets() {
     warrantyClaims, updateWarrantyClaim,
     customers, services, serviceCategories, approvedStockItems,
     invoices, addInvoice, posOperator,
+    updateStockItem, addStockMovement,
   } = useStoreLocalState();
   const navigate = useNavigate();
   const { checkPermission, checkSubPermission, effectiveRole, session } = useAccess();
@@ -366,7 +367,20 @@ export default function RepairTickets() {
     setSelectedTicket(prev => prev ? { ...prev, ...updates } : null);
     setPartSearch('');
     setShowPartDropdown(false);
-  }, [selectedTicket, warrantyRepairTickets, updateRepairTicket, updateWarrantyRepairTicket]);
+    const stockItem = approvedStockItems.find(si => si.id === itemId);
+    if (stockItem) {
+      const prevQty = stockItem.qty;
+      const newQty = Math.max(0, prevQty - 1);
+      updateStockItem(itemId, { qty: newQty });
+      addStockMovement({
+        id: `sm-${Date.now()}-${itemId}`, stockItemId: itemId, stockItemName: itemName,
+        type: 'repair_consumption', quantityChange: -1, previousQty: prevQty, newQty,
+        referenceId: selectedTicket.id, referenceType: 'repair_ticket',
+        performedBy: currentOperatorName, timestamp: now,
+        reason: `Used in repair ${selectedTicket.ticketNumber}`,
+      });
+    }
+  }, [selectedTicket, warrantyRepairTickets, updateRepairTicket, updateWarrantyRepairTicket, approvedStockItems, updateStockItem, addStockMovement]);
 
   const handleAddServiceToTicket = useCallback((svc: typeof services[0]) => {
     if (!selectedTicket) return;
@@ -414,7 +428,23 @@ export default function RepairTickets() {
     if (isWarranty) updateWarrantyRepairTicket(selectedTicket.id, updates);
     else updateRepairTicket(selectedTicket.id, updates);
     setSelectedTicket(prev => prev ? { ...prev, ...updates } : null);
-  }, [selectedTicket, warrantyRepairTickets, updateRepairTicket, updateWarrantyRepairTicket]);
+    if (removed) {
+      const stockItem = approvedStockItems.find(si => si.id === itemId);
+      if (stockItem) {
+        const prevQty = stockItem.qty;
+        const restoreQty = removed.quantity;
+        const newQty = prevQty + restoreQty;
+        updateStockItem(itemId, { qty: newQty });
+        addStockMovement({
+          id: `sm-${Date.now()}-${itemId}`, stockItemId: itemId, stockItemName: removed.name,
+          type: 'repair_return', quantityChange: restoreQty, previousQty: prevQty, newQty,
+          referenceId: selectedTicket.id, referenceType: 'repair_ticket',
+          performedBy: currentOperatorName, timestamp: now,
+          reason: `Part removed from repair ${selectedTicket.ticketNumber}`,
+        });
+      }
+    }
+  }, [selectedTicket, warrantyRepairTickets, updateRepairTicket, updateWarrantyRepairTicket, approvedStockItems, updateStockItem, addStockMovement]);
 
   const handleSaveTicketFields = useCallback((updates: Partial<RepairTicket>) => {
     if (!selectedTicket) return;

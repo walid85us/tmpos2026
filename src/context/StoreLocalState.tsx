@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useMemo, useEffect, useRef } from 'react';
-import { Customer, HeldOrder, CartItem, PaymentMethod, Discount, RepairTicket, RepairTicketStatus, Invoice, RepairService, RepairCategory, DocumentTemplate, StoreBranding, LogoPlacement } from '../types';
+import { Customer, HeldOrder, CartItem, PaymentMethod, Discount, RepairTicket, RepairTicketStatus, Invoice, RepairService, RepairCategory, DocumentTemplate, StoreBranding, LogoPlacement, Supplier, StockMovement, StockMovementType, PurchaseOrder, GoodsReceivedNote, RMA, InventoryTransfer, InventoryCount, TradeInItem, RefurbishmentJob } from '../types';
 import { useAccess } from './AccessContext';
 import { buildTemplateHtml, getDefaultEnabledTags } from '../utils/templateBuilder';
 
@@ -7,10 +7,24 @@ export interface StockItem {
   id: string;
   name: string;
   sku: string;
+  upc?: string;
   qty: number;
   cost: number;
   price: number;
   category: string;
+  type: 'serialized' | 'non-serialized' | 'handset';
+  manufacturer?: string;
+  isRepairPart: boolean;
+  isHiddenOnPOS: boolean;
+  serialNumbers?: string[];
+  minStockLevel?: number;
+  maxStockLevel?: number;
+  location?: string;
+  taxId?: string;
+  description?: string;
+  images?: string[];
+  supplierId?: string;
+  supplierName?: string;
   addedAt: string;
   status: 'approved' | 'pending_approval' | 'rejected';
   isSuggestiveSale?: boolean;
@@ -140,6 +154,7 @@ interface StoreLocalStateContextType {
   stockItems: StockItem[];
   addStockItem: (item: StockItem) => void;
   updateStockItem: (id: string, updates: Partial<StockItem>) => void;
+  deleteStockItem: (id: string) => void;
   approvedStockItems: StockItem[];
   pendingStockItems: StockItem[];
   heldOrders: HeldOrder[];
@@ -193,6 +208,31 @@ interface StoreLocalStateContextType {
   resetDocumentTemplate: (id: string) => void;
   storeBranding: StoreBranding;
   updateStoreBranding: (updates: Partial<StoreBranding>) => void;
+  suppliers: Supplier[];
+  addSupplier: (s: Supplier) => void;
+  updateSupplier: (id: string, updates: Partial<Supplier>) => void;
+  stockMovements: StockMovement[];
+  addStockMovement: (m: StockMovement) => void;
+  purchaseOrders: PurchaseOrder[];
+  addPurchaseOrder: (po: PurchaseOrder) => void;
+  updatePurchaseOrder: (id: string, updates: Partial<PurchaseOrder>) => void;
+  goodsReceivedNotes: GoodsReceivedNote[];
+  addGoodsReceivedNote: (grn: GoodsReceivedNote) => void;
+  rmas: RMA[];
+  addRMA: (rma: RMA) => void;
+  updateRMA: (id: string, updates: Partial<RMA>) => void;
+  inventoryTransfers: InventoryTransfer[];
+  addInventoryTransfer: (t: InventoryTransfer) => void;
+  updateInventoryTransfer: (id: string, updates: Partial<InventoryTransfer>) => void;
+  inventoryCounts: InventoryCount[];
+  addInventoryCount: (c: InventoryCount) => void;
+  updateInventoryCount: (id: string, updates: Partial<InventoryCount>) => void;
+  tradeIns: TradeInItem[];
+  addTradeIn: (t: TradeInItem) => void;
+  updateTradeIn: (id: string, updates: Partial<TradeInItem>) => void;
+  refurbishmentJobs: RefurbishmentJob[];
+  addRefurbishmentJob: (j: RefurbishmentJob) => void;
+  updateRefurbishmentJob: (id: string, updates: Partial<RefurbishmentJob>) => void;
 }
 
 const SEED_CUSTOMERS: Customer[] = [
@@ -204,11 +244,18 @@ const SEED_CUSTOMERS: Customer[] = [
 ];
 
 const SEED_STOCK_ITEMS: StockItem[] = [
-  { id: 'stk-001', name: 'iPhone 13 Screen', sku: 'IP13-SCR-001', qty: 12, cost: 45.00, price: 89.00, category: 'Parts', addedAt: '2026-03-20T10:00:00Z', status: 'approved' },
-  { id: 'stk-002', name: 'USB-C Charging Cable', sku: 'USB-C-CBL-01', qty: 50, cost: 3.50, price: 12.99, category: 'Accessories', addedAt: '2026-03-20T10:00:00Z', status: 'approved', isSuggestiveSale: true },
-  { id: 'stk-003', name: 'Samsung S21 Battery', sku: 'SAM-S21-BAT', qty: 8, cost: 22.00, price: 45.00, category: 'Parts', addedAt: '2026-03-20T10:00:00Z', status: 'approved' },
-  { id: 'stk-004', name: 'Tempered Glass Protector', sku: 'TG-UNIV-001', qty: 100, cost: 2.00, price: 9.99, category: 'Accessories', addedAt: '2026-03-20T10:00:00Z', status: 'approved', isSuggestiveSale: true },
-  { id: 'stk-005', name: 'iPad Air 5 Digitizer', sku: 'IPAD-A5-DIG', qty: 4, cost: 65.00, price: 129.00, category: 'Parts', addedAt: '2026-03-20T10:00:00Z', status: 'approved' },
+  { id: 'stk-001', name: 'iPhone 13 Screen', sku: 'IP13-SCR-001', qty: 12, cost: 45.00, price: 89.00, category: 'Parts', type: 'non-serialized', isRepairPart: true, isHiddenOnPOS: false, manufacturer: 'Apple OEM', minStockLevel: 5, maxStockLevel: 30, location: 'Shelf A-1', supplierId: 'sup-001', supplierName: 'Global Parts Inc.', addedAt: '2026-03-20T10:00:00Z', status: 'approved' },
+  { id: 'stk-002', name: 'USB-C Charging Cable', sku: 'USB-C-CBL-01', upc: '012345678901', qty: 50, cost: 3.50, price: 12.99, category: 'Accessories', type: 'non-serialized', isRepairPart: false, isHiddenOnPOS: false, manufacturer: 'Anker', minStockLevel: 10, maxStockLevel: 100, addedAt: '2026-03-20T10:00:00Z', status: 'approved', isSuggestiveSale: true },
+  { id: 'stk-003', name: 'Samsung S21 Battery', sku: 'SAM-S21-BAT', qty: 8, cost: 22.00, price: 45.00, category: 'Parts', type: 'non-serialized', isRepairPart: true, isHiddenOnPOS: false, manufacturer: 'Samsung OEM', minStockLevel: 3, maxStockLevel: 20, location: 'Shelf B-2', supplierId: 'sup-001', supplierName: 'Global Parts Inc.', addedAt: '2026-03-20T10:00:00Z', status: 'approved' },
+  { id: 'stk-004', name: 'Tempered Glass Protector', sku: 'TG-UNIV-001', upc: '012345678902', qty: 100, cost: 2.00, price: 9.99, category: 'Accessories', type: 'non-serialized', isRepairPart: false, isHiddenOnPOS: false, minStockLevel: 20, maxStockLevel: 200, addedAt: '2026-03-20T10:00:00Z', status: 'approved', isSuggestiveSale: true },
+  { id: 'stk-005', name: 'iPad Air 5 Digitizer', sku: 'IPAD-A5-DIG', qty: 4, cost: 65.00, price: 129.00, category: 'Parts', type: 'non-serialized', isRepairPart: true, isHiddenOnPOS: false, manufacturer: 'Apple OEM', minStockLevel: 2, maxStockLevel: 15, location: 'Shelf A-3', supplierId: 'sup-002', supplierName: 'Tech Sourcing Co.', addedAt: '2026-03-20T10:00:00Z', status: 'approved' },
+  { id: 'stk-006', name: 'iPhone 14 Pro OLED Screen', sku: 'IP14P-OLED-001', qty: 6, cost: 95.00, price: 189.00, category: 'Parts', type: 'non-serialized', isRepairPart: true, isHiddenOnPOS: false, manufacturer: 'Apple OEM', minStockLevel: 3, maxStockLevel: 15, location: 'Shelf A-2', supplierId: 'sup-001', supplierName: 'Global Parts Inc.', addedAt: '2026-03-18T10:00:00Z', status: 'approved' },
+  { id: 'stk-007', name: 'iPhone 15 Pro Refurbished', sku: 'IP15P-REF-001', qty: 2, cost: 650.00, price: 899.00, category: 'Devices', type: 'serialized', isRepairPart: false, isHiddenOnPOS: false, manufacturer: 'Apple', serialNumbers: ['IMEI-352901234567890', 'IMEI-352901234567891'], minStockLevel: 1, maxStockLevel: 5, location: 'Display Case', addedAt: '2026-03-15T10:00:00Z', status: 'approved' },
+  { id: 'stk-008', name: 'Samsung Galaxy S23 Back Glass', sku: 'SAM-S23-BG', qty: 15, cost: 18.00, price: 35.00, category: 'Parts', type: 'non-serialized', isRepairPart: true, isHiddenOnPOS: true, manufacturer: 'Samsung OEM', minStockLevel: 5, maxStockLevel: 30, location: 'Shelf B-3', supplierId: 'sup-001', supplierName: 'Global Parts Inc.', addedAt: '2026-03-10T10:00:00Z', status: 'approved' },
+  { id: 'stk-009', name: 'Lightning Cable (MFi)', sku: 'LTN-CBL-MFI', upc: '012345678903', qty: 35, cost: 5.00, price: 14.99, category: 'Accessories', type: 'non-serialized', isRepairPart: false, isHiddenOnPOS: false, minStockLevel: 10, maxStockLevel: 60, addedAt: '2026-03-08T10:00:00Z', status: 'approved' },
+  { id: 'stk-010', name: 'Wireless Charger Pad', sku: 'WC-PAD-001', upc: '012345678904', qty: 20, cost: 12.00, price: 29.99, category: 'Accessories', type: 'non-serialized', isRepairPart: false, isHiddenOnPOS: false, minStockLevel: 5, maxStockLevel: 40, addedAt: '2026-03-05T10:00:00Z', status: 'approved', isSuggestiveSale: true },
+  { id: 'stk-011', name: 'PS5 HDMI Port IC', sku: 'PS5-HDMI-IC', qty: 3, cost: 8.00, price: 25.00, category: 'Parts', type: 'non-serialized', isRepairPart: true, isHiddenOnPOS: true, manufacturer: 'Generic', minStockLevel: 2, maxStockLevel: 10, location: 'Shelf C-1', supplierId: 'sup-002', supplierName: 'Tech Sourcing Co.', addedAt: '2026-03-01T10:00:00Z', status: 'approved' },
+  { id: 'stk-012', name: 'MacBook Air M1 Battery', sku: 'MBA-M1-BAT', qty: 0, cost: 80.00, price: 159.00, category: 'Parts', type: 'non-serialized', isRepairPart: true, isHiddenOnPOS: true, manufacturer: 'Apple OEM', minStockLevel: 2, maxStockLevel: 8, location: 'Shelf A-4', supplierId: 'sup-002', supplierName: 'Tech Sourcing Co.', addedAt: '2026-02-28T10:00:00Z', status: 'approved' },
 ];
 
 const SEED_SUGGESTIVE_SALES: SuggestiveSaleItem[] = [
@@ -426,50 +473,55 @@ const SEED_REPAIR_TICKETS: RepairTicket[] = [
     ],
     comments: [
       { id: 'com1', authorId: 'op-3', authorName: 'Alex Kim', text: 'Part ordered from primary supplier. ETA 2 days.', createdAt: '2026-03-15T11:00:00Z', isInternal: true },
-      { id: 'com2', authorId: 'op-1', authorName: 'Admin', text: 'Customer called — needs phone by Friday.', createdAt: '2026-03-15T14:00:00Z', isInternal: false }
+      { id: 'com2', authorId: 'op-1', authorName: 'Sarah Johnson', text: 'Customer approved the repair cost.', createdAt: '2026-03-15T14:00:00Z', isInternal: false }
     ]
   },
   {
-    id: 'rt-2', ticketNumber: 'T-1002', customerId: 'c2', customerName: 'Sarah Jenkins', customerPhone: '(555) 987-6543',
-    device: 'MacBook Air M2', deviceCategory: 'Laptops', brand: 'Apple', model: 'Air M2', issue: 'Liquid Damage Assessment',
-    status: 'Diagnosed', priority: 'Medium', createdAt: '2026-03-16T14:30:00Z', updatedAt: '2026-03-17T09:00:00Z',
-    estimatedCost: 450, technicianId: 'op-2', technicianName: 'Jamie Torres', location: 'Shelf B-2',
-    diagnosticNotes: 'Liquid indicator triggered on logic board. Corrosion on I/O flex. Keyboard unresponsive intermittently.',
-    intakeNotes: 'Spilled coffee on keyboard yesterday. Was working intermittently.',
-    preRepairCondition: ['Liquid Indicator Triggered', 'Keyboard Intermittent', 'Power On'],
-    serialNumber: 'FVFH92X1Q6',
+    id: 'rt-2', ticketNumber: 'T-1002', customerId: 'c2', customerName: 'Sarah Jenkins', customerPhone: '(555) 045-6789',
+    device: 'MacBook Pro 14"', deviceCategory: 'Laptops', brand: 'Apple', model: 'Pro 14"', issue: 'Battery Replacement',
+    status: 'Diagnosed', priority: 'Medium', createdAt: '2026-03-16T14:30:00Z', updatedAt: '2026-03-16T14:30:00Z',
+    estimatedCost: 199, technicianId: 'op-3', technicianName: 'Alex Kim', location: 'Bench 2',
+    diagnosticNotes: 'Battery health at 42%. Cycle count: 1,200. Recommend full replacement.',
+    intakeNotes: 'Battery drains within 2 hours even with minimal usage.',
+    preRepairCondition: ['Working Display', 'Normal Boot', 'Battery Swollen'],
+    serialNumber: 'C02X12345678',
     serviceLineItems: [{ id: 'sli-2', serviceId: 's2', name: 'MacBook Air M1 Battery Replacement', price: 199.99, cost: 80.00, warrantyPeriod: '180 days' }],
     history: [
       { id: 'h4', action: 'Ticket Created', performedBy: 'System', timestamp: '2026-03-16T14:30:00Z' },
-      { id: 'h5', action: 'Assigned to Jamie Torres', performedBy: 'Admin', timestamp: '2026-03-16T14:35:00Z' },
-      { id: 'h6', action: 'Status → Diagnosed', performedBy: 'Jamie Torres', timestamp: '2026-03-17T09:00:00Z', details: 'Logic board corrosion found — needs ultrasonic cleaning and possibly replacement.' }
+      { id: 'h5', action: 'Assigned to Alex Kim', performedBy: 'Admin', timestamp: '2026-03-16T14:35:00Z' },
+      { id: 'h6', action: 'Status → Diagnosed', performedBy: 'Alex Kim', timestamp: '2026-03-16T15:30:00Z' }
     ]
   },
   {
-    id: 'rt-3', ticketNumber: 'T-1003', customerId: 'c3', customerName: 'Michael Chen', customerPhone: '(555) 456-7890',
-    device: 'iPad Pro 12.9', deviceCategory: 'Tablets', brand: 'Apple', model: 'Pro 12.9 M2', issue: 'Battery Service',
-    status: 'Awaiting Parts', priority: 'Rush', createdAt: '2026-03-18T09:15:00Z', updatedAt: '2026-03-18T15:00:00Z',
-    estimatedCost: 129, isRushJob: true, technicianId: 'op-3', technicianName: 'Alex Kim', location: 'Repair Bench 3',
-    diagnosticNotes: 'Battery health at 72%. Swelling detected — replaced immediately. OEM part on backorder.',
-    preRepairCondition: ['Battery Swelling', 'Slow Performance', 'Power On'],
-    serialNumber: 'DLXP2YFJ1G',
-    serviceLineItems: [{ id: 'sli-3', serviceId: 's3', name: 'iPad Pro 11 Charging Port Repair', price: 89.99, cost: 15.00, warrantyPeriod: '90 days' }],
+    id: 'rt-3', ticketNumber: 'T-1003', customerId: 'c3', customerName: 'Mike Rodriguez', customerPhone: '(555) 078-9012',
+    device: 'Samsung Galaxy S21', deviceCategory: 'Smartphones', brand: 'Samsung', model: 'Galaxy S21', issue: 'Battery Replacement',
+    status: 'Completed', priority: 'Low', createdAt: '2026-03-17T09:15:00Z', updatedAt: '2026-03-18T16:00:00Z',
+    estimatedCost: 79.99, actualCost: 79.99, technicianId: 'op-3', technicianName: 'Alex Kim', location: 'Completed Shelf',
+    diagnosticNotes: 'Battery health critical. Device shutting down at 40%.',
+    intakeNotes: 'Phone dies too quickly. Wants battery replacement.',
+    preRepairCondition: ['Working Display', 'Power On', 'Battery Issues'],
+    postRepairCondition: ['Working Display', 'Power On', 'Battery Health 100%'],
+    imei: '352109876543210', network: 'AT&T',
+    serviceLineItems: [{ id: 'sli-3', serviceId: 's6', name: 'Samsung S21 Battery Replacement', price: 79.99, cost: 22.00, warrantyPeriod: '90 days' }],
+    partsUsed: [{ itemId: 'stk-003', name: 'Samsung S21 Battery', price: 45.00, quantity: 1 }],
+    linkedInvoiceId: 'inv-rt3',
     history: [
-      { id: 'h7', action: 'Ticket Created', performedBy: 'System', timestamp: '2026-03-18T09:15:00Z' },
-      { id: 'h8', action: 'Status → Awaiting Parts', performedBy: 'Alex Kim', timestamp: '2026-03-18T15:00:00Z', details: 'OEM battery on backorder. ETA 3-5 business days.' }
+      { id: 'h7', action: 'Ticket Created', performedBy: 'System', timestamp: '2026-03-17T09:15:00Z' },
+      { id: 'h8', action: 'Status → Completed', performedBy: 'Alex Kim', timestamp: '2026-03-18T16:00:00Z' }
     ]
   },
   {
-    id: 'rt-4', ticketNumber: 'T-1004', customerId: 'c4', customerName: 'Emma Watson', customerPhone: '(555) 321-0987',
-    device: 'Samsung S23 Ultra', deviceCategory: 'Smartphones', brand: 'Samsung', model: 'S23 Ultra', issue: 'Back Glass Replacement',
-    status: 'Ready for Pickup', priority: 'Low', createdAt: '2026-03-19T11:20:00Z', updatedAt: '2026-03-19T16:45:00Z',
-    estimatedCost: 89, actualCost: 75, technicianId: 'op-3', technicianName: 'Alex Kim', location: 'Ready Bin 4',
-    diagnosticNotes: 'Back glass shattered. Replaced with OEM part. Adhesive cured. Wireless charging tested OK.',
-    preRepairCondition: ['Cracked Back Glass', 'Power On', 'Cosmetic Only'],
-    postRepairCondition: ['New Back Glass', 'Wireless Charging OK', 'Adhesive Cured'],
+    id: 'rt-4', ticketNumber: 'T-1004', customerId: 'c4', customerName: 'Emma Chen', customerPhone: '(555) 032-1456',
+    device: 'Samsung Galaxy S23', deviceCategory: 'Smartphones', brand: 'Samsung', model: 'Galaxy S23', issue: 'Back Glass Replacement',
+    status: 'Ready for Pickup', priority: 'Medium', createdAt: '2026-03-19T11:20:00Z', updatedAt: '2026-03-19T16:45:00Z',
+    estimatedCost: 89, actualCost: 79.99, technicianId: 'op-3', technicianName: 'Alex Kim', location: 'Pickup Counter',
+    diagnosticNotes: 'Back glass shattered. Camera module intact.',
+    intakeNotes: 'Customer sat on phone. Back glass is cracked but phone works fine.',
+    preRepairCondition: ['Shattered Back Glass', 'Working Display', 'Power On'],
+    postRepairCondition: ['New Back Glass', 'Working Display', 'Power On'],
     imei: '352567890123456', network: 'T-Mobile',
     serviceLineItems: [{ id: 'sli-4', serviceId: 's6', name: 'Samsung S21 Battery Replacement', price: 79.99, cost: 22.00, warrantyPeriod: '90 days' }],
-    partsUsed: [{ itemId: 'stk-1', name: 'Samsung S23 Back Glass OEM', price: 35.00, quantity: 1 }],
+    partsUsed: [{ itemId: 'stk-008', name: 'Samsung Galaxy S23 Back Glass', price: 35.00, quantity: 1 }],
     history: [
       { id: 'h9', action: 'Ticket Created', performedBy: 'System', timestamp: '2026-03-19T11:20:00Z' },
       { id: 'h10', action: 'Assigned to Alex Kim', performedBy: 'Admin', timestamp: '2026-03-19T11:25:00Z' },
@@ -490,6 +542,109 @@ const SEED_REPAIR_TICKETS: RepairTicket[] = [
       { id: 'h14', action: 'Ticket Created', performedBy: 'System', timestamp: '2026-03-20T10:00:00Z' }
     ]
   }
+];
+
+const SEED_SUPPLIERS: Supplier[] = [
+  { id: 'sup-001', name: 'Global Parts Inc.', contactName: 'James Wilson', email: 'orders@globalparts.com', phone: '800-555-0100', address: '123 Parts Ave, Los Angeles, CA 90001', status: 'Active', createdAt: '2025-01-15' },
+  { id: 'sup-002', name: 'Tech Sourcing Co.', contactName: 'Lisa Chen', email: 'supply@techsourcing.com', phone: '800-555-0200', address: '456 Tech Blvd, San Jose, CA 95110', website: 'https://techsourcing.com', status: 'Active', createdAt: '2025-02-20' },
+  { id: 'sup-003', name: 'Premium Displays Ltd.', contactName: 'Mark Thompson', email: 'sales@premiumdisplays.com', phone: '800-555-0300', status: 'Active', createdAt: '2025-06-10' },
+];
+
+const SEED_STOCK_MOVEMENTS: StockMovement[] = [
+  { id: 'sm-001', stockItemId: 'stk-001', stockItemName: 'iPhone 13 Screen', type: 'initial_stock', quantityChange: 12, previousQty: 0, newQty: 12, performedBy: 'System', timestamp: '2026-03-20T10:00:00Z', notes: 'Initial stock load' },
+  { id: 'sm-002', stockItemId: 'stk-003', stockItemName: 'Samsung S21 Battery', type: 'repair_consumption', quantityChange: -1, previousQty: 9, newQty: 8, referenceId: 'rt-3', referenceType: 'repair_ticket', performedBy: 'Alex Kim', timestamp: '2026-03-17T14:00:00Z', reason: 'Used in repair T-1003' },
+  { id: 'sm-003', stockItemId: 'stk-008', stockItemName: 'Samsung Galaxy S23 Back Glass', type: 'repair_consumption', quantityChange: -1, previousQty: 16, newQty: 15, referenceId: 'rt-4', referenceType: 'repair_ticket', performedBy: 'Alex Kim', timestamp: '2026-03-19T13:00:00Z', reason: 'Used in repair T-1004' },
+  { id: 'sm-004', stockItemId: 'stk-004', stockItemName: 'Tempered Glass Protector', type: 'sale', quantityChange: -1, previousQty: 101, newQty: 100, referenceId: 'ord-001', referenceType: 'order', performedBy: 'Sarah J.', timestamp: '2026-03-19T14:30:00Z', reason: 'Sold in order INV-1001' },
+  { id: 'sm-005', stockItemId: 'stk-006', stockItemName: 'iPhone 14 Pro OLED Screen', type: 'receiving', quantityChange: 6, previousQty: 0, newQty: 6, referenceId: 'po-001', referenceType: 'purchase_order', performedBy: 'Sarah Johnson', timestamp: '2026-03-18T10:00:00Z', reason: 'Received from PO-2026-001' },
+];
+
+const SEED_PURCHASE_ORDERS: PurchaseOrder[] = [
+  {
+    id: 'po-001', poNumber: 'PO-2026-001', supplierId: 'sup-001', supplierName: 'Global Parts Inc.',
+    status: 'Partially Received',
+    items: [
+      { productId: 'stk-001', name: 'iPhone 13 Screen', sku: 'IP13-SCR-001', orderedQuantity: 10, receivedQuantity: 6, costPrice: 45.00 },
+      { productId: 'stk-003', name: 'Samsung S21 Battery', sku: 'SAM-S21-BAT', orderedQuantity: 15, receivedQuantity: 0, costPrice: 22.00 },
+    ],
+    totalAmount: 780.00, createdAt: '2026-03-10', orderedAt: '2026-03-11', expectedDate: '2026-03-25', createdBy: 'Sarah Johnson',
+    notes: 'Priority order for Q2 stock replenishment'
+  },
+  {
+    id: 'po-002', poNumber: 'PO-2026-002', supplierId: 'sup-002', supplierName: 'Tech Sourcing Co.',
+    status: 'Ordered',
+    items: [
+      { productId: 'stk-012', name: 'MacBook Air M1 Battery', sku: 'MBA-M1-BAT', orderedQuantity: 5, receivedQuantity: 0, costPrice: 80.00 },
+      { productId: 'stk-005', name: 'iPad Air 5 Digitizer', sku: 'IPAD-A5-DIG', orderedQuantity: 8, receivedQuantity: 0, costPrice: 65.00 },
+    ],
+    totalAmount: 920.00, createdAt: '2026-03-18', orderedAt: '2026-03-19', expectedDate: '2026-04-01', createdBy: 'Sarah Johnson'
+  },
+  {
+    id: 'po-003', poNumber: 'PO-2026-003', supplierId: 'sup-003', supplierName: 'Premium Displays Ltd.',
+    status: 'Draft',
+    items: [
+      { productId: 'stk-006', name: 'iPhone 14 Pro OLED Screen', sku: 'IP14P-OLED-001', orderedQuantity: 10, receivedQuantity: 0, costPrice: 95.00 },
+    ],
+    totalAmount: 950.00, createdAt: '2026-03-22', expectedDate: '2026-04-05', createdBy: 'Sarah Johnson'
+  },
+];
+
+const SEED_GRNS: GoodsReceivedNote[] = [
+  {
+    id: 'grn-001', grnNumber: 'GRN-2026-001', poId: 'po-001', poNumber: 'PO-2026-001', supplierId: 'sup-001', supplierName: 'Global Parts Inc.',
+    items: [{ productId: 'stk-001', name: 'iPhone 13 Screen', orderedQty: 10, quantity: 6, costPrice: 45.00 }],
+    receivedAt: '2026-03-18', receivedBy: 'Sarah Johnson', notes: 'Partial shipment — remaining 4 screens expected next week'
+  },
+];
+
+const SEED_RMAS: RMA[] = [
+  {
+    id: 'rma-001', rmaNumber: 'RMA-2026-001', supplierId: 'sup-001', supplierName: 'Global Parts Inc.', poId: 'po-001', poNumber: 'PO-2026-001',
+    items: [{ productId: 'stk-001', name: 'iPhone 13 Screen', quantity: 1, reason: 'Defective digitizer — dead zones in upper-right corner' }],
+    status: 'Pending', createdAt: '2026-03-20', createdBy: 'Alex Kim', notes: 'Defect discovered during repair T-1001'
+  },
+];
+
+const SEED_TRANSFERS: InventoryTransfer[] = [
+  {
+    id: 'tr-001', transferNumber: 'TRF-2026-001', fromStore: 'Main Warehouse', toStore: 'Downtown Branch',
+    items: [{ productId: 'stk-001', name: 'iPhone 13 Screen', quantity: 3 }, { productId: 'stk-004', name: 'Tempered Glass Protector', quantity: 10 }],
+    status: 'Sent', requestedBy: 'Sarah Johnson', notes: 'Restocking downtown branch for weekend rush',
+    createdAt: '2026-03-19', sentAt: '2026-03-20'
+  },
+  {
+    id: 'tr-002', transferNumber: 'TRF-2026-002', fromStore: 'Downtown Branch', toStore: 'Main Warehouse',
+    items: [{ productId: 'stk-011', name: 'PS5 HDMI Port IC', quantity: 2 }],
+    status: 'Received', requestedBy: 'Mike Torres', notes: 'Consolidating repair parts to main location',
+    createdAt: '2026-03-15', sentAt: '2026-03-16', receivedAt: '2026-03-17'
+  },
+];
+
+const SEED_COUNTS: InventoryCount[] = [
+  {
+    id: 'ic-001', countNumber: 'CNT-2026-001', date: '2026-03-01', status: 'Completed',
+    items: [
+      { productId: 'stk-001', name: 'iPhone 13 Screen', sku: 'IP13-SCR-001', expected: 14, actual: 12, discrepancy: -2 },
+      { productId: 'stk-002', name: 'USB-C Charging Cable', sku: 'USB-C-CBL-01', expected: 50, actual: 50, discrepancy: 0 },
+      { productId: 'stk-004', name: 'Tempered Glass Protector', sku: 'TG-UNIV-001', expected: 102, actual: 100, discrepancy: -2 },
+    ],
+    performedBy: 'Sarah Johnson', notes: '2 iPhone screens unaccounted for — likely used in repairs without logging', completedAt: '2026-03-01T17:00:00Z'
+  },
+];
+
+const SEED_TRADE_INS: TradeInItem[] = [
+  { id: 'ti-001', customerId: 'c3', customerName: 'Mike Rodriguez', device: 'iPhone 12 64GB', imei: '352678901234567', condition: 'Good', gradeNotes: 'Minor scratches on frame, screen in great condition. Battery health 82%.', buybackPrice: 180, resalePrice: 299, status: 'In Inventory', movedToInventoryId: 'stk-007', createdAt: '2026-03-10' },
+  { id: 'ti-002', customerId: 'c4', customerName: 'Emma Chen', device: 'Samsung Galaxy S21 128GB', imei: '352789012345678', serialNumber: 'RF8N30XXXXX', condition: 'Fair', gradeNotes: 'Screen has light burn-in. Back glass intact. Battery health 68%.', buybackPrice: 120, status: 'Refurbishing', createdAt: '2026-03-18' },
+  { id: 'ti-003', customerId: 'c1', customerName: 'Alexander Wright', device: 'iPad Air 4 256GB', serialNumber: 'DMXW20XXXXX', condition: 'Excellent', gradeNotes: 'Like new. Comes with original box and accessories.', buybackPrice: 280, resalePrice: 399, status: 'Pending', createdAt: '2026-03-22' },
+];
+
+const SEED_REFURB_JOBS: RefurbishmentJob[] = [
+  {
+    id: 'rfb-001', itemId: 'ti-002', itemName: 'Samsung Galaxy S21 128GB',
+    technicianId: 'op-3', technicianName: 'Alex Kim',
+    status: 'In Progress', notes: 'Replacing battery and addressing screen burn-in. Will test all sensors after.',
+    partsUsed: [{ name: 'Samsung S21 Battery', cost: 22.00 }, { name: 'Screen Burn-in Fix Kit', cost: 15.00 }],
+    totalCost: 37.00, estimatedCompletion: '2026-03-25', createdAt: '2026-03-19'
+  },
 ];
 
 function makeDefaultTemplate(id: string, type: import('../types').TemplateType, name: string): DocumentTemplate {
@@ -538,6 +693,15 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const [loyaltyAdjustments, setLoyaltyAdjustments] = useState<LoyaltyAdjustment[]>([]);
   const [documentTemplates, setDocumentTemplates] = useState<DocumentTemplate[]>(DEFAULT_TEMPLATES);
   const [storeBranding, setStoreBranding] = useState<StoreBranding>({ logoUrl: null, logoPlacement: 'top-left' });
+  const [suppliers, setSuppliers] = useState<Supplier[]>(SEED_SUPPLIERS);
+  const [stockMovements, setStockMovements] = useState<StockMovement[]>(SEED_STOCK_MOVEMENTS);
+  const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>(SEED_PURCHASE_ORDERS);
+  const [goodsReceivedNotes, setGoodsReceivedNotes] = useState<GoodsReceivedNote[]>(SEED_GRNS);
+  const [rmas, setRmas] = useState<RMA[]>(SEED_RMAS);
+  const [inventoryTransfers, setInventoryTransfers] = useState<InventoryTransfer[]>(SEED_TRANSFERS);
+  const [inventoryCounts, setInventoryCounts] = useState<InventoryCount[]>(SEED_COUNTS);
+  const [tradeIns, setTradeIns] = useState<TradeInItem[]>(SEED_TRADE_INS);
+  const [refurbishmentJobs, setRefurbishmentJobs] = useState<RefurbishmentJob[]>(SEED_REFURB_JOBS);
 
   const updateDocumentTemplate = useCallback((id: string, updates: Partial<DocumentTemplate>) => {
     setDocumentTemplates(prev => prev.map(t => t.id === id ? { ...t, ...updates, isDefault: false, updatedAt: new Date().toISOString() } : t));
@@ -562,92 +726,33 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
     prevSessionRoleRef.current = session?.role;
   }, [session?.role]);
 
-  const addCustomer = useCallback((c: Customer) => {
-    setCustomers(prev => [...prev, c]);
-  }, []);
+  const addCustomer = useCallback((c: Customer) => { setCustomers(prev => [...prev, c]); }, []);
+  const updateCustomer = useCallback((id: string, updates: Partial<Customer>) => { setCustomers(prev => prev.map(c => c.id === id ? { ...c, ...updates } : c)); }, []);
 
-  const updateCustomer = useCallback((id: string, updates: Partial<Customer>) => {
-    setCustomers(prev => prev.map(c => c.id === id ? { ...c, ...updates } : c));
-  }, []);
-
-  const addStockItem = useCallback((item: StockItem) => {
-    setStockItems(prev => [...prev, item]);
-  }, []);
-
-  const updateStockItem = useCallback((id: string, updates: Partial<StockItem>) => {
-    setStockItems(prev => prev.map(si => si.id === id ? { ...si, ...updates } : si));
-  }, []);
+  const addStockItem = useCallback((item: StockItem) => { setStockItems(prev => [...prev, item]); }, []);
+  const updateStockItem = useCallback((id: string, updates: Partial<StockItem>) => { setStockItems(prev => prev.map(si => si.id === id ? { ...si, ...updates } : si)); }, []);
+  const deleteStockItem = useCallback((id: string) => { setStockItems(prev => prev.filter(si => si.id !== id)); }, []);
 
   const approvedStockItems = useMemo(() => stockItems.filter(si => si.status === 'approved'), [stockItems]);
   const pendingStockItems = useMemo(() => stockItems.filter(si => si.status === 'pending_approval'), [stockItems]);
 
-  const addHeldOrder = useCallback((order: HeldOrder) => {
-    setHeldOrders(prev => [...prev, order]);
-  }, []);
-
-  const removeHeldOrder = useCallback((id: string) => {
-    setHeldOrders(prev => prev.filter(o => o.id !== id));
-  }, []);
-
-  const addSuggestiveSaleItem = useCallback((item: SuggestiveSaleItem) => {
-    setSuggestiveSalesItems(prev => [...prev, item]);
-  }, []);
-
-  const removeSuggestiveSaleItem = useCallback((id: string) => {
-    setSuggestiveSalesItems(prev => prev.filter(i => i.id !== id));
-  }, []);
-
-  const setDraftCart = useCallback((draft: DraftCart) => {
-    setDraftCartState(draft);
-  }, []);
-
-  const clearDraftCart = useCallback(() => {
-    setDraftCartState(EMPTY_DRAFT);
-  }, []);
-
-  const addCompletedOrder = useCallback((order: CompletedOrder) => {
-    setCompletedOrders(prev => [order, ...prev]);
-  }, []);
-
-  const updateCompletedOrder = useCallback((id: string, updates: Partial<CompletedOrder>) => {
-    setCompletedOrders(prev => prev.map(o => o.id === id ? { ...o, ...updates } : o));
-  }, []);
-
-  const addRefundRecord = useCallback((record: RefundRecord) => {
-    setRefundRecords(prev => [record, ...prev]);
-  }, []);
-
-  const addWarrantyClaim = useCallback((claim: WarrantyClaimRecord) => {
-    setWarrantyClaims(prev => [claim, ...prev]);
-  }, []);
-
-  const updateWarrantyClaim = useCallback((id: string, updates: Partial<WarrantyClaimRecord>) => {
-    setWarrantyClaims(prev => prev.map(wc => wc.id === id ? { ...wc, ...updates } : wc));
-  }, []);
-
-  const setPosOperator = useCallback((op: POSOperator | null) => {
-    setPosOperatorState(op);
-  }, []);
-
-  const addRepairTicket = useCallback((ticket: RepairTicket) => {
-    setRepairTickets(prev => [ticket, ...prev]);
-  }, []);
-
-  const updateRepairTicket = useCallback((id: string, updates: Partial<RepairTicket>) => {
-    setRepairTickets(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t));
-  }, []);
-
-  const deleteRepairTicket = useCallback((id: string) => {
-    setRepairTickets(prev => prev.filter(t => t.id !== id));
-  }, []);
-
-  const addWarrantyRepairTicket = useCallback((ticket: RepairTicket) => {
-    setWarrantyRepairTickets(prev => [ticket, ...prev]);
-  }, []);
-
-  const updateWarrantyRepairTicket = useCallback((id: string, updates: Partial<RepairTicket>) => {
-    setWarrantyRepairTickets(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t));
-  }, []);
+  const addHeldOrder = useCallback((order: HeldOrder) => { setHeldOrders(prev => [...prev, order]); }, []);
+  const removeHeldOrder = useCallback((id: string) => { setHeldOrders(prev => prev.filter(o => o.id !== id)); }, []);
+  const addSuggestiveSaleItem = useCallback((item: SuggestiveSaleItem) => { setSuggestiveSalesItems(prev => [...prev, item]); }, []);
+  const removeSuggestiveSaleItem = useCallback((id: string) => { setSuggestiveSalesItems(prev => prev.filter(i => i.id !== id)); }, []);
+  const setDraftCart = useCallback((draft: DraftCart) => { setDraftCartState(draft); }, []);
+  const clearDraftCart = useCallback(() => { setDraftCartState(EMPTY_DRAFT); }, []);
+  const addCompletedOrder = useCallback((order: CompletedOrder) => { setCompletedOrders(prev => [order, ...prev]); }, []);
+  const updateCompletedOrder = useCallback((id: string, updates: Partial<CompletedOrder>) => { setCompletedOrders(prev => prev.map(o => o.id === id ? { ...o, ...updates } : o)); }, []);
+  const addRefundRecord = useCallback((record: RefundRecord) => { setRefundRecords(prev => [record, ...prev]); }, []);
+  const addWarrantyClaim = useCallback((claim: WarrantyClaimRecord) => { setWarrantyClaims(prev => [claim, ...prev]); }, []);
+  const updateWarrantyClaim = useCallback((id: string, updates: Partial<WarrantyClaimRecord>) => { setWarrantyClaims(prev => prev.map(wc => wc.id === id ? { ...wc, ...updates } : wc)); }, []);
+  const setPosOperator = useCallback((op: POSOperator | null) => { setPosOperatorState(op); }, []);
+  const addRepairTicket = useCallback((ticket: RepairTicket) => { setRepairTickets(prev => [ticket, ...prev]); }, []);
+  const updateRepairTicket = useCallback((id: string, updates: Partial<RepairTicket>) => { setRepairTickets(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t)); }, []);
+  const deleteRepairTicket = useCallback((id: string) => { setRepairTickets(prev => prev.filter(t => t.id !== id)); }, []);
+  const addWarrantyRepairTicket = useCallback((ticket: RepairTicket) => { setWarrantyRepairTickets(prev => [ticket, ...prev]); }, []);
+  const updateWarrantyRepairTicket = useCallback((id: string, updates: Partial<RepairTicket>) => { setWarrantyRepairTickets(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t)); }, []);
 
   const addPendingReplacement = useCallback((r: { warrantyClaimId: string; itemName: string; customerName: string; customerId: string; originalPrice: number; type?: 'replacement' | 'repair_return' }) => {
     setPendingReplacements(prev => {
@@ -655,54 +760,36 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
       return [...prev, r];
     });
   }, []);
+  const removePendingReplacement = useCallback((warrantyClaimId: string) => { setPendingReplacements(prev => prev.filter(r => r.warrantyClaimId !== warrantyClaimId)); }, []);
 
-  const removePendingReplacement = useCallback((warrantyClaimId: string) => {
-    setPendingReplacements(prev => prev.filter(r => r.warrantyClaimId !== warrantyClaimId));
-  }, []);
+  const addInvoice = useCallback((inv: Invoice) => { setInvoices(prev => [inv, ...prev]); }, []);
+  const updateInvoice = useCallback((id: string, updates: Partial<Invoice>) => { setInvoices(prev => prev.map(inv => inv.id === id ? { ...inv, ...updates } : inv)); }, []);
+  const deleteInvoice = useCallback((id: string) => { setInvoices(prev => prev.filter(inv => inv.id !== id)); }, []);
+  const addService = useCallback((s: RepairService) => { setServices(prev => [...prev, s]); }, []);
+  const updateService = useCallback((id: string, updates: Partial<RepairService>) => { setServices(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s)); }, []);
+  const deleteService = useCallback((id: string) => { setServices(prev => prev.filter(s => s.id !== id)); }, []);
+  const addServiceCategory = useCallback((c: RepairCategory) => { setServiceCategories(prev => [...prev, c]); }, []);
+  const updateServiceCategory = useCallback((id: string, updates: Partial<RepairCategory>) => { setServiceCategories(prev => prev.map(c => c.id === id ? { ...c, ...updates } : c)); }, []);
+  const deleteServiceCategory = useCallback((id: string) => { setServiceCategories(prev => prev.filter(c => c.id !== id)); }, []);
+  const updateLoyaltyConfig = useCallback((updates: Partial<LoyaltyProgramConfig>) => { setLoyaltyConfig(prev => ({ ...prev, ...updates })); }, []);
+  const addLoyaltyAdjustment = useCallback((adj: LoyaltyAdjustment) => { setLoyaltyAdjustments(prev => [adj, ...prev]); }, []);
 
-  const addInvoice = useCallback((inv: Invoice) => {
-    setInvoices(prev => [inv, ...prev]);
-  }, []);
-
-  const updateInvoice = useCallback((id: string, updates: Partial<Invoice>) => {
-    setInvoices(prev => prev.map(inv => inv.id === id ? { ...inv, ...updates } : inv));
-  }, []);
-
-  const deleteInvoice = useCallback((id: string) => {
-    setInvoices(prev => prev.filter(inv => inv.id !== id));
-  }, []);
-
-  const addService = useCallback((s: RepairService) => {
-    setServices(prev => [...prev, s]);
-  }, []);
-
-  const updateService = useCallback((id: string, updates: Partial<RepairService>) => {
-    setServices(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s));
-  }, []);
-
-  const deleteService = useCallback((id: string) => {
-    setServices(prev => prev.filter(s => s.id !== id));
-  }, []);
-
-  const addServiceCategory = useCallback((c: RepairCategory) => {
-    setServiceCategories(prev => [...prev, c]);
-  }, []);
-
-  const updateServiceCategory = useCallback((id: string, updates: Partial<RepairCategory>) => {
-    setServiceCategories(prev => prev.map(c => c.id === id ? { ...c, ...updates } : c));
-  }, []);
-
-  const deleteServiceCategory = useCallback((id: string) => {
-    setServiceCategories(prev => prev.filter(c => c.id !== id));
-  }, []);
-
-  const updateLoyaltyConfig = useCallback((updates: Partial<LoyaltyProgramConfig>) => {
-    setLoyaltyConfig(prev => ({ ...prev, ...updates }));
-  }, []);
-
-  const addLoyaltyAdjustment = useCallback((adj: LoyaltyAdjustment) => {
-    setLoyaltyAdjustments(prev => [adj, ...prev]);
-  }, []);
+  const addSupplier = useCallback((s: Supplier) => { setSuppliers(prev => [...prev, s]); }, []);
+  const updateSupplier = useCallback((id: string, updates: Partial<Supplier>) => { setSuppliers(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s)); }, []);
+  const addStockMovement = useCallback((m: StockMovement) => { setStockMovements(prev => [m, ...prev]); }, []);
+  const addPurchaseOrder = useCallback((po: PurchaseOrder) => { setPurchaseOrders(prev => [po, ...prev]); }, []);
+  const updatePurchaseOrder = useCallback((id: string, updates: Partial<PurchaseOrder>) => { setPurchaseOrders(prev => prev.map(po => po.id === id ? { ...po, ...updates } : po)); }, []);
+  const addGoodsReceivedNote = useCallback((grn: GoodsReceivedNote) => { setGoodsReceivedNotes(prev => [grn, ...prev]); }, []);
+  const addRMA = useCallback((rma: RMA) => { setRmas(prev => [rma, ...prev]); }, []);
+  const updateRMA = useCallback((id: string, updates: Partial<RMA>) => { setRmas(prev => prev.map(r => r.id === id ? { ...r, ...updates } : r)); }, []);
+  const addInventoryTransfer = useCallback((t: InventoryTransfer) => { setInventoryTransfers(prev => [t, ...prev]); }, []);
+  const updateInventoryTransfer = useCallback((id: string, updates: Partial<InventoryTransfer>) => { setInventoryTransfers(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t)); }, []);
+  const addInventoryCount = useCallback((c: InventoryCount) => { setInventoryCounts(prev => [c, ...prev]); }, []);
+  const updateInventoryCount = useCallback((id: string, updates: Partial<InventoryCount>) => { setInventoryCounts(prev => prev.map(c => c.id === id ? { ...c, ...updates } : c)); }, []);
+  const addTradeIn = useCallback((t: TradeInItem) => { setTradeIns(prev => [t, ...prev]); }, []);
+  const updateTradeIn = useCallback((id: string, updates: Partial<TradeInItem>) => { setTradeIns(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t)); }, []);
+  const addRefurbishmentJob = useCallback((j: RefurbishmentJob) => { setRefurbishmentJobs(prev => [j, ...prev]); }, []);
+  const updateRefurbishmentJob = useCallback((id: string, updates: Partial<RefurbishmentJob>) => { setRefurbishmentJobs(prev => prev.map(j => j.id === id ? { ...j, ...updates } : j)); }, []);
 
   const findDuplicateCustomers = useCallback((name: string, email: string, phone: string) => {
     const e = email.trim().toLowerCase();
@@ -725,7 +812,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   return (
     <StoreLocalStateContext.Provider value={{
       customers, addCustomer, updateCustomer,
-      stockItems, addStockItem, updateStockItem, approvedStockItems, pendingStockItems,
+      stockItems, addStockItem, updateStockItem, deleteStockItem, approvedStockItems, pendingStockItems,
       heldOrders, addHeldOrder, removeHeldOrder,
       suggestiveSalesItems, addSuggestiveSaleItem, removeSuggestiveSaleItem,
       draftCart, setDraftCart, clearDraftCart,
@@ -744,6 +831,15 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
       loyaltyAdjustments, addLoyaltyAdjustment,
       documentTemplates, updateDocumentTemplate, resetDocumentTemplate,
       storeBranding, updateStoreBranding,
+      suppliers, addSupplier, updateSupplier,
+      stockMovements, addStockMovement,
+      purchaseOrders, addPurchaseOrder, updatePurchaseOrder,
+      goodsReceivedNotes, addGoodsReceivedNote,
+      rmas, addRMA, updateRMA,
+      inventoryTransfers, addInventoryTransfer, updateInventoryTransfer,
+      inventoryCounts, addInventoryCount, updateInventoryCount,
+      tradeIns, addTradeIn, updateTradeIn,
+      refurbishmentJobs, addRefurbishmentJob, updateRefurbishmentJob,
     }}>
       {children}
     </StoreLocalStateContext.Provider>

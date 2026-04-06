@@ -1,186 +1,245 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { PurchaseOrder, GoodsReceivedNote, RMA } from '../types';
+import { useStoreLocalState } from '../context/StoreLocalState';
 
-const MOCK_POS: PurchaseOrder[] = [
-  {
-    id: 'po1',
-    poNumber: 'PO-2024-001',
-    supplierId: 'sup1',
-    supplierName: 'Global Parts Inc.',
-    status: 'Pending',
-    items: [
-      { productId: 'p1', name: 'iPhone 13 Screen', orderedQuantity: 10, receivedQuantity: 0, costPrice: 45.00 }
-    ],
-    totalAmount: 450.00,
-    createdAt: '2024-03-18',
-    expectedDate: '2024-03-25'
-  },
-  {
-    id: 'po2',
-    poNumber: 'PO-2024-002',
-    supplierId: 'sup2',
-    supplierName: 'Tech Sourcing Co.',
-    status: 'Partially Received',
-    items: [
-      { productId: 'p2', name: 'MacBook Battery', orderedQuantity: 5, receivedQuantity: 2, costPrice: 80.00 }
-    ],
-    totalAmount: 400.00,
-    createdAt: '2024-03-15',
-    expectedDate: '2024-03-22'
-  }
-];
-
-const MOCK_GRNS: GoodsReceivedNote[] = [
-  {
-    id: 'grn1',
-    grnNumber: 'GRN-2024-001',
-    poId: 'po2',
-    poNumber: 'PO-2024-002',
-    supplierName: 'Tech Sourcing Co.',
-    items: [{ productId: 'p2', name: 'MacBook Battery', quantity: 2 }],
-    receivedAt: '2024-03-19',
-    receivedBy: 'John Doe'
-  }
-];
-
-const MOCK_RMAS: RMA[] = [
-  {
-    id: 'rma1',
-    rmaNumber: 'RMA-2024-001',
-    supplierName: 'Global Parts Inc.',
-    items: [{ productId: 'p1', name: 'iPhone 13 Screen', quantity: 1, reason: 'Defective Digitizer' }],
-    status: 'Pending',
-    createdAt: '2024-03-20'
-  }
-];
+type SupplyTab = 'po' | 'grn' | 'rma' | 'suppliers';
 
 export default function SupplyChain() {
-  const [activeTab, setActiveTab] = useState<'po' | 'grn' | 'rma'>('po');
-  const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>(MOCK_POS);
-  const [grns, setGrns] = useState<GoodsReceivedNote[]>(MOCK_GRNS);
-  const [rmas, setRmas] = useState<RMA[]>(MOCK_RMAS);
+  const {
+    suppliers, addSupplier, updateSupplier,
+    purchaseOrders, addPurchaseOrder, updatePurchaseOrder,
+    goodsReceivedNotes, addGoodsReceivedNote,
+    rmas, addRMA, updateRMA,
+    approvedStockItems, updateStockItem,
+    addStockMovement,
+  } = useStoreLocalState();
+
+  const [activeTab, setActiveTab] = useState<SupplyTab>('po');
   const [searchQuery, setSearchQuery] = useState('');
   const [showCreatePO, setShowCreatePO] = useState(false);
   const [showCreateRMA, setShowCreateRMA] = useState(false);
+  const [showCreateSupplier, setShowCreateSupplier] = useState(false);
+  const [showReceiveModal, setShowReceiveModal] = useState<string | null>(null);
+  const [selectedPO, setSelectedPO] = useState<string | null>(null);
+  const [receiveQtys, setReceiveQtys] = useState<Record<string, number>>({});
 
   const getStatusColor = (status: string) => {
     switch (status) {
-      case 'Received':
-      case 'Refunded':
-      case 'Replaced':
-        return 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20';
-      case 'Partially Received':
-      case 'Shipped':
-        return 'bg-amber-500/10 text-amber-600 border-amber-500/20';
-      case 'Pending':
-        return 'bg-primary/10 text-primary border-primary/20';
-      case 'Cancelled':
-      case 'Rejected':
-        return 'bg-rose-500/10 text-rose-600 border-rose-500/20';
-      default:
-        return 'bg-slate-500/10 text-slate-600 border-slate-500/20';
+      case 'Received': case 'Refunded': case 'Replaced': case 'Active': return 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20';
+      case 'Partially Received': case 'Shipped': case 'Ordered': return 'bg-amber-500/10 text-amber-600 border-amber-500/20';
+      case 'Pending': case 'Draft': return 'bg-primary/10 text-primary border-primary/20';
+      case 'Cancelled': case 'Rejected': case 'Inactive': return 'bg-rose-500/10 text-rose-600 border-rose-500/20';
+      default: return 'bg-slate-500/10 text-slate-600 border-slate-500/20';
     }
   };
 
-  const renderPO = () => (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <div className="relative">
-          <span className="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 text-sm">search</span>
-          <input 
-            type="text" 
-            placeholder="Search POs..."
-            className="pl-11 pr-6 py-3 bg-white/80 backdrop-blur-xl rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 text-sm font-bold text-slate-900 w-64 shadow-sm"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
-        </div>
-        <button onClick={() => setShowCreatePO(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2">
-          <span className="material-symbols-outlined text-sm">add</span>
-          Create Purchase Order
-        </button>
-      </div>
+  const handleReceiveGoods = (poId: string) => {
+    const po = purchaseOrders.find(p => p.id === poId);
+    if (!po) return;
+    const grnItems: { productId: string; name: string; orderedQty: number; quantity: number; costPrice: number }[] = [];
+    let anyReceived = false;
+    const updatedPOItems = po.items.map(item => {
+      const rQty = receiveQtys[item.productId] || 0;
+      if (rQty > 0) {
+        anyReceived = true;
+        grnItems.push({ productId: item.productId, name: item.name, orderedQty: item.orderedQuantity, quantity: rQty, costPrice: item.costPrice });
+        const stockItem = approvedStockItems.find(si => si.id === item.productId);
+        if (stockItem) {
+          updateStockItem(stockItem.id, { qty: stockItem.qty + rQty });
+          addStockMovement({
+            id: `sm-${Date.now()}-${item.productId}`, stockItemId: stockItem.id, stockItemName: stockItem.name,
+            type: 'receiving', quantityChange: rQty, previousQty: stockItem.qty, newQty: stockItem.qty + rQty,
+            referenceId: po.id, referenceType: 'purchase_order',
+            performedBy: 'Current User', timestamp: new Date().toISOString(),
+            reason: `Received from ${po.poNumber}`,
+          });
+        }
+        return { ...item, receivedQuantity: item.receivedQuantity + rQty };
+      }
+      return item;
+    });
+    if (!anyReceived) return;
+    const allFullyReceived = updatedPOItems.every(i => i.receivedQuantity >= i.orderedQuantity);
+    const anyPartial = updatedPOItems.some(i => i.receivedQuantity > 0 && i.receivedQuantity < i.orderedQuantity);
+    const newStatus = allFullyReceived ? 'Received' as const : 'Partially Received' as const;
+    updatePurchaseOrder(po.id, { items: updatedPOItems, status: newStatus, ...(allFullyReceived ? { receivedDate: new Date().toISOString().split('T')[0] } : {}) });
+    addGoodsReceivedNote({
+      id: `grn-${Date.now()}`, grnNumber: `GRN-${new Date().getFullYear()}-${String(goodsReceivedNotes.length + 1).padStart(3, '0')}`,
+      poId: po.id, poNumber: po.poNumber, supplierId: po.supplierId, supplierName: po.supplierName,
+      items: grnItems, receivedAt: new Date().toISOString().split('T')[0], receivedBy: 'Current User',
+    });
+    setShowReceiveModal(null);
+    setReceiveQtys({});
+  };
 
-      <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
-        <table className="w-full text-left border-collapse">
-          <thead>
-            <tr className="border-b border-slate-100 bg-slate-50/50">
-              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">PO #</th>
-              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Supplier</th>
-              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Date</th>
-              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Expected</th>
-              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Total</th>
-              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Status</th>
-              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {purchaseOrders.map((po) => (
-              <tr key={po.id} className="hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0 group">
-                <td className="px-8 py-6 font-black text-primary text-xs">{po.poNumber}</td>
-                <td className="px-8 py-6 text-sm font-bold text-slate-900">{po.supplierName}</td>
-                <td className="px-8 py-6 text-sm font-bold text-slate-600">{po.createdAt}</td>
-                <td className="px-8 py-6 text-sm font-bold text-slate-600">{po.expectedDate || 'N/A'}</td>
-                <td className="px-8 py-6 text-right font-black text-slate-900">${po.totalAmount.toFixed(2)}</td>
-                <td className="px-8 py-6">
-                  <span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${getStatusColor(po.status)}`}>
-                    {po.status}
-                  </span>
-                </td>
-                <td className="px-8 py-6 text-right">
-                  <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl transition-colors" title="Edit">
-                      <span className="material-symbols-outlined text-sm">edit</span>
-                    </button>
-                    <button className="p-2 hover:bg-emerald-50 text-emerald-600 rounded-xl transition-colors" title="Receive Goods">
-                      <span className="material-symbols-outlined text-sm">inventory</span>
-                    </button>
-                    <button className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl transition-colors" title="Print">
-                      <span className="material-symbols-outlined text-sm">print</span>
-                    </button>
-                  </div>
-                </td>
+  const renderPO = () => {
+    const filtered = purchaseOrders.filter(po =>
+      !searchQuery || po.poNumber.toLowerCase().includes(searchQuery.toLowerCase()) || po.supplierName.toLowerCase().includes(searchQuery.toLowerCase())
+    );
+    return (
+      <div className="space-y-6">
+        <div className="flex justify-between items-center">
+          <div className="relative">
+            <span className="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 text-sm">search</span>
+            <input type="text" placeholder="Search POs..." className="pl-11 pr-6 py-3 bg-white/80 backdrop-blur-xl rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 text-sm font-bold text-slate-900 w-64 shadow-sm" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
+          </div>
+          <button onClick={() => setShowCreatePO(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2">
+            <span className="material-symbols-outlined text-sm">add</span>Create Purchase Order
+          </button>
+        </div>
+
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {[
+            { l: 'Total POs', v: purchaseOrders.length, c: 'text-primary' },
+            { l: 'Draft', v: purchaseOrders.filter(p => p.status === 'Draft').length, c: 'text-slate-500' },
+            { l: 'Ordered', v: purchaseOrders.filter(p => p.status === 'Ordered' || p.status === 'Partially Received').length, c: 'text-amber-500' },
+            { l: 'Total Value', v: `$${purchaseOrders.reduce((s, p) => s + p.totalAmount, 0).toLocaleString()}`, c: 'text-primary' },
+          ].map(card => (
+            <div key={card.l} className="bg-white/80 backdrop-blur-xl rounded-2xl border border-slate-200 p-4 shadow-sm">
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{card.l}</p>
+              <p className={`text-xl font-black ${card.c} mt-1`}>{card.v}</p>
+            </div>
+          ))}
+        </div>
+
+        <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="border-b border-slate-100 bg-slate-50/50">
+                <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">PO #</th>
+                <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Supplier</th>
+                <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Date</th>
+                <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Expected</th>
+                <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Items</th>
+                <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Total</th>
+                <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Status</th>
+                <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Actions</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {filtered.map((po) => (
+                <tr key={po.id} className="hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0 group">
+                  <td className="px-8 py-5 font-black text-primary text-xs">{po.poNumber}</td>
+                  <td className="px-6 py-5 text-sm font-bold text-slate-900">{po.supplierName}</td>
+                  <td className="px-6 py-5 text-sm font-bold text-slate-600">{po.createdAt}</td>
+                  <td className="px-6 py-5 text-sm font-bold text-slate-600">{po.expectedDate || '—'}</td>
+                  <td className="px-6 py-5 text-sm font-bold text-slate-600">{po.items.length}</td>
+                  <td className="px-6 py-5 text-right font-black text-slate-900">${po.totalAmount.toFixed(2)}</td>
+                  <td className="px-6 py-5">
+                    <span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${getStatusColor(po.status)}`}>{po.status}</span>
+                  </td>
+                  <td className="px-6 py-5 text-right">
+                    <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button onClick={() => setSelectedPO(selectedPO === po.id ? null : po.id)} className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl transition-colors" title="View Details">
+                        <span className="material-symbols-outlined text-sm">visibility</span>
+                      </button>
+                      {po.status === 'Draft' && (
+                        <button onClick={() => updatePurchaseOrder(po.id, { status: 'Ordered', orderedAt: new Date().toISOString().split('T')[0] })} className="p-2 hover:bg-primary/10 text-primary rounded-xl transition-colors" title="Send Order">
+                          <span className="material-symbols-outlined text-sm">send</span>
+                        </button>
+                      )}
+                      {(po.status === 'Ordered' || po.status === 'Partially Received') && (
+                        <button onClick={() => { setShowReceiveModal(po.id); setReceiveQtys({}); }} className="p-2 hover:bg-emerald-50 text-emerald-600 rounded-xl transition-colors" title="Receive Goods">
+                          <span className="material-symbols-outlined text-sm">inventory</span>
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {filtered.length === 0 && (
+                <tr><td colSpan={8} className="px-8 py-12 text-center text-sm font-bold text-slate-400">No purchase orders found</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {selectedPO && (() => {
+          const po = purchaseOrders.find(p => p.id === selectedPO);
+          if (!po) return null;
+          const poGrns = goodsReceivedNotes.filter(g => g.poId === po.id);
+          return (
+            <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm space-y-6">
+              <div className="flex justify-between items-start">
+                <div>
+                  <h3 className="text-xl font-black text-primary">{po.poNumber}</h3>
+                  <p className="text-sm text-slate-500">{po.supplierName} · Created: {po.createdAt}{po.orderedAt ? ` · Ordered: ${po.orderedAt}` : ''}</p>
+                  {po.notes && <p className="text-xs text-slate-400 mt-1 italic">{po.notes}</p>}
+                </div>
+                <button onClick={() => setSelectedPO(null)} className="p-2 hover:bg-slate-100 rounded-xl text-slate-400"><span className="material-symbols-outlined text-sm">close</span></button>
+              </div>
+              <div>
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Line Items</p>
+                <div className="space-y-2">
+                  {po.items.map((item, i) => (
+                    <div key={i} className="flex items-center justify-between p-4 bg-slate-50 rounded-xl">
+                      <div>
+                        <p className="font-bold text-sm text-slate-900">{item.name}</p>
+                        {item.sku && <p className="text-[10px] text-slate-400 font-mono">{item.sku}</p>}
+                      </div>
+                      <div className="text-right">
+                        <p className="text-sm font-bold text-slate-700">{item.receivedQuantity}/{item.orderedQuantity} received</p>
+                        <p className="text-xs text-slate-400">${item.costPrice.toFixed(2)} ea</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              {poGrns.length > 0 && (
+                <div>
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Receiving History</p>
+                  <div className="space-y-2">
+                    {poGrns.map(grn => (
+                      <div key={grn.id} className="flex items-center justify-between p-3 bg-emerald-50 rounded-xl border border-emerald-100">
+                        <div>
+                          <p className="font-bold text-xs text-emerald-800">{grn.grnNumber}</p>
+                          <p className="text-[10px] text-emerald-600">{grn.items.map(i => `${i.name} x${i.quantity}`).join(', ')}</p>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-xs text-emerald-700">{grn.receivedAt}</p>
+                          <p className="text-[10px] text-emerald-500">by {grn.receivedBy}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </motion.div>
+          );
+        })()}
       </div>
-    </div>
-  );
+    );
+  };
 
   const renderGRN = () => (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h2 className="text-2xl font-black text-primary tracking-tight">Goods Received Notes</h2>
-      </div>
+      <h2 className="text-2xl font-black text-primary tracking-tight">Goods Received Notes</h2>
       <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
         <table className="w-full text-left border-collapse">
           <thead>
             <tr className="border-b border-slate-100 bg-slate-50/50">
-              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">GRN #</th>
-              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">PO Reference</th>
-              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Supplier</th>
-              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Received At</th>
-              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Received By</th>
-              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Actions</th>
+              <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">GRN #</th>
+              <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">PO Reference</th>
+              <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Supplier</th>
+              <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Items</th>
+              <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Received At</th>
+              <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Received By</th>
             </tr>
           </thead>
           <tbody>
-            {grns.map((grn) => (
-              <tr key={grn.id} className="hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0 group">
-                <td className="px-8 py-6 font-black text-primary text-xs">{grn.grnNumber}</td>
-                <td className="px-8 py-6 text-sm font-bold text-primary">{grn.poNumber}</td>
-                <td className="px-8 py-6 text-sm font-bold text-slate-900">{grn.supplierName}</td>
-                <td className="px-8 py-6 text-sm font-bold text-slate-600">{grn.receivedAt}</td>
-                <td className="px-8 py-6 text-sm font-bold text-slate-600">{grn.receivedBy}</td>
-                <td className="px-8 py-6 text-right">
-                  <button className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl transition-colors" title="View Details">
-                    <span className="material-symbols-outlined text-sm">visibility</span>
-                  </button>
-                </td>
+            {goodsReceivedNotes.map((grn) => (
+              <tr key={grn.id} className="hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0">
+                <td className="px-8 py-5 font-black text-primary text-xs">{grn.grnNumber}</td>
+                <td className="px-6 py-5 text-sm font-bold text-primary">{grn.poNumber}</td>
+                <td className="px-6 py-5 text-sm font-bold text-slate-900">{grn.supplierName}</td>
+                <td className="px-6 py-5 text-sm font-bold text-slate-600">{grn.items.map(i => `${i.name} x${i.quantity}`).join(', ')}</td>
+                <td className="px-6 py-5 text-sm font-bold text-slate-600">{grn.receivedAt}</td>
+                <td className="px-6 py-5 text-sm font-bold text-slate-600">{grn.receivedBy}</td>
               </tr>
             ))}
+            {goodsReceivedNotes.length === 0 && (
+              <tr><td colSpan={6} className="px-8 py-12 text-center text-sm font-bold text-slate-400">No goods received notes</td></tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -192,50 +251,102 @@ export default function SupplyChain() {
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-black text-primary tracking-tight">RMA Management</h2>
         <button onClick={() => setShowCreateRMA(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2">
-          <span className="material-symbols-outlined text-sm">add</span>
-          Create RMA
+          <span className="material-symbols-outlined text-sm">add</span>Create RMA
         </button>
       </div>
       <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
         <table className="w-full text-left border-collapse">
           <thead>
             <tr className="border-b border-slate-100 bg-slate-50/50">
-              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">RMA #</th>
-              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Supplier</th>
-              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Items</th>
-              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Date Created</th>
-              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Status</th>
-              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Actions</th>
+              <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">RMA #</th>
+              <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Supplier</th>
+              <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">PO Ref</th>
+              <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Items</th>
+              <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Date</th>
+              <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Status</th>
+              <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
             {rmas.map((rma) => (
               <tr key={rma.id} className="hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0 group">
-                <td className="px-8 py-6 font-black text-primary text-xs">{rma.rmaNumber}</td>
-                <td className="px-8 py-6 text-sm font-bold text-slate-900">{rma.supplierName}</td>
-                <td className="px-8 py-6 text-sm font-bold text-slate-600">
-                  {rma.items.length} {rma.items.length === 1 ? 'Item' : 'Items'}
-                </td>
-                <td className="px-8 py-6 text-sm font-bold text-slate-600">{rma.createdAt}</td>
-                <td className="px-8 py-6">
-                  <span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${getStatusColor(rma.status)}`}>
-                    {rma.status}
-                  </span>
-                </td>
-                <td className="px-8 py-6 text-right">
-                  <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl transition-colors" title="Edit">
-                      <span className="material-symbols-outlined text-sm">edit</span>
-                    </button>
-                    <button className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl transition-colors" title="Print Label">
-                      <span className="material-symbols-outlined text-sm">print</span>
-                    </button>
+                <td className="px-8 py-5 font-black text-primary text-xs">{rma.rmaNumber}</td>
+                <td className="px-6 py-5 text-sm font-bold text-slate-900">{rma.supplierName}</td>
+                <td className="px-6 py-5 text-sm font-bold text-primary">{rma.poNumber || '—'}</td>
+                <td className="px-6 py-5 text-sm font-bold text-slate-600">{rma.items.length} item{rma.items.length !== 1 ? 's' : ''}</td>
+                <td className="px-6 py-5 text-sm font-bold text-slate-600">{rma.createdAt}</td>
+                <td className="px-6 py-5"><span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${getStatusColor(rma.status)}`}>{rma.status}</span></td>
+                <td className="px-6 py-5 text-right">
+                  <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    {rma.status === 'Pending' && (
+                      <button onClick={() => updateRMA(rma.id, { status: 'Shipped' })} className="px-3 py-1.5 bg-amber-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-amber-600">Ship</button>
+                    )}
+                    {rma.status === 'Shipped' && (
+                      <>
+                        <button onClick={() => {
+                          updateRMA(rma.id, { status: 'Refunded' });
+                          rma.items.forEach(item => {
+                            addStockMovement({
+                              id: `sm-rma-${Date.now()}-${item.productId}`, stockItemId: item.productId, stockItemName: item.name,
+                              type: 'rma_return', quantityChange: -item.quantity, previousQty: 0, newQty: 0,
+                              referenceId: rma.id, referenceType: 'rma',
+                              performedBy: 'Current User', timestamp: new Date().toISOString(),
+                              reason: `RMA ${rma.rmaNumber} — ${item.reason}`,
+                            });
+                          });
+                        }} className="px-3 py-1.5 bg-emerald-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-emerald-600">Refunded</button>
+                        <button onClick={() => updateRMA(rma.id, { status: 'Replaced' })} className="px-3 py-1.5 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90">Replaced</button>
+                      </>
+                    )}
                   </div>
                 </td>
               </tr>
             ))}
+            {rmas.length === 0 && (
+              <tr><td colSpan={7} className="px-8 py-12 text-center text-sm font-bold text-slate-400">No RMAs</td></tr>
+            )}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+
+  const renderSuppliers = () => (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-black text-primary tracking-tight">Supplier Directory</h2>
+        <button onClick={() => setShowCreateSupplier(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2">
+          <span className="material-symbols-outlined text-sm">add</span>Add Supplier
+        </button>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {suppliers.map(sup => (
+          <div key={sup.id} className="bg-white/80 backdrop-blur-xl p-6 rounded-[2.5rem] border border-slate-200 shadow-sm hover:shadow-md transition-all">
+            <div className="flex justify-between items-start mb-4">
+              <div>
+                <h3 className="text-lg font-black text-primary tracking-tight">{sup.name}</h3>
+                {sup.contactName && <p className="text-xs text-slate-500 font-bold">{sup.contactName}</p>}
+              </div>
+              <span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${getStatusColor(sup.status)}`}>{sup.status}</span>
+            </div>
+            <div className="space-y-2 text-sm">
+              {sup.email && <div className="flex items-center gap-2 text-slate-600"><span className="material-symbols-outlined text-sm text-slate-400">email</span><span className="font-bold">{sup.email}</span></div>}
+              {sup.phone && <div className="flex items-center gap-2 text-slate-600"><span className="material-symbols-outlined text-sm text-slate-400">phone</span><span className="font-bold">{sup.phone}</span></div>}
+              {sup.website && <div className="flex items-center gap-2 text-slate-600"><span className="material-symbols-outlined text-sm text-slate-400">language</span><span className="font-bold">{sup.website}</span></div>}
+            </div>
+            <div className="flex gap-2 mt-4 pt-4 border-t border-slate-100">
+              <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">POs: {purchaseOrders.filter(p => p.supplierId === sup.id).length}</span>
+              <span className="text-slate-200">·</span>
+              <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">RMAs: {rmas.filter(r => r.supplierId === sup.id).length}</span>
+            </div>
+          </div>
+        ))}
+        {suppliers.length === 0 && (
+          <div className="col-span-full flex flex-col items-center py-12">
+            <span className="material-symbols-outlined text-4xl text-slate-300 mb-2">business</span>
+            <p className="text-sm font-bold text-slate-400">No suppliers added yet</p>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -249,111 +360,248 @@ export default function SupplyChain() {
         </div>
         <div className="flex items-center gap-2 bg-white/80 backdrop-blur-xl p-1.5 rounded-2xl border border-slate-200 shadow-sm">
           {[
-            { id: 'po', label: 'Purchase Orders', icon: 'shopping_bag' },
-            { id: 'grn', label: 'Received Notes', icon: 'inventory' },
-            { id: 'rma', label: 'RMA', icon: 'assignment_return' }
+            { id: 'po' as SupplyTab, label: 'Purchase Orders', icon: 'shopping_bag' },
+            { id: 'grn' as SupplyTab, label: 'Received Notes', icon: 'inventory' },
+            { id: 'rma' as SupplyTab, label: 'RMA', icon: 'assignment_return' },
+            { id: 'suppliers' as SupplyTab, label: 'Suppliers', icon: 'business' },
           ].map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id as any)}
-              className={`flex items-center gap-2 px-6 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${
-                activeTab === tab.id 
-                  ? 'bg-primary text-white shadow-lg shadow-primary/20' 
-                  : 'text-slate-400 hover:text-primary hover:bg-slate-50'
-              }`}
-            >
-              <span className="material-symbols-outlined text-sm">{tab.icon}</span>
-              {tab.label}
+            <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${activeTab === tab.id ? 'bg-primary text-white shadow-lg shadow-primary/20' : 'text-slate-400 hover:text-primary hover:bg-slate-50'}`}>
+              <span className="material-symbols-outlined text-sm">{tab.icon}</span>{tab.label}
             </button>
           ))}
         </div>
       </header>
 
       <AnimatePresence mode="wait">
-        <motion.div
-          key={activeTab}
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -10 }}
-          transition={{ duration: 0.2 }}
-        >
+        <motion.div key={activeTab} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.2 }}>
           {activeTab === 'po' && renderPO()}
           {activeTab === 'grn' && renderGRN()}
           {activeTab === 'rma' && renderRMA()}
+          {activeTab === 'suppliers' && renderSuppliers()}
         </motion.div>
       </AnimatePresence>
 
       <AnimatePresence>
+        {/* Receive Goods Modal */}
+        {showReceiveModal && (() => {
+          const po = purchaseOrders.find(p => p.id === showReceiveModal);
+          if (!po) return null;
+          return (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" onClick={() => setShowReceiveModal(null)} />
+              <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative w-full max-w-lg bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden">
+                <div className="p-8 border-b border-slate-100 bg-slate-50/50">
+                  <h3 className="text-2xl font-black text-primary tracking-tight">Receive Goods</h3>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">{po.poNumber} · {po.supplierName}</p>
+                </div>
+                <div className="p-8 space-y-4">
+                  {po.items.filter(i => i.receivedQuantity < i.orderedQuantity).map(item => (
+                    <div key={item.productId} className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl">
+                      <div>
+                        <p className="font-bold text-sm text-slate-900">{item.name}</p>
+                        <p className="text-[10px] text-slate-400">Ordered: {item.orderedQuantity} · Received: {item.receivedQuantity} · Remaining: {item.orderedQuantity - item.receivedQuantity}</p>
+                      </div>
+                      <input type="number" min="0" max={item.orderedQuantity - item.receivedQuantity} value={receiveQtys[item.productId] || ''} onChange={(e) => setReceiveQtys({ ...receiveQtys, [item.productId]: parseInt(e.target.value) || 0 })} className="w-20 px-3 py-2 bg-white border border-slate-200 rounded-xl text-center font-bold" placeholder="0" />
+                    </div>
+                  ))}
+                  <div className="flex gap-4 pt-4">
+                    <button onClick={() => setShowReceiveModal(null)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-all">Cancel</button>
+                    <button onClick={() => handleReceiveGoods(po.id)} className="flex-1 py-4 bg-emerald-500 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-emerald-500/20 active:scale-95 transition-all">Receive & Update Stock</button>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          );
+        })()}
+
+        {/* Create PO Modal */}
         {showCreatePO && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" onClick={() => setShowCreatePO(false)} />
             <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative w-full max-w-lg bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden">
               <div className="p-8 border-b border-slate-100 bg-slate-50/50">
                 <h3 className="text-2xl font-black text-primary tracking-tight">Create Purchase Order</h3>
-                <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Supply Chain Management</p>
               </div>
-              <div className="p-8 space-y-6">
-                <div className="space-y-2">
+              <form className="p-8 space-y-5" onSubmit={(e) => {
+                e.preventDefault();
+                const fd = new FormData(e.currentTarget);
+                const sup = suppliers.find(s => s.id === fd.get('supplier'));
+                if (!sup) return;
+                const itemId = fd.get('item') as string;
+                const item = approvedStockItems.find(i => i.id === itemId);
+                if (!item) return;
+                const qty = parseInt(fd.get('qty') as string) || 1;
+                addPurchaseOrder({
+                  id: `po-${Date.now()}`, poNumber: `PO-${new Date().getFullYear()}-${String(purchaseOrders.length + 1).padStart(3, '0')}`,
+                  supplierId: sup.id, supplierName: sup.name, status: 'Draft',
+                  items: [{ productId: item.id, name: item.name, sku: item.sku, orderedQuantity: qty, receivedQuantity: 0, costPrice: item.cost }],
+                  totalAmount: item.cost * qty, createdAt: new Date().toISOString().split('T')[0],
+                  expectedDate: fd.get('expected') as string || undefined,
+                  notes: fd.get('notes') as string || undefined,
+                  createdBy: 'Current User',
+                });
+                setShowCreatePO(false);
+              }}>
+                <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Supplier</label>
-                  <select className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700">
-                    <option>Select Supplier...</option>
-                    <option>Global Parts Inc.</option>
-                    <option>Tech Sourcing Co.</option>
-                    <option>Premium Displays Ltd.</option>
+                  <select name="supplier" required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1">
+                    <option value="">Select Supplier...</option>
+                    {suppliers.filter(s => s.status === 'Active').map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                   </select>
                 </div>
-                <div className="space-y-2">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Expected Delivery</label>
-                  <input type="date" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700" />
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Item to Order</label>
+                  <select name="item" required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1">
+                    <option value="">Select Item...</option>
+                    {approvedStockItems.map(i => <option key={i.id} value={i.id}>{i.name} (${i.cost.toFixed(2)} ea)</option>)}
+                  </select>
                 </div>
-                <div className="space-y-2">
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Quantity</label>
+                    <input name="qty" type="number" min="1" defaultValue="1" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Expected Delivery</label>
+                    <input name="expected" type="date" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1" />
+                  </div>
+                </div>
+                <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Notes</label>
-                  <textarea className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 h-24" placeholder="Order notes..." />
+                  <textarea name="notes" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 h-20 mt-1" placeholder="Order notes..." />
                 </div>
-                <div className="flex gap-4 pt-4">
-                  <button onClick={() => setShowCreatePO(false)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-all">Cancel</button>
-                  <button onClick={() => setShowCreatePO(false)} className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 active:scale-95 transition-all">Create PO</button>
+                <div className="flex gap-4 pt-2">
+                  <button type="button" onClick={() => setShowCreatePO(false)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-all">Cancel</button>
+                  <button type="submit" className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 active:scale-95 transition-all">Create PO</button>
                 </div>
-              </div>
+              </form>
             </motion.div>
           </div>
         )}
 
+        {/* Create RMA Modal */}
         {showCreateRMA && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" onClick={() => setShowCreateRMA(false)} />
             <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative w-full max-w-lg bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden">
               <div className="p-8 border-b border-slate-100 bg-slate-50/50">
                 <h3 className="text-2xl font-black text-primary tracking-tight">Create RMA</h3>
-                <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Return Merchandise Authorization</p>
               </div>
-              <div className="p-8 space-y-6">
-                <div className="space-y-2">
+              <form className="p-8 space-y-5" onSubmit={(e) => {
+                e.preventDefault();
+                const fd = new FormData(e.currentTarget);
+                const sup = suppliers.find(s => s.id === fd.get('supplier'));
+                if (!sup) return;
+                const itemName = fd.get('item') as string;
+                const reason = fd.get('reason') as string;
+                const poRef = fd.get('poRef') as string;
+                const po = purchaseOrders.find(p => p.poNumber === poRef);
+                addRMA({
+                  id: `rma-${Date.now()}`, rmaNumber: `RMA-${new Date().getFullYear()}-${String(rmas.length + 1).padStart(3, '0')}`,
+                  supplierId: sup.id, supplierName: sup.name,
+                  poId: po?.id, poNumber: po?.poNumber,
+                  items: [{ productId: '', name: itemName, quantity: parseInt(fd.get('qty') as string) || 1, reason }],
+                  status: 'Pending', createdAt: new Date().toISOString().split('T')[0],
+                  createdBy: 'Current User', notes: fd.get('notes') as string || undefined,
+                });
+                setShowCreateRMA(false);
+              }}>
+                <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Supplier</label>
-                  <select className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700">
-                    <option>Select Supplier...</option>
-                    <option>Global Parts Inc.</option>
-                    <option>Tech Sourcing Co.</option>
+                  <select name="supplier" required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1">
+                    <option value="">Select Supplier...</option>
+                    {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                   </select>
                 </div>
-                <div className="space-y-2">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Item to Return</label>
-                  <input className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700" placeholder="Product name or SKU..." />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Reason for Return</label>
-                  <select className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700">
-                    <option>Defective</option>
-                    <option>Wrong Item</option>
-                    <option>Quality Issue</option>
-                    <option>Damaged in Transit</option>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">PO Reference (Optional)</label>
+                  <select name="poRef" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1">
+                    <option value="">None</option>
+                    {purchaseOrders.map(po => <option key={po.id} value={po.poNumber}>{po.poNumber}</option>)}
                   </select>
                 </div>
-                <div className="flex gap-4 pt-4">
-                  <button onClick={() => setShowCreateRMA(false)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-all">Cancel</button>
-                  <button onClick={() => setShowCreateRMA(false)} className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 active:scale-95 transition-all">Submit RMA</button>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Item</label>
+                    <input name="item" required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1" placeholder="Product name..." />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Quantity</label>
+                    <input name="qty" type="number" min="1" defaultValue="1" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1" />
+                  </div>
                 </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Reason</label>
+                  <select name="reason" required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1">
+                    <option>Defective</option><option>Wrong Item</option><option>Quality Issue</option><option>Damaged in Transit</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Notes</label>
+                  <textarea name="notes" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 h-20 mt-1" />
+                </div>
+                <div className="flex gap-4 pt-2">
+                  <button type="button" onClick={() => setShowCreateRMA(false)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-all">Cancel</button>
+                  <button type="submit" className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 active:scale-95 transition-all">Submit RMA</button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Create Supplier Modal */}
+        {showCreateSupplier && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" onClick={() => setShowCreateSupplier(false)} />
+            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative w-full max-w-lg bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden">
+              <div className="p-8 border-b border-slate-100 bg-slate-50/50">
+                <h3 className="text-2xl font-black text-primary tracking-tight">Add Supplier</h3>
               </div>
+              <form className="p-8 space-y-5" onSubmit={(e) => {
+                e.preventDefault();
+                const fd = new FormData(e.currentTarget);
+                addSupplier({
+                  id: `sup-${Date.now()}`, name: fd.get('name') as string,
+                  contactName: fd.get('contact') as string || undefined,
+                  email: fd.get('email') as string || undefined,
+                  phone: fd.get('phone') as string || undefined,
+                  address: fd.get('address') as string || undefined,
+                  website: fd.get('website') as string || undefined,
+                  status: 'Active', createdAt: new Date().toISOString().split('T')[0],
+                });
+                setShowCreateSupplier(false);
+              }}>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Company Name *</label>
+                  <input name="name" required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1" placeholder="Supplier name..." />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Contact Name</label>
+                    <input name="contact" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Phone</label>
+                    <input name="phone" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1" />
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Email</label>
+                  <input name="email" type="email" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1" />
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Address</label>
+                  <input name="address" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1" />
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Website</label>
+                  <input name="website" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1" placeholder="https://..." />
+                </div>
+                <div className="flex gap-4 pt-2">
+                  <button type="button" onClick={() => setShowCreateSupplier(false)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-all">Cancel</button>
+                  <button type="submit" className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 active:scale-95 transition-all">Add Supplier</button>
+                </div>
+              </form>
             </motion.div>
           </div>
         )}
