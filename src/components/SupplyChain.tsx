@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
-import { PurchaseOrder, RMA } from '../types';
+import { PurchaseOrder, RMA, SupplierRefundEntry } from '../types';
 
 type SupplyTab = 'po' | 'grn' | 'rma' | 'suppliers';
 
@@ -14,6 +14,7 @@ export default function SupplyChain() {
     rmas, addRMA, updateRMA,
     approvedStockItems, updateStockItem,
     addStockMovement,
+    supplierRefundEntries, addSupplierRefundEntry,
   } = useStoreLocalState();
   const { checkSubPermission } = useAccess();
   const canManagePOs = checkSubPermission('manage_purchase_orders');
@@ -50,11 +51,15 @@ export default function SupplyChain() {
   const [rmaReplacementItems, setRmaReplacementItems] = useState<{ productId: string; name: string; quantity: number }[]>([]);
 
   const [editingPendingRMA, setEditingPendingRMA] = useState<string | null>(null);
+  const [rmaRefundTax, setRmaRefundTax] = useState('');
+  const [rmaRefundMethod, setRmaRefundMethod] = useState('Credit Note');
+  const [rmaRefundNotes, setRmaRefundNotes] = useState('');
+  const [rmaDetailTab, setRmaDetailTab] = useState<'overview' | 'items' | 'resolution' | 'finance'>('overview');
 
   const getStatusColor = (status: string) => {
     switch (status) {
-      case 'Received': case 'Refunded': case 'Replaced': case 'Active': return 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20';
-      case 'Partially Received': case 'Shipped': case 'Ordered': return 'bg-amber-500/10 text-amber-600 border-amber-500/20';
+      case 'Received': case 'Refunded': case 'Replaced': case 'Active': case 'Closed': return 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20';
+      case 'Partially Received': case 'Shipped': case 'Ordered': case 'Partially Resolved': return 'bg-amber-500/10 text-amber-600 border-amber-500/20';
       case 'Pending': case 'Draft': return 'bg-primary/10 text-primary border-primary/20';
       case 'Cancelled': case 'Rejected': case 'Inactive': return 'bg-rose-500/10 text-rose-600 border-rose-500/20';
       default: return 'bg-slate-500/10 text-slate-600 border-slate-500/20';
@@ -289,7 +294,7 @@ export default function SupplyChain() {
           <tbody>
             {rmas.map((rma) => (
               <tr key={rma.id} className="hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0 group">
-                <td className="px-8 py-5"><button onClick={() => setSelectedRMA(rma)} className="font-black text-primary text-xs hover:underline">{rma.rmaNumber}</button></td>
+                <td className="px-8 py-5"><button onClick={() => { setSelectedRMA(rma); setRmaDetailTab('overview'); }} className="font-black text-primary text-xs hover:underline">{rma.rmaNumber}</button></td>
                 <td className="px-6 py-5 text-sm font-bold text-slate-900">{rma.supplierName}</td>
                 <td className="px-6 py-5 text-sm font-bold text-primary">{rma.poNumber || '—'}</td>
                 <td className="px-6 py-5 text-sm font-bold text-slate-600">{rma.items.length} item{rma.items.length !== 1 ? 's' : ''}</td>
@@ -305,10 +310,10 @@ export default function SupplyChain() {
                         <button onClick={() => setRmaConfirmAction({ id: rma.id, action: 'ship', label: `Ship RMA ${rma.rmaNumber}?` })} className="px-3 py-1.5 bg-amber-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-amber-600">Ship</button>
                       </>
                     )}
-                    {canManageRMAs && rma.status === 'Shipped' && (
+                    {canManageRMAs && (rma.status === 'Shipped' || rma.status === 'Partially Resolved') && (
                       <>
-                        <button onClick={() => { setRmaRefundAmount(rma.items.reduce((s, i) => s + i.quantity * 10, 0).toString()); setRmaConfirmAction({ id: rma.id, action: 'refund', label: `Confirm refund for ${rma.rmaNumber}?` }); }} className="px-3 py-1.5 bg-emerald-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-emerald-600">Refunded</button>
-                        <button onClick={() => { setRmaReplacementItems(rma.items.map(i => ({ productId: i.productId, name: i.name, quantity: i.quantity }))); setRmaConfirmAction({ id: rma.id, action: 'replace', label: `Confirm replacement for ${rma.rmaNumber}?` }); }} className="px-3 py-1.5 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90">Replaced</button>
+                        <button onClick={() => { const openTotal = rma.items.reduce((s, i) => s + (i.quantity - (i.refundedQty || 0) - (i.replacedQty || 0)) * 10, 0); setRmaRefundAmount(openTotal.toString()); setRmaRefundTax(''); setRmaRefundMethod('Credit Note'); setRmaRefundNotes(''); setRmaConfirmAction({ id: rma.id, action: 'refund', label: `Confirm refund for ${rma.rmaNumber}?` }); }} className="px-3 py-1.5 bg-emerald-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-emerald-600">Refunded</button>
+                        <button onClick={() => { setRmaReplacementItems(rma.items.map(i => ({ productId: i.productId, name: i.name, quantity: Math.max(0, i.quantity - (i.refundedQty || 0) - (i.replacedQty || 0)) }))); setRmaConfirmAction({ id: rma.id, action: 'replace', label: `Confirm replacement for ${rma.rmaNumber}?` }); }} className="px-3 py-1.5 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90">Replaced</button>
                       </>
                     )}
                   </div>
@@ -551,43 +556,109 @@ export default function SupplyChain() {
           </div>
         )}
 
-        {selectedRMA && (
+        {selectedRMA && (() => {
+          const liveRMA = rmas.find(r => r.id === selectedRMA.id) || selectedRMA;
+          const rmaRefunds = supplierRefundEntries.filter(e => e.rmaId === liveRMA.id);
+          return (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" onClick={() => setSelectedRMA(null)} />
-            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative w-full max-w-lg bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden">
-              <div className="p-8 border-b border-slate-100 bg-slate-50/50 flex justify-between items-start">
+            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative w-full max-w-2xl bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden max-h-[90vh] flex flex-col">
+              <div className="p-8 border-b border-slate-100 bg-slate-50/50 flex justify-between items-start shrink-0">
                 <div>
-                  <h3 className="text-2xl font-black text-primary tracking-tight">{selectedRMA.rmaNumber}</h3>
-                  <p className="text-sm text-slate-500">{selectedRMA.supplierName}{selectedRMA.poNumber ? ` · PO: ${selectedRMA.poNumber}` : ''}</p>
-                  <span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border mt-2 inline-block ${getStatusColor(selectedRMA.status)}`}>{selectedRMA.status}</span>
+                  <h3 className="text-2xl font-black text-primary tracking-tight">{liveRMA.rmaNumber}</h3>
+                  <p className="text-sm text-slate-500">{liveRMA.supplierName}{liveRMA.poNumber ? ` · PO: ${liveRMA.poNumber}` : ''}</p>
+                  <span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border mt-2 inline-block ${getStatusColor(liveRMA.status)}`}>{liveRMA.status}</span>
                 </div>
                 <button onClick={() => setSelectedRMA(null)} className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
               </div>
-              <div className="p-8 space-y-4">
-                {selectedRMA.notes && <p className="text-xs text-slate-400 italic">{selectedRMA.notes}</p>}
-                {selectedRMA.refundAmount && (
-                  <div className="bg-emerald-50 rounded-xl p-3 border border-emerald-100">
-                    <p className="text-[10px] font-black text-emerald-600 uppercase">Refund Amount</p>
-                    <p className="text-lg font-black text-emerald-700">${selectedRMA.refundAmount.toFixed(2)}</p>
+              <div className="flex border-b border-slate-100 shrink-0">
+                {(['overview', 'items', 'resolution', 'finance'] as const).map(tab => (
+                  <button key={tab} onClick={() => setRmaDetailTab(tab)} className={`flex-1 py-3 text-[10px] font-black uppercase tracking-widest transition-colors ${rmaDetailTab === tab ? 'text-primary border-b-2 border-primary' : 'text-slate-400 hover:text-slate-600'}`}>{tab}</button>
+                ))}
+              </div>
+              <div className="p-8 space-y-4 overflow-y-auto flex-1">
+                {rmaDetailTab === 'overview' && (
+                  <>
+                    <div className="grid grid-cols-2 gap-3 text-xs">
+                      <div className="bg-slate-50 rounded-xl p-3"><p className="text-[10px] font-black text-slate-400 uppercase">Created</p><p className="font-bold">{liveRMA.createdAt}</p></div>
+                      <div className="bg-slate-50 rounded-xl p-3"><p className="text-[10px] font-black text-slate-400 uppercase">Created By</p><p className="font-bold">{liveRMA.createdBy || '—'}</p></div>
+                      {liveRMA.trackingNumber && <div className="bg-slate-50 rounded-xl p-3"><p className="text-[10px] font-black text-slate-400 uppercase">Tracking</p><p className="font-bold">{liveRMA.trackingNumber}</p></div>}
+                      <div className="bg-slate-50 rounded-xl p-3"><p className="text-[10px] font-black text-slate-400 uppercase">Total Items</p><p className="font-bold">{liveRMA.items.reduce((s, i) => s + i.quantity, 0)}</p></div>
+                    </div>
+                    {liveRMA.notes && <div className="bg-slate-50 rounded-xl p-3"><p className="text-[10px] font-black text-slate-400 uppercase mb-1">Notes</p><p className="text-xs text-slate-600 italic">{liveRMA.notes}</p></div>}
+                    {liveRMA.refundAmount != null && liveRMA.refundAmount > 0 && (
+                      <div className="bg-emerald-50 rounded-xl p-3 border border-emerald-100">
+                        <p className="text-[10px] font-black text-emerald-600 uppercase">Refund Amount</p>
+                        <p className="text-lg font-black text-emerald-700">${liveRMA.refundAmount.toFixed(2)}{liveRMA.refundTax ? ` + $${liveRMA.refundTax.toFixed(2)} tax` : ''}</p>
+                        {liveRMA.refundMethod && <p className="text-[10px] text-emerald-500 mt-1">Method: {liveRMA.refundMethod}</p>}
+                        {liveRMA.refundNotes && <p className="text-[10px] text-slate-400 italic mt-1">{liveRMA.refundNotes}</p>}
+                      </div>
+                    )}
+                  </>
+                )}
+                {rmaDetailTab === 'items' && (
+                  <div className="space-y-2">
+                    {liveRMA.items.map((item, i) => {
+                      const openQty = item.quantity - (item.refundedQty || 0) - (item.replacedQty || 0);
+                      return (
+                        <div key={i} className="p-4 bg-slate-50 rounded-xl space-y-2">
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <p className="font-bold text-sm text-slate-900">{item.name}</p>
+                              <p className="text-[10px] text-slate-400">{item.reason}{item.serialNumber ? ` · S/N: ${item.serialNumber}` : ''}</p>
+                            </div>
+                            <p className="text-sm font-bold text-slate-700">Qty: {item.quantity}</p>
+                          </div>
+                          <div className="flex gap-3 text-[10px]">
+                            <span className="px-2 py-0.5 bg-amber-100 text-amber-700 rounded font-black">Shipped: {item.shippedQty ?? item.quantity}</span>
+                            <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded font-black">Refunded: {item.refundedQty || 0}</span>
+                            <span className="px-2 py-0.5 bg-primary/10 text-primary rounded font-black">Replaced: {item.replacedQty || 0}</span>
+                            <span className={`px-2 py-0.5 rounded font-black ${openQty > 0 ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-400'}`}>Open: {openQty}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
-                <div>
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Items</p>
-                  {selectedRMA.items.map((item, i) => (
-                    <div key={i} className="flex items-center justify-between p-4 bg-slate-50 rounded-xl mb-2">
-                      <div>
-                        <p className="font-bold text-sm text-slate-900">{item.name}</p>
-                        <p className="text-[10px] text-slate-400">{item.reason}</p>
+                {rmaDetailTab === 'resolution' && (
+                  <div className="space-y-3">
+                    {liveRMA.replacementItems && liveRMA.replacementItems.length > 0 && (
+                      <div className="bg-primary/5 rounded-xl p-4 border border-primary/10">
+                        <p className="text-[10px] font-black text-primary uppercase tracking-widest mb-2">Replacement Items Received</p>
+                        {liveRMA.replacementItems.map((ri, idx) => (
+                          <div key={idx} className="flex justify-between text-xs py-1">
+                            <span className="font-bold text-slate-900">{ri.name}</span>
+                            <span className="font-black text-primary">x{ri.quantity}</span>
+                          </div>
+                        ))}
                       </div>
-                      <p className="text-sm font-bold text-slate-700">Qty: {item.quantity}</p>
-                    </div>
-                  ))}
-                </div>
-                <p className="text-[10px] text-slate-400">Created: {selectedRMA.createdAt} · By: {selectedRMA.createdBy}</p>
+                    )}
+                    {canManageRMAs && liveRMA.status !== 'Closed' && liveRMA.status !== 'Rejected' && (
+                      <button onClick={() => { updateRMA(liveRMA.id, { status: 'Closed' }); }} className="w-full py-3 bg-emerald-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-emerald-600 active:scale-95 transition-all">Close RMA</button>
+                    )}
+                  </div>
+                )}
+                {rmaDetailTab === 'finance' && (
+                  <div className="space-y-3">
+                    {rmaRefunds.length > 0 ? rmaRefunds.map(entry => (
+                      <div key={entry.id} className="bg-emerald-50 rounded-xl p-4 border border-emerald-100 space-y-1">
+                        <div className="flex justify-between items-start">
+                          <p className="text-sm font-black text-emerald-700">${entry.amount.toFixed(2)}{entry.tax > 0 ? ` + $${entry.tax.toFixed(2)} tax` : ''}</p>
+                          <span className="text-[10px] text-slate-400">{new Date(entry.createdAt).toLocaleDateString()}</span>
+                        </div>
+                        <p className="text-[10px] text-slate-500">Method: {entry.method} · By: {entry.createdBy}</p>
+                        {entry.notes && <p className="text-[10px] text-slate-400 italic">{entry.notes}</p>}
+                      </div>
+                    )) : (
+                      <p className="text-sm text-slate-400 text-center py-4">No finance records for this RMA.</p>
+                    )}
+                  </div>
+                )}
               </div>
             </motion.div>
           </div>
-        )}
+          );
+        })()}
 
         {showCreatePO && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
@@ -858,45 +929,105 @@ export default function SupplyChain() {
                     <p className="text-sm text-slate-500">This action cannot be undone.</p>
                   </div>
                   {isRefund && (
-                    <div>
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Refund Amount</label>
-                      <div className="relative">
-                        <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-bold">$</span>
-                        <input type="number" step="0.01" value={rmaRefundAmount} onChange={(e) => setRmaRefundAmount(e.target.value)} className="w-full pl-10 pr-4 py-4 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-lg" placeholder="0.00" />
+                    <div className="space-y-3">
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Refund Amount</label>
+                        <div className="relative">
+                          <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-bold">$</span>
+                          <input type="number" step="0.01" value={rmaRefundAmount} onChange={(e) => setRmaRefundAmount(e.target.value)} className="w-full pl-10 pr-4 py-4 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-lg" placeholder="0.00" />
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Tax</label>
+                          <div className="relative">
+                            <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-bold">$</span>
+                            <input type="number" step="0.01" value={rmaRefundTax} onChange={(e) => setRmaRefundTax(e.target.value)} className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold" placeholder="0.00" />
+                          </div>
+                        </div>
+                        <div>
+                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Method</label>
+                          <select value={rmaRefundMethod} onChange={(e) => setRmaRefundMethod(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm">
+                            <option>Credit Note</option><option>Bank Transfer</option><option>Check</option><option>Cash</option><option>Original Payment</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Notes</label>
+                        <textarea value={rmaRefundNotes} onChange={(e) => setRmaRefundNotes(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm h-16 resize-none" placeholder="Refund notes..." />
                       </div>
                     </div>
                   )}
-                  {isReplace && (
+                  {isReplace && (() => {
+                    const rmaForReplace = rmas.find(r => r.id === rmaConfirmAction?.id);
+                    return (
                     <div className="space-y-2">
-                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Replacement Items (will be added to stock)</p>
-                      {rmaReplacementItems.map((ri, idx) => (
+                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Replacement Items (capped by open qty)</p>
+                      {rmaReplacementItems.map((ri, idx) => {
+                        const rmaItem = rmaForReplace?.items.find(i => i.productId === ri.productId);
+                        const openQty = rmaItem ? rmaItem.quantity - (rmaItem.refundedQty || 0) - (rmaItem.replacedQty || 0) : ri.quantity;
+                        return (
                         <div key={idx} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl">
-                          <span className="font-bold text-sm text-slate-900">{ri.name}</span>
-                          <input type="number" min="0" value={ri.quantity} onChange={(e) => setRmaReplacementItems(prev => prev.map((r, i2) => i2 === idx ? { ...r, quantity: parseInt(e.target.value) || 0 } : r))} className="w-16 px-2 py-1 bg-white border border-slate-200 rounded-lg text-center font-bold text-sm" />
+                          <div>
+                            <span className="font-bold text-sm text-slate-900">{ri.name}</span>
+                            <span className="text-[10px] text-slate-400 ml-2">Open: {openQty}</span>
+                          </div>
+                          <input type="number" min="0" max={openQty} value={ri.quantity} onChange={(e) => { const v = Math.min(parseInt(e.target.value) || 0, openQty); setRmaReplacementItems(prev => prev.map((r, i2) => i2 === idx ? { ...r, quantity: v } : r)); }} className="w-16 px-2 py-1 bg-white border border-slate-200 rounded-lg text-center font-bold text-sm" />
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
-                  )}
+                    );
+                  })()}
                   <div className="flex gap-4 pt-2">
-                    <button onClick={() => { setRmaConfirmAction(null); setPoConfirmAction(null); setRmaRefundAmount(''); setRmaReplacementItems([]); }} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest">Cancel</button>
+                    <button onClick={() => { setRmaConfirmAction(null); setPoConfirmAction(null); setRmaRefundAmount(''); setRmaRefundTax(''); setRmaRefundMethod('Credit Note'); setRmaRefundNotes(''); setRmaReplacementItems([]); }} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest">Cancel</button>
                     <button onClick={() => {
                       if (rmaConfirmAction && canManageRMAs) {
+                        const rma = rmas.find(r => r.id === rmaConfirmAction.id);
                         if (rmaConfirmAction.action === 'ship') {
-                          updateRMA(rmaConfirmAction.id, { status: 'Shipped' });
+                          const shippedItems = rma ? rma.items.map(item => ({ ...item, shippedQty: item.quantity })) : [];
+                          updateRMA(rmaConfirmAction.id, { status: 'Shipped', items: shippedItems });
                         } else if (rmaConfirmAction.action === 'refund') {
-                          updateRMA(rmaConfirmAction.id, { status: 'Refunded', refundAmount: parseFloat(rmaRefundAmount) || 0 });
-                          const rma = rmas.find(r => r.id === rmaConfirmAction.id);
+                          const refundAmt = parseFloat(rmaRefundAmount) || 0;
+                          const refundTax = parseFloat(rmaRefundTax) || 0;
+                          const updatedItems = rma ? rma.items.map(item => ({
+                            ...item,
+                            refundedQty: (item.refundedQty || 0) + item.quantity - (item.refundedQty || 0) - (item.replacedQty || 0),
+                          })) : [];
+                          const allResolved = updatedItems.every(i => (i.refundedQty || 0) + (i.replacedQty || 0) >= i.quantity);
+                          updateRMA(rmaConfirmAction.id, {
+                            status: allResolved ? 'Refunded' : 'Partially Resolved',
+                            refundAmount: (rma?.refundAmount || 0) + refundAmt,
+                            refundTax: (rma?.refundTax || 0) + refundTax,
+                            refundMethod: rmaRefundMethod,
+                            refundNotes: rmaRefundNotes || undefined,
+                            items: updatedItems,
+                          });
+                          if (rma) {
+                            addSupplierRefundEntry({
+                              id: `sre-${Date.now()}`, rmaId: rma.id, rmaNumber: rma.rmaNumber,
+                              supplierId: rma.supplierId || '', supplierName: rma.supplierName,
+                              amount: refundAmt, tax: refundTax, method: rmaRefundMethod,
+                              notes: rmaRefundNotes || undefined,
+                              createdAt: new Date().toISOString(), createdBy: 'Current User',
+                            });
+                          }
                           rma?.items.forEach(item => {
                             addStockMovement({
                               id: `sm-rma-${Date.now()}-${item.productId}`, stockItemId: item.productId, stockItemName: item.name,
                               type: 'rma_return', quantityChange: 0, previousQty: 0, newQty: 0,
                               referenceId: rmaConfirmAction.id, referenceType: 'rma',
                               performedBy: 'Current User', timestamp: new Date().toISOString(),
-                              reason: `RMA ${rma?.rmaNumber} refunded - $${rmaRefundAmount}`,
+                              reason: `RMA ${rma?.rmaNumber} refunded - $${refundAmt.toFixed(2)}`,
                             });
                           });
                         } else if (rmaConfirmAction.action === 'replace') {
-                          updateRMA(rmaConfirmAction.id, { status: 'Replaced', replacementItems: rmaReplacementItems });
+                          const updatedItems = rma ? rma.items.map(item => {
+                            const replacement = rmaReplacementItems.find(ri => ri.productId === item.productId);
+                            return { ...item, replacedQty: (item.replacedQty || 0) + (replacement?.quantity || 0) };
+                          }) : [];
+                          const allResolved = updatedItems.every(i => (i.refundedQty || 0) + (i.replacedQty || 0) >= i.quantity);
+                          updateRMA(rmaConfirmAction.id, { status: allResolved ? 'Replaced' : 'Partially Resolved', replacementItems: rmaReplacementItems, items: updatedItems });
                           rmaReplacementItems.forEach(ri => {
                             if (ri.quantity > 0) {
                               const stockItem = approvedStockItems.find(si => si.id === ri.productId);
@@ -917,6 +1048,9 @@ export default function SupplyChain() {
                         }
                         setRmaConfirmAction(null);
                         setRmaRefundAmount('');
+                        setRmaRefundTax('');
+                        setRmaRefundMethod('Credit Note');
+                        setRmaRefundNotes('');
                         setRmaReplacementItems([]);
                       }
                       if (poConfirmAction && canManagePOs) {

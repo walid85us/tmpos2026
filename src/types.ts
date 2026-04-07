@@ -174,6 +174,8 @@ export interface InventoryCount {
   performedBy: string;
   notes?: string;
   completedAt?: string;
+  adjustedAt?: string;
+  adjustedBy?: string;
 }
 
 export interface BillPayment {
@@ -516,6 +518,9 @@ export interface RMAItem {
   quantity: number;
   reason: string;
   serialNumber?: string;
+  shippedQty?: number;
+  refundedQty?: number;
+  replacedQty?: number;
 }
 
 export interface RMA {
@@ -526,13 +531,30 @@ export interface RMA {
   poId?: string;
   poNumber?: string;
   items: RMAItem[];
-  status: 'Pending' | 'Shipped' | 'Refunded' | 'Replaced' | 'Rejected';
+  status: 'Pending' | 'Shipped' | 'Refunded' | 'Replaced' | 'Rejected' | 'Partially Resolved' | 'Closed';
   createdAt: string;
   trackingNumber?: string;
   notes?: string;
   createdBy?: string;
   refundAmount?: number;
+  refundTax?: number;
+  refundMethod?: string;
+  refundNotes?: string;
   replacementItems?: { productId: string; name: string; quantity: number }[];
+}
+
+export interface SupplierRefundEntry {
+  id: string;
+  rmaId: string;
+  rmaNumber: string;
+  supplierId: string;
+  supplierName: string;
+  amount: number;
+  tax: number;
+  method: string;
+  notes?: string;
+  createdAt: string;
+  createdBy: string;
 }
 
 export type PermissionLevel = 'none' | 'view' | 'create' | 'edit' | 'manage' | 'approve' | 'full';

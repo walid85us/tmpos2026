@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useMemo, useEffect, useRef } from 'react';
-import { Customer, HeldOrder, CartItem, PaymentMethod, Discount, RepairTicket, RepairTicketStatus, Invoice, RepairService, RepairCategory, DocumentTemplate, StoreBranding, LogoPlacement, Supplier, StockMovement, StockMovementType, PurchaseOrder, GoodsReceivedNote, RMA, InventoryTransfer, InventoryCount, TradeInItem, RefurbishmentJob } from '../types';
+import { Customer, HeldOrder, CartItem, PaymentMethod, Discount, RepairTicket, RepairTicketStatus, Invoice, RepairService, RepairCategory, DocumentTemplate, StoreBranding, LogoPlacement, Supplier, StockMovement, StockMovementType, PurchaseOrder, GoodsReceivedNote, RMA, InventoryTransfer, InventoryCount, TradeInItem, RefurbishmentJob, SupplierRefundEntry } from '../types';
 import { useAccess } from './AccessContext';
 import { buildTemplateHtml, getDefaultEnabledTags } from '../utils/templateBuilder';
 
@@ -234,6 +234,8 @@ interface StoreLocalStateContextType {
   refurbishmentJobs: RefurbishmentJob[];
   addRefurbishmentJob: (j: RefurbishmentJob) => void;
   updateRefurbishmentJob: (id: string, updates: Partial<RefurbishmentJob>) => void;
+  supplierRefundEntries: SupplierRefundEntry[];
+  addSupplierRefundEntry: (entry: SupplierRefundEntry) => void;
   storeLocations: string[];
   getItemMovements: (stockItemId: string) => StockMovement[];
 }
@@ -707,6 +709,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const [inventoryCounts, setInventoryCounts] = useState<InventoryCount[]>(SEED_COUNTS);
   const [tradeIns, setTradeIns] = useState<TradeInItem[]>(SEED_TRADE_INS);
   const [refurbishmentJobs, setRefurbishmentJobs] = useState<RefurbishmentJob[]>(SEED_REFURB_JOBS);
+  const [supplierRefundEntries, setSupplierRefundEntries] = useState<SupplierRefundEntry[]>([]);
   const storeLocations = SEED_STORE_LOCATIONS;
 
   const getItemMovements = useCallback((stockItemId: string) => {
@@ -799,6 +802,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const addTradeIn = useCallback((t: TradeInItem) => { setTradeIns(prev => [t, ...prev]); }, []);
   const updateTradeIn = useCallback((id: string, updates: Partial<TradeInItem>) => { setTradeIns(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t)); }, []);
   const deleteTradeIn = useCallback((id: string) => { setTradeIns(prev => prev.filter(t => t.id !== id)); }, []);
+  const addSupplierRefundEntry = useCallback((entry: SupplierRefundEntry) => { setSupplierRefundEntries(prev => [entry, ...prev]); }, []);
   const addRefurbishmentJob = useCallback((j: RefurbishmentJob) => { setRefurbishmentJobs(prev => [j, ...prev]); }, []);
   const updateRefurbishmentJob = useCallback((id: string, updates: Partial<RefurbishmentJob>) => { setRefurbishmentJobs(prev => prev.map(j => j.id === id ? { ...j, ...updates } : j)); }, []);
 
@@ -851,6 +855,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
       inventoryCounts, addInventoryCount, updateInventoryCount,
       tradeIns, addTradeIn, updateTradeIn, deleteTradeIn,
       refurbishmentJobs, addRefurbishmentJob, updateRefurbishmentJob,
+      supplierRefundEntries, addSupplierRefundEntry,
       storeLocations, getItemMovements,
     }}>
       {children}

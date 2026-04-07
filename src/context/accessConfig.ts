@@ -82,6 +82,7 @@ export const SUB_PERMISSIONS: SubPermissionDef[] = [
   { id: 'manage_goods_received_notes', label: 'Manage GRNs', parentDomain: 'supply_chain', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Process and record goods received notes' },
   { id: 'manage_rmas', label: 'Manage RMAs', parentDomain: 'supply_chain', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Create and manage return merchandise authorizations' },
   { id: 'manage_suppliers', label: 'Manage Suppliers', parentDomain: 'supply_chain', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Add and edit supplier records' },
+  { id: 'create_inventory_items', label: 'Create Inventory Items', parentDomain: 'inventory', minModuleLevel: 'create', defaultLevel: 'create', description: 'Add new products to inventory' },
 ];
 
 export const ADMIN_ACTION_LEVEL_MAP = SUB_PERMISSIONS;
@@ -151,6 +152,7 @@ export const tenantRoles: EmployeeRole[] = [
       reopen_invoice: true,
       assign_technician: true,
       adjust_stock: true,
+      create_inventory_items: true,
       manage_transfers: true,
       manage_purchase_orders: true,
       manage_trade_ins: true,
@@ -205,6 +207,7 @@ export const tenantRoles: EmployeeRole[] = [
       reopen_invoice: false,
       assign_technician: false,
       adjust_stock: true,
+      create_inventory_items: true,
       manage_transfers: false,
       manage_purchase_orders: false,
       manage_trade_ins: false,
@@ -259,6 +262,7 @@ export const tenantRoles: EmployeeRole[] = [
       reopen_invoice: false,
       assign_technician: false,
       adjust_stock: false,
+      create_inventory_items: false,
       manage_transfers: false,
       manage_purchase_orders: false,
       manage_trade_ins: false,

@@ -1,0 +1,223 @@
+Inventory & Supply Chain Improvements — Narrow QA Correction Pass 3
+
+Read `replit.md` and `Ref.txt` first and treat them as source-of-truth constraints before making any changes.
+
+Also re-read the Inventory & Supply Chain reference links already provided for this workstream before implementing these corrections. Use them as behavioral reference, but do not copy them blindly. Improve beyond them while preserving our current architecture, design baseline, RBAC model, store scoping, and completed workstreams.
+
+This is NOT a redesign and NOT a new workstream.
+This is a narrow correction pass based only on the remaining QA failures and partial failures from Inventory & Supply Chain Improvements.
+
+Expert-role stack
+- Principal SaaS Product Architect for multi-tenant repair/POS workflows
+- Staff React 19 + TypeScript + Vite engineer
+- Firebase / Firestore data-model and state-flow architect
+- Auth / RBAC / lifecycle gating specialist
+- Inventory and supply-chain workflow architect
+- Logistics / receiving / reconciliation workflow architect
+- Senior refund, tax, and finance operations expert for supplier-side returns and recoveries
+- QA-driven refactor auditor
+- Side auditor and systems thinker at all times
+
+Operating posture
+- Act as a side auditor and systems thinker throughout.
+- Audit ripple effects before editing.
+- Fix only the failed or partial QA items deeply and coherently.
+- Preserve current design baseline exactly.
+- Preserve auth, preview mode, RBAC, lifecycle gating, and platform/store hierarchy.
+- Preserve tenant isolation and store scoping.
+- Reuse existing modal/drawer/table/toast/permission/sub-permission patterns.
+- Do not reopen completed workstreams except for narrow compatibility-safe fixes required by this pass.
+- Do not make changes to folder `Z`.
+- Do not make changes to file `Y`.
+
+Remaining corrections to implement
+
+A) Transfer workflow refinement
+1. Transfer editability before received
+- current QA shows transfers are still not properly editable before received
+- fix this so that as long as a transfer is not finalized/received, the appropriate fields and line items remain editable
+- preserve lifecycle guardrails, but do not leave transfers effectively locked too early
+
+2. Mismatch resolution after reconciliation
+- current discrepancy behavior is visible, but there must be a real path to resolve mismatch and keep the transfer open until it is properly closed
+- add a clear mismatch-resolution flow so authorized users can:
+  - review discrepancy lines
+  - adjust actual received quantities and notes
+  - keep transfer open in discrepancy-related status
+  - resolve/close it later when reconciliation is complete
+- do not force a false final state too early
+- preserve actual-received inventory logic
+
+B) Inventory count closure refinement
+1. Completed-count adjustment closure
+- current QA shows adjustment is not supported once count status becomes Completed
+- improve the lifecycle so discrepancy resolution and adjustment closure remain practical and operational
+- user must be able to:
+  - review discrepancy results
+  - confirm/complete adjustments
+  - understand what was adjusted and what remains unresolved
+- do not leave Completed as a dead-end with no usable adjustment closure
+
+C) Trade-in refinement
+1. Customer field UX
+- remove the mixed dropdown/search behavior
+- use only one customer search bar/searchable field by name or phone number
+- do not keep redundant dropdown behavior
+
+2. Walk-in logic
+- when Walk-in Customer is selected, the customer search field must be disabled
+- when Walk-in Customer is deselected, the customer search field must be enabled again
+
+3. ID capture/upload UX
+- keep device capture/upload support
+- replace the URL-style field with a proper dedicated Upload button
+- add a visible preview area for the captured/uploaded ID image
+- keep it practical for mobile camera capture and desktop file upload
+
+D) RMA refinement — operational and finance-correct
+1. RMA details modal/editing
+- current QA shows RMA details/editing still do not behave correctly enough
+- ensure RMA # opens in a proper modal/drawer
+- if status is still Pending / not shipped, it must remain editable in a practical way
+
+2. Replacement quantity controls
+- current replace flow allows arbitrary replacement quantity; this is not acceptable
+- implement strict per-line resolution logic
+
+For each RMA line track and enforce:
+- requestedQty
+- shippedQty
+- refundedQty
+- replacedQty
+- openQty = shippedQty - refundedQty - replacedQty
+
+Rules:
+- replacement quantity cannot exceed openQty
+- refund quantity cannot exceed openQty
+- once openQty reaches zero, that line is fully resolved
+- the overall RMA can progress through meaningful resolution states such as:
+  - Pending
+  - Shipped
+  - Partially Resolved
+  - Closed
+
+3. Refund confirmation logic
+- refunded should represent confirmation only once supplier refund is actually confirmed to the store
+- refund modal must capture:
+  - refund amount
+  - refund subtotal if relevant
+  - tax adjustment amount
+  - total refund
+  - refund method such as vendor_credit / cash / bank_refund / purchase_offset
+  - notes
+- do not label this as sales revenue
+
+4. Finance/reporting model for supplier refund
+- supplier refund must be treated as purchase-side recovery, not customer sales revenue
+- implement a lightweight operational finance record for supplier refunds / vendor credits without building a full accounting subsystem
+- add a practical finance object or equivalent tracking structure linked to RMA and supplier, such as:
+  - SupplierRefundEntry / VendorCreditEntry
+  - linked to supplier, RMA, and PO where relevant
+- this should support operational reporting on:
+  - supplier refunds / vendor credits
+  - net purchase recovery
+  - tax adjustment from supplier-side returns
+- keep this in supply-chain / procurement logic, not sales revenue logic
+
+5. Replacement stock behavior
+- replacement confirmation must add quantity back into inventory appropriately
+- do not allow replacement to be cosmetic only
+- quantity added back must match the confirmed replacement quantity and remain within openQty
+
+6. RMA detail UX sections
+Refine RMA details so it can clearly show:
+- overview
+- items
+- resolution
+- finance
+- history
+This does not need to be a huge redesign, but the information architecture should support operational clarity.
+
+E) Dashboard low-stock action refinement
+1. Current issue
+- low-stock dashboard items deep-link to inventory, but the desired UX is stronger
+
+2. Required behavior
+- from Dashboard low-stock area, clicking an item should open a compact action popup/modal that offers:
+  - View Stock Details
+  - Adjust Stock
+- this should happen without forcing the user to leave Dashboard
+- if the user chooses View Stock Details, open the stock detail modal
+- if the user chooses Adjust Stock, open the adjust-stock flow directly if authorized
+- keep it permission-aware and clean
+- if unauthorized for adjustment, show only the allowed option(s)
+
+F) Inventory RBAC hardening
+1. Add product creation sub-permission
+- add a dedicated sub-permission under Inventory for adding/creating inventory items
+- this should control who can add products/items to inventory
+
+2. View-only means truly view-only
+- a view-only inventory user must not be able to add product to inventory
+- audit all remaining inventory entry points to ensure a view-only role cannot create or mutate inventory through any direct or indirect route
+
+3. Keep other sub-permissions intact
+- preserve and refine the other inventory and supply-chain sub-permissions already added
+- ensure UI gating and handler guards remain consistent
+
+G) Documentation
+Update `replit.md` so it accurately reflects:
+- transfer mismatch resolution / close-later behavior
+- completed count adjustment closure behavior
+- trade-in search-only customer field and ID upload preview
+- RMA per-line resolution model
+- supplier refund / vendor credit operational finance logic
+- dashboard low-stock action popup behavior
+- add-product inventory sub-permission and stricter view-only enforcement
+
+Important suggested logic to include
+- do not treat supplier refund as sales revenue
+- record supplier refund as vendor credit / purchase recovery / purchase return adjustment
+- keep finance light and operational, not a full accounting subsystem
+- enforce replacement/refund quantity caps strictly through openQty
+- keep discrepancy and reconciliation as first-class operational concepts
+- preserve preview/demo usability even where backend persistence is still mocked
+
+Required design and behavior rules
+- Preserve the current premium glassmorphism design baseline exactly
+- Maintain keyboard accessibility and clear blocked/save/error states
+- Keep state paths unified
+- Avoid duplicate parallel systems
+- Ensure corrected flows work in preview/demo mode
+- Maintain store scoping and tenant safety
+- Keep type safety strong
+
+Definition of done
+This correction pass is done only if:
+- transfers remain editable before received where appropriate
+- mismatch resolution exists and transfer can remain open until properly resolved
+- completed inventory counts have practical adjustment closure
+- trade-in customer field is search-only and walk-in logic is clean
+- ID upload/capture uses proper upload button and preview area
+- RMA details/editability are improved
+- replacement/refund quantities are capped by openQty
+- supplier refunds are recorded as purchase-side recovery/vendor credit, not sales revenue
+- replacement stock add-back is coherent and capped correctly
+- dashboard low-stock item opens action popup with View Details / Adjust Stock options
+- add-product inventory sub-permission exists and is enforced
+- view-only inventory users truly cannot create or mutate inventory
+- no regressions are introduced in inventory, supply chain, repairs, customers, invoices, POS, services, or warranty
+- `replit.md` is updated to reflect all corrections
+
+Required final response format
+Return your completion report in exactly this structure:
+
+1. Files Changed
+2. Corrections Implemented
+3. Inventory / Supply Chain Workflow Decisions
+4. Permission / Access Enforcement Fixes
+5. Transfer Reconciliation and Resolution Design
+6. Supplier Refund / Vendor Credit Logic
+7. Non-Regressions Confirmed
+8. Known Deferred Items
+9. Manual QA Retest Areas

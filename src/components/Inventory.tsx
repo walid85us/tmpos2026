@@ -29,6 +29,7 @@ const Inventory: React.FC = () => {
   const canManageTradeIns = checkSubPermission('manage_trade_ins');
   const canManageRefurbishment = checkSubPermission('manage_refurbishment');
   const canManageStockCounts = checkSubPermission('manage_stock_counts');
+  const canCreateInventoryItems = checkSubPermission('create_inventory_items');
 
   const [activeTab, setActiveTab] = useState<InventoryTab>('inventory');
   const [searchQuery, setSearchQuery] = useState('');
@@ -44,12 +45,21 @@ const Inventory: React.FC = () => {
 
   useEffect(() => {
     const itemId = searchParams.get('item');
+    const action = searchParams.get('action');
     if (itemId) {
       const match = approvedStockItems.find(si => si.id === itemId);
       if (match) {
         setActiveTab('inventory');
         setSelectedItem(match);
         setDetailTab('info');
+        if (action === 'adjust' && canAdjustStock) {
+          setAdjustItem(match);
+          setAdjustType('increase');
+          setAdjustQty('');
+          setAdjustReason('Restock');
+          setAdjustNotes('');
+          setShowAdjustModal(true);
+        }
       }
       setSearchParams({}, { replace: true });
     }
@@ -114,6 +124,7 @@ const Inventory: React.FC = () => {
 
   const [tradeInSearch, setTradeInSearch] = useState('');
   const [tradeInIsWalkIn, setTradeInIsWalkIn] = useState(false);
+  const [tradeInSelectedCustomerId, setTradeInSelectedCustomerId] = useState('');
   const [editingTradeIn, setEditingTradeIn] = useState<string | null>(null);
   const [tradeInConfirm, setTradeInConfirm] = useState<{ id: string; action: string; label: string; notes?: boolean } | null>(null);
   const [tradeInConfirmNotes, setTradeInConfirmNotes] = useState('');
@@ -321,9 +332,15 @@ const Inventory: React.FC = () => {
           <button onClick={() => window.print()} className="flex-1 md:flex-none px-5 py-3 bg-white border border-slate-200 text-primary font-black text-xs rounded-2xl hover:bg-slate-50 transition-all uppercase tracking-widest flex items-center justify-center gap-2">
             <span className="material-symbols-outlined text-sm">file_download</span>Export
           </button>
-          <button onClick={() => { resetAddProductForm(); setIsAddProductModalOpen(true); }} className="flex-1 md:flex-none px-5 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center justify-center gap-2">
-            <span className="material-symbols-outlined text-sm">add</span>Add Product
-          </button>
+          {canCreateInventoryItems ? (
+            <button onClick={() => { resetAddProductForm(); setIsAddProductModalOpen(true); }} className="flex-1 md:flex-none px-5 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center justify-center gap-2">
+              <span className="material-symbols-outlined text-sm">add</span>Add Product
+            </button>
+          ) : (
+            <button disabled className="flex-1 md:flex-none px-5 py-3 bg-slate-200 text-slate-400 font-black text-xs rounded-2xl uppercase tracking-widest flex items-center justify-center gap-2 cursor-not-allowed">
+              <span className="material-symbols-outlined text-sm">lock</span>Add Product
+            </button>
+          )}
         </div>
       </div>
 
@@ -495,7 +512,7 @@ const Inventory: React.FC = () => {
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-black text-primary tracking-tight">Buyback & Trade-In</h2>
         {canManageTradeIns ? (
-          <button onClick={() => { setShowCreateTradeIn(true); setTradeInIsWalkIn(false); setTradeInSearch(''); setCapturedIdPhoto(''); }} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
+          <button onClick={() => { setShowCreateTradeIn(true); setTradeInIsWalkIn(false); setTradeInSearch(''); setTradeInSelectedCustomerId(''); setCapturedIdPhoto(''); }} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
             <span className="material-symbols-outlined text-sm">add</span>New Trade-In
           </button>
         ) : (
@@ -1222,9 +1239,11 @@ const Inventory: React.FC = () => {
                 e.preventDefault();
                 if (!canManageTradeIns) return;
                 const fd = new FormData(e.currentTarget);
-                const cust = tradeInIsWalkIn ? null : customers.find(c => c.id === fd.get('customer'));
+                const custId = tradeInIsWalkIn ? 'walk-in' : tradeInSelectedCustomerId;
+                const cust = tradeInIsWalkIn ? null : customers.find(c => c.id === custId);
+                if (!tradeInIsWalkIn && !custId) return;
                 addTradeIn({
-                  id: `ti-${Date.now()}`, customerId: tradeInIsWalkIn ? 'walk-in' : (fd.get('customer') as string), customerName: tradeInIsWalkIn ? 'Walk-in Customer' : (cust?.name || 'Unknown'),
+                  id: `ti-${Date.now()}`, customerId: custId, customerName: tradeInIsWalkIn ? 'Walk-in Customer' : (cust?.name || 'Unknown'),
                   device: fd.get('device') as string, condition: fd.get('condition') as any, gradeNotes: fd.get('notes') as string || undefined,
                   buybackPrice: parseFloat(fd.get('buyback') as string) || 0,
                   resalePrice: parseFloat(fd.get('resale') as string) || undefined,
@@ -1244,10 +1263,20 @@ const Inventory: React.FC = () => {
                     <span className="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 text-sm">search</span>
                     <input type="text" value={tradeInSearch} onChange={(e) => setTradeInSearch(e.target.value)} disabled={tradeInIsWalkIn} placeholder="Search by name or phone..." className="w-full pl-11 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-sm disabled:opacity-40 disabled:cursor-not-allowed" />
                   </div>
-                  {!tradeInIsWalkIn && (
-                    <select name="customer" required={!tradeInIsWalkIn} className="w-full mt-2 px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold">
-                      {filteredCustomers.map(c => <option key={c.id} value={c.id}>{c.name} · {c.phone}</option>)}
-                    </select>
+                  {!tradeInIsWalkIn && tradeInSearch.trim() && (
+                    <div className="mt-2 max-h-32 overflow-y-auto bg-white border border-slate-200 rounded-xl shadow-sm">
+                      {filteredCustomers.length > 0 ? filteredCustomers.slice(0, 5).map(c => (
+                        <button type="button" key={c.id} onClick={() => { setTradeInSearch(c.name); setTradeInSelectedCustomerId(c.id); }} className={`w-full text-left px-4 py-2.5 hover:bg-slate-50 transition-colors border-b border-slate-50 last:border-0 ${tradeInSelectedCustomerId === c.id ? 'bg-primary/5' : ''}`}>
+                          <p className="text-sm font-bold text-slate-900">{c.name}</p>
+                          <p className="text-[10px] text-slate-400">{c.phone} · {c.email}</p>
+                        </button>
+                      )) : (
+                        <p className="px-4 py-3 text-xs text-slate-400">No customers found</p>
+                      )}
+                    </div>
+                  )}
+                  {!tradeInIsWalkIn && tradeInSelectedCustomerId && (
+                    <input type="hidden" name="customer" value={tradeInSelectedCustomerId} />
                   )}
                 </div>
                 <div>
@@ -1272,21 +1301,32 @@ const Inventory: React.FC = () => {
                 </div>
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">ID Photo</label>
-                  <div className="flex gap-2">
-                    <input name="idPhoto" value={capturedIdPhoto} onChange={(e) => setCapturedIdPhoto(e.target.value)} className="flex-1 px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-sm" placeholder="URL or capture" />
-                    <input ref={idPhotoCaptureRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (file) {
-                        const reader = new FileReader();
-                        reader.onloadend = () => setCapturedIdPhoto(reader.result as string);
-                        reader.readAsDataURL(file);
-                      }
-                    }} />
-                    <button type="button" onClick={() => idPhotoCaptureRef.current?.click()} className="px-4 py-3 bg-primary text-white rounded-2xl text-[10px] font-black uppercase tracking-widest flex items-center gap-1 hover:bg-primary/90">
-                      <span className="material-symbols-outlined text-sm">photo_camera</span>Capture
-                    </button>
-                  </div>
-                  {capturedIdPhoto && <p className="text-[10px] text-emerald-600 font-bold mt-1">ID photo captured</p>}
+                  <input ref={idPhotoCaptureRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      const reader = new FileReader();
+                      reader.onloadend = () => setCapturedIdPhoto(reader.result as string);
+                      reader.readAsDataURL(file);
+                    }
+                  }} />
+                  {capturedIdPhoto ? (
+                    <div className="relative">
+                      <img src={capturedIdPhoto} alt="ID Photo" className="w-full h-32 object-cover rounded-2xl border border-slate-200" />
+                      <div className="absolute top-2 right-2 flex gap-1">
+                        <button type="button" onClick={() => idPhotoCaptureRef.current?.click()} className="p-2 bg-white/90 backdrop-blur rounded-xl text-slate-600 hover:text-primary shadow-sm" title="Replace"><span className="material-symbols-outlined text-sm">edit</span></button>
+                        <button type="button" onClick={() => setCapturedIdPhoto('')} className="p-2 bg-white/90 backdrop-blur rounded-xl text-slate-600 hover:text-red-500 shadow-sm" title="Remove"><span className="material-symbols-outlined text-sm">close</span></button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex gap-2">
+                      <button type="button" onClick={() => idPhotoCaptureRef.current?.click()} className="flex-1 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl text-[10px] font-black text-slate-500 uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-slate-100 transition-all">
+                        <span className="material-symbols-outlined text-sm">upload</span>Upload Photo
+                      </button>
+                      <button type="button" onClick={() => { const input = document.createElement('input'); input.type = 'file'; input.accept = 'image/*'; input.capture = 'environment'; input.onchange = (ev) => { const file = (ev.target as HTMLInputElement).files?.[0]; if (file) { const reader = new FileReader(); reader.onloadend = () => setCapturedIdPhoto(reader.result as string); reader.readAsDataURL(file); } }; input.click(); }} className="py-3.5 px-4 bg-primary text-white rounded-2xl text-[10px] font-black uppercase tracking-widest flex items-center gap-1 hover:bg-primary/90">
+                        <span className="material-symbols-outlined text-sm">photo_camera</span>Camera
+                      </button>
+                    </div>
+                  )}
                 </div>
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Grade Notes</label>
@@ -1592,7 +1632,7 @@ const Inventory: React.FC = () => {
         {selectedTransfer && (() => {
           const t = inventoryTransfers.find(tr => tr.id === selectedTransfer);
           if (!t) return null;
-          const isEditable = canManageTransfers && t.status === 'Draft';
+          const isEditable = canManageTransfers && (t.status === 'Draft' || t.status === 'Sent' || t.status === 'In Transit');
           return (
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
               <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-2xl overflow-hidden max-h-[90vh] flex flex-col">
@@ -1649,6 +1689,29 @@ const Inventory: React.FC = () => {
                       <button onClick={() => updateInventoryTransfer(t.id, { notes: prompt('Update notes:', t.notes || '') || t.notes })} className="flex-1 py-3 bg-slate-100 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-slate-200">Edit Notes</button>
                     </div>
                   )}
+                  {canManageTransfers && (t.status === 'Discrepancy Detected' || t.status === 'Partially Received') && (
+                    <div className="flex gap-2 pt-2">
+                      <button onClick={() => {
+                        setSelectedTransfer(null);
+                        setTransferReceiveModal(t.id);
+                        const qtys: Record<number, number> = {};
+                        const conds: Record<number, string> = {};
+                        const notes: Record<number, string> = {};
+                        t.items.forEach((item, idx) => {
+                          qtys[idx] = item.receivedQty ?? item.quantity;
+                          conds[idx] = item.condition || 'Good';
+                          notes[idx] = item.discrepancyNote || '';
+                        });
+                        setTransferReceiveQtys(qtys);
+                        setTransferReceiveConditions(conds);
+                        setTransferReceiveNotes(notes);
+                      }} className="flex-1 py-3 bg-amber-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-amber-600 active:scale-95 transition-all">Re-Reconcile</button>
+                      <button onClick={() => {
+                        updateInventoryTransfer(t.id, { status: 'Received', reconciledBy: 'Current User' });
+                        setSelectedTransfer(null);
+                      }} className="flex-1 py-3 bg-emerald-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-emerald-600 active:scale-95 transition-all">Accept & Close</button>
+                    </div>
+                  )}
                 </div>
               </motion.div>
             </div>
@@ -1674,6 +1737,20 @@ const Inventory: React.FC = () => {
                   <button onClick={() => { setSelectedCount(null); setCountConfirmComplete(false); }} className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
                 </div>
                 <div className="p-8 space-y-4 overflow-y-auto flex-1">
+                  {showOnlyDisc && c.adjustedAt && (
+                    <div className="bg-emerald-50 rounded-xl p-4 border border-emerald-100 space-y-2">
+                      <div className="flex items-center gap-2">
+                        <span className="material-symbols-outlined text-emerald-600 text-sm">check_circle</span>
+                        <p className="text-xs font-black text-emerald-700 uppercase tracking-widest">Adjustment Summary</p>
+                      </div>
+                      <div className="grid grid-cols-3 gap-3 text-xs">
+                        <div className="bg-white rounded-lg p-2 text-center"><p className="text-[10px] text-slate-400 font-bold">Total Items</p><p className="font-black text-slate-900">{c.items.length}</p></div>
+                        <div className="bg-white rounded-lg p-2 text-center"><p className="text-[10px] text-slate-400 font-bold">Adjusted</p><p className="font-black text-amber-600">{discItems.length}</p></div>
+                        <div className="bg-white rounded-lg p-2 text-center"><p className="text-[10px] text-slate-400 font-bold">Net Change</p><p className={`font-black ${discItems.reduce((s, i) => s + i.discrepancy, 0) >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>{discItems.reduce((s, i) => s + i.discrepancy, 0) > 0 ? '+' : ''}{discItems.reduce((s, i) => s + i.discrepancy, 0)}</p></div>
+                      </div>
+                      <p className="text-[10px] text-slate-400">Adjusted by {c.adjustedBy} on {new Date(c.adjustedAt).toLocaleDateString()}</p>
+                    </div>
+                  )}
                   {showOnlyDisc && discItems.length === 0 && <p className="text-sm text-slate-500 text-center py-4">No discrepancies found in this count.</p>}
                   {showOnlyDisc && <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Discrepancies Only</p>}
                   {!showOnlyDisc && <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">All Items ({c.items.length})</p>}
@@ -1755,7 +1832,7 @@ const Inventory: React.FC = () => {
                               }
                             }
                           });
-                          updateInventoryCount(c.id, { status: 'Completed', completedAt: new Date().toISOString() });
+                          updateInventoryCount(c.id, { status: 'Completed', completedAt: new Date().toISOString(), adjustedAt: new Date().toISOString(), adjustedBy: 'Current User' });
                           setCountConfirmComplete(false);
                           setSelectedCount(null);
                         }} className="flex-1 py-3 bg-emerald-500 text-white rounded-xl font-black text-xs uppercase tracking-widest shadow-xl shadow-emerald-500/20">Confirm & Apply</button>

@@ -717,6 +717,10 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
   const [dashStockCost, setDashStockCost] = useState('');
   const [dashStockPrice, setDashStockPrice] = useState('');
   const [dashStockCategory, setDashStockCategory] = useState('Parts');
+  const [lowStockActionItem, setLowStockActionItem] = useState<StockItem | null>(null);
+  const [lowStockAdjustQty, setLowStockAdjustQty] = useState('');
+  const [lowStockAdjustReason, setLowStockAdjustReason] = useState('Restock');
+  const canAdjustStock = checkSubPermission('adjust_stock');
 
   const role = effectiveRole || session?.role || '';
   const todayStr = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
@@ -852,28 +856,52 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
           </div>
           <div className="space-y-2 max-h-48 overflow-y-auto">
             {outOfStockItems.slice(0, 5).map(item => (
-              <button key={item.id} onClick={() => navigate(`/inventory?item=${item.id}`)} className="w-full flex items-center justify-between p-3 bg-white rounded-xl border border-red-100 hover:bg-red-50 transition-all cursor-pointer text-left">
-                <div className="flex items-center gap-3">
-                  <span className="material-symbols-outlined text-red-500 text-sm">block</span>
-                  <div>
-                    <p className="text-sm font-bold text-slate-900">{item.name}</p>
-                    <p className="text-[10px] text-slate-400">SKU: {item.sku}</p>
+              <div key={item.id} className="relative">
+                <button onClick={() => setLowStockActionItem(lowStockActionItem?.id === item.id ? null : item)} className="w-full flex items-center justify-between p-3 bg-white rounded-xl border border-red-100 hover:bg-red-50 transition-all cursor-pointer text-left">
+                  <div className="flex items-center gap-3">
+                    <span className="material-symbols-outlined text-red-500 text-sm">block</span>
+                    <div>
+                      <p className="text-sm font-bold text-slate-900">{item.name}</p>
+                      <p className="text-[10px] text-slate-400">SKU: {item.sku}</p>
+                    </div>
                   </div>
-                </div>
-                <span className="px-2 py-1 bg-red-100 text-red-700 text-[10px] font-black uppercase tracking-widest rounded-lg">Out of Stock</span>
-              </button>
+                  <span className="px-2 py-1 bg-red-100 text-red-700 text-[10px] font-black uppercase tracking-widest rounded-lg">Out of Stock</span>
+                </button>
+                {lowStockActionItem?.id === item.id && (
+                  <div className="absolute right-2 top-full mt-1 z-10 bg-white rounded-xl shadow-xl border border-slate-200 overflow-hidden w-48">
+                    <button onClick={() => { navigate(`/inventory?item=${item.id}`); setLowStockActionItem(null); }} className="w-full px-4 py-3 text-left text-xs font-bold text-slate-700 hover:bg-slate-50 flex items-center gap-2"><span className="material-symbols-outlined text-sm">visibility</span>View Details</button>
+                    {canAdjustStock ? (
+                      <button onClick={() => { navigate(`/inventory?item=${item.id}&action=adjust`); setLowStockActionItem(null); }} className="w-full px-4 py-3 text-left text-xs font-bold text-primary hover:bg-primary/5 flex items-center gap-2 border-t border-slate-100"><span className="material-symbols-outlined text-sm">tune</span>Adjust Stock</button>
+                    ) : (
+                      <div className="w-full px-4 py-3 text-left text-xs font-bold text-slate-300 flex items-center gap-2 border-t border-slate-100 cursor-not-allowed"><span className="material-symbols-outlined text-sm">lock</span>Adjust Stock</div>
+                    )}
+                  </div>
+                )}
+              </div>
             ))}
             {lowStockItems.slice(0, 5).map(item => (
-              <button key={item.id} onClick={() => navigate(`/inventory?item=${item.id}`)} className="w-full flex items-center justify-between p-3 bg-white rounded-xl border border-orange-100 hover:bg-orange-50 transition-all cursor-pointer text-left">
-                <div className="flex items-center gap-3">
-                  <span className="material-symbols-outlined text-orange-500 text-sm">warning</span>
-                  <div>
-                    <p className="text-sm font-bold text-slate-900">{item.name}</p>
-                    <p className="text-[10px] text-slate-400">SKU: {item.sku} · {item.qty} remaining</p>
+              <div key={item.id} className="relative">
+                <button onClick={() => setLowStockActionItem(lowStockActionItem?.id === item.id ? null : item)} className="w-full flex items-center justify-between p-3 bg-white rounded-xl border border-orange-100 hover:bg-orange-50 transition-all cursor-pointer text-left">
+                  <div className="flex items-center gap-3">
+                    <span className="material-symbols-outlined text-orange-500 text-sm">warning</span>
+                    <div>
+                      <p className="text-sm font-bold text-slate-900">{item.name}</p>
+                      <p className="text-[10px] text-slate-400">SKU: {item.sku} · {item.qty} remaining</p>
+                    </div>
                   </div>
-                </div>
-                <span className="px-2 py-1 bg-orange-100 text-orange-700 text-[10px] font-black uppercase tracking-widest rounded-lg">Low Stock</span>
-              </button>
+                  <span className="px-2 py-1 bg-orange-100 text-orange-700 text-[10px] font-black uppercase tracking-widest rounded-lg">Low Stock</span>
+                </button>
+                {lowStockActionItem?.id === item.id && (
+                  <div className="absolute right-2 top-full mt-1 z-10 bg-white rounded-xl shadow-xl border border-slate-200 overflow-hidden w-48">
+                    <button onClick={() => { navigate(`/inventory?item=${item.id}`); setLowStockActionItem(null); }} className="w-full px-4 py-3 text-left text-xs font-bold text-slate-700 hover:bg-slate-50 flex items-center gap-2"><span className="material-symbols-outlined text-sm">visibility</span>View Details</button>
+                    {canAdjustStock ? (
+                      <button onClick={() => { navigate(`/inventory?item=${item.id}&action=adjust`); setLowStockActionItem(null); }} className="w-full px-4 py-3 text-left text-xs font-bold text-primary hover:bg-primary/5 flex items-center gap-2 border-t border-slate-100"><span className="material-symbols-outlined text-sm">tune</span>Adjust Stock</button>
+                    ) : (
+                      <div className="w-full px-4 py-3 text-left text-xs font-bold text-slate-300 flex items-center gap-2 border-t border-slate-100 cursor-not-allowed"><span className="material-symbols-outlined text-sm">lock</span>Adjust Stock</div>
+                    )}
+                  </div>
+                )}
+              </div>
             ))}
           </div>
         </div>
