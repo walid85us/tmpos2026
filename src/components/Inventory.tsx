@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState, StockItem } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
-import { StockMovement } from '../types';
+import { StockMovement, RefurbishmentJob } from '../types';
 import ContextualHelp from './ContextualHelp';
 
 type InventoryTab = 'inventory' | 'movements' | 'suggestive' | 'trade-in' | 'refurb' | 'transfer' | 'count' | 'bills' | 'giftcards' | 'bundles';
@@ -16,12 +16,16 @@ const Inventory: React.FC = () => {
     inventoryCounts, addInventoryCount, updateInventoryCount,
     tradeIns, addTradeIn, updateTradeIn,
     refurbishmentJobs, addRefurbishmentJob, updateRefurbishmentJob,
-    suppliers, customers,
+    suppliers, customers, storeLocations, getItemMovements,
   } = useStoreLocalState();
   const { checkPermission, checkSubPermission } = useAccess();
   const hasInventoryPermission = checkPermission('inventory', 'manage');
+  const hasInventoryEdit = checkPermission('inventory', 'edit');
   const canAdjustStock = checkSubPermission('adjust_stock');
   const canManageTransfers = checkSubPermission('manage_transfers');
+  const canManageTradeIns = checkSubPermission('manage_trade_ins');
+  const canManageRefurbishment = checkSubPermission('manage_refurbishment');
+  const canManageStockCounts = checkSubPermission('manage_stock_counts');
 
   const [activeTab, setActiveTab] = useState<InventoryTab>('inventory');
   const [searchQuery, setSearchQuery] = useState('');
@@ -69,6 +73,19 @@ const Inventory: React.FC = () => {
   const [editSugCategory, setEditSugCategory] = useState('');
   const [editSugSaveSuccess, setEditSugSaveSuccess] = useState(false);
 
+  const [selectedTransfer, setSelectedTransfer] = useState<string | null>(null);
+  const [transferConfirmAction, setTransferConfirmAction] = useState<{ id: string; action: string; label: string } | null>(null);
+  const [transferReceiveModal, setTransferReceiveModal] = useState<string | null>(null);
+  const [transferReceiveQtys, setTransferReceiveQtys] = useState<Record<string, number>>({});
+
+  const [selectedCount, setSelectedCount] = useState<string | null>(null);
+  const [countActuals, setCountActuals] = useState<Record<string, number>>({});
+
+  const [selectedRefurbJob, setSelectedRefurbJob] = useState<RefurbishmentJob | null>(null);
+  const [refurbConfirmComplete, setRefurbConfirmComplete] = useState(false);
+  const [refurbCompletionNote, setRefurbCompletionNote] = useState('');
+  const [refurbNewResale, setRefurbNewResale] = useState('');
+
   const resetAddProductForm = () => {
     setNewProductName(''); setNewProductCategory('Parts'); setNewProductSku('');
     setNewProductUpc(''); setNewProductCost(''); setNewProductPrice(''); setNewProductQty('1');
@@ -103,8 +120,6 @@ const Inventory: React.FC = () => {
     const outOfStock = allInventoryItems.filter(i => i.qty === 0).length;
     return { totalItems, totalValue, lowStock, outOfStock };
   }, [allInventoryItems]);
-
-  const getItemMovements = (itemId: string) => stockMovements.filter(m => m.stockItemId === itemId).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
   const handleSaveProduct = () => {
     if (!newProductName.trim()) return;
@@ -144,7 +159,7 @@ const Inventory: React.FC = () => {
   };
 
   const handleAdjustStock = () => {
-    if (!adjustItem || !adjustQty) return;
+    if (!canAdjustStock || !adjustItem || !adjustQty) return;
     const qty = parseInt(adjustQty);
     if (qty <= 0) return;
     const change = adjustType === 'increase' ? qty : -qty;
@@ -435,9 +450,15 @@ const Inventory: React.FC = () => {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-black text-primary tracking-tight">Buyback & Trade-In</h2>
-        <button onClick={() => setShowCreateTradeIn(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
-          <span className="material-symbols-outlined text-sm">add</span>New Trade-In
-        </button>
+        {canManageTradeIns ? (
+          <button onClick={() => setShowCreateTradeIn(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
+            <span className="material-symbols-outlined text-sm">add</span>New Trade-In
+          </button>
+        ) : (
+          <button disabled className="px-6 py-3 bg-slate-200 text-slate-400 font-black text-xs rounded-2xl uppercase tracking-widest flex items-center gap-2 cursor-not-allowed">
+            <span className="material-symbols-outlined text-sm">lock</span>New Trade-In
+          </button>
+        )}
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {tradeIns.map((item) => (
@@ -450,13 +471,14 @@ const Inventory: React.FC = () => {
               <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{item.createdAt}</span>
             </div>
             <div className="space-y-2 mb-4 text-sm">
-              <div className="flex justify-between"><span className="text-slate-500 font-bold">Customer</span><span className="text-slate-900 font-black">{item.customerName}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500 font-bold">Customer</span><span className="text-slate-900 font-black">{item.isWalkIn ? 'Walk-in Customer' : item.customerName}</span></div>
               <div className="flex justify-between"><span className="text-slate-500 font-bold">Condition</span><span className="text-slate-900 font-black">{item.condition}</span></div>
               <div className="flex justify-between"><span className="text-slate-500 font-bold">Buyback</span><span className="text-primary font-black">${item.buybackPrice}</span></div>
               {item.resalePrice && <div className="flex justify-between"><span className="text-slate-500 font-bold">Resale</span><span className="text-emerald-600 font-black">${item.resalePrice}</span></div>}
+              {item.idPhotoUrl && <div className="flex justify-between"><span className="text-slate-500 font-bold">ID Photo</span><span className="text-emerald-600 font-black text-[10px]">Captured</span></div>}
               {item.gradeNotes && <p className="text-xs text-slate-400 italic pt-1">{item.gradeNotes}</p>}
             </div>
-            {item.status === 'Pending' && (
+            {canManageTradeIns && item.status === 'Pending' && (
               <div className="flex gap-2">
                 <button onClick={() => updateTradeIn(item.id, { status: 'Evaluated' })} className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">Evaluate</button>
                 <button onClick={() => {
@@ -479,7 +501,7 @@ const Inventory: React.FC = () => {
                 }} className="flex-1 py-3 bg-primary/10 hover:bg-primary/20 text-primary font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">Move to Stock</button>
               </div>
             )}
-            {item.status === 'Evaluated' && (
+            {canManageTradeIns && item.status === 'Evaluated' && (
               <div className="flex gap-2">
                 <button onClick={() => {
                   addRefurbishmentJob({
@@ -543,38 +565,22 @@ const Inventory: React.FC = () => {
             {refurbishmentJobs.map((job) => (
               <tr key={job.id} className="hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0">
                 <td className="px-8 py-5">
-                  <p className="font-bold text-slate-900">{job.itemName}</p>
-                  <p className="text-[10px] text-slate-400">{job.notes}</p>
+                  <button onClick={() => { setSelectedRefurbJob(job); setRefurbConfirmComplete(false); setRefurbCompletionNote(''); const ti = tradeIns.find(t => t.id === job.itemId); setRefurbNewResale(ti?.resalePrice?.toString() || ''); }} className="text-left">
+                    <p className="font-bold text-slate-900 hover:text-primary transition-colors">{job.itemName}</p>
+                    <p className="text-[10px] text-slate-400">{job.notes}</p>
+                  </button>
                 </td>
                 <td className="px-6 py-5 text-sm font-bold text-slate-600">{job.technicianName}</td>
                 <td className="px-6 py-5"><span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${getStatusColor(job.status)}`}>{job.status}</span></td>
                 <td className="px-6 py-5 text-xs text-slate-600">{job.partsUsed.length > 0 ? job.partsUsed.map(p => p.name).join(', ') : '—'}</td>
                 <td className="px-6 py-5 font-black text-primary">${job.totalCost.toFixed(2)}</td>
                 <td className="px-6 py-5 text-right">
-                  {job.status !== 'Completed' ? (
-                    <button onClick={() => {
-                      const tradeIn = tradeIns.find(t => t.id === job.itemId);
-                      const newItem: StockItem = {
-                        id: `stk-rfb-${Date.now()}`, name: `${job.itemName} (Refurbished)`,
-                        sku: `RFB-${Date.now().toString().slice(-6)}`, qty: 1,
-                        cost: (tradeIn?.buybackPrice || 0) + job.totalCost,
-                        price: tradeIn?.resalePrice || ((tradeIn?.buybackPrice || 0) + job.totalCost) * 1.5,
-                        category: 'Devices', type: 'serialized', isRepairPart: false, isHiddenOnPOS: false,
-                        addedAt: new Date().toISOString(), status: 'approved',
-                      };
-                      addStockItem(newItem);
-                      addStockMovement({
-                        id: `sm-${Date.now()}`, stockItemId: newItem.id, stockItemName: newItem.name,
-                        type: 'refurbishment_complete', quantityChange: 1, previousQty: 0, newQty: 1,
-                        referenceId: job.id, referenceType: 'refurbishment',
-                        performedBy: 'Current User', timestamp: new Date().toISOString(),
-                        reason: `Refurbishment of ${job.itemName} completed`,
-                      });
-                      updateRefurbishmentJob(job.id, { status: 'Completed', completedAt: new Date().toISOString(), resultingProductId: newItem.id });
-                      if (tradeIn) updateTradeIn(tradeIn.id, { status: 'In Inventory', movedToInventoryId: newItem.id });
-                    }} className="px-4 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 active:scale-95 transition-all">Complete</button>
-                  ) : (
+                  {canManageRefurbishment && job.status !== 'Completed' ? (
+                    <button onClick={() => { setSelectedRefurbJob(job); setRefurbConfirmComplete(true); setRefurbCompletionNote(''); const ti = tradeIns.find(t => t.id === job.itemId); setRefurbNewResale(ti?.resalePrice?.toString() || ((ti?.buybackPrice || 0) + job.totalCost * 1.5).toFixed(0)); }} className="px-4 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 active:scale-95 transition-all">Complete</button>
+                  ) : job.status === 'Completed' ? (
                     <span className="text-[10px] font-black text-emerald-600 uppercase tracking-widest">Done</span>
+                  ) : (
+                    <button disabled className="px-4 py-2 bg-slate-100 text-slate-400 text-[10px] font-black uppercase tracking-widest rounded-xl cursor-not-allowed flex items-center gap-1"><span className="material-symbols-outlined text-xs">lock</span>Complete</button>
                   )}
                 </td>
               </tr>
@@ -616,8 +622,8 @@ const Inventory: React.FC = () => {
           </thead>
           <tbody>
             {inventoryTransfers.map((t) => (
-              <tr key={t.id} className="hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0">
-                <td className="px-8 py-5 font-black text-primary text-xs">{t.transferNumber}</td>
+              <tr key={t.id} className="hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0 group">
+                <td className="px-8 py-5"><button onClick={() => setSelectedTransfer(selectedTransfer === t.id ? null : t.id)} className="font-black text-primary text-xs hover:underline">{t.transferNumber}</button></td>
                 <td className="px-6 py-5">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-bold text-slate-900">{t.fromStore}</span>
@@ -630,20 +636,9 @@ const Inventory: React.FC = () => {
                 <td className="px-6 py-5 text-sm font-bold text-slate-500">{t.requestedBy || '—'}</td>
                 <td className="px-6 py-5 text-right">
                   <div className="flex justify-end gap-2">
-                    {canManageTransfers && t.status === 'Draft' && <button onClick={() => updateInventoryTransfer(t.id, { status: 'Sent', sentAt: new Date().toISOString() })} className="px-3 py-1.5 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90">Send</button>}
-                    {canManageTransfers && t.status === 'Sent' && <button onClick={() => updateInventoryTransfer(t.id, { status: 'In Transit' })} className="px-3 py-1.5 bg-amber-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-amber-600">In Transit</button>}
-                    {canManageTransfers && (t.status === 'Sent' || t.status === 'In Transit') && <button onClick={() => {
-                      updateInventoryTransfer(t.id, { status: 'Received', receivedAt: new Date().toISOString() });
-                      t.items.forEach(item => {
-                        addStockMovement({
-                          id: `sm-${Date.now()}-${item.productId}`, stockItemId: item.productId, stockItemName: item.name,
-                          type: 'transfer_in', quantityChange: item.quantity, previousQty: 0, newQty: item.quantity,
-                          referenceId: t.id, referenceType: 'transfer',
-                          performedBy: 'Current User', timestamp: new Date().toISOString(),
-                          reason: `Received from transfer ${t.transferNumber}`,
-                        });
-                      });
-                    }} className="px-3 py-1.5 bg-emerald-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-emerald-600">Receive</button>}
+                    {canManageTransfers && t.status === 'Draft' && <button onClick={() => setTransferConfirmAction({ id: t.id, action: 'send', label: `Send transfer ${t.transferNumber}?` })} className="px-3 py-1.5 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90">Send</button>}
+                    {canManageTransfers && t.status === 'Sent' && <button onClick={() => setTransferConfirmAction({ id: t.id, action: 'transit', label: `Mark ${t.transferNumber} as In Transit?` })} className="px-3 py-1.5 bg-amber-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-amber-600">In Transit</button>}
+                    {canManageTransfers && (t.status === 'Sent' || t.status === 'In Transit') && <button onClick={() => { setTransferReceiveModal(t.id); const qtys: Record<string, number> = {}; t.items.forEach(i => { qtys[i.productId] = i.quantity; }); setTransferReceiveQtys(qtys); }} className="px-3 py-1.5 bg-emerald-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-emerald-600">Receive</button>}
                   </div>
                 </td>
               </tr>
@@ -654,75 +649,166 @@ const Inventory: React.FC = () => {
           </tbody>
         </table>
       </div>
+
+      {selectedTransfer && (() => {
+        const t = inventoryTransfers.find(tr => tr.id === selectedTransfer);
+        if (!t) return null;
+        return (
+          <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm space-y-4">
+            <div className="flex justify-between items-start">
+              <div>
+                <h3 className="text-xl font-black text-primary">{t.transferNumber}</h3>
+                <p className="text-sm text-slate-500">{t.fromStore} → {t.toStore} · {t.createdAt}{t.sentAt ? ` · Sent: ${t.sentAt}` : ''}{t.receivedAt ? ` · Received: ${t.receivedAt}` : ''}</p>
+                {t.notes && <p className="text-xs text-slate-400 mt-1 italic">{t.notes}</p>}
+              </div>
+              <button onClick={() => setSelectedTransfer(null)} className="p-2 hover:bg-slate-100 rounded-xl text-slate-400"><span className="material-symbols-outlined text-sm">close</span></button>
+            </div>
+            <div>
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Items</p>
+              <div className="space-y-2">
+                {t.items.map((item, i) => (
+                  <div key={i} className="flex items-center justify-between p-4 bg-slate-50 rounded-xl">
+                    <p className="font-bold text-sm text-slate-900">{item.name}</p>
+                    <p className="text-sm font-bold text-slate-700">Qty: {item.quantity}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </motion.div>
+        );
+      })()}
     </div>
   );
 
-  const renderCount = () => (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h2 className="text-2xl font-black text-primary tracking-tight">Stock Count & Audits</h2>
-        <button onClick={() => setShowCreateCount(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
-          <span className="material-symbols-outlined text-sm">add</span>Start New Count
-        </button>
-      </div>
-      <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
-        <table className="w-full text-left border-collapse">
-          <thead>
-            <tr className="border-b border-slate-100 bg-slate-50/50">
-              <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Count #</th>
-              <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Date</th>
-              <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Performed By</th>
-              <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Items</th>
-              <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Status</th>
-              <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Discrepancies</th>
-              <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {inventoryCounts.map((c) => {
-              const discrepancies = c.items.filter(i => i.discrepancy !== 0).length;
-              return (
-                <tr key={c.id} className="hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0">
-                  <td className="px-8 py-5 font-black text-primary text-xs">{c.countNumber}</td>
-                  <td className="px-6 py-5 text-sm font-bold text-slate-900">{c.date}</td>
-                  <td className="px-6 py-5 text-sm font-bold text-slate-600">{c.performedBy}</td>
-                  <td className="px-6 py-5 text-sm font-bold text-slate-600">{c.items.length}</td>
-                  <td className="px-6 py-5"><span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${getStatusColor(c.status)}`}>{c.status}</span></td>
-                  <td className="px-6 py-5"><span className={`font-black ${discrepancies > 0 ? 'text-red-600' : 'text-slate-400'}`}>{discrepancies} item{discrepancies !== 1 ? 's' : ''}</span></td>
-                  <td className="px-6 py-5 text-right">
-                    {c.status === 'In Progress' && (
-                      <button onClick={() => {
-                        c.items.forEach(item => {
-                          if (item.discrepancy !== 0) {
-                            const stockItem = approvedStockItems.find(si => si.id === item.productId);
-                            if (stockItem) {
-                              updateStockItem(stockItem.id, { qty: item.actual });
-                              addStockMovement({
-                                id: `sm-cnt-${Date.now()}-${item.productId}`, stockItemId: item.productId, stockItemName: item.name,
-                                type: 'count_adjustment', quantityChange: item.discrepancy,
-                                previousQty: item.expected, newQty: item.actual,
-                                referenceId: c.id, referenceType: 'count',
-                                performedBy: 'Current User', timestamp: new Date().toISOString(),
-                                reason: `Stock count ${c.countNumber} adjustment`,
-                              });
+  const renderCount = () => {
+    const totalDiscrepancies = inventoryCounts.reduce((sum, c) => sum + c.items.filter(i => i.discrepancy !== 0).length, 0);
+    return (
+      <div className="space-y-6">
+        <div className="flex justify-between items-center">
+          <div>
+            <h2 className="text-2xl font-black text-primary tracking-tight">Stock Count & Audits</h2>
+            {totalDiscrepancies > 0 && <p className="text-xs text-orange-600 font-bold mt-1">{totalDiscrepancies} total discrepancies found across all counts</p>}
+          </div>
+          {canManageStockCounts ? (
+            <button onClick={() => setShowCreateCount(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
+              <span className="material-symbols-outlined text-sm">add</span>Start New Count
+            </button>
+          ) : (
+            <button disabled className="px-6 py-3 bg-slate-200 text-slate-400 font-black text-xs rounded-2xl uppercase tracking-widest flex items-center gap-2 cursor-not-allowed">
+              <span className="material-symbols-outlined text-sm">lock</span>Start New Count
+            </button>
+          )}
+        </div>
+        <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="border-b border-slate-100 bg-slate-50/50">
+                <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Count #</th>
+                <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Date</th>
+                <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Performed By</th>
+                <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Items</th>
+                <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Status</th>
+                <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Discrepancies</th>
+                <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {inventoryCounts.map((c) => {
+                const discrepancies = c.items.filter(i => i.discrepancy !== 0).length;
+                return (
+                  <tr key={c.id} className="hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0">
+                    <td className="px-8 py-5"><button onClick={() => { setSelectedCount(selectedCount === c.id ? null : c.id); if (selectedCount !== c.id) { const actuals: Record<string, number> = {}; c.items.forEach(i => { actuals[i.productId] = i.actual; }); setCountActuals(actuals); } }} className="font-black text-primary text-xs hover:underline">{c.countNumber}</button></td>
+                    <td className="px-6 py-5 text-sm font-bold text-slate-900">{c.date}</td>
+                    <td className="px-6 py-5 text-sm font-bold text-slate-600">{c.performedBy}</td>
+                    <td className="px-6 py-5 text-sm font-bold text-slate-600">{c.items.length}</td>
+                    <td className="px-6 py-5"><span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${getStatusColor(c.status)}`}>{c.status}</span></td>
+                    <td className="px-6 py-5"><span className={`font-black ${discrepancies > 0 ? 'text-red-600' : 'text-slate-400'}`}>{discrepancies} item{discrepancies !== 1 ? 's' : ''}</span></td>
+                    <td className="px-6 py-5 text-right">
+                      {canManageStockCounts && c.status === 'In Progress' && (
+                        <button onClick={() => {
+                          c.items.forEach(item => {
+                            if (item.discrepancy !== 0) {
+                              const stockItem = approvedStockItems.find(si => si.id === item.productId);
+                              if (stockItem) {
+                                updateStockItem(stockItem.id, { qty: item.actual });
+                                addStockMovement({
+                                  id: `sm-cnt-${Date.now()}-${item.productId}`, stockItemId: item.productId, stockItemName: item.name,
+                                  type: 'count_adjustment', quantityChange: item.discrepancy,
+                                  previousQty: item.expected, newQty: item.actual,
+                                  referenceId: c.id, referenceType: 'count',
+                                  performedBy: 'Current User', timestamp: new Date().toISOString(),
+                                  reason: `Stock count ${c.countNumber} adjustment`,
+                                });
+                              }
                             }
-                          }
-                        });
-                        updateInventoryCount(c.id, { status: 'Completed', completedAt: new Date().toISOString() });
-                      }} className="px-4 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 active:scale-95 transition-all">Complete Count</button>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-            {inventoryCounts.length === 0 && (
-              <tr><td colSpan={7} className="px-8 py-12 text-center text-sm font-bold text-slate-400">No stock counts</td></tr>
-            )}
-          </tbody>
-        </table>
+                          });
+                          updateInventoryCount(c.id, { status: 'Completed', completedAt: new Date().toISOString() });
+                        }} className="px-4 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 active:scale-95 transition-all">Complete Count</button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+              {inventoryCounts.length === 0 && (
+                <tr><td colSpan={7} className="px-8 py-12 text-center text-sm font-bold text-slate-400">No stock counts</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {selectedCount && (() => {
+          const c = inventoryCounts.find(ct => ct.id === selectedCount);
+          if (!c) return null;
+          return (
+            <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm space-y-4">
+              <div className="flex justify-between items-start">
+                <div>
+                  <h3 className="text-xl font-black text-primary">{c.countNumber}</h3>
+                  <p className="text-sm text-slate-500">{c.date} · {c.performedBy}</p>
+                </div>
+                <button onClick={() => setSelectedCount(null)} className="p-2 hover:bg-slate-100 rounded-xl text-slate-400"><span className="material-symbols-outlined text-sm">close</span></button>
+              </div>
+              <div className="space-y-2">
+                {c.items.map((item) => (
+                  <div key={item.productId} className={`flex items-center justify-between p-4 rounded-xl ${item.discrepancy !== 0 ? 'bg-red-50 border border-red-100' : 'bg-slate-50'}`}>
+                    <div>
+                      <p className="font-bold text-sm text-slate-900">{item.name}</p>
+                      <p className="text-[10px] text-slate-400 font-mono">{item.sku}</p>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <div className="text-right">
+                        <p className="text-[10px] font-black text-slate-400 uppercase">Expected</p>
+                        <p className="text-sm font-bold">{item.expected}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-[10px] font-black text-slate-400 uppercase">Actual</p>
+                        {c.status === 'In Progress' && canManageStockCounts ? (
+                          <input type="number" min="0" value={countActuals[item.productId] ?? item.actual} onChange={(e) => {
+                            const val = parseInt(e.target.value) || 0;
+                            setCountActuals(prev => ({ ...prev, [item.productId]: val }));
+                            const disc = val - item.expected;
+                            updateInventoryCount(c.id, { items: c.items.map(i => i.productId === item.productId ? { ...i, actual: val, discrepancy: disc } : i) });
+                          }} className="w-16 px-2 py-1 bg-white border border-slate-200 rounded-lg text-center font-bold text-sm" />
+                        ) : (
+                          <p className="text-sm font-bold">{item.actual}</p>
+                        )}
+                      </div>
+                      {item.discrepancy !== 0 && (
+                        <div className="text-right">
+                          <p className="text-[10px] font-black text-red-400 uppercase">Diff</p>
+                          <p className={`text-sm font-black ${item.discrepancy > 0 ? 'text-emerald-600' : 'text-red-600'}`}>{item.discrepancy > 0 ? '+' : ''}{item.discrepancy}</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </motion.div>
+          );
+        })()}
       </div>
-    </div>
-  );
+    );
+  };
 
   const renderSuggestive = () => (
     <div className="space-y-6">
@@ -836,7 +922,6 @@ const Inventory: React.FC = () => {
       />
 
       <AnimatePresence>
-        {/* Item Detail Modal */}
         {selectedItem && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
             <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-2xl overflow-hidden max-h-[90vh] flex flex-col">
@@ -893,7 +978,11 @@ const Inventory: React.FC = () => {
                       ) : (
                         <button disabled className="flex-1 py-3 bg-slate-100 text-slate-400 font-black text-[10px] rounded-xl uppercase tracking-widest cursor-not-allowed flex items-center justify-center gap-1"><span className="material-symbols-outlined text-xs">lock</span>Adjust Stock</button>
                       )}
-                      <button onClick={() => setDetailTab('edit')} className="flex-1 py-3 bg-slate-100 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-slate-200 active:scale-95 transition-all">Edit Item</button>
+                      {hasInventoryEdit ? (
+                        <button onClick={() => setDetailTab('edit')} className="flex-1 py-3 bg-slate-100 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-slate-200 active:scale-95 transition-all">Edit Item</button>
+                      ) : (
+                        <button disabled className="flex-1 py-3 bg-slate-100 text-slate-400 font-black text-[10px] rounded-xl uppercase tracking-widest cursor-not-allowed flex items-center justify-center gap-1"><span className="material-symbols-outlined text-xs">lock</span>Edit Item</button>
+                      )}
                     </div>
                   </div>
                 )}
@@ -916,11 +1005,27 @@ const Inventory: React.FC = () => {
                     </div>
                   );
                 })()}
-                {detailTab === 'edit' && (
+                {detailTab === 'edit' && hasInventoryEdit && (
                   <div className="space-y-4">
                     <div>
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Name</label>
                       <input type="text" defaultValue={selectedItem.name} onBlur={(e) => updateStockItem(selectedItem.id, { name: e.target.value })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold" />
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Type</label>
+                        <select defaultValue={selectedItem.type} onChange={(e) => updateStockItem(selectedItem.id, { type: e.target.value as any })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold">
+                          <option value="non-serialized">Non-Serialized</option>
+                          <option value="serialized">Serialized</option>
+                          <option value="handset">Handset</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Category</label>
+                        <select defaultValue={selectedItem.category} onChange={(e) => updateStockItem(selectedItem.id, { category: e.target.value })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold">
+                          <option>Parts</option><option>Accessories</option><option>Devices</option><option>Other</option>
+                        </select>
+                      </div>
                     </div>
                     <div className="grid grid-cols-2 gap-4">
                       <div>
@@ -946,6 +1051,13 @@ const Inventory: React.FC = () => {
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Location</label>
                       <input type="text" defaultValue={selectedItem.location || ''} onBlur={(e) => updateStockItem(selectedItem.id, { location: e.target.value || undefined })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold" />
                     </div>
+                    <div>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Supplier</label>
+                      <select defaultValue={selectedItem.supplierId || ''} onChange={(e) => { const sup = suppliers.find(s => s.id === e.target.value); updateStockItem(selectedItem.id, { supplierId: e.target.value || undefined, supplierName: sup?.name }); }} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold">
+                        <option value="">None</option>
+                        {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                      </select>
+                    </div>
                     <div className="flex gap-4">
                       <label className="flex items-center gap-2 cursor-pointer">
                         <input type="checkbox" defaultChecked={selectedItem.isRepairPart} onChange={(e) => updateStockItem(selectedItem.id, { isRepairPart: e.target.checked })} className="w-4 h-4 rounded" />
@@ -959,12 +1071,17 @@ const Inventory: React.FC = () => {
                     <button onClick={() => { setSelectedItem(null); }} className="w-full py-3 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all mt-4">Done</button>
                   </div>
                 )}
+                {detailTab === 'edit' && !hasInventoryEdit && (
+                  <div className="flex flex-col items-center py-12 gap-3">
+                    <span className="material-symbols-outlined text-4xl text-slate-300">lock</span>
+                    <p className="text-sm font-bold text-slate-400">You don't have permission to edit inventory items</p>
+                  </div>
+                )}
               </div>
             </motion.div>
           </div>
         )}
 
-        {/* Stock Adjust Modal */}
         {showAdjustModal && adjustItem && (
           <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
             <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
@@ -1006,7 +1123,6 @@ const Inventory: React.FC = () => {
           </div>
         )}
 
-        {/* Add Product Modal */}
         {isAddProductModalOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
             <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg overflow-hidden max-h-[90vh] flex flex-col">
@@ -1109,27 +1225,35 @@ const Inventory: React.FC = () => {
           </div>
         )}
 
-        {/* Create Trade-In Modal */}
         {showCreateTradeIn && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
-            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
-              <div className="p-8 border-b border-slate-100 bg-slate-50/50">
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden max-h-[90vh] flex flex-col">
+              <div className="p-8 border-b border-slate-100 bg-slate-50/50 shrink-0">
                 <h2 className="text-xl font-black text-primary tracking-tight">New Trade-In</h2>
               </div>
-              <form className="p-8 space-y-4" onSubmit={(e) => {
+              <form className="p-8 space-y-4 overflow-y-auto flex-1" onSubmit={(e) => {
                 e.preventDefault();
                 const fd = new FormData(e.currentTarget);
-                const cust = customers.find(c => c.id === fd.get('customer'));
+                const isWalkIn = fd.get('isWalkIn') === 'on';
+                const cust = isWalkIn ? null : customers.find(c => c.id === fd.get('customer'));
                 addTradeIn({
-                  id: `ti-${Date.now()}`, customerId: fd.get('customer') as string, customerName: cust?.name || 'Walk-in',
+                  id: `ti-${Date.now()}`, customerId: isWalkIn ? 'walk-in' : (fd.get('customer') as string), customerName: isWalkIn ? 'Walk-in Customer' : (cust?.name || 'Unknown'),
                   device: fd.get('device') as string, condition: fd.get('condition') as any, gradeNotes: fd.get('notes') as string || undefined,
-                  buybackPrice: parseFloat(fd.get('buyback') as string) || 0, status: 'Pending', createdAt: new Date().toISOString().split('T')[0],
+                  buybackPrice: parseFloat(fd.get('buyback') as string) || 0,
+                  resalePrice: parseFloat(fd.get('resale') as string) || undefined,
+                  isWalkIn,
+                  idPhotoUrl: fd.get('idPhoto') as string || undefined,
+                  status: 'Pending', createdAt: new Date().toISOString().split('T')[0],
                 });
                 setShowCreateTradeIn(false);
               }}>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input type="checkbox" name="isWalkIn" className="w-4 h-4 rounded" />
+                  <span className="text-xs font-bold text-slate-600">Walk-in Customer (no account)</span>
+                </label>
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Customer</label>
-                  <select name="customer" required className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold">
+                  <select name="customer" className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold">
                     {customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                   </select>
                 </div>
@@ -1150,6 +1274,14 @@ const Inventory: React.FC = () => {
                   </div>
                 </div>
                 <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Resale Price (Optional)</label>
+                  <input name="resale" type="number" step="0.01" className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold" placeholder="Estimated resale value" />
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">ID Photo URL (Optional)</label>
+                  <input name="idPhoto" className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold" placeholder="URL to customer ID photo" />
+                </div>
+                <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Grade Notes</label>
                   <textarea name="notes" className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold h-20 resize-none" placeholder="Condition details..." />
                 </div>
@@ -1162,7 +1294,6 @@ const Inventory: React.FC = () => {
           </div>
         )}
 
-        {/* Create Transfer Modal */}
         {showCreateTransfer && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
             <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
@@ -1188,11 +1319,15 @@ const Inventory: React.FC = () => {
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">From</label>
-                    <input name="from" defaultValue="Main Warehouse" required className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold" />
+                    <select name="from" required className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold">
+                      {storeLocations.map(loc => <option key={loc} value={loc}>{loc}</option>)}
+                    </select>
                   </div>
                   <div>
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">To</label>
-                    <input name="to" required className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold" placeholder="Branch name" />
+                    <select name="to" required className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold">
+                      {storeLocations.map(loc => <option key={loc} value={loc}>{loc}</option>)}
+                    </select>
                   </div>
                 </div>
                 <div>
@@ -1218,7 +1353,6 @@ const Inventory: React.FC = () => {
           </div>
         )}
 
-        {/* Create Count Modal */}
         {showCreateCount && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
             <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg overflow-hidden">
@@ -1245,7 +1379,183 @@ const Inventory: React.FC = () => {
           </div>
         )}
 
-        {/* Edit Suggestive Item Modal */}
+        {transferConfirmAction && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-sm overflow-hidden">
+              <div className="p-8 text-center space-y-4">
+                <span className="material-symbols-outlined text-4xl text-primary">help</span>
+                <p className="text-lg font-black text-primary">{transferConfirmAction.label}</p>
+                <p className="text-sm text-slate-500">This action cannot be undone.</p>
+                <div className="flex gap-4 pt-2">
+                  <button onClick={() => setTransferConfirmAction(null)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest">Cancel</button>
+                  <button onClick={() => {
+                    if (!canManageTransfers) return;
+                    if (transferConfirmAction.action === 'send') updateInventoryTransfer(transferConfirmAction.id, { status: 'Sent', sentAt: new Date().toISOString() });
+                    else if (transferConfirmAction.action === 'transit') updateInventoryTransfer(transferConfirmAction.id, { status: 'In Transit' });
+                    setTransferConfirmAction(null);
+                  }} className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20">Confirm</button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {transferReceiveModal && (() => {
+          const t = inventoryTransfers.find(tr => tr.id === transferReceiveModal);
+          if (!t) return null;
+          return (
+            <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
+              <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg overflow-hidden">
+                <div className="p-8 border-b border-slate-100 bg-slate-50/50">
+                  <h2 className="text-xl font-black text-primary tracking-tight">Receive Transfer</h2>
+                  <p className="text-xs font-bold text-slate-400">{t.transferNumber} · {t.fromStore} → {t.toStore}</p>
+                </div>
+                <div className="p-8 space-y-4">
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Verify received quantities</p>
+                  {t.items.map(item => (
+                    <div key={item.productId} className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl">
+                      <div>
+                        <p className="font-bold text-sm text-slate-900">{item.name}</p>
+                        <p className="text-[10px] text-slate-400">Shipped: {item.quantity}</p>
+                      </div>
+                      <input type="number" min="0" max={item.quantity} value={transferReceiveQtys[item.productId] ?? item.quantity} onChange={(e) => setTransferReceiveQtys(prev => ({ ...prev, [item.productId]: parseInt(e.target.value) || 0 }))} className="w-20 px-3 py-2 bg-white border border-slate-200 rounded-xl text-center font-bold" />
+                    </div>
+                  ))}
+                  {t.items.some(item => (transferReceiveQtys[item.productId] ?? item.quantity) < item.quantity) && (
+                    <div className="bg-orange-50 border border-orange-200 rounded-xl p-3">
+                      <p className="text-xs font-bold text-orange-700">Discrepancy detected — received quantity differs from shipped.</p>
+                    </div>
+                  )}
+                  <div className="flex gap-4 pt-2">
+                    <button onClick={() => setTransferReceiveModal(null)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest">Cancel</button>
+                    <button onClick={() => {
+                      if (!canManageTransfers) return;
+                      t.items.forEach(item => {
+                        const receivedQty = transferReceiveQtys[item.productId] ?? item.quantity;
+                        if (receivedQty > 0) {
+                          const stockItem = approvedStockItems.find(si => si.id === item.productId);
+                          const prevQty = stockItem?.qty || 0;
+                          const newQty = prevQty + receivedQty;
+                          if (stockItem) {
+                            updateStockItem(stockItem.id, { qty: newQty });
+                          }
+                          addStockMovement({
+                            id: `sm-${Date.now()}-${item.productId}`, stockItemId: item.productId, stockItemName: item.name,
+                            type: 'transfer_in', quantityChange: receivedQty, previousQty: prevQty, newQty,
+                            referenceId: t.id, referenceType: 'transfer',
+                            performedBy: 'Current User', timestamp: new Date().toISOString(),
+                            reason: `Received from transfer ${t.transferNumber}${receivedQty < item.quantity ? ` (${item.quantity - receivedQty} short)` : ''}`,
+                          });
+                        }
+                      });
+                      updateInventoryTransfer(t.id, { status: 'Received', receivedAt: new Date().toISOString() });
+                      setTransferReceiveModal(null);
+                      setTransferReceiveQtys({});
+                    }} className="flex-1 py-4 bg-emerald-500 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-emerald-500/20">Receive & Update</button>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          );
+        })()}
+
+        {selectedRefurbJob && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg overflow-hidden max-h-[90vh] flex flex-col">
+              <div className="p-8 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center shrink-0">
+                <div>
+                  <h2 className="text-xl font-black text-primary tracking-tight">{selectedRefurbJob.itemName}</h2>
+                  <p className="text-xs font-bold text-slate-400">Refurbishment Job · {selectedRefurbJob.status}</p>
+                </div>
+                <button onClick={() => { setSelectedRefurbJob(null); setRefurbConfirmComplete(false); }} className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+              </div>
+              <div className="p-8 space-y-4 overflow-y-auto flex-1">
+                {!refurbConfirmComplete ? (
+                  <>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="bg-slate-50 rounded-xl p-3">
+                        <p className="text-[10px] font-black text-slate-400 uppercase">Technician</p>
+                        <p className="text-sm font-bold text-slate-900 mt-1">{selectedRefurbJob.technicianName}</p>
+                      </div>
+                      <div className="bg-slate-50 rounded-xl p-3">
+                        <p className="text-[10px] font-black text-slate-400 uppercase">Total Cost</p>
+                        <p className="text-sm font-bold text-primary mt-1">${selectedRefurbJob.totalCost.toFixed(2)}</p>
+                      </div>
+                    </div>
+                    {selectedRefurbJob.notes && (
+                      <div className="bg-slate-50 rounded-xl p-3">
+                        <p className="text-[10px] font-black text-slate-400 uppercase">Notes</p>
+                        <p className="text-sm text-slate-600 mt-1">{selectedRefurbJob.notes}</p>
+                      </div>
+                    )}
+                    {selectedRefurbJob.partsUsed.length > 0 && (
+                      <div>
+                        <p className="text-[10px] font-black text-slate-400 uppercase mb-2">Parts Used</p>
+                        {selectedRefurbJob.partsUsed.map((p, i) => (
+                          <div key={i} className="flex justify-between p-3 bg-slate-50 rounded-xl mb-1">
+                            <span className="text-sm font-bold text-slate-900">{p.name}</span>
+                            <span className="text-sm font-bold text-primary">${p.cost.toFixed(2)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {selectedRefurbJob.estimatedCompletion && (
+                      <div className="bg-slate-50 rounded-xl p-3">
+                        <p className="text-[10px] font-black text-slate-400 uppercase">Est. Completion</p>
+                        <p className="text-sm font-bold text-slate-900 mt-1">{selectedRefurbJob.estimatedCompletion}</p>
+                      </div>
+                    )}
+                    {canManageRefurbishment && selectedRefurbJob.status !== 'Completed' && (
+                      <div className="flex gap-2 pt-2">
+                        <button onClick={() => setRefurbConfirmComplete(true)} className="flex-1 py-3 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all">Complete Job</button>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <p className="text-sm font-bold text-slate-700">Confirm completion and set resale price for the refurbished item.</p>
+                    <div>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Resale Price</label>
+                      <input type="number" step="0.01" value={refurbNewResale} onChange={(e) => setRefurbNewResale(e.target.value)} className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold" placeholder="0.00" />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Completion Note</label>
+                      <textarea value={refurbCompletionNote} onChange={(e) => setRefurbCompletionNote(e.target.value)} className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold h-20 resize-none" placeholder="Final notes on refurbishment..." />
+                    </div>
+                    <div className="flex gap-4 pt-2">
+                      <button onClick={() => setRefurbConfirmComplete(false)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest">Back</button>
+                      <button onClick={() => {
+                        const tradeIn = tradeIns.find(t => t.id === selectedRefurbJob.itemId);
+                        const resale = parseFloat(refurbNewResale) || (tradeIn?.resalePrice || ((tradeIn?.buybackPrice || 0) + selectedRefurbJob.totalCost) * 1.5);
+                        const newItem: StockItem = {
+                          id: `stk-rfb-${Date.now()}`, name: `${selectedRefurbJob.itemName} (Refurbished)`,
+                          sku: `RFB-${Date.now().toString().slice(-6)}`, qty: 1,
+                          cost: (tradeIn?.buybackPrice || 0) + selectedRefurbJob.totalCost,
+                          price: resale,
+                          category: 'Devices', type: 'serialized', isRepairPart: false, isHiddenOnPOS: false,
+                          addedAt: new Date().toISOString(), status: 'approved',
+                        };
+                        addStockItem(newItem);
+                        addStockMovement({
+                          id: `sm-${Date.now()}`, stockItemId: newItem.id, stockItemName: newItem.name,
+                          type: 'refurbishment_complete', quantityChange: 1, previousQty: 0, newQty: 1,
+                          referenceId: selectedRefurbJob.id, referenceType: 'refurbishment',
+                          performedBy: 'Current User', timestamp: new Date().toISOString(),
+                          reason: `Refurbishment of ${selectedRefurbJob.itemName} completed${refurbCompletionNote ? ': ' + refurbCompletionNote : ''}`,
+                        });
+                        updateRefurbishmentJob(selectedRefurbJob.id, { status: 'Completed', completedAt: new Date().toISOString(), resultingProductId: newItem.id, refurbNotes: refurbCompletionNote || undefined });
+                        if (tradeIn) updateTradeIn(tradeIn.id, { status: 'In Inventory', movedToInventoryId: newItem.id, resalePrice: resale });
+                        setSelectedRefurbJob(null);
+                        setRefurbConfirmComplete(false);
+                      }} className="flex-1 py-4 bg-emerald-500 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-emerald-500/20">Confirm & Complete</button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+
         {editingSuggestiveItem && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
             <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg overflow-hidden">

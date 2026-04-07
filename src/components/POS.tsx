@@ -1739,6 +1739,7 @@ export const POS: React.FC = () => {
                     { id: 'svc-port', name: 'Charging Port Repair', price: 99.00, icon: 'electrical_services', type: 'repair', category: 'Repairs', description: 'Port replacement service' },
                   ];
                   const fromStock = approvedStockItems
+                    .filter(si => !si.isHiddenOnPOS)
                     .map(si => {
                       const inCartQty = cart.filter(ci => ci.type === 'product' && ci.id.startsWith(si.id + '-')).reduce((sum, ci) => sum + (ci.qty || 1), 0);
                       return {

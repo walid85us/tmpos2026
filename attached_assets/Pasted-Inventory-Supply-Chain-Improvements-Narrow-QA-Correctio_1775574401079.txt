@@ -1,0 +1,235 @@
+Inventory & Supply Chain Improvements — Narrow QA Correction Pass 1
+
+Read `replit.md` and `Ref.txt` first and treat them as source-of-truth constraints before making any changes.
+
+Also re-read the Inventory & Supply Chain reference links already provided for this workstream before implementing these corrections. Use them as behavioral reference, but do not copy them blindly. Improve beyond them while preserving our current architecture, design baseline, RBAC model, store scoping, and completed workstreams.
+
+This is NOT a redesign and NOT a new workstream.
+This is a narrow correction pass based only on the QA failures and partial failures from Inventory & Supply Chain Improvements.
+
+Expert-role stack
+- Principal SaaS Product Architect for multi-tenant repair/POS workflows
+- Staff React 19 + TypeScript + Vite engineer
+- Firebase / Firestore data-model and state-flow architect
+- Auth / RBAC / lifecycle gating specialist
+- Inventory and supply-chain workflow architect
+- QA-driven refactor auditor
+- Side auditor and systems thinker at all times
+
+Operating posture
+- Act as a side auditor and systems thinker throughout.
+- Audit ripple effects before editing.
+- Fix only the failed or partial QA items deeply and coherently.
+- Preserve current design baseline exactly.
+- Preserve auth, preview mode, RBAC, lifecycle gating, and platform/store hierarchy.
+- Preserve tenant isolation and store scoping.
+- Reuse existing modal/drawer/table/toast/permission/sub-permission patterns.
+- Do not reopen completed workstreams except for narrow compatibility-safe fixes required by this pass.
+- Do not make changes to folder `Z`.
+- Do not make changes to file `Y`.
+
+Remaining corrections to implement
+
+A) Inventory item edit and operational enforcement
+1. Type editability
+- in the inventory edit screen, item type must be maintainable where appropriate
+- allow changing type in a controlled way if the current item state allows it cleanly
+- if there are guardrails required for serialized vs non-serialized conversion, implement them clearly rather than silently blocking
+- do not leave type effectively frozen without explanation
+
+2. Hide-from-POS must actually be enforced
+- if an inventory item is marked hide-from-POS, it must not appear in POS sellable item selection/search/add flows
+- audit all relevant POS entry points and product pickers
+- keep this coherent with existing invoice→POS and inventory flows
+
+3. Repair part flag must actually be enforced
+- if an inventory item is marked not a repair part, it must not appear in repair-parts selection/linkage flows
+- audit all repair part pickers and ticket part-add flows
+- do not let the flag exist only cosmetically
+
+B) Purchase Order workflow refinement
+1. PO details UX
+- clicking View Details or a PO reference should open a proper popup/modal/drawer, not expand awkwardly inline under the list
+
+2. Multi-item same-vendor PO creation
+- when creating a PO, user must be able to add multiple inventory items from the same vendor into one PO cleanly
+
+3. Vendor assignment on inventory items
+- add a practical vendor assignment model to inventory items
+- inventory item can have:
+  - one or more vendor links if the current architecture supports it cleanly, or
+  - at minimum a primary/default vendor
+- there must also be a valid generic/no-vendor option
+
+4. PO item picker behavior
+- when a vendor is chosen in PO creation:
+  - the item picker should prioritize/filter items linked to that vendor
+- generic items may still be selectable if your final model supports them intentionally
+
+5. Supplier maintenance
+- supplier records must be editable after creation
+- do not leave suppliers create-only
+
+C) Transfer workflow refinement
+1. Transfer details UX
+- Transfer # must be clickable
+- clicking it must open a transfer detail popup/modal/drawer
+
+2. Transfer editability
+- as long as the transfer is not received/finalized, it should remain editable where operationally appropriate
+
+3. Confirmation flows
+- any transfer action button should show a confirmation message/modal before committing the action
+
+4. Receive reconciliation
+- clicking Receive must open a reconciliation popup/modal
+- user should be able to review the transfer and confirm what was actually received
+- receiving should not be a blind one-click state change
+
+5. Store locations master data
+- when creating a transfer, From and To must come from a managed location/store dropdown
+- make sure this location/store maintenance process exists and is ready for store owner or authorized users
+- keep it coherent with current multi-store/store-scoped architecture
+
+D) Inventory count / discrepancy handling refinement
+1. Improve the count experience materially
+- current count/adjustment section needs stronger operational clarity
+
+2. Add discrepancy management visibility
+- there must be a clear place to review:
+  - counted items
+  - remaining items
+  - discrepancies
+  - adjustment outcome
+- do not leave discrepancy logic hidden or too shallow
+
+3. Align with strong inventory-count workflows
+- make the count flow feel like a real stock-count process, not just a small adjustment helper
+
+E) Trade-in / refurbishment / RMA refinement
+1. Trade-in improvements
+- when creating a new trade-in, allow selecting walk-in customer
+- allow taking/uploading photo of ID
+- add resale price field that moves with the item when sent into stock
+- Send to Refurb must open a confirmation window and include a note/comments field describing what needs refurbishment
+
+2. Refurbishment improvements
+- refurbishment items should be clickable to open a detail popup/modal with comments/details
+- before completing refurbishment, allow re-evaluating resale price
+- clicking Complete must open a confirmation popup before sending the item to stock
+- completion/release-to-stock should be permission-aware
+
+3. Add needed inventory sub-permissions for these areas
+- add sub-permissions under Inventory for at minimum:
+  - manage_trade_ins
+  - manage_refurbishment
+  - manage_stock_counts
+  - manage_transfers (already exists, keep and refine as needed)
+- wire them into actual UI gating, not just definitions
+
+4. RMA refinement
+- when creating an RMA and selecting a supplier:
+  - only PO references from that supplier should be listed
+  - items from that PO should populate automatically
+  - each item line should support a reason field
+- in RMA Management:
+  - RMA # must be clickable and open RMA details in popup/modal/drawer
+  - if RMA is still pending and not shipped, details should remain editable
+  - Ship action must show confirmation
+  - Refunded action must open a popup to confirm refund amount
+  - that refund should be reflected back into store operational account/revenue logic in a coherent preview-safe way, without turning this into a full accounting subsystem
+  - Replaced action must open a popup to confirm replacement items
+  - once confirmed, there should be an option to send replacement items back into stock appropriately
+
+F) Dashboard low-stock visibility
+1. Low-stock alerts should also surface on Dashboard for users with inventory access/permission
+- keep it permission-aware
+- make it operationally useful, not noisy
+
+G) RBAC / permission re-evaluation and enforcement hardening
+1. Current issue
+- a sales user with view-only inventory access can still open an item detail and edit from the Edit tab
+- this is not acceptable
+
+2. Required behavior
+- view-only users must not be able to edit inventory through detail tabs, modals, or hidden side paths
+- audit all edit-capable entry points in Inventory and Supply Chain
+
+3. Expand sub-permissions
+Add and wire cleanly, at minimum:
+Under Inventory:
+- adjust_stock
+- manage_transfers
+- manage_stock_counts
+- manage_trade_ins
+- manage_refurbishment
+
+Under Supply Chain:
+- manage_purchase_orders
+- manage_goods_received_notes
+- manage_rmas
+- manage_suppliers
+
+4. Real UI enforcement
+- do not stop at defining sub-permissions
+- wire them into actual action gating with existing `checkSubPermission()` patterns
+- blocked states must be clean, visible, and not misleading
+
+H) Documentation
+Update `replit.md` so it accurately reflects:
+- enforced hide-from-POS behavior
+- enforced repair-part filtering
+- vendor-linked inventory / PO item selection logic
+- transfer detail + receive reconciliation behavior
+- inventory count/discrepancy handling improvements
+- trade-in / refurbishment / RMA workflow decisions
+- new inventory and supply-chain sub-permissions and their enforcement
+- dashboard low-stock visibility logic
+
+Important suggested logic to include
+- do not let inventory flags exist only cosmetically; enforce them operationally
+- modal/detail view should be the consistent pattern for PO / Transfer / RMA details
+- all lifecycle actions that materially change stock or financial state should use confirmation/review popups
+- permissions must be enforced both on primary buttons and hidden edit surfaces
+- keep generic/no-vendor items supported intentionally, not accidentally
+
+Required design and behavior rules
+- Preserve the current premium glassmorphism design baseline exactly
+- Maintain keyboard accessibility and clear blocked/save/error states
+- Keep state paths unified
+- Avoid duplicate parallel systems
+- Ensure corrected flows work in preview/demo mode
+- Maintain store scoping and tenant safety
+- Keep type safety strong
+
+Definition of done
+This correction pass is done only if:
+- inventory type can be maintained appropriately in edit flow
+- hide-from-POS is actually enforced in POS flows
+- repair-part flag is actually enforced in repair part flows
+- PO details open in popup/modal/drawer
+- PO creation supports multiple items for a selected vendor
+- supplier records are editable
+- transfers are clickable, editable before receipt, and use confirmation/reconciliation popups
+- From/To transfer fields use managed location/store dropdowns
+- inventory count/discrepancy handling is materially improved
+- trade-in supports walk-in customer, ID upload, resale price, and refurb confirmation note
+- refurbishment details and completion flow are materially improved
+- RMA creation/editing/lifecycle behaviors are materially improved and supplier/PO linkage works correctly
+- low-stock visibility appears on Dashboard for authorized users
+- view-only inventory users cannot edit through detail tabs
+- new inventory and supply-chain sub-permissions are both defined and enforced
+- no regressions are introduced in inventory, supply chain, repairs, customers, invoices, POS, services, or warranty
+- `replit.md` is updated to reflect all corrections
+
+Required final response format
+Return your completion report in exactly this structure:
+
+1. Files Changed
+2. Corrections Implemented
+3. Inventory / Supply Chain Workflow Decisions
+4. Permission / Access Enforcement Fixes
+5. Operational Flag Enforcement Fixes
+6. Non-Regressions Confirmed
+7. Known Deferred Items
+8. Manual QA Retest Areas

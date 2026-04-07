@@ -763,10 +763,14 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
     }
   };
 
+  const lowStockItems = approvedStockItems.filter(i => i.qty > 0 && i.qty <= (i.minStockLevel || 5));
+  const outOfStockItems = approvedStockItems.filter(i => i.qty === 0);
+  const criticalStockCount = lowStockItems.length + outOfStockItems.length;
+
   const statCards: { label: string; value: string; color: string; bg: string; border: string; icon: string; route: string; sub?: string; roles: string[] }[] = [
     { label: "Today's Revenue", value: '$4,285.50', color: 'text-white', bg: 'signature-gradient', border: '', icon: 'payments', route: '/reports', sub: '+12.5% vs yesterday', roles: ['store_owner', 'manager', 'sales_staff'] },
     { label: 'Active Repairs', value: '18', color: 'text-primary', bg: 'bg-white', border: 'border border-outline-variant/10', icon: 'build', route: '/repairs', sub: '3 awaiting parts', roles: ['store_owner', 'manager', 'technician'] },
-    { label: 'Critical Stock', value: '04', color: 'text-red-700', bg: 'bg-red-50', border: 'border border-red-100', icon: 'warning', route: '/inventory', sub: 'Immediate reorder required', roles: ['store_owner', 'manager'] },
+    { label: 'Critical Stock', value: String(criticalStockCount).padStart(2, '0'), color: criticalStockCount > 0 ? 'text-red-700' : 'text-emerald-700', bg: criticalStockCount > 0 ? 'bg-red-50' : 'bg-emerald-50', border: criticalStockCount > 0 ? 'border border-red-100' : 'border border-emerald-100', icon: 'warning', route: '/inventory', sub: criticalStockCount > 0 ? `${outOfStockItems.length} out of stock, ${lowStockItems.length} low` : 'All stock levels healthy', roles: ['store_owner', 'manager'] },
   ];
 
   const visibleStats = statCards.filter(s => s.roles.includes(role || ''));
@@ -831,6 +835,49 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
           </div>
         ))}
       </div>
+
+      {(role === 'store_owner' || role === 'manager') && criticalStockCount > 0 && (
+        <div className="bg-red-50 border border-red-200 rounded-[2rem] p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-red-100 rounded-xl flex items-center justify-center">
+                <span className="material-symbols-outlined text-red-600">warning</span>
+              </div>
+              <div>
+                <h3 className="text-sm font-black text-red-800 uppercase tracking-widest">Low Stock Alerts</h3>
+                <p className="text-xs text-red-600">{criticalStockCount} item{criticalStockCount !== 1 ? 's' : ''} need attention</p>
+              </div>
+            </div>
+            <button onClick={() => navigate('/inventory')} className="px-4 py-2 bg-red-100 text-red-700 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-red-200 transition-all">View All</button>
+          </div>
+          <div className="space-y-2 max-h-48 overflow-y-auto">
+            {outOfStockItems.slice(0, 5).map(item => (
+              <div key={item.id} className="flex items-center justify-between p-3 bg-white rounded-xl border border-red-100">
+                <div className="flex items-center gap-3">
+                  <span className="material-symbols-outlined text-red-500 text-sm">block</span>
+                  <div>
+                    <p className="text-sm font-bold text-slate-900">{item.name}</p>
+                    <p className="text-[10px] text-slate-400">SKU: {item.sku}</p>
+                  </div>
+                </div>
+                <span className="px-2 py-1 bg-red-100 text-red-700 text-[10px] font-black uppercase tracking-widest rounded-lg">Out of Stock</span>
+              </div>
+            ))}
+            {lowStockItems.slice(0, 5).map(item => (
+              <div key={item.id} className="flex items-center justify-between p-3 bg-white rounded-xl border border-orange-100">
+                <div className="flex items-center gap-3">
+                  <span className="material-symbols-outlined text-orange-500 text-sm">warning</span>
+                  <div>
+                    <p className="text-sm font-bold text-slate-900">{item.name}</p>
+                    <p className="text-[10px] text-slate-400">SKU: {item.sku} · {item.qty} remaining</p>
+                  </div>
+                </div>
+                <span className="px-2 py-1 bg-orange-100 text-orange-700 text-[10px] font-black uppercase tracking-widest rounded-lg">Low Stock</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {checkSubPermission('approve_inventory') && pendingStockItems.length > 0 && (
         <div className="bg-amber-50 border border-amber-200 rounded-[2rem] p-6 space-y-4">

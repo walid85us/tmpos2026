@@ -76,6 +76,12 @@ export const SUB_PERMISSIONS: SubPermissionDef[] = [
   { id: 'adjust_stock', label: 'Adjust Stock', parentDomain: 'inventory', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Increase or decrease stock levels with reason tracking' },
   { id: 'manage_transfers', label: 'Manage Transfers', parentDomain: 'inventory', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Create and manage inventory transfers between locations' },
   { id: 'manage_purchase_orders', label: 'Manage Purchase Orders', parentDomain: 'supply_chain', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Create, send, and receive purchase orders from suppliers' },
+  { id: 'manage_trade_ins', label: 'Manage Trade-Ins', parentDomain: 'inventory', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Create and process trade-in items' },
+  { id: 'manage_refurbishment', label: 'Manage Refurbishment', parentDomain: 'inventory', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Create and manage refurbishment jobs' },
+  { id: 'manage_stock_counts', label: 'Manage Stock Counts', parentDomain: 'inventory', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Start and complete stock count audits' },
+  { id: 'manage_goods_received_notes', label: 'Manage GRNs', parentDomain: 'supply_chain', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Process and record goods received notes' },
+  { id: 'manage_rmas', label: 'Manage RMAs', parentDomain: 'supply_chain', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Create and manage return merchandise authorizations' },
+  { id: 'manage_suppliers', label: 'Manage Suppliers', parentDomain: 'supply_chain', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Add and edit supplier records' },
 ];
 
 export const ADMIN_ACTION_LEVEL_MAP = SUB_PERMISSIONS;
@@ -147,6 +153,12 @@ export const tenantRoles: EmployeeRole[] = [
       adjust_stock: true,
       manage_transfers: true,
       manage_purchase_orders: true,
+      manage_trade_ins: true,
+      manage_refurbishment: true,
+      manage_stock_counts: true,
+      manage_goods_received_notes: true,
+      manage_rmas: true,
+      manage_suppliers: true,
     },
     description: 'Store management access'
   },
@@ -195,6 +207,12 @@ export const tenantRoles: EmployeeRole[] = [
       adjust_stock: true,
       manage_transfers: false,
       manage_purchase_orders: false,
+      manage_trade_ins: false,
+      manage_refurbishment: true,
+      manage_stock_counts: false,
+      manage_goods_received_notes: false,
+      manage_rmas: false,
+      manage_suppliers: false,
     },
     description: 'Repair and parts access'
   },
@@ -243,6 +261,12 @@ export const tenantRoles: EmployeeRole[] = [
       adjust_stock: false,
       manage_transfers: false,
       manage_purchase_orders: false,
+      manage_trade_ins: false,
+      manage_refurbishment: false,
+      manage_stock_counts: false,
+      manage_goods_received_notes: false,
+      manage_rmas: false,
+      manage_suppliers: false,
     },
     description: 'Sales and customer access'
   },

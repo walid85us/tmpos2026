@@ -112,6 +112,8 @@ export interface TradeInItem {
   resalePrice?: number;
   status: 'Pending' | 'Evaluated' | 'In Inventory' | 'Sold' | 'Refurbishing';
   movedToInventoryId?: string;
+  isWalkIn?: boolean;
+  idPhotoUrl?: string;
   createdAt: string;
 }
 
@@ -123,6 +125,7 @@ export interface RefurbishmentJob {
   technicianName: string;
   status: 'Pending' | 'In Progress' | 'Testing' | 'Completed';
   notes: string;
+  refurbNotes?: string;
   partsUsed: { name: string; cost: number }[];
   totalCost: number;
   estimatedCompletion?: string;

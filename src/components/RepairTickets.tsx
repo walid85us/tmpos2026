@@ -170,9 +170,10 @@ export default function RepairTickets() {
   }, [serviceSearch, services]);
 
   const partMatches = useMemo(() => {
-    if (!partSearch.trim()) return approvedStockItems.slice(0, 8);
+    const repairParts = approvedStockItems.filter(s => s.isRepairPart);
+    if (!partSearch.trim()) return repairParts.slice(0, 8);
     const q = partSearch.toLowerCase();
-    return approvedStockItems.filter(s => s.name.toLowerCase().includes(q) || s.sku.toLowerCase().includes(q)).slice(0, 8);
+    return repairParts.filter(s => s.name.toLowerCase().includes(q) || s.sku.toLowerCase().includes(q)).slice(0, 8);
   }, [partSearch, approvedStockItems]);
 
   const selectedServices = useMemo(() => {

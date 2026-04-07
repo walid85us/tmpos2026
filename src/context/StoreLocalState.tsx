@@ -233,6 +233,8 @@ interface StoreLocalStateContextType {
   refurbishmentJobs: RefurbishmentJob[];
   addRefurbishmentJob: (j: RefurbishmentJob) => void;
   updateRefurbishmentJob: (id: string, updates: Partial<RefurbishmentJob>) => void;
+  storeLocations: string[];
+  getItemMovements: (stockItemId: string) => StockMovement[];
 }
 
 const SEED_CUSTOMERS: Customer[] = [
@@ -604,6 +606,8 @@ const SEED_RMAS: RMA[] = [
   },
 ];
 
+const SEED_STORE_LOCATIONS: string[] = ['Main Warehouse', 'Downtown Branch', 'Eastside Location', 'Airport Kiosk'];
+
 const SEED_TRANSFERS: InventoryTransfer[] = [
   {
     id: 'tr-001', transferNumber: 'TRF-2026-001', fromStore: 'Main Warehouse', toStore: 'Downtown Branch',
@@ -702,6 +706,11 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const [inventoryCounts, setInventoryCounts] = useState<InventoryCount[]>(SEED_COUNTS);
   const [tradeIns, setTradeIns] = useState<TradeInItem[]>(SEED_TRADE_INS);
   const [refurbishmentJobs, setRefurbishmentJobs] = useState<RefurbishmentJob[]>(SEED_REFURB_JOBS);
+  const storeLocations = SEED_STORE_LOCATIONS;
+
+  const getItemMovements = useCallback((stockItemId: string) => {
+    return stockMovements.filter(m => m.stockItemId === stockItemId).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  }, [stockMovements]);
 
   const updateDocumentTemplate = useCallback((id: string, updates: Partial<DocumentTemplate>) => {
     setDocumentTemplates(prev => prev.map(t => t.id === id ? { ...t, ...updates, isDefault: false, updatedAt: new Date().toISOString() } : t));
@@ -840,6 +849,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
       inventoryCounts, addInventoryCount, updateInventoryCount,
       tradeIns, addTradeIn, updateTradeIn,
       refurbishmentJobs, addRefurbishmentJob, updateRefurbishmentJob,
+      storeLocations, getItemMovements,
     }}>
       {children}
     </StoreLocalStateContext.Provider>
