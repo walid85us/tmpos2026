@@ -852,7 +852,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
           </div>
           <div className="space-y-2 max-h-48 overflow-y-auto">
             {outOfStockItems.slice(0, 5).map(item => (
-              <button key={item.id} onClick={() => navigate('/inventory')} className="w-full flex items-center justify-between p-3 bg-white rounded-xl border border-red-100 hover:bg-red-50 transition-all cursor-pointer text-left">
+              <button key={item.id} onClick={() => navigate(`/inventory?item=${item.id}`)} className="w-full flex items-center justify-between p-3 bg-white rounded-xl border border-red-100 hover:bg-red-50 transition-all cursor-pointer text-left">
                 <div className="flex items-center gap-3">
                   <span className="material-symbols-outlined text-red-500 text-sm">block</span>
                   <div>
@@ -864,7 +864,7 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
               </button>
             ))}
             {lowStockItems.slice(0, 5).map(item => (
-              <button key={item.id} onClick={() => navigate('/inventory')} className="w-full flex items-center justify-between p-3 bg-white rounded-xl border border-orange-100 hover:bg-orange-50 transition-all cursor-pointer text-left">
+              <button key={item.id} onClick={() => navigate(`/inventory?item=${item.id}`)} className="w-full flex items-center justify-between p-3 bg-white rounded-xl border border-orange-100 hover:bg-orange-50 transition-all cursor-pointer text-left">
                 <div className="flex items-center gap-3">
                   <span className="material-symbols-outlined text-orange-500 text-sm">warning</span>
                   <div>

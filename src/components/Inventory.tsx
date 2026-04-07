@@ -1,4 +1,5 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState, StockItem } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
@@ -9,6 +10,7 @@ type InventoryTab = 'inventory' | 'movements' | 'suggestive' | 'trade-in' | 'ref
 type FilterType = 'all' | 'serialized' | 'non-serialized' | 'handset';
 
 const Inventory: React.FC = () => {
+  const [searchParams, setSearchParams] = useSearchParams();
   const {
     approvedStockItems, pendingStockItems, addStockItem, updateStockItem, deleteStockItem,
     stockMovements, addStockMovement,
@@ -39,6 +41,19 @@ const Inventory: React.FC = () => {
   const [isAddProductModalOpen, setIsAddProductModalOpen] = useState(false);
   const [selectedItem, setSelectedItem] = useState<StockItem | null>(null);
   const [detailTab, setDetailTab] = useState<'info' | 'movements' | 'edit'>('info');
+
+  useEffect(() => {
+    const itemId = searchParams.get('item');
+    if (itemId) {
+      const match = approvedStockItems.find(si => si.id === itemId);
+      if (match) {
+        setActiveTab('inventory');
+        setSelectedItem(match);
+        setDetailTab('info');
+      }
+      setSearchParams({}, { replace: true });
+    }
+  }, []);
   const [showAdjustModal, setShowAdjustModal] = useState(false);
   const [adjustItem, setAdjustItem] = useState<StockItem | null>(null);
   const [adjustType, setAdjustType] = useState<'increase' | 'decrease'>('increase');
