@@ -1,8 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState, StockItem } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
-import { StockMovement, RefurbishmentJob } from '../types';
+import { StockMovement, RefurbishmentJob, TransferLineItem } from '../types';
 import ContextualHelp from './ContextualHelp';
 
 type InventoryTab = 'inventory' | 'movements' | 'suggestive' | 'trade-in' | 'refurb' | 'transfer' | 'count' | 'bills' | 'giftcards' | 'bundles';
@@ -14,13 +14,14 @@ const Inventory: React.FC = () => {
     stockMovements, addStockMovement,
     inventoryTransfers, addInventoryTransfer, updateInventoryTransfer,
     inventoryCounts, addInventoryCount, updateInventoryCount,
-    tradeIns, addTradeIn, updateTradeIn,
+    tradeIns, addTradeIn, updateTradeIn, deleteTradeIn,
     refurbishmentJobs, addRefurbishmentJob, updateRefurbishmentJob,
     suppliers, customers, storeLocations, getItemMovements,
   } = useStoreLocalState();
   const { checkPermission, checkSubPermission } = useAccess();
   const hasInventoryPermission = checkPermission('inventory', 'manage');
   const hasInventoryEdit = checkPermission('inventory', 'edit');
+  const hasInventoryView = checkPermission('inventory', 'view');
   const canAdjustStock = checkSubPermission('adjust_stock');
   const canManageTransfers = checkSubPermission('manage_transfers');
   const canManageTradeIns = checkSubPermission('manage_trade_ins');
@@ -76,15 +77,35 @@ const Inventory: React.FC = () => {
   const [selectedTransfer, setSelectedTransfer] = useState<string | null>(null);
   const [transferConfirmAction, setTransferConfirmAction] = useState<{ id: string; action: string; label: string } | null>(null);
   const [transferReceiveModal, setTransferReceiveModal] = useState<string | null>(null);
-  const [transferReceiveQtys, setTransferReceiveQtys] = useState<Record<string, number>>({});
+  const [transferReceiveQtys, setTransferReceiveQtys] = useState<Record<number, number>>({});
+  const [transferReceiveConditions, setTransferReceiveConditions] = useState<Record<number, string>>({});
+  const [transferReceiveNotes, setTransferReceiveNotes] = useState<Record<number, string>>({});
+  const [editingTransfer, setEditingTransfer] = useState<string | null>(null);
+  const [editTransferFrom, setEditTransferFrom] = useState('');
+  const [editTransferTo, setEditTransferTo] = useState('');
+  const [editTransferNotes, setEditTransferNotes] = useState('');
+  const [createTransferFrom, setCreateTransferFrom] = useState('');
+  const [createTransferTo, setCreateTransferTo] = useState('');
+  const [createTransferItems, setCreateTransferItems] = useState<{ productId: string; name: string; sku: string; quantity: number; isSerialized: boolean }[]>([]);
 
   const [selectedCount, setSelectedCount] = useState<string | null>(null);
   const [countActuals, setCountActuals] = useState<Record<string, number>>({});
+  const [countConfirmComplete, setCountConfirmComplete] = useState(false);
 
   const [selectedRefurbJob, setSelectedRefurbJob] = useState<RefurbishmentJob | null>(null);
   const [refurbConfirmComplete, setRefurbConfirmComplete] = useState(false);
   const [refurbCompletionNote, setRefurbCompletionNote] = useState('');
   const [refurbNewResale, setRefurbNewResale] = useState('');
+
+  const [tradeInSearch, setTradeInSearch] = useState('');
+  const [tradeInIsWalkIn, setTradeInIsWalkIn] = useState(false);
+  const [editingTradeIn, setEditingTradeIn] = useState<string | null>(null);
+  const [tradeInConfirm, setTradeInConfirm] = useState<{ id: string; action: string; label: string; notes?: boolean } | null>(null);
+  const [tradeInConfirmNotes, setTradeInConfirmNotes] = useState('');
+  const [deleteTradeInConfirm, setDeleteTradeInConfirm] = useState<string | null>(null);
+
+  const idPhotoCaptureRef = useRef<HTMLInputElement>(null);
+  const [capturedIdPhoto, setCapturedIdPhoto] = useState<string>('');
 
   const resetAddProductForm = () => {
     setNewProductName(''); setNewProductCategory('Parts'); setNewProductSku('');
@@ -214,6 +235,8 @@ const Inventory: React.FC = () => {
       case 'Sent': case 'In Transit': case 'In Progress': case 'Refurbishing': case 'Testing': return 'bg-amber-500/10 text-amber-600 border-amber-500/20';
       case 'Draft': case 'Pending': case 'Evaluated': return 'bg-primary/10 text-primary border-primary/20';
       case 'Cancelled': return 'bg-rose-500/10 text-rose-600 border-rose-500/20';
+      case 'Partially Received': return 'bg-orange-500/10 text-orange-600 border-orange-500/20';
+      case 'Discrepancy Detected': return 'bg-red-500/10 text-red-600 border-red-500/20';
       default: return 'bg-slate-500/10 text-slate-600 border-slate-500/20';
     }
   };
@@ -446,12 +469,18 @@ const Inventory: React.FC = () => {
     );
   };
 
+  const filteredCustomers = useMemo(() => {
+    if (!tradeInSearch.trim()) return customers;
+    const q = tradeInSearch.toLowerCase();
+    return customers.filter(c => c.name.toLowerCase().includes(q) || c.phone?.toLowerCase().includes(q));
+  }, [customers, tradeInSearch]);
+
   const renderTradeIn = () => (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-black text-primary tracking-tight">Buyback & Trade-In</h2>
         {canManageTradeIns ? (
-          <button onClick={() => setShowCreateTradeIn(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
+          <button onClick={() => { setShowCreateTradeIn(true); setTradeInIsWalkIn(false); setTradeInSearch(''); setCapturedIdPhoto(''); }} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
             <span className="material-symbols-outlined text-sm">add</span>New Trade-In
           </button>
         ) : (
@@ -468,68 +497,106 @@ const Inventory: React.FC = () => {
                 <span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${getStatusColor(item.status)}`}>{item.status}</span>
                 <h3 className="text-lg font-black text-primary tracking-tight mt-2">{item.device}</h3>
               </div>
-              <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{item.createdAt}</span>
-            </div>
-            <div className="space-y-2 mb-4 text-sm">
-              <div className="flex justify-between"><span className="text-slate-500 font-bold">Customer</span><span className="text-slate-900 font-black">{item.isWalkIn ? 'Walk-in Customer' : item.customerName}</span></div>
-              <div className="flex justify-between"><span className="text-slate-500 font-bold">Condition</span><span className="text-slate-900 font-black">{item.condition}</span></div>
-              <div className="flex justify-between"><span className="text-slate-500 font-bold">Buyback</span><span className="text-primary font-black">${item.buybackPrice}</span></div>
-              {item.resalePrice && <div className="flex justify-between"><span className="text-slate-500 font-bold">Resale</span><span className="text-emerald-600 font-black">${item.resalePrice}</span></div>}
-              {item.idPhotoUrl && <div className="flex justify-between"><span className="text-slate-500 font-bold">ID Photo</span><span className="text-emerald-600 font-black text-[10px]">Captured</span></div>}
-              {item.gradeNotes && <p className="text-xs text-slate-400 italic pt-1">{item.gradeNotes}</p>}
-            </div>
-            {canManageTradeIns && item.status === 'Pending' && (
-              <div className="flex gap-2">
-                <button onClick={() => updateTradeIn(item.id, { status: 'Evaluated' })} className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">Evaluate</button>
-                <button onClick={() => {
-                  const newItem: StockItem = {
-                    id: `stk-ti-${Date.now()}`, name: `${item.device} (Trade-In)`, sku: `TI-${Date.now().toString().slice(-6)}`,
-                    qty: 1, cost: item.buybackPrice, price: item.resalePrice || item.buybackPrice * 1.5,
-                    category: 'Devices', type: 'serialized', isRepairPart: false, isHiddenOnPOS: false,
-                    serialNumbers: item.imei ? [item.imei] : item.serialNumber ? [item.serialNumber] : undefined,
-                    addedAt: new Date().toISOString(), status: 'approved',
-                  };
-                  addStockItem(newItem);
-                  addStockMovement({
-                    id: `sm-${Date.now()}`, stockItemId: newItem.id, stockItemName: newItem.name,
-                    type: 'trade_in_conversion', quantityChange: 1, previousQty: 0, newQty: 1,
-                    referenceId: item.id, referenceType: 'trade_in',
-                    performedBy: 'Current User', timestamp: new Date().toISOString(),
-                    reason: `Trade-in from ${item.customerName}`,
-                  });
-                  updateTradeIn(item.id, { status: 'In Inventory', movedToInventoryId: newItem.id });
-                }} className="flex-1 py-3 bg-primary/10 hover:bg-primary/20 text-primary font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">Move to Stock</button>
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{item.createdAt}</span>
+                {canManageTradeIns && (item.status === 'Pending' || item.status === 'Evaluated') && (
+                  <>
+                    <button onClick={() => setEditingTradeIn(editingTradeIn === item.id ? null : item.id)} className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-primary transition-colors" title="Edit">
+                      <span className="material-symbols-outlined text-sm">edit</span>
+                    </button>
+                    <button onClick={() => setDeleteTradeInConfirm(item.id)} className="p-1.5 hover:bg-red-50 rounded-lg text-slate-400 hover:text-red-500 transition-colors" title="Delete">
+                      <span className="material-symbols-outlined text-sm">delete</span>
+                    </button>
+                  </>
+                )}
               </div>
-            )}
-            {canManageTradeIns && item.status === 'Evaluated' && (
-              <div className="flex gap-2">
-                <button onClick={() => {
-                  addRefurbishmentJob({
-                    id: `rfb-${Date.now()}`, itemId: item.id, itemName: item.device,
-                    technicianId: '', technicianName: 'Unassigned', status: 'Pending',
-                    notes: item.gradeNotes || '', partsUsed: [], totalCost: 0,
-                    createdAt: new Date().toISOString(),
-                  });
-                  updateTradeIn(item.id, { status: 'Refurbishing' });
-                }} className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">Send to Refurb</button>
-                <button onClick={() => {
-                  const newItem: StockItem = {
-                    id: `stk-ti-${Date.now()}`, name: `${item.device} (Trade-In)`, sku: `TI-${Date.now().toString().slice(-6)}`,
-                    qty: 1, cost: item.buybackPrice, price: item.resalePrice || item.buybackPrice * 1.5,
-                    category: 'Devices', type: 'serialized', isRepairPart: false, isHiddenOnPOS: false,
-                    addedAt: new Date().toISOString(), status: 'approved',
-                  };
-                  addStockItem(newItem);
-                  addStockMovement({
-                    id: `sm-${Date.now()}`, stockItemId: newItem.id, stockItemName: newItem.name,
-                    type: 'trade_in_conversion', quantityChange: 1, previousQty: 0, newQty: 1,
-                    referenceId: item.id, referenceType: 'trade_in',
-                    performedBy: 'Current User', timestamp: new Date().toISOString(),
-                    reason: `Trade-in from ${item.customerName}`,
-                  });
-                  updateTradeIn(item.id, { status: 'In Inventory', movedToInventoryId: newItem.id });
-                }} className="flex-1 py-3 bg-primary/10 hover:bg-primary/20 text-primary font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">Move to Stock</button>
-              </div>
+            </div>
+            {editingTradeIn === item.id ? (
+              <form className="space-y-3 mb-4" onSubmit={(e) => {
+                e.preventDefault();
+                if (!canManageTradeIns) return;
+                const fd = new FormData(e.currentTarget);
+                updateTradeIn(item.id, {
+                  device: fd.get('device') as string || item.device,
+                  condition: fd.get('condition') as any || item.condition,
+                  buybackPrice: parseFloat(fd.get('buyback') as string) || item.buybackPrice,
+                  resalePrice: parseFloat(fd.get('resale') as string) || item.resalePrice,
+                  gradeNotes: fd.get('notes') as string || undefined,
+                });
+                setEditingTradeIn(null);
+              }}>
+                <input name="device" defaultValue={item.device} className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" placeholder="Device" />
+                <select name="condition" defaultValue={item.condition} className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm">
+                  <option>Excellent</option><option>Good</option><option>Fair</option><option>Poor</option><option>Broken</option>
+                </select>
+                <div className="grid grid-cols-2 gap-2">
+                  <input name="buyback" type="number" step="0.01" defaultValue={item.buybackPrice} placeholder="Buyback" className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" />
+                  <input name="resale" type="number" step="0.01" defaultValue={item.resalePrice || ''} placeholder="Resale" className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" />
+                </div>
+                <textarea name="notes" defaultValue={item.gradeNotes || ''} placeholder="Grade notes..." className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm h-16 resize-none" />
+                <div className="flex gap-2">
+                  <button type="button" onClick={() => setEditingTradeIn(null)} className="px-3 py-2 bg-slate-100 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-xl">Cancel</button>
+                  <button type="submit" className="px-3 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl">Save</button>
+                </div>
+              </form>
+            ) : (
+              <>
+                <div className="space-y-2 mb-4 text-sm">
+                  <div className="flex justify-between"><span className="text-slate-500 font-bold">Customer</span><span className="text-slate-900 font-black">{item.isWalkIn ? 'Walk-in Customer' : item.customerName}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500 font-bold">Condition</span><span className="text-slate-900 font-black">{item.condition}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500 font-bold">Buyback</span><span className="text-primary font-black">${item.buybackPrice}</span></div>
+                  {item.resalePrice && <div className="flex justify-between"><span className="text-slate-500 font-bold">Resale</span><span className="text-emerald-600 font-black">${item.resalePrice}</span></div>}
+                  {item.idPhotoUrl && <div className="flex justify-between"><span className="text-slate-500 font-bold">ID Photo</span><span className="text-emerald-600 font-black text-[10px]">Captured</span></div>}
+                  {item.gradeNotes && <p className="text-xs text-slate-400 italic pt-1">{item.gradeNotes}</p>}
+                </div>
+                {canManageTradeIns && item.status === 'Pending' && (
+                  <div className="flex gap-2">
+                    <button onClick={() => setTradeInConfirm({ id: item.id, action: 'evaluate', label: `Evaluate trade-in for ${item.device}?` })} className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">Evaluate</button>
+                    <button onClick={() => {
+                      if (!canManageTradeIns) return;
+                      const newItem: StockItem = {
+                        id: `stk-ti-${Date.now()}`, name: `${item.device} (Trade-In)`, sku: `TI-${Date.now().toString().slice(-6)}`,
+                        qty: 1, cost: item.buybackPrice, price: item.resalePrice || item.buybackPrice * 1.5,
+                        category: 'Devices', type: 'serialized', isRepairPart: false, isHiddenOnPOS: false,
+                        serialNumbers: item.imei ? [item.imei] : item.serialNumber ? [item.serialNumber] : undefined,
+                        addedAt: new Date().toISOString(), status: 'approved',
+                      };
+                      addStockItem(newItem);
+                      addStockMovement({
+                        id: `sm-${Date.now()}`, stockItemId: newItem.id, stockItemName: newItem.name,
+                        type: 'trade_in_conversion', quantityChange: 1, previousQty: 0, newQty: 1,
+                        referenceId: item.id, referenceType: 'trade_in',
+                        performedBy: 'Current User', timestamp: new Date().toISOString(),
+                        reason: `Trade-in from ${item.customerName}`,
+                      });
+                      updateTradeIn(item.id, { status: 'In Inventory', movedToInventoryId: newItem.id });
+                    }} className="flex-1 py-3 bg-primary/10 hover:bg-primary/20 text-primary font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">Move to Stock</button>
+                  </div>
+                )}
+                {canManageTradeIns && item.status === 'Evaluated' && (
+                  <div className="flex gap-2">
+                    <button onClick={() => setTradeInConfirm({ id: item.id, action: 'refurb', label: `Send ${item.device} to refurbishment?`, notes: true })} className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">Send to Refurb</button>
+                    <button onClick={() => {
+                      if (!canManageTradeIns) return;
+                      const newItem: StockItem = {
+                        id: `stk-ti-${Date.now()}`, name: `${item.device} (Trade-In)`, sku: `TI-${Date.now().toString().slice(-6)}`,
+                        qty: 1, cost: item.buybackPrice, price: item.resalePrice || item.buybackPrice * 1.5,
+                        category: 'Devices', type: 'serialized', isRepairPart: false, isHiddenOnPOS: false,
+                        addedAt: new Date().toISOString(), status: 'approved',
+                      };
+                      addStockItem(newItem);
+                      addStockMovement({
+                        id: `sm-${Date.now()}`, stockItemId: newItem.id, stockItemName: newItem.name,
+                        type: 'trade_in_conversion', quantityChange: 1, previousQty: 0, newQty: 1,
+                        referenceId: item.id, referenceType: 'trade_in',
+                        performedBy: 'Current User', timestamp: new Date().toISOString(),
+                        reason: `Trade-in from ${item.customerName}`,
+                      });
+                      updateTradeIn(item.id, { status: 'In Inventory', movedToInventoryId: newItem.id });
+                    }} className="flex-1 py-3 bg-primary/10 hover:bg-primary/20 text-primary font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">Move to Stock</button>
+                  </div>
+                )}
+              </>
             )}
           </div>
         ))}
@@ -594,91 +661,74 @@ const Inventory: React.FC = () => {
     </div>
   );
 
-  const renderTransfers = () => (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h2 className="text-2xl font-black text-primary tracking-tight">Inventory Transfers</h2>
-        {canManageTransfers ? (
-          <button onClick={() => setShowCreateTransfer(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
-            <span className="material-symbols-outlined text-sm">add</span>New Transfer
-          </button>
-        ) : (
-          <button disabled className="px-6 py-3 bg-slate-200 text-slate-400 font-black text-xs rounded-2xl uppercase tracking-widest flex items-center gap-2 cursor-not-allowed">
-            <span className="material-symbols-outlined text-sm">lock</span>New Transfer
-          </button>
-        )}
-      </div>
-      <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
-        <table className="w-full text-left border-collapse">
-          <thead>
-            <tr className="border-b border-slate-100 bg-slate-50/50">
-              <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Transfer #</th>
-              <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">From / To</th>
-              <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Items</th>
-              <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Status</th>
-              <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Requested By</th>
-              <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {inventoryTransfers.map((t) => (
-              <tr key={t.id} className="hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0 group">
-                <td className="px-8 py-5"><button onClick={() => setSelectedTransfer(selectedTransfer === t.id ? null : t.id)} className="font-black text-primary text-xs hover:underline">{t.transferNumber}</button></td>
-                <td className="px-6 py-5">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-bold text-slate-900">{t.fromStore}</span>
-                    <span className="material-symbols-outlined text-slate-300 text-sm">arrow_forward</span>
-                    <span className="text-sm font-bold text-slate-900">{t.toStore}</span>
-                  </div>
-                </td>
-                <td className="px-6 py-5 text-sm font-bold text-slate-600">{t.items.length} item{t.items.length !== 1 ? 's' : ''}</td>
-                <td className="px-6 py-5"><span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${getStatusColor(t.status)}`}>{t.status}</span></td>
-                <td className="px-6 py-5 text-sm font-bold text-slate-500">{t.requestedBy || '—'}</td>
-                <td className="px-6 py-5 text-right">
-                  <div className="flex justify-end gap-2">
-                    {canManageTransfers && t.status === 'Draft' && <button onClick={() => setTransferConfirmAction({ id: t.id, action: 'send', label: `Send transfer ${t.transferNumber}?` })} className="px-3 py-1.5 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90">Send</button>}
-                    {canManageTransfers && t.status === 'Sent' && <button onClick={() => setTransferConfirmAction({ id: t.id, action: 'transit', label: `Mark ${t.transferNumber} as In Transit?` })} className="px-3 py-1.5 bg-amber-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-amber-600">In Transit</button>}
-                    {canManageTransfers && (t.status === 'Sent' || t.status === 'In Transit') && <button onClick={() => { setTransferReceiveModal(t.id); const qtys: Record<string, number> = {}; t.items.forEach(i => { qtys[i.productId] = i.quantity; }); setTransferReceiveQtys(qtys); }} className="px-3 py-1.5 bg-emerald-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-emerald-600">Receive</button>}
-                  </div>
-                </td>
+  const renderTransfers = () => {
+    const hasDiscrepancy = (t: typeof inventoryTransfers[0]) => t.items.some(i => i.receivedQty !== undefined && i.receivedQty !== i.quantity);
+    return (
+      <div className="space-y-6">
+        <div className="flex justify-between items-center">
+          <h2 className="text-2xl font-black text-primary tracking-tight">Inventory Transfers</h2>
+          {canManageTransfers ? (
+            <button onClick={() => { setShowCreateTransfer(true); setCreateTransferFrom(storeLocations[0] || ''); setCreateTransferTo(storeLocations[1] || ''); setCreateTransferItems([]); }} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
+              <span className="material-symbols-outlined text-sm">add</span>New Transfer
+            </button>
+          ) : (
+            <button disabled className="px-6 py-3 bg-slate-200 text-slate-400 font-black text-xs rounded-2xl uppercase tracking-widest flex items-center gap-2 cursor-not-allowed">
+              <span className="material-symbols-outlined text-sm">lock</span>New Transfer
+            </button>
+          )}
+        </div>
+        <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="border-b border-slate-100 bg-slate-50/50">
+                <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Transfer #</th>
+                <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">From / To</th>
+                <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Items</th>
+                <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Status</th>
+                <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Requested By</th>
+                <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Actions</th>
               </tr>
-            ))}
-            {inventoryTransfers.length === 0 && (
-              <tr><td colSpan={6} className="px-8 py-12 text-center text-sm font-bold text-slate-400">No transfers</td></tr>
-            )}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {inventoryTransfers.map((t) => (
+                <tr key={t.id} className="hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0 group">
+                  <td className="px-8 py-5">
+                    <button onClick={() => setSelectedTransfer(t.id)} className="font-black text-primary text-xs hover:underline flex items-center gap-1">
+                      {t.transferNumber}
+                      {hasDiscrepancy(t) && <span className="material-symbols-outlined text-red-500 text-xs">error</span>}
+                    </button>
+                  </td>
+                  <td className="px-6 py-5">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-bold text-slate-900">{t.fromStore}</span>
+                      <span className="material-symbols-outlined text-slate-300 text-sm">arrow_forward</span>
+                      <span className="text-sm font-bold text-slate-900">{t.toStore}</span>
+                    </div>
+                  </td>
+                  <td className="px-6 py-5 text-sm font-bold text-slate-600">{t.items.length} item{t.items.length !== 1 ? 's' : ''}</td>
+                  <td className="px-6 py-5">
+                    <span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${getStatusColor(t.status)}`}>{t.status}</span>
+                    {hasDiscrepancy(t) && <span className="ml-1 px-2 py-0.5 bg-red-100 text-red-700 text-[9px] font-black rounded uppercase">Mismatch</span>}
+                  </td>
+                  <td className="px-6 py-5 text-sm font-bold text-slate-500">{t.requestedBy || '—'}</td>
+                  <td className="px-6 py-5 text-right">
+                    <div className="flex justify-end gap-2">
+                      {canManageTransfers && t.status === 'Draft' && <button onClick={() => setTransferConfirmAction({ id: t.id, action: 'send', label: `Send transfer ${t.transferNumber}?` })} className="px-3 py-1.5 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90">Send</button>}
+                      {canManageTransfers && t.status === 'Sent' && <button onClick={() => setTransferConfirmAction({ id: t.id, action: 'transit', label: `Mark ${t.transferNumber} as In Transit?` })} className="px-3 py-1.5 bg-amber-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-amber-600">In Transit</button>}
+                      {canManageTransfers && (t.status === 'Sent' || t.status === 'In Transit') && <button onClick={() => { setTransferReceiveModal(t.id); const qtys: Record<number, number> = {}; const conds: Record<number, string> = {}; const notes: Record<number, string> = {}; t.items.forEach((item, idx) => { qtys[idx] = item.quantity; conds[idx] = 'Good'; notes[idx] = ''; }); setTransferReceiveQtys(qtys); setTransferReceiveConditions(conds); setTransferReceiveNotes(notes); }} className="px-3 py-1.5 bg-emerald-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-emerald-600">Receive</button>}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {inventoryTransfers.length === 0 && (
+                <tr><td colSpan={6} className="px-8 py-12 text-center text-sm font-bold text-slate-400">No transfers</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
-
-      {selectedTransfer && (() => {
-        const t = inventoryTransfers.find(tr => tr.id === selectedTransfer);
-        if (!t) return null;
-        return (
-          <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm space-y-4">
-            <div className="flex justify-between items-start">
-              <div>
-                <h3 className="text-xl font-black text-primary">{t.transferNumber}</h3>
-                <p className="text-sm text-slate-500">{t.fromStore} → {t.toStore} · {t.createdAt}{t.sentAt ? ` · Sent: ${t.sentAt}` : ''}{t.receivedAt ? ` · Received: ${t.receivedAt}` : ''}</p>
-                {t.notes && <p className="text-xs text-slate-400 mt-1 italic">{t.notes}</p>}
-              </div>
-              <button onClick={() => setSelectedTransfer(null)} className="p-2 hover:bg-slate-100 rounded-xl text-slate-400"><span className="material-symbols-outlined text-sm">close</span></button>
-            </div>
-            <div>
-              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Items</p>
-              <div className="space-y-2">
-                {t.items.map((item, i) => (
-                  <div key={i} className="flex items-center justify-between p-4 bg-slate-50 rounded-xl">
-                    <p className="font-bold text-sm text-slate-900">{item.name}</p>
-                    <p className="text-sm font-bold text-slate-700">Qty: {item.quantity}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </motion.div>
-        );
-      })()}
-    </div>
-  );
+    );
+  };
 
   const renderCount = () => {
     const totalDiscrepancies = inventoryCounts.reduce((sum, c) => sum + c.items.filter(i => i.discrepancy !== 0).length, 0);
@@ -717,7 +767,7 @@ const Inventory: React.FC = () => {
                 const discrepancies = c.items.filter(i => i.discrepancy !== 0).length;
                 return (
                   <tr key={c.id} className="hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0">
-                    <td className="px-8 py-5"><button onClick={() => { setSelectedCount(selectedCount === c.id ? null : c.id); if (selectedCount !== c.id) { const actuals: Record<string, number> = {}; c.items.forEach(i => { actuals[i.productId] = i.actual; }); setCountActuals(actuals); } }} className="font-black text-primary text-xs hover:underline">{c.countNumber}</button></td>
+                    <td className="px-8 py-5"><button onClick={() => { setSelectedCount(c.id); setCountConfirmComplete(false); const actuals: Record<string, number> = {}; c.items.forEach(i => { actuals[i.productId] = i.actual; }); setCountActuals(actuals); }} className="font-black text-primary text-xs hover:underline">{c.countNumber}</button></td>
                     <td className="px-6 py-5 text-sm font-bold text-slate-900">{c.date}</td>
                     <td className="px-6 py-5 text-sm font-bold text-slate-600">{c.performedBy}</td>
                     <td className="px-6 py-5 text-sm font-bold text-slate-600">{c.items.length}</td>
@@ -725,25 +775,7 @@ const Inventory: React.FC = () => {
                     <td className="px-6 py-5"><span className={`font-black ${discrepancies > 0 ? 'text-red-600' : 'text-slate-400'}`}>{discrepancies} item{discrepancies !== 1 ? 's' : ''}</span></td>
                     <td className="px-6 py-5 text-right">
                       {canManageStockCounts && c.status === 'In Progress' && (
-                        <button onClick={() => {
-                          c.items.forEach(item => {
-                            if (item.discrepancy !== 0) {
-                              const stockItem = approvedStockItems.find(si => si.id === item.productId);
-                              if (stockItem) {
-                                updateStockItem(stockItem.id, { qty: item.actual });
-                                addStockMovement({
-                                  id: `sm-cnt-${Date.now()}-${item.productId}`, stockItemId: item.productId, stockItemName: item.name,
-                                  type: 'count_adjustment', quantityChange: item.discrepancy,
-                                  previousQty: item.expected, newQty: item.actual,
-                                  referenceId: c.id, referenceType: 'count',
-                                  performedBy: 'Current User', timestamp: new Date().toISOString(),
-                                  reason: `Stock count ${c.countNumber} adjustment`,
-                                });
-                              }
-                            }
-                          });
-                          updateInventoryCount(c.id, { status: 'Completed', completedAt: new Date().toISOString() });
-                        }} className="px-4 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 active:scale-95 transition-all">Complete Count</button>
+                        <button onClick={() => { setSelectedCount(c.id); setCountConfirmComplete(false); const actuals: Record<string, number> = {}; c.items.forEach(i => { actuals[i.productId] = i.actual; }); setCountActuals(actuals); }} className="px-4 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 active:scale-95 transition-all">Review</button>
                       )}
                     </td>
                   </tr>
@@ -755,57 +787,6 @@ const Inventory: React.FC = () => {
             </tbody>
           </table>
         </div>
-
-        {selectedCount && (() => {
-          const c = inventoryCounts.find(ct => ct.id === selectedCount);
-          if (!c) return null;
-          return (
-            <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm space-y-4">
-              <div className="flex justify-between items-start">
-                <div>
-                  <h3 className="text-xl font-black text-primary">{c.countNumber}</h3>
-                  <p className="text-sm text-slate-500">{c.date} · {c.performedBy}</p>
-                </div>
-                <button onClick={() => setSelectedCount(null)} className="p-2 hover:bg-slate-100 rounded-xl text-slate-400"><span className="material-symbols-outlined text-sm">close</span></button>
-              </div>
-              <div className="space-y-2">
-                {c.items.map((item) => (
-                  <div key={item.productId} className={`flex items-center justify-between p-4 rounded-xl ${item.discrepancy !== 0 ? 'bg-red-50 border border-red-100' : 'bg-slate-50'}`}>
-                    <div>
-                      <p className="font-bold text-sm text-slate-900">{item.name}</p>
-                      <p className="text-[10px] text-slate-400 font-mono">{item.sku}</p>
-                    </div>
-                    <div className="flex items-center gap-4">
-                      <div className="text-right">
-                        <p className="text-[10px] font-black text-slate-400 uppercase">Expected</p>
-                        <p className="text-sm font-bold">{item.expected}</p>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-[10px] font-black text-slate-400 uppercase">Actual</p>
-                        {c.status === 'In Progress' && canManageStockCounts ? (
-                          <input type="number" min="0" value={countActuals[item.productId] ?? item.actual} onChange={(e) => {
-                            const val = parseInt(e.target.value) || 0;
-                            setCountActuals(prev => ({ ...prev, [item.productId]: val }));
-                            const disc = val - item.expected;
-                            updateInventoryCount(c.id, { items: c.items.map(i => i.productId === item.productId ? { ...i, actual: val, discrepancy: disc } : i) });
-                          }} className="w-16 px-2 py-1 bg-white border border-slate-200 rounded-lg text-center font-bold text-sm" />
-                        ) : (
-                          <p className="text-sm font-bold">{item.actual}</p>
-                        )}
-                      </div>
-                      {item.discrepancy !== 0 && (
-                        <div className="text-right">
-                          <p className="text-[10px] font-black text-red-400 uppercase">Diff</p>
-                          <p className={`text-sm font-black ${item.discrepancy > 0 ? 'text-emerald-600' : 'text-red-600'}`}>{item.discrepancy > 0 ? '+' : ''}{item.discrepancy}</p>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </motion.div>
-          );
-        })()}
       </div>
     );
   };
@@ -933,8 +914,8 @@ const Inventory: React.FC = () => {
                 <button onClick={() => setSelectedItem(null)} className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
               </div>
               <div className="flex border-b border-slate-100 shrink-0">
-                {(['info', 'movements', 'edit'] as const).map(tab => (
-                  <button key={tab} onClick={() => setDetailTab(tab)} className={`flex-1 py-3 text-[10px] font-black uppercase tracking-widest transition-all ${detailTab === tab ? 'text-primary border-b-2 border-primary bg-primary/5' : 'text-slate-400 hover:text-slate-600'}`}>
+                {(['info', 'movements', ...(hasInventoryEdit ? ['edit' as const] : [])] as const).map(tab => (
+                  <button key={tab} onClick={() => setDetailTab(tab as any)} className={`flex-1 py-3 text-[10px] font-black uppercase tracking-widest transition-all ${detailTab === tab ? 'text-primary border-b-2 border-primary bg-primary/5' : 'text-slate-400 hover:text-slate-600'}`}>
                     {tab === 'info' ? 'Details' : tab === 'movements' ? 'Movements' : 'Edit'}
                   </button>
                 ))}
@@ -1183,20 +1164,11 @@ const Inventory: React.FC = () => {
                       <input type="number" value={newProductQty} onChange={(e) => setNewProductQty(e.target.value)} className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold" />
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-3 gap-4">
                     <div>
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Manufacturer</label>
                       <input type="text" value={newProductManufacturer} onChange={(e) => setNewProductManufacturer(e.target.value)} className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold" placeholder="Brand" />
                     </div>
-                    <div>
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Supplier</label>
-                      <select value={newProductSupplierId} onChange={(e) => setNewProductSupplierId(e.target.value)} className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold">
-                        <option value="">None</option>
-                        {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                      </select>
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-3 gap-4">
                     <div>
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Min Stock</label>
                       <input type="number" value={newProductMinStock} onChange={(e) => setNewProductMinStock(e.target.value)} className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold" placeholder="0" />
@@ -1205,10 +1177,10 @@ const Inventory: React.FC = () => {
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Max Stock</label>
                       <input type="number" value={newProductMaxStock} onChange={(e) => setNewProductMaxStock(e.target.value)} className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold" placeholder="0" />
                     </div>
-                    <div>
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Location</label>
-                      <input type="text" value={newProductLocation} onChange={(e) => setNewProductLocation(e.target.value)} className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold" placeholder="Shelf" />
-                    </div>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Location</label>
+                    <input type="text" value={newProductLocation} onChange={(e) => setNewProductLocation(e.target.value)} className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold" placeholder="Shelf" />
                   </div>
                   <div className="flex flex-wrap gap-4">
                     <label className="flex items-center gap-2 cursor-pointer"><input type="checkbox" checked={newProductIsRepairPart} onChange={(e) => setNewProductIsRepairPart(e.target.checked)} className="w-4 h-4 rounded" /><span className="text-xs font-bold text-slate-600">Repair Part</span></label>
@@ -1233,29 +1205,35 @@ const Inventory: React.FC = () => {
               </div>
               <form className="p-8 space-y-4 overflow-y-auto flex-1" onSubmit={(e) => {
                 e.preventDefault();
+                if (!canManageTradeIns) return;
                 const fd = new FormData(e.currentTarget);
-                const isWalkIn = fd.get('isWalkIn') === 'on';
-                const cust = isWalkIn ? null : customers.find(c => c.id === fd.get('customer'));
+                const cust = tradeInIsWalkIn ? null : customers.find(c => c.id === fd.get('customer'));
                 addTradeIn({
-                  id: `ti-${Date.now()}`, customerId: isWalkIn ? 'walk-in' : (fd.get('customer') as string), customerName: isWalkIn ? 'Walk-in Customer' : (cust?.name || 'Unknown'),
+                  id: `ti-${Date.now()}`, customerId: tradeInIsWalkIn ? 'walk-in' : (fd.get('customer') as string), customerName: tradeInIsWalkIn ? 'Walk-in Customer' : (cust?.name || 'Unknown'),
                   device: fd.get('device') as string, condition: fd.get('condition') as any, gradeNotes: fd.get('notes') as string || undefined,
                   buybackPrice: parseFloat(fd.get('buyback') as string) || 0,
                   resalePrice: parseFloat(fd.get('resale') as string) || undefined,
-                  isWalkIn,
-                  idPhotoUrl: fd.get('idPhoto') as string || undefined,
+                  isWalkIn: tradeInIsWalkIn,
+                  idPhotoUrl: capturedIdPhoto || (fd.get('idPhoto') as string) || undefined,
                   status: 'Pending', createdAt: new Date().toISOString().split('T')[0],
                 });
                 setShowCreateTradeIn(false);
               }}>
                 <label className="flex items-center gap-2 cursor-pointer">
-                  <input type="checkbox" name="isWalkIn" className="w-4 h-4 rounded" />
+                  <input type="checkbox" checked={tradeInIsWalkIn} onChange={(e) => setTradeInIsWalkIn(e.target.checked)} className="w-4 h-4 rounded" />
                   <span className="text-xs font-bold text-slate-600">Walk-in Customer (no account)</span>
                 </label>
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Customer</label>
-                  <select name="customer" className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold">
-                    {customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                  </select>
+                  <div className="relative">
+                    <span className="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 text-sm">search</span>
+                    <input type="text" value={tradeInSearch} onChange={(e) => setTradeInSearch(e.target.value)} disabled={tradeInIsWalkIn} placeholder="Search by name or phone..." className="w-full pl-11 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-sm disabled:opacity-40 disabled:cursor-not-allowed" />
+                  </div>
+                  {!tradeInIsWalkIn && (
+                    <select name="customer" required={!tradeInIsWalkIn} className="w-full mt-2 px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold">
+                      {filteredCustomers.map(c => <option key={c.id} value={c.id}>{c.name} · {c.phone}</option>)}
+                    </select>
+                  )}
                 </div>
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Device</label>
@@ -1278,8 +1256,22 @@ const Inventory: React.FC = () => {
                   <input name="resale" type="number" step="0.01" className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold" placeholder="Estimated resale value" />
                 </div>
                 <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">ID Photo URL (Optional)</label>
-                  <input name="idPhoto" className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold" placeholder="URL to customer ID photo" />
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">ID Photo</label>
+                  <div className="flex gap-2">
+                    <input name="idPhoto" value={capturedIdPhoto} onChange={(e) => setCapturedIdPhoto(e.target.value)} className="flex-1 px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-sm" placeholder="URL or capture" />
+                    <input ref={idPhotoCaptureRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        const reader = new FileReader();
+                        reader.onloadend = () => setCapturedIdPhoto(reader.result as string);
+                        reader.readAsDataURL(file);
+                      }
+                    }} />
+                    <button type="button" onClick={() => idPhotoCaptureRef.current?.click()} className="px-4 py-3 bg-primary text-white rounded-2xl text-[10px] font-black uppercase tracking-widest flex items-center gap-1 hover:bg-primary/90">
+                      <span className="material-symbols-outlined text-sm">photo_camera</span>Capture
+                    </button>
+                  </div>
+                  {capturedIdPhoto && <p className="text-[10px] text-emerald-600 font-bold mt-1">ID photo captured</p>}
                 </div>
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Grade Notes</label>
@@ -1296,59 +1288,65 @@ const Inventory: React.FC = () => {
 
         {showCreateTransfer && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
-            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
-              <div className="p-8 border-b border-slate-100 bg-slate-50/50">
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg overflow-hidden max-h-[90vh] flex flex-col">
+              <div className="p-8 border-b border-slate-100 bg-slate-50/50 shrink-0">
                 <h2 className="text-xl font-black text-primary tracking-tight">New Transfer</h2>
               </div>
-              <form className="p-8 space-y-4" onSubmit={(e) => {
-                e.preventDefault();
-                const fd = new FormData(e.currentTarget);
-                const itemId = fd.get('item') as string;
-                const item = approvedStockItems.find(i => i.id === itemId);
-                if (!item) return;
-                const qty = parseInt(fd.get('qty') as string) || 1;
-                addInventoryTransfer({
-                  id: `tr-${Date.now()}`, transferNumber: `TRF-${new Date().getFullYear()}-${String(inventoryTransfers.length + 1).padStart(3, '0')}`,
-                  fromStore: fd.get('from') as string, toStore: fd.get('to') as string,
-                  items: [{ productId: itemId, name: item.name, quantity: qty }],
-                  status: 'Draft', requestedBy: 'Current User', notes: fd.get('notes') as string || undefined,
-                  createdAt: new Date().toISOString().split('T')[0],
-                });
-                setShowCreateTransfer(false);
-              }}>
+              <div className="p-8 space-y-4 overflow-y-auto flex-1">
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">From</label>
-                    <select name="from" required className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold">
-                      {storeLocations.map(loc => <option key={loc} value={loc}>{loc}</option>)}
+                    <select value={createTransferFrom} onChange={(e) => { setCreateTransferFrom(e.target.value); if (e.target.value === createTransferTo) setCreateTransferTo(storeLocations.find(l => l !== e.target.value) || ''); }} className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold">
+                      {storeLocations.filter(loc => loc !== createTransferTo).map(loc => <option key={loc} value={loc}>{loc}</option>)}
                     </select>
                   </div>
                   <div>
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">To</label>
-                    <select name="to" required className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold">
-                      {storeLocations.map(loc => <option key={loc} value={loc}>{loc}</option>)}
+                    <select value={createTransferTo} onChange={(e) => { setCreateTransferTo(e.target.value); if (e.target.value === createTransferFrom) setCreateTransferFrom(storeLocations.find(l => l !== e.target.value) || ''); }} className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold">
+                      {storeLocations.filter(loc => loc !== createTransferFrom).map(loc => <option key={loc} value={loc}>{loc}</option>)}
                     </select>
                   </div>
                 </div>
                 <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Item</label>
-                  <select name="item" required className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold">
-                    {approvedStockItems.filter(i => i.qty > 0).map(i => <option key={i.id} value={i.id}>{i.name} ({i.qty} in stock)</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Quantity</label>
-                  <input name="qty" type="number" min="1" defaultValue="1" required className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold" />
+                  <div className="flex justify-between items-center mb-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Items to Transfer</label>
+                    <button type="button" onClick={() => {
+                      const available = approvedStockItems.filter(i => i.qty > 0 && !createTransferItems.find(ti => ti.productId === i.id));
+                      if (available.length === 0) return;
+                      const item = available[0];
+                      setCreateTransferItems(prev => [...prev, { productId: item.id, name: item.name, sku: item.sku, quantity: 1, isSerialized: item.type === 'serialized' }]);
+                    }} className="text-[10px] font-black text-primary uppercase tracking-widest hover:underline">+ Add Item</button>
+                  </div>
+                  {createTransferItems.length === 0 && <p className="text-xs text-slate-400 text-center py-4">No items added yet.</p>}
+                  {createTransferItems.map((ti, idx) => (
+                    <div key={idx} className="flex items-center gap-2 mb-2">
+                      <select value={ti.productId} onChange={(e) => { const item = approvedStockItems.find(i => i.id === e.target.value); if (item) setCreateTransferItems(prev => prev.map((p, i2) => i2 === idx ? { ...p, productId: item.id, name: item.name, sku: item.sku, isSerialized: item.type === 'serialized' } : p)); }} className="flex-1 px-4 py-3 bg-slate-50 rounded-xl border border-slate-200 font-bold text-sm">
+                        {approvedStockItems.filter(i => i.qty > 0).map(i => <option key={i.id} value={i.id}>{i.name} ({i.qty})</option>)}
+                      </select>
+                      <input type="number" min="1" value={ti.quantity} onChange={(e) => setCreateTransferItems(prev => prev.map((p, i2) => i2 === idx ? { ...p, quantity: parseInt(e.target.value) || 1 } : p))} className="w-20 px-3 py-3 bg-slate-50 rounded-xl border border-slate-200 font-bold text-center" />
+                      <button type="button" onClick={() => setCreateTransferItems(prev => prev.filter((_, i2) => i2 !== idx))} className="p-2 text-slate-400 hover:text-red-500"><span className="material-symbols-outlined text-sm">delete</span></button>
+                    </div>
+                  ))}
                 </div>
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Notes</label>
-                  <textarea name="notes" className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold h-16 resize-none" />
+                  <textarea value={editTransferNotes} onChange={(e) => setEditTransferNotes(e.target.value)} className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold h-16 resize-none" />
                 </div>
                 <div className="flex gap-4 pt-2">
-                  <button type="button" onClick={() => setShowCreateTransfer(false)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest">Cancel</button>
-                  <button type="submit" className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20">Create</button>
+                  <button onClick={() => setShowCreateTransfer(false)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest">Cancel</button>
+                  <button disabled={createTransferItems.length === 0 || !createTransferFrom || !createTransferTo} onClick={() => {
+                    if (!canManageTransfers) return;
+                    addInventoryTransfer({
+                      id: `tr-${Date.now()}`, transferNumber: `TRF-${new Date().getFullYear()}-${String(inventoryTransfers.length + 1).padStart(3, '0')}`,
+                      fromStore: createTransferFrom, toStore: createTransferTo,
+                      items: createTransferItems.map(ti => ({ productId: ti.productId, name: ti.name, sku: ti.sku, quantity: ti.quantity, isSerialized: ti.isSerialized })),
+                      status: 'Draft', requestedBy: 'Current User', notes: editTransferNotes || undefined,
+                      createdAt: new Date().toISOString().split('T')[0],
+                    });
+                    setShowCreateTransfer(false);
+                  }} className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 disabled:opacity-40">Create</button>
                 </div>
-              </form>
+              </div>
             </motion.div>
           </div>
         )}
@@ -1365,6 +1363,7 @@ const Inventory: React.FC = () => {
                 <div className="flex gap-4 pt-2">
                   <button onClick={() => setShowCreateCount(false)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest">Cancel</button>
                   <button onClick={() => {
+                    if (!canManageStockCounts) return;
                     addInventoryCount({
                       id: `ic-${Date.now()}`, countNumber: `CNT-${new Date().getFullYear()}-${String(inventoryCounts.length + 1).padStart(3, '0')}`,
                       date: new Date().toISOString().split('T')[0], status: 'In Progress',
@@ -1390,7 +1389,33 @@ const Inventory: React.FC = () => {
                   <button onClick={() => setTransferConfirmAction(null)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest">Cancel</button>
                   <button onClick={() => {
                     if (!canManageTransfers) return;
-                    if (transferConfirmAction.action === 'send') updateInventoryTransfer(transferConfirmAction.id, { status: 'Sent', sentAt: new Date().toISOString() });
+                    if (transferConfirmAction.action === 'send') {
+                      const tr = inventoryTransfers.find(t => t.id === transferConfirmAction.id);
+                      if (tr) {
+                        const aggregated = new Map<string, { totalQty: number; name: string }>();
+                        tr.items.forEach(item => {
+                          const existing = aggregated.get(item.productId);
+                          if (existing) { existing.totalQty += item.quantity; }
+                          else { aggregated.set(item.productId, { totalQty: item.quantity, name: item.name }); }
+                        });
+                        for (const [productId, { totalQty, name }] of aggregated) {
+                          const stockItem = approvedStockItems.find(si => si.id === productId);
+                          if (stockItem) {
+                            const prevQty = stockItem.qty;
+                            const newQty = Math.max(0, prevQty - totalQty);
+                            updateStockItem(stockItem.id, { qty: newQty });
+                            addStockMovement({
+                              id: `sm-tout-${Date.now()}-${productId}`, stockItemId: productId, stockItemName: name,
+                              type: 'transfer_out', quantityChange: -totalQty, previousQty: prevQty, newQty,
+                              referenceId: tr.id, referenceType: 'transfer',
+                              performedBy: 'Current User', timestamp: new Date().toISOString(),
+                              reason: `Sent via transfer ${tr.transferNumber} to ${tr.toStore}`,
+                            });
+                          }
+                        }
+                      }
+                      updateInventoryTransfer(transferConfirmAction.id, { status: 'Sent', sentAt: new Date().toISOString() });
+                    }
                     else if (transferConfirmAction.action === 'transit') updateInventoryTransfer(transferConfirmAction.id, { status: 'In Transit' });
                     setTransferConfirmAction(null);
                   }} className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20">Confirm</button>
@@ -1403,56 +1428,325 @@ const Inventory: React.FC = () => {
         {transferReceiveModal && (() => {
           const t = inventoryTransfers.find(tr => tr.id === transferReceiveModal);
           if (!t) return null;
+          const hasVariance = t.items.some((item, i) => {
+            const recv = transferReceiveQtys[i] ?? item.quantity;
+            return recv !== item.quantity;
+          });
+          const hasOverage = t.items.some((item, i) => (transferReceiveQtys[i] ?? item.quantity) > item.quantity);
           return (
             <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
-              <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg overflow-hidden">
-                <div className="p-8 border-b border-slate-100 bg-slate-50/50">
-                  <h2 className="text-xl font-black text-primary tracking-tight">Receive Transfer</h2>
-                  <p className="text-xs font-bold text-slate-400">{t.transferNumber} · {t.fromStore} → {t.toStore}</p>
-                </div>
-                <div className="p-8 space-y-4">
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Verify received quantities</p>
-                  {t.items.map(item => (
-                    <div key={item.productId} className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl">
-                      <div>
-                        <p className="font-bold text-sm text-slate-900">{item.name}</p>
-                        <p className="text-[10px] text-slate-400">Shipped: {item.quantity}</p>
-                      </div>
-                      <input type="number" min="0" max={item.quantity} value={transferReceiveQtys[item.productId] ?? item.quantity} onChange={(e) => setTransferReceiveQtys(prev => ({ ...prev, [item.productId]: parseInt(e.target.value) || 0 }))} className="w-20 px-3 py-2 bg-white border border-slate-200 rounded-xl text-center font-bold" />
+              <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-2xl overflow-hidden max-h-[90vh] flex flex-col">
+                <div className="p-8 border-b border-slate-100 bg-slate-50/50 shrink-0">
+                  <h2 className="text-xl font-black text-primary tracking-tight">Receive & Reconcile Transfer</h2>
+                  <div className="grid grid-cols-2 gap-4 mt-3 text-xs">
+                    <div className="bg-white rounded-xl p-3 border border-slate-100">
+                      <p className="text-[10px] font-black text-slate-400 uppercase">Transfer #</p>
+                      <p className="font-bold text-primary">{t.transferNumber}</p>
                     </div>
-                  ))}
-                  {t.items.some(item => (transferReceiveQtys[item.productId] ?? item.quantity) < item.quantity) && (
-                    <div className="bg-orange-50 border border-orange-200 rounded-xl p-3">
-                      <p className="text-xs font-bold text-orange-700">Discrepancy detected — received quantity differs from shipped.</p>
+                    <div className="bg-white rounded-xl p-3 border border-slate-100">
+                      <p className="text-[10px] font-black text-slate-400 uppercase">Status</p>
+                      <p className="font-bold text-slate-900">{t.status}</p>
+                    </div>
+                    <div className="bg-white rounded-xl p-3 border border-slate-100">
+                      <p className="text-[10px] font-black text-slate-400 uppercase">From</p>
+                      <p className="font-bold text-slate-900">{t.fromStore}</p>
+                    </div>
+                    <div className="bg-white rounded-xl p-3 border border-slate-100">
+                      <p className="text-[10px] font-black text-slate-400 uppercase">To</p>
+                      <p className="font-bold text-slate-900">{t.toStore}</p>
+                    </div>
+                    <div className="bg-white rounded-xl p-3 border border-slate-100">
+                      <p className="text-[10px] font-black text-slate-400 uppercase">Sent</p>
+                      <p className="font-bold text-slate-900">{t.sentAt ? new Date(t.sentAt).toLocaleDateString() : '—'}</p>
+                    </div>
+                    <div className="bg-white rounded-xl p-3 border border-slate-100">
+                      <p className="text-[10px] font-black text-slate-400 uppercase">Requested By</p>
+                      <p className="font-bold text-slate-900">{t.requestedBy}</p>
+                    </div>
+                  </div>
+                </div>
+                <div className="p-8 space-y-4 overflow-y-auto flex-1">
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Line Item Reconciliation</p>
+                  <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+                    <table className="w-full text-left border-collapse text-sm">
+                      <thead>
+                        <tr className="bg-slate-50 border-b border-slate-100">
+                          <th className="px-4 py-3 text-[10px] font-black text-slate-400 uppercase">Item</th>
+                          <th className="px-3 py-3 text-[10px] font-black text-slate-400 uppercase text-center">Expected</th>
+                          <th className="px-3 py-3 text-[10px] font-black text-slate-400 uppercase text-center">Received</th>
+                          <th className="px-3 py-3 text-[10px] font-black text-slate-400 uppercase text-center">Variance</th>
+                          <th className="px-3 py-3 text-[10px] font-black text-slate-400 uppercase">Condition</th>
+                          <th className="px-3 py-3 text-[10px] font-black text-slate-400 uppercase">Notes</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {t.items.map((item, i) => {
+                          const recv = transferReceiveQtys[i] ?? item.quantity;
+                          const variance = recv - item.quantity;
+                          const stockItem = approvedStockItems.find(si => si.id === item.productId);
+                          return (
+                            <tr key={i} className={`border-b border-slate-50 ${variance !== 0 ? 'bg-red-50/50' : ''}`}>
+                              <td className="px-4 py-3">
+                                <p className="font-bold text-slate-900">{item.name}</p>
+                                <p className="text-[10px] text-slate-400">{item.sku || ''}{item.isSerialized ? ' · Serialized' : ''}{item.supplierName ? ` · ${item.supplierName}` : ''}</p>
+                              </td>
+                              <td className="px-3 py-3 text-center font-bold text-slate-700">{item.quantity}</td>
+                              <td className="px-3 py-3 text-center">
+                                <input type="number" min="0" value={recv} onChange={(e) => setTransferReceiveQtys(prev => ({ ...prev, [i]: parseInt(e.target.value) || 0 }))} className="w-16 px-2 py-1 bg-white border border-slate-200 rounded-lg text-center font-bold" />
+                              </td>
+                              <td className="px-3 py-3 text-center">
+                                <span className={`font-black ${variance === 0 ? 'text-slate-400' : variance > 0 ? 'text-amber-600' : 'text-red-600'}`}>{variance > 0 ? '+' : ''}{variance}</span>
+                              </td>
+                              <td className="px-3 py-3">
+                                <select value={transferReceiveConditions[i] || 'Good'} onChange={(e) => setTransferReceiveConditions(prev => ({ ...prev, [i]: e.target.value }))} className="px-2 py-1 bg-white border border-slate-200 rounded-lg text-xs font-bold w-24">
+                                  <option>Good</option><option>Damaged</option><option>Missing</option>
+                                </select>
+                              </td>
+                              <td className="px-3 py-3">
+                                <input type="text" value={transferReceiveNotes[i] || ''} onChange={(e) => setTransferReceiveNotes(prev => ({ ...prev, [i]: e.target.value }))} placeholder="Note..." className="w-full px-2 py-1 bg-white border border-slate-200 rounded-lg text-xs font-bold" />
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  {hasVariance && (
+                    <div className={`rounded-xl p-3 border ${hasOverage ? 'bg-amber-50 border-amber-200' : 'bg-orange-50 border-orange-200'}`}>
+                      <p className="text-xs font-bold text-orange-700">
+                        {hasOverage ? 'Overage detected — extra received quantities require confirmation.' : 'Shortage detected — received quantity differs from expected.'}
+                      </p>
                     </div>
                   )}
                   <div className="flex gap-4 pt-2">
                     <button onClick={() => setTransferReceiveModal(null)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest">Cancel</button>
                     <button onClick={() => {
                       if (!canManageTransfers) return;
-                      t.items.forEach(item => {
-                        const receivedQty = transferReceiveQtys[item.productId] ?? item.quantity;
+                      let anyVariance = false;
+                      const recvAgg = new Map<string, { totalRecv: number; name: string }>();
+                      const reconciledItems = t.items.map((item, i) => {
+                        const receivedQty = transferReceiveQtys[i] ?? item.quantity;
+                        const variance = receivedQty - item.quantity;
+                        if (variance !== 0) anyVariance = true;
                         if (receivedQty > 0) {
-                          const stockItem = approvedStockItems.find(si => si.id === item.productId);
-                          const prevQty = stockItem?.qty || 0;
-                          const newQty = prevQty + receivedQty;
-                          if (stockItem) {
-                            updateStockItem(stockItem.id, { qty: newQty });
-                          }
-                          addStockMovement({
-                            id: `sm-${Date.now()}-${item.productId}`, stockItemId: item.productId, stockItemName: item.name,
-                            type: 'transfer_in', quantityChange: receivedQty, previousQty: prevQty, newQty,
-                            referenceId: t.id, referenceType: 'transfer',
-                            performedBy: 'Current User', timestamp: new Date().toISOString(),
-                            reason: `Received from transfer ${t.transferNumber}${receivedQty < item.quantity ? ` (${item.quantity - receivedQty} short)` : ''}`,
-                          });
+                          const existing = recvAgg.get(item.productId);
+                          if (existing) { existing.totalRecv += receivedQty; }
+                          else { recvAgg.set(item.productId, { totalRecv: receivedQty, name: item.name }); }
                         }
+                        return {
+                          ...item,
+                          receivedQty,
+                          variance,
+                          condition: (transferReceiveConditions[i] || 'Good') as TransferLineItem['condition'],
+                          discrepancyNote: transferReceiveNotes[i] || undefined,
+                        };
                       });
-                      updateInventoryTransfer(t.id, { status: 'Received', receivedAt: new Date().toISOString() });
+                      for (const [productId, { totalRecv, name }] of recvAgg) {
+                        const stockItem = approvedStockItems.find(si => si.id === productId);
+                        const prevQty = stockItem?.qty || 0;
+                        const newQty = prevQty + totalRecv;
+                        if (stockItem) { updateStockItem(stockItem.id, { qty: newQty }); }
+                        addStockMovement({
+                          id: `sm-${Date.now()}-${productId}`, stockItemId: productId, stockItemName: name,
+                          type: 'transfer_in', quantityChange: totalRecv, previousQty: prevQty, newQty,
+                          referenceId: t.id, referenceType: 'transfer',
+                          performedBy: 'Current User', timestamp: new Date().toISOString(),
+                          reason: `Received from transfer ${t.transferNumber}`,
+                        });
+                      }
+                      const allFullyReceived = reconciledItems.every(i => (i.receivedQty ?? 0) >= i.quantity);
+                      let newStatus: typeof t.status;
+                      if (!anyVariance) {
+                        newStatus = 'Received';
+                      } else if (allFullyReceived) {
+                        newStatus = 'Discrepancy Detected';
+                      } else {
+                        newStatus = 'Partially Received';
+                      }
+                      updateInventoryTransfer(t.id, { status: newStatus, receivedAt: new Date().toISOString(), items: reconciledItems, reconciledBy: 'Current User' });
                       setTransferReceiveModal(null);
                       setTransferReceiveQtys({});
-                    }} className="flex-1 py-4 bg-emerald-500 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-emerald-500/20">Receive & Update</button>
+                    }} className="flex-1 py-4 bg-emerald-500 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-emerald-500/20">Finalize Reconciliation</button>
                   </div>
+                </div>
+              </motion.div>
+            </div>
+          );
+        })()}
+
+        {selectedTransfer && (() => {
+          const t = inventoryTransfers.find(tr => tr.id === selectedTransfer);
+          if (!t) return null;
+          const isEditable = canManageTransfers && t.status === 'Draft';
+          return (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
+              <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-2xl overflow-hidden max-h-[90vh] flex flex-col">
+                <div className="p-8 border-b border-slate-100 bg-slate-50/50 flex justify-between items-start shrink-0">
+                  <div>
+                    <h3 className="text-2xl font-black text-primary tracking-tight">{t.transferNumber}</h3>
+                    <p className="text-sm text-slate-500">{t.fromStore} → {t.toStore}</p>
+                    <div className="flex items-center gap-2 mt-2">
+                      <span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${getStatusColor(t.status)}`}>{t.status}</span>
+                      {t.items.some(i => i.receivedQty !== undefined && i.receivedQty !== i.quantity) && (
+                        <span className="px-2 py-0.5 bg-red-100 text-red-700 text-[9px] font-black rounded uppercase">Discrepancy</span>
+                      )}
+                    </div>
+                  </div>
+                  <button onClick={() => setSelectedTransfer(null)} className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+                </div>
+                <div className="p-8 overflow-y-auto flex-1 space-y-4">
+                  <div className="grid grid-cols-3 gap-3 text-xs">
+                    <div className="bg-slate-50 rounded-xl p-3"><p className="text-[10px] font-black text-slate-400 uppercase">Created</p><p className="font-bold">{t.createdAt}</p></div>
+                    {t.sentAt && <div className="bg-slate-50 rounded-xl p-3"><p className="text-[10px] font-black text-slate-400 uppercase">Sent</p><p className="font-bold">{new Date(t.sentAt).toLocaleDateString()}</p></div>}
+                    {t.receivedAt && <div className="bg-slate-50 rounded-xl p-3"><p className="text-[10px] font-black text-slate-400 uppercase">Received</p><p className="font-bold">{new Date(t.receivedAt).toLocaleDateString()}</p></div>}
+                    <div className="bg-slate-50 rounded-xl p-3"><p className="text-[10px] font-black text-slate-400 uppercase">Requested By</p><p className="font-bold">{t.requestedBy}</p></div>
+                    {t.reconciledBy && <div className="bg-slate-50 rounded-xl p-3"><p className="text-[10px] font-black text-slate-400 uppercase">Reconciled By</p><p className="font-bold">{t.reconciledBy}</p></div>}
+                  </div>
+                  {t.notes && <p className="text-xs text-slate-400 italic">{t.notes}</p>}
+                  <div>
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Items</p>
+                    <div className="space-y-2">
+                      {t.items.map((item, i) => {
+                        const hasVar = item.receivedQty !== undefined && item.receivedQty !== item.quantity;
+                        return (
+                          <div key={i} className={`flex items-center justify-between p-4 rounded-xl ${hasVar ? 'bg-red-50 border border-red-100' : 'bg-slate-50'}`}>
+                            <div>
+                              <p className="font-bold text-sm text-slate-900">{item.name}</p>
+                              {item.sku && <p className="text-[10px] text-slate-400 font-mono">{item.sku}</p>}
+                              {item.discrepancyNote && <p className="text-[10px] text-red-500 mt-0.5">{item.discrepancyNote}</p>}
+                            </div>
+                            <div className="text-right">
+                              <p className="text-sm font-bold text-slate-700">Shipped: {item.quantity}</p>
+                              {item.receivedQty !== undefined && (
+                                <p className={`text-xs font-black ${hasVar ? 'text-red-600' : 'text-emerald-600'}`}>Received: {item.receivedQty} {hasVar && `(${(item.variance || 0) > 0 ? '+' : ''}${item.variance})`}</p>
+                              )}
+                              {item.condition && item.condition !== 'Good' && (
+                                <p className="text-[10px] font-black text-amber-600 uppercase">{item.condition}</p>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  {isEditable && (
+                    <div className="flex gap-2 pt-2">
+                      <button onClick={() => updateInventoryTransfer(t.id, { notes: prompt('Update notes:', t.notes || '') || t.notes })} className="flex-1 py-3 bg-slate-100 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-slate-200">Edit Notes</button>
+                    </div>
+                  )}
+                </div>
+              </motion.div>
+            </div>
+          );
+        })()}
+
+        {selectedCount && (() => {
+          const c = inventoryCounts.find(ct => ct.id === selectedCount);
+          if (!c) return null;
+          const discItems = c.items.filter(i => i.discrepancy !== 0);
+          const showOnlyDisc = c.status === 'Completed';
+          const displayItems = showOnlyDisc ? discItems : c.items;
+          return (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
+              <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-2xl overflow-hidden max-h-[90vh] flex flex-col">
+                <div className="p-8 border-b border-slate-100 bg-slate-50/50 flex justify-between items-start shrink-0">
+                  <div>
+                    <h3 className="text-2xl font-black text-primary tracking-tight">{c.countNumber}</h3>
+                    <p className="text-sm text-slate-500">{c.date} · {c.performedBy}</p>
+                    <span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border mt-2 inline-block ${getStatusColor(c.status)}`}>{c.status}</span>
+                    {discItems.length > 0 && <span className="ml-2 px-2 py-0.5 bg-red-100 text-red-700 text-[9px] font-black rounded uppercase">{discItems.length} discrepanc{discItems.length !== 1 ? 'ies' : 'y'}</span>}
+                  </div>
+                  <button onClick={() => { setSelectedCount(null); setCountConfirmComplete(false); }} className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+                </div>
+                <div className="p-8 space-y-4 overflow-y-auto flex-1">
+                  {showOnlyDisc && discItems.length === 0 && <p className="text-sm text-slate-500 text-center py-4">No discrepancies found in this count.</p>}
+                  {showOnlyDisc && <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Discrepancies Only</p>}
+                  {!showOnlyDisc && <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">All Items ({c.items.length})</p>}
+                  <div className="space-y-2">
+                    {displayItems.map((item) => (
+                      <div key={item.productId} className={`flex items-center justify-between p-4 rounded-xl ${item.discrepancy !== 0 ? 'bg-red-50 border border-red-100' : 'bg-slate-50'}`}>
+                        <div>
+                          <p className="font-bold text-sm text-slate-900">{item.name}</p>
+                          <p className="text-[10px] text-slate-400 font-mono">{item.sku}</p>
+                        </div>
+                        <div className="flex items-center gap-4">
+                          <div className="text-right">
+                            <p className="text-[10px] font-black text-slate-400 uppercase">Expected</p>
+                            <p className="text-sm font-bold">{item.expected}</p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-[10px] font-black text-slate-400 uppercase">Actual</p>
+                            {c.status === 'In Progress' && canManageStockCounts ? (
+                              <input type="number" min="0" value={countActuals[item.productId] ?? item.actual} onChange={(e) => {
+                                const val = parseInt(e.target.value) || 0;
+                                setCountActuals(prev => ({ ...prev, [item.productId]: val }));
+                                const disc = val - item.expected;
+                                updateInventoryCount(c.id, { items: c.items.map(i => i.productId === item.productId ? { ...i, actual: val, discrepancy: disc } : i) });
+                              }} className="w-16 px-2 py-1 bg-white border border-slate-200 rounded-lg text-center font-bold text-sm" />
+                            ) : (
+                              <p className="text-sm font-bold">{item.actual}</p>
+                            )}
+                          </div>
+                          {item.discrepancy !== 0 && (
+                            <div className="text-right">
+                              <p className="text-[10px] font-black text-red-400 uppercase">Diff</p>
+                              <p className={`text-sm font-black ${item.discrepancy > 0 ? 'text-emerald-600' : 'text-red-600'}`}>{item.discrepancy > 0 ? '+' : ''}{item.discrepancy}</p>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  {c.status === 'In Progress' && canManageStockCounts && !countConfirmComplete && (
+                    <div className="flex gap-4 pt-2">
+                      <button onClick={() => setCountConfirmComplete(true)} className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20">Review & Complete</button>
+                    </div>
+                  )}
+                  {countConfirmComplete && (
+                    <div className="bg-amber-50 rounded-2xl border border-amber-200 p-6 space-y-4">
+                      <p className="text-sm font-bold text-amber-800">Confirm Count Completion</p>
+                      {discItems.length > 0 ? (
+                        <>
+                          <p className="text-xs text-amber-700">{discItems.length} item{discItems.length !== 1 ? 's' : ''} will be adjusted to match actual counts:</p>
+                          <div className="space-y-1">
+                            {discItems.map(item => (
+                              <div key={item.productId} className="flex justify-between text-xs bg-white rounded-lg p-2">
+                                <span className="font-bold text-slate-900">{item.name}</span>
+                                <span className={`font-black ${item.discrepancy > 0 ? 'text-emerald-600' : 'text-red-600'}`}>{item.expected} → {item.actual} ({item.discrepancy > 0 ? '+' : ''}{item.discrepancy})</span>
+                              </div>
+                            ))}
+                          </div>
+                        </>
+                      ) : (
+                        <p className="text-xs text-amber-700">No discrepancies found. All items match expected quantities.</p>
+                      )}
+                      <div className="flex gap-4">
+                        <button onClick={() => setCountConfirmComplete(false)} className="flex-1 py-3 bg-white text-slate-500 rounded-xl font-black text-xs uppercase tracking-widest border border-slate-200">Back</button>
+                        <button onClick={() => {
+                          if (!canManageStockCounts) return;
+                          c.items.forEach(item => {
+                            if (item.discrepancy !== 0) {
+                              const stockItem = approvedStockItems.find(si => si.id === item.productId);
+                              if (stockItem) {
+                                updateStockItem(stockItem.id, { qty: item.actual });
+                                addStockMovement({
+                                  id: `sm-cnt-${Date.now()}-${item.productId}`, stockItemId: item.productId, stockItemName: item.name,
+                                  type: 'count_adjustment', quantityChange: item.discrepancy,
+                                  previousQty: item.expected, newQty: item.actual,
+                                  referenceId: c.id, referenceType: 'count',
+                                  performedBy: 'Current User', timestamp: new Date().toISOString(),
+                                  reason: `Stock count ${c.countNumber} adjustment`,
+                                });
+                              }
+                            }
+                          });
+                          updateInventoryCount(c.id, { status: 'Completed', completedAt: new Date().toISOString() });
+                          setCountConfirmComplete(false);
+                          setSelectedCount(null);
+                        }} className="flex-1 py-3 bg-emerald-500 text-white rounded-xl font-black text-xs uppercase tracking-widest shadow-xl shadow-emerald-500/20">Confirm & Apply</button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </motion.div>
             </div>
@@ -1525,6 +1819,7 @@ const Inventory: React.FC = () => {
                     <div className="flex gap-4 pt-2">
                       <button onClick={() => setRefurbConfirmComplete(false)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest">Back</button>
                       <button onClick={() => {
+                        if (!canManageRefurbishment) return;
                         const tradeIn = tradeIns.find(t => t.id === selectedRefurbJob.itemId);
                         const resale = parseFloat(refurbNewResale) || (tradeIn?.resalePrice || ((tradeIn?.buybackPrice || 0) + selectedRefurbJob.totalCost) * 1.5);
                         const newItem: StockItem = {
@@ -1551,6 +1846,60 @@ const Inventory: React.FC = () => {
                     </div>
                   </>
                 )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {tradeInConfirm && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-sm overflow-hidden">
+              <div className="p-8 text-center space-y-4">
+                <span className="material-symbols-outlined text-4xl text-primary">help</span>
+                <p className="text-lg font-black text-primary">{tradeInConfirm.label}</p>
+                {tradeInConfirm.notes && (
+                  <div className="text-left">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Refurbishment Notes</label>
+                    <textarea value={tradeInConfirmNotes} onChange={(e) => setTradeInConfirmNotes(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm h-20 resize-none" placeholder="What needs refurbishment..." />
+                  </div>
+                )}
+                <div className="flex gap-4 pt-2">
+                  <button onClick={() => { setTradeInConfirm(null); setTradeInConfirmNotes(''); }} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest">Cancel</button>
+                  <button onClick={() => {
+                    if (!canManageTradeIns) return;
+                    const item = tradeIns.find(t => t.id === tradeInConfirm.id);
+                    if (!item) return;
+                    if (tradeInConfirm.action === 'evaluate') {
+                      updateTradeIn(item.id, { status: 'Evaluated' });
+                    } else if (tradeInConfirm.action === 'refurb') {
+                      addRefurbishmentJob({
+                        id: `rfb-${Date.now()}`, itemId: item.id, itemName: item.device,
+                        technicianId: '', technicianName: 'Unassigned', status: 'Pending',
+                        notes: tradeInConfirmNotes || item.gradeNotes || '', partsUsed: [], totalCost: 0,
+                        createdAt: new Date().toISOString(),
+                      });
+                      updateTradeIn(item.id, { status: 'Refurbishing' });
+                    }
+                    setTradeInConfirm(null);
+                    setTradeInConfirmNotes('');
+                  }} className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20">Confirm</button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {deleteTradeInConfirm && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-sm overflow-hidden">
+              <div className="p-8 text-center space-y-4">
+                <span className="material-symbols-outlined text-4xl text-red-500">delete</span>
+                <p className="text-lg font-black text-primary">Delete this trade-in?</p>
+                <p className="text-sm text-slate-500">This action cannot be undone.</p>
+                <div className="flex gap-4 pt-2">
+                  <button onClick={() => setDeleteTradeInConfirm(null)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest">Cancel</button>
+                  <button onClick={() => { if (canManageTradeIns) { deleteTradeIn(deleteTradeInConfirm); } setDeleteTradeInConfirm(null); }} className="flex-1 py-4 bg-red-500 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-red-500/20">Delete</button>
+                </div>
               </div>
             </motion.div>
           </div>

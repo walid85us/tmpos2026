@@ -230,6 +230,7 @@ interface StoreLocalStateContextType {
   tradeIns: TradeInItem[];
   addTradeIn: (t: TradeInItem) => void;
   updateTradeIn: (id: string, updates: Partial<TradeInItem>) => void;
+  deleteTradeIn: (id: string) => void;
   refurbishmentJobs: RefurbishmentJob[];
   addRefurbishmentJob: (j: RefurbishmentJob) => void;
   updateRefurbishmentJob: (id: string, updates: Partial<RefurbishmentJob>) => void;
@@ -797,6 +798,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const updateInventoryCount = useCallback((id: string, updates: Partial<InventoryCount>) => { setInventoryCounts(prev => prev.map(c => c.id === id ? { ...c, ...updates } : c)); }, []);
   const addTradeIn = useCallback((t: TradeInItem) => { setTradeIns(prev => [t, ...prev]); }, []);
   const updateTradeIn = useCallback((id: string, updates: Partial<TradeInItem>) => { setTradeIns(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t)); }, []);
+  const deleteTradeIn = useCallback((id: string) => { setTradeIns(prev => prev.filter(t => t.id !== id)); }, []);
   const addRefurbishmentJob = useCallback((j: RefurbishmentJob) => { setRefurbishmentJobs(prev => [j, ...prev]); }, []);
   const updateRefurbishmentJob = useCallback((id: string, updates: Partial<RefurbishmentJob>) => { setRefurbishmentJobs(prev => prev.map(j => j.id === id ? { ...j, ...updates } : j)); }, []);
 
@@ -847,7 +849,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
       rmas, addRMA, updateRMA,
       inventoryTransfers, addInventoryTransfer, updateInventoryTransfer,
       inventoryCounts, addInventoryCount, updateInventoryCount,
-      tradeIns, addTradeIn, updateTradeIn,
+      tradeIns, addTradeIn, updateTradeIn, deleteTradeIn,
       refurbishmentJobs, addRefurbishmentJob, updateRefurbishmentJob,
       storeLocations, getItemMovements,
     }}>

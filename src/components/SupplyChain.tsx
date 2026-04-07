@@ -31,11 +31,13 @@ export default function SupplyChain() {
   const [selectedRMA, setSelectedRMA] = useState<RMA | null>(null);
   const [receiveQtys, setReceiveQtys] = useState<Record<string, number>>({});
   const [editingSupplier, setEditingSupplier] = useState<string | null>(null);
+  const [editingDraftPO, setEditingDraftPO] = useState<string | null>(null);
 
   const [poSupplierId, setPoSupplierId] = useState('');
   const [poItems, setPoItems] = useState<{ productId: string; name: string; sku: string; qty: number; cost: number }[]>([]);
   const [poExpected, setPoExpected] = useState('');
   const [poNotes, setPoNotes] = useState('');
+  const [vendorChangeConfirm, setVendorChangeConfirm] = useState<{ newSupplierId: string; itemCount: number } | null>(null);
 
   const [rmaSupplierId, setRmaSupplierId] = useState('');
   const [rmaPoId, setRmaPoId] = useState('');
@@ -44,6 +46,10 @@ export default function SupplyChain() {
 
   const [rmaConfirmAction, setRmaConfirmAction] = useState<{ id: string; action: string; label: string } | null>(null);
   const [poConfirmAction, setPoConfirmAction] = useState<{ id: string; action: string; label: string } | null>(null);
+  const [rmaRefundAmount, setRmaRefundAmount] = useState('');
+  const [rmaReplacementItems, setRmaReplacementItems] = useState<{ productId: string; name: string; quantity: number }[]>([]);
+
+  const [editingPendingRMA, setEditingPendingRMA] = useState<string | null>(null);
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -100,6 +106,19 @@ export default function SupplyChain() {
     if (available.length === 0) return;
     const item = available[0];
     setPoItems(prev => [...prev, { productId: item.id, name: item.name, sku: item.sku, qty: 1, cost: item.cost }]);
+  };
+
+  const handleSupplierChange = (newSupplierId: string) => {
+    if (poItems.length > 0 && newSupplierId !== poSupplierId) {
+      setVendorChangeConfirm({ newSupplierId, itemCount: poItems.length });
+    } else {
+      setPoSupplierId(newSupplierId);
+    }
+  };
+
+  const getItemRMAStatus = (productId: string) => {
+    const existing = rmas.find(r => r.status !== 'Rejected' && r.items.some(i => i.productId === productId));
+    return existing ? existing.rmaNumber : null;
   };
 
   const renderPO = () => {
@@ -170,9 +189,21 @@ export default function SupplyChain() {
                         <span className="material-symbols-outlined text-sm">visibility</span>
                       </button>
                       {canManagePOs && po.status === 'Draft' && (
-                        <button onClick={() => setPoConfirmAction({ id: po.id, action: 'send', label: `Send ${po.poNumber} to supplier?` })} className="p-2 hover:bg-primary/10 text-primary rounded-xl transition-colors" title="Send Order">
-                          <span className="material-symbols-outlined text-sm">send</span>
-                        </button>
+                        <>
+                          <button onClick={() => {
+                            setEditingDraftPO(po.id);
+                            setPoSupplierId(po.supplierId || '');
+                            setPoItems(po.items.map(i => ({ productId: i.productId, name: i.name, sku: i.sku || '', qty: i.orderedQuantity, cost: i.costPrice })));
+                            setPoExpected(po.expectedDate || '');
+                            setPoNotes(po.notes || '');
+                            setShowCreatePO(true);
+                          }} className="p-2 hover:bg-primary/10 text-primary rounded-xl transition-colors" title="Edit Draft">
+                            <span className="material-symbols-outlined text-sm">edit</span>
+                          </button>
+                          <button onClick={() => setPoConfirmAction({ id: po.id, action: 'send', label: `Send ${po.poNumber} to supplier?` })} className="p-2 hover:bg-primary/10 text-primary rounded-xl transition-colors" title="Send Order">
+                            <span className="material-symbols-outlined text-sm">send</span>
+                          </button>
+                        </>
                       )}
                       {canManagePOs && canManageGRNs && (po.status === 'Ordered' || po.status === 'Partially Received') && (
                         <button onClick={() => { setShowReceiveModal(po.id); setReceiveQtys({}); }} className="p-2 hover:bg-emerald-50 text-emerald-600 rounded-xl transition-colors" title="Receive Goods">
@@ -267,12 +298,17 @@ export default function SupplyChain() {
                 <td className="px-6 py-5 text-right">
                   <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                     {canManageRMAs && rma.status === 'Pending' && (
-                      <button onClick={() => setRmaConfirmAction({ id: rma.id, action: 'ship', label: `Ship RMA ${rma.rmaNumber}?` })} className="px-3 py-1.5 bg-amber-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-amber-600">Ship</button>
+                      <>
+                        <button onClick={() => setEditingPendingRMA(editingPendingRMA === rma.id ? null : rma.id)} className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl" title="Edit">
+                          <span className="material-symbols-outlined text-sm">edit</span>
+                        </button>
+                        <button onClick={() => setRmaConfirmAction({ id: rma.id, action: 'ship', label: `Ship RMA ${rma.rmaNumber}?` })} className="px-3 py-1.5 bg-amber-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-amber-600">Ship</button>
+                      </>
                     )}
                     {canManageRMAs && rma.status === 'Shipped' && (
                       <>
-                        <button onClick={() => setRmaConfirmAction({ id: rma.id, action: 'refund', label: `Mark ${rma.rmaNumber} as Refunded?` })} className="px-3 py-1.5 bg-emerald-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-emerald-600">Refunded</button>
-                        <button onClick={() => setRmaConfirmAction({ id: rma.id, action: 'replace', label: `Mark ${rma.rmaNumber} as Replaced?` })} className="px-3 py-1.5 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90">Replaced</button>
+                        <button onClick={() => { setRmaRefundAmount(rma.items.reduce((s, i) => s + i.quantity * 10, 0).toString()); setRmaConfirmAction({ id: rma.id, action: 'refund', label: `Confirm refund for ${rma.rmaNumber}?` }); }} className="px-3 py-1.5 bg-emerald-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-emerald-600">Refunded</button>
+                        <button onClick={() => { setRmaReplacementItems(rma.items.map(i => ({ productId: i.productId, name: i.name, quantity: i.quantity }))); setRmaConfirmAction({ id: rma.id, action: 'replace', label: `Confirm replacement for ${rma.rmaNumber}?` }); }} className="px-3 py-1.5 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90">Replaced</button>
                       </>
                     )}
                   </div>
@@ -285,6 +321,46 @@ export default function SupplyChain() {
           </tbody>
         </table>
       </div>
+
+      {editingPendingRMA && (() => {
+        const rma = rmas.find(r => r.id === editingPendingRMA);
+        if (!rma || rma.status !== 'Pending') return null;
+        return (
+          <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm space-y-4">
+            <div className="flex justify-between items-start">
+              <h3 className="text-lg font-black text-primary">Edit {rma.rmaNumber}</h3>
+              <button onClick={() => setEditingPendingRMA(null)} className="p-2 hover:bg-slate-100 rounded-xl text-slate-400"><span className="material-symbols-outlined text-sm">close</span></button>
+            </div>
+            <div>
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Notes</label>
+              <textarea defaultValue={rma.notes || ''} onBlur={(e) => { if (!canManageRMAs) return; updateRMA(rma.id, { notes: e.target.value || undefined }); }} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm h-20 resize-none" />
+            </div>
+            <div className="space-y-2">
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Items</p>
+              {rma.items.map((item, i) => (
+                <div key={i} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl">
+                  <div>
+                    <p className="font-bold text-sm text-slate-900">{item.name}</p>
+                    <input defaultValue={item.reason} onBlur={(e) => {
+                      if (!canManageRMAs) return;
+                      const updated = [...rma.items];
+                      updated[i] = { ...updated[i], reason: e.target.value };
+                      updateRMA(rma.id, { items: updated });
+                    }} className="text-xs bg-white border border-slate-200 rounded-lg px-2 py-1 mt-1 font-bold w-full" placeholder="Reason" />
+                  </div>
+                  <input type="number" min="1" defaultValue={item.quantity} onBlur={(e) => {
+                    if (!canManageRMAs) return;
+                    const updated = [...rma.items];
+                    updated[i] = { ...updated[i], quantity: parseInt(e.target.value) || 1 };
+                    updateRMA(rma.id, { items: updated });
+                  }} className="w-16 px-2 py-1 bg-white border border-slate-200 rounded-lg text-center font-bold text-sm" />
+                </div>
+              ))}
+            </div>
+            <button onClick={() => setEditingPendingRMA(null)} className="px-4 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl">Done Editing</button>
+          </motion.div>
+        );
+      })()}
     </div>
   );
 
@@ -321,12 +397,12 @@ export default function SupplyChain() {
             </div>
             {editingSupplier === sup.id ? (
               <div className="space-y-3 mb-4">
-                <input defaultValue={sup.contactName || ''} onBlur={(e) => updateSupplier(sup.id, { contactName: e.target.value || undefined })} placeholder="Contact Name" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" />
-                <input defaultValue={sup.email || ''} onBlur={(e) => updateSupplier(sup.id, { email: e.target.value || undefined })} placeholder="Email" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" />
-                <input defaultValue={sup.phone || ''} onBlur={(e) => updateSupplier(sup.id, { phone: e.target.value || undefined })} placeholder="Phone" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" />
-                <input defaultValue={sup.website || ''} onBlur={(e) => updateSupplier(sup.id, { website: e.target.value || undefined })} placeholder="Website" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" />
+                <input defaultValue={sup.contactName || ''} onBlur={(e) => { if (canManageSuppliers) updateSupplier(sup.id, { contactName: e.target.value || undefined }); }} placeholder="Contact Name" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" />
+                <input defaultValue={sup.email || ''} onBlur={(e) => { if (canManageSuppliers) updateSupplier(sup.id, { email: e.target.value || undefined }); }} placeholder="Email" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" />
+                <input defaultValue={sup.phone || ''} onBlur={(e) => { if (canManageSuppliers) updateSupplier(sup.id, { phone: e.target.value || undefined }); }} placeholder="Phone" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" />
+                <input defaultValue={sup.website || ''} onBlur={(e) => { if (canManageSuppliers) updateSupplier(sup.id, { website: e.target.value || undefined }); }} placeholder="Website" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" />
                 <div className="flex gap-2">
-                  <button onClick={() => updateSupplier(sup.id, { status: sup.status === 'Active' ? 'Inactive' : 'Active' })} className="px-3 py-2 bg-slate-100 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-slate-200">{sup.status === 'Active' ? 'Deactivate' : 'Activate'}</button>
+                  <button onClick={() => { if (canManageSuppliers) updateSupplier(sup.id, { status: sup.status === 'Active' ? 'Inactive' : 'Active' }); }} className="px-3 py-2 bg-slate-100 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-slate-200">{sup.status === 'Active' ? 'Deactivate' : 'Activate'}</button>
                   <button onClick={() => setEditingSupplier(null)} className="px-3 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl">Done</button>
                 </div>
               </div>
@@ -489,6 +565,12 @@ export default function SupplyChain() {
               </div>
               <div className="p-8 space-y-4">
                 {selectedRMA.notes && <p className="text-xs text-slate-400 italic">{selectedRMA.notes}</p>}
+                {selectedRMA.refundAmount && (
+                  <div className="bg-emerald-50 rounded-xl p-3 border border-emerald-100">
+                    <p className="text-[10px] font-black text-emerald-600 uppercase">Refund Amount</p>
+                    <p className="text-lg font-black text-emerald-700">${selectedRMA.refundAmount.toFixed(2)}</p>
+                  </div>
+                )}
                 <div>
                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Items</p>
                   {selectedRMA.items.map((item, i) => (
@@ -509,15 +591,16 @@ export default function SupplyChain() {
 
         {showCreatePO && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" onClick={() => setShowCreatePO(false)} />
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" onClick={() => { setShowCreatePO(false); setEditingDraftPO(null); }} />
             <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative w-full max-w-lg bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden max-h-[90vh] flex flex-col">
               <div className="p-8 border-b border-slate-100 bg-slate-50/50 shrink-0">
-                <h3 className="text-2xl font-black text-primary tracking-tight">Create Purchase Order</h3>
+                <h3 className="text-2xl font-black text-primary tracking-tight">{editingDraftPO ? 'Edit Purchase Order' : 'Create Purchase Order'}</h3>
+                {editingDraftPO && <p className="text-xs text-slate-400 mt-1">Editing draft PO. Changes saved on submit.</p>}
               </div>
               <div className="p-8 space-y-5 overflow-y-auto flex-1">
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Supplier</label>
-                  <select value={poSupplierId} onChange={(e) => { setPoSupplierId(e.target.value); setPoItems([]); }} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1">
+                  <select value={poSupplierId} onChange={(e) => handleSupplierChange(e.target.value)} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1">
                     <option value="">Select Supplier...</option>
                     {suppliers.filter(s => s.status === 'Active').map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                   </select>
@@ -560,22 +643,50 @@ export default function SupplyChain() {
                   <textarea value={poNotes} onChange={(e) => setPoNotes(e.target.value)} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 h-20 mt-1" placeholder="Order notes..." />
                 </div>
                 <div className="flex gap-4 pt-2">
-                  <button onClick={() => setShowCreatePO(false)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-all">Cancel</button>
+                  <button onClick={() => { setShowCreatePO(false); setEditingDraftPO(null); }} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-all">Cancel</button>
                   <button disabled={!poSupplierId || poItems.length === 0} onClick={() => {
+                    if (!canManagePOs) return;
                     const sup = suppliers.find(s => s.id === poSupplierId);
                     if (!sup) return;
-                    addPurchaseOrder({
-                      id: `po-${Date.now()}`, poNumber: `PO-${new Date().getFullYear()}-${String(purchaseOrders.length + 1).padStart(3, '0')}`,
-                      supplierId: sup.id, supplierName: sup.name, status: 'Draft',
-                      items: poItems.map(pi => ({ productId: pi.productId, name: pi.name, sku: pi.sku, orderedQuantity: pi.qty, receivedQuantity: 0, costPrice: pi.cost })),
-                      totalAmount: poItems.reduce((s, i) => s + i.cost * i.qty, 0),
-                      createdAt: new Date().toISOString().split('T')[0],
-                      expectedDate: poExpected || undefined,
-                      notes: poNotes || undefined,
-                      createdBy: 'Current User',
-                    });
+                    if (editingDraftPO) {
+                      updatePurchaseOrder(editingDraftPO, {
+                        supplierId: sup.id, supplierName: sup.name,
+                        items: poItems.map(pi => ({ productId: pi.productId, name: pi.name, sku: pi.sku, orderedQuantity: pi.qty, receivedQuantity: 0, costPrice: pi.cost })),
+                        totalAmount: poItems.reduce((s, i) => s + i.cost * i.qty, 0),
+                        expectedDate: poExpected || undefined,
+                        notes: poNotes || undefined,
+                      });
+                    } else {
+                      addPurchaseOrder({
+                        id: `po-${Date.now()}`, poNumber: `PO-${new Date().getFullYear()}-${String(purchaseOrders.length + 1).padStart(3, '0')}`,
+                        supplierId: sup.id, supplierName: sup.name, status: 'Draft',
+                        items: poItems.map(pi => ({ productId: pi.productId, name: pi.name, sku: pi.sku, orderedQuantity: pi.qty, receivedQuantity: 0, costPrice: pi.cost })),
+                        totalAmount: poItems.reduce((s, i) => s + i.cost * i.qty, 0),
+                        createdAt: new Date().toISOString().split('T')[0],
+                        expectedDate: poExpected || undefined,
+                        notes: poNotes || undefined,
+                        createdBy: 'Current User',
+                      });
+                    }
                     setShowCreatePO(false);
-                  }} className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 active:scale-95 transition-all disabled:opacity-40">Create PO</button>
+                    setEditingDraftPO(null);
+                  }} className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 active:scale-95 transition-all disabled:opacity-40">{editingDraftPO ? 'Save Changes' : 'Create PO'}</button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {vendorChangeConfirm && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-sm overflow-hidden">
+              <div className="p-8 text-center space-y-4">
+                <span className="material-symbols-outlined text-4xl text-amber-500">warning</span>
+                <p className="text-lg font-black text-primary">Change Supplier?</p>
+                <p className="text-sm text-slate-500">Changing the supplier will remove the {vendorChangeConfirm.itemCount} item{vendorChangeConfirm.itemCount !== 1 ? 's' : ''} currently added to this PO, because they may not belong to the new vendor context.</p>
+                <div className="flex gap-4 pt-2">
+                  <button onClick={() => setVendorChangeConfirm(null)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest">Cancel</button>
+                  <button onClick={() => { setPoSupplierId(vendorChangeConfirm.newSupplierId); setPoItems([]); setVendorChangeConfirm(null); }} className="flex-1 py-4 bg-amber-500 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-amber-500/20">Confirm & Reset</button>
                 </div>
               </div>
             </motion.div>
@@ -617,48 +728,63 @@ export default function SupplyChain() {
                   <div className="space-y-3">
                     <div className="flex justify-between items-center">
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Items</label>
-                      <button type="button" onClick={() => setRmaItems(prev => [...prev, { productId: '', name: '', quantity: 1, reason: 'Defective' }])} className="text-[10px] font-black text-primary uppercase tracking-widest hover:underline">+ Add Item</button>
+                      <button type="button" onClick={() => {
+                        const available = approvedStockItems.filter(i => !rmaItems.find(ri => ri.productId === i.id));
+                        if (available.length === 0) return;
+                        setRmaItems(prev => [...prev, { productId: available[0].id, name: available[0].name, quantity: 1, reason: 'Defective' }]);
+                      }} className="text-[10px] font-black text-primary uppercase tracking-widest hover:underline">+ Add Item</button>
                     </div>
                   </div>
                 )}
 
-                {rmaItems.map((item, idx) => (
-                  <div key={idx} className="p-4 bg-slate-50 rounded-2xl space-y-2">
-                    <div className="flex items-center justify-between">
-                      <input value={item.name} onChange={(e) => setRmaItems(prev => prev.map((r, i) => i === idx ? { ...r, name: e.target.value } : r))} placeholder="Item name..." className="flex-1 px-4 py-2 bg-white border border-slate-200 rounded-xl font-bold text-sm mr-2" />
-                      <input type="number" min="1" value={item.quantity} onChange={(e) => setRmaItems(prev => prev.map((r, i) => i === idx ? { ...r, quantity: parseInt(e.target.value) || 1 } : r))} className="w-16 px-2 py-2 bg-white border border-slate-200 rounded-xl font-bold text-center text-sm mr-2" />
-                      <button onClick={() => setRmaItems(prev => prev.filter((_, i) => i !== idx))} className="text-slate-400 hover:text-red-500"><span className="material-symbols-outlined text-sm">delete</span></button>
-                    </div>
-                    <select value={item.reason} onChange={(e) => setRmaItems(prev => prev.map((r, i) => i === idx ? { ...r, reason: e.target.value } : r))} className="w-full px-4 py-2 bg-white border border-slate-200 rounded-xl font-bold text-sm">
-                      <option>Defective</option><option>Wrong Item</option><option>Quality Issue</option><option>Damaged in Transit</option>
-                    </select>
+                {rmaItems.length > 0 && (
+                  <div className="space-y-2">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">RMA Items</p>
+                    {rmaItems.map((ri, idx) => {
+                      const alreadyInRMA = getItemRMAStatus(ri.productId);
+                      return (
+                        <div key={idx} className={`p-3 rounded-xl border ${alreadyInRMA ? 'bg-amber-50 border-amber-200' : 'bg-slate-50 border-slate-200'}`}>
+                          <div className="flex items-center justify-between">
+                            <div className="flex-1">
+                              <p className="font-bold text-sm text-slate-900">{ri.name}</p>
+                              {alreadyInRMA && <p className="text-[10px] font-black text-amber-600">Already in {alreadyInRMA}</p>}
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <input type="number" min="1" value={ri.quantity} onChange={(e) => setRmaItems(prev => prev.map((r, i2) => i2 === idx ? { ...r, quantity: parseInt(e.target.value) || 1 } : r))} className="w-14 px-2 py-1 bg-white border border-slate-200 rounded-lg text-center font-bold text-sm" />
+                              <button onClick={() => setRmaItems(prev => prev.filter((_, i2) => i2 !== idx))} className="p-1 text-slate-400 hover:text-red-500"><span className="material-symbols-outlined text-sm">delete</span></button>
+                            </div>
+                          </div>
+                          <select value={ri.reason} onChange={(e) => setRmaItems(prev => prev.map((r, i2) => i2 === idx ? { ...r, reason: e.target.value } : r))} className="w-full mt-2 px-3 py-2 bg-white border border-slate-200 rounded-lg font-bold text-xs">
+                            <option>Defective</option><option>Wrong Item</option><option>Damaged in Transit</option><option>Quality Issue</option><option>Other</option>
+                          </select>
+                        </div>
+                      );
+                    })}
                   </div>
-                ))}
-
-                {rmaItems.length > 0 && !rmaPoId && (
-                  <button type="button" onClick={() => setRmaItems(prev => [...prev, { productId: '', name: '', quantity: 1, reason: 'Defective' }])} className="text-[10px] font-black text-primary uppercase tracking-widest hover:underline">+ Add Another Item</button>
                 )}
 
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Notes</label>
-                  <textarea value={rmaNotes} onChange={(e) => setRmaNotes(e.target.value)} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 h-20 mt-1" />
+                  <textarea value={rmaNotes} onChange={(e) => setRmaNotes(e.target.value)} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 h-20 mt-1" placeholder="RMA notes..." />
                 </div>
+
                 <div className="flex gap-4 pt-2">
                   <button onClick={() => setShowCreateRMA(false)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-all">Cancel</button>
-                  <button disabled={!rmaSupplierId || rmaItems.length === 0} onClick={() => {
+                  <button disabled={rmaItems.length === 0} onClick={() => {
+                    if (!canManageRMAs) return;
                     const sup = suppliers.find(s => s.id === rmaSupplierId);
-                    if (!sup) return;
                     const po = purchaseOrders.find(p => p.id === rmaPoId);
                     addRMA({
                       id: `rma-${Date.now()}`, rmaNumber: `RMA-${new Date().getFullYear()}-${String(rmas.length + 1).padStart(3, '0')}`,
-                      supplierId: sup.id, supplierName: sup.name,
-                      poId: po?.id, poNumber: po?.poNumber,
-                      items: rmaItems,
-                      status: 'Pending', createdAt: new Date().toISOString().split('T')[0],
-                      createdBy: 'Current User', notes: rmaNotes || undefined,
+                      supplierId: rmaSupplierId || undefined, supplierName: sup?.name || po?.supplierName || 'Unknown',
+                      poId: rmaPoId || undefined, poNumber: po?.poNumber,
+                      items: rmaItems, status: 'Pending',
+                      createdAt: new Date().toISOString().split('T')[0],
+                      notes: rmaNotes || undefined,
+                      createdBy: 'Current User',
                     });
                     setShowCreateRMA(false);
-                  }} className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 active:scale-95 transition-all disabled:opacity-40">Submit RMA</button>
+                  }} className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 active:scale-95 transition-all disabled:opacity-40">Create RMA</button>
                 </div>
               </div>
             </motion.div>
@@ -668,19 +794,19 @@ export default function SupplyChain() {
         {showCreateSupplier && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" onClick={() => setShowCreateSupplier(false)} />
-            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative w-full max-w-lg bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden">
+            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative w-full max-w-md bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden">
               <div className="p-8 border-b border-slate-100 bg-slate-50/50">
                 <h3 className="text-2xl font-black text-primary tracking-tight">Add Supplier</h3>
               </div>
-              <form className="p-8 space-y-5" onSubmit={(e) => {
+              <form className="p-8 space-y-4" onSubmit={(e) => {
                 e.preventDefault();
+                if (!canManageSuppliers) return;
                 const fd = new FormData(e.currentTarget);
                 addSupplier({
                   id: `sup-${Date.now()}`, name: fd.get('name') as string,
                   contactName: fd.get('contact') as string || undefined,
                   email: fd.get('email') as string || undefined,
                   phone: fd.get('phone') as string || undefined,
-                  address: fd.get('address') as string || undefined,
                   website: fd.get('website') as string || undefined,
                   status: 'Active', createdAt: new Date().toISOString().split('T')[0],
                 });
@@ -688,12 +814,16 @@ export default function SupplyChain() {
               }}>
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Company Name *</label>
-                  <input name="name" required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1" placeholder="Supplier name..." />
+                  <input name="name" required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1" />
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Contact Name</label>
+                  <input name="contact" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1" />
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Contact Name</label>
-                    <input name="contact" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1" />
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Email</label>
+                    <input name="email" type="email" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1" />
                   </div>
                   <div>
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Phone</label>
@@ -701,20 +831,12 @@ export default function SupplyChain() {
                   </div>
                 </div>
                 <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Email</label>
-                  <input name="email" type="email" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1" />
-                </div>
-                <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Address</label>
-                  <input name="address" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1" />
-                </div>
-                <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Website</label>
-                  <input name="website" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1" placeholder="https://..." />
+                  <input name="website" className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 font-bold text-slate-700 mt-1" />
                 </div>
                 <div className="flex gap-4 pt-2">
-                  <button type="button" onClick={() => setShowCreateSupplier(false)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-all">Cancel</button>
-                  <button type="submit" className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 active:scale-95 transition-all">Add Supplier</button>
+                  <button type="button" onClick={() => setShowCreateSupplier(false)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest">Cancel</button>
+                  <button type="submit" className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20">Add Supplier</button>
                 </div>
               </form>
             </motion.div>
@@ -724,33 +846,78 @@ export default function SupplyChain() {
         {(rmaConfirmAction || poConfirmAction) && (() => {
           const action = rmaConfirmAction || poConfirmAction;
           if (!action) return null;
+          const isRefund = rmaConfirmAction?.action === 'refund';
+          const isReplace = rmaConfirmAction?.action === 'replace';
           return (
-            <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" onClick={() => { setRmaConfirmAction(null); setPoConfirmAction(null); }} />
-              <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="relative bg-white rounded-[3rem] shadow-2xl w-full max-w-sm overflow-hidden">
-                <div className="p-8 text-center space-y-4">
-                  <span className="material-symbols-outlined text-4xl text-primary">help</span>
-                  <p className="text-lg font-black text-primary">{action.label}</p>
-                  <p className="text-sm text-slate-500">This action cannot be undone.</p>
+            <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
+              <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
+                <div className="p-8 space-y-4">
+                  <div className="text-center">
+                    <span className="material-symbols-outlined text-4xl text-primary">help</span>
+                    <p className="text-lg font-black text-primary mt-2">{action.label}</p>
+                    <p className="text-sm text-slate-500">This action cannot be undone.</p>
+                  </div>
+                  {isRefund && (
+                    <div>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Refund Amount</label>
+                      <div className="relative">
+                        <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-bold">$</span>
+                        <input type="number" step="0.01" value={rmaRefundAmount} onChange={(e) => setRmaRefundAmount(e.target.value)} className="w-full pl-10 pr-4 py-4 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-lg" placeholder="0.00" />
+                      </div>
+                    </div>
+                  )}
+                  {isReplace && (
+                    <div className="space-y-2">
+                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Replacement Items (will be added to stock)</p>
+                      {rmaReplacementItems.map((ri, idx) => (
+                        <div key={idx} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl">
+                          <span className="font-bold text-sm text-slate-900">{ri.name}</span>
+                          <input type="number" min="0" value={ri.quantity} onChange={(e) => setRmaReplacementItems(prev => prev.map((r, i2) => i2 === idx ? { ...r, quantity: parseInt(e.target.value) || 0 } : r))} className="w-16 px-2 py-1 bg-white border border-slate-200 rounded-lg text-center font-bold text-sm" />
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   <div className="flex gap-4 pt-2">
-                    <button onClick={() => { setRmaConfirmAction(null); setPoConfirmAction(null); }} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest">Cancel</button>
+                    <button onClick={() => { setRmaConfirmAction(null); setPoConfirmAction(null); setRmaRefundAmount(''); setRmaReplacementItems([]); }} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest">Cancel</button>
                     <button onClick={() => {
                       if (rmaConfirmAction && canManageRMAs) {
-                        if (rmaConfirmAction.action === 'ship') updateRMA(rmaConfirmAction.id, { status: 'Shipped' });
-                        else if (rmaConfirmAction.action === 'refund') {
+                        if (rmaConfirmAction.action === 'ship') {
+                          updateRMA(rmaConfirmAction.id, { status: 'Shipped' });
+                        } else if (rmaConfirmAction.action === 'refund') {
+                          updateRMA(rmaConfirmAction.id, { status: 'Refunded', refundAmount: parseFloat(rmaRefundAmount) || 0 });
                           const rma = rmas.find(r => r.id === rmaConfirmAction.id);
-                          updateRMA(rmaConfirmAction.id, { status: 'Refunded' });
                           rma?.items.forEach(item => {
                             addStockMovement({
                               id: `sm-rma-${Date.now()}-${item.productId}`, stockItemId: item.productId, stockItemName: item.name,
-                              type: 'rma_return', quantityChange: -item.quantity, previousQty: 0, newQty: 0,
+                              type: 'rma_return', quantityChange: 0, previousQty: 0, newQty: 0,
                               referenceId: rmaConfirmAction.id, referenceType: 'rma',
                               performedBy: 'Current User', timestamp: new Date().toISOString(),
-                              reason: `RMA ${rma.rmaNumber} — ${item.reason}`,
+                              reason: `RMA ${rma?.rmaNumber} refunded - $${rmaRefundAmount}`,
                             });
                           });
-                        } else if (rmaConfirmAction.action === 'replace') updateRMA(rmaConfirmAction.id, { status: 'Replaced' });
+                        } else if (rmaConfirmAction.action === 'replace') {
+                          updateRMA(rmaConfirmAction.id, { status: 'Replaced', replacementItems: rmaReplacementItems });
+                          rmaReplacementItems.forEach(ri => {
+                            if (ri.quantity > 0) {
+                              const stockItem = approvedStockItems.find(si => si.id === ri.productId);
+                              if (stockItem) {
+                                const prevQty = stockItem.qty;
+                                const newQty = prevQty + ri.quantity;
+                                updateStockItem(stockItem.id, { qty: newQty });
+                                addStockMovement({
+                                  id: `sm-rma-rep-${Date.now()}-${ri.productId}`, stockItemId: ri.productId, stockItemName: ri.name,
+                                  type: 'rma_return', quantityChange: ri.quantity, previousQty: prevQty, newQty,
+                                  referenceId: rmaConfirmAction.id, referenceType: 'rma',
+                                  performedBy: 'Current User', timestamp: new Date().toISOString(),
+                                  reason: `RMA replacement received`,
+                                });
+                              }
+                            }
+                          });
+                        }
                         setRmaConfirmAction(null);
+                        setRmaRefundAmount('');
+                        setRmaReplacementItems([]);
                       }
                       if (poConfirmAction && canManagePOs) {
                         if (poConfirmAction.action === 'send') updatePurchaseOrder(poConfirmAction.id, { status: 'Ordered', orderedAt: new Date().toISOString().split('T')[0] });

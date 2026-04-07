@@ -134,18 +134,35 @@ export interface RefurbishmentJob {
   completedAt?: string;
 }
 
+export interface TransferLineItem {
+  productId: string;
+  name: string;
+  sku?: string;
+  quantity: number;
+  receivedQty?: number;
+  variance?: number;
+  condition?: 'Good' | 'Damaged' | 'Missing';
+  discrepancyNote?: string;
+  isSerialized?: boolean;
+  serials?: string[];
+  receivedSerials?: string[];
+  supplierId?: string;
+  supplierName?: string;
+}
+
 export interface InventoryTransfer {
   id: string;
   transferNumber: string;
   fromStore: string;
   toStore: string;
-  items: { productId: string; name: string; quantity: number; isSerialized?: boolean; serials?: string[] }[];
-  status: 'Draft' | 'Sent' | 'In Transit' | 'Received' | 'Cancelled';
+  items: TransferLineItem[];
+  status: 'Draft' | 'Sent' | 'In Transit' | 'Received' | 'Partially Received' | 'Discrepancy Detected' | 'Cancelled';
   requestedBy: string;
   notes?: string;
   createdAt: string;
   sentAt?: string;
   receivedAt?: string;
+  reconciledBy?: string;
 }
 
 export interface InventoryCount {
@@ -514,6 +531,8 @@ export interface RMA {
   trackingNumber?: string;
   notes?: string;
   createdBy?: string;
+  refundAmount?: number;
+  replacementItems?: { productId: string; name: string; quantity: number }[];
 }
 
 export type PermissionLevel = 'none' | 'view' | 'create' | 'edit' | 'manage' | 'approve' | 'full';

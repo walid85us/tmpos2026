@@ -1,0 +1,277 @@
+Inventory & Supply Chain Improvements — Narrow QA Correction Pass 2
+
+Read `replit.md` and `Ref.txt` first and treat them as source-of-truth constraints before making any changes.
+
+Also re-read the Inventory & Supply Chain reference links already provided for this workstream before implementing these corrections. Use them as behavioral reference, but do not copy them blindly. Improve beyond them while preserving our current architecture, design baseline, RBAC model, store scoping, and completed workstreams.
+
+This is NOT a redesign and NOT a new workstream.
+This is a narrow correction pass based only on the remaining QA failures and partial failures from Inventory & Supply Chain Improvements.
+
+Expert-role stack
+- Principal SaaS Product Architect for multi-tenant repair/POS workflows
+- Staff React 19 + TypeScript + Vite engineer
+- Firebase / Firestore data-model and state-flow architect
+- Auth / RBAC / lifecycle gating specialist
+- Inventory and supply-chain workflow architect
+- Logistics / receiving / reconciliation workflow architect
+- QA-driven refactor auditor
+- Side auditor and systems thinker at all times
+
+Operating posture
+- Act as a side auditor and systems thinker throughout.
+- Audit ripple effects before editing.
+- Fix only the failed or partial QA items deeply and coherently.
+- Preserve current design baseline exactly.
+- Preserve auth, preview mode, RBAC, lifecycle gating, and platform/store hierarchy.
+- Preserve tenant isolation and store scoping.
+- Reuse existing modal/drawer/table/toast/permission/sub-permission patterns.
+- Do not reopen completed workstreams except for narrow compatibility-safe fixes required by this pass.
+- Do not make changes to folder `Z`.
+- Do not make changes to file `Y`.
+
+Remaining corrections to implement
+
+A) Purchase Order workflow refinement
+1. PO details UX
+- clicking View Details or a PO reference must open a proper popup/modal/drawer
+- do not expand awkwardly inline under the list
+
+2. PO editability before send
+- if a PO is still Draft / not sent yet, it must be editable
+- user must be able to edit item details while still in draft
+- once the PO moves beyond the editable stage, apply clear lifecycle guardrails
+
+3. Vendor change confirmation/reset logic
+- when creating/editing a PO, if the user already added items and then changes the supplier/vendor:
+  - show a warning popup
+  - explain clearly that existing PO items will be removed/reset because they do not belong to the new vendor context
+  - require confirmation before resetting the PO item selection
+
+4. Multi-item same-vendor PO creation
+- keep or improve support for multiple items from the same vendor in one PO
+
+B) Transfer workflow refinement
+1. Transfer details UX
+- Transfer # must be clickable
+- clicking it must open a proper transfer detail popup/modal/drawer
+- do not render details awkwardly inline under the Inventory Transfers list
+
+2. Transfer editability
+- as long as the transfer is not received/finalized, it should remain editable where operationally appropriate
+
+3. Confirmation flows
+- lifecycle actions must continue to use confirmation prompts
+
+4. From / To location dropdown logic
+- when creating or editing a transfer:
+  - From and To must come from managed location/store dropdowns
+  - the same location must not be selectable in both fields at the same time
+  - if one location is selected in From, it must not appear in To, and vice versa
+
+5. Transfer receive must become a true reconciliation workflow
+Do NOT treat receiving as a simple confirm button.
+The Receive action must open a proper reconciliation popup/modal with:
+
+Header:
+- Transfer #
+- From location
+- To location
+- Sent date
+- Requested by / sent by
+- current transfer status
+- carrier/tracking fields only if they already exist; otherwise keep architecture ready for future shipping integration
+- supplier/vendor context should be shown at item level where relevant, not as the main identity of the transfer
+
+Line-item reconciliation table:
+- Item
+- SKU
+- Vendor/Supplier if available
+- Serialized / non-serialized
+- Expected Qty
+- Received Qty
+- Variance
+- Condition / Disposition
+- Notes / discrepancy reason
+
+Required reconciliation rules:
+- Variance = Received Qty - Expected Qty
+- zero variance = clean row
+- non-zero variance = flagged row with visible discrepancy styling
+
+Required transfer states after reconciliation:
+- Received
+- Partially Received
+- Discrepancy Detected
+
+State rules:
+- no variance on any row → can finalize as Received
+- some mismatch → must finalize into Partially Received or Discrepancy Detected
+- unresolved differences must remain visible in transfer details/history
+
+Inventory rules:
+- destination stock must increase only by actual received quantities
+- shortages must not be silently added
+- extra received quantities must require explicit confirmation
+- reconciliation event must be recorded in transfer history
+
+Serialized item rules:
+- if serialized behavior exists for the transferred item, allow explicit received-serial confirmation where cleanly supported
+- missing/unexpected serials should create visible discrepancy behavior rather than being hidden
+
+Transfer list/detail visibility:
+- transfers with mismatches must show a clear discrepancy badge/indicator in the list and in detail
+- include a short discrepancy summary such as mismatch count or shortage/overage visibility
+
+C) Inventory count / discrepancy handling refinement
+1. Count details UX
+- count details should open in a separate popup/modal/drawer while counting
+- do not keep it overly embedded or unclear
+
+2. Completed count visibility
+- once the count is completed, only discrepancies should be listed in the discrepancy-focused view
+- counted/clean lines may still be accessible in detail, but discrepancy review should be focused
+
+3. Adjustment functionality
+- there must be clear adjustment functionality from the count/discrepancy flow
+- user must be able to review discrepancy, confirm adjustment outcome, and see resulting inventory impact
+- do not leave count with no practical adjustment closure
+
+D) Trade-in refinement
+1. Customer selection UX
+- replace the current customer dropdown with a searchable customer field supporting search by name or phone number
+
+2. Walk-in customer logic
+- if Walk-in Customer is selected:
+  - the customer search field should be disabled
+- if Walk-in Customer is deselected:
+  - the customer search field should become enabled again
+
+3. ID capture
+- keep upload support
+- also support ID photo capture using the device camera available to the device running the application, where cleanly possible within the current architecture and preview constraints
+
+4. Resale price
+- keep resale price behavior and ensure it moves with the item when sent into stock/refurbishment pathways where appropriate
+
+5. Trade-in lifecycle controls
+- add edit ability for trade-in details
+- add delete ability for trade-ins where operationally appropriate
+- if Evaluate is a meaningful action/state, clicking Evaluate should also use a confirmation step
+
+6. Send to Refurb behavior
+- clicking Send to Refurb must open a confirmation popup
+- popup must include a note/comments field describing what needs refurbishment
+
+E) Refurbishment refinement
+1. Keep current detail modal improvements
+2. Before completing refurbishment:
+- allow resale price re-evaluation
+- require confirmation popup before sending item to stock
+3. keep permission awareness around refurbishment completion
+
+F) RMA refinement
+1. Prevent accidental duplication
+- if an item has already been added to an RMA, mark it as already added to RMA
+- show which RMA it belongs to
+- prevent silent duplication
+
+2. RMA details/editing
+- RMA # must be clickable and open in popup/modal/drawer
+- if RMA is still Pending / not shipped, it must remain editable
+
+3. Lifecycle confirmations
+- Ship action must show confirmation
+- Refunded action must open a popup to confirm refund amount
+- Refunded should represent confirmation once supplier refund is actually confirmed to the store
+- Replaced action must open a popup to confirm replacement items
+
+4. Replacement stock logic
+- when replacement is confirmed, the replacement quantity should be added back into inventory for the relevant item in the appropriate coherent way
+- do not make replacement a cosmetic state only
+
+G) Dashboard low-stock refinement
+1. Keep low-stock dashboard visibility for authorized users
+2. Make item names clickable from dashboard
+- clicking an item name from the dashboard low-stock area must open the item detail view/modal for quick review and edit
+
+H) RBAC / permission re-evaluation hardening
+1. Current issue
+- view-only users must not be able to edit inventory through any detail tabs, edit surfaces, or indirect routes
+- audit all remaining edit-capable surfaces, not only the main buttons
+
+2. Expand and enforce sub-permissions
+Under Inventory, ensure clean definition + actual enforcement for:
+- adjust_stock
+- manage_transfers
+- manage_stock_counts
+- manage_trade_ins
+- manage_refurbishment
+
+Under Supply Chain, ensure clean definition + actual enforcement for:
+- manage_purchase_orders
+- manage_goods_received_notes
+- manage_rmas
+- manage_suppliers
+
+3. UI enforcement must be real
+- do not stop at definitions
+- wire all mutation-capable actions through actual `checkSubPermission()` enforcement
+- blocked states must be clean, visible, and not misleading
+
+I) Documentation
+Update `replit.md` so it accurately reflects:
+- PO draft editability and vendor reset logic
+- transfer reconciliation workflow and discrepancy states
+- count/discrepancy/adjustment behavior
+- trade-in customer search, walk-in logic, ID capture, edit/delete behavior
+- refurbishment completion rules
+- RMA duplication prevention, editability, refund/replacement handling
+- dashboard low-stock click-through behavior
+- refined inventory and supply-chain permission enforcement
+
+Important suggested logic to include
+- treat receiving as actual reconciliation, not simple acknowledgment
+- use discrepancy as a first-class operational state
+- make transfer list/detail visibly show mismatch conditions
+- enforce all operational flags and permissions in real flows, not cosmetically
+- keep supplier/vendor context where useful, but keep transfer identity centered on From/To location
+- build this in a way that can later connect cleanly to a Shipping module
+
+Required design and behavior rules
+- Preserve the current premium glassmorphism design baseline exactly
+- Maintain keyboard accessibility and clear blocked/save/error states
+- Keep state paths unified
+- Avoid duplicate parallel systems
+- Ensure corrected flows work in preview/demo mode
+- Maintain store scoping and tenant safety
+- Keep type safety strong
+
+Definition of done
+This correction pass is done only if:
+- PO details open in popup/modal/drawer
+- draft POs can be edited appropriately
+- changing supplier with existing PO items triggers confirmation/reset logic
+- Transfer # opens in popup/modal/drawer
+- transfers remain editable before receipt
+- transfer receive uses a true reconciliation workflow with discrepancy states and actual-received inventory logic
+- From/To dropdowns do not allow the same location on both sides
+- count details/discrepancies/adjustments are materially improved
+- trade-in supports searchable customers, walk-in logic, ID capture, edit/delete, and refurb confirmation note
+- RMA duplication prevention and lifecycle handling are materially improved
+- dashboard low-stock items are clickable into item details
+- view-only users cannot edit through hidden or detail surfaces
+- expanded sub-permissions are both defined and enforced
+- no regressions are introduced in inventory, supply chain, repairs, customers, invoices, POS, services, or warranty
+- `replit.md` is updated to reflect all corrections
+
+Required final response format
+Return your completion report in exactly this structure:
+
+1. Files Changed
+2. Corrections Implemented
+3. Inventory / Supply Chain Workflow Decisions
+4. Permission / Access Enforcement Fixes
+5. Transfer Reconciliation Design
+6. Non-Regressions Confirmed
+7. Known Deferred Items
+8. Manual QA Retest Areas
