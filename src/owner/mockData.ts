@@ -175,6 +175,7 @@ export const featureMatrix = [
   { id: 'loyalty_management', name: 'Loyalty Management', planAvailability: { essential: false, growth: true, advanced: true } as Record<string, boolean>, source: 'inherited' as const, lifecycle: 'implemented' as FeatureLifecycle },
   { id: 'ai_diagnostics', name: 'AI Diagnostics', planAvailability: { essential: false, growth: false, advanced: false } as Record<string, boolean>, source: 'custom' as const, lifecycle: 'planned' as FeatureLifecycle },
   { id: 'voice_assistant', name: 'Voice Assistant', planAvailability: { essential: false, growth: false, advanced: false } as Record<string, boolean>, source: 'custom' as const, lifecycle: 'draft' as FeatureLifecycle },
+  { id: 'shipping', name: 'Shipping Center', planAvailability: { essential: false, growth: true, advanced: true } as Record<string, boolean>, source: 'inherited' as const, lifecycle: 'implemented' as FeatureLifecycle },
 ];
 
 export type FeatureOverrideType = 'inherited' | 'overridden' | 'paid_override' | 'pending_payment' | 'trial' | 'disabled' | 'addon';

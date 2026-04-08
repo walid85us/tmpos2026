@@ -705,6 +705,72 @@ export interface DocumentTemplate {
   updatedAt: string;
 }
 
+export type ShipmentStatus = 'Draft' | 'Ready' | 'Label Created' | 'Packed' | 'Dispatched' | 'In Transit' | 'Delivered' | 'Exception' | 'Cancelled';
+export type ShipmentType = 'customer_delivery' | 'repair_return' | 'store_transfer' | 'rma_outbound' | 'rma_return';
+export type ShipmentSourceType = 'invoice' | 'repair' | 'transfer' | 'rma';
+
+export interface ShipmentPackage {
+  id: string;
+  weight?: number;
+  weightUnit?: 'lb' | 'kg';
+  length?: number;
+  width?: number;
+  height?: number;
+  dimensionUnit?: 'in' | 'cm';
+  contentsSummary?: string;
+  declaredValue?: number;
+  insuredValue?: number;
+}
+
+export interface ShipmentEvent {
+  id: string;
+  timestamp: string;
+  status: string;
+  location?: string;
+  description: string;
+  performedBy?: string;
+}
+
+export interface ShipmentAddress {
+  name: string;
+  company?: string;
+  line1: string;
+  line2?: string;
+  city: string;
+  state: string;
+  postalCode: string;
+  country: string;
+  phone?: string;
+  email?: string;
+}
+
+export interface Shipment {
+  id: string;
+  shipmentNumber: string;
+  type: ShipmentType;
+  status: ShipmentStatus;
+  sourceType: ShipmentSourceType;
+  sourceId: string;
+  sourceNumber: string;
+  originAddress: ShipmentAddress;
+  destinationAddress: ShipmentAddress;
+  packages: ShipmentPackage[];
+  carrier?: string;
+  serviceLevel?: string;
+  trackingNumber?: string;
+  shippingCost?: number;
+  estimatedDelivery?: string;
+  events: ShipmentEvent[];
+  notes?: string;
+  labelUrl?: string;
+  packingSlipUrl?: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  dispatchedAt?: string;
+  deliveredAt?: string;
+}
+
 export type LogoPlacement = 'top-left' | 'top-center' | 'top-right';
 
 export interface StoreBranding {

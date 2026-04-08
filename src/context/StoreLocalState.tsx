@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useMemo, useEffect, useRef } from 'react';
-import { Customer, HeldOrder, CartItem, PaymentMethod, Discount, RepairTicket, RepairTicketStatus, Invoice, RepairService, RepairCategory, DocumentTemplate, StoreBranding, LogoPlacement, Supplier, StockMovement, StockMovementType, PurchaseOrder, GoodsReceivedNote, RMA, InventoryTransfer, InventoryCount, TradeInItem, RefurbishmentJob, SupplierRefundEntry } from '../types';
+import { Customer, HeldOrder, CartItem, PaymentMethod, Discount, RepairTicket, RepairTicketStatus, Invoice, RepairService, RepairCategory, DocumentTemplate, StoreBranding, LogoPlacement, Supplier, StockMovement, StockMovementType, PurchaseOrder, GoodsReceivedNote, RMA, InventoryTransfer, InventoryCount, TradeInItem, RefurbishmentJob, SupplierRefundEntry, Shipment } from '../types';
 import { useAccess } from './AccessContext';
 import { buildTemplateHtml, getDefaultEnabledTags } from '../utils/templateBuilder';
 
@@ -236,6 +236,9 @@ interface StoreLocalStateContextType {
   updateRefurbishmentJob: (id: string, updates: Partial<RefurbishmentJob>) => void;
   supplierRefundEntries: SupplierRefundEntry[];
   addSupplierRefundEntry: (entry: SupplierRefundEntry) => void;
+  shipments: Shipment[];
+  addShipment: (s: Shipment) => void;
+  updateShipment: (id: string, updates: Partial<Shipment>) => void;
   storeLocations: string[];
   getItemMovements: (stockItemId: string) => StockMovement[];
 }
@@ -609,6 +612,76 @@ const SEED_RMAS: RMA[] = [
   },
 ];
 
+const SEED_SHIPMENTS: Shipment[] = [
+  {
+    id: 'shp-001', shipmentNumber: 'SHP-2026-001', type: 'customer_delivery', status: 'Delivered',
+    sourceType: 'invoice', sourceId: 'inv-001', sourceNumber: 'INV-1001',
+    originAddress: { name: 'Main Warehouse', line1: '100 Commerce Dr', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US', phone: '555-0100' },
+    destinationAddress: { name: 'Alexander Wright', company: 'Wright Tech Solutions', line1: '500 Corporate Blvd', city: 'Austin', state: 'TX', postalCode: '78702', country: 'US', phone: '555-0123', email: 'alex@wright.com' },
+    packages: [{ id: 'pkg-001', weight: 2.5, weightUnit: 'lb', length: 12, width: 8, height: 4, dimensionUnit: 'in', contentsSummary: 'iPhone 15 Pro + accessories' }],
+    carrier: 'UPS', serviceLevel: 'Ground', trackingNumber: '1Z999AA10123456784', shippingCost: 12.50,
+    events: [
+      { id: 'evt-001', timestamp: '2026-03-20T10:00:00Z', status: 'Created', description: 'Shipment created', performedBy: 'Sarah Johnson' },
+      { id: 'evt-002', timestamp: '2026-03-20T14:00:00Z', status: 'Packed', description: 'Package packed and labeled', performedBy: 'Sarah Johnson' },
+      { id: 'evt-003', timestamp: '2026-03-21T09:00:00Z', status: 'Dispatched', description: 'Handed off to UPS', performedBy: 'Mike Torres' },
+      { id: 'evt-004', timestamp: '2026-03-22T11:30:00Z', status: 'In Transit', description: 'In transit — Austin sorting facility' },
+      { id: 'evt-005', timestamp: '2026-03-23T14:15:00Z', status: 'Delivered', description: 'Delivered — signed by A. Wright' },
+    ],
+    createdBy: 'Sarah Johnson', createdAt: '2026-03-20T10:00:00Z', updatedAt: '2026-03-23T14:15:00Z', dispatchedAt: '2026-03-21T09:00:00Z', deliveredAt: '2026-03-23T14:15:00Z',
+  },
+  {
+    id: 'shp-002', shipmentNumber: 'SHP-2026-002', type: 'repair_return', status: 'In Transit',
+    sourceType: 'repair', sourceId: 'rep-001', sourceNumber: 'REP-1001',
+    originAddress: { name: 'Downtown Branch', line1: '200 Main St', city: 'Austin', state: 'TX', postalCode: '78703', country: 'US' },
+    destinationAddress: { name: 'Sarah Jenkins', line1: '350 Oak Lane', city: 'Austin', state: 'TX', postalCode: '78704', country: 'US', phone: '555-0456', email: 'sarah.j@gmail.com' },
+    packages: [{ id: 'pkg-002', weight: 1.0, weightUnit: 'lb', length: 8, width: 6, height: 3, dimensionUnit: 'in', contentsSummary: 'Repaired Samsung S21', declaredValue: 450 }],
+    carrier: 'FedEx', serviceLevel: 'Priority Overnight', trackingNumber: '794644790138', shippingCost: 24.95, estimatedDelivery: '2026-04-10',
+    events: [
+      { id: 'evt-006', timestamp: '2026-04-07T09:00:00Z', status: 'Created', description: 'Return shipment created for completed repair', performedBy: 'Alex Kim' },
+      { id: 'evt-007', timestamp: '2026-04-07T15:00:00Z', status: 'Dispatched', description: 'Picked up by FedEx', performedBy: 'Alex Kim' },
+      { id: 'evt-008', timestamp: '2026-04-08T08:00:00Z', status: 'In Transit', description: 'In transit — FedEx Memphis hub' },
+    ],
+    createdBy: 'Alex Kim', createdAt: '2026-04-07T09:00:00Z', updatedAt: '2026-04-08T08:00:00Z', dispatchedAt: '2026-04-07T15:00:00Z',
+  },
+  {
+    id: 'shp-003', shipmentNumber: 'SHP-2026-003', type: 'store_transfer', status: 'Ready',
+    sourceType: 'transfer', sourceId: 'tr-001', sourceNumber: 'TRF-2026-001',
+    originAddress: { name: 'Main Warehouse', line1: '100 Commerce Dr', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US' },
+    destinationAddress: { name: 'Downtown Branch', line1: '200 Main St', city: 'Austin', state: 'TX', postalCode: '78703', country: 'US' },
+    packages: [{ id: 'pkg-003', weight: 5.0, weightUnit: 'lb', length: 18, width: 12, height: 6, dimensionUnit: 'in', contentsSummary: '3x iPhone 13 Screen, 10x Tempered Glass' }],
+    carrier: 'Internal Courier', serviceLevel: 'Same Day',
+    events: [
+      { id: 'evt-009', timestamp: '2026-04-08T08:00:00Z', status: 'Created', description: 'Transfer shipment created', performedBy: 'Sarah Johnson' },
+      { id: 'evt-010', timestamp: '2026-04-08T10:00:00Z', status: 'Ready', description: 'Package prepared for pickup', performedBy: 'Sarah Johnson' },
+    ],
+    createdBy: 'Sarah Johnson', createdAt: '2026-04-08T08:00:00Z', updatedAt: '2026-04-08T10:00:00Z',
+  },
+  {
+    id: 'shp-004', shipmentNumber: 'SHP-2026-004', type: 'rma_outbound', status: 'Dispatched',
+    sourceType: 'rma', sourceId: 'rma-001', sourceNumber: 'RMA-2026-001',
+    originAddress: { name: 'Main Warehouse', line1: '100 Commerce Dr', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US' },
+    destinationAddress: { name: 'Global Parts Inc.', company: 'Global Parts Inc.', line1: '800 Industrial Pkwy', city: 'Dallas', state: 'TX', postalCode: '75201', country: 'US', phone: '555-9000' },
+    packages: [{ id: 'pkg-004', weight: 0.5, weightUnit: 'lb', length: 6, width: 4, height: 2, dimensionUnit: 'in', contentsSummary: '1x Defective iPhone 13 Screen' }],
+    carrier: 'USPS', serviceLevel: 'Priority Mail', trackingNumber: '9400111899223100001234', shippingCost: 8.75,
+    events: [
+      { id: 'evt-011', timestamp: '2026-04-05T11:00:00Z', status: 'Created', description: 'RMA return shipment created', performedBy: 'Alex Kim' },
+      { id: 'evt-012', timestamp: '2026-04-06T09:00:00Z', status: 'Dispatched', description: 'Dropped off at USPS', performedBy: 'Alex Kim' },
+    ],
+    createdBy: 'Alex Kim', createdAt: '2026-04-05T11:00:00Z', updatedAt: '2026-04-06T09:00:00Z', dispatchedAt: '2026-04-06T09:00:00Z',
+  },
+  {
+    id: 'shp-005', shipmentNumber: 'SHP-2026-005', type: 'customer_delivery', status: 'Draft',
+    sourceType: 'invoice', sourceId: 'inv-002', sourceNumber: 'INV-1002',
+    originAddress: { name: 'Main Warehouse', line1: '100 Commerce Dr', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US' },
+    destinationAddress: { name: 'Mike Rodriguez', line1: '720 Elm Street', city: 'Austin', state: 'TX', postalCode: '78705', country: 'US', phone: '555-0789' },
+    packages: [],
+    events: [
+      { id: 'evt-013', timestamp: '2026-04-08T14:00:00Z', status: 'Created', description: 'Shipment drafted for invoice INV-1002', performedBy: 'Sarah Johnson' },
+    ],
+    createdBy: 'Sarah Johnson', createdAt: '2026-04-08T14:00:00Z', updatedAt: '2026-04-08T14:00:00Z',
+  },
+];
+
 const SEED_STORE_LOCATIONS: string[] = ['Main Warehouse', 'Downtown Branch', 'Eastside Location', 'Airport Kiosk'];
 
 const SEED_TRANSFERS: InventoryTransfer[] = [
@@ -710,6 +783,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const [tradeIns, setTradeIns] = useState<TradeInItem[]>(SEED_TRADE_INS);
   const [refurbishmentJobs, setRefurbishmentJobs] = useState<RefurbishmentJob[]>(SEED_REFURB_JOBS);
   const [supplierRefundEntries, setSupplierRefundEntries] = useState<SupplierRefundEntry[]>([]);
+  const [shipments, setShipments] = useState<Shipment[]>(SEED_SHIPMENTS);
   const storeLocations = SEED_STORE_LOCATIONS;
 
   const getItemMovements = useCallback((stockItemId: string) => {
@@ -805,6 +879,8 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const addSupplierRefundEntry = useCallback((entry: SupplierRefundEntry) => { setSupplierRefundEntries(prev => [entry, ...prev]); }, []);
   const addRefurbishmentJob = useCallback((j: RefurbishmentJob) => { setRefurbishmentJobs(prev => [j, ...prev]); }, []);
   const updateRefurbishmentJob = useCallback((id: string, updates: Partial<RefurbishmentJob>) => { setRefurbishmentJobs(prev => prev.map(j => j.id === id ? { ...j, ...updates } : j)); }, []);
+  const addShipment = useCallback((s: Shipment) => { setShipments(prev => [s, ...prev]); }, []);
+  const updateShipment = useCallback((id: string, updates: Partial<Shipment>) => { setShipments(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s)); }, []);
 
   const findDuplicateCustomers = useCallback((name: string, email: string, phone: string) => {
     const e = email.trim().toLowerCase();
@@ -856,6 +932,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
       tradeIns, addTradeIn, updateTradeIn, deleteTradeIn,
       refurbishmentJobs, addRefurbishmentJob, updateRefurbishmentJob,
       supplierRefundEntries, addSupplierRefundEntry,
+      shipments, addShipment, updateShipment,
       storeLocations, getItemMovements,
     }}>
       {children}

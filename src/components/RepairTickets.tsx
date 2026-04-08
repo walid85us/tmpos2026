@@ -79,9 +79,10 @@ export default function RepairTickets() {
     customers, services, serviceCategories, approvedStockItems,
     invoices, addInvoice, posOperator,
     updateStockItem, addStockMovement,
+    shipments, addShipment,
   } = useStoreLocalState();
   const navigate = useNavigate();
-  const { checkPermission, checkSubPermission, effectiveRole, session } = useAccess();
+  const { checkPermission, checkSubPermission, effectiveRole, session, canAccess } = useAccess();
   const canCreateTickets = checkPermission('repairs', 'create');
   const canEditTickets = checkPermission('repairs', 'edit');
   const canManageTickets = checkPermission('repairs', 'manage');
@@ -970,6 +971,54 @@ export default function RepairTickets() {
                           <div className="flex justify-between"><span className="text-slate-500 font-bold">Priority</span><span className={`font-black ${selectedTicket.priority === 'Rush' ? 'text-red-600' : selectedTicket.priority === 'High' ? 'text-orange-600' : 'text-slate-700'}`}>{selectedTicket.priority}</span></div>
                         </div>
                       </div>
+
+                      {canAccess('shipping') && checkSubPermission('create_shipment') && (() => {
+                        const linkedShipments = shipments.filter(s => s.sourceType === 'repair' && s.sourceNumber === selectedTicket.ticketNumber);
+                        return (
+                          <div className="bg-slate-50 rounded-[2.5rem] p-7 space-y-3 shadow-inner">
+                            <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
+                              <span className="material-symbols-outlined text-xs">package_2</span> Shipping
+                            </h3>
+                            {linkedShipments.length > 0 ? (
+                              <div className="space-y-2">
+                                {linkedShipments.map(sh => (
+                                  <div key={sh.id} className="flex justify-between items-center bg-white p-3 rounded-xl border border-slate-100">
+                                    <div>
+                                      <p className="text-xs font-bold text-primary">{sh.shipmentNumber}</p>
+                                      <p className="text-[10px] text-slate-400">{sh.carrier || 'No carrier'}</p>
+                                    </div>
+                                    <span className="text-[9px] font-black uppercase text-sky-700 bg-sky-50 px-2 py-0.5 rounded-lg border border-sky-200">{sh.status}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <button onClick={() => {
+                                const now = new Date().toISOString();
+                                const newShipment: Shipment = {
+                                  id: `shp-${Date.now()}`,
+                                  shipmentNumber: `SHP-${new Date().getFullYear()}-${String(shipments.length + 1).padStart(3, '0')}`,
+                                  type: 'repair_return',
+                                  status: 'Draft',
+                                  sourceType: 'repair',
+                                  sourceId: selectedTicket.id,
+                                  sourceNumber: selectedTicket.ticketNumber,
+                                  originAddress: { name: 'Store', line1: '123 Main St', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US' },
+                                  destinationAddress: { name: selectedTicket.customerName, line1: '', city: '', state: '', postalCode: '', country: 'US', phone: selectedTicket.customerPhone, email: selectedTicket.customerEmail },
+                                  packages: [],
+                                  events: [{ id: `evt-${Date.now()}`, timestamp: now, status: 'Created', description: `Shipment created from repair ${selectedTicket.ticketNumber}`, performedBy: 'Current User' }],
+                                  createdBy: 'Current User',
+                                  createdAt: now,
+                                  updatedAt: now,
+                                };
+                                addShipment(newShipment);
+                              }}
+                                className="w-full py-2.5 bg-white text-primary border border-slate-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-slate-50 transition-all flex items-center justify-center gap-1.5">
+                                <span className="material-symbols-outlined text-sm">add</span> Create Shipment
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })()}
 
                       {canManageTickets && !warrantyRepairTickets.some(wt => wt.id === selectedTicket.id) && (
                         <button onClick={() => setDeleteConfirm(selectedTicket.id)}

@@ -3,12 +3,12 @@ import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState, SEED_POS_OPERATORS } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
 import { tenantRoles } from '../context/accessConfig';
-import type { Invoice, RepairService } from '../types';
+import type { Invoice, RepairService, Shipment, ShipmentEvent } from '../types';
 import { renderTemplate, buildLineItemsHtml, buildReceiptLineItemsHtml } from '../utils/templateBuilder';
 
 export default function Invoices() {
-  const { invoices, addInvoice, updateInvoice, customers, services, serviceCategories, approvedStockItems, storeBranding, documentTemplates } = useStoreLocalState();
-  const { checkPermission, checkSubPermission } = useAccess();
+  const { invoices, addInvoice, updateInvoice, customers, services, serviceCategories, approvedStockItems, storeBranding, documentTemplates, shipments, addShipment } = useStoreLocalState();
+  const { checkPermission, checkSubPermission, canAccess } = useAccess();
   const canReopenInvoice = checkSubPermission('reopen_invoice');
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('All');
@@ -802,6 +802,39 @@ export default function Invoices() {
                       <span className="material-symbols-outlined text-sm">link</span> Online Pay Link
                     </button>
                   )}
+                  {canAccess('shipping') && checkSubPermission('create_shipment') && (() => {
+                    const linkedShipments = shipments.filter(s => s.sourceType === 'invoice' && s.sourceNumber === detailInvoice.invoiceNumber);
+                    return linkedShipments.length > 0 ? (
+                      <span className="px-4 py-2 bg-sky-50 text-sky-700 border border-sky-200 rounded-xl font-black text-[10px] uppercase tracking-widest flex items-center gap-1.5">
+                        <span className="material-symbols-outlined text-sm">package_2</span> {linkedShipments.length} Shipment{linkedShipments.length > 1 ? 's' : ''} · {linkedShipments[0].status}
+                      </span>
+                    ) : (
+                      <button onClick={() => {
+                        const now = new Date().toISOString();
+                        const customer = customers.find(c => c.id === detailInvoice.customerId);
+                        const newShipment: Shipment = {
+                          id: `shp-${Date.now()}`,
+                          shipmentNumber: `SHP-${new Date().getFullYear()}-${String(shipments.length + 1).padStart(3, '0')}`,
+                          type: 'customer_delivery',
+                          status: 'Draft',
+                          sourceType: 'invoice',
+                          sourceId: detailInvoice.id,
+                          sourceNumber: detailInvoice.invoiceNumber,
+                          originAddress: { name: 'Store', line1: '123 Main St', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US' },
+                          destinationAddress: { name: customer?.name || detailInvoice.customerName || 'Customer', line1: '', city: '', state: '', postalCode: '', country: 'US', email: customer?.email, phone: customer?.phone },
+                          packages: [],
+                          events: [{ id: `evt-${Date.now()}`, timestamp: now, status: 'Created', description: `Shipment created from invoice ${detailInvoice.invoiceNumber}`, performedBy: 'Current User' }],
+                          createdBy: 'Current User',
+                          createdAt: now,
+                          updatedAt: now,
+                        };
+                        addShipment(newShipment);
+                      }}
+                        className="px-4 py-2 bg-white text-slate-600 border border-slate-200 rounded-xl font-black text-[10px] uppercase tracking-widest shadow-sm hover:bg-slate-50 transition-all flex items-center gap-1.5">
+                        <span className="material-symbols-outlined text-sm">package_2</span> Create Shipment
+                      </button>
+                    );
+                  })()}
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">

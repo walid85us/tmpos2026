@@ -30,6 +30,7 @@ export const PERMISSION_DOMAINS = [
   { id: 'supply_chain', label: 'Supply Chain', levels: ['none', 'view', 'create', 'edit', 'manage', 'full'] as PermissionLevel[] },
   { id: 'integrations', label: 'Integrations', levels: ['none', 'view', 'manage', 'full'] as PermissionLevel[] },
   { id: 'widgets', label: 'Widgets', levels: ['none', 'view', 'manage', 'full'] as PermissionLevel[] },
+  { id: 'shipping', label: 'Shipping', levels: ['none', 'view', 'create', 'edit', 'manage', 'full'] as PermissionLevel[] },
 ] as const;
 
 export const adminPermissions = [
@@ -83,6 +84,13 @@ export const SUB_PERMISSIONS: SubPermissionDef[] = [
   { id: 'manage_rmas', label: 'Manage RMAs', parentDomain: 'supply_chain', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Create and manage return merchandise authorizations' },
   { id: 'manage_suppliers', label: 'Manage Suppliers', parentDomain: 'supply_chain', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Add and edit supplier records' },
   { id: 'create_inventory_items', label: 'Create Inventory Items', parentDomain: 'inventory', minModuleLevel: 'create', defaultLevel: 'create', description: 'Add new products to inventory' },
+  { id: 'create_shipment', label: 'Create Shipment', parentDomain: 'shipping', minModuleLevel: 'create', defaultLevel: 'create', description: 'Create new shipment records' },
+  { id: 'edit_shipment_pre_dispatch', label: 'Edit Shipment (Pre-Dispatch)', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'edit', description: 'Edit shipment details before dispatch' },
+  { id: 'dispatch_shipment', label: 'Dispatch Shipment', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Mark shipments as dispatched' },
+  { id: 'update_tracking_events', label: 'Update Tracking', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'edit', description: 'Add tracking events and updates' },
+  { id: 'cancel_shipment', label: 'Cancel Shipment', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Cancel shipment records' },
+  { id: 'view_shipping_costs', label: 'View Shipping Costs', parentDomain: 'shipping', minModuleLevel: 'view', defaultLevel: 'edit', description: 'View shipment cost and financial details' },
+  { id: 'manage_shipping_settings', label: 'Manage Shipping Settings', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Configure carrier providers and shipping settings' },
 ];
 
 export const ADMIN_ACTION_LEVEL_MAP = SUB_PERMISSIONS;
@@ -131,6 +139,7 @@ export const tenantRoles: EmployeeRole[] = [
       supply_chain: 'manage',
       integrations: 'manage',
       widgets: 'manage',
+      shipping: 'manage',
     } as Record<string, PermissionLevel>,
     subPermissions: {
       manage_employees: true,
@@ -161,6 +170,13 @@ export const tenantRoles: EmployeeRole[] = [
       manage_goods_received_notes: true,
       manage_rmas: true,
       manage_suppliers: true,
+      create_shipment: true,
+      edit_shipment_pre_dispatch: true,
+      dispatch_shipment: true,
+      update_tracking_events: true,
+      cancel_shipment: true,
+      view_shipping_costs: true,
+      manage_shipping_settings: true,
     },
     description: 'Store management access'
   },
@@ -186,6 +202,7 @@ export const tenantRoles: EmployeeRole[] = [
       supply_chain: 'none',
       integrations: 'none',
       widgets: 'none',
+      shipping: 'view',
     } as Record<string, PermissionLevel>,
     subPermissions: {
       manage_employees: false,
@@ -216,6 +233,13 @@ export const tenantRoles: EmployeeRole[] = [
       manage_goods_received_notes: false,
       manage_rmas: false,
       manage_suppliers: false,
+      create_shipment: false,
+      edit_shipment_pre_dispatch: false,
+      dispatch_shipment: false,
+      update_tracking_events: false,
+      cancel_shipment: false,
+      view_shipping_costs: false,
+      manage_shipping_settings: false,
     },
     description: 'Repair and parts access'
   },
@@ -241,6 +265,7 @@ export const tenantRoles: EmployeeRole[] = [
       supply_chain: 'none',
       integrations: 'none',
       widgets: 'none',
+      shipping: 'view',
     } as Record<string, PermissionLevel>,
     subPermissions: {
       manage_employees: false,
@@ -271,6 +296,13 @@ export const tenantRoles: EmployeeRole[] = [
       manage_goods_received_notes: false,
       manage_rmas: false,
       manage_suppliers: false,
+      create_shipment: false,
+      edit_shipment_pre_dispatch: false,
+      dispatch_shipment: false,
+      update_tracking_events: false,
+      cancel_shipment: false,
+      view_shipping_costs: false,
+      manage_shipping_settings: false,
     },
     description: 'Sales and customer access'
   },
@@ -280,8 +312,8 @@ export const roles = [...platformRoles, ...tenantRoles];
 
 export const planFeatures: Record<Plan, string[]> = {
   starter: ['dashboard', 'sales', 'customers', 'invoices', 'support'],
-  growth: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'employees', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management'],
-  advanced: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'employees', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management'],
+  growth: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'employees', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping'],
+  advanced: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'employees', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping'],
 };
 
 export const permissions = PERMISSION_DOMAINS;

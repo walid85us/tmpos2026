@@ -1,0 +1,513 @@
+Project: Multi-Tenant Repair / POS SaaS
+Workstream: Shipping Module / Shipping Center
+Mode: Strict isolated workstream implementation
+Priority: High architectural quality, no regression, preserve current product baseline exactly
+
+You are a principal-level full-stack SaaS architect, senior React/TypeScript engineer, Firebase/Firestore data architect, enterprise UX systems designer, and QA-minded refactoring specialist.
+
+You must also operate in two parallel modes throughout this task:
+1) Side Auditor — continuously inspect for regression risk, permission leakage, tenant-scope leakage, lifecycle conflicts, weak abstractions, shallow implementation, and duplicated logic.
+2) Systems Thinker — design this workstream as part of the whole platform, making sure it fits the existing auth model, preview mode, RBAC, lifecycle gating, store/platform hierarchy, and already completed modules.
+
+Read and understand the existing codebase first, especially:
+- Ref.txt
+- replit.md
+
+Before changing anything, inspect the current architecture and identify:
+- navigation structure
+- module boundaries
+- platform vs tenant/store data access patterns
+- auth and preview mode handling
+- existing RBAC and sub-permission patterns
+- lifecycle gating patterns
+- audit/history patterns
+- document/invoice/repair/inventory/transfer/RMA relationships
+- current design system and UI interaction patterns
+
+Do not produce a shallow feature layer.
+Do not bolt on a disconnected shipping screen.
+Do not break or visually alter the established design baseline.
+Do not weaken existing lifecycle controls.
+Do not bypass preview mode.
+Do not hardcode tenant/store assumptions.
+Do not introduce duplicate business logic where a shared engine belongs.
+
+This workstream must implement a NEW TOP-LEVEL CENTRALIZED MODULE:
+- Shipping Module / Shipping Center
+
+This workstream must also implement a SHARED SHIPPING ENGINE that can be used from:
+- Invoices
+- Repairs
+- Transfers
+- RMA
+
+This shipping system must feel like a first-class operational module, not a popup-only utility.
+
+--------------------------------------------------
+CORE OBJECTIVE
+--------------------------------------------------
+
+Design and implement a centralized Shipping Center with a reusable internal shipping engine and source-document linking model, while preserving the current application baseline exactly.
+
+Shipping must support the operational needs of a multi-tenant retail/repair business without forcing live carrier integration yet. Build this workstream with a clean provider-agnostic architecture so future carrier integrations can be added later without reworking the data model or UI flow.
+
+For this workstream, prioritize:
+- centralized visibility
+- shipment creation and management
+- source-document linkage
+- package and label workflow readiness
+- tracking and status lifecycle
+- RBAC and lifecycle enforcement
+- tenant/store-safe data design
+- future extensibility for live carrier APIs
+
+If live carrier integrations do not already exist, implement a robust manual/provider-agnostic shipping engine with clean adapter points for future integrations. Do not fake “live API” behavior in a misleading way.
+
+--------------------------------------------------
+MANDATORY ARCHITECTURE REQUIREMENTS
+--------------------------------------------------
+
+1) CENTRALIZED TOP-LEVEL SHIPPING CENTER
+Create a dedicated top-level module in the main application navigation for Shipping Center.
+This must match the established navigation and visual language already used in the app.
+
+The Shipping Center should be the operational hub for:
+- shipment list / queue
+- shipment detail view
+- shipping status visibility
+- source document linkage
+- package and parcel details
+- tracking details
+- shipping cost and service details
+- exception handling
+- label/document access if supported in current app patterns
+
+2) SHARED SHIPPING ENGINE
+Implement a reusable shipping domain layer shared across modules.
+This must not be copy-pasted separately into invoices, repairs, transfers, and RMA.
+
+The shared engine must handle at minimum:
+- shipment record creation
+- source module/source document association
+- package data normalization
+- address storage and normalization
+- shipment status lifecycle transitions
+- tracking event storage model
+- service/cost metadata structure
+- carrier/provider abstraction
+- shipment audit trail hooks
+- safe update and cancellation rules
+
+3) SOURCE DOCUMENT INTEGRATION
+Expose shipping actions from the relevant modules without moving shipping ownership into those modules.
+
+Required source contexts:
+- Invoice shipment
+- Repair return shipment
+- Transfer shipment
+- RMA shipment
+
+From each supported source context, users should be able to initiate or open the related shipment record using the shared engine.
+
+Source modules must remain source modules.
+Shipping Center must remain the central shipping operating module.
+
+4) MULTI-TENANT / PLATFORM / STORE MODEL
+Maintain strict data separation and hierarchy behavior:
+- platform scope must never leak tenant/store private data incorrectly
+- tenant/store users must only see shipment data they are permitted to see
+- shipment records must respect existing tenant/store ownership patterns
+- cross-store and internal transfer shipping must fit existing store hierarchy patterns
+
+5) PRESERVE EXISTING PRODUCT FOUNDATIONS EXACTLY
+You must preserve:
+- current design baseline
+- auth behavior
+- preview mode
+- RBAC and sub-permission architecture
+- lifecycle gating
+- platform/store hierarchy
+- existing completed workflows across all prior workstreams
+
+No visual redesign.
+No global UI restyling.
+No unrelated cleanup unless strictly required for this workstream.
+
+--------------------------------------------------
+FUNCTIONAL SCOPE
+--------------------------------------------------
+
+Implement the following functional scope.
+
+A) SHIPPING CENTER LIST / QUEUE
+Create a primary Shipping Center screen with:
+- searchable shipment list
+- filterable status views
+- source type filter
+- store filter if consistent with user scope
+- carrier/provider filter if supported by model
+- date range / recent activity support if existing patterns allow
+- shipment identifier / tracking number visibility
+- linked source document reference visibility
+- recipient / destination summary
+- service level summary
+- shipping cost summary where available
+- current lifecycle status
+- exception indicator
+
+Use the app’s established table/list/card conventions. Do not invent a conflicting UX language.
+
+B) SHIPMENT DETAIL EXPERIENCE
+Create a shipment detail experience consistent with current module detail patterns.
+It should include:
+- shipment summary
+- source document linkage
+- origin and destination addresses
+- package/parcels information
+- carrier/provider section
+- service/shipping method
+- cost details
+- tracking number and tracking timeline/events
+- status history / audit-style visibility where patterns already exist
+- notes/internal operational comments if supported by current architecture
+- available actions based on permissions and lifecycle state
+
+C) SHIPMENT CREATION FLOW
+Users must be able to create shipments from:
+- invoices
+- repairs
+- transfers
+- RMA
+
+Creation flow should prefill from the source document where possible:
+- customer / recipient information
+- relevant addresses
+- item/reference information
+- store/source location
+- shipment purpose/type
+
+Creation must still allow controlled editing where business logic permits.
+
+D) SHIPMENT TYPES
+Support a clear internal type model that distinguishes operational intent, such as:
+- customer delivery shipment
+- repair return shipment
+- store transfer shipment
+- RMA outbound / return shipment
+
+This does not need to create unnecessary UI complexity, but the data model must support it cleanly.
+
+E) PACKAGE / PARCEL MODEL
+Support package entry and editing with at minimum:
+- package count or parcel rows
+- weight
+- dimensions
+- package notes or contents summary where appropriate
+- optional declared value / insured value field if the current business model can support it cleanly
+
+Avoid overengineering, but do not lock the platform into a single-package-only design.
+
+F) PROVIDER / CARRIER ABSTRACTION
+Implement a clean shipping provider abstraction layer.
+
+If live integrations are not already present, support at least:
+- manual carrier/provider selection
+- manual service level entry or normalized service choice
+- manual tracking number entry
+- manual cost entry
+- future adapter extension points
+
+If there is already a shipping integration structure in the app, reuse and strengthen it rather than rebuilding inconsistently.
+
+G) STATUS LIFECYCLE
+Implement a disciplined shipment lifecycle aligned with the app’s lifecycle gating philosophy.
+
+Recommended operational states:
+- Draft
+- Ready / Prepared
+- Label Created or Booked
+- Packed
+- Dispatched / Handed Off
+- In Transit
+- Delivered
+- Exception
+- Cancelled
+
+Use the most compatible naming with the existing codebase if similar status conventions already exist.
+Transitions must be controlled and permission-aware.
+Do not allow illogical backward editing without explicit gating.
+
+H) TRACKING / EVENT MODEL
+Support tracking visibility in a future-proof way.
+At minimum allow:
+- tracking number storage
+- carrier/provider association
+- event/timeline entries
+- latest tracking state summary
+- delivery/exceptions visibility
+
+If live tracking does not exist, implement a manual event-capable structure rather than pretending live sync exists.
+
+I) SOURCE LINKAGE + NON-DUPLICATION
+A shipment must retain a durable link back to its source record.
+Source records should be able to show:
+- linked shipment existence
+- quick access to shipment detail
+- summarized shipping status if appropriate
+
+Avoid duplicating full shipping state in multiple modules. Keep the shipping record authoritative.
+
+J) SHIPPING DOCUMENTS / LABEL READINESS
+If the application already has document handling patterns, add support for shipment-related artifacts in a compatible way.
+Examples:
+- label file metadata
+- packing slip metadata
+- shipment notes/documents
+
+Do not force a full document management redesign.
+
+--------------------------------------------------
+RBAC / PREVIEW MODE / LIFECYCLE RULES
+--------------------------------------------------
+
+You must integrate this workstream into the existing RBAC and sub-permission architecture.
+
+Add shipping-specific permissions in the same style and depth as the existing permissions system.
+At minimum support permission separation for:
+- view shipping center
+- create shipment
+- edit draft/pre-dispatch shipment
+- dispatch / mark handoff
+- update tracking/events
+- cancel shipment
+- view shipment financial details if cost visibility needs separation
+- manage shipping settings/provider behavior if such admin scope exists
+
+Respect existing role inheritance and permission resolution behavior.
+
+Preview mode requirements:
+- preview mode must allow safe viewing
+- preview mode must never commit writes
+- destructive/committing actions must be blocked exactly as current app patterns require
+- no bypass through inline action handlers or modal saves
+
+Lifecycle requirements:
+- shipment edits must be limited by status
+- source-document actions must respect upstream lifecycle state where relevant
+- cancelled/delivered shipments must not remain fully editable unless that matches current controlled exception patterns
+- transfer-related shipments must respect internal operational state consistency
+
+--------------------------------------------------
+DATA MODEL REQUIREMENTS
+--------------------------------------------------
+
+Design a clean Firestore-friendly model that fits the existing codebase patterns.
+
+Include the necessary entities/structures for:
+- shipment
+- shipment packages/parcels
+- shipment tracking events
+- shipment-source linkage
+- provider/carrier metadata
+- shipping cost summary
+- audit/history fields consistent with current patterns
+
+Every record must preserve tenant/store ownership and safe queryability.
+
+Be deliberate about:
+- IDs and references
+- sourceType and sourceId modeling
+- tenantId/storeId/platform visibility boundaries
+- createdBy/updatedBy timestamps and audit-style metadata
+- status transition traceability
+- optional future carrier integration compatibility
+
+Do not create a brittle schema that will require migration immediately in the next phase.
+
+--------------------------------------------------
+UI / UX REQUIREMENTS
+--------------------------------------------------
+
+The UX must feel native to the current product.
+
+Requirements:
+- maintain existing design baseline exactly
+- follow current spacing, panels, modals, tables, drawers, badges, and detail-view patterns
+- no flashy redesign
+- no inconsistent iconography or layout systems
+- no hidden critical actions without discoverability
+- preserve current responsiveness conventions
+
+Preferred operational UX:
+- Shipping Center list as primary operational entry
+- detail view for full shipment state
+- source modules expose “Create Shipment” or “Open Shipment” where relevant
+- modal/sheet/full-detail usage should follow existing product patterns, not new inventions
+
+--------------------------------------------------
+COMMERCIAL PLAN / FEATURE MATRIX REQUIREMENTS
+--------------------------------------------------
+
+This Shipping Module / Shipping Center workstream must also be integrated into the existing System Owner Plans & Features matrix created in the completed Platform Command Center & Commercial Plan System workstream.
+
+Required behavior:
+- Add Shipping Module / Shipping Center to the system owner Plans & Features matrix
+- Make it configurable in the same architectural style as the existing feature/plan controls
+- Ensure the feature can be enabled/disabled by commercial plan / tenant entitlement using the current product’s established feature-gating model
+- Respect existing tenant feature provisioning behavior and avoid any bypass of commercial plan controls
+- If the current architecture distinguishes between module-level access and action-level access, follow that same pattern exactly
+- Do not create a one-off shipping entitlement mechanism outside the current Plans & Features system
+- Shipping Center visibility, source-module shipping actions, and shared shipping engine access must all respect plan eligibility where appropriate
+- Preview/demo behavior must still remain safe and consistent with existing feature-gated modules
+
+At minimum, the feature model must account for:
+- Shipping Center module availability
+- Shipment creation availability
+- Shipment tracking/management availability
+- Shipment action entry points from invoices, repairs, transfers, and RMA
+- Any shipping-specific advanced capabilities only if the current app’s feature system already supports that level of granularity
+
+Use the existing Platform Command Center / commercial plan architecture as the single source of truth for shipping feature entitlement.
+
+--------------------------------------------------
+STORE PERMISSIONS MATRIX REQUIREMENTS
+--------------------------------------------------
+
+This workstream must also be integrated into the existing Store Permissions Matrix and any related role/sub-permission architecture already implemented in the system.
+
+Required behavior:
+- Add Shipping Center permissions into the Store Permissions Matrix
+- Follow the exact structure and UI pattern already used by the permissions matrix
+- Do not create a separate disconnected shipping permissions screen
+- Ensure shipping permissions are assignable/editable in the same role configuration flow already used by the app
+- Ensure permission resolution works consistently across tenant/store hierarchy and inherited role behavior
+
+At minimum, add shipping permission coverage for:
+- view_shipping_center
+- create_shipment
+- edit_shipment_pre_dispatch
+- dispatch_shipment
+- update_tracking_events
+- cancel_shipment
+- view_shipping_costs
+- manage_shipping_settings (only if that admin scope fits the current permission model)
+
+These permissions must be enforced consistently in:
+- Shipping Center navigation visibility
+- Shipping Center list/detail access
+- shipment creation from invoices
+- shipment creation from repairs
+- shipment creation from transfers
+- shipment creation from RMA
+- shipment edits
+- shipment status transitions
+- shipment cancellation
+- tracking/timeline updates
+- shipment financial visibility
+
+Do not rely on UI hiding alone.
+Use the existing permission enforcement architecture and sub-permission resolution model already present in the app.
+
+--------------------------------------------------
+CROSS-SYSTEM INTEGRATION REQUIREMENT
+--------------------------------------------------
+
+Before finalizing, verify Shipping is integrated coherently across all three layers:
+1) System Owner Plans & Features matrix
+2) Store Permissions Matrix / role permissions
+3) Runtime UI and action enforcement
+
+Shipping must not appear active for a tenant/store unless:
+- the feature is enabled by the commercial plan / feature entitlement model, and
+- the logged-in user also has the required store/role permissions
+
+A user with permissions but without plan entitlement must still be blocked.
+A tenant with plan entitlement but a user without permissions must still be blocked.
+
+This combined gating must be enforced cleanly and consistently throughout the module and all source entry points.
+
+--------------------------------------------------
+NON-REGRESSION REQUIREMENTS
+--------------------------------------------------
+
+You must protect all completed workstreams:
+1. Platform Command Center & Commercial Plan System
+2. Tenant Management & Provisioning
+3. Store Dashboard & POS Refinement
+4. Customers, Invoices & Services Improvements
+5. Repairs Module Deep Refinement
+6. Inventory & Supply Chain Improvements
+
+Specifically do not break:
+- permissions and sub-permission behavior
+- preview mode safety
+- invoice flows
+- repair lifecycle
+- inventory and transfer behavior
+- customer and service flows
+- tenant/store provisioning and scoping
+- dashboard navigation and operational screens
+
+Avoid broad refactors unless they are necessary and low-risk.
+Prefer cohesive local architecture improvements over sweeping rewrites.
+
+--------------------------------------------------
+IMPLEMENTATION DISCIPLINE
+--------------------------------------------------
+
+Follow this exact execution discipline:
+
+1) First inspect current architecture and identify the minimum correct insertion points.
+2) Then design the shared shipping engine and its data model.
+3) Then add the top-level Shipping Center.
+4) Then wire source-document entry points from invoices, repairs, transfers, and RMA.
+5) Then add permission enforcement and preview mode protections.
+6) Then perform a regression-oriented review across impacted modules.
+7) Then update documentation.
+
+Do not mark the work complete unless it is actually implemented coherently end-to-end.
+
+--------------------------------------------------
+DOCUMENTATION REQUIREMENTS
+--------------------------------------------------
+
+Update replit.md with:
+- Shipping Center architecture
+- shared shipping engine design
+- shipment/source linkage model
+- permission additions
+- lifecycle rules
+- any provider abstraction decisions
+- affected modules and rationale
+
+--------------------------------------------------
+OUTPUT FORMAT REQUIRED
+--------------------------------------------------
+
+When finished, respond in this structure:
+
+1. Workstream Completion Status
+2. Files Changed
+3. New Capabilities Implemented
+4. Shared Engine / Data Model Summary
+5. RBAC / Preview Mode / Lifecycle Enforcement Added
+6. Source Module Integrations Added
+7. Non-Regression Notes
+8. Documentation Updated
+9. Plans & Features Matrix Updates
+10. Store Permissions Matrix Updates
+11. Cross-Gating Validation Notes
+
+Before finalizing, self-audit your work and verify:
+- no design baseline drift
+- no tenant/store leakage
+- no preview mode write leaks
+- no RBAC bypass
+- no shallow duplicated shipping logic
+- no broken source module flows
+- no regression to completed workstreams
+
+This is an isolation workstream.
+Stay tightly scoped to Shipping Module / Shipping Center.
+Do not start unrelated future workstreams.
+Do not add speculative features outside this shipping scope unless they are necessary to make this module coherent.

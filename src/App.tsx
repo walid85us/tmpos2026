@@ -44,6 +44,7 @@ import BillingPage from './owner/BillingPage';
 import UsagePage from './owner/UsagePage';
 import ProvisioningPage from './owner/ProvisioningPage';
 import WarrantyManagement from './components/WarrantyManagement';
+import ShippingCenter from './components/ShippingCenter';
 import PageShell from './components/PageShell';
 
 import Login from './components/Login';
@@ -90,6 +91,7 @@ const router = createBrowserRouter([
       { path: '/supply-chain', element: <AccessGuard feature="supply-chain"><SupplyChain /></AccessGuard> },
       { path: '/supply-chain/po/new', element: <Navigate to="/supply-chain" replace /> },
       { path: '/supply-chain/po/:id', element: <Navigate to="/supply-chain" replace /> },
+      { path: '/shipping', element: <AccessGuard feature="shipping"><ShippingCenter /></AccessGuard> },
       { path: '/integrations', element: <AccessGuard feature="integrations"><Integrations /></AccessGuard> },
       { path: '/widgets', element: <AccessGuard feature="widgets"><Widgets /></AccessGuard> },
       { path: '/prospects', element: <AccessGuard feature="prospects"><Prospects /></AccessGuard> },

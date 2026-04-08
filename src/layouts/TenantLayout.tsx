@@ -18,6 +18,7 @@ const navItems = [
   { id: 'invoices', label: 'Invoices', icon: 'receipt_long', path: '/invoices' },
   { id: 'services', label: 'Services', icon: 'settings_suggest', path: '/services' },
   { id: 'supply-chain', label: 'Supply Chain', icon: 'local_shipping', path: '/supply-chain' },
+  { id: 'shipping', label: 'Shipping', icon: 'package_2', path: '/shipping' },
   { id: 'prospects', label: 'Prospects', icon: 'contact_mail', path: '/prospects' },
   { id: 'marketing', label: 'Marketing', icon: 'campaign', path: '/marketing' },
   { id: 'reports', label: 'Reports', icon: 'bar_chart', path: '/reports' },

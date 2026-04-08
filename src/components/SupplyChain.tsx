@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
-import { PurchaseOrder, RMA, SupplierRefundEntry } from '../types';
+import { PurchaseOrder, RMA, SupplierRefundEntry, Shipment, ShipmentEvent } from '../types';
 
 type SupplyTab = 'po' | 'grn' | 'rma' | 'suppliers';
 
@@ -15,8 +15,9 @@ export default function SupplyChain() {
     approvedStockItems, updateStockItem,
     addStockMovement,
     supplierRefundEntries, addSupplierRefundEntry,
+    shipments, addShipment,
   } = useStoreLocalState();
-  const { checkSubPermission } = useAccess();
+  const { checkSubPermission, canAccess } = useAccess();
   const canManagePOs = checkSubPermission('manage_purchase_orders');
   const canManageRMAs = checkSubPermission('manage_rmas');
   const canManageSuppliers = checkSubPermission('manage_suppliers');
@@ -609,6 +610,49 @@ export default function SupplyChain() {
                       <div className="bg-slate-50 rounded-xl p-3"><p className="text-[10px] font-black text-slate-400 uppercase">Total Items</p><p className="font-bold">{liveRMA.items.reduce((s, i) => s + i.quantity, 0)}</p></div>
                     </div>
                     {liveRMA.notes && <div className="bg-slate-50 rounded-xl p-3"><p className="text-[10px] font-black text-slate-400 uppercase mb-1">Notes</p><p className="text-xs text-slate-600 italic">{liveRMA.notes}</p></div>}
+                    {canAccess('shipping') && checkSubPermission('create_shipment') && (() => {
+                      const linkedShipments = shipments.filter(s => s.sourceType === 'rma' && s.sourceNumber === liveRMA.rmaNumber);
+                      return (
+                        <div className="bg-slate-50 rounded-xl p-3 space-y-2">
+                          <p className="text-[10px] font-black text-slate-400 uppercase flex items-center gap-1"><span className="material-symbols-outlined text-xs">package_2</span> Shipping</p>
+                          {linkedShipments.length > 0 ? (
+                            linkedShipments.map(sh => (
+                              <div key={sh.id} className="flex justify-between items-center bg-white p-2.5 rounded-lg border border-slate-100">
+                                <div>
+                                  <p className="text-xs font-bold text-primary">{sh.shipmentNumber}</p>
+                                  <p className="text-[10px] text-slate-400">{sh.carrier || 'No carrier'} · {sh.type === 'rma_outbound' ? 'Outbound' : sh.type === 'rma_return' ? 'Return' : sh.type}</p>
+                                </div>
+                                <span className="text-[9px] font-black uppercase text-sky-700 bg-sky-50 px-2 py-0.5 rounded-lg border border-sky-200">{sh.status}</span>
+                              </div>
+                            ))
+                          ) : (
+                            <button onClick={() => {
+                              const now = new Date().toISOString();
+                              const newShipment: Shipment = {
+                                id: `shp-${Date.now()}`,
+                                shipmentNumber: `SHP-${new Date().getFullYear()}-${String(shipments.length + 1).padStart(3, '0')}`,
+                                type: 'rma_outbound',
+                                status: 'Draft',
+                                sourceType: 'rma',
+                                sourceId: liveRMA.id,
+                                sourceNumber: liveRMA.rmaNumber,
+                                originAddress: { name: 'Store', line1: '123 Main St', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US' },
+                                destinationAddress: { name: liveRMA.supplierName, line1: '', city: '', state: '', postalCode: '', country: 'US' },
+                                packages: [],
+                                events: [{ id: `evt-${Date.now()}`, timestamp: now, status: 'Created', description: `Shipment created from RMA ${liveRMA.rmaNumber}`, performedBy: 'Current User' }],
+                                createdBy: 'Current User',
+                                createdAt: now,
+                                updatedAt: now,
+                              };
+                              addShipment(newShipment);
+                            }}
+                              className="w-full py-2 bg-white text-primary border border-slate-200 rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-slate-50 transition-all flex items-center justify-center gap-1.5">
+                              <span className="material-symbols-outlined text-sm">add</span> Create RMA Shipment
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })()}
                     {liveRMA.refundAmount != null && liveRMA.refundAmount > 0 && (
                       <div className="bg-emerald-50 rounded-xl p-3 border border-emerald-100">
                         <p className="text-[10px] font-black text-emerald-600 uppercase">Refund Amount</p>
