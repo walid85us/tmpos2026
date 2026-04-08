@@ -169,7 +169,7 @@ export interface InventoryCount {
   id: string;
   countNumber: string;
   date: string;
-  status: 'In Progress' | 'Completed' | 'Cancelled';
+  status: 'In Progress' | 'Completed' | 'Closed' | 'Cancelled';
   items: { productId: string; name: string; sku: string; expected: number; actual: number; discrepancy: number }[];
   performedBy: string;
   notes?: string;

@@ -109,8 +109,10 @@ const Inventory: React.FC = () => {
   const [editTransferFrom, setEditTransferFrom] = useState('');
   const [editTransferTo, setEditTransferTo] = useState('');
   const [editTransferNotes, setEditTransferNotes] = useState('');
+  const [editTransferItems, setEditTransferItems] = useState<{ productId: string; name: string; sku: string; quantity: number; isSerialized: boolean }[]>([]);
   const [createTransferFrom, setCreateTransferFrom] = useState('');
   const [createTransferTo, setCreateTransferTo] = useState('');
+  const [createTransferNotes, setCreateTransferNotes] = useState('');
   const [createTransferItems, setCreateTransferItems] = useState<{ productId: string; name: string; sku: string; quantity: number; isSerialized: boolean }[]>([]);
 
   const [selectedCount, setSelectedCount] = useState<string | null>(null);
@@ -257,7 +259,7 @@ const Inventory: React.FC = () => {
 
   const getStatusColor = (status: string) => {
     switch (status) {
-      case 'Received': case 'Completed': case 'In Inventory': return 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20';
+      case 'Received': case 'Completed': case 'Closed': case 'In Inventory': return 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20';
       case 'Sent': case 'In Transit': case 'In Progress': case 'Refurbishing': case 'Testing': return 'bg-amber-500/10 text-amber-600 border-amber-500/20';
       case 'Draft': case 'Pending': case 'Evaluated': return 'bg-primary/10 text-primary border-primary/20';
       case 'Cancelled': return 'bg-rose-500/10 text-rose-600 border-rose-500/20';
@@ -700,7 +702,7 @@ const Inventory: React.FC = () => {
         <div className="flex justify-between items-center">
           <h2 className="text-2xl font-black text-primary tracking-tight">Inventory Transfers</h2>
           {canManageTransfers ? (
-            <button onClick={() => { setShowCreateTransfer(true); setCreateTransferFrom(storeLocations[0] || ''); setCreateTransferTo(storeLocations[1] || ''); setCreateTransferItems([]); }} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
+            <button onClick={() => { setShowCreateTransfer(true); setCreateTransferFrom(storeLocations[0] || ''); setCreateTransferTo(storeLocations[1] || ''); setCreateTransferNotes(''); setCreateTransferItems([]); }} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
               <span className="material-symbols-outlined text-sm">add</span>New Transfer
             </button>
           ) : (
@@ -1301,7 +1303,7 @@ const Inventory: React.FC = () => {
                 </div>
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">ID Photo</label>
-                  <input ref={idPhotoCaptureRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => {
+                  <input ref={idPhotoCaptureRef} type="file" accept="image/*" className="hidden" onChange={(e) => {
                     const file = e.target.files?.[0];
                     if (file) {
                       const reader = new FileReader();
@@ -1311,7 +1313,7 @@ const Inventory: React.FC = () => {
                   }} />
                   {capturedIdPhoto ? (
                     <div className="relative">
-                      <img src={capturedIdPhoto} alt="ID Photo" className="w-full h-32 object-cover rounded-2xl border border-slate-200" />
+                      <img src={capturedIdPhoto} alt="ID Photo" className="w-full h-40 object-contain rounded-2xl border border-slate-200 bg-slate-50" />
                       <div className="absolute top-2 right-2 flex gap-1">
                         <button type="button" onClick={() => idPhotoCaptureRef.current?.click()} className="p-2 bg-white/90 backdrop-blur rounded-xl text-slate-600 hover:text-primary shadow-sm" title="Replace"><span className="material-symbols-outlined text-sm">edit</span></button>
                         <button type="button" onClick={() => setCapturedIdPhoto('')} className="p-2 bg-white/90 backdrop-blur rounded-xl text-slate-600 hover:text-red-500 shadow-sm" title="Remove"><span className="material-symbols-outlined text-sm">close</span></button>
@@ -1385,7 +1387,7 @@ const Inventory: React.FC = () => {
                 </div>
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Notes</label>
-                  <textarea value={editTransferNotes} onChange={(e) => setEditTransferNotes(e.target.value)} className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold h-16 resize-none" />
+                  <textarea value={createTransferNotes} onChange={(e) => setCreateTransferNotes(e.target.value)} className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl font-bold h-16 resize-none" />
                 </div>
                 <div className="flex gap-4 pt-2">
                   <button onClick={() => setShowCreateTransfer(false)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest">Cancel</button>
@@ -1395,7 +1397,7 @@ const Inventory: React.FC = () => {
                       id: `tr-${Date.now()}`, transferNumber: `TRF-${new Date().getFullYear()}-${String(inventoryTransfers.length + 1).padStart(3, '0')}`,
                       fromStore: createTransferFrom, toStore: createTransferTo,
                       items: createTransferItems.map(ti => ({ productId: ti.productId, name: ti.name, sku: ti.sku, quantity: ti.quantity, isSerialized: ti.isSerialized })),
-                      status: 'Draft', requestedBy: 'Current User', notes: editTransferNotes || undefined,
+                      status: 'Draft', requestedBy: 'Current User', notes: createTransferNotes || undefined,
                       createdAt: new Date().toISOString().split('T')[0],
                     });
                     setShowCreateTransfer(false);
@@ -1686,7 +1688,16 @@ const Inventory: React.FC = () => {
                   </div>
                   {isEditable && (
                     <div className="flex gap-2 pt-2">
-                      <button onClick={() => updateInventoryTransfer(t.id, { notes: prompt('Update notes:', t.notes || '') || t.notes })} className="flex-1 py-3 bg-slate-100 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-slate-200">Edit Notes</button>
+                      <button onClick={() => {
+                        setEditingTransfer(t.id);
+                        setEditTransferFrom(t.fromStore);
+                        setEditTransferTo(t.toStore);
+                        setEditTransferNotes(t.notes || '');
+                        setEditTransferItems(t.items.map(item => ({ productId: item.productId || '', name: item.name, sku: item.sku || '', quantity: item.quantity, isSerialized: item.isSerialized ?? false })));
+                      }} className="flex-1 py-3 bg-slate-100 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-slate-200 flex items-center justify-center gap-2">
+                        <span className="material-symbols-outlined text-sm">edit</span>
+                        Edit Transfer
+                      </button>
                     </div>
                   )}
                   {canManageTransfers && (t.status === 'Discrepancy Detected' || t.status === 'Partially Received') && (
@@ -1718,11 +1729,106 @@ const Inventory: React.FC = () => {
           );
         })()}
 
+        {editingTransfer && (() => {
+          const t = inventoryTransfers.find(tr => tr.id === editingTransfer);
+          if (!t) return null;
+          const isDraft = t.status === 'Draft';
+          return (
+            <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
+              <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg overflow-hidden max-h-[90vh] flex flex-col">
+                <div className="p-8 border-b border-slate-100 bg-slate-50/50 flex justify-between items-start shrink-0">
+                  <div>
+                    <h3 className="text-2xl font-black text-primary tracking-tight">Edit {t.transferNumber}</h3>
+                    <p className="text-sm text-slate-500">{isDraft ? 'All fields editable' : 'Notes only'}</p>
+                  </div>
+                  <button onClick={() => setEditingTransfer(null)} className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+                </div>
+                <div className="p-8 space-y-5 overflow-y-auto flex-1">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">From</label>
+                      {isDraft ? (
+                        <select value={editTransferFrom} onChange={(e) => { setEditTransferFrom(e.target.value); if (e.target.value === editTransferTo) setEditTransferTo(storeLocations.find(l => l !== e.target.value) || ''); }} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm">
+                          {storeLocations.filter(loc => loc !== editTransferTo).map(loc => <option key={loc} value={loc}>{loc}</option>)}
+                        </select>
+                      ) : (
+                        <p className="px-4 py-3 bg-slate-100 rounded-xl font-bold text-sm text-slate-500">{editTransferFrom}</p>
+                      )}
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">To</label>
+                      {isDraft ? (
+                        <select value={editTransferTo} onChange={(e) => { setEditTransferTo(e.target.value); if (e.target.value === editTransferFrom) setEditTransferFrom(storeLocations.find(l => l !== e.target.value) || ''); }} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm">
+                          {storeLocations.filter(loc => loc !== editTransferFrom).map(loc => <option key={loc} value={loc}>{loc}</option>)}
+                        </select>
+                      ) : (
+                        <p className="px-4 py-3 bg-slate-100 rounded-xl font-bold text-sm text-slate-500">{editTransferTo}</p>
+                      )}
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Notes</label>
+                    <textarea value={editTransferNotes} onChange={(e) => setEditTransferNotes(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm h-20 resize-none" placeholder="Transfer notes..." />
+                  </div>
+                  {isDraft && (
+                    <div>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Items</label>
+                      <div className="space-y-2">
+                        {editTransferItems.map((item, i) => (
+                          <div key={i} className="flex items-center gap-3 p-3 bg-slate-50 rounded-xl">
+                            <div className="flex-1 min-w-0">
+                              <p className="font-bold text-sm text-slate-900 truncate">{item.name}</p>
+                              {item.sku && <p className="text-[10px] text-slate-400 font-mono">{item.sku}</p>}
+                            </div>
+                            <input type="number" min="1" value={item.quantity} onChange={(e) => {
+                              const updated = [...editTransferItems];
+                              updated[i] = { ...updated[i], quantity: Math.max(1, parseInt(e.target.value) || 1) };
+                              setEditTransferItems(updated);
+                            }} className="w-16 px-2 py-1.5 bg-white border border-slate-200 rounded-lg text-center font-bold text-sm" />
+                            <button onClick={() => setEditTransferItems(editTransferItems.filter((_, idx) => idx !== i))} className="p-1.5 hover:bg-red-50 text-slate-400 hover:text-red-500 rounded-lg"><span className="material-symbols-outlined text-sm">close</span></button>
+                          </div>
+                        ))}
+                        {editTransferItems.length === 0 && <p className="text-xs text-slate-400 text-center py-3">No items</p>}
+                      </div>
+                    </div>
+                  )}
+                  {!isDraft && t.items.length > 0 && (
+                    <div>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Items (read-only)</label>
+                      <div className="space-y-2">
+                        {t.items.map((item, i) => (
+                          <div key={i} className="flex items-center justify-between p-3 bg-slate-100 rounded-xl">
+                            <p className="font-bold text-sm text-slate-500">{item.name}</p>
+                            <p className="text-sm font-bold text-slate-400">×{item.quantity}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <div className="flex gap-3 pt-2">
+                    <button onClick={() => setEditingTransfer(null)} className="flex-1 py-3 bg-white text-slate-500 rounded-xl font-black text-[10px] uppercase tracking-widest border border-slate-200">Cancel</button>
+                    <button onClick={() => {
+                      const updates: Record<string, unknown> = { notes: editTransferNotes || undefined };
+                      if (isDraft) {
+                        updates.fromStore = editTransferFrom;
+                        updates.toStore = editTransferTo;
+                        updates.items = editTransferItems.map(item => ({ productId: item.productId, name: item.name, sku: item.sku, quantity: item.quantity, isSerialized: item.isSerialized }));
+                      }
+                      updateInventoryTransfer(t.id, updates);
+                      setEditingTransfer(null);
+                    }} className="flex-1 py-3 bg-primary text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-primary/20">Save Changes</button>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          );
+        })()}
+
         {selectedCount && (() => {
           const c = inventoryCounts.find(ct => ct.id === selectedCount);
           if (!c) return null;
           const discItems = c.items.filter(i => i.discrepancy !== 0);
-          const showOnlyDisc = c.status === 'Completed';
+          const showOnlyDisc = c.status === 'Completed' || c.status === 'Closed';
           const displayItems = showOnlyDisc ? discItems : c.items;
           return (
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
@@ -1837,6 +1943,26 @@ const Inventory: React.FC = () => {
                           setSelectedCount(null);
                         }} className="flex-1 py-3 bg-emerald-500 text-white rounded-xl font-black text-xs uppercase tracking-widest shadow-xl shadow-emerald-500/20">Confirm & Apply</button>
                       </div>
+                    </div>
+                  )}
+                  {c.status === 'Completed' && canManageStockCounts && (
+                    <div className="bg-slate-50 rounded-2xl border border-slate-200 p-5 space-y-3">
+                      <div className="flex items-center gap-2">
+                        <span className="material-symbols-outlined text-slate-500 text-sm">task_alt</span>
+                        <p className="text-xs font-black text-slate-600 uppercase tracking-widest">Close Out Count</p>
+                      </div>
+                      <p className="text-xs text-slate-500">
+                        {discItems.length > 0
+                          ? `${discItems.length} discrepanc${discItems.length !== 1 ? 'ies were' : 'y was'} adjusted. Acknowledge and close this count to finalize.`
+                          : 'No discrepancies found. Close this count to finalize.'}
+                      </p>
+                      <button onClick={() => {
+                        updateInventoryCount(c.id, { status: 'Closed' as 'Closed' });
+                        setSelectedCount(null);
+                      }} className="w-full py-3 bg-primary text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-primary/20 flex items-center justify-center gap-2">
+                        <span className="material-symbols-outlined text-sm">lock</span>
+                        Close Count
+                      </button>
                     </div>
                   )}
                 </div>

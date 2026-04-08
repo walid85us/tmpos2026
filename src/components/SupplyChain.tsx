@@ -51,6 +51,8 @@ export default function SupplyChain() {
   const [rmaReplacementItems, setRmaReplacementItems] = useState<{ productId: string; name: string; quantity: number }[]>([]);
 
   const [editingPendingRMA, setEditingPendingRMA] = useState<string | null>(null);
+  const [editRMANotes, setEditRMANotes] = useState('');
+  const [editRMAItems, setEditRMAItems] = useState<{ productId: string; name: string; reason: string; quantity: number; serialNumber?: string }[]>([]);
   const [rmaRefundTax, setRmaRefundTax] = useState('');
   const [rmaRefundMethod, setRmaRefundMethod] = useState('Credit Note');
   const [rmaRefundNotes, setRmaRefundNotes] = useState('');
@@ -304,7 +306,7 @@ export default function SupplyChain() {
                   <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                     {canManageRMAs && rma.status === 'Pending' && (
                       <>
-                        <button onClick={() => setEditingPendingRMA(editingPendingRMA === rma.id ? null : rma.id)} className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl" title="Edit">
+                        <button onClick={() => { setEditingPendingRMA(rma.id); setEditRMANotes(rma.notes || ''); setEditRMAItems(rma.items.map(i => ({ productId: i.productId, name: i.name, reason: i.reason, quantity: i.quantity, serialNumber: i.serialNumber }))); }} className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl" title="Edit">
                           <span className="material-symbols-outlined text-sm">edit</span>
                         </button>
                         <button onClick={() => setRmaConfirmAction({ id: rma.id, action: 'ship', label: `Ship RMA ${rma.rmaNumber}?` })} className="px-3 py-1.5 bg-amber-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-amber-600">Ship</button>
@@ -327,45 +329,6 @@ export default function SupplyChain() {
         </table>
       </div>
 
-      {editingPendingRMA && (() => {
-        const rma = rmas.find(r => r.id === editingPendingRMA);
-        if (!rma || rma.status !== 'Pending') return null;
-        return (
-          <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm space-y-4">
-            <div className="flex justify-between items-start">
-              <h3 className="text-lg font-black text-primary">Edit {rma.rmaNumber}</h3>
-              <button onClick={() => setEditingPendingRMA(null)} className="p-2 hover:bg-slate-100 rounded-xl text-slate-400"><span className="material-symbols-outlined text-sm">close</span></button>
-            </div>
-            <div>
-              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Notes</label>
-              <textarea defaultValue={rma.notes || ''} onBlur={(e) => { if (!canManageRMAs) return; updateRMA(rma.id, { notes: e.target.value || undefined }); }} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm h-20 resize-none" />
-            </div>
-            <div className="space-y-2">
-              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Items</p>
-              {rma.items.map((item, i) => (
-                <div key={i} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl">
-                  <div>
-                    <p className="font-bold text-sm text-slate-900">{item.name}</p>
-                    <input defaultValue={item.reason} onBlur={(e) => {
-                      if (!canManageRMAs) return;
-                      const updated = [...rma.items];
-                      updated[i] = { ...updated[i], reason: e.target.value };
-                      updateRMA(rma.id, { items: updated });
-                    }} className="text-xs bg-white border border-slate-200 rounded-lg px-2 py-1 mt-1 font-bold w-full" placeholder="Reason" />
-                  </div>
-                  <input type="number" min="1" defaultValue={item.quantity} onBlur={(e) => {
-                    if (!canManageRMAs) return;
-                    const updated = [...rma.items];
-                    updated[i] = { ...updated[i], quantity: parseInt(e.target.value) || 1 };
-                    updateRMA(rma.id, { items: updated });
-                  }} className="w-16 px-2 py-1 bg-white border border-slate-200 rounded-lg text-center font-bold text-sm" />
-                </div>
-              ))}
-            </div>
-            <button onClick={() => setEditingPendingRMA(null)} className="px-4 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl">Done Editing</button>
-          </motion.div>
-        );
-      })()}
     </div>
   );
 
@@ -555,6 +518,66 @@ export default function SupplyChain() {
             </motion.div>
           </div>
         )}
+
+        {editingPendingRMA && (() => {
+          const rma = rmas.find(r => r.id === editingPendingRMA);
+          if (!rma || rma.status !== 'Pending') return null;
+          return (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
+              <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg overflow-hidden max-h-[90vh] flex flex-col">
+                <div className="p-8 border-b border-slate-100 bg-slate-50/50 flex justify-between items-start shrink-0">
+                  <div>
+                    <h3 className="text-2xl font-black text-primary tracking-tight">Edit {rma.rmaNumber}</h3>
+                    <p className="text-sm text-slate-500">{rma.supplierName}</p>
+                  </div>
+                  <button onClick={() => setEditingPendingRMA(null)} className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+                </div>
+                <div className="p-8 space-y-5 overflow-y-auto flex-1">
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Notes</label>
+                    <textarea value={editRMANotes} onChange={(e) => setEditRMANotes(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm h-20 resize-none" placeholder="RMA notes..." />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Items</label>
+                    <div className="space-y-3">
+                      {editRMAItems.map((item, i) => (
+                        <div key={i} className="p-4 bg-slate-50 rounded-xl space-y-2">
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <p className="font-bold text-sm text-slate-900">{item.name}</p>
+                              {item.serialNumber && <p className="text-[10px] text-slate-400">S/N: {item.serialNumber}</p>}
+                            </div>
+                            <input type="number" min="1" value={item.quantity} onChange={(e) => {
+                              const updated = [...editRMAItems];
+                              updated[i] = { ...updated[i], quantity: Math.max(1, parseInt(e.target.value) || 1) };
+                              setEditRMAItems(updated);
+                            }} className="w-16 px-2 py-1.5 bg-white border border-slate-200 rounded-lg text-center font-bold text-sm" />
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-black text-slate-400 uppercase">Reason</label>
+                            <input value={item.reason} onChange={(e) => {
+                              const updated = [...editRMAItems];
+                              updated[i] = { ...updated[i], reason: e.target.value };
+                              setEditRMAItems(updated);
+                            }} className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs font-bold" placeholder="Reason for return" />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="flex gap-3 pt-2">
+                    <button onClick={() => setEditingPendingRMA(null)} className="flex-1 py-3 bg-white text-slate-500 rounded-xl font-black text-[10px] uppercase tracking-widest border border-slate-200">Cancel</button>
+                    <button onClick={() => {
+                      if (!canManageRMAs) return;
+                      updateRMA(rma.id, { notes: editRMANotes || undefined, items: editRMAItems.map(i => ({ ...rma.items.find(orig => orig.productId === i.productId) || {}, productId: i.productId, name: i.name, reason: i.reason, quantity: i.quantity, serialNumber: i.serialNumber })) });
+                      setEditingPendingRMA(null);
+                    }} className="flex-1 py-3 bg-primary text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-primary/20">Save Changes</button>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          );
+        })()}
 
         {selectedRMA && (() => {
           const liveRMA = rmas.find(r => r.id === selectedRMA.id) || selectedRMA;

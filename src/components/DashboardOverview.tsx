@@ -692,7 +692,7 @@ function StoreActivationPanel() {
 export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => void }) {
   const { session, canAccess, effectiveRole, checkPermission, checkSubPermission } = useAccess();
   const navigate = useNavigate();
-  const { addCustomer, addStockItem, updateStockItem, stockItems: sharedStockItems, approvedStockItems, pendingStockItems, heldOrders, removeHeldOrder } = useStoreLocalState();
+  const { addCustomer, addStockItem, updateStockItem, addStockMovement, stockItems: sharedStockItems, approvedStockItems, pendingStockItems, heldOrders, removeHeldOrder } = useStoreLocalState();
   const hasInventoryPermission = checkPermission('inventory', 'manage');
   const [showPrintLabelModal, setShowPrintLabelModal] = useState(false);
   const [showScanQRModal, setShowScanQRModal] = useState(false);
@@ -720,6 +720,9 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
   const [lowStockActionItem, setLowStockActionItem] = useState<StockItem | null>(null);
   const [lowStockAdjustQty, setLowStockAdjustQty] = useState('');
   const [lowStockAdjustReason, setLowStockAdjustReason] = useState('Restock');
+  const [lowStockDetailItem, setLowStockDetailItem] = useState<StockItem | null>(null);
+  const [lowStockAdjustItem, setLowStockAdjustItem] = useState<StockItem | null>(null);
+  const [lowStockAdjustSaved, setLowStockAdjustSaved] = useState(false);
   const canAdjustStock = checkSubPermission('adjust_stock');
 
   const role = effectiveRole || session?.role || '';
@@ -869,9 +872,9 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                 </button>
                 {lowStockActionItem?.id === item.id && (
                   <div className="absolute right-2 top-full mt-1 z-10 bg-white rounded-xl shadow-xl border border-slate-200 overflow-hidden w-48">
-                    <button onClick={() => { navigate(`/inventory?item=${item.id}`); setLowStockActionItem(null); }} className="w-full px-4 py-3 text-left text-xs font-bold text-slate-700 hover:bg-slate-50 flex items-center gap-2"><span className="material-symbols-outlined text-sm">visibility</span>View Details</button>
+                    <button onClick={() => { setLowStockDetailItem(item); setLowStockActionItem(null); }} className="w-full px-4 py-3 text-left text-xs font-bold text-slate-700 hover:bg-slate-50 flex items-center gap-2"><span className="material-symbols-outlined text-sm">visibility</span>View Details</button>
                     {canAdjustStock ? (
-                      <button onClick={() => { navigate(`/inventory?item=${item.id}&action=adjust`); setLowStockActionItem(null); }} className="w-full px-4 py-3 text-left text-xs font-bold text-primary hover:bg-primary/5 flex items-center gap-2 border-t border-slate-100"><span className="material-symbols-outlined text-sm">tune</span>Adjust Stock</button>
+                      <button onClick={() => { setLowStockAdjustItem(item); setLowStockAdjustQty(''); setLowStockAdjustReason('Restock'); setLowStockAdjustSaved(false); setLowStockActionItem(null); }} className="w-full px-4 py-3 text-left text-xs font-bold text-primary hover:bg-primary/5 flex items-center gap-2 border-t border-slate-100"><span className="material-symbols-outlined text-sm">tune</span>Adjust Stock</button>
                     ) : (
                       <div className="w-full px-4 py-3 text-left text-xs font-bold text-slate-300 flex items-center gap-2 border-t border-slate-100 cursor-not-allowed"><span className="material-symbols-outlined text-sm">lock</span>Adjust Stock</div>
                     )}
@@ -893,9 +896,9 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                 </button>
                 {lowStockActionItem?.id === item.id && (
                   <div className="absolute right-2 top-full mt-1 z-10 bg-white rounded-xl shadow-xl border border-slate-200 overflow-hidden w-48">
-                    <button onClick={() => { navigate(`/inventory?item=${item.id}`); setLowStockActionItem(null); }} className="w-full px-4 py-3 text-left text-xs font-bold text-slate-700 hover:bg-slate-50 flex items-center gap-2"><span className="material-symbols-outlined text-sm">visibility</span>View Details</button>
+                    <button onClick={() => { setLowStockDetailItem(item); setLowStockActionItem(null); }} className="w-full px-4 py-3 text-left text-xs font-bold text-slate-700 hover:bg-slate-50 flex items-center gap-2"><span className="material-symbols-outlined text-sm">visibility</span>View Details</button>
                     {canAdjustStock ? (
-                      <button onClick={() => { navigate(`/inventory?item=${item.id}&action=adjust`); setLowStockActionItem(null); }} className="w-full px-4 py-3 text-left text-xs font-bold text-primary hover:bg-primary/5 flex items-center gap-2 border-t border-slate-100"><span className="material-symbols-outlined text-sm">tune</span>Adjust Stock</button>
+                      <button onClick={() => { setLowStockAdjustItem(item); setLowStockAdjustQty(''); setLowStockAdjustReason('Restock'); setLowStockAdjustSaved(false); setLowStockActionItem(null); }} className="w-full px-4 py-3 text-left text-xs font-bold text-primary hover:bg-primary/5 flex items-center gap-2 border-t border-slate-100"><span className="material-symbols-outlined text-sm">tune</span>Adjust Stock</button>
                     ) : (
                       <div className="w-full px-4 py-3 text-left text-xs font-bold text-slate-300 flex items-center gap-2 border-t border-slate-100 cursor-not-allowed"><span className="material-symbols-outlined text-sm">lock</span>Adjust Stock</div>
                     )}
@@ -1543,6 +1546,112 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                       </div>
                     ))}
                   </div>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+        {lowStockDetailItem && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
+            <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
+              <div className="p-8 border-b border-slate-100 bg-slate-50/50 flex justify-between items-start">
+                <div>
+                  <h3 className="text-xl font-black text-primary tracking-tight">{lowStockDetailItem.name}</h3>
+                  <p className="text-xs text-slate-400 font-mono">{lowStockDetailItem.sku}</p>
+                </div>
+                <button onClick={() => setLowStockDetailItem(null)} className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+              </div>
+              <div className="p-8 space-y-4">
+                <div className="grid grid-cols-2 gap-3 text-xs">
+                  <div className="bg-slate-50 rounded-xl p-3">
+                    <p className="text-[10px] font-black text-slate-400 uppercase">Current Stock</p>
+                    <p className={`text-lg font-black ${lowStockDetailItem.qty <= 0 ? 'text-red-600' : 'text-amber-600'}`}>{lowStockDetailItem.qty}</p>
+                  </div>
+                  <div className="bg-slate-50 rounded-xl p-3">
+                    <p className="text-[10px] font-black text-slate-400 uppercase">Reorder Point</p>
+                    <p className="text-lg font-black text-slate-700">{lowStockDetailItem.reorderPoint ?? '—'}</p>
+                  </div>
+                  <div className="bg-slate-50 rounded-xl p-3">
+                    <p className="text-[10px] font-black text-slate-400 uppercase">Category</p>
+                    <p className="font-bold">{lowStockDetailItem.category}</p>
+                  </div>
+                  <div className="bg-slate-50 rounded-xl p-3">
+                    <p className="text-[10px] font-black text-slate-400 uppercase">Cost / Price</p>
+                    <p className="font-bold">${lowStockDetailItem.cost?.toFixed(2) ?? '—'} / ${lowStockDetailItem.price?.toFixed(2) ?? '—'}</p>
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  {canAdjustStock && (
+                    <button onClick={() => { setLowStockAdjustItem(lowStockDetailItem); setLowStockAdjustQty(''); setLowStockAdjustReason('Restock'); setLowStockAdjustSaved(false); setLowStockDetailItem(null); }} className="flex-1 py-3 bg-primary text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-primary/20 flex items-center justify-center gap-2">
+                      <span className="material-symbols-outlined text-sm">tune</span>Adjust Stock
+                    </button>
+                  )}
+                  <button onClick={() => setLowStockDetailItem(null)} className="flex-1 py-3 bg-slate-100 text-slate-500 rounded-xl font-black text-[10px] uppercase tracking-widest">Close</button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {lowStockAdjustItem && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
+            <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-sm overflow-hidden">
+              <div className="p-8 border-b border-slate-100 bg-slate-50/50 flex justify-between items-start">
+                <div>
+                  <h3 className="text-xl font-black text-primary tracking-tight">Adjust Stock</h3>
+                  <p className="text-sm text-slate-500">{lowStockAdjustItem.name}</p>
+                  <p className="text-[10px] text-slate-400 font-mono">{lowStockAdjustItem.sku} · Current: {lowStockAdjustItem.qty}</p>
+                </div>
+                <button onClick={() => setLowStockAdjustItem(null)} className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+              </div>
+              <div className="p-8 space-y-5">
+                {lowStockAdjustSaved ? (
+                  <div className="text-center space-y-3 py-4">
+                    <span className="material-symbols-outlined text-emerald-500 text-4xl">check_circle</span>
+                    <p className="text-sm font-black text-emerald-700">Stock Updated</p>
+                    <p className="text-xs text-slate-500">New quantity: {lowStockAdjustItem.qty}</p>
+                    <button onClick={() => setLowStockAdjustItem(null)} className="w-full py-3 bg-primary text-white rounded-xl font-black text-[10px] uppercase tracking-widest">Done</button>
+                  </div>
+                ) : (
+                  <>
+                    <div>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">New Quantity</label>
+                      <input type="number" min="0" value={lowStockAdjustQty} onChange={(e) => setLowStockAdjustQty(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" placeholder="Enter new quantity" />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Reason</label>
+                      <select value={lowStockAdjustReason} onChange={(e) => setLowStockAdjustReason(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm">
+                        <option value="Restock">Restock</option>
+                        <option value="Correction">Correction</option>
+                        <option value="Received Shipment">Received Shipment</option>
+                        <option value="Return to Stock">Return to Stock</option>
+                        <option value="Other">Other</option>
+                      </select>
+                    </div>
+                    <div className="flex gap-3">
+                      <button onClick={() => setLowStockAdjustItem(null)} className="flex-1 py-3 bg-white text-slate-500 rounded-xl font-black text-[10px] uppercase tracking-widest border border-slate-200">Cancel</button>
+                      <button onClick={() => {
+                        const newQty = parseInt(lowStockAdjustQty);
+                        if (isNaN(newQty) || newQty < 0) return;
+                        const prevQty = lowStockAdjustItem.qty;
+                        updateStockItem(lowStockAdjustItem.id, { qty: newQty });
+                        addStockMovement({
+                          id: `sm-dash-${Date.now()}-${lowStockAdjustItem.id}`,
+                          stockItemId: lowStockAdjustItem.id,
+                          stockItemName: lowStockAdjustItem.name,
+                          type: 'adjustment',
+                          quantityChange: newQty - prevQty,
+                          previousQty: prevQty,
+                          newQty,
+                          performedBy: 'Current User',
+                          timestamp: new Date().toISOString(),
+                          reason: `Dashboard quick adjust: ${lowStockAdjustReason}`,
+                        });
+                        setLowStockAdjustItem({ ...lowStockAdjustItem, qty: newQty });
+                        setLowStockAdjustSaved(true);
+                      }} disabled={!lowStockAdjustQty || isNaN(parseInt(lowStockAdjustQty))} className="flex-1 py-3 bg-emerald-500 text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-emerald-500/20 disabled:opacity-50 disabled:cursor-not-allowed">Apply</button>
+                    </div>
+                  </>
                 )}
               </div>
             </motion.div>

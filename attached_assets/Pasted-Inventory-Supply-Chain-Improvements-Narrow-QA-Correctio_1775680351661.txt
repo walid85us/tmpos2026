@@ -1,0 +1,166 @@
+Inventory & Supply Chain Improvements — Narrow QA Correction Pass 4
+
+Read `replit.md` and `Ref.txt` first and treat them as source-of-truth constraints before making any changes.
+
+Also re-read the Inventory & Supply Chain reference links already provided for this workstream before implementing these corrections. Use them as behavioral reference, but do not copy them blindly. Improve beyond them while preserving our current architecture, design baseline, RBAC model, store scoping, and completed workstreams.
+
+This is NOT a redesign and NOT a new workstream.
+This is a narrow correction pass based only on the remaining QA failures and partial failures from Inventory & Supply Chain Improvements.
+
+Expert-role stack
+- Principal SaaS Product Architect for multi-tenant repair/POS workflows
+- Staff React 19 + TypeScript + Vite engineer
+- Firebase / Firestore data-model and state-flow architect
+- Auth / RBAC / lifecycle gating specialist
+- Inventory and supply-chain workflow architect
+- Logistics / receiving / reconciliation workflow architect
+- QA-driven refactor auditor
+- Side auditor and systems thinker at all times
+
+Operating posture
+- Act as a side auditor and systems thinker throughout.
+- Audit ripple effects before editing.
+- Fix only the failed or partial QA items deeply and coherently.
+- Preserve current design baseline exactly.
+- Preserve auth, preview mode, RBAC, lifecycle gating, and platform/store hierarchy.
+- Preserve tenant isolation and store scoping.
+- Reuse existing modal/drawer/table/toast/permission/sub-permission patterns.
+- Do not reopen completed workstreams except for narrow compatibility-safe fixes required by this pass.
+- Do not make changes to folder `Z`.
+- Do not make changes to file `Y`.
+
+Remaining corrections to implement
+
+A) Transfer editability before received
+1. Current issue
+- transfers are still not truly editable before received/finalized
+
+2. Required behavior
+- as long as a transfer is not Received/finalized, it must remain editable where operationally appropriate
+- make this practical and explicit, not cosmetic
+- user should be able to edit the relevant transfer details and line items through the intended edit flow before final receipt
+- preserve lifecycle guardrails, but do not lock the transfer too early
+- if some fields should become read-only after Send or In Transit, define that clearly and keep the remaining editable fields operational
+
+3. UX requirement
+- keep the edit flow clean and modal/drawer/form-based, not awkward inline corruption under the list
+
+B) Completed inventory count adjustment closure
+1. Current issue
+- practical adjustment closure still fails once count status is Completed
+
+2. Required behavior
+- a completed count with discrepancies must still support a clear operational closure path
+- user must be able to:
+  - review the discrepancy outcome
+  - see what was adjusted
+  - complete/confirm any remaining closure steps in a practical way
+- do not leave Completed as a dead-end where the user can see discrepancy but cannot finalize the adjustment outcome properly
+
+3. Desired model
+- keep count completion operationally meaningful:
+  - in-progress count
+  - review/confirm
+  - completed with discrepancy results
+  - visible adjustment outcome / closure summary
+- if a dedicated close-out modal or action is needed, add it cleanly
+
+C) Trade-in ID preview and camera behavior
+1. Current issue
+- uploaded ID preview is cropped / partial
+- Camera action should connect to the device camera when available
+
+2. Required behavior
+- uploaded/captured ID preview must show the full image within the preview area
+- use a fit/contain-style preview behavior instead of clipping the image
+- keep the preview readable and operational
+
+3. Camera behavior
+- clicking Camera must invoke device camera capture when the device/browser supports it
+- preserve desktop/file-picker fallback when direct camera is unavailable
+- do not regress the working upload path
+
+D) RMA edit flow UX
+1. Current issue
+- when clicking Edit on an RMA, edit behavior still appears under the RMA listing
+- user wants this in popup/modal/drawer form
+
+2. Required behavior
+- if an RMA is editable (such as Pending / not shipped), clicking Edit must open a proper popup/modal/drawer
+- do not expand edit UI awkwardly inline under the listing
+- keep the edit experience consistent with the rest of the app’s detail/edit pattern
+
+E) Dashboard low-stock action popup
+1. Current issue
+- current behavior still routes away to Inventory and opens stacked detail/adjust flows
+- desired behavior is a true in-dashboard popup/action menu
+
+2. Required behavior
+- clicking a low-stock item on Dashboard must open a compact popup/modal/action sheet without leaving Dashboard
+- the popup must offer:
+  - View Stock Details
+  - Adjust Stock
+- this must happen on the Dashboard surface itself
+- do not redirect to Inventory automatically for this action
+
+3. Permission-aware behavior
+- if user has permission to adjust stock:
+  - show both View Stock Details and Adjust Stock
+- if user does not have permission to adjust stock:
+  - show only allowed options or a clean blocked state
+- do not show misleading actions
+
+4. View Stock Details behavior
+- from the popup, choosing View Stock Details may open the stock detail modal on top of Dashboard if that fits the current architecture best
+- keep it clean and consistent
+
+5. Adjust Stock behavior
+- from the popup, choosing Adjust Stock must open the proper stock-adjust flow directly if authorized
+- do not stack broken overlapping windows
+- keep modal layering clean and intentional
+
+F) Documentation
+Update `replit.md` so it accurately reflects:
+- final editable-before-received transfer rules
+- completed-count closure behavior
+- trade-in ID preview/camera behavior
+- RMA edit-in-modal behavior
+- dashboard low-stock action popup and permission-aware options
+
+Important suggested logic to include
+- do not use inline-under-list editing for transfer or RMA correction flows when the rest of the app already uses modal/detail patterns
+- completed counts should expose a real close-out/adjustment result, not only a status label
+- dashboard low-stock quick actions should be operational and stay in-context
+- camera capture should use device capability when available, with safe fallback
+
+Required design and behavior rules
+- Preserve the current premium glassmorphism design baseline exactly
+- Maintain keyboard accessibility and clear blocked/save/error states
+- Keep state paths unified
+- Avoid duplicate parallel systems
+- Ensure corrected flows work in preview/demo mode
+- Maintain store scoping and tenant safety
+- Keep type safety strong
+
+Definition of done
+This correction pass is done only if:
+- transfers remain truly editable before received where appropriate
+- completed counts have a practical adjustment closure path after completion
+- trade-in ID preview shows full image and camera action uses device camera when available
+- RMA edit opens in popup/modal/drawer instead of inline listing edit
+- dashboard low-stock item opens an in-dashboard action popup
+- the popup offers permission-aware View Stock Details / Adjust Stock actions
+- no regressions are introduced in inventory, supply chain, repairs, customers, invoices, POS, services, or warranty
+- `replit.md` is updated to reflect all corrections
+
+Required final response format
+Return your completion report in exactly this structure:
+
+1. Files Changed
+2. Corrections Implemented
+3. Inventory / Supply Chain Workflow Decisions
+4. Permission / Access Enforcement Fixes
+5. Dashboard Low-Stock Quick Action Design
+6. Non-Regressions Confirmed
+7. Known Deferred Items
+8. Manual QA Retest Areas
