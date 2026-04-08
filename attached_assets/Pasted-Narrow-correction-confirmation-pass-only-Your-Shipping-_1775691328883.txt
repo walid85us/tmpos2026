@@ -1,0 +1,56 @@
+Narrow correction / confirmation pass only.
+
+Your Shipping Center summary is close, but I cannot start final QA yet because three required continuity items are still missing or not explicitly confirmed.
+
+You must complete and/or explicitly confirm the following without changing unrelated parts of the system:
+
+1) Transfer integration is required
+Shipping source integration must exist for:
+- Invoices
+- Repairs
+- Transfers
+- RMA
+
+Your summary mentioned Invoice, Repair, and RMA, but did NOT mention Transfers.
+You must implement or confirm the missing Transfer shipping integration now.
+
+Required Transfer behavior:
+- Transfer record must expose Create Shipment or Open Shipment using the shared shipping engine
+- Shipment creation must prefill internal transfer context correctly
+- Existing linked shipment must be discoverable/openable from the Transfer record
+- Transfer shipping actions must respect plan gating, store permissions, and preview mode just like the other source modules
+
+2) System Owner Plans & Features matrix integration is required
+Do not only add backend/default entitlements.
+Shipping must be included in the actual existing System Owner Plans & Features matrix architecture/UI in the same style as other module/feature controls.
+
+You must confirm:
+- Shipping Module / Shipping Center appears in the Plans & Features matrix
+- It is configurable through the current feature-gating architecture
+- It is not implemented as a disconnected one-off entitlement path
+- Runtime module visibility and source entry points respect this feature gate
+
+3) Store Permissions Matrix integration is required
+Do not only add sub-permission definitions in code.
+Shipping permissions must be included in the actual existing Store Permissions Matrix / role configuration structure/UI in the same style as current permissions.
+
+You must confirm:
+- Shipping permissions appear in the Store Permissions Matrix
+- They are assignable/editable through the current role configuration flow
+- They are not implemented as a disconnected one-off permission area
+- Runtime enforcement is active in Shipping Center and all source entry points
+
+Do a narrow correction pass only.
+Do not redesign anything.
+Do not touch unrelated workstreams.
+Do not broaden scope.
+
+When finished, reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Transfer Integration Added or Confirmed
+3. Plans & Features Matrix Update Confirmed
+4. Store Permissions Matrix Update Confirmed
+5. Runtime Dual-Gating Validation
+6. Files Changed
+7. Non-Regression Notes

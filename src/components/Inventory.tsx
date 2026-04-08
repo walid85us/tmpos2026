@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState, StockItem } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
-import { StockMovement, RefurbishmentJob, TransferLineItem } from '../types';
+import { StockMovement, RefurbishmentJob, TransferLineItem, Shipment, ShipmentEvent } from '../types';
 import ContextualHelp from './ContextualHelp';
 
 type InventoryTab = 'inventory' | 'movements' | 'suggestive' | 'trade-in' | 'refurb' | 'transfer' | 'count' | 'bills' | 'giftcards' | 'bundles';
@@ -19,8 +19,9 @@ const Inventory: React.FC = () => {
     tradeIns, addTradeIn, updateTradeIn, deleteTradeIn,
     refurbishmentJobs, addRefurbishmentJob, updateRefurbishmentJob,
     suppliers, customers, storeLocations, getItemMovements,
+    shipments, addShipment,
   } = useStoreLocalState();
-  const { checkPermission, checkSubPermission } = useAccess();
+  const { checkPermission, checkSubPermission, canAccess } = useAccess();
   const hasInventoryPermission = checkPermission('inventory', 'manage');
   const hasInventoryEdit = checkPermission('inventory', 'edit');
   const hasInventoryView = checkPermission('inventory', 'view');
@@ -1647,6 +1648,49 @@ const Inventory: React.FC = () => {
                     {t.reconciledBy && <div className="bg-slate-50 rounded-xl p-3"><p className="text-[10px] font-black text-slate-400 uppercase">Reconciled By</p><p className="font-bold">{t.reconciledBy}</p></div>}
                   </div>
                   {t.notes && <p className="text-xs text-slate-400 italic">{t.notes}</p>}
+                  {canAccess('shipping') && checkSubPermission('create_shipment') && (() => {
+                    const linkedShipments = shipments.filter(s => s.sourceType === 'transfer' && s.sourceNumber === t.transferNumber);
+                    return (
+                      <div className="bg-slate-50 rounded-xl p-3 space-y-2">
+                        <p className="text-[10px] font-black text-slate-400 uppercase flex items-center gap-1"><span className="material-symbols-outlined text-xs">package_2</span> Shipping</p>
+                        {linkedShipments.length > 0 ? (
+                          linkedShipments.map(sh => (
+                            <div key={sh.id} className="flex justify-between items-center bg-white p-2.5 rounded-lg border border-slate-100">
+                              <div>
+                                <p className="text-xs font-bold text-primary">{sh.shipmentNumber}</p>
+                                <p className="text-[10px] text-slate-400">{sh.carrier || 'No carrier'}</p>
+                              </div>
+                              <span className="text-[9px] font-black uppercase text-sky-700 bg-sky-50 px-2 py-0.5 rounded-lg border border-sky-200">{sh.status}</span>
+                            </div>
+                          ))
+                        ) : (
+                          <button onClick={() => {
+                            const now = new Date().toISOString();
+                            const newShipment: Shipment = {
+                              id: `shp-${Date.now()}`,
+                              shipmentNumber: `SHP-${new Date().getFullYear()}-${String(shipments.length + 1).padStart(3, '0')}`,
+                              type: 'store_transfer',
+                              status: 'Draft',
+                              sourceType: 'transfer',
+                              sourceId: t.id,
+                              sourceNumber: t.transferNumber,
+                              originAddress: { name: t.fromStore, line1: '', city: '', state: '', postalCode: '', country: 'US' },
+                              destinationAddress: { name: t.toStore, line1: '', city: '', state: '', postalCode: '', country: 'US' },
+                              packages: [],
+                              events: [{ id: `evt-${Date.now()}`, timestamp: now, status: 'Created', description: `Shipment created from transfer ${t.transferNumber}`, performedBy: 'Current User' }],
+                              createdBy: 'Current User',
+                              createdAt: now,
+                              updatedAt: now,
+                            };
+                            addShipment(newShipment);
+                          }}
+                            className="w-full py-2 bg-white text-primary border border-slate-200 rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-slate-50 transition-all flex items-center justify-center gap-1.5">
+                            <span className="material-symbols-outlined text-sm">add</span> Create Shipment
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })()}
                   <div>
                     <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Items</p>
                     <div className="space-y-2">
