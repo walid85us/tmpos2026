@@ -692,8 +692,9 @@ function StoreActivationPanel() {
 export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => void }) {
   const { session, canAccess, effectiveRole, checkPermission, checkSubPermission } = useAccess();
   const navigate = useNavigate();
-  const { addCustomer, addStockItem, updateStockItem, addStockMovement, stockItems: sharedStockItems, approvedStockItems, pendingStockItems, heldOrders, removeHeldOrder } = useStoreLocalState();
+  const { addCustomer, addStockItem, updateStockItem, addStockMovement, stockItems: sharedStockItems, approvedStockItems, pendingStockItems, heldOrders, removeHeldOrder, suppliers, getItemMovements } = useStoreLocalState();
   const hasInventoryPermission = checkPermission('inventory', 'manage');
+  const hasInventoryEdit = checkPermission('inventory', 'edit');
   const [showPrintLabelModal, setShowPrintLabelModal] = useState(false);
   const [showScanQRModal, setShowScanQRModal] = useState(false);
   const [showAddStockModal, setShowAddStockModal] = useState(false);
@@ -717,12 +718,14 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
   const [dashStockCost, setDashStockCost] = useState('');
   const [dashStockPrice, setDashStockPrice] = useState('');
   const [dashStockCategory, setDashStockCategory] = useState('Parts');
-  const [lowStockActionItem, setLowStockActionItem] = useState<StockItem | null>(null);
-  const [lowStockAdjustQty, setLowStockAdjustQty] = useState('');
-  const [lowStockAdjustReason, setLowStockAdjustReason] = useState('Restock');
-  const [lowStockDetailItem, setLowStockDetailItem] = useState<StockItem | null>(null);
-  const [lowStockAdjustItem, setLowStockAdjustItem] = useState<StockItem | null>(null);
-  const [lowStockAdjustSaved, setLowStockAdjustSaved] = useState(false);
+  const [dashSelectedItem, setDashSelectedItem] = useState<StockItem | null>(null);
+  const [dashDetailTab, setDashDetailTab] = useState<'info' | 'movements' | 'edit'>('info');
+  const [dashShowAdjustModal, setDashShowAdjustModal] = useState(false);
+  const [dashAdjustItem, setDashAdjustItem] = useState<StockItem | null>(null);
+  const [dashAdjustType, setDashAdjustType] = useState<'increase' | 'decrease'>('increase');
+  const [dashAdjustQty, setDashAdjustQty] = useState('');
+  const [dashAdjustReason, setDashAdjustReason] = useState('');
+  const [dashAdjustNotes, setDashAdjustNotes] = useState('');
   const canAdjustStock = checkSubPermission('adjust_stock');
 
   const role = effectiveRole || session?.role || '';
@@ -859,52 +862,28 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
           </div>
           <div className="space-y-2 max-h-48 overflow-y-auto">
             {outOfStockItems.slice(0, 5).map(item => (
-              <div key={item.id} className="relative">
-                <button onClick={() => setLowStockActionItem(lowStockActionItem?.id === item.id ? null : item)} className="w-full flex items-center justify-between p-3 bg-white rounded-xl border border-red-100 hover:bg-red-50 transition-all cursor-pointer text-left">
-                  <div className="flex items-center gap-3">
-                    <span className="material-symbols-outlined text-red-500 text-sm">block</span>
-                    <div>
-                      <p className="text-sm font-bold text-slate-900">{item.name}</p>
-                      <p className="text-[10px] text-slate-400">SKU: {item.sku}</p>
-                    </div>
+              <button key={item.id} onClick={() => { setDashSelectedItem(item); setDashDetailTab('info'); }} className="w-full flex items-center justify-between p-3 bg-white rounded-xl border border-red-100 hover:bg-red-50 transition-all cursor-pointer text-left">
+                <div className="flex items-center gap-3">
+                  <span className="material-symbols-outlined text-red-500 text-sm">block</span>
+                  <div>
+                    <p className="text-sm font-bold text-slate-900">{item.name}</p>
+                    <p className="text-[10px] text-slate-400">SKU: {item.sku}</p>
                   </div>
-                  <span className="px-2 py-1 bg-red-100 text-red-700 text-[10px] font-black uppercase tracking-widest rounded-lg">Out of Stock</span>
-                </button>
-                {lowStockActionItem?.id === item.id && (
-                  <div className="absolute right-2 top-full mt-1 z-10 bg-white rounded-xl shadow-xl border border-slate-200 overflow-hidden w-48">
-                    <button onClick={() => { setLowStockDetailItem(item); setLowStockActionItem(null); }} className="w-full px-4 py-3 text-left text-xs font-bold text-slate-700 hover:bg-slate-50 flex items-center gap-2"><span className="material-symbols-outlined text-sm">visibility</span>View Details</button>
-                    {canAdjustStock ? (
-                      <button onClick={() => { setLowStockAdjustItem(item); setLowStockAdjustQty(''); setLowStockAdjustReason('Restock'); setLowStockAdjustSaved(false); setLowStockActionItem(null); }} className="w-full px-4 py-3 text-left text-xs font-bold text-primary hover:bg-primary/5 flex items-center gap-2 border-t border-slate-100"><span className="material-symbols-outlined text-sm">tune</span>Adjust Stock</button>
-                    ) : (
-                      <div className="w-full px-4 py-3 text-left text-xs font-bold text-slate-300 flex items-center gap-2 border-t border-slate-100 cursor-not-allowed"><span className="material-symbols-outlined text-sm">lock</span>Adjust Stock</div>
-                    )}
-                  </div>
-                )}
-              </div>
+                </div>
+                <span className="px-2 py-1 bg-red-100 text-red-700 text-[10px] font-black uppercase tracking-widest rounded-lg">Out of Stock</span>
+              </button>
             ))}
             {lowStockItems.slice(0, 5).map(item => (
-              <div key={item.id} className="relative">
-                <button onClick={() => setLowStockActionItem(lowStockActionItem?.id === item.id ? null : item)} className="w-full flex items-center justify-between p-3 bg-white rounded-xl border border-orange-100 hover:bg-orange-50 transition-all cursor-pointer text-left">
-                  <div className="flex items-center gap-3">
-                    <span className="material-symbols-outlined text-orange-500 text-sm">warning</span>
-                    <div>
-                      <p className="text-sm font-bold text-slate-900">{item.name}</p>
-                      <p className="text-[10px] text-slate-400">SKU: {item.sku} · {item.qty} remaining</p>
-                    </div>
+              <button key={item.id} onClick={() => { setDashSelectedItem(item); setDashDetailTab('info'); }} className="w-full flex items-center justify-between p-3 bg-white rounded-xl border border-orange-100 hover:bg-orange-50 transition-all cursor-pointer text-left">
+                <div className="flex items-center gap-3">
+                  <span className="material-symbols-outlined text-orange-500 text-sm">warning</span>
+                  <div>
+                    <p className="text-sm font-bold text-slate-900">{item.name}</p>
+                    <p className="text-[10px] text-slate-400">SKU: {item.sku} · {item.qty} remaining</p>
                   </div>
-                  <span className="px-2 py-1 bg-orange-100 text-orange-700 text-[10px] font-black uppercase tracking-widest rounded-lg">Low Stock</span>
-                </button>
-                {lowStockActionItem?.id === item.id && (
-                  <div className="absolute right-2 top-full mt-1 z-10 bg-white rounded-xl shadow-xl border border-slate-200 overflow-hidden w-48">
-                    <button onClick={() => { setLowStockDetailItem(item); setLowStockActionItem(null); }} className="w-full px-4 py-3 text-left text-xs font-bold text-slate-700 hover:bg-slate-50 flex items-center gap-2"><span className="material-symbols-outlined text-sm">visibility</span>View Details</button>
-                    {canAdjustStock ? (
-                      <button onClick={() => { setLowStockAdjustItem(item); setLowStockAdjustQty(''); setLowStockAdjustReason('Restock'); setLowStockAdjustSaved(false); setLowStockActionItem(null); }} className="w-full px-4 py-3 text-left text-xs font-bold text-primary hover:bg-primary/5 flex items-center gap-2 border-t border-slate-100"><span className="material-symbols-outlined text-sm">tune</span>Adjust Stock</button>
-                    ) : (
-                      <div className="w-full px-4 py-3 text-left text-xs font-bold text-slate-300 flex items-center gap-2 border-t border-slate-100 cursor-not-allowed"><span className="material-symbols-outlined text-sm">lock</span>Adjust Stock</div>
-                    )}
-                  </div>
-                )}
-              </div>
+                </div>
+                <span className="px-2 py-1 bg-orange-100 text-orange-700 text-[10px] font-black uppercase tracking-widest rounded-lg">Low Stock</span>
+              </button>
             ))}
           </div>
         </div>
@@ -1551,108 +1530,227 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
             </motion.div>
           </div>
         )}
-        {lowStockDetailItem && (
+        {dashSelectedItem && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
-            <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
-              <div className="p-8 border-b border-slate-100 bg-slate-50/50 flex justify-between items-start">
+            <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-2xl overflow-hidden max-h-[90vh] flex flex-col">
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50 shrink-0">
                 <div>
-                  <h3 className="text-xl font-black text-primary tracking-tight">{lowStockDetailItem.name}</h3>
-                  <p className="text-xs text-slate-400 font-mono">{lowStockDetailItem.sku}</p>
+                  <h2 className="text-xl font-black text-primary tracking-tight">{dashSelectedItem.name}</h2>
+                  <p className="text-slate-500 text-xs font-medium">SKU: {dashSelectedItem.sku}{dashSelectedItem.upc ? ` · UPC: ${dashSelectedItem.upc}` : ''}</p>
                 </div>
-                <button onClick={() => setLowStockDetailItem(null)} className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+                <button onClick={() => setDashSelectedItem(null)} className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
               </div>
-              <div className="p-8 space-y-4">
-                <div className="grid grid-cols-2 gap-3 text-xs">
-                  <div className="bg-slate-50 rounded-xl p-3">
-                    <p className="text-[10px] font-black text-slate-400 uppercase">Current Stock</p>
-                    <p className={`text-lg font-black ${lowStockDetailItem.qty <= 0 ? 'text-red-600' : 'text-amber-600'}`}>{lowStockDetailItem.qty}</p>
+              <div className="flex border-b border-slate-100 shrink-0">
+                {(['info', 'movements', ...(hasInventoryEdit ? ['edit' as const] : [])] as const).map(tab => (
+                  <button key={tab} onClick={() => setDashDetailTab(tab as any)} className={`flex-1 py-3 text-[10px] font-black uppercase tracking-widest transition-all ${dashDetailTab === tab ? 'text-primary border-b-2 border-primary bg-primary/5' : 'text-slate-400 hover:text-slate-600'}`}>
+                    {tab === 'info' ? 'Details' : tab === 'movements' ? 'Movements' : 'Edit'}
+                  </button>
+                ))}
+              </div>
+              <div className="p-8 overflow-y-auto flex-1">
+                {dashDetailTab === 'info' && (
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-2 gap-4">
+                      {[
+                        { l: 'Category', v: dashSelectedItem.category },
+                        { l: 'Type', v: dashSelectedItem.type },
+                        { l: 'Price', v: `$${dashSelectedItem.price.toFixed(2)}` },
+                        { l: 'Cost', v: `$${dashSelectedItem.cost.toFixed(2)}` },
+                        { l: 'Quantity', v: dashSelectedItem.qty.toString() },
+                        { l: 'Min Stock', v: dashSelectedItem.minStockLevel?.toString() || '—' },
+                        { l: 'Max Stock', v: dashSelectedItem.maxStockLevel?.toString() || '—' },
+                        { l: 'Manufacturer', v: dashSelectedItem.manufacturer || '—' },
+                        { l: 'Location', v: dashSelectedItem.location || '—' },
+                        { l: 'Supplier', v: dashSelectedItem.supplierName || '—' },
+                      ].map(row => (
+                        <div key={row.l} className="bg-slate-50 rounded-xl p-3">
+                          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{row.l}</p>
+                          <p className="text-sm font-bold text-slate-900 mt-1">{row.v}</p>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex gap-2 flex-wrap">
+                      {dashSelectedItem.isRepairPart && <span className="px-3 py-1 bg-orange-50 text-orange-600 text-[10px] font-black uppercase tracking-widest rounded-lg border border-orange-200">Repair Part</span>}
+                      {dashSelectedItem.isHiddenOnPOS && <span className="px-3 py-1 bg-slate-100 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-lg border border-slate-200">Hidden on POS</span>}
+                      {dashSelectedItem.isSuggestiveSale && <span className="px-3 py-1 bg-lime-50 text-lime-600 text-[10px] font-black uppercase tracking-widest rounded-lg border border-lime-200">Suggestive Sale</span>}
+                    </div>
+                    {dashSelectedItem.serialNumbers && dashSelectedItem.serialNumbers.length > 0 && (
+                      <div className="bg-slate-50 rounded-xl p-4">
+                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Serial Numbers</p>
+                        <div className="space-y-1">{dashSelectedItem.serialNumbers.map((sn, i) => <p key={i} className="text-xs font-mono text-slate-600">{sn}</p>)}</div>
+                      </div>
+                    )}
+                    <div className="flex gap-2 pt-2">
+                      {canAdjustStock ? (
+                        <button onClick={() => { setDashAdjustItem(dashSelectedItem); setDashAdjustType('increase'); setDashAdjustQty(''); setDashAdjustReason(''); setDashAdjustNotes(''); setDashShowAdjustModal(true); }} className="flex-1 py-3 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all">Adjust Stock</button>
+                      ) : (
+                        <button disabled className="flex-1 py-3 bg-slate-100 text-slate-400 font-black text-[10px] rounded-xl uppercase tracking-widest cursor-not-allowed flex items-center justify-center gap-1"><span className="material-symbols-outlined text-xs">lock</span>Adjust Stock</button>
+                      )}
+                      {hasInventoryEdit ? (
+                        <button onClick={() => setDashDetailTab('edit')} className="flex-1 py-3 bg-slate-100 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-slate-200 active:scale-95 transition-all">Edit Item</button>
+                      ) : (
+                        <button disabled className="flex-1 py-3 bg-slate-100 text-slate-400 font-black text-[10px] rounded-xl uppercase tracking-widest cursor-not-allowed flex items-center justify-center gap-1"><span className="material-symbols-outlined text-xs">lock</span>Edit Item</button>
+                      )}
+                    </div>
                   </div>
-                  <div className="bg-slate-50 rounded-xl p-3">
-                    <p className="text-[10px] font-black text-slate-400 uppercase">Reorder Point</p>
-                    <p className="text-lg font-black text-slate-700">{lowStockDetailItem.reorderPoint ?? '—'}</p>
+                )}
+                {dashDetailTab === 'movements' && (() => {
+                  const movements = getItemMovements(dashSelectedItem.id);
+                  const getMovementLabel = (type: string) => {
+                    const labels: Record<string, string> = { adjustment_increase: 'Stock Increase', adjustment_decrease: 'Stock Decrease', sale: 'Sale', refund_restock: 'Refund Restock', repair_consumption: 'Repair Usage', repair_return: 'Repair Return', transfer_out: 'Transfer Out', transfer_in: 'Transfer In', receiving: 'PO Receiving', trade_in_conversion: 'Trade-In', refurbishment_complete: 'Refurbishment', rma_return: 'RMA Return', initial_stock: 'Initial Stock', count_adjustment: 'Count Adjustment', adjustment: 'Adjustment' };
+                    return labels[type] || type;
+                  };
+                  const getMovementColor = (type: string) => {
+                    if (type.includes('increase') || type === 'receiving' || type === 'refund_restock' || type === 'transfer_in' || type === 'trade_in_conversion' || type === 'refurbishment_complete' || type === 'initial_stock' || type === 'repair_return' || type === 'adjustment') return 'text-emerald-600';
+                    return 'text-red-600';
+                  };
+                  return (
+                    <div className="space-y-3">
+                      {movements.length === 0 ? (
+                        <p className="text-sm text-slate-400 text-center py-8">No movement history for this item</p>
+                      ) : movements.map(m => (
+                        <div key={m.id} className="flex items-center justify-between p-4 bg-slate-50 rounded-xl">
+                          <div>
+                            <p className="text-xs font-bold text-slate-900">{getMovementLabel(m.type)}</p>
+                            <p className="text-[10px] text-slate-400">{new Date(m.timestamp).toLocaleString()} · {m.performedBy}</p>
+                            {m.reason && <p className="text-[10px] text-slate-500 mt-0.5">{m.reason}</p>}
+                          </div>
+                          <span className={`font-black text-sm ${getMovementColor(m.type)}`}>{m.quantityChange > 0 ? '+' : ''}{m.quantityChange}</span>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
+                {dashDetailTab === 'edit' && hasInventoryEdit && (
+                  <div className="space-y-4">
+                    <div>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Name</label>
+                      <input type="text" defaultValue={dashSelectedItem.name} onBlur={(e) => { updateStockItem(dashSelectedItem.id, { name: e.target.value }); setDashSelectedItem({ ...dashSelectedItem, name: e.target.value }); }} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold" />
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Type</label>
+                        <select defaultValue={dashSelectedItem.type} onChange={(e) => { updateStockItem(dashSelectedItem.id, { type: e.target.value as any }); setDashSelectedItem({ ...dashSelectedItem, type: e.target.value as any }); }} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold">
+                          <option value="non-serialized">Non-Serialized</option><option value="serialized">Serialized</option><option value="handset">Handset</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Category</label>
+                        <select defaultValue={dashSelectedItem.category} onChange={(e) => { updateStockItem(dashSelectedItem.id, { category: e.target.value }); setDashSelectedItem({ ...dashSelectedItem, category: e.target.value }); }} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold">
+                          <option>Parts</option><option>Accessories</option><option>Devices</option><option>Other</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Cost</label>
+                        <input type="number" step="0.01" defaultValue={dashSelectedItem.cost} onBlur={(e) => { const v = parseFloat(e.target.value) || 0; updateStockItem(dashSelectedItem.id, { cost: v }); setDashSelectedItem({ ...dashSelectedItem, cost: v }); }} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold" />
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Price</label>
+                        <input type="number" step="0.01" defaultValue={dashSelectedItem.price} onBlur={(e) => { const v = parseFloat(e.target.value) || 0; updateStockItem(dashSelectedItem.id, { price: v }); setDashSelectedItem({ ...dashSelectedItem, price: v }); }} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold" />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Min Stock</label>
+                        <input type="number" defaultValue={dashSelectedItem.minStockLevel || ''} onBlur={(e) => updateStockItem(dashSelectedItem.id, { minStockLevel: parseInt(e.target.value) || undefined })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold" />
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Max Stock</label>
+                        <input type="number" defaultValue={dashSelectedItem.maxStockLevel || ''} onBlur={(e) => updateStockItem(dashSelectedItem.id, { maxStockLevel: parseInt(e.target.value) || undefined })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold" />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Location</label>
+                      <input type="text" defaultValue={dashSelectedItem.location || ''} onBlur={(e) => updateStockItem(dashSelectedItem.id, { location: e.target.value || undefined })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold" />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Supplier</label>
+                      <select defaultValue={dashSelectedItem.supplierId || ''} onChange={(e) => { const sup = suppliers.find(s => s.id === e.target.value); updateStockItem(dashSelectedItem.id, { supplierId: e.target.value || undefined, supplierName: sup?.name }); }} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold">
+                        <option value="">None</option>
+                        {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                      </select>
+                    </div>
+                    <div className="flex gap-4">
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox" defaultChecked={dashSelectedItem.isRepairPart} onChange={(e) => updateStockItem(dashSelectedItem.id, { isRepairPart: e.target.checked })} className="w-4 h-4 rounded" />
+                        <span className="text-xs font-bold text-slate-600">Repair Part</span>
+                      </label>
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox" defaultChecked={dashSelectedItem.isHiddenOnPOS} onChange={(e) => updateStockItem(dashSelectedItem.id, { isHiddenOnPOS: e.target.checked })} className="w-4 h-4 rounded" />
+                        <span className="text-xs font-bold text-slate-600">Hidden on POS</span>
+                      </label>
+                    </div>
+                    <button onClick={() => setDashSelectedItem(null)} className="w-full py-3 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-primary/90 active:scale-95 transition-all mt-4">Done</button>
                   </div>
-                  <div className="bg-slate-50 rounded-xl p-3">
-                    <p className="text-[10px] font-black text-slate-400 uppercase">Category</p>
-                    <p className="font-bold">{lowStockDetailItem.category}</p>
+                )}
+                {dashDetailTab === 'edit' && !hasInventoryEdit && (
+                  <div className="flex flex-col items-center py-12 gap-3">
+                    <span className="material-symbols-outlined text-4xl text-slate-300">lock</span>
+                    <p className="text-sm font-bold text-slate-400">You don't have permission to edit inventory items</p>
                   </div>
-                  <div className="bg-slate-50 rounded-xl p-3">
-                    <p className="text-[10px] font-black text-slate-400 uppercase">Cost / Price</p>
-                    <p className="font-bold">${lowStockDetailItem.cost?.toFixed(2) ?? '—'} / ${lowStockDetailItem.price?.toFixed(2) ?? '—'}</p>
-                  </div>
-                </div>
-                <div className="flex gap-3">
-                  {canAdjustStock && (
-                    <button onClick={() => { setLowStockAdjustItem(lowStockDetailItem); setLowStockAdjustQty(''); setLowStockAdjustReason('Restock'); setLowStockAdjustSaved(false); setLowStockDetailItem(null); }} className="flex-1 py-3 bg-primary text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-primary/20 flex items-center justify-center gap-2">
-                      <span className="material-symbols-outlined text-sm">tune</span>Adjust Stock
-                    </button>
-                  )}
-                  <button onClick={() => setLowStockDetailItem(null)} className="flex-1 py-3 bg-slate-100 text-slate-500 rounded-xl font-black text-[10px] uppercase tracking-widest">Close</button>
-                </div>
+                )}
               </div>
             </motion.div>
           </div>
         )}
 
-        {lowStockAdjustItem && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
-            <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-sm overflow-hidden">
-              <div className="p-8 border-b border-slate-100 bg-slate-50/50 flex justify-between items-start">
-                <div>
-                  <h3 className="text-xl font-black text-primary tracking-tight">Adjust Stock</h3>
-                  <p className="text-sm text-slate-500">{lowStockAdjustItem.name}</p>
-                  <p className="text-[10px] text-slate-400 font-mono">{lowStockAdjustItem.sku} · Current: {lowStockAdjustItem.qty}</p>
-                </div>
-                <button onClick={() => setLowStockAdjustItem(null)} className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+        {dashShowAdjustModal && dashAdjustItem && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
+            <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
+              <div className="p-8 border-b border-slate-100 bg-slate-50/50">
+                <h2 className="text-xl font-black text-primary tracking-tight">Adjust Stock</h2>
+                <p className="text-xs font-bold text-slate-400">{dashAdjustItem.name} · Current: {dashAdjustItem.qty}</p>
               </div>
               <div className="p-8 space-y-5">
-                {lowStockAdjustSaved ? (
-                  <div className="text-center space-y-3 py-4">
-                    <span className="material-symbols-outlined text-emerald-500 text-4xl">check_circle</span>
-                    <p className="text-sm font-black text-emerald-700">Stock Updated</p>
-                    <p className="text-xs text-slate-500">New quantity: {lowStockAdjustItem.qty}</p>
-                    <button onClick={() => setLowStockAdjustItem(null)} className="w-full py-3 bg-primary text-white rounded-xl font-black text-[10px] uppercase tracking-widest">Done</button>
-                  </div>
-                ) : (
-                  <>
-                    <div>
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">New Quantity</label>
-                      <input type="number" min="0" value={lowStockAdjustQty} onChange={(e) => setLowStockAdjustQty(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" placeholder="Enter new quantity" />
-                    </div>
-                    <div>
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Reason</label>
-                      <select value={lowStockAdjustReason} onChange={(e) => setLowStockAdjustReason(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm">
-                        <option value="Restock">Restock</option>
-                        <option value="Correction">Correction</option>
-                        <option value="Received Shipment">Received Shipment</option>
-                        <option value="Return to Stock">Return to Stock</option>
-                        <option value="Other">Other</option>
-                      </select>
-                    </div>
-                    <div className="flex gap-3">
-                      <button onClick={() => setLowStockAdjustItem(null)} className="flex-1 py-3 bg-white text-slate-500 rounded-xl font-black text-[10px] uppercase tracking-widest border border-slate-200">Cancel</button>
-                      <button onClick={() => {
-                        const newQty = parseInt(lowStockAdjustQty);
-                        if (isNaN(newQty) || newQty < 0) return;
-                        const prevQty = lowStockAdjustItem.qty;
-                        updateStockItem(lowStockAdjustItem.id, { qty: newQty });
-                        addStockMovement({
-                          id: `sm-dash-${Date.now()}-${lowStockAdjustItem.id}`,
-                          stockItemId: lowStockAdjustItem.id,
-                          stockItemName: lowStockAdjustItem.name,
-                          type: 'adjustment',
-                          quantityChange: newQty - prevQty,
-                          previousQty: prevQty,
-                          newQty,
-                          performedBy: 'Current User',
-                          timestamp: new Date().toISOString(),
-                          reason: `Dashboard quick adjust: ${lowStockAdjustReason}`,
-                        });
-                        setLowStockAdjustItem({ ...lowStockAdjustItem, qty: newQty });
-                        setLowStockAdjustSaved(true);
-                      }} disabled={!lowStockAdjustQty || isNaN(parseInt(lowStockAdjustQty))} className="flex-1 py-3 bg-emerald-500 text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-emerald-500/20 disabled:opacity-50 disabled:cursor-not-allowed">Apply</button>
-                    </div>
-                  </>
-                )}
+                <div className="flex gap-2">
+                  <button onClick={() => setDashAdjustType('increase')} className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${dashAdjustType === 'increase' ? 'bg-emerald-500 text-white' : 'bg-slate-100 text-slate-500'}`}>Increase</button>
+                  <button onClick={() => setDashAdjustType('decrease')} className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${dashAdjustType === 'decrease' ? 'bg-red-500 text-white' : 'bg-slate-100 text-slate-500'}`}>Decrease</button>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Quantity</label>
+                  <input type="number" min="1" value={dashAdjustQty} onChange={(e) => setDashAdjustQty(e.target.value)} className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-lg" placeholder="Enter quantity..." />
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Reason</label>
+                  <select value={dashAdjustReason} onChange={(e) => setDashAdjustReason(e.target.value)} className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold">
+                    <option value="">Select reason...</option>
+                    <option>Recount correction</option>
+                    <option>Damaged/Defective</option>
+                    <option>Returned to supplier</option>
+                    <option>Found in stock</option>
+                    <option>Theft/Loss</option>
+                    <option>Other</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Notes (Optional)</label>
+                  <textarea value={dashAdjustNotes} onChange={(e) => setDashAdjustNotes(e.target.value)} className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold h-20 resize-none" placeholder="Additional details..." />
+                </div>
+                <div className="flex gap-4 pt-2">
+                  <button onClick={() => setDashShowAdjustModal(false)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-all">Cancel</button>
+                  <button onClick={() => {
+                    if (!canAdjustStock || !dashAdjustItem || !dashAdjustQty) return;
+                    const qty = parseInt(dashAdjustQty);
+                    if (qty <= 0) return;
+                    const change = dashAdjustType === 'increase' ? qty : -qty;
+                    const newQty = Math.max(0, dashAdjustItem.qty + change);
+                    updateStockItem(dashAdjustItem.id, { qty: newQty });
+                    addStockMovement({
+                      id: `sm-dash-${Date.now()}-${dashAdjustItem.id}`, stockItemId: dashAdjustItem.id, stockItemName: dashAdjustItem.name,
+                      type: dashAdjustType === 'increase' ? 'adjustment_increase' : 'adjustment_decrease',
+                      quantityChange: change, previousQty: dashAdjustItem.qty, newQty,
+                      reason: dashAdjustReason || (dashAdjustType === 'increase' ? 'Manual stock increase' : 'Manual stock decrease'),
+                      performedBy: 'Current User', timestamp: new Date().toISOString(), notes: dashAdjustNotes || undefined,
+                    });
+                    setDashShowAdjustModal(false);
+                    setDashAdjustItem(null);
+                    if (dashSelectedItem?.id === dashAdjustItem.id) {
+                      setDashSelectedItem({ ...dashSelectedItem, qty: newQty });
+                    }
+                  }} disabled={!dashAdjustQty || parseInt(dashAdjustQty) <= 0} className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-primary/20 active:scale-95 transition-all disabled:opacity-40">Apply Adjustment</button>
+                </div>
               </div>
             </motion.div>
           </div>

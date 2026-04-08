@@ -134,6 +134,10 @@ const Inventory: React.FC = () => {
 
   const idPhotoCaptureRef = useRef<HTMLInputElement>(null);
   const [capturedIdPhoto, setCapturedIdPhoto] = useState<string>('');
+  const [viewingTradeIn, setViewingTradeIn] = useState<string | null>(null);
+  const [editTradeInPhoto, setEditTradeInPhoto] = useState<string>('');
+  const editIdPhotoRef = useRef<HTMLInputElement>(null);
+  const [countReAdjustMode, setCountReAdjustMode] = useState(false);
 
   const resetAddProductForm = () => {
     setNewProductName(''); setNewProductCategory('Parts'); setNewProductSku('');
@@ -535,7 +539,7 @@ const Inventory: React.FC = () => {
                 <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{item.createdAt}</span>
                 {canManageTradeIns && (item.status === 'Pending' || item.status === 'Evaluated') && (
                   <>
-                    <button onClick={() => setEditingTradeIn(editingTradeIn === item.id ? null : item.id)} className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-primary transition-colors" title="Edit">
+                    <button onClick={() => { setEditingTradeIn(item.id); setEditTradeInPhoto(item.idPhotoUrl || ''); }} className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-primary transition-colors" title="Edit">
                       <span className="material-symbols-outlined text-sm">edit</span>
                     </button>
                     <button onClick={() => setDeleteTradeInConfirm(item.id)} className="p-1.5 hover:bg-red-50 rounded-lg text-slate-400 hover:text-red-500 transition-colors" title="Delete">
@@ -545,92 +549,65 @@ const Inventory: React.FC = () => {
                 )}
               </div>
             </div>
-            {editingTradeIn === item.id ? (
-              <form className="space-y-3 mb-4" onSubmit={(e) => {
-                e.preventDefault();
-                if (!canManageTradeIns) return;
-                const fd = new FormData(e.currentTarget);
-                updateTradeIn(item.id, {
-                  device: fd.get('device') as string || item.device,
-                  condition: fd.get('condition') as any || item.condition,
-                  buybackPrice: parseFloat(fd.get('buyback') as string) || item.buybackPrice,
-                  resalePrice: parseFloat(fd.get('resale') as string) || item.resalePrice,
-                  gradeNotes: fd.get('notes') as string || undefined,
-                });
-                setEditingTradeIn(null);
-              }}>
-                <input name="device" defaultValue={item.device} className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" placeholder="Device" />
-                <select name="condition" defaultValue={item.condition} className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm">
-                  <option>Excellent</option><option>Good</option><option>Fair</option><option>Poor</option><option>Broken</option>
-                </select>
-                <div className="grid grid-cols-2 gap-2">
-                  <input name="buyback" type="number" step="0.01" defaultValue={item.buybackPrice} placeholder="Buyback" className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" />
-                  <input name="resale" type="number" step="0.01" defaultValue={item.resalePrice || ''} placeholder="Resale" className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" />
-                </div>
-                <textarea name="notes" defaultValue={item.gradeNotes || ''} placeholder="Grade notes..." className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm h-16 resize-none" />
-                <div className="flex gap-2">
-                  <button type="button" onClick={() => setEditingTradeIn(null)} className="px-3 py-2 bg-slate-100 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-xl">Cancel</button>
-                  <button type="submit" className="px-3 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl">Save</button>
-                </div>
-              </form>
-            ) : (
-              <>
-                <div className="space-y-2 mb-4 text-sm">
-                  <div className="flex justify-between"><span className="text-slate-500 font-bold">Customer</span><span className="text-slate-900 font-black">{item.isWalkIn ? 'Walk-in Customer' : item.customerName}</span></div>
-                  <div className="flex justify-between"><span className="text-slate-500 font-bold">Condition</span><span className="text-slate-900 font-black">{item.condition}</span></div>
-                  <div className="flex justify-between"><span className="text-slate-500 font-bold">Buyback</span><span className="text-primary font-black">${item.buybackPrice}</span></div>
-                  {item.resalePrice && <div className="flex justify-between"><span className="text-slate-500 font-bold">Resale</span><span className="text-emerald-600 font-black">${item.resalePrice}</span></div>}
-                  {item.idPhotoUrl && <div className="flex justify-between"><span className="text-slate-500 font-bold">ID Photo</span><span className="text-emerald-600 font-black text-[10px]">Captured</span></div>}
-                  {item.gradeNotes && <p className="text-xs text-slate-400 italic pt-1">{item.gradeNotes}</p>}
-                </div>
-                {canManageTradeIns && item.status === 'Pending' && (
-                  <div className="flex gap-2">
-                    <button onClick={() => setTradeInConfirm({ id: item.id, action: 'evaluate', label: `Evaluate trade-in for ${item.device}?` })} className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">Evaluate</button>
-                    <button onClick={() => {
-                      if (!canManageTradeIns) return;
-                      const newItem: StockItem = {
-                        id: `stk-ti-${Date.now()}`, name: `${item.device} (Trade-In)`, sku: `TI-${Date.now().toString().slice(-6)}`,
-                        qty: 1, cost: item.buybackPrice, price: item.resalePrice || item.buybackPrice * 1.5,
-                        category: 'Devices', type: 'serialized', isRepairPart: false, isHiddenOnPOS: false,
-                        serialNumbers: item.imei ? [item.imei] : item.serialNumber ? [item.serialNumber] : undefined,
-                        addedAt: new Date().toISOString(), status: 'approved',
-                      };
-                      addStockItem(newItem);
-                      addStockMovement({
-                        id: `sm-${Date.now()}`, stockItemId: newItem.id, stockItemName: newItem.name,
-                        type: 'trade_in_conversion', quantityChange: 1, previousQty: 0, newQty: 1,
-                        referenceId: item.id, referenceType: 'trade_in',
-                        performedBy: 'Current User', timestamp: new Date().toISOString(),
-                        reason: `Trade-in from ${item.customerName}`,
-                      });
-                      updateTradeIn(item.id, { status: 'In Inventory', movedToInventoryId: newItem.id });
-                    }} className="flex-1 py-3 bg-primary/10 hover:bg-primary/20 text-primary font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">Move to Stock</button>
-                  </div>
-                )}
-                {canManageTradeIns && item.status === 'Evaluated' && (
-                  <div className="flex gap-2">
-                    <button onClick={() => setTradeInConfirm({ id: item.id, action: 'refurb', label: `Send ${item.device} to refurbishment?`, notes: true })} className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">Send to Refurb</button>
-                    <button onClick={() => {
-                      if (!canManageTradeIns) return;
-                      const newItem: StockItem = {
-                        id: `stk-ti-${Date.now()}`, name: `${item.device} (Trade-In)`, sku: `TI-${Date.now().toString().slice(-6)}`,
-                        qty: 1, cost: item.buybackPrice, price: item.resalePrice || item.buybackPrice * 1.5,
-                        category: 'Devices', type: 'serialized', isRepairPart: false, isHiddenOnPOS: false,
-                        addedAt: new Date().toISOString(), status: 'approved',
-                      };
-                      addStockItem(newItem);
-                      addStockMovement({
-                        id: `sm-${Date.now()}`, stockItemId: newItem.id, stockItemName: newItem.name,
-                        type: 'trade_in_conversion', quantityChange: 1, previousQty: 0, newQty: 1,
-                        referenceId: item.id, referenceType: 'trade_in',
-                        performedBy: 'Current User', timestamp: new Date().toISOString(),
-                        reason: `Trade-in from ${item.customerName}`,
-                      });
-                      updateTradeIn(item.id, { status: 'In Inventory', movedToInventoryId: newItem.id });
-                    }} className="flex-1 py-3 bg-primary/10 hover:bg-primary/20 text-primary font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">Move to Stock</button>
-                  </div>
-                )}
-              </>
+            <div className="space-y-2 mb-4 text-sm">
+              <div className="flex justify-between"><span className="text-slate-500 font-bold">Customer</span><span className="text-slate-900 font-black">{item.isWalkIn ? 'Walk-in Customer' : item.customerName}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500 font-bold">Condition</span><span className="text-slate-900 font-black">{item.condition}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500 font-bold">Buyback</span><span className="text-primary font-black">${item.buybackPrice}</span></div>
+              {item.resalePrice && <div className="flex justify-between"><span className="text-slate-500 font-bold">Resale</span><span className="text-emerald-600 font-black">${item.resalePrice}</span></div>}
+              {item.idPhotoUrl && <div className="flex justify-between"><span className="text-slate-500 font-bold">ID Photo</span><span className="text-emerald-600 font-black text-[10px]">Captured</span></div>}
+              {item.gradeNotes && <p className="text-xs text-slate-400 italic pt-1">{item.gradeNotes}</p>}
+            </div>
+            <div className="flex gap-2 mb-3">
+              <button onClick={() => setViewingTradeIn(item.id)} className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95 flex items-center justify-center gap-1">
+                <span className="material-symbols-outlined text-sm">visibility</span>View Details
+              </button>
+            </div>
+            {canManageTradeIns && item.status === 'Pending' && (
+              <div className="flex gap-2">
+                <button onClick={() => setTradeInConfirm({ id: item.id, action: 'evaluate', label: `Evaluate trade-in for ${item.device}?` })} className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">Evaluate</button>
+                <button onClick={() => {
+                  if (!canManageTradeIns) return;
+                  const newItem: StockItem = {
+                    id: `stk-ti-${Date.now()}`, name: `${item.device} (Trade-In)`, sku: `TI-${Date.now().toString().slice(-6)}`,
+                    qty: 1, cost: item.buybackPrice, price: item.resalePrice || item.buybackPrice * 1.5,
+                    category: 'Devices', type: 'serialized', isRepairPart: false, isHiddenOnPOS: false,
+                    serialNumbers: item.imei ? [item.imei] : item.serialNumber ? [item.serialNumber] : undefined,
+                    addedAt: new Date().toISOString(), status: 'approved',
+                  };
+                  addStockItem(newItem);
+                  addStockMovement({
+                    id: `sm-${Date.now()}`, stockItemId: newItem.id, stockItemName: newItem.name,
+                    type: 'trade_in_conversion', quantityChange: 1, previousQty: 0, newQty: 1,
+                    referenceId: item.id, referenceType: 'trade_in',
+                    performedBy: 'Current User', timestamp: new Date().toISOString(),
+                    reason: `Trade-in from ${item.customerName}`,
+                  });
+                  updateTradeIn(item.id, { status: 'In Inventory', movedToInventoryId: newItem.id });
+                }} className="flex-1 py-3 bg-primary/10 hover:bg-primary/20 text-primary font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">Move to Stock</button>
+              </div>
+            )}
+            {canManageTradeIns && item.status === 'Evaluated' && (
+              <div className="flex gap-2">
+                <button onClick={() => setTradeInConfirm({ id: item.id, action: 'refurb', label: `Send ${item.device} to refurbishment?`, notes: true })} className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">Send to Refurb</button>
+                <button onClick={() => {
+                  if (!canManageTradeIns) return;
+                  const newItem: StockItem = {
+                    id: `stk-ti-${Date.now()}`, name: `${item.device} (Trade-In)`, sku: `TI-${Date.now().toString().slice(-6)}`,
+                    qty: 1, cost: item.buybackPrice, price: item.resalePrice || item.buybackPrice * 1.5,
+                    category: 'Devices', type: 'serialized', isRepairPart: false, isHiddenOnPOS: false,
+                    addedAt: new Date().toISOString(), status: 'approved',
+                  };
+                  addStockItem(newItem);
+                  addStockMovement({
+                    id: `sm-${Date.now()}`, stockItemId: newItem.id, stockItemName: newItem.name,
+                    type: 'trade_in_conversion', quantityChange: 1, previousQty: 0, newQty: 1,
+                    referenceId: item.id, referenceType: 'trade_in',
+                    performedBy: 'Current User', timestamp: new Date().toISOString(),
+                    reason: `Trade-in from ${item.customerName}`,
+                  });
+                  updateTradeIn(item.id, { status: 'In Inventory', movedToInventoryId: newItem.id });
+                }} className="flex-1 py-3 bg-primary/10 hover:bg-primary/20 text-primary font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">Move to Stock</button>
+              </div>
             )}
           </div>
         ))}
@@ -1321,11 +1298,21 @@ const Inventory: React.FC = () => {
                     </div>
                   ) : (
                     <div className="flex gap-2">
-                      <button type="button" onClick={() => idPhotoCaptureRef.current?.click()} className="flex-1 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl text-[10px] font-black text-slate-500 uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-slate-100 transition-all">
-                        <span className="material-symbols-outlined text-sm">upload</span>Upload Photo
-                      </button>
-                      <button type="button" onClick={() => { const input = document.createElement('input'); input.type = 'file'; input.accept = 'image/*'; input.capture = 'environment'; input.onchange = (ev) => { const file = (ev.target as HTMLInputElement).files?.[0]; if (file) { const reader = new FileReader(); reader.onloadend = () => setCapturedIdPhoto(reader.result as string); reader.readAsDataURL(file); } }; input.click(); }} className="py-3.5 px-4 bg-primary text-white rounded-2xl text-[10px] font-black uppercase tracking-widest flex items-center gap-1 hover:bg-primary/90">
+                      <button type="button" onClick={() => {
+                        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                          navigator.mediaDevices.getUserMedia({ video: true }).then(stream => {
+                            stream.getTracks().forEach(t => t.stop());
+                            const input = document.createElement('input');
+                            input.type = 'file'; input.accept = 'image/*'; input.capture = 'environment';
+                            input.onchange = (ev) => { const file = (ev.target as HTMLInputElement).files?.[0]; if (file) { const reader = new FileReader(); reader.onloadend = () => setCapturedIdPhoto(reader.result as string); reader.readAsDataURL(file); } };
+                            document.body.appendChild(input); input.click(); document.body.removeChild(input);
+                          }).catch(() => { alert('Camera not available on this device. Please use Upload instead.'); });
+                        } else { alert('Camera not supported on this device. Please use Upload instead.'); }
+                      }} className="flex-1 py-3.5 bg-primary text-white rounded-2xl text-[10px] font-black uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-primary/90">
                         <span className="material-symbols-outlined text-sm">photo_camera</span>Camera
+                      </button>
+                      <button type="button" onClick={() => idPhotoCaptureRef.current?.click()} className="py-3.5 px-4 bg-slate-50 border border-slate-200 rounded-2xl text-[10px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-1 hover:bg-slate-100 transition-all">
+                        <span className="material-symbols-outlined text-sm">upload</span>Upload
                       </button>
                     </div>
                   )}
@@ -1634,7 +1621,7 @@ const Inventory: React.FC = () => {
         {selectedTransfer && (() => {
           const t = inventoryTransfers.find(tr => tr.id === selectedTransfer);
           if (!t) return null;
-          const isEditable = canManageTransfers && (t.status === 'Draft' || t.status === 'Sent' || t.status === 'In Transit');
+          const isEditable = canManageTransfers && (t.status === 'Draft' || t.status === 'Sent' || t.status === 'In Transit' || t.status === 'Partially Received' || t.status === 'Discrepancy Detected');
           return (
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
               <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-2xl overflow-hidden max-h-[90vh] flex flex-col">
@@ -1732,89 +1719,78 @@ const Inventory: React.FC = () => {
         {editingTransfer && (() => {
           const t = inventoryTransfers.find(tr => tr.id === editingTransfer);
           if (!t) return null;
-          const isDraft = t.status === 'Draft';
+          const showCaution = t.status !== 'Draft';
           return (
             <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
               <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg overflow-hidden max-h-[90vh] flex flex-col">
                 <div className="p-8 border-b border-slate-100 bg-slate-50/50 flex justify-between items-start shrink-0">
                   <div>
                     <h3 className="text-2xl font-black text-primary tracking-tight">Edit {t.transferNumber}</h3>
-                    <p className="text-sm text-slate-500">{isDraft ? 'All fields editable' : 'Notes only'}</p>
+                    <p className="text-sm text-slate-500">{showCaution ? `Status: ${t.status} — changes may affect logistics` : 'All fields editable'}</p>
                   </div>
                   <button onClick={() => setEditingTransfer(null)} className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
                 </div>
                 <div className="p-8 space-y-5 overflow-y-auto flex-1">
+                  {showCaution && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-start gap-2">
+                      <span className="material-symbols-outlined text-amber-500 text-sm mt-0.5">warning</span>
+                      <p className="text-xs text-amber-700 font-bold">This transfer is already <span className="font-black">{t.status}</span>. Changing locations or items may require re-coordination with the receiving store.</p>
+                    </div>
+                  )}
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">From</label>
-                      {isDraft ? (
-                        <select value={editTransferFrom} onChange={(e) => { setEditTransferFrom(e.target.value); if (e.target.value === editTransferTo) setEditTransferTo(storeLocations.find(l => l !== e.target.value) || ''); }} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm">
-                          {storeLocations.filter(loc => loc !== editTransferTo).map(loc => <option key={loc} value={loc}>{loc}</option>)}
-                        </select>
-                      ) : (
-                        <p className="px-4 py-3 bg-slate-100 rounded-xl font-bold text-sm text-slate-500">{editTransferFrom}</p>
-                      )}
+                      <select value={editTransferFrom} onChange={(e) => { setEditTransferFrom(e.target.value); if (e.target.value === editTransferTo) setEditTransferTo(storeLocations.find(l => l !== e.target.value) || ''); }} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm">
+                        {storeLocations.filter(loc => loc !== editTransferTo).map(loc => <option key={loc} value={loc}>{loc}</option>)}
+                      </select>
                     </div>
                     <div>
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">To</label>
-                      {isDraft ? (
-                        <select value={editTransferTo} onChange={(e) => { setEditTransferTo(e.target.value); if (e.target.value === editTransferFrom) setEditTransferFrom(storeLocations.find(l => l !== e.target.value) || ''); }} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm">
-                          {storeLocations.filter(loc => loc !== editTransferFrom).map(loc => <option key={loc} value={loc}>{loc}</option>)}
-                        </select>
-                      ) : (
-                        <p className="px-4 py-3 bg-slate-100 rounded-xl font-bold text-sm text-slate-500">{editTransferTo}</p>
-                      )}
+                      <select value={editTransferTo} onChange={(e) => { setEditTransferTo(e.target.value); if (e.target.value === editTransferFrom) setEditTransferFrom(storeLocations.find(l => l !== e.target.value) || ''); }} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm">
+                        {storeLocations.filter(loc => loc !== editTransferFrom).map(loc => <option key={loc} value={loc}>{loc}</option>)}
+                      </select>
                     </div>
                   </div>
                   <div>
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Notes</label>
                     <textarea value={editTransferNotes} onChange={(e) => setEditTransferNotes(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm h-20 resize-none" placeholder="Transfer notes..." />
                   </div>
-                  {isDraft && (
-                    <div>
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Items</label>
-                      <div className="space-y-2">
-                        {editTransferItems.map((item, i) => (
-                          <div key={i} className="flex items-center gap-3 p-3 bg-slate-50 rounded-xl">
-                            <div className="flex-1 min-w-0">
-                              <p className="font-bold text-sm text-slate-900 truncate">{item.name}</p>
-                              {item.sku && <p className="text-[10px] text-slate-400 font-mono">{item.sku}</p>}
-                            </div>
-                            <input type="number" min="1" value={item.quantity} onChange={(e) => {
-                              const updated = [...editTransferItems];
-                              updated[i] = { ...updated[i], quantity: Math.max(1, parseInt(e.target.value) || 1) };
-                              setEditTransferItems(updated);
-                            }} className="w-16 px-2 py-1.5 bg-white border border-slate-200 rounded-lg text-center font-bold text-sm" />
-                            <button onClick={() => setEditTransferItems(editTransferItems.filter((_, idx) => idx !== i))} className="p-1.5 hover:bg-red-50 text-slate-400 hover:text-red-500 rounded-lg"><span className="material-symbols-outlined text-sm">close</span></button>
-                          </div>
-                        ))}
-                        {editTransferItems.length === 0 && <p className="text-xs text-slate-400 text-center py-3">No items</p>}
-                      </div>
+                  <div>
+                    <div className="flex justify-between items-center mb-2">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Items</label>
+                      <button type="button" onClick={() => {
+                        const available = approvedStockItems.filter(i => i.qty > 0 && !editTransferItems.find(ti => ti.productId === i.id));
+                        if (available.length === 0) return;
+                        const item = available[0];
+                        setEditTransferItems(prev => [...prev, { productId: item.id, name: item.name, sku: item.sku, quantity: 1, isSerialized: item.type === 'serialized' }]);
+                      }} className="text-[10px] font-black text-primary uppercase tracking-widest hover:underline">+ Add Item</button>
                     </div>
-                  )}
-                  {!isDraft && t.items.length > 0 && (
-                    <div>
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Items (read-only)</label>
-                      <div className="space-y-2">
-                        {t.items.map((item, i) => (
-                          <div key={i} className="flex items-center justify-between p-3 bg-slate-100 rounded-xl">
-                            <p className="font-bold text-sm text-slate-500">{item.name}</p>
-                            <p className="text-sm font-bold text-slate-400">×{item.quantity}</p>
-                          </div>
-                        ))}
-                      </div>
+                    <div className="space-y-2">
+                      {editTransferItems.map((item, i) => (
+                        <div key={i} className="flex items-center gap-2">
+                          <select value={item.productId} onChange={(e) => { const si = approvedStockItems.find(s => s.id === e.target.value); if (si) { const updated = [...editTransferItems]; updated[i] = { ...updated[i], productId: si.id, name: si.name, sku: si.sku, isSerialized: si.type === 'serialized' }; setEditTransferItems(updated); } }} className="flex-1 px-4 py-3 bg-slate-50 rounded-xl border border-slate-200 font-bold text-sm">
+                            {approvedStockItems.filter(s => s.qty > 0 || s.id === item.productId).map(s => <option key={s.id} value={s.id}>{s.name} ({s.qty})</option>)}
+                          </select>
+                          <input type="number" min="1" value={item.quantity} onChange={(e) => {
+                            const updated = [...editTransferItems];
+                            updated[i] = { ...updated[i], quantity: Math.max(1, parseInt(e.target.value) || 1) };
+                            setEditTransferItems(updated);
+                          }} className="w-16 px-2 py-1.5 bg-white border border-slate-200 rounded-lg text-center font-bold text-sm" />
+                          <button onClick={() => setEditTransferItems(editTransferItems.filter((_, idx) => idx !== i))} className="p-1.5 hover:bg-red-50 text-slate-400 hover:text-red-500 rounded-lg"><span className="material-symbols-outlined text-sm">close</span></button>
+                        </div>
+                      ))}
+                      {editTransferItems.length === 0 && <p className="text-xs text-slate-400 text-center py-3">No items — use + Add Item above</p>}
                     </div>
-                  )}
+                  </div>
                   <div className="flex gap-3 pt-2">
                     <button onClick={() => setEditingTransfer(null)} className="flex-1 py-3 bg-white text-slate-500 rounded-xl font-black text-[10px] uppercase tracking-widest border border-slate-200">Cancel</button>
                     <button onClick={() => {
-                      const updates: Record<string, unknown> = { notes: editTransferNotes || undefined };
-                      if (isDraft) {
-                        updates.fromStore = editTransferFrom;
-                        updates.toStore = editTransferTo;
-                        updates.items = editTransferItems.map(item => ({ productId: item.productId, name: item.name, sku: item.sku, quantity: item.quantity, isSerialized: item.isSerialized }));
-                      }
-                      updateInventoryTransfer(t.id, updates);
+                      updateInventoryTransfer(t.id, {
+                        notes: editTransferNotes || undefined,
+                        fromStore: editTransferFrom,
+                        toStore: editTransferTo,
+                        items: editTransferItems.map(item => ({ productId: item.productId, name: item.name, sku: item.sku, quantity: item.quantity, isSerialized: item.isSerialized })),
+                      });
                       setEditingTransfer(null);
                     }} className="flex-1 py-3 bg-primary text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-primary/20">Save Changes</button>
                   </div>
@@ -1828,7 +1804,7 @@ const Inventory: React.FC = () => {
           const c = inventoryCounts.find(ct => ct.id === selectedCount);
           if (!c) return null;
           const discItems = c.items.filter(i => i.discrepancy !== 0);
-          const showOnlyDisc = c.status === 'Completed' || c.status === 'Closed';
+          const showOnlyDisc = (c.status === 'Completed' || c.status === 'Closed') && !countReAdjustMode;
           const displayItems = showOnlyDisc ? discItems : c.items;
           return (
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
@@ -1840,7 +1816,7 @@ const Inventory: React.FC = () => {
                     <span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border mt-2 inline-block ${getStatusColor(c.status)}`}>{c.status}</span>
                     {discItems.length > 0 && <span className="ml-2 px-2 py-0.5 bg-red-100 text-red-700 text-[9px] font-black rounded uppercase">{discItems.length} discrepanc{discItems.length !== 1 ? 'ies' : 'y'}</span>}
                   </div>
-                  <button onClick={() => { setSelectedCount(null); setCountConfirmComplete(false); }} className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+                  <button onClick={() => { setSelectedCount(null); setCountConfirmComplete(false); setCountReAdjustMode(false); setCountActuals({}); }} className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
                 </div>
                 <div className="p-8 space-y-4 overflow-y-auto flex-1">
                   {showOnlyDisc && c.adjustedAt && (
@@ -1874,12 +1850,14 @@ const Inventory: React.FC = () => {
                           </div>
                           <div className="text-right">
                             <p className="text-[10px] font-black text-slate-400 uppercase">Actual</p>
-                            {c.status === 'In Progress' && canManageStockCounts ? (
+                            {((c.status === 'In Progress') || (c.status === 'Completed' && countReAdjustMode)) && canManageStockCounts ? (
                               <input type="number" min="0" value={countActuals[item.productId] ?? item.actual} onChange={(e) => {
                                 const val = parseInt(e.target.value) || 0;
                                 setCountActuals(prev => ({ ...prev, [item.productId]: val }));
-                                const disc = val - item.expected;
-                                updateInventoryCount(c.id, { items: c.items.map(i => i.productId === item.productId ? { ...i, actual: val, discrepancy: disc } : i) });
+                                if (c.status === 'In Progress') {
+                                  const disc = val - item.expected;
+                                  updateInventoryCount(c.id, { items: c.items.map(i => i.productId === item.productId ? { ...i, actual: val, discrepancy: disc } : i) });
+                                }
                               }} className="w-16 px-2 py-1 bg-white border border-slate-200 rounded-lg text-center font-bold text-sm" />
                             ) : (
                               <p className="text-sm font-bold">{item.actual}</p>
@@ -1940,12 +1918,55 @@ const Inventory: React.FC = () => {
                           });
                           updateInventoryCount(c.id, { status: 'Completed', completedAt: new Date().toISOString(), adjustedAt: new Date().toISOString(), adjustedBy: 'Current User' });
                           setCountConfirmComplete(false);
+                          setCountReAdjustMode(false);
+                          setCountActuals({});
                           setSelectedCount(null);
                         }} className="flex-1 py-3 bg-emerald-500 text-white rounded-xl font-black text-xs uppercase tracking-widest shadow-xl shadow-emerald-500/20">Confirm & Apply</button>
                       </div>
                     </div>
                   )}
-                  {c.status === 'Completed' && canManageStockCounts && (
+                  {c.status === 'Completed' && countReAdjustMode && canManageStockCounts && (
+                    <div className="bg-amber-50 rounded-2xl border border-amber-200 p-5 space-y-3">
+                      <div className="flex items-center gap-2">
+                        <span className="material-symbols-outlined text-amber-500 text-sm">edit_note</span>
+                        <p className="text-xs font-black text-amber-700 uppercase tracking-widest">Re-Adjust Mode</p>
+                      </div>
+                      <p className="text-xs text-amber-600">Edit the actual quantities above to correct any mistakes. Stock will be updated when you save.</p>
+                      <div className="flex gap-3">
+                        <button onClick={() => { setCountReAdjustMode(false); setCountActuals({}); }} className="flex-1 py-3 bg-white text-slate-500 rounded-xl font-black text-[10px] uppercase tracking-widest border border-slate-200">Cancel</button>
+                        <button onClick={() => {
+                          c.items.forEach(item => {
+                            const newActual = countActuals[item.productId] ?? item.actual;
+                            if (newActual !== item.actual) {
+                              const delta = newActual - item.actual;
+                              const stockItem = approvedStockItems.find(si => si.id === item.productId);
+                              if (stockItem) {
+                                updateStockItem(stockItem.id, { qty: stockItem.qty + delta });
+                                addStockMovement({
+                                  id: `sm-readj-${Date.now()}-${item.productId}`, stockItemId: item.productId, stockItemName: item.name,
+                                  type: 'count_adjustment', quantityChange: delta,
+                                  previousQty: stockItem.qty, newQty: stockItem.qty + delta,
+                                  referenceId: c.id, referenceType: 'count',
+                                  performedBy: 'Current User', timestamp: new Date().toISOString(),
+                                  reason: `Stock count ${c.countNumber} re-adjustment`,
+                                });
+                              }
+                            }
+                          });
+                          updateInventoryCount(c.id, {
+                            items: c.items.map(item => {
+                              const newActual = countActuals[item.productId] ?? item.actual;
+                              return { ...item, actual: newActual, discrepancy: newActual - item.expected };
+                            }),
+                            adjustedAt: new Date().toISOString(), adjustedBy: 'Current User',
+                          });
+                          setCountReAdjustMode(false);
+                          setCountActuals({});
+                        }} className="flex-1 py-3 bg-emerald-500 text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-emerald-500/20">Save Re-Adjustments</button>
+                      </div>
+                    </div>
+                  )}
+                  {c.status === 'Completed' && !countReAdjustMode && canManageStockCounts && (
                     <div className="bg-slate-50 rounded-2xl border border-slate-200 p-5 space-y-3">
                       <div className="flex items-center gap-2">
                         <span className="material-symbols-outlined text-slate-500 text-sm">task_alt</span>
@@ -1956,13 +1977,21 @@ const Inventory: React.FC = () => {
                           ? `${discItems.length} discrepanc${discItems.length !== 1 ? 'ies were' : 'y was'} adjusted. Acknowledge and close this count to finalize.`
                           : 'No discrepancies found. Close this count to finalize.'}
                       </p>
-                      <button onClick={() => {
-                        updateInventoryCount(c.id, { status: 'Closed' as 'Closed' });
-                        setSelectedCount(null);
-                      }} className="w-full py-3 bg-primary text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-primary/20 flex items-center justify-center gap-2">
-                        <span className="material-symbols-outlined text-sm">lock</span>
-                        Close Count
-                      </button>
+                      <div className="flex gap-3">
+                        <button onClick={() => { setCountReAdjustMode(true); setCountActuals({}); }} className="flex-1 py-3 bg-amber-100 text-amber-700 rounded-xl font-black text-[10px] uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-amber-200 transition-all">
+                          <span className="material-symbols-outlined text-sm">edit_note</span>
+                          Re-Adjust
+                        </button>
+                        <button onClick={() => {
+                          updateInventoryCount(c.id, { status: 'Closed' as 'Closed' });
+                          setSelectedCount(null);
+                          setCountReAdjustMode(false);
+                          setCountActuals({});
+                        }} className="flex-1 py-3 bg-primary text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-primary/20 flex items-center justify-center gap-2">
+                          <span className="material-symbols-outlined text-sm">lock</span>
+                          Close Count
+                        </button>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -2122,6 +2151,172 @@ const Inventory: React.FC = () => {
             </motion.div>
           </div>
         )}
+
+        {viewingTradeIn && (() => {
+          const item = tradeIns.find(t => t.id === viewingTradeIn);
+          if (!item) return null;
+          return (
+            <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
+              <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden max-h-[90vh] flex flex-col">
+                <div className="p-8 border-b border-slate-100 bg-slate-50/50 flex justify-between items-start shrink-0">
+                  <div>
+                    <h3 className="text-xl font-black text-primary tracking-tight">{item.device}</h3>
+                    <span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border mt-2 inline-block ${getStatusColor(item.status)}`}>{item.status}</span>
+                  </div>
+                  <button onClick={() => setViewingTradeIn(null)} className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+                </div>
+                <div className="p-8 space-y-4 overflow-y-auto flex-1">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="bg-slate-50 rounded-xl p-3">
+                      <p className="text-[10px] font-black text-slate-400 uppercase">Customer</p>
+                      <p className="text-sm font-bold text-slate-900 mt-1">{item.isWalkIn ? 'Walk-in Customer' : item.customerName}</p>
+                    </div>
+                    <div className="bg-slate-50 rounded-xl p-3">
+                      <p className="text-[10px] font-black text-slate-400 uppercase">Condition</p>
+                      <p className="text-sm font-bold text-slate-900 mt-1">{item.condition}</p>
+                    </div>
+                    <div className="bg-slate-50 rounded-xl p-3">
+                      <p className="text-[10px] font-black text-slate-400 uppercase">Buyback Price</p>
+                      <p className="text-sm font-black text-primary mt-1">${item.buybackPrice.toFixed(2)}</p>
+                    </div>
+                    <div className="bg-slate-50 rounded-xl p-3">
+                      <p className="text-[10px] font-black text-slate-400 uppercase">Resale Price</p>
+                      <p className="text-sm font-black text-emerald-600 mt-1">{item.resalePrice ? `$${item.resalePrice.toFixed(2)}` : '—'}</p>
+                    </div>
+                    <div className="bg-slate-50 rounded-xl p-3">
+                      <p className="text-[10px] font-black text-slate-400 uppercase">Created</p>
+                      <p className="text-sm font-bold text-slate-900 mt-1">{item.createdAt}</p>
+                    </div>
+                    <div className="bg-slate-50 rounded-xl p-3">
+                      <p className="text-[10px] font-black text-slate-400 uppercase">IMEI / Serial</p>
+                      <p className="text-sm font-bold text-slate-900 mt-1">{item.imei || item.serialNumber || '—'}</p>
+                    </div>
+                  </div>
+                  {item.gradeNotes && (
+                    <div className="bg-slate-50 rounded-xl p-3">
+                      <p className="text-[10px] font-black text-slate-400 uppercase mb-1">Grade Notes</p>
+                      <p className="text-sm text-slate-600">{item.gradeNotes}</p>
+                    </div>
+                  )}
+                  {item.idPhotoUrl && (
+                    <div>
+                      <p className="text-[10px] font-black text-slate-400 uppercase mb-2">ID Photo</p>
+                      <img src={item.idPhotoUrl} alt="ID Photo" className="w-full h-48 object-contain rounded-2xl border border-slate-200 bg-slate-50" />
+                    </div>
+                  )}
+                  <div className="flex gap-3 pt-2">
+                    {canManageTradeIns && (item.status === 'Pending' || item.status === 'Evaluated') && (
+                      <button onClick={() => { setViewingTradeIn(null); setEditingTradeIn(item.id); setEditTradeInPhoto(item.idPhotoUrl || ''); }} className="flex-1 py-3 bg-primary text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-primary/20 flex items-center justify-center gap-2">
+                        <span className="material-symbols-outlined text-sm">edit</span>Edit
+                      </button>
+                    )}
+                    <button onClick={() => setViewingTradeIn(null)} className="flex-1 py-3 bg-slate-100 text-slate-500 rounded-xl font-black text-[10px] uppercase tracking-widest">Close</button>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          );
+        })()}
+
+        {editingTradeIn && (() => {
+          const item = tradeIns.find(t => t.id === editingTradeIn);
+          if (!item) return null;
+          return (
+            <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
+              <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden max-h-[90vh] flex flex-col">
+                <div className="p-8 border-b border-slate-100 bg-slate-50/50 flex justify-between items-start shrink-0">
+                  <div>
+                    <h3 className="text-xl font-black text-primary tracking-tight">Edit Trade-In</h3>
+                    <p className="text-sm text-slate-500">{item.device}</p>
+                  </div>
+                  <button onClick={() => setEditingTradeIn(null)} className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary"><span className="material-symbols-outlined">close</span></button>
+                </div>
+                <form className="p-8 space-y-5 overflow-y-auto flex-1" onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!canManageTradeIns) return;
+                  const fd = new FormData(e.currentTarget);
+                  updateTradeIn(item.id, {
+                    device: fd.get('device') as string || item.device,
+                    condition: fd.get('condition') as any || item.condition,
+                    buybackPrice: parseFloat(fd.get('buyback') as string) || item.buybackPrice,
+                    resalePrice: parseFloat(fd.get('resale') as string) || item.resalePrice,
+                    gradeNotes: fd.get('notes') as string || undefined,
+                    idPhotoUrl: editTradeInPhoto || undefined,
+                  });
+                  setEditingTradeIn(null);
+                }}>
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Device</label>
+                    <input name="device" defaultValue={item.device} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" placeholder="Device" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Condition</label>
+                    <select name="condition" defaultValue={item.condition} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm">
+                      <option>Excellent</option><option>Good</option><option>Fair</option><option>Poor</option><option>Broken</option>
+                    </select>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Buyback Price</label>
+                      <input name="buyback" type="number" step="0.01" defaultValue={item.buybackPrice} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Resale Price</label>
+                      <input name="resale" type="number" step="0.01" defaultValue={item.resalePrice || ''} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Grade Notes</label>
+                    <textarea name="notes" defaultValue={item.gradeNotes || ''} placeholder="Condition details..." className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm h-20 resize-none" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">ID Photo</label>
+                    <input ref={editIdPhotoRef} type="file" accept="image/*" className="hidden" onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        const reader = new FileReader();
+                        reader.onloadend = () => setEditTradeInPhoto(reader.result as string);
+                        reader.readAsDataURL(file);
+                      }
+                    }} />
+                    {editTradeInPhoto ? (
+                      <div className="relative">
+                        <img src={editTradeInPhoto} alt="ID Photo" className="w-full h-40 object-contain rounded-2xl border border-slate-200 bg-slate-50" />
+                        <div className="absolute top-2 right-2 flex gap-1">
+                          <button type="button" onClick={() => editIdPhotoRef.current?.click()} className="p-2 bg-white/90 backdrop-blur rounded-xl text-slate-600 hover:text-primary shadow-sm" title="Replace"><span className="material-symbols-outlined text-sm">edit</span></button>
+                          <button type="button" onClick={() => setEditTradeInPhoto('')} className="p-2 bg-white/90 backdrop-blur rounded-xl text-slate-600 hover:text-red-500 shadow-sm" title="Remove"><span className="material-symbols-outlined text-sm">close</span></button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex gap-2">
+                        <button type="button" onClick={() => {
+                          if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                            navigator.mediaDevices.getUserMedia({ video: true }).then(stream => {
+                              stream.getTracks().forEach(t => t.stop());
+                              const input = document.createElement('input');
+                              input.type = 'file'; input.accept = 'image/*'; input.capture = 'environment';
+                              input.onchange = (ev) => { const file = (ev.target as HTMLInputElement).files?.[0]; if (file) { const reader = new FileReader(); reader.onloadend = () => setEditTradeInPhoto(reader.result as string); reader.readAsDataURL(file); } };
+                              document.body.appendChild(input); input.click(); document.body.removeChild(input);
+                            }).catch(() => { alert('Camera not available on this device. Please use Upload instead.'); });
+                          } else { alert('Camera not supported on this device. Please use Upload instead.'); }
+                        }} className="flex-1 py-3.5 bg-primary text-white rounded-2xl text-[10px] font-black uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-primary/90">
+                          <span className="material-symbols-outlined text-sm">photo_camera</span>Camera
+                        </button>
+                        <button type="button" onClick={() => editIdPhotoRef.current?.click()} className="py-3.5 px-4 bg-slate-50 border border-slate-200 rounded-2xl text-[10px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-1 hover:bg-slate-100 transition-all">
+                          <span className="material-symbols-outlined text-sm">upload</span>Upload
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex gap-3 pt-2">
+                    <button type="button" onClick={() => setEditingTradeIn(null)} className="flex-1 py-3 bg-white text-slate-500 rounded-xl font-black text-[10px] uppercase tracking-widest border border-slate-200">Cancel</button>
+                    <button type="submit" className="flex-1 py-3 bg-primary text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-primary/20">Save Changes</button>
+                  </div>
+                </form>
+              </motion.div>
+            </div>
+          );
+        })()}
 
         {editingSuggestiveItem && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
