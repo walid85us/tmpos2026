@@ -610,8 +610,10 @@ export default function SupplyChain() {
                       <div className="bg-slate-50 rounded-xl p-3"><p className="text-[10px] font-black text-slate-400 uppercase">Total Items</p><p className="font-bold">{liveRMA.items.reduce((s, i) => s + i.quantity, 0)}</p></div>
                     </div>
                     {liveRMA.notes && <div className="bg-slate-50 rounded-xl p-3"><p className="text-[10px] font-black text-slate-400 uppercase mb-1">Notes</p><p className="text-xs text-slate-600 italic">{liveRMA.notes}</p></div>}
-                    {canAccess('shipping') && checkSubPermission('create_shipment') && (() => {
+                    {canAccess('shipping') && checkSubPermission('create_shipment') && liveRMA.status !== 'Closed' && liveRMA.status !== 'Rejected' && (() => {
                       const linkedShipments = shipments.filter(s => s.sourceType === 'rma' && s.sourceNumber === liveRMA.rmaNumber);
+                      const supplier = (liveRMA.supplierId ? suppliers.find(s => s.id === liveRMA.supplierId) : null) || suppliers.find(s => s.name === liveRMA.supplierName);
+                      const supplierAddr = (supplier?.address || '').split(',').map(s => s.trim());
                       return (
                         <div className="bg-slate-50 rounded-xl p-3 space-y-2">
                           <p className="text-[10px] font-black text-slate-400 uppercase flex items-center gap-1"><span className="material-symbols-outlined text-xs">package_2</span> Shipping</p>
@@ -636,8 +638,8 @@ export default function SupplyChain() {
                                 sourceType: 'rma',
                                 sourceId: liveRMA.id,
                                 sourceNumber: liveRMA.rmaNumber,
-                                originAddress: { name: 'Store', line1: '123 Main St', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US' },
-                                destinationAddress: { name: liveRMA.supplierName, line1: '', city: '', state: '', postalCode: '', country: 'US' },
+                                originAddress: { name: 'Main Warehouse', line1: '123 Main St', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US' },
+                                destinationAddress: { name: liveRMA.supplierName, line1: supplierAddr[0] || '', city: supplierAddr[1] || '', state: supplierAddr[2] || '', postalCode: supplierAddr[3] || '', country: 'US', email: supplier?.email, phone: supplier?.phone },
                                 packages: [],
                                 events: [{ id: `evt-${Date.now()}`, timestamp: now, status: 'Created', description: `Shipment created from RMA ${liveRMA.rmaNumber}`, performedBy: 'Current User' }],
                                 createdBy: 'Current User',

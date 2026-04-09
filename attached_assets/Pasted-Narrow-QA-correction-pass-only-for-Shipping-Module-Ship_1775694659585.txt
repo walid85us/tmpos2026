@@ -1,0 +1,153 @@
+Narrow QA correction pass only for Shipping Module / Shipping Center.
+
+Do not redesign the module.
+Do not broaden scope.
+Do not touch unrelated workstreams.
+Preserve the current Shipping Center architecture, Plans & Features matrix integration, Store Permissions Matrix integration, navigation, routing, and source-module integrations already completed.
+
+QA found that the module shell is present and access gating is mostly correct, but the core write execution path is failing.
+
+You must fix the following specific issues only:
+
+--------------------------------------------------
+BLOCKER GROUP A — CREATE SHIPMENT ACTIONS NOT EXECUTING
+--------------------------------------------------
+
+QA result:
+- When clicking Create Shipment, nothing happens
+- This affects shipment creation flow and blocks downstream testing
+
+Required fix:
+- Ensure Create Shipment actions actually execute from all supported source contexts:
+  - Invoice
+  - Repair
+  - Transfer
+  - RMA
+- Ensure the Shipping Center create flow also opens and executes correctly if manual creation is supported there
+- Ensure buttons are not visually enabled while functionally inert
+- Ensure modal/sheet/dialog open handlers are wired correctly
+- Ensure no silent early-return is blocking the action
+- Ensure plan gating + permission gating + preview mode checks are correct, but do not incorrectly block valid creation scenarios
+
+--------------------------------------------------
+BLOCKER GROUP B — SOURCE PREFILL NOT EXECUTING
+--------------------------------------------------
+
+QA result:
+- Source Reference Number / source-linked creation is not prefilling destination name/address from the source
+- Prefill is not functioning correctly from source records
+
+Required fix:
+- When shipment creation starts from a valid source record, prefill must execute correctly
+- Source-linked shipment creation must populate appropriate data from the source context, including where applicable:
+  - source type
+  - source document reference
+  - destination/recipient/customer name
+  - destination address
+  - origin store/location
+  - shipment purpose/type
+- Do not require the user to manually re-enter obvious source data already available in the linked record
+- Ensure source-linked creation works consistently for:
+  - Invoice
+  - Repair
+  - Transfer
+  - RMA
+
+--------------------------------------------------
+BLOCKER GROUP C — SAVE ACTIONS NOT EXECUTING
+--------------------------------------------------
+
+QA result:
+- Draft shipment exists, but editing then clicking Save Changes does nothing
+- Package-related save/persist behavior is blocked by this issue
+
+Required fix:
+- Ensure shipment create/save/update handlers execute correctly
+- Ensure save buttons are properly wired
+- Ensure form validation errors are surfaced clearly instead of failing silently
+- Ensure successful saves persist to the correct shipment record
+- Ensure reopening the shipment shows saved values correctly
+- Ensure package/parcels data persists correctly after save
+- Ensure multiple package rows save and reopen correctly
+
+--------------------------------------------------
+BLOCKER GROUP D — STATUS CONFIRM ACTIONS NOT EXECUTING
+--------------------------------------------------
+
+QA result:
+- Clicking a shipment status opens a confirmation message
+- Clicking Confirm does nothing
+- This blocks lifecycle, dispatch, exception, delivered, cancelled, tracking-update verification
+
+Required fix:
+- Ensure status transition confirm actions actually execute
+- Ensure confirm buttons are properly wired
+- Ensure valid lifecycle transitions update the shipment record correctly
+- Ensure invalid transitions remain blocked
+- Ensure shipment list and detail stay synchronized after status changes
+- Ensure dispatch / exception / delivered / cancelled flows execute correctly where allowed
+- Ensure tracking-related updates dependent on shipment lifecycle are not blocked by broken status execution
+
+--------------------------------------------------
+BLOCKER GROUP E — PREVIEW MODE + WRITE SAFETY
+--------------------------------------------------
+
+QA result:
+- Preview mode test could not be confirmed because normal write actions are already broken
+
+Required fix:
+- After repairing all normal write flows, verify preview mode still blocks writes correctly
+- Preview mode must not break view behavior
+- Preview mode must not allow create/save/status-change/tracking/cancel actions to commit
+
+--------------------------------------------------
+LIFECYCLE GATING CORRECTION
+--------------------------------------------------
+
+QA also identified expected business gating behavior that must be enforced clearly:
+
+1) Invoice shipping:
+- Create Shipment should be allowed when the invoice is in the correct eligible lifecycle state
+- Based on QA expectation, invoice shipment creation should be allowed once the invoice is paid
+- If current lifecycle logic differs, align it now to the app’s operational intent and make the gating explicit and correct
+
+2) Repair shipping:
+- Create Shipment should be allowed when the repair is in the correct eligible lifecycle state
+- Based on QA expectation, repair shipment creation should be allowed once the repair is completed
+- If current lifecycle logic differs, align it now to the app’s operational intent and make the gating explicit and correct
+
+3) Transfer and RMA:
+- Preserve correct lifecycle eligibility logic for transfer and RMA shipment creation
+- Do not weaken lifecycle controls, but ensure valid creation states are not incorrectly blocked
+
+--------------------------------------------------
+IMPLEMENTATION DISCIPLINE
+--------------------------------------------------
+
+Focus only on the execution-path defects and lifecycle gating corrections above.
+
+Do not:
+- redesign Shipping Center
+- change unrelated modules
+- alter commercial plans architecture
+- alter permissions architecture beyond what is necessary for correct execution
+- start EasyPost/Shippo/live carrier integration yet
+- broaden into future shipping phases
+
+Preserve the current structure and perform a narrow correction pass only.
+
+--------------------------------------------------
+OUTPUT FORMAT REQUIRED
+--------------------------------------------------
+
+When finished, reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Create Shipment Execution Fixes
+3. Source Prefill Fixes
+4. Save/Persistence Fixes
+5. Status Transition Execution Fixes
+6. Preview Mode Validation
+7. Lifecycle Gating Corrections
+8. Files Changed
+9. Non-Regression Notes

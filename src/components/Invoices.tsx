@@ -802,7 +802,7 @@ export default function Invoices() {
                       <span className="material-symbols-outlined text-sm">link</span> Online Pay Link
                     </button>
                   )}
-                  {canAccess('shipping') && checkSubPermission('create_shipment') && (() => {
+                  {canAccess('shipping') && checkSubPermission('create_shipment') && detailInvoice.status === 'Paid' && (() => {
                     const linkedShipments = shipments.filter(s => s.sourceType === 'invoice' && s.sourceNumber === detailInvoice.invoiceNumber);
                     return linkedShipments.length > 0 ? (
                       <span className="px-4 py-2 bg-sky-50 text-sky-700 border border-sky-200 rounded-xl font-black text-[10px] uppercase tracking-widest flex items-center gap-1.5">
@@ -812,6 +812,7 @@ export default function Invoices() {
                       <button onClick={() => {
                         const now = new Date().toISOString();
                         const customer = customers.find(c => c.id === detailInvoice.customerId);
+                        const addrParts = (customer?.address || '').split(',').map(s => s.trim());
                         const newShipment: Shipment = {
                           id: `shp-${Date.now()}`,
                           shipmentNumber: `SHP-${new Date().getFullYear()}-${String(shipments.length + 1).padStart(3, '0')}`,
@@ -820,8 +821,8 @@ export default function Invoices() {
                           sourceType: 'invoice',
                           sourceId: detailInvoice.id,
                           sourceNumber: detailInvoice.invoiceNumber,
-                          originAddress: { name: 'Store', line1: '123 Main St', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US' },
-                          destinationAddress: { name: customer?.name || detailInvoice.customerName || 'Customer', line1: '', city: '', state: '', postalCode: '', country: 'US', email: customer?.email, phone: customer?.phone },
+                          originAddress: { name: 'Main Warehouse', line1: '123 Main St', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US' },
+                          destinationAddress: { name: customer?.name || detailInvoice.customerName || 'Customer', line1: addrParts[0] || '', city: addrParts[1] || '', state: addrParts[2] || '', postalCode: addrParts[3] || '', country: 'US', email: customer?.email, phone: customer?.phone },
                           packages: [],
                           events: [{ id: `evt-${Date.now()}`, timestamp: now, status: 'Created', description: `Shipment created from invoice ${detailInvoice.invoiceNumber}`, performedBy: 'Current User' }],
                           createdBy: 'Current User',

@@ -972,8 +972,10 @@ export default function RepairTickets() {
                         </div>
                       </div>
 
-                      {canAccess('shipping') && checkSubPermission('create_shipment') && (() => {
+                      {canAccess('shipping') && checkSubPermission('create_shipment') && (selectedTicket.status === 'Ready for Pickup' || selectedTicket.status === 'Completed') && (() => {
                         const linkedShipments = shipments.filter(s => s.sourceType === 'repair' && s.sourceNumber === selectedTicket.ticketNumber);
+                        const customer = customers.find(c => c.id === selectedTicket.customerId) || customers.find(c => c.name === selectedTicket.customerName);
+                        const addrParts = (customer?.address || '').split(',').map(s => s.trim());
                         return (
                           <div className="bg-slate-50 rounded-[2.5rem] p-7 space-y-3 shadow-inner">
                             <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
@@ -1002,8 +1004,8 @@ export default function RepairTickets() {
                                   sourceType: 'repair',
                                   sourceId: selectedTicket.id,
                                   sourceNumber: selectedTicket.ticketNumber,
-                                  originAddress: { name: 'Store', line1: '123 Main St', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US' },
-                                  destinationAddress: { name: selectedTicket.customerName, line1: '', city: '', state: '', postalCode: '', country: 'US', phone: selectedTicket.customerPhone, email: selectedTicket.customerEmail },
+                                  originAddress: { name: 'Main Warehouse', line1: '123 Main St', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US' },
+                                  destinationAddress: { name: selectedTicket.customerName, line1: addrParts[0] || '', city: addrParts[1] || '', state: addrParts[2] || '', postalCode: addrParts[3] || '', country: 'US', phone: selectedTicket.customerPhone, email: selectedTicket.customerEmail },
                                   packages: [],
                                   events: [{ id: `evt-${Date.now()}`, timestamp: now, status: 'Created', description: `Shipment created from repair ${selectedTicket.ticketNumber}`, performedBy: 'Current User' }],
                                   createdBy: 'Current User',

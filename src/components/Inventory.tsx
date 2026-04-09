@@ -1648,8 +1648,9 @@ const Inventory: React.FC = () => {
                     {t.reconciledBy && <div className="bg-slate-50 rounded-xl p-3"><p className="text-[10px] font-black text-slate-400 uppercase">Reconciled By</p><p className="font-bold">{t.reconciledBy}</p></div>}
                   </div>
                   {t.notes && <p className="text-xs text-slate-400 italic">{t.notes}</p>}
-                  {canAccess('shipping') && checkSubPermission('create_shipment') && (() => {
+                  {canAccess('shipping') && checkSubPermission('create_shipment') && t.status !== 'Received' && t.status !== 'Cancelled' && (() => {
                     const linkedShipments = shipments.filter(s => s.sourceType === 'transfer' && s.sourceNumber === t.transferNumber);
+                    const itemsSummary = t.items.map(i => `${i.name} x${i.quantity}`).join(', ');
                     return (
                       <div className="bg-slate-50 rounded-xl p-3 space-y-2">
                         <p className="text-[10px] font-black text-slate-400 uppercase flex items-center gap-1"><span className="material-symbols-outlined text-xs">package_2</span> Shipping</p>
@@ -1674,9 +1675,10 @@ const Inventory: React.FC = () => {
                               sourceType: 'transfer',
                               sourceId: t.id,
                               sourceNumber: t.transferNumber,
-                              originAddress: { name: t.fromStore, line1: '', city: '', state: '', postalCode: '', country: 'US' },
+                              originAddress: { name: t.fromStore, line1: '123 Main St', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US' },
                               destinationAddress: { name: t.toStore, line1: '', city: '', state: '', postalCode: '', country: 'US' },
-                              packages: [],
+                              packages: itemsSummary ? [{ id: `pkg-${Date.now()}`, contentsSummary: itemsSummary }] : [],
+                              notes: `Transfer ${t.transferNumber}: ${t.fromStore} → ${t.toStore}`,
                               events: [{ id: `evt-${Date.now()}`, timestamp: now, status: 'Created', description: `Shipment created from transfer ${t.transferNumber}`, performedBy: 'Current User' }],
                               createdBy: 'Current User',
                               createdAt: now,
