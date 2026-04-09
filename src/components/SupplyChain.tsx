@@ -17,7 +17,7 @@ export default function SupplyChain() {
     supplierRefundEntries, addSupplierRefundEntry,
     shipments, addShipment,
   } = useStoreLocalState();
-  const { checkSubPermission, canAccess } = useAccess();
+  const { checkSubPermission, canAccess, isPreviewModeEnabled } = useAccess();
   const canManagePOs = checkSubPermission('manage_purchase_orders');
   const canManageRMAs = checkSubPermission('manage_rmas');
   const canManageSuppliers = checkSubPermission('manage_suppliers');
@@ -629,6 +629,7 @@ export default function SupplyChain() {
                             ))
                           ) : (
                             <button onClick={() => {
+                              if (isPreviewModeEnabled) return;
                               const now = new Date().toISOString();
                               const newShipment: Shipment = {
                                 id: `shp-${Date.now()}`,

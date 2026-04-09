@@ -82,7 +82,7 @@ export default function RepairTickets() {
     shipments, addShipment,
   } = useStoreLocalState();
   const navigate = useNavigate();
-  const { checkPermission, checkSubPermission, effectiveRole, session, canAccess } = useAccess();
+  const { checkPermission, checkSubPermission, effectiveRole, session, canAccess, isPreviewModeEnabled } = useAccess();
   const canCreateTickets = checkPermission('repairs', 'create');
   const canEditTickets = checkPermission('repairs', 'edit');
   const canManageTickets = checkPermission('repairs', 'manage');
@@ -995,6 +995,7 @@ export default function RepairTickets() {
                               </div>
                             ) : (
                               <button onClick={() => {
+                                if (isPreviewModeEnabled) return;
                                 const now = new Date().toISOString();
                                 const newShipment: Shipment = {
                                   id: `shp-${Date.now()}`,

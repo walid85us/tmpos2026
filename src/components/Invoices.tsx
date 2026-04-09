@@ -8,7 +8,7 @@ import { renderTemplate, buildLineItemsHtml, buildReceiptLineItemsHtml } from '.
 
 export default function Invoices() {
   const { invoices, addInvoice, updateInvoice, customers, services, serviceCategories, approvedStockItems, storeBranding, documentTemplates, shipments, addShipment } = useStoreLocalState();
-  const { checkPermission, checkSubPermission, canAccess } = useAccess();
+  const { checkPermission, checkSubPermission, canAccess, isPreviewModeEnabled } = useAccess();
   const canReopenInvoice = checkSubPermission('reopen_invoice');
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('All');
@@ -810,6 +810,7 @@ export default function Invoices() {
                       </span>
                     ) : (
                       <button onClick={() => {
+                        if (isPreviewModeEnabled) return;
                         const now = new Date().toISOString();
                         const customer = customers.find(c => c.id === detailInvoice.customerId);
                         const addrParts = (customer?.address || '').split(',').map(s => s.trim());

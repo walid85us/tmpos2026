@@ -63,7 +63,7 @@ function formatDateTime(iso: string): string {
 
 export default function ShippingCenter() {
   const { shipments, addShipment, updateShipment } = useStoreLocalState();
-  const { checkPermission, checkSubPermission } = useAccess();
+  const { checkPermission, checkSubPermission, isPreviewModeEnabled } = useAccess();
 
   const canView = checkPermission('shipping', 'view');
   const canCreate = checkSubPermission('create_shipment');
@@ -123,6 +123,7 @@ export default function ShippingCenter() {
   const isPreDispatch = (status: ShipmentStatus) => ['Draft', 'Ready', 'Label Created', 'Packed'].includes(status);
 
   function handleStatusTransition(id: string, newStatus: ShipmentStatus) {
+    if (isPreviewModeEnabled) { setShowStatusConfirm(null); return; }
     const now = new Date().toISOString();
     const updates: Partial<Shipment> = { status: newStatus, updatedAt: now };
     const shipment = shipments.find(s => s.id === id);
@@ -144,6 +145,7 @@ export default function ShippingCenter() {
   }
 
   function handleCreateShipment() {
+    if (isPreviewModeEnabled) { setShowCreateModal(false); return; }
     const now = new Date().toISOString();
     const shipment: Shipment = {
       id: `shp-${Date.now()}`,
@@ -172,6 +174,7 @@ export default function ShippingCenter() {
   }
 
   function handleSaveEdit() {
+    if (isPreviewModeEnabled) { setEditingShipment(null); return; }
     if (!editingShipment) return;
     const now = new Date().toISOString();
     updateShipment(editingShipment, {
@@ -186,6 +189,7 @@ export default function ShippingCenter() {
   }
 
   function handleAddEvent(shipmentId: string) {
+    if (isPreviewModeEnabled) { setAddEventModal(null); setEventDescription(''); setEventLocation(''); return; }
     if (!eventDescription.trim()) return;
     const shipment = shipments.find(s => s.id === shipmentId);
     if (!shipment) return;

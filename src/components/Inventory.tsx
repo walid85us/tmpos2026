@@ -21,7 +21,7 @@ const Inventory: React.FC = () => {
     suppliers, customers, storeLocations, getItemMovements,
     shipments, addShipment,
   } = useStoreLocalState();
-  const { checkPermission, checkSubPermission, canAccess } = useAccess();
+  const { checkPermission, checkSubPermission, canAccess, isPreviewModeEnabled } = useAccess();
   const hasInventoryPermission = checkPermission('inventory', 'manage');
   const hasInventoryEdit = checkPermission('inventory', 'edit');
   const hasInventoryView = checkPermission('inventory', 'view');
@@ -1666,6 +1666,7 @@ const Inventory: React.FC = () => {
                           ))
                         ) : (
                           <button onClick={() => {
+                            if (isPreviewModeEnabled) return;
                             const now = new Date().toISOString();
                             const newShipment: Shipment = {
                               id: `shp-${Date.now()}`,
