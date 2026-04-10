@@ -1003,7 +1003,7 @@ export default function RepairTickets() {
                                   type: 'repair_return',
                                   originAddress: { name: 'Main Warehouse', line1: '123 Main St', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US' },
                                   destinationAddress: { name: selectedTicket.customerName, line1: addrParts[0] || '', city: addrParts[1] || '', state: addrParts[2] || '', postalCode: addrParts[3] || '', country: 'US', phone: selectedTicket.customerPhone, email: selectedTicket.customerEmail },
-                                  sourceItems: [{ id: selectedTicket.id, name: `${selectedTicket.deviceType} - ${selectedTicket.issueDescription.slice(0, 50)}`, quantity: 1 }],
+                                  sourceItems: [{ id: selectedTicket.id, name: `${selectedTicket.device} - ${selectedTicket.issue.slice(0, 50)}`, quantity: 1 }],
                                 };
                                 navigate('/shipping', { state: { openCreate: true, prefill } });
                               }}

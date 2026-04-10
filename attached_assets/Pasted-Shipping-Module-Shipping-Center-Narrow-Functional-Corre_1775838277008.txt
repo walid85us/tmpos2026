@@ -1,0 +1,175 @@
+Shipping Module / Shipping Center — Narrow Functional Correction Pass
+
+Do not redesign anything.
+Do not broaden scope.
+Do not touch unrelated workstreams.
+Preserve the current architecture:
+- top-level Shipping Center
+- plan/feature gating
+- Store Permissions Matrix integration
+- source-module navigation into Shipping Center
+- package/item workflow direction
+- pre/post Label Created editability rules
+
+This is a narrow functional correction pass based on the latest QA.
+
+--------------------------------------------------
+QA TRUTH — CURRENT FAILURES
+--------------------------------------------------
+
+1) Repair entry point still fails
+- Create Shipment does not open correctly from eligible Repair
+
+2) RMA behavior is wrong
+- Shipment workflow is being created/opened automatically as soon as the RMA is created
+- This is incorrect
+- RMA should expose a deliberate Create Shipment / Open Shipment workflow entry point, same operational pattern as the other source modules
+- No automatic shipment creation simply because an RMA record exists
+
+3) Source prefill still fails
+- Source reference / recipient / destination / address / origin context are not fully populating correctly from the source
+
+4) Create/Edit flows are incorrectly stuck in preview mode
+- In the workflow window, QA sees:
+  - “Preview Mode — Shipment will not be saved”
+  - save button showing “Preview Only”
+- This is blocking normal create/save/edit testing
+- This means normal mode is not behaving correctly, or preview-state detection is leaking into the flow incorrectly
+
+5) Save still does not work in practice
+- Because of the issue above, package rows cannot be validated fully
+- Draft edit/save cannot be validated fully
+- Pre-Label Created edits cannot be validated fully
+
+6) Status transition still does not execute
+- Confirm dialog appears
+- Status does not actually change
+
+--------------------------------------------------
+MANDATORY CORRECTIONS
+--------------------------------------------------
+
+A) FIX NORMAL MODE VS PREVIEW MODE DETECTION
+This is now the highest-priority issue.
+
+Required:
+- In normal mode, shipment create/edit/status actions must be fully writable when all gating conditions are satisfied
+- In preview mode, shipment writes must remain blocked
+- Do not let preview-state UI leak into normal mode
+- Do not disable submit buttons in normal mode
+- Do not show “Preview Mode — Shipment will not be saved” in normal mode
+
+You must inspect the full state path that determines preview behavior, especially:
+- AccessContext / preview-state source
+- route navigation into Shipping Center
+- modal open state initialization
+- location.state contamination
+- stale preview flags from source modules
+- any logic that assumes routed prefill = preview
+- any disabled-button conditions tied to the wrong flag
+
+The corrected rule must be:
+- normal mode + eligible + entitled + permitted = writable
+- preview mode = view only / no commit
+
+B) FIX REPAIR ENTRY POINT
+Required:
+- For eligible Repair Tickets, Create Shipment must open the workflow correctly
+- No dead click
+- No wrong lifecycle gate
+- No stale selected record issue
+- No route-state bug
+
+C) FIX RMA OPERATIONAL BEHAVIOR
+Required:
+- Do not auto-create or auto-trigger shipment workflow simply because an RMA exists
+- RMA must behave like an intentional shipping workflow:
+  - if no shipment exists, show Create Shipment
+  - if shipment exists, show Open Shipment / linked shipment state
+- Preserve lifecycle gating for valid RMA states
+
+D) FIX SOURCE PREFILL COMPLETENESS
+Required:
+- Starting from Invoice, Repair, Transfer, and RMA must populate correctly where data exists:
+  - source type
+  - source ID
+  - source reference
+  - recipient/destination name
+  - destination address
+  - origin/store context
+  - shipment purpose/type
+- Do not silently leave blank fields when source data exists
+- Use stable mapping functions, not scattered fragile inline logic
+
+E) RESTORE REAL SAVE/EDIT BEHAVIOR IN NORMAL MODE
+Required:
+- In normal mode, Create Shipment must save successfully
+- Draft shipment edit/save must work
+- Multiple package rows must save and reopen correctly
+- Pre-Label Created content/package edits must save correctly
+- Modal submit buttons must execute real save logic in normal mode
+
+F) FIX STATUS CONFIRM EXECUTION
+Required:
+- In normal mode, valid status transitions must actually execute after clicking Confirm
+- Detail and list views must both reflect the new status
+- Preview mode must still block status writes
+
+--------------------------------------------------
+IMPORTANT BEHAVIORAL REQUIREMENTS
+--------------------------------------------------
+
+1) Invoice shipping
+- allowed only when invoice is Paid
+
+2) Repair shipping
+- must work for the intended eligible repair final-service state(s)
+- QA specifically expects Completed to work
+- if Ready for Pickup is also intentionally valid, keep it only if it truly matches the product lifecycle
+
+3) Transfer shipping
+- preserve current valid gating
+
+4) RMA shipping
+- preserve valid gating
+- but do NOT auto-create shipment on RMA creation
+
+5) Package behavior
+- keep source-informed item/package behavior already added
+- before Label Created: package/content edits allowed
+- after Label Created: package/content edits more controlled
+
+--------------------------------------------------
+IMPLEMENTATION DISCIPLINE
+--------------------------------------------------
+
+1) Diagnose root cause of preview leakage into normal mode
+2) Fix repair entry execution
+3) Fix RMA create/open operational pattern
+4) Fix source prefill completeness
+5) Fix normal-mode create/save/edit
+6) Fix status confirm execution
+7) Re-verify preview mode still blocks writes
+8) Update replit.md only for the corrected behavior
+
+Do not claim success unless you validated both:
+- normal mode writes work
+- preview mode blocks writes
+
+--------------------------------------------------
+OUTPUT FORMAT REQUIRED
+--------------------------------------------------
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Normal Mode vs Preview Mode Fix
+3. Repair Entry Fix
+4. RMA Workflow Fix
+5. Source Prefill Fix
+6. Save/Edit Fix
+7. Status Transition Fix
+8. Validation Performed
+9. Files Changed
+10. Documentation Updated
+11. Non-Regression Notes
