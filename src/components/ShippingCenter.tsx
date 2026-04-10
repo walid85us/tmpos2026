@@ -74,7 +74,7 @@ function formatDateTime(iso: string): string {
 }
 
 export default function ShippingCenter() {
-  const { shipments, addShipment, updateShipment } = useStoreLocalState();
+  const { shipments, addShipment, updateShipment, invoices, repairTickets, rmas, inventoryTransfers, suppliers, customers } = useStoreLocalState();
   const { checkPermission, checkSubPermission, isWriteBlocked } = useAccess();
   const location = useLocation();
   const navigate = useNavigate();
@@ -113,6 +113,154 @@ export default function ShippingCenter() {
   const [newPackages, setNewPackages] = useState<ShipmentPackage[]>([]);
   const [sourceItems, setSourceItems] = useState<{ id: string; name: string; quantity: number; price?: number }[]>([]);
   const [editPackages, setEditPackages] = useState<ShipmentPackage[]>([]);
+  const [sourceResolved, setSourceResolved] = useState<string | null>(null);
+  const [sourceResolveError, setSourceResolveError] = useState<string | null>(null);
+  const [isResolving, setIsResolving] = useState(false);
+
+  const STORE_ADDRESS: ShipmentAddress = { name: 'Main Warehouse', line1: '100 Commerce Dr', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US', phone: '555-0100' };
+
+  const ELIGIBLE_INVOICE_STATUSES = ['Paid', 'Partially Paid'];
+  const ELIGIBLE_REPAIR_STATUSES = ['Ready for Pickup', 'Completed'];
+  const ELIGIBLE_TRANSFER_STATUSES = ['Draft', 'Sent', 'In Transit'];
+  const ELIGIBLE_RMA_STATUSES = ['Pending', 'Shipped'];
+
+  function resolveSourceReference() {
+    const ref = newSourceNumber.trim();
+    if (!ref) {
+      setSourceResolveError('Enter a source reference number to resolve.');
+      setSourceResolved(null);
+      return;
+    }
+
+    setIsResolving(true);
+    setSourceResolveError(null);
+    setSourceResolved(null);
+
+    if (newSourceType === 'invoice') {
+      const invoice = invoices.find(inv => inv.invoiceNumber.toLowerCase() === ref.toLowerCase());
+      if (!invoice) {
+        setSourceResolveError(`No invoice found with reference "${ref}".`);
+        setIsResolving(false);
+        return;
+      }
+      if (!ELIGIBLE_INVOICE_STATUSES.includes(invoice.status)) {
+        setSourceResolveError(`Invoice ${invoice.invoiceNumber} has status "${invoice.status}" — only Paid or Partially Paid invoices are eligible for shipping.`);
+        setIsResolving(false);
+        return;
+      }
+      const customer = customers.find(c => c.id === invoice.customerId);
+      const addrParts = (customer?.address || '').split(',').map(s => s.trim());
+      setNewSourceId(invoice.id);
+      setNewSourceNumber(invoice.invoiceNumber);
+      setNewType('customer_delivery');
+      setNewOrigin(STORE_ADDRESS);
+      setNewDest({
+        name: customer?.name || invoice.customerName || 'Customer',
+        line1: addrParts[0] || '', city: addrParts[1] || '', state: addrParts[2] || '', postalCode: addrParts[3] || '', country: 'US',
+        email: customer?.email || invoice.customerEmail, phone: customer?.phone || invoice.customerPhone,
+      });
+      const items = invoice.items.map(i => ({ id: i.id, name: i.name, quantity: i.quantity, price: i.price }));
+      setSourceItems(items);
+      if (items.length > 0) {
+        const contentsSummary = items.map(i => `${i.name} x${i.quantity}`).join(', ');
+        const declaredValue = items.reduce((sum, i) => sum + (i.price || 0) * i.quantity, 0);
+        setNewPackages([{ id: `pkg-${Date.now()}`, contentsSummary, declaredValue: declaredValue > 0 ? declaredValue : undefined }]);
+      } else {
+        setNewPackages([]);
+      }
+      setSourceResolved(`Resolved: ${invoice.invoiceNumber} — ${invoice.customerName} (${invoice.status})`);
+    } else if (newSourceType === 'repair') {
+      const ticket = repairTickets.find(t => t.ticketNumber.toLowerCase() === ref.toLowerCase());
+      if (!ticket) {
+        setSourceResolveError(`No repair ticket found with reference "${ref}".`);
+        setIsResolving(false);
+        return;
+      }
+      if (!ELIGIBLE_REPAIR_STATUSES.includes(ticket.status)) {
+        setSourceResolveError(`Repair ticket ${ticket.ticketNumber} has status "${ticket.status}" — only Ready for Pickup or Completed tickets are eligible for shipping.`);
+        setIsResolving(false);
+        return;
+      }
+      const customer = customers.find(c => c.id === ticket.customerId);
+      const addrParts = (customer?.address || '').split(',').map(s => s.trim());
+      setNewSourceId(ticket.id);
+      setNewSourceNumber(ticket.ticketNumber);
+      setNewType('repair_return');
+      setNewOrigin(STORE_ADDRESS);
+      setNewDest({
+        name: customer?.name || ticket.customerName || 'Customer',
+        line1: addrParts[0] || '', city: addrParts[1] || '', state: addrParts[2] || '', postalCode: addrParts[3] || '', country: 'US',
+        email: customer?.email || ticket.customerEmail, phone: customer?.phone || ticket.customerPhone,
+      });
+      const items = [{ id: ticket.id, name: `${ticket.device} — ${ticket.issue}`, quantity: 1, price: ticket.actualCost || ticket.estimatedCost }];
+      setSourceItems(items);
+      const contentsSummary = `${ticket.device} (${ticket.issue})`;
+      const declaredValue = ticket.actualCost || ticket.estimatedCost || 0;
+      setNewPackages([{ id: `pkg-${Date.now()}`, contentsSummary, declaredValue: declaredValue > 0 ? declaredValue : undefined }]);
+      setSourceResolved(`Resolved: ${ticket.ticketNumber} — ${ticket.customerName}, ${ticket.device} (${ticket.status})`);
+    } else if (newSourceType === 'transfer') {
+      const transfer = inventoryTransfers.find(t => t.transferNumber.toLowerCase() === ref.toLowerCase());
+      if (!transfer) {
+        setSourceResolveError(`No transfer found with reference "${ref}".`);
+        setIsResolving(false);
+        return;
+      }
+      if (!ELIGIBLE_TRANSFER_STATUSES.includes(transfer.status)) {
+        setSourceResolveError(`Transfer ${transfer.transferNumber} has status "${transfer.status}" — only Draft, Sent, or In Transit transfers are eligible for shipping.`);
+        setIsResolving(false);
+        return;
+      }
+      setNewSourceId(transfer.id);
+      setNewSourceNumber(transfer.transferNumber);
+      setNewType('store_transfer');
+      setNewOrigin({ ...STORE_ADDRESS, name: transfer.fromStore });
+      setNewDest({ name: transfer.toStore, line1: '', city: '', state: '', postalCode: '', country: 'US' });
+      const items = transfer.items.map(i => ({ id: i.productId, name: i.name, quantity: i.quantity }));
+      setSourceItems(items);
+      if (items.length > 0) {
+        const contentsSummary = items.map(i => `${i.name} x${i.quantity}`).join(', ');
+        setNewPackages([{ id: `pkg-${Date.now()}`, contentsSummary }]);
+      } else {
+        setNewPackages([]);
+      }
+      setSourceResolved(`Resolved: ${transfer.transferNumber} — ${transfer.fromStore} → ${transfer.toStore} (${transfer.status})`);
+    } else if (newSourceType === 'rma') {
+      const rma = rmas.find(r => r.rmaNumber.toLowerCase() === ref.toLowerCase());
+      if (!rma) {
+        setSourceResolveError(`No RMA found with reference "${ref}".`);
+        setIsResolving(false);
+        return;
+      }
+      if (!ELIGIBLE_RMA_STATUSES.includes(rma.status)) {
+        setSourceResolveError(`RMA ${rma.rmaNumber} has status "${rma.status}" — only Pending or Shipped RMAs are eligible for shipping.`);
+        setIsResolving(false);
+        return;
+      }
+      const supplier = suppliers.find(s => s.id === rma.supplierId);
+      const addrParts = (supplier?.address || '').split(',').map(s => s.trim());
+      setNewSourceId(rma.id);
+      setNewSourceNumber(rma.rmaNumber);
+      setNewType('rma_outbound');
+      setNewOrigin(STORE_ADDRESS);
+      setNewDest({
+        name: supplier?.name || rma.supplierName || 'Supplier',
+        company: supplier?.name || rma.supplierName,
+        line1: addrParts[0] || '', city: addrParts[1] || '', state: addrParts[2] || '', postalCode: addrParts[3] || '', country: 'US',
+        phone: supplier?.phone, email: supplier?.email,
+      });
+      const items = rma.items.map(i => ({ id: i.productId, name: i.name, quantity: i.quantity }));
+      setSourceItems(items);
+      if (items.length > 0) {
+        const contentsSummary = items.map(i => `${i.name} x${i.quantity}`).join(', ');
+        setNewPackages([{ id: `pkg-${Date.now()}`, contentsSummary }]);
+      } else {
+        setNewPackages([]);
+      }
+      setSourceResolved(`Resolved: ${rma.rmaNumber} — ${rma.supplierName} (${rma.status})`);
+    }
+
+    setIsResolving(false);
+  }
 
   useEffect(() => {
     const state = location.state as { openCreate?: boolean; prefill?: ShipmentPrefill } | null;
@@ -261,6 +409,7 @@ export default function ShippingCenter() {
     setNewOrigin({ name: '', line1: '', city: '', state: '', postalCode: '', country: 'US' });
     setNewDest({ name: '', line1: '', city: '', state: '', postalCode: '', country: 'US' });
     setNewSourceType('invoice'); setNewSourceNumber(''); setNewSourceId(''); setNewType('customer_delivery');
+    setSourceResolved(null); setSourceResolveError(null);
     setNewPackages([]); setSourceItems([]);
   }
 
@@ -769,14 +918,36 @@ export default function ShippingCenter() {
                   </div>
                   <div>
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Source Type *</label>
-                    <select value={newSourceType} onChange={e => setNewSourceType(e.target.value as ShipmentSourceType)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20">
+                    <select value={newSourceType} onChange={e => { setNewSourceType(e.target.value as ShipmentSourceType); setSourceResolved(null); setSourceResolveError(null); setNewSourceId(''); setSourceItems([]); setNewPackages([]); }} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20">
                       {Object.entries(SOURCE_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
                     </select>
                   </div>
                 </div>
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Source Reference Number</label>
-                  <input value={newSourceNumber} onChange={e => setNewSourceNumber(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" placeholder="e.g. INV-1001, REP-1001, TRF-2026-001" />
+                  <div className="flex gap-2">
+                    <input value={newSourceNumber} onChange={e => { setNewSourceNumber(e.target.value); setSourceResolved(null); setSourceResolveError(null); }}
+                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); resolveSourceReference(); } }}
+                      className="flex-1 px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20"
+                      placeholder={newSourceType === 'invoice' ? 'e.g. INV-2026-001' : newSourceType === 'repair' ? 'e.g. T-1001' : newSourceType === 'transfer' ? 'e.g. TRF-2026-001' : 'e.g. RMA-2026-001'} />
+                    <button type="button" onClick={resolveSourceReference} disabled={isResolving || !newSourceNumber.trim()}
+                      className="px-4 py-3 bg-primary text-white font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-primary/90 transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5 shrink-0">
+                      <span className="material-symbols-outlined text-sm">{isResolving ? 'hourglass_top' : 'search'}</span>
+                      Resolve
+                    </button>
+                  </div>
+                  {sourceResolveError && (
+                    <div className="mt-2 px-3 py-2 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2">
+                      <span className="material-symbols-outlined text-red-500 text-sm mt-0.5">error</span>
+                      <p className="text-xs text-red-600 font-medium">{sourceResolveError}</p>
+                    </div>
+                  )}
+                  {sourceResolved && (
+                    <div className="mt-2 px-3 py-2 bg-emerald-50 border border-emerald-200 rounded-lg flex items-start gap-2">
+                      <span className="material-symbols-outlined text-emerald-500 text-sm mt-0.5">check_circle</span>
+                      <p className="text-xs text-emerald-700 font-medium">{sourceResolved}</p>
+                    </div>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-2 gap-6">

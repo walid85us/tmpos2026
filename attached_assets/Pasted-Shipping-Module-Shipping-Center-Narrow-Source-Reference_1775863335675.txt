@@ -1,0 +1,106 @@
+Shipping Module / Shipping Center — Narrow Source Reference Resolution Fix
+
+Do not redesign anything.
+Do not broaden scope.
+Do not touch unrelated workstreams.
+Do not change the now-working runtime mode separation, create/save/edit flow, package persistence, status transitions, or preview mode protections.
+
+The root-cause recovery pass succeeded for the core workflow.
+Current QA shows only one remaining functional gap:
+
+--------------------------------------------------
+REMAINING QA FAILURE
+--------------------------------------------------
+
+Source Reference Number resolution/prefill is not working.
+
+Observed QA result:
+- In shipment creation, when using a valid paid invoice number in Source Reference Number
+- the shipment form does not populate from the source
+- source-linked details are not being resolved into the form
+
+Current passing areas should remain untouched:
+- writable normal mode
+- preview mode write blocking
+- create/save/edit
+- multiple package rows persistence
+- status transition execution
+- repair/transfer/RMA source workflow opening
+
+--------------------------------------------------
+REQUIRED FIX
+--------------------------------------------------
+
+Implement/fix source reference lookup and prefill behavior where supported.
+
+At minimum:
+- entering or selecting a valid Source Reference Number must resolve the source record correctly
+- when resolved, the form must populate source-linked fields from that record
+
+Supported source contexts must be handled correctly where this feature is intended:
+- Invoice
+- Repair
+- Transfer
+- RMA
+
+Populate where data exists:
+- sourceType
+- sourceId
+- source reference number
+- destination / recipient / customer / vendor / store name
+- destination address
+- origin location / store
+- shipment type / purpose
+- source items / relevant line items / transfer context / RMA context
+
+--------------------------------------------------
+IMPORTANT BEHAVIOR RULES
+--------------------------------------------------
+
+1) Do not require a source-routed entry path only
+If Source Reference Number is meant to be usable manually inside the shipment form, it must actually resolve and prefill.
+
+2) Respect lifecycle gating
+If a source reference is entered for an ineligible source state, handle that cleanly and visibly.
+Do not silently fail.
+
+3) Respect plan/permission rules
+Do not bypass existing entitlement or permission logic.
+
+4) Do not break the already working source-routed prefill path
+The existing routed source flows must remain working.
+
+5) Do not silently fail
+If a reference is invalid, missing, or ineligible, show clear feedback.
+
+--------------------------------------------------
+IMPLEMENTATION DISCIPLINE
+--------------------------------------------------
+
+1) Inspect whether Source Reference Number currently is:
+- display-only
+- partially wired
+- wired only for routed state
+- missing a resolver
+- using wrong source collections/keys
+- using display labels instead of stable references
+
+2) Implement a proper resolver flow for manual source reference entry where intended
+
+3) Reuse centralized source-to-shipment mapping logic
+Do not duplicate fragile mapping inline.
+
+4) Preserve all current working shipping behavior
+
+--------------------------------------------------
+OUTPUT FORMAT REQUIRED
+--------------------------------------------------
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Source Reference Resolution Fix
+3. Prefill Mapping Confirmed
+4. Validation Performed
+5. Files Changed
+6. Non-Regression Notes
