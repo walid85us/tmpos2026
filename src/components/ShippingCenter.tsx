@@ -1,9 +1,21 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
 import { Shipment, ShipmentStatus, ShipmentSourceType, ShipmentType, ShipmentAddress, ShipmentPackage, ShipmentEvent } from '../types';
 import PageShell from './PageShell';
+
+export interface ShipmentPrefill {
+  sourceType: ShipmentSourceType;
+  sourceId: string;
+  sourceNumber: string;
+  type: ShipmentType;
+  originAddress: ShipmentAddress;
+  destinationAddress: ShipmentAddress;
+  notes?: string;
+  sourceItems?: { id: string; name: string; quantity: number; price?: number }[];
+}
 
 const STATUS_ORDER: ShipmentStatus[] = ['Draft', 'Ready', 'Label Created', 'Packed', 'Dispatched', 'In Transit', 'Delivered', 'Exception', 'Cancelled'];
 
@@ -64,6 +76,8 @@ function formatDateTime(iso: string): string {
 export default function ShippingCenter() {
   const { shipments, addShipment, updateShipment } = useStoreLocalState();
   const { checkPermission, checkSubPermission, isPreviewModeEnabled } = useAccess();
+  const location = useLocation();
+  const navigate = useNavigate();
 
   const canView = checkPermission('shipping', 'view');
   const canCreate = checkSubPermission('create_shipment');
@@ -94,8 +108,39 @@ export default function ShippingCenter() {
   const [newDest, setNewDest] = useState<ShipmentAddress>({ name: '', line1: '', city: '', state: '', postalCode: '', country: 'US' });
   const [newSourceType, setNewSourceType] = useState<ShipmentSourceType>('invoice');
   const [newSourceNumber, setNewSourceNumber] = useState('');
+  const [newSourceId, setNewSourceId] = useState('');
   const [newType, setNewType] = useState<ShipmentType>('customer_delivery');
   const [newPackages, setNewPackages] = useState<ShipmentPackage[]>([]);
+  const [sourceItems, setSourceItems] = useState<{ id: string; name: string; quantity: number; price?: number }[]>([]);
+  const [editPackages, setEditPackages] = useState<ShipmentPackage[]>([]);
+
+  useEffect(() => {
+    const state = location.state as { openCreate?: boolean; prefill?: ShipmentPrefill } | null;
+    if (state?.openCreate && state.prefill && canCreate) {
+      const p = state.prefill;
+      setNewSourceType(p.sourceType);
+      setNewSourceId(p.sourceId);
+      setNewSourceNumber(p.sourceNumber);
+      setNewType(p.type);
+      setNewOrigin(p.originAddress);
+      setNewDest(p.destinationAddress);
+      setNewNotes(p.notes || '');
+      setSourceItems(p.sourceItems || []);
+      if (p.sourceItems && p.sourceItems.length > 0) {
+        const contentsSummary = p.sourceItems.map(i => `${i.name} x${i.quantity}`).join(', ');
+        const declaredValue = p.sourceItems.reduce((sum, i) => sum + (i.price || 0) * i.quantity, 0);
+        setNewPackages([{ id: `pkg-${Date.now()}`, contentsSummary, declaredValue: declaredValue > 0 ? declaredValue : undefined }]);
+      } else {
+        setNewPackages([]);
+      }
+      setNewCarrier('');
+      setNewService('');
+      setNewTracking('');
+      setNewCost('');
+      setShowCreateModal(true);
+      navigate(location.pathname, { replace: true, state: null });
+    }
+  }, [location.state]);
 
   const filtered = useMemo(() => {
     let items = [...shipments];
@@ -147,13 +192,14 @@ export default function ShippingCenter() {
   function handleCreateShipment() {
     if (isPreviewModeEnabled) { setShowCreateModal(false); return; }
     const now = new Date().toISOString();
+    const newId = `shp-${Date.now()}`;
     const shipment: Shipment = {
-      id: `shp-${Date.now()}`,
+      id: newId,
       shipmentNumber: `SHP-${new Date().getFullYear()}-${String(shipments.length + 1).padStart(3, '0')}`,
       type: newType,
       status: 'Draft',
       sourceType: newSourceType,
-      sourceId: `src-${Date.now()}`,
+      sourceId: newSourceId || `src-${Date.now()}`,
       sourceNumber: newSourceNumber || 'N/A',
       originAddress: newOrigin,
       destinationAddress: newDest,
@@ -161,9 +207,9 @@ export default function ShippingCenter() {
       carrier: newCarrier || undefined,
       serviceLevel: newService || undefined,
       trackingNumber: newTracking || undefined,
-      shippingCost: newCost ? parseFloat(newCost) : undefined,
+      shippingCost: canViewCosts && newCost ? parseFloat(newCost) : undefined,
       notes: newNotes || undefined,
-      events: [{ id: `evt-${Date.now()}`, timestamp: now, status: 'Created', description: 'Shipment created', performedBy: 'Current User' }],
+      events: [{ id: `evt-${Date.now()}`, timestamp: now, status: 'Created', description: `Shipment created${newSourceNumber ? ` from ${newSourceNumber}` : ''}`, performedBy: 'Current User' }],
       createdBy: 'Current User',
       createdAt: now,
       updatedAt: now,
@@ -171,6 +217,8 @@ export default function ShippingCenter() {
     addShipment(shipment);
     resetCreateForm();
     setShowCreateModal(false);
+    setSelectedShipment(newId);
+    setDetailTab('overview');
   }
 
   function handleSaveEdit() {
@@ -183,6 +231,7 @@ export default function ShippingCenter() {
       trackingNumber: newTracking || undefined,
       shippingCost: newCost ? parseFloat(newCost) : undefined,
       notes: newNotes || undefined,
+      packages: editPackages,
       updatedAt: now,
     });
     setEditingShipment(null);
@@ -211,14 +260,33 @@ export default function ShippingCenter() {
     setNewCarrier(''); setNewService(''); setNewTracking(''); setNewCost(''); setNewNotes('');
     setNewOrigin({ name: '', line1: '', city: '', state: '', postalCode: '', country: 'US' });
     setNewDest({ name: '', line1: '', city: '', state: '', postalCode: '', country: 'US' });
-    setNewSourceType('invoice'); setNewSourceNumber(''); setNewType('customer_delivery'); setNewPackages([]);
+    setNewSourceType('invoice'); setNewSourceNumber(''); setNewSourceId(''); setNewType('customer_delivery');
+    setNewPackages([]); setSourceItems([]);
   }
 
   function openEditModal(s: Shipment) {
     setNewCarrier(s.carrier || ''); setNewService(s.serviceLevel || '');
     setNewTracking(s.trackingNumber || ''); setNewCost(s.shippingCost?.toString() || '');
     setNewNotes(s.notes || '');
+    setEditPackages([...s.packages]);
     setEditingShipment(s.id);
+  }
+
+  function addPackageRow(target: 'create' | 'edit') {
+    const pkg: ShipmentPackage = { id: `pkg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}` };
+    if (target === 'create') setNewPackages(prev => [...prev, pkg]);
+    else setEditPackages(prev => [...prev, pkg]);
+  }
+
+  function updatePackageField(target: 'create' | 'edit', pkgId: string, field: keyof ShipmentPackage, value: string | number | undefined) {
+    const updater = (pkgs: ShipmentPackage[]) => pkgs.map(p => p.id === pkgId ? { ...p, [field]: value } : p);
+    if (target === 'create') setNewPackages(updater);
+    else setEditPackages(updater);
+  }
+
+  function removePackage(target: 'create' | 'edit', pkgId: string) {
+    if (target === 'create') setNewPackages(prev => prev.filter(p => p.id !== pkgId));
+    else setEditPackages(prev => prev.filter(p => p.id !== pkgId));
   }
 
   function getNextStatuses(current: ShipmentStatus): ShipmentStatus[] {
@@ -579,11 +647,28 @@ export default function ShippingCenter() {
           </div>
         )}
 
-        {editingShipment && (
+        {editingShipment && (() => {
+          const editShipData = shipments.find(s => s.id === editingShipment);
+          const packagesLocked = editShipData ? STATUS_ORDER.indexOf(editShipData.status) >= STATUS_ORDER.indexOf('Label Created') : false;
+          return (
           <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
-            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg p-8 max-h-[85vh] overflow-y-auto">
-              <h3 className="text-lg font-black text-primary mb-6">Edit Shipment</h3>
-              <div className="space-y-4">
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col">
+              <div className="p-8 border-b border-slate-100 flex justify-between items-start shrink-0">
+                <div>
+                  <h3 className="text-lg font-black text-primary">Edit Shipment</h3>
+                  {editShipData && <p className="text-xs text-slate-400 mt-0.5">{editShipData.shipmentNumber} · {editShipData.status}</p>}
+                </div>
+                <button onClick={() => setEditingShipment(null)} className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary">
+                  <span className="material-symbols-outlined">close</span>
+                </button>
+              </div>
+              {isPreviewModeEnabled && (
+                <div className="px-8 py-3 bg-amber-50 border-b border-amber-100 flex items-center gap-2">
+                  <span className="material-symbols-outlined text-amber-600 text-sm">visibility</span>
+                  <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest">Preview Mode — Changes will not be saved</p>
+                </div>
+              )}
+              <div className="p-8 overflow-y-auto flex-1 space-y-4">
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Carrier</label>
                   <select value={newCarrier} onChange={e => setNewCarrier(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20">
@@ -612,14 +697,49 @@ export default function ShippingCenter() {
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Notes</label>
                   <textarea value={newNotes} onChange={e => setNewNotes(e.target.value)} rows={3} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 resize-none" placeholder="Internal notes..." />
                 </div>
+
+                <div>
+                  <div className="flex justify-between items-center mb-3">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1">
+                      <span className="material-symbols-outlined text-xs">package_2</span>Packages
+                      {packagesLocked && <span className="text-amber-500 ml-1">(locked)</span>}
+                    </p>
+                    {!packagesLocked && (
+                      <button onClick={() => addPackageRow('edit')} className="text-[10px] font-black text-primary uppercase tracking-widest flex items-center gap-0.5 hover:text-primary/70"><span className="material-symbols-outlined text-sm">add</span>Add</button>
+                    )}
+                  </div>
+                  {editPackages.length === 0 ? (
+                    <p className="text-xs text-slate-400 italic">No packages.</p>
+                  ) : (
+                    <div className="space-y-3">
+                      {editPackages.map((pkg, i) => (
+                        <div key={pkg.id} className="bg-slate-50 rounded-xl p-4 space-y-2">
+                          <div className="flex justify-between items-center mb-1">
+                            <p className="text-[10px] font-black text-slate-400 uppercase">Package {i + 1}</p>
+                            {!packagesLocked && <button onClick={() => removePackage('edit', pkg.id)} className="text-slate-400 hover:text-red-500"><span className="material-symbols-outlined text-sm">close</span></button>}
+                          </div>
+                          <div className="grid grid-cols-3 gap-2">
+                            <input type="number" step="0.1" placeholder="Weight" disabled={packagesLocked} value={pkg.weight || ''} onChange={e => updatePackageField('edit', pkg.id, 'weight', e.target.value ? parseFloat(e.target.value) : undefined)} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" />
+                            <input type="number" step="0.1" placeholder="Length" disabled={packagesLocked} value={pkg.length || ''} onChange={e => updatePackageField('edit', pkg.id, 'length', e.target.value ? parseFloat(e.target.value) : undefined)} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" />
+                            <input type="number" step="0.01" placeholder="Declared $" disabled={packagesLocked} value={pkg.declaredValue || ''} onChange={e => updatePackageField('edit', pkg.id, 'declaredValue', e.target.value ? parseFloat(e.target.value) : undefined)} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" />
+                          </div>
+                          <input placeholder="Contents summary" disabled={packagesLocked} value={pkg.contentsSummary || ''} onChange={e => updatePackageField('edit', pkg.id, 'contentsSummary', e.target.value || undefined)} className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
-              <div className="flex gap-3 mt-6">
+              <div className="p-8 border-t border-slate-100 flex gap-3 shrink-0">
                 <button onClick={() => setEditingShipment(null)} className="flex-1 py-3 bg-white text-slate-500 rounded-xl font-black text-[10px] uppercase tracking-widest border border-slate-200">Cancel</button>
-                <button onClick={handleSaveEdit} className="flex-1 py-3 bg-primary text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-primary/20">Save Changes</button>
+                <button onClick={handleSaveEdit} disabled={isPreviewModeEnabled} className="flex-1 py-3 bg-primary text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-primary/20 disabled:opacity-50">
+                  {isPreviewModeEnabled ? 'Preview Only' : 'Save Changes'}
+                </button>
               </div>
             </motion.div>
           </div>
-        )}
+          );
+        })()}
 
         {showCreateModal && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
@@ -627,12 +747,18 @@ export default function ShippingCenter() {
               <div className="p-8 border-b border-slate-100 bg-slate-50/50 flex justify-between items-start shrink-0">
                 <div>
                   <h2 className="text-xl font-black text-primary">New Shipment</h2>
-                  <p className="text-sm text-slate-500 mt-1">Create a new shipment record</p>
+                  <p className="text-sm text-slate-500 mt-1">{newSourceNumber ? `From ${newSourceNumber}` : 'Create a new shipment record'}</p>
                 </div>
                 <button onClick={() => setShowCreateModal(false)} className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary">
                   <span className="material-symbols-outlined">close</span>
                 </button>
               </div>
+              {isPreviewModeEnabled && (
+                <div className="px-8 py-3 bg-amber-50 border-b border-amber-100 flex items-center gap-2">
+                  <span className="material-symbols-outlined text-amber-600 text-sm">visibility</span>
+                  <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest">Preview Mode — Shipment will not be saved</p>
+                </div>
+              )}
               <div className="p-8 overflow-y-auto flex-1 space-y-6">
                 <div className="grid grid-cols-2 gap-4">
                   <div>
@@ -676,6 +802,50 @@ export default function ShippingCenter() {
                   </div>
                 </div>
 
+                {sourceItems.length > 0 && (
+                  <div className="bg-sky-50 rounded-2xl p-5 border border-sky-100">
+                    <p className="text-[10px] font-black text-sky-600 uppercase tracking-widest mb-3 flex items-center gap-1"><span className="material-symbols-outlined text-xs">inventory_2</span>Source Items</p>
+                    <div className="space-y-1.5">
+                      {sourceItems.map(item => (
+                        <div key={item.id} className="flex justify-between items-center bg-white/80 px-3 py-2 rounded-lg text-xs">
+                          <span className="font-bold text-slate-700">{item.name}</span>
+                          <div className="flex items-center gap-3">
+                            <span className="text-slate-500">x{item.quantity}</span>
+                            {item.price !== undefined && <span className="font-black text-primary">${(item.price * item.quantity).toFixed(2)}</span>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div>
+                  <div className="flex justify-between items-center mb-3">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1"><span className="material-symbols-outlined text-xs">package_2</span>Packages</p>
+                    <button onClick={() => addPackageRow('create')} className="text-[10px] font-black text-primary uppercase tracking-widest flex items-center gap-0.5 hover:text-primary/70"><span className="material-symbols-outlined text-sm">add</span>Add Package</button>
+                  </div>
+                  {newPackages.length === 0 ? (
+                    <p className="text-xs text-slate-400 italic">No packages added yet. Click Add Package above.</p>
+                  ) : (
+                    <div className="space-y-3">
+                      {newPackages.map((pkg, i) => (
+                        <div key={pkg.id} className="bg-slate-50 rounded-xl p-4 space-y-2 relative">
+                          <div className="flex justify-between items-center mb-1">
+                            <p className="text-[10px] font-black text-slate-400 uppercase">Package {i + 1}</p>
+                            <button onClick={() => removePackage('create', pkg.id)} className="text-slate-400 hover:text-red-500"><span className="material-symbols-outlined text-sm">close</span></button>
+                          </div>
+                          <div className="grid grid-cols-3 gap-2">
+                            <input type="number" step="0.1" placeholder="Weight" value={pkg.weight || ''} onChange={e => updatePackageField('create', pkg.id, 'weight', e.target.value ? parseFloat(e.target.value) : undefined)} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                            <input type="number" step="0.1" placeholder="L x W x H" value={pkg.length || ''} onChange={e => updatePackageField('create', pkg.id, 'length', e.target.value ? parseFloat(e.target.value) : undefined)} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                            <input type="number" step="0.01" placeholder="Declared $" value={pkg.declaredValue || ''} onChange={e => updatePackageField('create', pkg.id, 'declaredValue', e.target.value ? parseFloat(e.target.value) : undefined)} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                          </div>
+                          <input placeholder="Contents summary" value={pkg.contentsSummary || ''} onChange={e => updatePackageField('create', pkg.id, 'contentsSummary', e.target.value || undefined)} className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Carrier</label>
@@ -692,15 +862,17 @@ export default function ShippingCenter() {
                     </select>
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-4">
+                <div className={`grid ${canViewCosts ? 'grid-cols-2' : 'grid-cols-1'} gap-4`}>
                   <div>
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Tracking Number</label>
                     <input value={newTracking} onChange={e => setNewTracking(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 font-mono" placeholder="Enter if available" />
                   </div>
-                  <div>
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Shipping Cost ($)</label>
-                    <input type="number" step="0.01" value={newCost} onChange={e => setNewCost(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" placeholder="0.00" />
-                  </div>
+                  {canViewCosts && (
+                    <div>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Shipping Cost ($)</label>
+                      <input type="number" step="0.01" value={newCost} onChange={e => setNewCost(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" placeholder="0.00" />
+                    </div>
+                  )}
                 </div>
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Notes</label>
@@ -711,10 +883,10 @@ export default function ShippingCenter() {
                 <button onClick={() => setShowCreateModal(false)} className="flex-1 py-3 bg-white text-slate-500 rounded-xl font-black text-[10px] uppercase tracking-widest border border-slate-200">Cancel</button>
                 <button
                   onClick={handleCreateShipment}
-                  disabled={!newOrigin.name || !newOrigin.line1 || !newDest.name || !newDest.line1}
+                  disabled={!newOrigin.name || !newOrigin.line1 || !newDest.name || !newDest.line1 || isPreviewModeEnabled}
                   className="flex-1 py-3 bg-primary text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-primary/20 disabled:opacity-50"
                 >
-                  Create Shipment
+                  {isPreviewModeEnabled ? 'Preview Only' : 'Create Shipment'}
                 </button>
               </div>
             </motion.div>

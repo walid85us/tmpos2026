@@ -1,0 +1,412 @@
+Shipping Module / Shipping Center — Critical Functional Recovery Pass
+
+This is not a cosmetic fix.
+This is not a shallow patch pass.
+This is a focused functional recovery pass for the Shipping Module / Shipping Center because QA shows the module shell exists, but the operational workflow is still broken.
+
+You must treat this as a senior-level shipping systems correction pass.
+
+Expert-role stack you must operate as:
+- Principal React + TypeScript SaaS engineer
+- Firebase / Firestore state and data-flow architect
+- Enterprise UX workflow architect
+- Senior shipping systems expert with 25 years of experience in parcel operations, fulfillment workflows, reverse logistics, retail shipping, repair return logistics, and warehouse/fulfillment execution
+- Senior shipping product designer with experience designing high-throughput fulfillment-center-style workflows comparable in rigor to Amazon-scale operational thinking
+- QA-minded side auditor
+- Systems thinker
+
+Parallel execution modes required:
+1) Side Auditor
+   - Continuously inspect for inert handlers, broken modal triggers, dead buttons, silent early returns, invalid state wiring, lifecycle leakage, permission leakage, preview mode violations, and false-positive UI that looks enabled but does nothing.
+2) Systems Thinker
+   - Make Shipping behave like a real operational module that fits this exact product:
+     - multi-tenant repair/POS SaaS
+     - Firebase/Firestore
+     - preserve auth
+     - preserve preview mode
+     - preserve RBAC / sub-permissions
+     - preserve lifecycle gating
+     - preserve platform/store hierarchy
+     - preserve current design baseline exactly
+
+Read and understand before changing anything:
+- Ref.txt
+- replit.md
+
+Do not redesign the app.
+Do not start future workstreams.
+Do not add speculative Phase 2 or Phase 3 shipping features.
+Do not introduce shallow fixes.
+Do not leave buttons clickable-looking but functionally inert.
+Do not silently fail on save or confirm actions.
+
+--------------------------------------------------
+CURRENT QA TRUTH — THESE ARE REAL FAILURES
+--------------------------------------------------
+
+QA confirms the following defects:
+
+1) Create Shipment from source modules is not working
+- Invoice: Create Shipment not clickable / flow does not open
+- Repair: Create Shipment not clickable / flow does not open
+- Transfer: Create Shipment not clickable / flow does not open
+- RMA: Create Shipment not clickable / flow does not open
+
+2) Source prefill is not working
+- Source Reference Number or source-linked context is not populating source data correctly
+- Destination/customer/context values are not being filled correctly from the source
+
+3) Shipment create/save/edit is not working
+- Changes are not being saved or visible
+- Draft shipments cannot be edited properly
+- Save Changes appears to do nothing
+
+4) Status transitions are not working
+- Confirmation dialog can appear
+- Confirm action does not actually update the status
+
+5) Preview mode validation is still blocked
+- Because normal mode write flow is broken, preview mode behavior cannot be trusted or validated yet
+
+6) Package behavior is insufficient
+- Package section should be informed by source items, especially invoice items
+- During shipment creation, package/item selection should be available where appropriate
+- Shipment content/package data should remain editable before “Label Created”
+- After “Label Created,” editability should become more controlled
+
+--------------------------------------------------
+MANDATORY GOAL
+--------------------------------------------------
+
+Recover the Shipping Module / Shipping Center into a genuinely functional Phase 1 shipping module for this system.
+
+It must work as an actual operational shipping center, not just a UI shell.
+
+This pass must make the module function correctly for:
+- creation
+- source prefill
+- save/edit
+- package handling
+- status transitions
+- preview mode safety
+- lifecycle gating
+- source linkage
+- RBAC + plan gating
+
+--------------------------------------------------
+PHASE 1 PRODUCT DIRECTION — MUST FIT THIS APP
+--------------------------------------------------
+
+You must align this module with the intended Phase 1 direction for this product:
+
+Phase 1 must center on:
+- shipping architecture
+- provider adapter-ready structure
+- address validation-ready structure
+- rates-ready structure
+- labels-ready structure
+- tracking
+- invoice / repair / transfer / RMA linkage
+- print label readiness
+
+This specific app should position shipping as:
+- Shipping Module / Shipping Center
+- shared engine
+- starts from Invoices, Repairs, Transfers, and RMA
+- future first provider adapter such as EasyPost or Shippo
+- thermal-label-ready printing path later
+- tracking timeline visible on customer, repair, invoice, and transfer surfaces later as appropriate
+- strict auditability
+- strict status consistency
+
+Do not build live carrier APIs in this pass unless already partially scaffolded.
+But do make the architecture and workflows correct for that future.
+
+--------------------------------------------------
+BLOCKER GROUP A — SOURCE ACTIONS MUST ACTUALLY OPEN
+--------------------------------------------------
+
+Fix the broken execution path for all source entry points.
+
+Required:
+- From Invoice, Repair, Transfer, and RMA, Create Shipment must be visibly available when lifecycle-eligible
+- When clicked in normal mode, it must actually open the correct shipment creation flow
+- No dead button state
+- No onClick wiring issues
+- No incorrect guard ordering
+- No silent return
+- No stale selected-record dependency
+- No modal/dialog state mismatch
+- No permission/plan checks accidentally blocking valid cases
+
+You must inspect the exact event flow from click → guard checks → source extraction → create flow open.
+
+--------------------------------------------------
+BLOCKER GROUP B — SOURCE PREFILL MUST WORK RELIABLY
+--------------------------------------------------
+
+When shipment creation starts from a valid source record, prefill must execute correctly.
+
+At minimum, prefill the following from the source where applicable:
+- sourceType
+- sourceId
+- source reference number
+- recipient / customer / vendor / store destination name
+- destination address
+- origin store / location
+- shipment purpose / shipment type
+- relevant notes/context
+
+Reliability requirements:
+- Prefer stable IDs over display names
+- Use clear source-to-shipment mapping functions, not scattered inline logic
+- No partial prefill that leaves the user with blank destination info when the source already contains it
+- If source data is incomplete, show that clearly instead of silently failing
+
+Supported source contexts:
+- Invoice
+- Repair
+- Transfer
+- RMA
+
+--------------------------------------------------
+BLOCKER GROUP C — SHIPMENT CREATE / SAVE / EDIT MUST WORK
+--------------------------------------------------
+
+Creation, editing, and save persistence must actually function.
+
+Required:
+- Create Shipment must create a shipment record correctly
+- Edit Draft Shipment must allow editing and saving correctly
+- Save buttons must execute
+- Validation errors must be surfaced visibly
+- No silent failures
+- Reopening the shipment must show persisted changes
+- Shipping Center list and detail must stay synchronized after create/save/edit
+
+Inspect:
+- local state write path
+- Firestore/mock/store-local write path
+- modal close timing
+- stale state copies
+- immutable updates
+- selected shipment state refresh
+- list/detail synchronization after updates
+
+--------------------------------------------------
+BLOCKER GROUP D — PACKAGE / ITEM WORKFLOW MUST BE OPERATIONALLY CORRECT
+--------------------------------------------------
+
+This is important.
+
+Package handling must behave more like a real shipping workflow for this system.
+
+Required behavior:
+1) Shipment package/content should be informed by source items where appropriate
+   - especially Invoice items
+   - and other source records where item/content context exists
+
+2) During shipment creation, the user should be able to:
+   - see relevant source items
+   - choose/select which items are included in the shipment where appropriate
+   - define package rows
+   - assign item/content notes into packages in a practical way without overengineering
+
+3) Editability rules:
+   - before shipment reaches “Label Created,” shipment content/package data should remain editable
+   - after “Label Created,” editing should become more controlled according to lifecycle rules
+   - do not fully lock the shipment too early
+   - do not leave post-label-created shipments fully open for uncontrolled edits
+
+4) Persistence:
+   - multiple package rows must save correctly
+   - reopening must show correct package data
+   - package changes must reflect the authoritative shipment record
+
+Do not build an overly complex warehouse management system.
+But do make package behavior credible, useful, and aligned with this app.
+
+--------------------------------------------------
+BLOCKER GROUP E — STATUS TRANSITIONS MUST EXECUTE
+--------------------------------------------------
+
+Status transitions must actually work.
+
+Current defect:
+- confirm dialog appears
+- clicking Confirm does nothing
+
+Required:
+- valid status transitions must update the record
+- invalid transitions must remain blocked
+- list and detail views must both update
+- confirmation dialog must not be a dead-end UI
+
+Inspect:
+- confirm handler wiring
+- selected shipment state at confirm time
+- transition guard logic
+- preview mode guard ordering
+- save/update pipeline after status change
+
+At minimum, the following lifecycle states must behave coherently:
+- Draft
+- Ready / Prepared
+- Label Created
+- Packed
+- Dispatched / Handed Off
+- In Transit
+- Delivered
+- Exception
+- Cancelled
+
+Use the current codebase naming if slightly different, but keep the lifecycle operationally coherent.
+
+--------------------------------------------------
+BLOCKER GROUP F — PREVIEW MODE MUST BE SAFE AND ALSO NOT BREAK NORMAL MODE
+--------------------------------------------------
+
+Preview mode requirements remain strict:
+- preview mode = safe viewing only
+- no writes committed
+- no create shipment commit
+- no save edit commit
+- no status transition commit
+- no tracking/event commit
+- no cancel commit
+
+But:
+- restoring preview safety must not break normal mode again
+- do not solve preview mode by accidentally blocking valid normal-mode execution
+
+You must explicitly verify both:
+1) normal mode writes work
+2) preview mode writes do not commit
+
+--------------------------------------------------
+BLOCKER GROUP G — LIFECYCLE GATING MUST MATCH BUSINESS INTENT
+--------------------------------------------------
+
+Required lifecycle gating:
+
+Invoices:
+- Create Shipment available only when invoice is Paid
+
+Repair Tickets:
+- Create Shipment available when repair is in the intended final-service eligible state
+- QA expectation is that Completed must be allowed
+- If Ready for Pickup is also intentionally allowed, keep it only if it is truly correct for the product’s repair lifecycle
+
+RMAs:
+- Keep correct gating for valid non-closed / non-rejected operational records
+
+Transfers:
+- Keep correct gating for valid non-received / non-cancelled operational records
+
+Do not weaken lifecycle controls.
+Do not incorrectly hide valid creation states.
+Do not show Create Shipment for invalid states.
+
+--------------------------------------------------
+PLANS / FEATURES / PERMISSIONS REQUIREMENTS
+--------------------------------------------------
+
+Do not break the existing completed gating architecture.
+
+Shipping must still respect:
+- System Owner Plans & Features matrix
+- Store Permissions Matrix
+- runtime dual gating
+
+A shipment action is valid only when:
+- shipping feature is entitled for that tenant/plan
+- user has required shipping permissions
+- source record is in an eligible lifecycle state
+- preview mode is not active for write actions
+
+Do not bypass any one of these.
+Do not make the UI appear actionable when one of these conditions fails.
+
+--------------------------------------------------
+IMPLEMENTATION APPROACH REQUIRED
+--------------------------------------------------
+
+Follow this exact correction discipline:
+
+1) Diagnose root cause first
+   - trace source button click handlers
+   - trace modal state open/close logic
+   - trace save/update write paths
+   - trace status confirm pipeline
+   - trace preview mode branching
+   - trace package persistence path
+
+2) Consolidate shipping logic
+   - centralize repeated source-to-shipment mapping
+   - centralize shipment save/update behavior where practical
+   - reduce fragile inline handlers that diverge across modules
+
+3) Repair execution path end to end
+   - source action → create flow → prefill → save → reopen → edit → status transition
+
+4) Repair package workflow
+   - source items visible/selectable where appropriate
+   - package rows save/reopen correctly
+   - pre/post Label Created editability enforced correctly
+
+5) Validate dual-mode behavior
+   - normal mode works
+   - preview mode blocks writes
+
+6) Update documentation
+   - document the corrected execution flow
+   - document package/item behavior
+   - document lifecycle/editability rules around Label Created
+
+--------------------------------------------------
+NON-NEGOTIABLE QUALITY BAR
+--------------------------------------------------
+
+Do not claim completion unless all of the following are true:
+
+- Create Shipment opens from all 4 source modules
+- source prefill works
+- shipment create/save/edit works
+- package rows save correctly
+- source-informed item/package handling exists where appropriate
+- status confirm actions execute correctly
+- preview mode blocks writes
+- normal mode still works
+- lifecycle gating is correct
+- no regression in plans/features, permissions matrix, or prior workstreams
+
+--------------------------------------------------
+DOCUMENTATION REQUIREMENT
+--------------------------------------------------
+
+Update replit.md to reflect:
+- corrected shipping execution flow
+- source prefill mapping behavior
+- package/item selection behavior
+- editability rules before vs after Label Created
+- preview mode write-blocking behavior
+- lifecycle gating for Invoice / Repair / Transfer / RMA
+
+--------------------------------------------------
+OUTPUT FORMAT REQUIRED
+--------------------------------------------------
+
+When finished, reply ONLY in this structure:
+
+1. Recovery Pass Status
+2. Root Cause Findings
+3. Source Action Execution Fixes
+4. Source Prefill Fixes
+5. Create/Save/Edit Fixes
+6. Package / Item Workflow Fixes
+7. Status Transition Fixes
+8. Preview Mode vs Normal Mode Validation
+9. Lifecycle Gating Confirmed
+10. Files Changed
+11. Documentation Updated
+12. Non-Regression Notes

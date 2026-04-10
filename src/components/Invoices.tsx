@@ -1,14 +1,17 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState, SEED_POS_OPERATORS } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
 import { tenantRoles } from '../context/accessConfig';
-import type { Invoice, RepairService, Shipment, ShipmentEvent } from '../types';
+import type { Invoice, RepairService } from '../types';
+import type { ShipmentPrefill } from './ShippingCenter';
 import { renderTemplate, buildLineItemsHtml, buildReceiptLineItemsHtml } from '../utils/templateBuilder';
 
 export default function Invoices() {
-  const { invoices, addInvoice, updateInvoice, customers, services, serviceCategories, approvedStockItems, storeBranding, documentTemplates, shipments, addShipment } = useStoreLocalState();
+  const { invoices, addInvoice, updateInvoice, customers, services, serviceCategories, approvedStockItems, storeBranding, documentTemplates, shipments } = useStoreLocalState();
   const { checkPermission, checkSubPermission, canAccess, isPreviewModeEnabled } = useAccess();
+  const navigate = useNavigate();
   const canReopenInvoice = checkSubPermission('reopen_invoice');
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('All');
@@ -810,27 +813,18 @@ export default function Invoices() {
                       </span>
                     ) : (
                       <button onClick={() => {
-                        if (isPreviewModeEnabled) return;
-                        const now = new Date().toISOString();
                         const customer = customers.find(c => c.id === detailInvoice.customerId);
                         const addrParts = (customer?.address || '').split(',').map(s => s.trim());
-                        const newShipment: Shipment = {
-                          id: `shp-${Date.now()}`,
-                          shipmentNumber: `SHP-${new Date().getFullYear()}-${String(shipments.length + 1).padStart(3, '0')}`,
-                          type: 'customer_delivery',
-                          status: 'Draft',
+                        const prefill: ShipmentPrefill = {
                           sourceType: 'invoice',
                           sourceId: detailInvoice.id,
                           sourceNumber: detailInvoice.invoiceNumber,
+                          type: 'customer_delivery',
                           originAddress: { name: 'Main Warehouse', line1: '123 Main St', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US' },
                           destinationAddress: { name: customer?.name || detailInvoice.customerName || 'Customer', line1: addrParts[0] || '', city: addrParts[1] || '', state: addrParts[2] || '', postalCode: addrParts[3] || '', country: 'US', email: customer?.email, phone: customer?.phone },
-                          packages: [],
-                          events: [{ id: `evt-${Date.now()}`, timestamp: now, status: 'Created', description: `Shipment created from invoice ${detailInvoice.invoiceNumber}`, performedBy: 'Current User' }],
-                          createdBy: 'Current User',
-                          createdAt: now,
-                          updatedAt: now,
+                          sourceItems: detailInvoice.items.map(i => ({ id: i.id, name: i.name, quantity: i.quantity, price: i.price })),
                         };
-                        addShipment(newShipment);
+                        navigate('/shipping', { state: { openCreate: true, prefill } });
                       }}
                         className="px-4 py-2 bg-white text-slate-600 border border-slate-200 rounded-xl font-black text-[10px] uppercase tracking-widest shadow-sm hover:bg-slate-50 transition-all flex items-center gap-1.5">
                         <span className="material-symbols-outlined text-sm">package_2</span> Create Shipment

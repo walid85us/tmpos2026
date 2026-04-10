@@ -1,9 +1,10 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState, StockItem } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
-import { StockMovement, RefurbishmentJob, TransferLineItem, Shipment, ShipmentEvent } from '../types';
+import { StockMovement, RefurbishmentJob, TransferLineItem } from '../types';
+import type { ShipmentPrefill } from './ShippingCenter';
 import ContextualHelp from './ContextualHelp';
 
 type InventoryTab = 'inventory' | 'movements' | 'suggestive' | 'trade-in' | 'refurb' | 'transfer' | 'count' | 'bills' | 'giftcards' | 'bundles';
@@ -19,9 +20,10 @@ const Inventory: React.FC = () => {
     tradeIns, addTradeIn, updateTradeIn, deleteTradeIn,
     refurbishmentJobs, addRefurbishmentJob, updateRefurbishmentJob,
     suppliers, customers, storeLocations, getItemMovements,
-    shipments, addShipment,
+    shipments,
   } = useStoreLocalState();
   const { checkPermission, checkSubPermission, canAccess, isPreviewModeEnabled } = useAccess();
+  const navigate = useNavigate();
   const hasInventoryPermission = checkPermission('inventory', 'manage');
   const hasInventoryEdit = checkPermission('inventory', 'edit');
   const hasInventoryView = checkPermission('inventory', 'view');
@@ -1666,26 +1668,17 @@ const Inventory: React.FC = () => {
                           ))
                         ) : (
                           <button onClick={() => {
-                            if (isPreviewModeEnabled) return;
-                            const now = new Date().toISOString();
-                            const newShipment: Shipment = {
-                              id: `shp-${Date.now()}`,
-                              shipmentNumber: `SHP-${new Date().getFullYear()}-${String(shipments.length + 1).padStart(3, '0')}`,
-                              type: 'store_transfer',
-                              status: 'Draft',
+                            const prefill: ShipmentPrefill = {
                               sourceType: 'transfer',
                               sourceId: t.id,
                               sourceNumber: t.transferNumber,
+                              type: 'store_transfer',
                               originAddress: { name: t.fromStore, line1: '123 Main St', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US' },
                               destinationAddress: { name: t.toStore, line1: '', city: '', state: '', postalCode: '', country: 'US' },
-                              packages: itemsSummary ? [{ id: `pkg-${Date.now()}`, contentsSummary: itemsSummary }] : [],
                               notes: `Transfer ${t.transferNumber}: ${t.fromStore} → ${t.toStore}`,
-                              events: [{ id: `evt-${Date.now()}`, timestamp: now, status: 'Created', description: `Shipment created from transfer ${t.transferNumber}`, performedBy: 'Current User' }],
-                              createdBy: 'Current User',
-                              createdAt: now,
-                              updatedAt: now,
+                              sourceItems: t.items.map(i => ({ id: `trf-item-${i.name}`, name: i.name, quantity: i.quantity })),
                             };
-                            addShipment(newShipment);
+                            navigate('/shipping', { state: { openCreate: true, prefill } });
                           }}
                             className="w-full py-2 bg-white text-primary border border-slate-200 rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-slate-50 transition-all flex items-center justify-center gap-1.5">
                             <span className="material-symbols-outlined text-sm">add</span> Create Shipment

@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
-import { PurchaseOrder, RMA, SupplierRefundEntry, Shipment, ShipmentEvent } from '../types';
+import { PurchaseOrder, RMA, SupplierRefundEntry } from '../types';
+import type { ShipmentPrefill } from './ShippingCenter';
 
 type SupplyTab = 'po' | 'grn' | 'rma' | 'suppliers';
 
@@ -15,9 +17,10 @@ export default function SupplyChain() {
     approvedStockItems, updateStockItem,
     addStockMovement,
     supplierRefundEntries, addSupplierRefundEntry,
-    shipments, addShipment,
+    shipments,
   } = useStoreLocalState();
   const { checkSubPermission, canAccess, isPreviewModeEnabled } = useAccess();
+  const navigate = useNavigate();
   const canManagePOs = checkSubPermission('manage_purchase_orders');
   const canManageRMAs = checkSubPermission('manage_rmas');
   const canManageSuppliers = checkSubPermission('manage_suppliers');
@@ -629,25 +632,16 @@ export default function SupplyChain() {
                             ))
                           ) : (
                             <button onClick={() => {
-                              if (isPreviewModeEnabled) return;
-                              const now = new Date().toISOString();
-                              const newShipment: Shipment = {
-                                id: `shp-${Date.now()}`,
-                                shipmentNumber: `SHP-${new Date().getFullYear()}-${String(shipments.length + 1).padStart(3, '0')}`,
-                                type: 'rma_outbound',
-                                status: 'Draft',
+                              const prefill: ShipmentPrefill = {
                                 sourceType: 'rma',
                                 sourceId: liveRMA.id,
                                 sourceNumber: liveRMA.rmaNumber,
+                                type: 'rma_outbound',
                                 originAddress: { name: 'Main Warehouse', line1: '123 Main St', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US' },
                                 destinationAddress: { name: liveRMA.supplierName, line1: supplierAddr[0] || '', city: supplierAddr[1] || '', state: supplierAddr[2] || '', postalCode: supplierAddr[3] || '', country: 'US', email: supplier?.email, phone: supplier?.phone },
-                                packages: [],
-                                events: [{ id: `evt-${Date.now()}`, timestamp: now, status: 'Created', description: `Shipment created from RMA ${liveRMA.rmaNumber}`, performedBy: 'Current User' }],
-                                createdBy: 'Current User',
-                                createdAt: now,
-                                updatedAt: now,
+                                sourceItems: liveRMA.items.map(i => ({ id: `rma-item-${i.name}`, name: i.name, quantity: i.quantity })),
                               };
-                              addShipment(newShipment);
+                              navigate('/shipping', { state: { openCreate: true, prefill } });
                             }}
                               className="w-full py-2 bg-white text-primary border border-slate-200 rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-slate-50 transition-all flex items-center justify-center gap-1.5">
                               <span className="material-symbols-outlined text-sm">add</span> Create RMA Shipment

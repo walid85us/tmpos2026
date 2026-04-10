@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { RepairTicket, RepairTicketStatus, TicketComment, RepairServiceLineItem, Invoice } from '../types';
 import { useStoreLocalState, SEED_POS_OPERATORS } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
+import type { ShipmentPrefill } from './ShippingCenter';
 import ContextualHelp from './ContextualHelp';
 
 const ALL_STATUSES: RepairTicketStatus[] = ['Pending', 'Diagnosed', 'In Progress', 'Awaiting Parts', 'Ready for Pickup', 'Completed', 'Delivered', 'Cancelled'];
@@ -79,7 +80,7 @@ export default function RepairTickets() {
     customers, services, serviceCategories, approvedStockItems,
     invoices, addInvoice, posOperator,
     updateStockItem, addStockMovement,
-    shipments, addShipment,
+    shipments,
   } = useStoreLocalState();
   const navigate = useNavigate();
   const { checkPermission, checkSubPermission, effectiveRole, session, canAccess, isPreviewModeEnabled } = useAccess();
@@ -995,25 +996,16 @@ export default function RepairTickets() {
                               </div>
                             ) : (
                               <button onClick={() => {
-                                if (isPreviewModeEnabled) return;
-                                const now = new Date().toISOString();
-                                const newShipment: Shipment = {
-                                  id: `shp-${Date.now()}`,
-                                  shipmentNumber: `SHP-${new Date().getFullYear()}-${String(shipments.length + 1).padStart(3, '0')}`,
-                                  type: 'repair_return',
-                                  status: 'Draft',
+                                const prefill: ShipmentPrefill = {
                                   sourceType: 'repair',
                                   sourceId: selectedTicket.id,
                                   sourceNumber: selectedTicket.ticketNumber,
+                                  type: 'repair_return',
                                   originAddress: { name: 'Main Warehouse', line1: '123 Main St', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US' },
                                   destinationAddress: { name: selectedTicket.customerName, line1: addrParts[0] || '', city: addrParts[1] || '', state: addrParts[2] || '', postalCode: addrParts[3] || '', country: 'US', phone: selectedTicket.customerPhone, email: selectedTicket.customerEmail },
-                                  packages: [],
-                                  events: [{ id: `evt-${Date.now()}`, timestamp: now, status: 'Created', description: `Shipment created from repair ${selectedTicket.ticketNumber}`, performedBy: 'Current User' }],
-                                  createdBy: 'Current User',
-                                  createdAt: now,
-                                  updatedAt: now,
+                                  sourceItems: [{ id: selectedTicket.id, name: `${selectedTicket.deviceType} - ${selectedTicket.issueDescription.slice(0, 50)}`, quantity: 1 }],
                                 };
-                                addShipment(newShipment);
+                                navigate('/shipping', { state: { openCreate: true, prefill } });
                               }}
                                 className="w-full py-2.5 bg-white text-primary border border-slate-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-slate-50 transition-all flex items-center justify-center gap-1.5">
                                 <span className="material-symbols-outlined text-sm">add</span> Create Shipment
