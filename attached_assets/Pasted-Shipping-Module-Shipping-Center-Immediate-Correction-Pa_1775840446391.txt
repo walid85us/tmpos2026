@@ -1,0 +1,90 @@
+Shipping Module / Shipping Center — Immediate Correction Pass
+
+Do not redesign anything.
+Do not broaden scope.
+Do not touch unrelated workstreams.
+
+Your latest fix is not acceptable yet because it removed preview-mode write blocking again, which violates this product’s required behavior.
+
+For this app:
+- preview mode is a real safety mode
+- preview mode must allow safe viewing only
+- preview mode must never commit writes
+- RBAC is NOT a replacement for preview-mode write blocking
+
+You must correct this properly without breaking normal-mode QA execution.
+
+--------------------------------------------------
+REQUIRED CORRECTION
+--------------------------------------------------
+
+A) Separate normal mode from preview mode correctly
+You stated that isPreviewModeEnabled is always true during dev sessions. That means your preview-mode detection or environment handling is wrong for QA/testing flow.
+
+You must fix the root cause properly.
+
+Required behavior:
+- In normal mode, valid shipping write actions must work:
+  - create shipment
+  - save shipment
+  - edit shipment
+  - status transition
+  - tracking/event updates
+- In preview mode, those same write actions must be blocked
+
+Do NOT solve this by removing preview-mode protection.
+Do NOT solve this by making preview mode writable.
+Do NOT solve this by relying on RBAC only.
+
+B) Confirm the remaining operational fixes explicitly
+You must verify and explicitly confirm the following:
+
+1. Repair entry works
+- Eligible Repair Create Shipment opens correctly
+
+2. RMA workflow is correct
+- RMA does NOT auto-create shipment just because an RMA exists
+- RMA shows Create Shipment when no shipment exists
+- RMA shows Open Shipment when a shipment already exists
+
+3. Source prefill works
+- Invoice, Repair, Transfer, and RMA all correctly prefill:
+  - source reference
+  - recipient/destination name
+  - destination address
+  - origin/store context
+  - shipment type/purpose where applicable
+
+4. Save/edit works
+- Shipment can be created and saved in normal mode
+- Draft shipment can be edited and saved in normal mode
+- Multiple package rows persist correctly
+
+5. Status transitions work
+- In normal mode, Confirm actually changes shipment status
+- List and detail both reflect the change
+
+--------------------------------------------------
+IMPLEMENTATION RULE
+--------------------------------------------------
+
+If your current preview-mode flag is incorrectly always true during development/testing, fix that root cause or use the same correct runtime distinction already used elsewhere in the app.
+
+Do not remove preview-mode safety.
+Do not fake QA success by making preview mode writable.
+
+--------------------------------------------------
+OUTPUT FORMAT REQUIRED
+--------------------------------------------------
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Normal Mode vs Preview Mode Separation Fixed
+3. Repair Entry Confirmed
+4. RMA Workflow Confirmed
+5. Source Prefill Confirmed
+6. Save/Edit Confirmed
+7. Status Transition Confirmed
+8. Files Changed
+9. Non-Regression Notes

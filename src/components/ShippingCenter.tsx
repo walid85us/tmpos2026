@@ -75,7 +75,7 @@ function formatDateTime(iso: string): string {
 
 export default function ShippingCenter() {
   const { shipments, addShipment, updateShipment } = useStoreLocalState();
-  const { checkPermission, checkSubPermission } = useAccess();
+  const { checkPermission, checkSubPermission, isPreviewModeEnabled } = useAccess();
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -168,6 +168,7 @@ export default function ShippingCenter() {
   const isPreDispatch = (status: ShipmentStatus) => ['Draft', 'Ready', 'Label Created', 'Packed'].includes(status);
 
   function handleStatusTransition(id: string, newStatus: ShipmentStatus) {
+    if (isPreviewModeEnabled) { setShowStatusConfirm(null); return; }
     const now = new Date().toISOString();
     const updates: Partial<Shipment> = { status: newStatus, updatedAt: now };
     const shipment = shipments.find(s => s.id === id);
@@ -189,6 +190,7 @@ export default function ShippingCenter() {
   }
 
   function handleCreateShipment() {
+    if (isPreviewModeEnabled) { setShowCreateModal(false); return; }
     const now = new Date().toISOString();
     const newId = `shp-${Date.now()}`;
     const shipment: Shipment = {
@@ -220,6 +222,7 @@ export default function ShippingCenter() {
   }
 
   function handleSaveEdit() {
+    if (isPreviewModeEnabled) { setEditingShipment(null); return; }
     if (!editingShipment) return;
     const now = new Date().toISOString();
     updateShipment(editingShipment, {
@@ -235,6 +238,7 @@ export default function ShippingCenter() {
   }
 
   function handleAddEvent(shipmentId: string) {
+    if (isPreviewModeEnabled) { setAddEventModal(null); setEventDescription(''); setEventLocation(''); return; }
     if (!eventDescription.trim()) return;
     const shipment = shipments.find(s => s.id === shipmentId);
     if (!shipment) return;
@@ -658,6 +662,12 @@ export default function ShippingCenter() {
                   <span className="material-symbols-outlined">close</span>
                 </button>
               </div>
+              {isPreviewModeEnabled && (
+                <div className="px-8 py-3 bg-amber-50 border-b border-amber-100 flex items-center gap-2">
+                  <span className="material-symbols-outlined text-amber-600 text-sm">visibility</span>
+                  <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest">Preview Mode — Changes will not be saved</p>
+                </div>
+              )}
               <div className="p-8 overflow-y-auto flex-1 space-y-4">
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Carrier</label>
@@ -722,8 +732,8 @@ export default function ShippingCenter() {
               </div>
               <div className="p-8 border-t border-slate-100 flex gap-3 shrink-0">
                 <button onClick={() => setEditingShipment(null)} className="flex-1 py-3 bg-white text-slate-500 rounded-xl font-black text-[10px] uppercase tracking-widest border border-slate-200">Cancel</button>
-                <button onClick={handleSaveEdit} className="flex-1 py-3 bg-primary text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-primary/20">
-                  Save Changes
+                <button onClick={handleSaveEdit} disabled={isPreviewModeEnabled} className="flex-1 py-3 bg-primary text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-primary/20 disabled:opacity-50">
+                  {isPreviewModeEnabled ? 'Preview Only' : 'Save Changes'}
                 </button>
               </div>
             </motion.div>
@@ -743,6 +753,12 @@ export default function ShippingCenter() {
                   <span className="material-symbols-outlined">close</span>
                 </button>
               </div>
+              {isPreviewModeEnabled && (
+                <div className="px-8 py-3 bg-amber-50 border-b border-amber-100 flex items-center gap-2">
+                  <span className="material-symbols-outlined text-amber-600 text-sm">visibility</span>
+                  <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest">Preview Mode — Shipment will not be saved</p>
+                </div>
+              )}
               <div className="p-8 overflow-y-auto flex-1 space-y-6">
                 <div className="grid grid-cols-2 gap-4">
                   <div>
@@ -867,10 +883,10 @@ export default function ShippingCenter() {
                 <button onClick={() => setShowCreateModal(false)} className="flex-1 py-3 bg-white text-slate-500 rounded-xl font-black text-[10px] uppercase tracking-widest border border-slate-200">Cancel</button>
                 <button
                   onClick={handleCreateShipment}
-                  disabled={!newOrigin.name || !newOrigin.line1 || !newDest.name || !newDest.line1}
+                  disabled={!newOrigin.name || !newOrigin.line1 || !newDest.name || !newDest.line1 || isPreviewModeEnabled}
                   className="flex-1 py-3 bg-primary text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-primary/20 disabled:opacity-50"
                 >
-                  Create Shipment
+                  {isPreviewModeEnabled ? 'Preview Only' : 'Create Shipment'}
                 </button>
               </div>
             </motion.div>
