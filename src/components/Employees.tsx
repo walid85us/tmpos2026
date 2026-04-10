@@ -79,7 +79,7 @@ const LEVEL_COLORS: Record<string, string> = {
 };
 
 export default function Employees() {
-  const { session, tenant, setPreviewTenant, isPreviewModeEnabled, tenantRolesState = [], addTenantRole, updateTenantRole, updateTenantRoleSubPermission, canAccess, checkPermission, checkSubPermission } = useAccess();
+  const { session, tenant, setPreviewTenant, isDevSession, tenantRolesState = [], addTenantRole, updateTenantRole, updateTenantRoleSubPermission, canAccess, checkPermission, checkSubPermission } = useAccess();
   const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<'list' | 'time' | 'roles' | 'permissions' | 'activity' | 'payroll'>('list');
   const [employees, setEmployees] = useState<Employee[]>(MOCK_EMPLOYEES);
@@ -288,7 +288,7 @@ export default function Employees() {
         };
         setEmployees(prev => [...prev, newEmployee]);
         logActivity(newEmployee.id, `${firstName} ${lastName}`, 'Employee Added', `New employee added with role ${roleId}`);
-        if (isPreviewModeEnabled && tenant && tenant.onboardingChecklist && !tenant.onboardingChecklist.teamInvited) {
+        if (isDevSession && tenant && tenant.onboardingChecklist && !tenant.onboardingChecklist.teamInvited) {
           const updatedChecklist = { ...tenant.onboardingChecklist, teamInvited: true };
           const checklistKeys: string[] = (planFeatures[tenant.plan] || []).includes('employees')
             ? ['storeSetupComplete', 'teamInvited']

@@ -143,9 +143,12 @@ const storeScenarios = [
 const DevSessionSwitcher: React.FC = () => {
   const navigate = useNavigate();
   const { 
-    enablePreviewMode, 
-    disablePreviewMode, 
-    isPreviewModeEnabled, 
+    activateDevSession, 
+    deactivateDevSession, 
+    disableWriteBlock,
+    isDevSession,
+    isPreviewModeEnabled,
+    enablePreviewMode,
     setPreviewSession,
     setPreviewTenant,
     session,
@@ -158,8 +161,10 @@ const DevSessionSwitcher: React.FC = () => {
 
   const { platform, tenant } = getAvailableRoles();
 
+  const READ_ONLY_STATUSES = ['read_only', 'suspended'];
+
   const switchSession = (role: Role, userType: 'platform' | 'tenant', scenarioId?: string) => {
-    enablePreviewMode();
+    activateDevSession();
     const newSession = {
       user: { id: 'dev-user', name: 'Dev User', email: 'dev@example.com' },
       userType: userType,
@@ -172,11 +177,18 @@ const DevSessionSwitcher: React.FC = () => {
       const scenario = scenarioId
         ? storeScenarios.find(s => s.id === scenarioId)
         : storeScenarios[0];
-      setPreviewTenant(scenario ? scenario.tenant : storeScenarios[0].tenant);
+      const tenantData = scenario ? scenario.tenant : storeScenarios[0].tenant;
+      setPreviewTenant(tenantData);
       setActiveScenario(scenario?.id || 'active');
+      if (READ_ONLY_STATUSES.includes(tenantData.status)) {
+        enablePreviewMode();
+      } else {
+        disableWriteBlock();
+      }
     } else {
       setPreviewTenant(null);
       setActiveScenario(null);
+      disableWriteBlock();
     }
     
     const landingRoute = resolveLandingRoute(newSession);
@@ -186,7 +198,7 @@ const DevSessionSwitcher: React.FC = () => {
   const switchScenario = (scenarioId: string) => {
     const scenario = storeScenarios.find(s => s.id === scenarioId);
     if (!scenario) return;
-    enablePreviewMode();
+    activateDevSession();
     setPreviewSession({
       user: { id: 'dev-user', name: 'Dev User', email: 'dev@example.com' },
       userType: 'tenant',
@@ -195,6 +207,11 @@ const DevSessionSwitcher: React.FC = () => {
     });
     setPreviewTenant(scenario.tenant);
     setActiveScenario(scenarioId);
+    if (READ_ONLY_STATUSES.includes(scenario.tenant.status)) {
+      enablePreviewMode();
+    } else {
+      disableWriteBlock();
+    }
     navigate('/');
   };
 
@@ -202,22 +219,24 @@ const DevSessionSwitcher: React.FC = () => {
     <div className="fixed bottom-4 right-4 bg-white p-4 rounded-xl border border-slate-200 shadow-lg z-50 w-72 max-h-[80vh] overflow-y-auto">
       <div className="flex justify-between items-center mb-3">
         <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
-          Preview Mode: {isPreviewModeEnabled ? 'ON' : 'OFF'}
+          Dev Session: {isDevSession ? 'Active' : 'OFF'}
+          {isPreviewModeEnabled && <span className="text-amber-600 ml-1">· Read-Only</span>}
         </h4>
-        {isPreviewModeEnabled && (
+        {isDevSession && (
           <button 
-            onClick={disablePreviewMode} 
+            onClick={deactivateDevSession} 
             className="text-[10px] bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded font-bold text-slate-700"
           >
-            Exit Preview
+            Exit Session
           </button>
         )}
       </div>
       
-      {isPreviewModeEnabled && session && (
+      {isDevSession && session && (
         <div className="mb-3 text-[10px] text-slate-600 bg-slate-50 p-2 rounded border border-slate-100">
           Active Role: <span className="font-bold text-slate-900">{session.role}</span>
           {activeScenario && <span className="ml-1 text-violet-600">({activeScenario})</span>}
+          {isPreviewModeEnabled && <span className="ml-1 text-amber-600 font-bold">(Read-Only)</span>}
         </div>
       )}
 

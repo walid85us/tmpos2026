@@ -1,0 +1,306 @@
+Shipping Module / Shipping Center — Root-Cause Recovery Pass
+Priority: Critical
+Mode: Do not patch symptoms. Diagnose and repair the real runtime/state-flow defects end to end.
+
+You are not doing another light correction pass.
+You are doing a root-cause recovery pass because QA has now failed this same family of issues multiple times.
+
+Operate with this expert-role stack:
+- Principal React + TypeScript application architect
+- Principal runtime-state / UI-state debugging specialist
+- Firebase / Firestore data-flow architect
+- Enterprise workflow UX engineer
+- Senior shipping systems product architect with 25 years of operational shipping, parcel workflow, warehouse/fulfillment, reverse logistics, repair return logistics, and order-to-ship execution experience
+- QA-minded side auditor
+- Systems thinker
+
+You must also behave like a senior debugging engineer:
+- trace the actual execution path
+- find the true source of state leakage
+- verify assumptions with code-level reasoning
+- stop making superficial fixes that leave the same failure alive
+
+Read first and preserve:
+- Ref.txt
+- replit.md
+- current design baseline
+- auth model
+- preview mode concept
+- RBAC/sub-permissions
+- lifecycle gating
+- platform/store hierarchy
+- Plans & Features matrix integration
+- Store Permissions Matrix integration
+
+Do not redesign the UI.
+Do not broaden scope into future shipping phases.
+Do not remove safety controls.
+Do not fake success with summaries.
+Do not claim completion until the exact QA failures below are truly repaired.
+
+--------------------------------------------------
+QA EVIDENCE — TREAT THIS AS SOURCE OF TRUTH
+--------------------------------------------------
+
+The latest QA and screenshot show:
+
+1) Paid Invoice shipment workflow opens, but still shows:
+- “PREVIEW MODE — SHIPMENT WILL NOT BE SAVED”
+- submit button labeled “PREVIEW ONLY”
+This is happening when the user expects normal writable mode.
+
+2) The same incorrect preview-only behavior is affecting:
+- Invoice shipment flow
+- Repair shipment flow
+- RMA shipment flow
+and likely any source-routed shipment flow.
+
+3) Source prefill is still failing in practice.
+Using Source Reference Number is not populating the form correctly.
+Fields expected to populate from source are still incomplete or blank.
+
+4) Because the workflow is trapped in preview-only state:
+- shipment create/save cannot be validated
+- draft edit/save cannot be validated
+- package persistence cannot be validated
+- status transition execution cannot be validated reliably
+
+5) Status transitions still do not execute in normal usage.
+
+This is the 3rd+ time this same defect family has resurfaced.
+Do not respond with another partial patch.
+You must repair the architecture/state flow that is causing it.
+
+--------------------------------------------------
+PRIMARY ROOT-CAUSE HYPOTHESIS TO INVESTIGATE
+--------------------------------------------------
+
+The most likely root issue is incorrect runtime mode detection and/or state leakage causing normal-mode flows to be treated as preview-mode flows.
+
+You must investigate and repair all possible sources of this:
+
+A) AccessContext preview-state source
+- where is isPreviewModeEnabled coming from
+- when is it true
+- why is it true during the user’s normal QA path
+
+B) Route-to-modal state contamination
+- navigation from source modules into /shipping
+- location.state contents
+- any prefill payload incorrectly carrying preview flags
+- any modal initializer treating routed prefill state as preview mode
+
+C) Environment/dev-session misuse
+- if the current logic assumes development session = preview mode, this is wrong for QA
+- fix the actual distinction between true preview mode and normal editable usage
+
+D) UI disabled-state conditions
+- inspect every condition that disables:
+  - Create Shipment submit button
+  - Save Changes
+  - status confirmation execution
+- map every disabled condition to its source flag(s)
+- verify no preview flag is leaking into normal mode
+
+E) Confirm/write handler guard ordering
+- ensure preview checks, permission checks, and lifecycle checks are correct
+- ensure valid normal-mode paths are not blocked by stale or global preview flags
+
+--------------------------------------------------
+MANDATORY REPAIR GOALS
+--------------------------------------------------
+
+You must fully repair all of the following.
+
+1) NORMAL MODE MUST BE WRITABLE
+When the user is in normal mode and all gating is valid:
+- Create Shipment must be writable
+- Save Changes must be writable
+- Status transitions must execute
+- Package edits must be writable before lifecycle lock states
+- No preview banner
+- No “Preview Only” submit button
+- No hidden global flag that disables commits
+
+2) PREVIEW MODE MUST STILL BE SAFE
+When the user is truly in preview mode:
+- create shipment must not commit
+- edit/save must not commit
+- status transitions must not commit
+- tracking/event writes must not commit
+- cancel must not commit
+- preview UI may be shown only in true preview mode
+
+3) SOURCE WORKFLOWS MUST BE OPERATIONAL
+For each eligible source type:
+- Invoice
+- Repair
+- Transfer
+- RMA
+
+The workflow must:
+- open correctly
+- load in the correct mode
+- prefill correctly
+- allow save in normal mode
+- show linked shipment behavior correctly if one exists
+
+4) SOURCE REFERENCE / SOURCE PREFILL MUST WORK RELIABLY
+When shipment creation starts from a source record, the form must populate correctly from the source.
+Also, when the Source Reference Number is used, it must resolve and populate correctly where supported.
+
+Populate at minimum where data exists:
+- sourceType
+- sourceId
+- source reference number
+- destination / recipient / customer / vendor / store name
+- destination address
+- origin location / store
+- shipment type / purpose
+- source items / service items / transfer context / RMA context
+
+No silent partial prefill when the source has usable data.
+
+5) CREATE / SAVE / EDIT MUST COMMIT PROPERLY
+In normal mode:
+- create shipment must persist
+- draft shipment edits must persist
+- package edits must persist
+- reopening must show persisted values
+- list/detail must stay synchronized
+
+6) STATUS TRANSITIONS MUST EXECUTE
+In normal mode:
+- clicking Confirm on a valid transition must actually update the shipment
+- list and detail must both reflect the new status
+- invalid transitions remain blocked
+- preview mode must block status writes only in true preview mode
+
+--------------------------------------------------
+REPAIR / RMA / PACKAGE OPERATIONAL RULES
+--------------------------------------------------
+
+A) Repair
+- Repair shipment entry must work for the valid intended lifecycle states
+- Completed must work
+- Ready for Pickup may remain valid only if that is truly intended in the business workflow
+- Fix any property mismatches and stale selected-record logic completely
+
+B) RMA
+- RMA must not auto-create shipment just because an RMA exists
+- If no shipment exists: show Create Shipment
+- If shipment exists: show Open Shipment / linked shipment access
+- Preserve proper lifecycle gating for valid RMA states
+
+C) Packages / Source Items
+- Keep source-informed item/package behavior
+- Invoice items must inform shipment content
+- Multiple package rows must save and reopen correctly
+- Before Label Created: package/content fields editable
+- After Label Created: package/content fields controlled appropriately
+- Do not lock too early
+- Do not leave post-label-created shipments completely open
+
+--------------------------------------------------
+REQUIRED DEBUGGING METHOD
+--------------------------------------------------
+
+Follow this exact method:
+
+1) Build a truth table for runtime mode handling
+For each of these contexts, explicitly determine:
+- true preview mode
+- normal editable mode
+- source-routed create flow
+- direct Shipping Center create flow
+- edit existing draft
+- status transition flow
+
+For each context, document:
+- expected preview flag state
+- expected submit/button enabled state
+- expected write behavior
+
+2) Trace the exact state path for source-routed shipment creation
+From click in source module → route navigation → location.state → ShippingCenter mount → modal initializer → form state → submit button enablement → create handler.
+
+3) Trace the exact state path for status transitions
+From click status → confirm dialog → confirm handler → state update → persistence → list/detail refresh.
+
+4) Identify the actual root cause(s)
+Examples of acceptable root causes:
+- preview flag derived from wrong global state
+- route state contaminates modal mode
+- disabled button condition tied to wrong flag
+- source prefill resolver not firing on mount/update
+- submit handler exits because selected shipment/form state not initialized
+Do not give vague answers.
+
+5) Repair with centralized logic where needed
+- centralize source-to-shipment mapping
+- centralize preview-vs-normal mode resolution
+- centralize submit enablement logic
+- reduce fragile inline conditions spread across components
+
+6) Re-validate end to end
+Validate both:
+- normal mode writable path
+- true preview mode blocked path
+
+--------------------------------------------------
+NON-NEGOTIABLE ACCEPTANCE CRITERIA
+--------------------------------------------------
+
+Do not claim completion unless ALL are true:
+
+1. Paid Invoice opens shipment workflow in normal writable mode
+2. Eligible Repair opens shipment workflow in normal writable mode
+3. Eligible Transfer opens shipment workflow in normal writable mode
+4. Eligible RMA shows correct Create/Open Shipment behavior
+5. No preview banner appears in normal mode
+6. No “Preview Only” submit button appears in normal mode
+7. Source prefill works from all 4 source types
+8. Source Reference Number resolution/prefill works where supported
+9. Shipment can be created and saved in normal mode
+10. Draft shipment can be edited and saved in normal mode
+11. Multiple package rows save and reopen correctly
+12. Status confirm action changes shipment correctly in normal mode
+13. Preview mode still blocks writes in true preview mode
+14. No regression in plans/features, permissions, or completed workstreams
+
+--------------------------------------------------
+DOCUMENTATION REQUIREMENT
+--------------------------------------------------
+
+Update replit.md with:
+- corrected runtime mode handling
+- true preview mode vs normal editable mode behavior
+- source-routed shipment creation flow
+- source prefill behavior
+- create/save/edit persistence behavior
+- status transition execution flow
+- package editability rules before/after Label Created
+
+--------------------------------------------------
+OUTPUT FORMAT REQUIRED
+--------------------------------------------------
+
+Reply ONLY in this structure:
+
+1. Recovery Pass Status
+2. Exact Root Cause Findings
+3. Runtime Mode Separation Fix
+4. Source Workflow Fixes
+5. Source Prefill / Source Reference Fixes
+6. Create / Save / Edit Fixes
+7. Status Transition Fixes
+8. Package Persistence / Editability Fixes
+9. Validation Matrix Performed
+10. Files Changed
+11. Documentation Updated
+12. Non-Regression Notes
+
+Important:
+Do not give a generic success summary.
+State the actual root cause(s) precisely.
+State exactly why the previous passes kept failing.

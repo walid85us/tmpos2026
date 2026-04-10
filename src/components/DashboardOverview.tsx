@@ -227,7 +227,7 @@ function LifecycleStepper({ onboardingStage, inviteSentDate, setupStartedDate, a
 }
 
 function StoreActivationPanel() {
-  const { session, tenant, setPreviewTenant, isPreviewModeEnabled } = useAccess();
+  const { session, tenant, setPreviewTenant, isDevSession } = useAccess();
   if (!session || session.role !== 'store_owner' || !tenant) return null;
 
   const onboardingStage = tenant.onboardingStage || (tenant.status === 'active' || tenant.status === 'trialing' ? 'active' : 'pending_setup');
@@ -256,9 +256,9 @@ function StoreActivationPanel() {
   }, []);
 
   const updateTenant = useCallback((updates: Partial<typeof tenant>) => {
-    if (!isPreviewModeEnabled) return;
+    if (!isDevSession) return;
     setPreviewTenant({ ...tenant, ...updates });
-  }, [tenant, isPreviewModeEnabled, setPreviewTenant]);
+  }, [tenant, isDevSession, setPreviewTenant]);
 
   const advanceStage = useCallback((nextStage: OnboardingStage) => {
     const today = new Date().toISOString().split('T')[0];
@@ -388,7 +388,7 @@ function StoreActivationPanel() {
             </div>
           </div>
           {(domainInfo.mode !== 'platform_subdomain' || !!domainInfo.customDomain) && (
-            <DomainStatusCard domainInfo={domainInfo} onDomainAction={isPreviewModeEnabled ? handleDomainAction : undefined} />
+            <DomainStatusCard domainInfo={domainInfo} onDomainAction={isDevSession ? handleDomainAction : undefined} />
           )}
         </div>
       </>
@@ -412,7 +412,7 @@ function StoreActivationPanel() {
             </div>
           </div>
           {(domainInfo.mode !== 'platform_subdomain' || !!domainInfo.customDomain) && (
-            <DomainStatusCard domainInfo={domainInfo} onDomainAction={isPreviewModeEnabled ? handleDomainAction : undefined} />
+            <DomainStatusCard domainInfo={domainInfo} onDomainAction={isDevSession ? handleDomainAction : undefined} />
           )}
         </div>
       </>
@@ -439,7 +439,7 @@ function StoreActivationPanel() {
             </div>
           </div>
           {(domainInfo.mode !== 'platform_subdomain' || !!domainInfo.customDomain) && (
-            <DomainStatusCard domainInfo={domainInfo} onDomainAction={isPreviewModeEnabled ? handleDomainAction : undefined} />
+            <DomainStatusCard domainInfo={domainInfo} onDomainAction={isDevSession ? handleDomainAction : undefined} />
           )}
         </div>
       </>
@@ -487,7 +487,7 @@ function StoreActivationPanel() {
             </div>
           </div>
           {(domainInfo.mode !== 'platform_subdomain' || !!domainInfo.customDomain) && (
-            <DomainStatusCard domainInfo={domainInfo} onDomainAction={isPreviewModeEnabled ? handleDomainAction : undefined} />
+            <DomainStatusCard domainInfo={domainInfo} onDomainAction={isDevSession ? handleDomainAction : undefined} />
           )}
         </div>
       </>
@@ -572,7 +572,7 @@ function StoreActivationPanel() {
                   : 'Welcome! Click below to begin setting up your store.'}
               </p>
               <div className="mt-2 flex gap-2 flex-wrap">
-                {isPreviewModeEnabled ? (
+                {isDevSession ? (
                   <button onClick={() => advanceStage('pending_setup')} className="px-4 py-2 bg-indigo-500 text-white text-[9px] font-black rounded-xl uppercase tracking-widest hover:bg-indigo-600 transition-colors">
                     Begin Store Setup
                   </button>
@@ -590,7 +590,7 @@ function StoreActivationPanel() {
                 <span className="material-symbols-outlined text-xs">info</span>
                 Your store activation is in progress. You will be notified once it is complete.
               </p>
-              {isPreviewModeEnabled && (
+              {isDevSession && (
                 <button onClick={() => advanceStage('active')} className="mt-2 px-4 py-2 bg-violet-500 text-white text-[9px] font-black rounded-xl uppercase tracking-widest hover:bg-violet-600 transition-colors">
                   Activate Store Now
                 </button>
@@ -614,13 +614,13 @@ function StoreActivationPanel() {
         <OnboardingChecklistCard
           checklist={checklist}
           onboardingStage={onboardingStage}
-          onToggleItem={isPreviewModeEnabled ? toggleChecklistItem : undefined}
+          onToggleItem={isDevSession ? toggleChecklistItem : undefined}
           isLocked={onboardingStage === 'invited'}
           employeesEntitled={employeesEntitled}
           onAddEmployee={() => setShowAddEmployeeModal(true)}
         />
         {(domainInfo.mode !== 'platform_subdomain' || !!domainInfo.customDomain) && (
-          <DomainStatusCard domainInfo={domainInfo} onDomainAction={isPreviewModeEnabled ? handleDomainAction : undefined} />
+          <DomainStatusCard domainInfo={domainInfo} onDomainAction={isDevSession ? handleDomainAction : undefined} />
         )}
       </div>
 

@@ -83,7 +83,7 @@ export default function RepairTickets() {
     shipments,
   } = useStoreLocalState();
   const navigate = useNavigate();
-  const { checkPermission, checkSubPermission, effectiveRole, session, canAccess, isPreviewModeEnabled } = useAccess();
+  const { checkPermission, checkSubPermission, effectiveRole, session, canAccess } = useAccess();
   const canCreateTickets = checkPermission('repairs', 'create');
   const canEditTickets = checkPermission('repairs', 'edit');
   const canManageTickets = checkPermission('repairs', 'manage');

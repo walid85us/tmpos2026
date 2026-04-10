@@ -12,7 +12,7 @@ interface AccessGuardProps {
 }
 
 const AccessGuard: React.FC<AccessGuardProps> = ({ children, allowedUserTypes, requiredRole, feature, redirectPath = '/' }) => {
-  const { session, loading, authError, isPreviewModeEnabled, resolveLandingRoute, canAccess } = useAccess();
+  const { session, loading, authError, isDevSession, resolveLandingRoute, canAccess } = useAccess();
 
   if (loading) {
     console.log('[AccessGuard] Still loading auth state...');
@@ -24,8 +24,8 @@ const AccessGuard: React.FC<AccessGuardProps> = ({ children, allowedUserTypes, r
     return <Navigate to="/not-provisioned" replace />;
   }
 
-  if (!session && !isPreviewModeEnabled) {
-    console.log('[AccessGuard] No session, not preview — redirecting to /login');
+  if (!session && !isDevSession) {
+    console.log('[AccessGuard] No session, not dev session — redirecting to /login');
     return <Navigate to="/login" replace />;
   }
 

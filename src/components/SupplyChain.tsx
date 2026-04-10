@@ -19,7 +19,7 @@ export default function SupplyChain() {
     supplierRefundEntries, addSupplierRefundEntry,
     shipments,
   } = useStoreLocalState();
-  const { checkSubPermission, canAccess, isPreviewModeEnabled } = useAccess();
+  const { checkSubPermission, canAccess } = useAccess();
   const navigate = useNavigate();
   const canManagePOs = checkSubPermission('manage_purchase_orders');
   const canManageRMAs = checkSubPermission('manage_rmas');

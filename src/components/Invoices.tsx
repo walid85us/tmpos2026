@@ -10,7 +10,7 @@ import { renderTemplate, buildLineItemsHtml, buildReceiptLineItemsHtml } from '.
 
 export default function Invoices() {
   const { invoices, addInvoice, updateInvoice, customers, services, serviceCategories, approvedStockItems, storeBranding, documentTemplates, shipments } = useStoreLocalState();
-  const { checkPermission, checkSubPermission, canAccess, isPreviewModeEnabled } = useAccess();
+  const { checkPermission, checkSubPermission, canAccess } = useAccess();
   const navigate = useNavigate();
   const canReopenInvoice = checkSubPermission('reopen_invoice');
   const [searchQuery, setSearchQuery] = useState('');

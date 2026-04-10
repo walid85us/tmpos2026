@@ -22,7 +22,7 @@ const Inventory: React.FC = () => {
     suppliers, customers, storeLocations, getItemMovements,
     shipments,
   } = useStoreLocalState();
-  const { checkPermission, checkSubPermission, canAccess, isPreviewModeEnabled } = useAccess();
+  const { checkPermission, checkSubPermission, canAccess } = useAccess();
   const navigate = useNavigate();
   const hasInventoryPermission = checkPermission('inventory', 'manage');
   const hasInventoryEdit = checkPermission('inventory', 'edit');

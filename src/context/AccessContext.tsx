@@ -59,8 +59,13 @@ interface AccessContextType {
   isStoreActivated: () => boolean;
   resolveLandingRoute: (session: Session) => string;
   isPreviewModeEnabled: boolean;
+  isDevSession: boolean;
+  isWriteBlocked: boolean;
   enablePreviewMode: () => void;
   disablePreviewMode: () => void;
+  disableWriteBlock: () => void;
+  activateDevSession: () => void;
+  deactivateDevSession: () => void;
   setPreviewSession: (session: Session) => void;
   setPreviewTenant: (tenant: Tenant) => void;
   getAvailableRoles: () => { platform: EmployeeRole[], tenant: EmployeeRole[] };
@@ -107,6 +112,7 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   const [tenantRolesState, setTenantRolesState] = useState(initialTenantRoles);
 
   const [isPreviewModeEnabled, setIsPreviewModeEnabled] = useState(false);
+  const [isDevSession, setIsDevSession] = useState(false);
   const [previewSession, setPreviewSession] = useState<Session | null>(null);
   const [previewTenant, setPreviewTenant] = useState<Tenant | null>(null);
   const [posOperatorRole, setPosOperatorRole] = useState<string | null>(null);
@@ -174,8 +180,9 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     return unsubscribe;
   }, [platformRolesState]);
 
-  const session = isPreviewModeEnabled ? previewSession : realSession;
-  const tenant = isPreviewModeEnabled ? previewTenant : realTenant;
+  const session = isDevSession ? previewSession : realSession;
+  const tenant = isDevSession ? previewTenant : realTenant;
+  const isWriteBlocked = isPreviewModeEnabled;
   const effectiveRole = (session?.userType === 'tenant' && posOperatorRole) ? posOperatorRole : (session?.role || '');
 
   const isStoreActivated = (): boolean => {
@@ -370,8 +377,13 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       isStoreActivated,
       resolveLandingRoute,
       isPreviewModeEnabled,
+      isDevSession,
+      isWriteBlocked,
       enablePreviewMode: () => setIsPreviewModeEnabled(true),
-      disablePreviewMode: () => { setIsPreviewModeEnabled(false); setPosOperatorRole(null); setSupervisorRefundAuth(null); },
+      disablePreviewMode: () => { setIsPreviewModeEnabled(false); setIsDevSession(false); setPosOperatorRole(null); setSupervisorRefundAuth(null); },
+      disableWriteBlock: () => setIsPreviewModeEnabled(false),
+      activateDevSession: () => setIsDevSession(true),
+      deactivateDevSession: () => { setIsDevSession(false); setIsPreviewModeEnabled(false); setPosOperatorRole(null); setSupervisorRefundAuth(null); },
       setPreviewSession: (s: Session) => { setPreviewSession(s); setPosOperatorRole(null); setSupervisorRefundAuth(null); },
       setPreviewTenant,
       getAvailableRoles,
