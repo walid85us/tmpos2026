@@ -314,6 +314,7 @@ export default function ShippingCenter() {
   }, [shipments]);
 
   const isPreDispatch = (status: ShipmentStatus) => ['Draft', 'Ready', 'Label Created', 'Packed'].includes(status);
+  const isEditable = (status: ShipmentStatus) => ['Draft', 'Ready'].includes(status);
 
   function handleStatusTransition(id: string, newStatus: ShipmentStatus) {
     if (isWriteBlocked) { setShowStatusConfirm(null); return; }
@@ -414,6 +415,7 @@ export default function ShippingCenter() {
   }
 
   function openEditModal(s: Shipment) {
+    if (!isEditable(s.status)) return;
     setNewCarrier(s.carrier || ''); setNewService(s.serviceLevel || '');
     setNewTracking(s.trackingNumber || ''); setNewCost(s.shippingCost?.toString() || '');
     setNewNotes(s.notes || '');
@@ -596,10 +598,16 @@ export default function ShippingCenter() {
                   <p className="text-sm text-slate-500">{TYPE_LABELS[selectedShip.type]} · {SOURCE_LABELS[selectedShip.sourceType]} {selectedShip.sourceNumber}</p>
                 </div>
                 <div className="flex items-center gap-2">
-                  {canEditPreDispatch && isPreDispatch(selectedShip.status) && (
+                  {canEditPreDispatch && isEditable(selectedShip.status) && (
                     <button onClick={(e) => { e.stopPropagation(); openEditModal(selectedShip); }} className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary transition-all">
                       <span className="material-symbols-outlined text-lg">edit</span>
                     </button>
+                  )}
+                  {canEditPreDispatch && !isEditable(selectedShip.status) && selectedShip.status !== 'Cancelled' && (
+                    <div className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl" title="Shipment editing is locked after Label Created">
+                      <span className="material-symbols-outlined text-slate-400 text-sm">lock</span>
+                      <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Edit Locked</span>
+                    </div>
                   )}
                   <button onClick={() => setSelectedShipment(null)} className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-400 hover:text-primary">
                     <span className="material-symbols-outlined">close</span>

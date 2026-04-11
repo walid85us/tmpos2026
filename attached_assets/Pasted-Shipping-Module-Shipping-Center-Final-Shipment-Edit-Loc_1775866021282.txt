@@ -1,0 +1,101 @@
+Shipping Module / Shipping Center — Final Shipment Edit Lock Polish Pass
+
+Do not redesign anything.
+Do not broaden scope.
+Do not touch unrelated workstreams.
+This is a narrow final polish pass only.
+
+Shipping Module / Shipping Center has passed final completion QA except for one final workflow rule refinement:
+
+--------------------------------------------------
+FINAL POLISH REQUIREMENT
+--------------------------------------------------
+
+Once a shipment reaches status "Label Created", the main shipment edit action must no longer remain available as a normal editable shipment flow.
+
+For this system, implement the following rule set:
+
+1) Fully editable statuses:
+- Draft
+- Ready / Prepared
+
+2) Edit lock starts at:
+- Label Created
+
+3) Shipment remains edit-locked in:
+- Label Created
+- Packed
+- Dispatched / Handed Off
+- In Transit
+- Delivered
+- Exception
+- Cancelled
+
+--------------------------------------------------
+EXPECTED UI / UX BEHAVIOR
+--------------------------------------------------
+
+Implement the lock in a clean, native way consistent with the current product.
+
+Preferred behavior:
+- Disable or hide the main Edit Shipment action once status >= Label Created
+- Do not leave an apparently clickable edit icon/button that does nothing
+- If disabled, make the disabled state visually clear and consistent with current app patterns
+- If helpful, add a short contextual explanation such as:
+  - "Shipment editing is locked after Label Created"
+but only if that fits the current UX baseline cleanly
+
+--------------------------------------------------
+IMPORTANT FUNCTIONAL DISTINCTION
+--------------------------------------------------
+
+Lock the main shipment editing flow for structural shipment data such as:
+- addresses
+- source linkage
+- package rows
+- dimensions / weight
+- declared value
+- item/content selection
+- carrier/service core settings
+
+This change should NOT break other allowed operational actions that may still remain valid after Label Created, such as:
+- viewing shipment details
+- status transitions
+- tracking updates
+- print/reprint label later if such action exists now or later
+- internal notes only if already supported cleanly
+
+--------------------------------------------------
+IMPLEMENTATION RULE
+--------------------------------------------------
+
+Use lifecycle-aware gating, not cosmetic UI hiding only.
+The edit-lock rule must be enforced consistently in:
+- shipment detail actions
+- edit button/icon visibility or enabled state
+- edit modal opening logic
+- any direct edit entry path
+
+Do not weaken existing preview mode, RBAC, plan gating, or source linkage behavior.
+
+--------------------------------------------------
+DOCUMENTATION
+--------------------------------------------------
+
+Update replit.md briefly to reflect:
+- shipment is fully editable only in Draft and Ready / Prepared
+- main shipment editing locks once status reaches Label Created
+- later statuses remain locked for structural shipment edits
+
+--------------------------------------------------
+OUTPUT FORMAT REQUIRED
+--------------------------------------------------
+
+Reply ONLY in this structure:
+
+1. Polish Pass Status
+2. Edit Lock Rule Implemented
+3. Affected Statuses Confirmed
+4. Files Changed
+5. Documentation Updated
+6. Non-Regression Notes
