@@ -386,16 +386,24 @@ export default function ShippingCenter() {
   function handleSaveEdit() {
     if (isWriteBlocked) { setEditingShipment(null); return; }
     if (!editingShipment) return;
+    const shipment = shipments.find(s => s.id === editingShipment);
     const now = new Date().toISOString();
-    updateShipment(editingShipment, {
-      carrier: newCarrier || undefined,
-      serviceLevel: newService || undefined,
-      trackingNumber: newTracking || undefined,
-      shippingCost: newCost ? parseFloat(newCost) : undefined,
+    const hasLabel = !!shipment?.label;
+    const hasRate = !!shipment?.selectedRate;
+    const updates: Partial<Shipment> = {
       notes: newNotes || undefined,
       packages: editPackages,
       updatedAt: now,
-    });
+    };
+    if (!hasLabel && !hasRate) {
+      updates.carrier = newCarrier || undefined;
+      updates.serviceLevel = newService || undefined;
+    }
+    if (!hasLabel) {
+      updates.trackingNumber = newTracking || undefined;
+    }
+    updates.shippingCost = newCost ? parseFloat(newCost) : undefined;
+    updateShipment(editingShipment, updates);
     setEditingShipment(null);
   }
 
@@ -421,6 +429,40 @@ export default function ShippingCenter() {
   function clearProviderFeedback() {
     setProviderError(null);
     setProviderSuccess(null);
+  }
+
+  function friendlyProviderError(raw: ProviderError): ProviderError {
+    const msg = raw.message.toLowerCase();
+    if (raw.code === 'PROVIDER_NOT_CONFIGURED' || msg.includes('no credentials') || msg.includes('not configured')) {
+      return { ...raw, message: 'Shipping provider is not configured. Go to Provider Settings to enter your credentials.' };
+    }
+    if (raw.code === 'NO_PROVIDER') return raw;
+    if (msg.includes('failed to fetch') || msg.includes('networkerror') || msg.includes('network error')) {
+      return { ...raw, message: 'Unable to reach the shipping provider. Check your internet connection and try again.', retryable: true };
+    }
+    if (raw.code === 'AUTH_FAILED' || msg.includes('401') || msg.includes('403') || msg.includes('unauthorized') || msg.includes('forbidden')) {
+      return { ...raw, message: 'Invalid credentials. Please verify your API key and secret in Provider Settings.' };
+    }
+    if (msg.includes('not found') || msg.includes('404')) {
+      return { ...raw, message: 'The requested resource was not found at the provider. Verify the shipment details and try again.' };
+    }
+    if (msg.includes('rate limit') || msg.includes('429') || msg.includes('too many')) {
+      return { ...raw, message: 'Too many requests to the shipping provider. Please wait a moment and try again.', retryable: true };
+    }
+    if (msg.includes('500') || msg.includes('502') || msg.includes('503') || msg.includes('server error') || msg.includes('internal error')) {
+      return { ...raw, message: 'The shipping provider is experiencing issues. Please try again shortly.', retryable: true };
+    }
+    if (msg.includes('timeout') || msg.includes('timed out')) {
+      return { ...raw, message: 'Request to the shipping provider timed out. Please try again.', retryable: true };
+    }
+    if (raw.code === 'VALIDATION_FAILED' || msg.includes('invalid address') || msg.includes('validation')) {
+      return { ...raw, message: `Address validation issue: ${raw.message}` };
+    }
+    return raw;
+  }
+
+  function hasShippablePackages(shipment: Shipment): boolean {
+    return shipment.packages.length > 0 && shipment.packages.some(p => p.weight || p.contentsSummary || p.declaredValue);
   }
 
   function resolveActiveProvider() {
@@ -468,7 +510,7 @@ export default function ShippingCenter() {
         messages: [result.error?.message || 'Validation failed'],
       };
       updateShipment(shipmentId, { addressValidation: failedValidation, updatedAt: new Date().toISOString() });
-      setProviderError(result.error || { code: 'UNKNOWN', message: 'Address validation failed.' });
+      setProviderError(friendlyProviderError(result.error || { code: 'UNKNOWN', message: 'Address validation failed.' }));
     }
     setProviderLoading(null);
   }
@@ -477,6 +519,10 @@ export default function ShippingCenter() {
     if (isWriteBlocked) return;
     const shipment = shipments.find(s => s.id === shipmentId);
     if (!shipment) return;
+    if (!hasShippablePackages(shipment)) {
+      setProviderError({ code: 'NO_PACKAGES', message: 'Add at least one package with weight or contents before requesting rates. Go to the Packages tab to add package details.', retryable: false });
+      return;
+    }
     clearProviderFeedback();
     setProviderLoading('rates');
     setShowRatesPanel(false);
@@ -499,7 +545,7 @@ export default function ShippingCenter() {
       setShowRatesPanel(true);
       setProviderSuccess(`${sorted.length} rate${sorted.length !== 1 ? 's' : ''} retrieved.`);
     } else {
-      setProviderError(result.error || { code: 'UNKNOWN', message: 'Rate retrieval failed.' });
+      setProviderError(friendlyProviderError(result.error || { code: 'UNKNOWN', message: 'Rate retrieval failed.' }));
     }
     setProviderLoading(null);
   }
@@ -523,8 +569,12 @@ export default function ShippingCenter() {
     if (isWriteBlocked) return;
     const shipment = shipments.find(s => s.id === shipmentId);
     if (!shipment) return;
-    if (!shipment.selectedRate && !shipment.carrier) {
-      setProviderError({ code: 'NO_RATE', message: 'Select a shipping service before purchasing a label.', retryable: false });
+    if (!hasShippablePackages(shipment)) {
+      setProviderError({ code: 'NO_PACKAGES', message: 'Add at least one package before purchasing a label. Go to the Packages tab.', retryable: false });
+      return;
+    }
+    if (!shipment.selectedRate && (!shipment.carrier || !shipment.serviceLevel)) {
+      setProviderError({ code: 'NO_RATE', message: 'Select a shipping rate or set both a carrier and service level before purchasing a label.', retryable: false });
       return;
     }
     clearProviderFeedback();
@@ -563,7 +613,7 @@ export default function ShippingCenter() {
       });
       setProviderSuccess('Label purchased successfully. Shipment status updated to Label Created.');
     } else {
-      setProviderError(result.error || { code: 'UNKNOWN', message: 'Label purchase failed.' });
+      setProviderError(friendlyProviderError(result.error || { code: 'UNKNOWN', message: 'Label purchase failed.' }));
     }
     setProviderLoading(null);
   }
@@ -612,7 +662,7 @@ export default function ShippingCenter() {
       updateShipment(shipmentId, updates);
       setProviderSuccess(`Tracking synced. ${(result.events || []).length} event(s) from provider.`);
     } else {
-      setProviderError(result.error || { code: 'UNKNOWN', message: 'Tracking sync failed.' });
+      setProviderError(friendlyProviderError(result.error || { code: 'UNKNOWN', message: 'Tracking sync failed.' }));
     }
     setProviderLoading(null);
   }
@@ -899,11 +949,21 @@ export default function ShippingCenter() {
                     <div className="bg-indigo-50/50 rounded-2xl p-5 border border-indigo-100 space-y-4">
                       <div className="flex items-center justify-between">
                         <p className="text-[10px] font-black text-indigo-500 uppercase tracking-widest flex items-center gap-1"><span className="material-symbols-outlined text-xs">hub</span>Provider & Operations</p>
-                        {(() => { const aid = getActiveProviderId(); return aid ? (
-                          <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest bg-indigo-100 text-indigo-600 rounded-md">{aid}</span>
-                        ) : (
-                          <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest bg-slate-100 text-slate-400 rounded-md">No Provider</span>
-                        ); })()}
+                        <div className="flex items-center gap-2">
+                          {(() => { const aid = getActiveProviderId(); return aid ? (
+                            <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest bg-indigo-100 text-indigo-600 rounded-md">{aid}</span>
+                          ) : (
+                            <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest bg-slate-100 text-slate-400 rounded-md">No Provider</span>
+                          ); })()}
+                          <button
+                            onClick={() => navigate('/settings/shipping-providers')}
+                            className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest text-indigo-500 hover:text-indigo-700 hover:bg-indigo-50 rounded-md transition-all flex items-center gap-0.5"
+                            title="Configure shipping providers"
+                          >
+                            <span className="material-symbols-outlined text-xs">settings</span>
+                            Configure
+                          </button>
+                        </div>
                       </div>
 
                       {providerError && (
@@ -978,7 +1038,8 @@ export default function ShippingCenter() {
 
                         {canFetchRates && !isWriteBlocked && ['Draft', 'Ready'].includes(selectedShip.status) && (
                           <button onClick={() => handleFetchRates(selectedShip.id)} disabled={providerLoading !== null}
-                            className="px-3 py-2 bg-white text-indigo-600 border border-indigo-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50 transition-all disabled:opacity-40 flex items-center gap-1">
+                            className="px-3 py-2 bg-white text-indigo-600 border border-indigo-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50 transition-all disabled:opacity-40 flex items-center gap-1"
+                            title={!hasShippablePackages(selectedShip) ? 'Add packages first' : 'Get shipping rates from provider'}>
                             <span className="material-symbols-outlined text-sm">{providerLoading === 'rates' ? 'hourglass_top' : 'request_quote'}</span>
                             {providerLoading === 'rates' ? 'Fetching...' : 'Get Rates'}
                           </button>
@@ -986,7 +1047,8 @@ export default function ShippingCenter() {
 
                         {canPurchaseLabel && !isWriteBlocked && selectedShip.status === 'Ready' && !selectedShip.label && (
                           <button onClick={() => handlePurchaseLabel(selectedShip.id)} disabled={providerLoading !== null}
-                            className="px-3 py-2 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-700 transition-all disabled:opacity-40 flex items-center gap-1 shadow-sm">
+                            className="px-3 py-2 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-700 transition-all disabled:opacity-40 flex items-center gap-1 shadow-sm"
+                            title={!hasShippablePackages(selectedShip) ? 'Add packages first' : !selectedShip.selectedRate && (!selectedShip.carrier || !selectedShip.serviceLevel) ? 'Select a rate or set carrier and service' : 'Purchase shipping label'}>
                             <span className="material-symbols-outlined text-sm">{providerLoading === 'label' ? 'hourglass_top' : 'receipt'}</span>
                             {providerLoading === 'label' ? 'Purchasing...' : 'Purchase Label'}
                           </button>
@@ -1164,6 +1226,10 @@ export default function ShippingCenter() {
         {editingShipment && (() => {
           const editShipData = shipments.find(s => s.id === editingShipment);
           const packagesLocked = editShipData ? STATUS_ORDER.indexOf(editShipData.status) >= STATUS_ORDER.indexOf('Label Created') : false;
+          const hasLabel = !!editShipData?.label;
+          const hasSelectedRate = !!editShipData?.selectedRate;
+          const trackingLocked = hasLabel;
+          const carrierServiceLocked = hasLabel || hasSelectedRate;
           return (
           <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
             <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col">
@@ -1183,23 +1249,31 @@ export default function ShippingCenter() {
                 </div>
               )}
               <div className="p-8 overflow-y-auto flex-1 space-y-4">
+                {carrierServiceLocked && (
+                  <div className="px-3 py-2 bg-indigo-50 border border-indigo-100 rounded-lg flex items-start gap-2">
+                    <span className="material-symbols-outlined text-indigo-500 text-sm mt-0.5">info</span>
+                    <p className="text-[10px] text-indigo-600 font-medium">
+                      {hasLabel ? 'Carrier, service, and tracking are locked after label purchase.' : 'Carrier and service are set from the selected rate.'}
+                    </p>
+                  </div>
+                )}
                 <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Carrier</label>
-                  <select value={newCarrier} onChange={e => setNewCarrier(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Carrier {carrierServiceLocked && <span className="text-amber-500 ml-1">(locked)</span>}</label>
+                  <select value={newCarrier} onChange={e => setNewCarrier(e.target.value)} disabled={carrierServiceLocked} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed">
                     <option value="">Select carrier...</option>
                     {CARRIERS.map(c => <option key={c} value={c}>{c}</option>)}
                   </select>
                 </div>
                 <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Service Level</label>
-                  <select value={newService} onChange={e => setNewService(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Service Level {carrierServiceLocked && <span className="text-amber-500 ml-1">(locked)</span>}</label>
+                  <select value={newService} onChange={e => setNewService(e.target.value)} disabled={carrierServiceLocked} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed">
                     <option value="">Select service...</option>
                     {SERVICE_LEVELS.map(s => <option key={s} value={s}>{s}</option>)}
                   </select>
                 </div>
                 <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Tracking Number</label>
-                  <input value={newTracking} onChange={e => setNewTracking(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 font-mono" placeholder="Enter tracking number" />
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Tracking Number {trackingLocked && <span className="text-amber-500 ml-1">(locked)</span>}</label>
+                  <input value={newTracking} onChange={e => setNewTracking(e.target.value)} disabled={trackingLocked} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 font-mono disabled:opacity-50 disabled:cursor-not-allowed" placeholder={trackingLocked ? 'Set by label purchase' : 'Enter tracking number'} />
                 </div>
                 {canViewCosts && (
                   <div>

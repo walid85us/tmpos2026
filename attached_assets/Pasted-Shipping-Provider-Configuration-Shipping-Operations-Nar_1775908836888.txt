@@ -1,0 +1,148 @@
+Shipping Provider Configuration & Shipping Operations — Narrow Product Polish Pass
+
+Do not redesign the app.
+Do not broaden scope.
+Do not touch unrelated workstreams.
+Preserve all currently working behavior:
+- provider configuration exists
+- provider selection works
+- credential masking works
+- test connection is honest
+- Shipping Center resolves active provider
+- shipping core workflow is intact
+
+This is a narrow polish and workflow-correction pass based on QA and product-direction refinement.
+
+--------------------------------------------------
+GOAL
+--------------------------------------------------
+
+Refine the shipping provider configuration UX and tighten the operational shipping flow so it behaves more like a real shipping workflow for this system.
+
+--------------------------------------------------
+REQUIRED IMPROVEMENTS
+--------------------------------------------------
+
+1) SHIPPING PROVIDER CONFIGURATION UX PLACEMENT
+Current QA suggestion:
+- Shipping Providers configuration should feel more native to Shipping itself
+
+Required improvement:
+- Keep the existing correct admin/settings governance and security model
+- But add a clear Shipping Center settings entry point or settings subsection that surfaces provider configuration in a native shipping context
+- Do NOT duplicate actual config ownership logic in two competing places
+- The user should feel that provider config belongs to Shipping operations, while governance/security still follows the correct existing admin architecture
+
+Preferred outcome:
+- Shipping Center includes a clear path such as a Settings / Provider Settings subsection or entry point
+- That path opens or routes into the governed provider configuration experience cleanly
+
+2) BETTER PROVIDER ERROR FEEDBACK
+Current QA result:
+- invalid ShipStation config returns a raw message like:
+  - “Failed to connect to ShipStation: Failed to fetch”
+
+Required improvement:
+- Keep the error honest
+- But make the operational feedback more user-friendly and actionable
+- Translate raw fetch/network/config failures into clear UI messaging such as:
+  - connection failed
+  - invalid credentials
+  - provider unreachable
+  - incomplete configuration
+  - network/API error
+- Preserve technical detail only where appropriate, not as the only message
+
+Do not fake success.
+Do not hide real failures.
+Do not expose secrets.
+
+3) GET RATES WORKFLOW MUST BE OPERATIONALLY CORRECT
+Required product behavior:
+- When clicking Get Rates, the app should return a list of available rate options where provider data is available
+- The user should then select which rate/service to use
+- The selected rate must update:
+  - carrier
+  - service level
+  - shipping cost
+- Rate selection must be based on package data
+- If packages have not been added yet, the user should not be able to get rates, or the app should clearly instruct them to add packages first
+
+Required implementation:
+- enforce package readiness before rate retrieval where appropriate
+- make rate list selection explicit and operationally clean
+- persist the selected rate onto the shipment record
+- keep manual fallback coherent if provider access is unavailable
+
+4) PURCHASE LABEL MUST DEPEND ON RATE / SHIPMENT READINESS
+Required product behavior:
+- When the shipment is moved to Ready / Prepared, Purchase Label becomes available when operational prerequisites are satisfied
+- Purchase Label should use the selected rate when a rate has been chosen
+- If no rate was selected, the system may allow manual carrier/service use only if that manual workflow is intentionally supported and coherent
+
+Required implementation:
+- define and enforce clear prerequisites before Purchase Label is enabled
+- use selected rate/carrier/service when present
+- do not allow ambiguous label purchase behavior
+
+5) TRACKING NUMBER AUTO-POPULATION + LOCK RULE
+Required product behavior:
+- When label purchase succeeds, tracking number should populate automatically from the provider result
+- After label purchase, tracking number should not be manually editable
+- Tracking number remains locked unless the shipment is cancelled and current business rules explicitly allow reset/rework
+
+Required implementation:
+- provider label purchase must populate tracking number correctly
+- tracking number field/edit path must become locked after successful label purchase
+- preserve existing lifecycle and edit-lock discipline
+
+6) MANUAL CARRIER / SERVICE FALLBACK RULE
+Required product behavior:
+- If the user has not selected a provider-returned rate, manual carrier/service entry may still be allowed only if that fallback is intentionally supported
+- If a provider rate is selected, carrier/service should come from that rate selection and not drift separately
+
+Required implementation:
+- make the relationship between selected rate and carrier/service clear
+- avoid conflicting editable states
+- prevent inconsistent shipment data
+
+--------------------------------------------------
+IMPORTANT IMPLEMENTATION RULES
+--------------------------------------------------
+
+- Do not break preview mode safety
+- Do not break existing permissions or plan gating
+- Do not break shipping core workflows
+- Do not break provider selection/configuration
+- Do not fake live provider success
+- Do not hardcode provider-specific behavior in a brittle way
+- Keep the design baseline consistent with the existing app
+
+--------------------------------------------------
+DOCUMENTATION
+--------------------------------------------------
+
+Update replit.md briefly to reflect:
+- shipping provider configuration entry from Shipping Center
+- package prerequisite for rate retrieval
+- rate selection behavior and shipment field updates
+- label purchase prerequisites
+- tracking auto-population and post-label lock rule
+- manual carrier/service fallback rule
+
+--------------------------------------------------
+OUTPUT FORMAT REQUIRED
+--------------------------------------------------
+
+Reply ONLY in this structure:
+
+1. Polish Pass Status
+2. Shipping Provider Config UX Improvement
+3. Provider Error Feedback Improvement
+4. Rate Selection Workflow Improvement
+5. Purchase Label Prerequisite / Selected Rate Logic
+6. Tracking Auto-Population / Lock Rule
+7. Manual Carrier/Service Fallback Logic
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes
