@@ -1,0 +1,286 @@
+Project: Multi-Tenant Repair / POS SaaS
+Workstream: Shipping Provider Configuration & Provider Selection
+Mode: Strict isolated workstream implementation
+Priority: High operational value, secure configuration handling, preserve current product baseline exactly
+
+You are a principal-level full-stack SaaS architect, senior React/TypeScript engineer, Firebase/Firestore data architect, enterprise shipping systems architect, provider-integration designer, admin settings UX specialist, and QA-minded refactoring expert.
+
+You must also operate in two parallel modes throughout this task:
+1) Side Auditor — continuously inspect for security mistakes, credential leakage, fake connection success, permission leakage, tenant/store leakage, preview mode write leaks, and shallow provider wiring.
+2) Systems Thinker — design this workstream as part of the whole platform, making sure it fits the existing auth model, preview mode, RBAC, lifecycle gating, platform/store hierarchy, commercial plan gating, and the completed Shipping Center + Shipping Phase 1 Expansion.
+
+Read and understand the existing codebase first, especially:
+- Ref.txt
+- replit.md
+
+Before changing anything, inspect the current architecture and identify:
+- where system owner/platform-level configuration screens already live
+- where settings/admin patterns already exist
+- how the Plans & Features matrix is structured
+- how Store Permissions Matrix and RBAC are structured
+- how Shipping Center currently decides provider operations
+- how environment/config data is currently represented
+- how preview mode and write blocking are enforced
+- how tenant/store scoping is enforced
+- how secure configuration patterns are handled elsewhere in the app
+
+Do not redesign the app.
+Do not create a disconnected configuration mini-app.
+Do not hardcode secrets.
+Do not expose raw secrets in normal UI.
+Do not fake provider connection success.
+Do not bypass preview mode, RBAC, or commercial feature gating.
+Do not create a provider-selection mechanism outside the existing architecture.
+
+--------------------------------------------------
+WORKSTREAM GOAL
+--------------------------------------------------
+
+Create a proper Shipping Provider Configuration and Provider Selection capability so the system can operationally support multiple carriers/providers.
+
+This workstream must add a clean, secure, native configuration area where authorized users can:
+- choose the active shipping provider
+- configure provider credentials/settings
+- support EasyPost, Shippo, and ShipStation
+- test or validate provider configuration safely
+- make Shipping Center and provider actions use the selected provider coherently
+
+This is the missing operational layer needed before the provider actions can be fully QA’d end to end.
+
+--------------------------------------------------
+SUPPORTED PROVIDERS
+--------------------------------------------------
+
+This workstream must support configuration for:
+- EasyPost
+- Shippo
+- ShipStation
+
+Implement these as provider options in a scalable way.
+Do not build a one-off flow that only works for one provider.
+
+--------------------------------------------------
+MANDATORY ARCHITECTURE REQUIREMENTS
+--------------------------------------------------
+
+1) CENTRALIZED PROVIDER CONFIGURATION
+Add a proper centralized configuration surface in the correct existing admin/system-owner/settings area of the app.
+
+This must feel native to the current product.
+Do not place provider setup in an arbitrary disconnected screen.
+
+2) ACTIVE PROVIDER SELECTION
+Support selecting one active shipping provider for system operation.
+The system must clearly know which provider is currently active.
+
+Required behaviors:
+- active provider selection must persist correctly
+- provider-dependent shipping actions must use the selected provider
+- switching providers must not corrupt existing shipment data
+- historical shipment/provider metadata must remain intact
+
+3) PROVIDER-SPECIFIC CREDENTIAL CONFIGURATION
+Support the appropriate configuration fields per provider, in a secure and scalable structure.
+
+Examples of what may be needed depending on provider:
+- API key
+- API secret
+- account/store identifier
+- environment/mode if appropriate
+- webhook-related identifiers only if your current architecture needs placeholders
+
+Do not invent fake credentials.
+Do not hardcode secrets into the codebase.
+
+4) SAFE SECRET HANDLING
+Use the safest pattern available within the current architecture.
+
+Requirements:
+- do not expose full secrets after save
+- mask sensitive values in the UI after initial entry
+- clearly distinguish between “configured” and “not configured”
+- allow update/replacement of credentials without displaying full stored secret values
+- do not leak sensitive values into logs, banners, or list rows
+
+5) PROVIDER CONNECTION / VALIDATION PATH
+Add a safe “Test Connection” / “Validate Provider Config” capability.
+
+Required behaviors:
+- runs against the currently entered/saved provider config
+- shows clear success/failure messaging
+- does not fake success
+- gives operationally useful feedback when config is incomplete or invalid
+- does not create shipments or labels as part of a connection test
+
+6) SHIPPING CENTER INTEGRATION
+Shipping Center provider operations must use the configured active provider.
+
+Required behaviors:
+- if no provider is configured, provider operations remain safely unavailable or error clearly
+- if a provider is configured, provider actions use that provider path
+- provider section in shipment detail should reflect the active/used provider coherently
+- switching active provider should affect new provider operations, not corrupt historical shipment/provider references
+
+--------------------------------------------------
+SCOPE OF CONFIGURATION OWNERSHIP
+--------------------------------------------------
+
+Implement the provider configuration ownership model in the most appropriate current product layer.
+
+Unless the existing architecture clearly requires otherwise, this should be treated as a platform/system-owner or high-admin configuration area, not a casual store-level setting.
+
+You must align with the current platform/store hierarchy and existing admin/settings architecture.
+
+If the existing app already supports tenant-level settings that are more appropriate, follow the existing architecture exactly.
+Do not invent a conflicting governance layer.
+
+--------------------------------------------------
+PLANS & FEATURES / PERMISSIONS / PREVIEW MODE
+--------------------------------------------------
+
+Preserve and correctly enforce all existing controls:
+- auth behavior
+- preview mode
+- RBAC/sub-permissions
+- lifecycle gating where relevant
+- platform/store hierarchy
+- System Owner Plans & Features matrix
+- Store Permissions Matrix
+
+If provider configuration deserves distinct gating in the current system, integrate it coherently.
+
+At minimum, evaluate and implement the correct gating for:
+- view provider configuration
+- edit provider configuration
+- select active provider
+- test connection / validate provider setup
+
+Do not create a disconnected permissions system.
+
+Preview mode requirements:
+- provider configuration writes must not commit in preview mode
+- test connection behavior must follow current product rules and remain safe
+- no secrets should be committed in preview mode
+
+--------------------------------------------------
+UI / UX REQUIREMENTS
+--------------------------------------------------
+
+The UX must feel native to the current product.
+Do not redesign the app.
+
+Requirements:
+- preserve current design baseline exactly
+- follow current settings/admin page patterns, cards, panels, forms, action bars, buttons, banners, and status badges
+- provider choice must be clear
+- configured/unconfigured state must be easy to understand
+- sensitive credential fields must be masked appropriately after save
+- connection test feedback must be clear and operationally honest
+
+--------------------------------------------------
+DATA MODEL REQUIREMENTS
+--------------------------------------------------
+
+Design/extend the model safely for:
+- configured provider records or provider config state
+- active provider selection
+- provider credential presence/status metadata
+- secure masked credential display state
+- connection validation result/state if stored
+- timestamps / updatedBy / audit-friendly metadata
+
+Maintain:
+- tenant/store/platform ownership alignment
+- safe queryability
+- auditability
+- compatibility with the existing provider adapter layer
+
+Do not create a brittle config model that will require immediate rework in the next phase.
+
+--------------------------------------------------
+NON-REGRESSION REQUIREMENTS
+--------------------------------------------------
+
+Do not break:
+1. Platform Command Center & Commercial Plan System
+2. Tenant Management & Provisioning
+3. Store Dashboard & POS Refinement
+4. Customers, Invoices & Services Improvements
+5. Repairs Module Deep Refinement
+6. Inventory & Supply Chain Improvements
+7. Shipping Module / Shipping Center
+8. Shipping Phase 1 Expansion core provider architecture
+
+Specifically preserve:
+- source-routed shipment creation
+- source reference resolution
+- create/save/edit behavior
+- package persistence
+- status transitions
+- preview mode safety
+- edit lock starting at Label Created
+- provider adapter architecture
+- no-fake-success provider behavior when config is missing
+
+--------------------------------------------------
+IMPLEMENTATION DISCIPLINE
+--------------------------------------------------
+
+Follow this exact execution discipline:
+
+1) Inspect existing admin/settings/system-owner architecture and choose the correct insertion point.
+2) Implement provider configuration model and active provider selection model.
+3) Add configuration UI for EasyPost, Shippo, and ShipStation.
+4) Add safe masked credential handling.
+5) Add Test Connection / Validate Provider Config flow.
+6) Wire Shipping Center provider operations to the selected provider configuration.
+7) Integrate permissions, feature gating, preview mode, and hierarchy enforcement.
+8) Run a regression-oriented review across shipping core flow and settings/admin surfaces.
+9) Update documentation.
+
+Do not claim completion unless the whole provider configuration flow is coherent end to end.
+
+--------------------------------------------------
+DOCUMENTATION REQUIREMENTS
+--------------------------------------------------
+
+Update replit.md with:
+- provider configuration architecture
+- active provider selection logic
+- supported providers (EasyPost, Shippo, ShipStation)
+- credential handling approach
+- masked secret handling behavior
+- provider connection test behavior
+- permissions / feature gating implications
+- how Shipping Center resolves the active provider
+- affected modules and rationale
+
+--------------------------------------------------
+OUTPUT FORMAT REQUIRED
+--------------------------------------------------
+
+When finished, reply in this structure:
+
+1. Workstream Completion Status
+2. Files Changed
+3. Provider Configuration Architecture Implemented
+4. Active Provider Selection Added
+5. EasyPost / Shippo / ShipStation Configuration Added
+6. Credential Handling / Connection Test Added
+7. Shipping Center Provider Resolution Wired
+8. RBAC / Preview Mode / Hierarchy / Plan Gating Enforcement Added
+9. Non-Regression Notes
+10. Documentation Updated
+
+Before finalizing, self-audit your work and verify:
+- no design baseline drift
+- no secret leakage
+- no fake provider success
+- no preview mode write leaks
+- no tenant/store leakage
+- no regression to completed workstreams
+- no mismatch between active provider selection and Shipping Center behavior
+
+This is an isolation workstream.
+Stay tightly scoped to Shipping Provider Configuration & Provider Selection.
+Do not start Phase 2 or Phase 3 shipping work in this pass.

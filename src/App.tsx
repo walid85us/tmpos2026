@@ -45,6 +45,7 @@ import UsagePage from './owner/UsagePage';
 import ProvisioningPage from './owner/ProvisioningPage';
 import WarrantyManagement from './components/WarrantyManagement';
 import ShippingCenter from './components/ShippingCenter';
+import ShippingProvidersPage from './components/ShippingProvidersPage';
 import PageShell from './components/PageShell';
 
 import Login from './components/Login';
@@ -102,6 +103,7 @@ const router = createBrowserRouter([
       { path: '/reports', element: <AccessGuard feature="reports"><Reports /></AccessGuard> },
       { path: '/settings', element: <AccessGuard feature="settings"><Settings /></AccessGuard> },
       { path: '/settings/configurations', element: <Navigate to="/settings" replace /> },
+      { path: '/settings/shipping-providers', element: <AccessGuard feature="shipping"><ShippingProvidersPage /></AccessGuard> },
       { path: '/support', element: <AccessGuard feature="support"><Support /></AccessGuard> },
     ],
   },

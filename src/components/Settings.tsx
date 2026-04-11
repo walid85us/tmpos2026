@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState } from '../context/StoreLocalState';
+import { useAccess } from '../context/AccessContext';
 import TemplateEditor from './TemplateEditor';
 import type { DocumentTemplate } from '../types';
 import { buildTemplateHtml, getDefaultEnabledTags } from '../utils/templateBuilder';
@@ -10,6 +12,9 @@ type SettingsTab = 'config' | 'hardware' | 'language';
 export default function Settings() {
   const [activeTab, setActiveTab] = useState<SettingsTab>('config');
   const { documentTemplates, updateDocumentTemplate, resetDocumentTemplate, storeBranding, updateStoreBranding } = useStoreLocalState();
+  const { checkPermission } = useAccess();
+  const navigate = useNavigate();
+  const hasShippingAccess = checkPermission('shipping', 'view');
   const [editingTemplate, setEditingTemplate] = useState<DocumentTemplate | null>(null);
 
   useEffect(() => {
@@ -127,6 +132,31 @@ export default function Settings() {
           </div>
         </div>
       </section>
+
+      {hasShippingAccess && (
+        <section className="space-y-6">
+          <div className="flex items-center gap-3 mb-2">
+            <span className="material-symbols-outlined text-primary">local_shipping</span>
+            <h3 className="text-xl font-black text-primary tracking-tight">Shipping</h3>
+          </div>
+          <div className="bg-white/80 backdrop-blur-xl p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 bg-indigo-50 rounded-2xl flex items-center justify-center">
+                  <span className="material-symbols-outlined text-indigo-600">hub</span>
+                </div>
+                <div>
+                  <p className="text-sm font-black text-primary">Shipping Providers</p>
+                  <p className="text-xs text-slate-500">Configure carrier integrations, credentials, and select your active shipping provider.</p>
+                </div>
+              </div>
+              <button onClick={() => navigate('/settings/shipping-providers')} className="px-6 py-3 text-[10px] font-black uppercase tracking-widest bg-primary text-white rounded-xl hover:bg-primary/90 transition-all shadow-sm">
+                Manage Providers
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* 3. Regional & Tax Settings */}
       <section className="space-y-6">

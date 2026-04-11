@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
 import { Shipment, ShipmentStatus, ShipmentSourceType, ShipmentType, ShipmentAddress, ShipmentPackage, ShipmentEvent, ShippingRate, AddressValidationResult } from '../types';
-import { getProvider } from '../shipping/providerRegistry';
+import { getProvider, getActiveProviderId } from '../shipping/providerRegistry';
 import type { ProviderError } from '../shipping/types';
 import PageShell from './PageShell';
 
@@ -423,18 +423,28 @@ export default function ShippingCenter() {
     setProviderSuccess(null);
   }
 
+  function resolveActiveProvider() {
+    const activeId = getActiveProviderId();
+    if (!activeId) {
+      setProviderError({ code: 'NO_PROVIDER', message: 'No active shipping provider selected. Configure a provider in Settings → Shipping Providers.', retryable: false });
+      return null;
+    }
+    const provider = getProvider(activeId);
+    if (!provider) {
+      setProviderError({ code: 'NO_PROVIDER', message: `Provider "${activeId}" is not available.`, retryable: false });
+      return null;
+    }
+    return provider;
+  }
+
   async function handleValidateAddress(shipmentId: string) {
     if (isWriteBlocked) return;
     const shipment = shipments.find(s => s.id === shipmentId);
     if (!shipment) return;
     clearProviderFeedback();
     setProviderLoading('validate');
-    const provider = getProvider('easypost');
-    if (!provider) {
-      setProviderError({ code: 'NO_PROVIDER', message: 'No shipping provider configured.', retryable: false });
-      setProviderLoading(null);
-      return;
-    }
+    const provider = resolveActiveProvider();
+    if (!provider) { setProviderLoading(null); return; }
     const result = await provider.validateAddress(shipment.destinationAddress);
     if (result.success && result.result) {
       const validationResult: AddressValidationResult = result.result;
@@ -471,12 +481,8 @@ export default function ShippingCenter() {
     setProviderLoading('rates');
     setShowRatesPanel(false);
     setAvailableRates([]);
-    const provider = getProvider('easypost');
-    if (!provider) {
-      setProviderError({ code: 'NO_PROVIDER', message: 'No shipping provider configured.', retryable: false });
-      setProviderLoading(null);
-      return;
-    }
+    const provider = resolveActiveProvider();
+    if (!provider) { setProviderLoading(null); return; }
     const result = await provider.getRates({
       originAddress: shipment.originAddress,
       destinationAddress: shipment.destinationAddress,
@@ -523,12 +529,8 @@ export default function ShippingCenter() {
     }
     clearProviderFeedback();
     setProviderLoading('label');
-    const provider = getProvider('easypost');
-    if (!provider) {
-      setProviderError({ code: 'NO_PROVIDER', message: 'No shipping provider configured.', retryable: false });
-      setProviderLoading(null);
-      return;
-    }
+    const provider = resolveActiveProvider();
+    if (!provider) { setProviderLoading(null); return; }
     const result = await provider.purchaseLabel({
       originAddress: shipment.originAddress,
       destinationAddress: shipment.destinationAddress,
@@ -572,12 +574,8 @@ export default function ShippingCenter() {
     if (!shipment || !shipment.trackingNumber) return;
     clearProviderFeedback();
     setProviderLoading('tracking');
-    const provider = getProvider('easypost');
-    if (!provider) {
-      setProviderError({ code: 'NO_PROVIDER', message: 'No shipping provider configured.', retryable: false });
-      setProviderLoading(null);
-      return;
-    }
+    const provider = resolveActiveProvider();
+    if (!provider) { setProviderLoading(null); return; }
     const result = await provider.getTracking({
       trackingNumber: shipment.trackingNumber,
       carrier: shipment.carrier || '',
@@ -899,7 +897,14 @@ export default function ShippingCenter() {
                     )}
 
                     <div className="bg-indigo-50/50 rounded-2xl p-5 border border-indigo-100 space-y-4">
-                      <p className="text-[10px] font-black text-indigo-500 uppercase tracking-widest flex items-center gap-1"><span className="material-symbols-outlined text-xs">hub</span>Provider & Operations</p>
+                      <div className="flex items-center justify-between">
+                        <p className="text-[10px] font-black text-indigo-500 uppercase tracking-widest flex items-center gap-1"><span className="material-symbols-outlined text-xs">hub</span>Provider & Operations</p>
+                        {(() => { const aid = getActiveProviderId(); return aid ? (
+                          <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest bg-indigo-100 text-indigo-600 rounded-md">{aid}</span>
+                        ) : (
+                          <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest bg-slate-100 text-slate-400 rounded-md">No Provider</span>
+                        ); })()}
+                      </div>
 
                       {providerError && (
                         <div className="px-3 py-2 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2">

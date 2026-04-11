@@ -797,15 +797,37 @@ export interface ProviderTrackingEvent {
 
 export type ShippingProviderStatus = 'not_configured' | 'configured' | 'active' | 'error';
 
+export interface ShippingProviderCredentials {
+  apiKey?: string;
+  apiSecret?: string;
+  accountId?: string;
+  environment?: 'test' | 'production';
+  webhookSecret?: string;
+}
+
 export interface ShippingProviderConfig {
   providerId: string;
   providerName: string;
   status: ShippingProviderStatus;
   isDefault: boolean;
+  credentials: ShippingProviderCredentials;
+  credentialsMasked?: {
+    apiKey?: string;
+    apiSecret?: string;
+    accountId?: string;
+  };
+  environment?: 'test' | 'production';
   configuredAt?: string;
   configuredBy?: string;
+  updatedAt?: string;
   lastTestedAt?: string;
   testResult?: 'success' | 'failure';
+  testMessage?: string;
+}
+
+export interface ShippingProvidersState {
+  providers: ShippingProviderConfig[];
+  activeProviderId: string | null;
 }
 
 export interface Shipment {
