@@ -91,6 +91,11 @@ export const SUB_PERMISSIONS: SubPermissionDef[] = [
   { id: 'cancel_shipment', label: 'Cancel Shipment', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Cancel shipment records' },
   { id: 'view_shipping_costs', label: 'View Shipping Costs', parentDomain: 'shipping', minModuleLevel: 'view', defaultLevel: 'edit', description: 'View shipment cost and financial details' },
   { id: 'manage_shipping_settings', label: 'Manage Shipping Settings', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Configure carrier providers and shipping settings' },
+  { id: 'validate_shipping_address', label: 'Validate Address', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'edit', description: 'Validate shipping addresses via provider' },
+  { id: 'fetch_shipping_rates', label: 'Fetch Rates', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'edit', description: 'Retrieve shipping rates from provider' },
+  { id: 'purchase_shipping_label', label: 'Purchase Label', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Purchase shipping labels via provider' },
+  { id: 'print_shipping_label', label: 'Print/Open Label', parentDomain: 'shipping', minModuleLevel: 'view', defaultLevel: 'view', description: 'Open or print purchased shipping labels' },
+  { id: 'sync_shipping_tracking', label: 'Sync Tracking', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'edit', description: 'Sync tracking updates from shipping provider' },
 ];
 
 export const ADMIN_ACTION_LEVEL_MAP = SUB_PERMISSIONS;
@@ -177,6 +182,11 @@ export const tenantRoles: EmployeeRole[] = [
       cancel_shipment: true,
       view_shipping_costs: true,
       manage_shipping_settings: true,
+      validate_shipping_address: true,
+      fetch_shipping_rates: true,
+      purchase_shipping_label: true,
+      print_shipping_label: true,
+      sync_shipping_tracking: true,
     },
     description: 'Store management access'
   },
@@ -240,6 +250,11 @@ export const tenantRoles: EmployeeRole[] = [
       cancel_shipment: false,
       view_shipping_costs: false,
       manage_shipping_settings: false,
+      validate_shipping_address: false,
+      fetch_shipping_rates: false,
+      purchase_shipping_label: false,
+      print_shipping_label: false,
+      sync_shipping_tracking: false,
     },
     description: 'Repair and parts access'
   },
@@ -303,6 +318,11 @@ export const tenantRoles: EmployeeRole[] = [
       cancel_shipment: false,
       view_shipping_costs: false,
       manage_shipping_settings: false,
+      validate_shipping_address: false,
+      fetch_shipping_rates: false,
+      purchase_shipping_label: false,
+      print_shipping_label: false,
+      sync_shipping_tracking: false,
     },
     description: 'Sales and customer access'
   },

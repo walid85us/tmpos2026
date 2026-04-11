@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useMemo, useEffect, useRef } from 'react';
-import { Customer, HeldOrder, CartItem, PaymentMethod, Discount, RepairTicket, RepairTicketStatus, Invoice, RepairService, RepairCategory, DocumentTemplate, StoreBranding, LogoPlacement, Supplier, StockMovement, StockMovementType, PurchaseOrder, GoodsReceivedNote, RMA, InventoryTransfer, InventoryCount, TradeInItem, RefurbishmentJob, SupplierRefundEntry, Shipment } from '../types';
+import { Customer, HeldOrder, CartItem, PaymentMethod, Discount, RepairTicket, RepairTicketStatus, Invoice, RepairService, RepairCategory, DocumentTemplate, StoreBranding, LogoPlacement, Supplier, StockMovement, StockMovementType, PurchaseOrder, GoodsReceivedNote, RMA, InventoryTransfer, InventoryCount, TradeInItem, RefurbishmentJob, SupplierRefundEntry, Shipment, ShippingProviderConfig } from '../types';
 import { useAccess } from './AccessContext';
 import { buildTemplateHtml, getDefaultEnabledTags } from '../utils/templateBuilder';
 
@@ -239,6 +239,8 @@ interface StoreLocalStateContextType {
   shipments: Shipment[];
   addShipment: (s: Shipment) => void;
   updateShipment: (id: string, updates: Partial<Shipment>) => void;
+  shippingProviderConfig: ShippingProviderConfig | null;
+  setShippingProviderConfig: (config: ShippingProviderConfig | null) => void;
   storeLocations: string[];
   getItemMovements: (stockItemId: string) => StockMovement[];
 }
@@ -784,6 +786,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const [refurbishmentJobs, setRefurbishmentJobs] = useState<RefurbishmentJob[]>(SEED_REFURB_JOBS);
   const [supplierRefundEntries, setSupplierRefundEntries] = useState<SupplierRefundEntry[]>([]);
   const [shipments, setShipments] = useState<Shipment[]>(SEED_SHIPMENTS);
+  const [shippingProviderConfig, setShippingProviderConfig] = useState<ShippingProviderConfig | null>(null);
   const storeLocations = SEED_STORE_LOCATIONS;
 
   const getItemMovements = useCallback((stockItemId: string) => {
@@ -933,6 +936,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
       refurbishmentJobs, addRefurbishmentJob, updateRefurbishmentJob,
       supplierRefundEntries, addSupplierRefundEntry,
       shipments, addShipment, updateShipment,
+      shippingProviderConfig, setShippingProviderConfig,
       storeLocations, getItemMovements,
     }}>
       {children}

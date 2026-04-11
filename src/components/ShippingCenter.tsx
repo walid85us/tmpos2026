@@ -3,7 +3,9 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
-import { Shipment, ShipmentStatus, ShipmentSourceType, ShipmentType, ShipmentAddress, ShipmentPackage, ShipmentEvent } from '../types';
+import { Shipment, ShipmentStatus, ShipmentSourceType, ShipmentType, ShipmentAddress, ShipmentPackage, ShipmentEvent, ShippingRate, AddressValidationResult } from '../types';
+import { getProvider } from '../shipping/providerRegistry';
+import type { ProviderError } from '../shipping/types';
 import PageShell from './PageShell';
 
 export interface ShipmentPrefill {
@@ -86,6 +88,11 @@ export default function ShippingCenter() {
   const canUpdateTracking = checkSubPermission('update_tracking_events');
   const canCancel = checkSubPermission('cancel_shipment');
   const canViewCosts = checkSubPermission('view_shipping_costs');
+  const canValidateAddress = checkSubPermission('validate_shipping_address');
+  const canFetchRates = checkSubPermission('fetch_shipping_rates');
+  const canPurchaseLabel = checkSubPermission('purchase_shipping_label');
+  const canPrintLabel = checkSubPermission('print_shipping_label');
+  const canSyncTracking = checkSubPermission('sync_shipping_tracking');
 
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<ShipmentStatus | 'all'>('all');
@@ -116,6 +123,12 @@ export default function ShippingCenter() {
   const [sourceResolved, setSourceResolved] = useState<string | null>(null);
   const [sourceResolveError, setSourceResolveError] = useState<string | null>(null);
   const [isResolving, setIsResolving] = useState(false);
+
+  const [providerLoading, setProviderLoading] = useState<string | null>(null);
+  const [providerError, setProviderError] = useState<ProviderError | null>(null);
+  const [providerSuccess, setProviderSuccess] = useState<string | null>(null);
+  const [showRatesPanel, setShowRatesPanel] = useState(false);
+  const [availableRates, setAvailableRates] = useState<ShippingRate[]>([]);
 
   const STORE_ADDRESS: ShipmentAddress = { name: 'Main Warehouse', line1: '100 Commerce Dr', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US', phone: '555-0100' };
 
@@ -405,6 +418,207 @@ export default function ShippingCenter() {
     setEventLocation('');
   }
 
+  function clearProviderFeedback() {
+    setProviderError(null);
+    setProviderSuccess(null);
+  }
+
+  async function handleValidateAddress(shipmentId: string) {
+    if (isWriteBlocked) return;
+    const shipment = shipments.find(s => s.id === shipmentId);
+    if (!shipment) return;
+    clearProviderFeedback();
+    setProviderLoading('validate');
+    const provider = getProvider('easypost');
+    if (!provider) {
+      setProviderError({ code: 'NO_PROVIDER', message: 'No shipping provider configured.', retryable: false });
+      setProviderLoading(null);
+      return;
+    }
+    const result = await provider.validateAddress(shipment.destinationAddress);
+    if (result.success && result.result) {
+      const validationResult: AddressValidationResult = result.result;
+      const now = new Date().toISOString();
+      const updates: Partial<Shipment> = { addressValidation: validationResult, updatedAt: now };
+      if (validationResult.status === 'corrected' && validationResult.suggestedAddress) {
+        updates.destinationAddress = validationResult.suggestedAddress;
+        validationResult.accepted = true;
+      }
+      updateShipment(shipmentId, updates);
+      setProviderSuccess(
+        validationResult.status === 'validated' ? 'Address validated successfully.'
+        : validationResult.status === 'corrected' ? 'Address corrected and updated from provider suggestion.'
+        : 'Address validation completed.'
+      );
+    } else {
+      const failedValidation: AddressValidationResult = {
+        status: 'failed',
+        validatedAt: new Date().toISOString(),
+        originalAddress: shipment.destinationAddress,
+        messages: [result.error?.message || 'Validation failed'],
+      };
+      updateShipment(shipmentId, { addressValidation: failedValidation, updatedAt: new Date().toISOString() });
+      setProviderError(result.error || { code: 'UNKNOWN', message: 'Address validation failed.' });
+    }
+    setProviderLoading(null);
+  }
+
+  async function handleFetchRates(shipmentId: string) {
+    if (isWriteBlocked) return;
+    const shipment = shipments.find(s => s.id === shipmentId);
+    if (!shipment) return;
+    clearProviderFeedback();
+    setProviderLoading('rates');
+    setShowRatesPanel(false);
+    setAvailableRates([]);
+    const provider = getProvider('easypost');
+    if (!provider) {
+      setProviderError({ code: 'NO_PROVIDER', message: 'No shipping provider configured.', retryable: false });
+      setProviderLoading(null);
+      return;
+    }
+    const result = await provider.getRates({
+      originAddress: shipment.originAddress,
+      destinationAddress: shipment.destinationAddress,
+      packages: shipment.packages,
+    });
+    if (result.success && result.rates) {
+      const sorted = [...result.rates].sort((a, b) => a.rate - b.rate);
+      setAvailableRates(sorted);
+      updateShipment(shipmentId, {
+        availableRates: sorted,
+        ratesRetrievedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+      setShowRatesPanel(true);
+      setProviderSuccess(`${sorted.length} rate${sorted.length !== 1 ? 's' : ''} retrieved.`);
+    } else {
+      setProviderError(result.error || { code: 'UNKNOWN', message: 'Rate retrieval failed.' });
+    }
+    setProviderLoading(null);
+  }
+
+  function handleSelectRate(shipmentId: string, rate: ShippingRate) {
+    if (isWriteBlocked) return;
+    clearProviderFeedback();
+    updateShipment(shipmentId, {
+      selectedRate: rate,
+      carrier: rate.carrier,
+      serviceLevel: rate.serviceName,
+      shippingCost: rate.rate,
+      estimatedDelivery: rate.estimatedDelivery,
+      updatedAt: new Date().toISOString(),
+    });
+    setShowRatesPanel(false);
+    setProviderSuccess(`Selected: ${rate.carrier} ${rate.serviceName} — $${rate.rate.toFixed(2)}`);
+  }
+
+  async function handlePurchaseLabel(shipmentId: string) {
+    if (isWriteBlocked) return;
+    const shipment = shipments.find(s => s.id === shipmentId);
+    if (!shipment) return;
+    if (!shipment.selectedRate && !shipment.carrier) {
+      setProviderError({ code: 'NO_RATE', message: 'Select a shipping service before purchasing a label.', retryable: false });
+      return;
+    }
+    clearProviderFeedback();
+    setProviderLoading('label');
+    const provider = getProvider('easypost');
+    if (!provider) {
+      setProviderError({ code: 'NO_PROVIDER', message: 'No shipping provider configured.', retryable: false });
+      setProviderLoading(null);
+      return;
+    }
+    const result = await provider.purchaseLabel({
+      originAddress: shipment.originAddress,
+      destinationAddress: shipment.destinationAddress,
+      packages: shipment.packages,
+      selectedRateId: shipment.selectedRate?.providerRateRef || '',
+      carrier: shipment.carrier || shipment.selectedRate?.carrier || '',
+      service: shipment.serviceLevel || shipment.selectedRate?.serviceName || '',
+      shipmentRef: shipment.shipmentNumber,
+    });
+    if (result.success && result.label) {
+      const now = new Date().toISOString();
+      const newEvent: ShipmentEvent = {
+        id: `evt-${Date.now()}`,
+        timestamp: now,
+        status: 'Label Created',
+        description: `Label purchased — ${result.label.carrier} ${result.label.service}, tracking: ${result.label.trackingNumber}`,
+        performedBy: 'Current User',
+      };
+      updateShipment(shipmentId, {
+        label: result.label,
+        labelUrl: result.label.url,
+        trackingNumber: result.label.trackingNumber,
+        carrier: result.label.carrier,
+        serviceLevel: result.label.service,
+        shippingCost: result.label.cost,
+        providerShipmentId: result.providerShipmentId,
+        status: 'Label Created',
+        events: [...shipment.events, newEvent],
+        updatedAt: now,
+      });
+      setProviderSuccess('Label purchased successfully. Shipment status updated to Label Created.');
+    } else {
+      setProviderError(result.error || { code: 'UNKNOWN', message: 'Label purchase failed.' });
+    }
+    setProviderLoading(null);
+  }
+
+  async function handleSyncTracking(shipmentId: string) {
+    if (isWriteBlocked) return;
+    const shipment = shipments.find(s => s.id === shipmentId);
+    if (!shipment || !shipment.trackingNumber) return;
+    clearProviderFeedback();
+    setProviderLoading('tracking');
+    const provider = getProvider('easypost');
+    if (!provider) {
+      setProviderError({ code: 'NO_PROVIDER', message: 'No shipping provider configured.', retryable: false });
+      setProviderLoading(null);
+      return;
+    }
+    const result = await provider.getTracking({
+      trackingNumber: shipment.trackingNumber,
+      carrier: shipment.carrier || '',
+      providerShipmentId: shipment.providerShipmentId,
+    });
+    if (result.success) {
+      const now = new Date().toISOString();
+      const updates: Partial<Shipment> = {
+        providerTrackingEvents: result.events || [],
+        lastTrackingSyncAt: now,
+        updatedAt: now,
+      };
+      if (result.estimatedDelivery) updates.estimatedDelivery = result.estimatedDelivery;
+      if (result.status) {
+        const statusMap: Record<string, ShipmentStatus> = {
+          'in_transit': 'In Transit', 'delivered': 'Delivered',
+          'out_for_delivery': 'In Transit', 'failure': 'Exception',
+          'return_to_sender': 'Exception', 'error': 'Exception',
+        };
+        const mappedStatus = statusMap[result.status.toLowerCase()];
+        if (mappedStatus && STATUS_ORDER.indexOf(mappedStatus) > STATUS_ORDER.indexOf(shipment.status)) {
+          updates.status = mappedStatus;
+          if (mappedStatus === 'Delivered') updates.deliveredAt = now;
+          const syncEvent: ShipmentEvent = {
+            id: `evt-sync-${Date.now()}`,
+            timestamp: now,
+            status: mappedStatus,
+            description: `Status updated to ${mappedStatus} via tracking sync`,
+            performedBy: 'System (Provider Sync)',
+          };
+          updates.events = [...shipment.events, syncEvent];
+        }
+      }
+      updateShipment(shipmentId, updates);
+      setProviderSuccess(`Tracking synced. ${(result.events || []).length} event(s) from provider.`);
+    } else {
+      setProviderError(result.error || { code: 'UNKNOWN', message: 'Tracking sync failed.' });
+    }
+    setProviderLoading(null);
+  }
+
   function resetCreateForm() {
     setNewCarrier(''); setNewService(''); setNewTracking(''); setNewCost(''); setNewNotes('');
     setNewOrigin({ name: '', line1: '', city: '', state: '', postalCode: '', country: 'US' });
@@ -443,7 +657,7 @@ export default function ShippingCenter() {
   function getNextStatuses(current: ShipmentStatus): ShipmentStatus[] {
     const transitions: Record<ShipmentStatus, ShipmentStatus[]> = {
       'Draft': ['Ready', 'Cancelled'],
-      'Ready': ['Label Created', 'Packed', 'Cancelled'],
+      'Ready': ['Packed', 'Cancelled'],
       'Label Created': ['Packed', 'Cancelled'],
       'Packed': ['Dispatched', 'Cancelled'],
       'Dispatched': ['In Transit'],
@@ -681,6 +895,144 @@ export default function ShippingCenter() {
                       <div className="bg-amber-50 rounded-xl p-4 border border-amber-100">
                         <p className="text-[10px] font-black text-amber-600 uppercase tracking-widest mb-1">Notes</p>
                         <p className="text-xs text-amber-800">{selectedShip.notes}</p>
+                      </div>
+                    )}
+
+                    <div className="bg-indigo-50/50 rounded-2xl p-5 border border-indigo-100 space-y-4">
+                      <p className="text-[10px] font-black text-indigo-500 uppercase tracking-widest flex items-center gap-1"><span className="material-symbols-outlined text-xs">hub</span>Provider & Operations</p>
+
+                      {providerError && (
+                        <div className="px-3 py-2 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2">
+                          <span className="material-symbols-outlined text-red-500 text-sm mt-0.5">error</span>
+                          <div>
+                            <p className="text-xs text-red-600 font-medium">{providerError.message}</p>
+                            {providerError.retryable && <p className="text-[10px] text-red-400 mt-0.5">This error may be temporary. You can retry.</p>}
+                          </div>
+                        </div>
+                      )}
+                      {providerSuccess && (
+                        <div className="px-3 py-2 bg-emerald-50 border border-emerald-200 rounded-lg flex items-start gap-2">
+                          <span className="material-symbols-outlined text-emerald-500 text-sm mt-0.5">check_circle</span>
+                          <p className="text-xs text-emerald-700 font-medium">{providerSuccess}</p>
+                        </div>
+                      )}
+
+                      {selectedShip.addressValidation && (
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className="text-slate-400 font-bold">Address</span>
+                          <span className={`px-2 py-0.5 rounded-md text-[10px] font-black uppercase tracking-widest ${
+                            selectedShip.addressValidation.status === 'validated' ? 'bg-emerald-100 text-emerald-700' :
+                            selectedShip.addressValidation.status === 'corrected' ? 'bg-blue-100 text-blue-700' :
+                            selectedShip.addressValidation.status === 'failed' ? 'bg-red-100 text-red-700' :
+                            'bg-slate-100 text-slate-500'
+                          }`}>{selectedShip.addressValidation.status}</span>
+                          {selectedShip.addressValidation.validatedAt && <span className="text-[10px] text-slate-400">{formatDateTime(selectedShip.addressValidation.validatedAt)}</span>}
+                        </div>
+                      )}
+
+                      {selectedShip.selectedRate && (
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className="text-slate-400 font-bold">Service</span>
+                          <span className="font-black text-slate-700">{selectedShip.selectedRate.carrier} {selectedShip.selectedRate.serviceName}</span>
+                          <span className="font-black text-primary">${selectedShip.selectedRate.rate.toFixed(2)}</span>
+                          {selectedShip.selectedRate.estimatedDays && <span className="text-slate-400">({selectedShip.selectedRate.estimatedDays}d)</span>}
+                        </div>
+                      )}
+
+                      {selectedShip.label && (
+                        <div className="flex items-center gap-2 text-xs flex-wrap">
+                          <span className="text-slate-400 font-bold">Label</span>
+                          <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-md text-[10px] font-black uppercase tracking-widest">Purchased</span>
+                          <span className="text-slate-500 font-mono text-[10px]">{selectedShip.label.trackingNumber}</span>
+                          <span className="text-slate-400 text-[10px]">{selectedShip.label.format.toUpperCase()}</span>
+                        </div>
+                      )}
+
+                      {selectedShip.providerShipmentId && (
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className="text-slate-400 font-bold">Provider Ref</span>
+                          <span className="text-slate-500 font-mono text-[10px]">{selectedShip.providerShipmentId}</span>
+                        </div>
+                      )}
+
+                      {selectedShip.lastTrackingSyncAt && (
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className="text-slate-400 font-bold">Last Sync</span>
+                          <span className="text-slate-500 text-[10px]">{formatDateTime(selectedShip.lastTrackingSyncAt)}</span>
+                        </div>
+                      )}
+
+                      <div className="flex gap-2 flex-wrap pt-1">
+                        {canValidateAddress && !isWriteBlocked && isEditable(selectedShip.status) && (
+                          <button onClick={() => handleValidateAddress(selectedShip.id)} disabled={providerLoading !== null}
+                            className="px-3 py-2 bg-white text-indigo-600 border border-indigo-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50 transition-all disabled:opacity-40 flex items-center gap-1">
+                            <span className="material-symbols-outlined text-sm">{providerLoading === 'validate' ? 'hourglass_top' : 'verified'}</span>
+                            {providerLoading === 'validate' ? 'Validating...' : 'Validate Address'}
+                          </button>
+                        )}
+
+                        {canFetchRates && !isWriteBlocked && ['Draft', 'Ready'].includes(selectedShip.status) && (
+                          <button onClick={() => handleFetchRates(selectedShip.id)} disabled={providerLoading !== null}
+                            className="px-3 py-2 bg-white text-indigo-600 border border-indigo-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50 transition-all disabled:opacity-40 flex items-center gap-1">
+                            <span className="material-symbols-outlined text-sm">{providerLoading === 'rates' ? 'hourglass_top' : 'request_quote'}</span>
+                            {providerLoading === 'rates' ? 'Fetching...' : 'Get Rates'}
+                          </button>
+                        )}
+
+                        {canPurchaseLabel && !isWriteBlocked && selectedShip.status === 'Ready' && !selectedShip.label && (
+                          <button onClick={() => handlePurchaseLabel(selectedShip.id)} disabled={providerLoading !== null}
+                            className="px-3 py-2 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-700 transition-all disabled:opacity-40 flex items-center gap-1 shadow-sm">
+                            <span className="material-symbols-outlined text-sm">{providerLoading === 'label' ? 'hourglass_top' : 'receipt'}</span>
+                            {providerLoading === 'label' ? 'Purchasing...' : 'Purchase Label'}
+                          </button>
+                        )}
+
+                        {canPrintLabel && selectedShip.label?.url && (
+                          <button onClick={() => window.open(selectedShip.label!.url, '_blank')}
+                            className="px-3 py-2 bg-white text-slate-600 border border-slate-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-slate-50 transition-all flex items-center gap-1">
+                            <span className="material-symbols-outlined text-sm">print</span>
+                            Open Label
+                          </button>
+                        )}
+
+                        {canSyncTracking && !isWriteBlocked && selectedShip.trackingNumber && !['Draft', 'Ready', 'Delivered', 'Cancelled'].includes(selectedShip.status) && (
+                          <button onClick={() => handleSyncTracking(selectedShip.id)} disabled={providerLoading !== null}
+                            className="px-3 py-2 bg-white text-sky-600 border border-sky-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-sky-50 transition-all disabled:opacity-40 flex items-center gap-1">
+                            <span className="material-symbols-outlined text-sm">{providerLoading === 'tracking' ? 'hourglass_top' : 'sync'}</span>
+                            {providerLoading === 'tracking' ? 'Syncing...' : 'Sync Tracking'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {showRatesPanel && availableRates.length > 0 && (
+                      <div className="bg-sky-50/50 rounded-2xl p-5 border border-sky-100 space-y-3">
+                        <div className="flex justify-between items-center">
+                          <p className="text-[10px] font-black text-sky-600 uppercase tracking-widest flex items-center gap-1"><span className="material-symbols-outlined text-xs">local_offer</span>Available Rates</p>
+                          <button onClick={() => setShowRatesPanel(false)} className="text-slate-400 hover:text-slate-600"><span className="material-symbols-outlined text-sm">close</span></button>
+                        </div>
+                        <div className="space-y-2">
+                          {availableRates.map(rate => (
+                            <div key={rate.id} className="flex items-center justify-between bg-white rounded-xl p-3 border border-sky-100 hover:border-primary/30 transition-all">
+                              <div>
+                                <p className="text-xs font-black text-slate-700">{rate.carrier} — {rate.serviceName}</p>
+                                <p className="text-[10px] text-slate-400">
+                                  {rate.estimatedDays ? `${rate.estimatedDays} day${rate.estimatedDays !== 1 ? 's' : ''}` : 'Delivery estimate N/A'}
+                                  {rate.isGuaranteed && ' · Guaranteed'}
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-3">
+                                <span className="text-sm font-black text-primary">${rate.rate.toFixed(2)}</span>
+                                {!isWriteBlocked && (
+                                  <button onClick={() => handleSelectRate(selectedShip.id, rate)}
+                                    className="px-3 py-1.5 bg-primary text-white rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-primary/90 transition-all">
+                                    Select
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
                       </div>
                     )}
 

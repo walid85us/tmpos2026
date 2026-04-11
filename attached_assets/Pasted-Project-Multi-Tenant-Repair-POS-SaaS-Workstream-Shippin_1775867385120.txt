@@ -1,0 +1,415 @@
+Project: Multi-Tenant Repair / POS SaaS
+Workstream: Shipping Phase 1 Expansion — Provider Adapter, Address Validation, Rates, Labels, Tracking Sync, and Print-Label Readiness
+Mode: Strict isolated workstream implementation
+Priority: High architectural quality, production-minded shipping foundation, preserve current product baseline exactly
+
+You are a principal-level full-stack SaaS architect, senior React/TypeScript engineer, Firebase/Firestore data architect, enterprise shipping systems architect, carrier-integration designer, label/parcel workflow specialist, and QA-minded refactoring expert.
+
+You must also operate in two parallel modes throughout this task:
+1) Side Auditor — continuously inspect for regression risk, tenant leakage, permission leakage, lifecycle mistakes, fake integration behavior, broken label/rate workflows, carrier-state inconsistency, print/layout issues, and shallow implementation.
+2) Systems Thinker — design this workstream as part of the whole platform, making sure it fits the existing auth model, preview mode, RBAC, lifecycle gating, platform/store hierarchy, commercial plan gating, and the completed Shipping Module / Shipping Center.
+
+Read and understand the existing codebase first, especially:
+- Ref.txt
+- replit.md
+
+Before changing anything, inspect the current architecture and identify:
+- current Shipping Center structure
+- shipment data model
+- current shipment lifecycle states
+- source linkage for invoices / repairs / transfers / RMA
+- auth, preview mode, and runtime write protections
+- plan feature gating
+- store permissions matrix and sub-permissions
+- current package / parcel model
+- current tracking event model
+- current document/print handling patterns
+- current design system and modal/detail/list conventions
+- any existing external integration patterns already used elsewhere in the app
+
+Do not produce a shallow demo layer.
+Do not fake live shipping success where real integration is not configured.
+Do not redesign the UI baseline.
+Do not bypass lifecycle controls.
+Do not bypass preview mode.
+Do not bypass plan or permission gating.
+Do not hardcode tenant-specific or store-specific assumptions.
+Do not create a disconnected shipping sub-app.
+Do not create a one-off provider flow that cannot scale to multiple carriers later.
+
+This is the next workstream after the completed Shipping Module / Shipping Center.
+You must preserve everything already completed and expand Shipping Phase 1 correctly.
+
+--------------------------------------------------
+WORKSTREAM GOAL
+--------------------------------------------------
+
+Expand the completed Shipping Module / Shipping Center into a true Phase 1 shipping foundation with:
+
+- provider adapter architecture
+- first provider integration path
+- address validation flow
+- rate shopping / service selection
+- label purchase / label artifact storage model
+- tracking enrichment and automatic shipment status updates from carrier/provider integration paths
+- print-label readiness, including thermal-label-ready handling
+- strict shipment auditability and status consistency
+
+This phase must still fit the current app as a multi-tenant repair/POS SaaS with centralized shipping operations.
+
+--------------------------------------------------
+PHASE 1 PRODUCT DIRECTION — REQUIRED
+--------------------------------------------------
+
+This workstream must align with the agreed Phase 1 direction:
+
+Phase 1 includes:
+- shipping architecture
+- provider adapter
+- address validation
+- rates
+- labels
+- tracking
+- invoice / repair / transfer / RMA linkage
+- print label
+
+This app’s shipping direction remains:
+- Shipping Module / Shipping Center
+- shared engine
+- starts from Invoices, Repairs, Transfers, and RMA
+- first provider adapter such as EasyPost or Shippo
+- thermal-label-ready printing
+- tracking timeline visible on operational surfaces over time
+- strict auditability
+- strict status consistency
+- automatic shipment status updates from carrier APIs/backend integrations rather than only manual status updates
+
+--------------------------------------------------
+MANDATORY ARCHITECTURE REQUIREMENTS
+--------------------------------------------------
+
+1) PROVIDER-AGNOSTIC SHIPPING ADAPTER LAYER
+Create a clean provider abstraction layer that supports future carriers/providers without reworking the shipping module.
+
+The adapter layer must clearly separate:
+- address validation
+- rate retrieval
+- label purchase
+- tracking retrieval / tracking event sync
+- carrier-specific service normalization
+- provider errors and retry-safe handling
+
+Do not bake provider-specific assumptions into the core shipment domain model.
+
+2) FIRST PROVIDER INTEGRATION PATH
+Implement the first provider integration path in a production-minded way.
+Preferred first provider direction: EasyPost-style or Shippo-style adapter architecture.
+
+Required:
+- use secure configuration patterns
+- no hardcoded API keys
+- no fake “success” when provider calls fail
+- if credentials are not available in the environment, keep the integration path real and code-complete, with safe fallback behavior and explicit UX messaging rather than pretending live booking succeeded
+
+3) ADDRESS VALIDATION FLOW
+Add address validation capability into shipment preparation where it fits operationally.
+
+Required behaviors:
+- validate destination address before final booking/purchase where appropriate
+- store validation result / status in shipment context
+- clearly indicate validated, corrected, or failed validation state
+- do not silently overwrite user data without visibility
+- allow controlled acceptance of provider-recommended address normalization where appropriate
+
+4) RATE SHOPPING / SERVICE SELECTION
+Add rate retrieval and service selection capability.
+
+Required behaviors:
+- retrieve available shipping rate/service options through the provider adapter where configured
+- normalize returned services into a consistent UI/data model
+- show service name, estimated delivery context if available, cost, and carrier/provider source
+- allow the user to choose a service for shipment booking
+- keep manual fallback behavior coherent if live provider access is unavailable
+
+5) LABEL PURCHASE / LABEL ARTIFACT HANDLING
+Add a shipment label workflow that fits the lifecycle properly.
+
+Required behaviors:
+- create/purchase label through the provider adapter where configured
+- store label artifact metadata and retrieval path
+- store provider shipment/buy/label identifiers safely
+- transition shipment into the correct status when label creation succeeds
+- do not allow label state inconsistencies
+- do not mark label-created unless the label step actually succeeded
+
+6) PRINT-LABEL READINESS
+Make the app ready for real label printing.
+
+Required behaviors:
+- label artifact handling must support common shipping label formats, especially PDF and thermal-label-friendly usage paths
+- provide a clear Print Label / Open Label / Download Label style operational action using the app’s current patterns
+- do not overbuild print management, but do ensure label artifacts are usable for shipping operations
+
+7) TRACKING ENRICHMENT + AUTOMATIC STATUS UPDATES
+This is critical.
+
+Shipping status should not remain only manual in the future architecture.
+In this phase, implement the backend/domain structure and operational flow for provider-driven tracking updates.
+
+Required behaviors:
+- shipment keeps provider tracking identifiers and tracking number
+- provider tracking events can be ingested / synced into the shipment tracking timeline
+- latest carrier/provider tracking state maps into the platform shipment lifecycle carefully
+- shipment status updates should be capable of automatic progression from provider/backend updates rather than relying only on manual changes
+- maintain auditability and avoid destructive overwrites of historical events
+
+Use disciplined state mapping.
+Do not let noisy carrier events create broken lifecycle transitions.
+
+--------------------------------------------------
+SHIPMENT STATUS / LIFECYCLE DISCIPLINE
+--------------------------------------------------
+
+Preserve the current shipment lifecycle discipline and strengthen it for provider-driven updates.
+
+Use lifecycle-aware behavior such as:
+- Draft
+- Ready / Prepared
+- Label Created
+- Packed
+- Dispatched / Handed Off
+- In Transit
+- Delivered
+- Exception
+- Cancelled
+
+Requirements:
+- Label Created should result from actual label success, not from UI intention alone
+- In Transit / Delivered / Exception should support provider-driven updates
+- manual transitions should remain controlled where still needed
+- automatic carrier updates must not violate lifecycle consistency
+- once status is Label Created or later, structural shipment editing remains locked as already implemented
+
+--------------------------------------------------
+FUNCTIONAL SCOPE
+--------------------------------------------------
+
+Implement the following functional scope.
+
+A) SHIPMENT PREPARATION ENHANCEMENTS
+Within shipment preparation / create flow / detail flow, support:
+- address validation trigger and result
+- rate retrieval trigger
+- rate/service selection
+- label purchase action where eligible
+- provider shipment identifiers
+- label metadata visibility
+- print/open label action readiness
+
+B) PROVIDER RESPONSE NORMALIZATION
+Normalize provider results for:
+- address validation outcomes
+- rates/services
+- tracking events
+- provider shipment references
+- label references
+- error states
+
+C) TRACKING SYNC FOUNDATIONS
+Support storing and updating:
+- provider tracking IDs
+- provider shipment IDs
+- tracking number
+- provider event timestamped history
+- mapped internal shipment status
+- latest sync timestamp / source metadata if appropriate
+
+D) SHIPMENT DETAIL ENHANCEMENTS
+Extend shipment detail to show:
+- provider section
+- validation state
+- selected shipping service
+- purchased label state
+- provider references
+- label action(s)
+- richer tracking timeline reflecting provider events
+
+E) OPERATIONAL ACTIONS
+Add actions consistent with lifecycle and permissions such as:
+- validate address
+- fetch rates
+- select service
+- purchase/create label
+- open/print label
+- sync tracking / refresh tracking if your architecture includes explicit sync actions
+
+F) FALLBACK / FAILURE UX
+If provider setup is unavailable or a provider call fails:
+- show clear operational feedback
+- do not corrupt shipment state
+- do not fake label creation or rate purchase
+- allow the shipment to remain operationally coherent
+
+--------------------------------------------------
+MULTI-TENANT / SECURITY / GATING REQUIREMENTS
+--------------------------------------------------
+
+Preserve and correctly enforce all existing controls:
+- auth behavior
+- preview mode
+- RBAC/sub-permissions
+- lifecycle gating
+- platform/store hierarchy
+- System Owner Plans & Features matrix
+- Store Permissions Matrix
+- shipment edit lock after Label Created
+
+Provider-related actions must respect:
+- feature entitlement
+- user permission
+- preview mode write block
+- shipment lifecycle eligibility
+
+Do not expose provider actions when unavailable or unauthorized.
+Do not show writable actions in preview mode.
+
+--------------------------------------------------
+PLANS & FEATURES / PERMISSIONS EXPANSION
+--------------------------------------------------
+
+If the existing architecture already supports shipping feature granularity, extend it coherently for Phase 1 actions.
+
+At minimum, evaluate and implement the correct gating for:
+- address validation
+- rate retrieval / rate shopping
+- label creation / label purchase
+- print/open label access
+- tracking sync / tracking refresh
+- view provider details if separated from general shipping view
+
+Do not create a disconnected gating system.
+Use the existing Plans & Features matrix and Store Permissions Matrix patterns.
+
+--------------------------------------------------
+UI / UX REQUIREMENTS
+--------------------------------------------------
+
+The UX must feel native to the current product.
+Do not redesign the app.
+
+Requirements:
+- preserve current design baseline exactly
+- follow existing tables, panels, action bars, badges, tabs, detail layouts, modals, and drawers
+- label/rates/provider actions must feel operational and clean
+- avoid clutter and fake enterprise complexity
+- keep action availability clear and lifecycle-aware
+- ensure disabled/blocked states are visually honest and understandable
+
+--------------------------------------------------
+DATA MODEL REQUIREMENTS
+--------------------------------------------------
+
+Design/extend the Firestore-friendly model safely for:
+- provider integration metadata
+- address validation result metadata
+- rate options / chosen service snapshot
+- label metadata/artifacts
+- provider shipment identifiers
+- provider tracking identifiers
+- carrier/provider event history
+- sync timestamps / source metadata
+- provider error/audit context where appropriate
+
+Maintain:
+- tenant/store ownership
+- safe queryability
+- auditability
+- compatibility with the existing shipment/source linkage model
+
+--------------------------------------------------
+NON-REGRESSION REQUIREMENTS
+--------------------------------------------------
+
+Do not break:
+1. Platform Command Center & Commercial Plan System
+2. Tenant Management & Provisioning
+3. Store Dashboard & POS Refinement
+4. Customers, Invoices & Services Improvements
+5. Repairs Module Deep Refinement
+6. Inventory & Supply Chain Improvements
+7. Shipping Module / Shipping Center core workflow
+
+Specifically preserve:
+- source-routed shipment creation
+- source reference resolution
+- create/save/edit behavior
+- package persistence
+- status transitions
+- preview mode safety
+- edit lock starting at Label Created
+- source linkage from Invoice / Repair / Transfer / RMA
+
+--------------------------------------------------
+IMPLEMENTATION DISCIPLINE
+--------------------------------------------------
+
+Follow this exact execution discipline:
+
+1) Inspect the completed Shipping Center architecture and identify the correct extension points.
+2) Design the provider adapter layer and normalized shipping-provider contracts.
+3) Implement first provider integration path and safe configuration handling.
+4) Add address validation + rate retrieval + service selection.
+5) Add label purchase + label artifact handling + print readiness.
+6) Add tracking enrichment and automatic carrier/provider-driven status update foundations.
+7) Integrate permissions, feature gating, preview mode, and lifecycle enforcement.
+8) Run a regression-oriented review across all impacted shipping/source flows.
+9) Update documentation.
+
+Do not claim completion unless the whole Phase 1 expansion is coherent end to end.
+
+--------------------------------------------------
+DOCUMENTATION REQUIREMENTS
+--------------------------------------------------
+
+Update replit.md with:
+- provider adapter architecture
+- first provider integration path
+- configuration assumptions / credential handling approach
+- address validation design
+- rate shopping / service selection design
+- label purchase / label artifact flow
+- print-label readiness
+- tracking sync / automatic status update design
+- permissions / feature gating updates
+- shipment lifecycle implications
+- affected modules and rationale
+
+--------------------------------------------------
+OUTPUT FORMAT REQUIRED
+--------------------------------------------------
+
+When finished, reply in this structure:
+
+1. Workstream Completion Status
+2. Files Changed
+3. Provider Adapter Architecture Implemented
+4. First Provider Integration Path Added
+5. Address Validation / Rates / Service Selection Added
+6. Label Purchase / Label Artifact / Print Readiness Added
+7. Tracking Sync / Automatic Status Update Foundations Added
+8. RBAC / Preview Mode / Lifecycle / Plan Gating Enforcement Added
+9. Non-Regression Notes
+10. Documentation Updated
+
+Before finalizing, self-audit your work and verify:
+- no design baseline drift
+- no tenant/store leakage
+- no preview mode write leaks
+- no fake provider success
+- no broken shipment lifecycle consistency
+- no regression to completed workstreams
+- no mismatch between manual and provider-driven status logic
+
+This is an isolation workstream.
+Stay tightly scoped to Shipping Phase 1 Expansion.
+Do not start Phase 2 or Phase 3 shipping work in this pass.

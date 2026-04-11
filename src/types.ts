@@ -744,6 +744,70 @@ export interface ShipmentAddress {
   email?: string;
 }
 
+export type AddressValidationStatus = 'pending' | 'validated' | 'corrected' | 'failed' | 'skipped';
+
+export interface AddressValidationResult {
+  status: AddressValidationStatus;
+  validatedAt?: string;
+  originalAddress: ShipmentAddress;
+  suggestedAddress?: ShipmentAddress;
+  messages?: string[];
+  providerRef?: string;
+  accepted?: boolean;
+}
+
+export interface ShippingRate {
+  id: string;
+  providerId: string;
+  carrier: string;
+  serviceName: string;
+  serviceCode: string;
+  rate: number;
+  currency: string;
+  estimatedDays?: number;
+  estimatedDelivery?: string;
+  isGuaranteed?: boolean;
+  providerRateRef?: string;
+}
+
+export interface LabelArtifact {
+  id: string;
+  format: 'pdf' | 'png' | 'zpl' | 'epl';
+  url: string;
+  trackingNumber: string;
+  carrier: string;
+  service: string;
+  purchasedAt: string;
+  providerLabelRef?: string;
+  providerShipmentRef?: string;
+  cost: number;
+  isReturn?: boolean;
+}
+
+export interface ProviderTrackingEvent {
+  id: string;
+  timestamp: string;
+  status: string;
+  statusDetail?: string;
+  location?: string;
+  description: string;
+  source: 'provider' | 'manual';
+  providerEventRef?: string;
+}
+
+export type ShippingProviderStatus = 'not_configured' | 'configured' | 'active' | 'error';
+
+export interface ShippingProviderConfig {
+  providerId: string;
+  providerName: string;
+  status: ShippingProviderStatus;
+  isDefault: boolean;
+  configuredAt?: string;
+  configuredBy?: string;
+  lastTestedAt?: string;
+  testResult?: 'success' | 'failure';
+}
+
 export interface Shipment {
   id: string;
   shipmentNumber: string;
@@ -769,6 +833,15 @@ export interface Shipment {
   updatedAt: string;
   dispatchedAt?: string;
   deliveredAt?: string;
+  addressValidation?: AddressValidationResult;
+  selectedRate?: ShippingRate;
+  label?: LabelArtifact;
+  providerShipmentId?: string;
+  providerTrackingId?: string;
+  providerTrackingEvents?: ProviderTrackingEvent[];
+  lastTrackingSyncAt?: string;
+  ratesRetrievedAt?: string;
+  availableRates?: ShippingRate[];
 }
 
 export type LogoPlacement = 'top-left' | 'top-center' | 'top-right';
