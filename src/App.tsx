@@ -93,6 +93,7 @@ const router = createBrowserRouter([
       { path: '/supply-chain/po/new', element: <Navigate to="/supply-chain" replace /> },
       { path: '/supply-chain/po/:id', element: <Navigate to="/supply-chain" replace /> },
       { path: '/shipping', element: <AccessGuard feature="shipping"><ShippingCenter /></AccessGuard> },
+      { path: '/shipping/providers', element: <AccessGuard feature="shipping"><ShippingProvidersPage /></AccessGuard> },
       { path: '/integrations', element: <AccessGuard feature="integrations"><Integrations /></AccessGuard> },
       { path: '/widgets', element: <AccessGuard feature="widgets"><Widgets /></AccessGuard> },
       { path: '/prospects', element: <AccessGuard feature="prospects"><Prospects /></AccessGuard> },

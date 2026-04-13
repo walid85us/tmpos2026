@@ -345,10 +345,21 @@ export default function ShippingCenter() {
 
   function handleStatusTransition(id: string, newStatus: ShipmentStatus) {
     if (isWriteBlocked) { setShowStatusConfirm(null); return; }
-    const now = new Date().toISOString();
-    const updates: Partial<Shipment> = { status: newStatus, updatedAt: now };
     const shipment = shipments.find(s => s.id === id);
     if (!shipment) return;
+
+    if (['In Transit', 'Delivered', 'Exception'].includes(newStatus) && isPostDispatch(shipment.status)) {
+      setShowStatusConfirm(null);
+      return;
+    }
+
+    if (newStatus === 'Cancelled' && shipment && hasCarrierAcceptance(shipment)) {
+      setShowStatusConfirm(null);
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const updates: Partial<Shipment> = { status: newStatus, updatedAt: now };
 
     if (newStatus === 'Dispatched') updates.dispatchedAt = now;
     if (newStatus === 'Delivered') updates.deliveredAt = now;
@@ -780,25 +791,35 @@ export default function ShippingCenter() {
     else setEditPackages(prev => prev.filter(p => p.id !== pkgId));
   }
 
-  function getNextStatuses(current: ShipmentStatus): ShipmentStatus[] {
+  function getNextStatuses(current: ShipmentStatus, shipment?: Shipment | null): ShipmentStatus[] {
     const transitions: Record<ShipmentStatus, ShipmentStatus[]> = {
       'Draft': ['Ready', 'Cancelled'],
       'Ready': ['Packed', 'Cancelled'],
       'Label Created': ['Packed', 'Cancelled'],
       'Packed': ['Dispatched', 'Cancelled'],
-      'Dispatched': ['In Transit'],
-      'In Transit': ['Delivered', 'Exception'],
+      'Dispatched': [],
+      'In Transit': [],
       'Delivered': [],
-      'Exception': ['In Transit', 'Cancelled'],
+      'Exception': [],
       'Cancelled': [],
     };
-    return transitions[current] || [];
+    const allowed = transitions[current] || [];
+
+    if (current === 'Dispatched' && shipment && !hasCarrierAcceptance(shipment)) {
+      return ['Cancelled'];
+    }
+
+    return allowed;
   }
 
-  function canDoTransition(status: ShipmentStatus, newStatus: ShipmentStatus): boolean {
-    if (newStatus === 'Cancelled') return canCancel;
+  function canDoTransition(status: ShipmentStatus, newStatus: ShipmentStatus, shipment?: Shipment | null): boolean {
+    if (newStatus === 'Cancelled') {
+      if (!canCancel) return false;
+      if (shipment && hasCarrierAcceptance(shipment)) return false;
+      return true;
+    }
     if (newStatus === 'Dispatched') return canDispatch;
-    if (['In Transit', 'Delivered', 'Exception'].includes(newStatus)) return canUpdateTracking;
+    if (['In Transit', 'Delivered', 'Exception'].includes(newStatus)) return false;
     return canEditPreDispatch;
   }
 
@@ -815,9 +836,48 @@ export default function ShippingCenter() {
 
   const selectedShip = selectedShipment ? shipments.find(s => s.id === selectedShipment) : null;
 
+  function hasCarrierAcceptance(shipment: Shipment): boolean {
+    if (providerEnvironment === 'test') return false;
+    const provEvents = shipment.providerTrackingEvents || [];
+    const acceptanceStatuses = ['accepted', 'in_transit', 'out_for_delivery', 'delivered', 'available_for_pickup'];
+    return provEvents.some(e => {
+      const isTestEvent = (e as any).source === 'test_provider' || (e.description || '').startsWith('[TEST]');
+      return !isTestEvent && acceptanceStatuses.includes((e.status || '').toLowerCase());
+    });
+  }
+
+  function isPostDispatch(status: ShipmentStatus): boolean {
+    return ['Dispatched', 'In Transit', 'Delivered', 'Exception'].includes(status);
+  }
+
+  function getLabelActualFormat(label: { format: string; url: string }): 'pdf' | 'png' | 'other' {
+    const urlLower = label.url.toLowerCase();
+    if (urlLower.includes('.pdf') || urlLower.includes('/pdf') || urlLower.includes('format=pdf')) return 'pdf';
+    if (urlLower.includes('.png') || urlLower.includes('/png') || urlLower.includes('format=png')) return 'png';
+    if (label.format === 'pdf') return 'pdf';
+    if (label.format === 'png') return 'png';
+    return label.format as any || 'other';
+  }
+
   return (
     <PageShell title="Shipping Center">
       <div className="space-y-6">
+        <div className="flex items-center gap-1 border-b border-slate-200 mb-2">
+          <button
+            onClick={() => {}}
+            className="px-4 py-2.5 text-[10px] font-black uppercase tracking-widest text-primary border-b-2 border-primary"
+          >
+            <span className="flex items-center gap-1"><span className="material-symbols-outlined text-sm">inventory_2</span>Shipments</span>
+          </button>
+          {canManageProviderSettings && (
+            <button
+              onClick={() => navigate('/shipping/providers')}
+              className="px-4 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-slate-600 border-b-2 border-transparent hover:border-slate-300 transition-all"
+            >
+              <span className="flex items-center gap-1"><span className="material-symbols-outlined text-sm">hub</span>Providers</span>
+            </button>
+          )}
+        </div>
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3 flex-1 min-w-0">
             <div className="relative flex-1 max-w-md">
@@ -1120,9 +1180,9 @@ export default function ShippingCenter() {
                               </div>
                             </div>
                           ))}
-                          <button onClick={() => navigate('/settings/shipping-providers')}
+                          <button onClick={() => navigate('/shipping/providers')}
                             className="w-full py-2 text-[10px] font-black uppercase tracking-widest text-indigo-500 hover:text-indigo-700 hover:bg-indigo-50 rounded-lg border border-dashed border-indigo-200 transition-all flex items-center justify-center gap-1">
-                            <span className="material-symbols-outlined text-xs">open_in_new</span>
+                            <span className="material-symbols-outlined text-xs">settings</span>
                             Full Provider Settings
                           </button>
                         </div>
@@ -1150,14 +1210,17 @@ export default function ShippingCenter() {
                         </div>
                       )}
 
-                      {selectedShip.label && (
+                      {selectedShip.label && (() => {
+                        const fmt = getLabelActualFormat(selectedShip.label!);
+                        return (
                         <div className="flex items-center gap-2 text-xs flex-wrap">
                           <span className="text-slate-400 font-bold">Label</span>
                           <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-md text-[10px] font-black uppercase tracking-widest">Purchased</span>
                           <span className="text-slate-500 font-mono text-[10px]">{selectedShip.label.trackingNumber}</span>
-                          <span className={`px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-widest ${selectedShip.label.format === 'pdf' ? 'bg-red-100 text-red-600' : 'bg-slate-100 text-slate-500'}`}>{selectedShip.label.format.toUpperCase()}</span>
+                          <span className={`px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-widest ${fmt === 'pdf' ? 'bg-red-100 text-red-600' : 'bg-slate-100 text-slate-500'}`}>{fmt.toUpperCase()}</span>
                         </div>
-                      )}
+                        );
+                      })()}
 
                       {selectedShip.providerShipmentId && (
                         <div className="flex items-center gap-2 text-xs">
@@ -1226,13 +1289,16 @@ export default function ShippingCenter() {
                           );
                         })()}
 
-                        {canPrintLabel && selectedShip.label?.url && (
+                        {canPrintLabel && selectedShip.label?.url && (() => {
+                          const actualFormat = getLabelActualFormat(selectedShip.label!);
+                          return (
                           <button onClick={() => window.open(selectedShip.label!.url, '_blank')}
                             className="px-3 py-2 bg-white text-slate-600 border border-slate-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-slate-50 transition-all flex items-center gap-1">
-                            <span className="material-symbols-outlined text-sm">{selectedShip.label!.format === 'pdf' ? 'picture_as_pdf' : 'print'}</span>
-                            {selectedShip.label!.format === 'pdf' ? 'Open PDF Label' : 'Open Label'}
+                            <span className="material-symbols-outlined text-sm">{actualFormat === 'pdf' ? 'picture_as_pdf' : 'print'}</span>
+                            {actualFormat === 'pdf' ? 'Open PDF Label' : actualFormat === 'png' ? 'Open Label (PNG)' : 'Open Label'}
                           </button>
-                        )}
+                          );
+                        })()}
 
                         {canSyncTracking && !isWriteBlocked && selectedShip.trackingNumber && !['Draft', 'Ready', 'Delivered', 'Cancelled'].includes(selectedShip.status) && (
                           <button onClick={() => handleSyncTracking(selectedShip.id)} disabled={providerLoading !== null}
@@ -1275,10 +1341,27 @@ export default function ShippingCenter() {
                       </div>
                     )}
 
-                    {getNextStatuses(selectedShip.status).length > 0 && (
+                    {isPostDispatch(selectedShip.status) && (
+                      <div className="px-3 py-2 bg-sky-50 border border-sky-200 rounded-lg flex items-start gap-2">
+                        <span className="material-symbols-outlined text-sky-500 text-sm mt-0.5">info</span>
+                        <div>
+                          <p className="text-xs text-sky-700 font-medium">Post-dispatch status control</p>
+                          <p className="text-[10px] text-sky-600 mt-0.5">
+                            {selectedShip.status === 'Dispatched' && !hasCarrierAcceptance(selectedShip)
+                              ? 'Shipment dispatched. Status updates (In Transit, Delivered, Exception) will be driven by carrier tracking events via Sync Tracking. Cancellation is available until the carrier accepts the package.'
+                              : selectedShip.status === 'Dispatched' && hasCarrierAcceptance(selectedShip)
+                                ? 'Carrier has accepted the package. Status updates are now provider-driven only. Cancellation is no longer available.'
+                                : `Status "${selectedShip.status}" is managed by carrier tracking events. Use Sync Tracking to get the latest carrier updates.`
+                            }
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {getNextStatuses(selectedShip.status, selectedShip).length > 0 && (
                       <div className="flex gap-2 flex-wrap">
-                        {getNextStatuses(selectedShip.status).map(next => (
-                          canDoTransition(selectedShip.status, next) && (
+                        {getNextStatuses(selectedShip.status, selectedShip).map(next => (
+                          canDoTransition(selectedShip.status, next, selectedShip) && (
                             <button
                               key={next}
                               onClick={() => setShowStatusConfirm({ id: selectedShip.id, newStatus: next, label: `Move shipment to "${next}"?` })}
@@ -1360,10 +1443,20 @@ export default function ShippingCenter() {
                       </div>
                     )}
 
-                    {!isTestProvider && providerEnvironment === 'production' && !hasProviderEvents && selectedShip.trackingNumber && (
+                    {!isTestProvider && !hasProviderEvents && selectedShip.trackingNumber && (
                       <div className="px-3 py-2 bg-sky-50 border border-sky-200 rounded-lg flex items-start gap-2">
                         <span className="material-symbols-outlined text-sky-500 text-sm mt-0.5">info</span>
-                        <p className="text-xs text-sky-700">No provider tracking events yet. Use "Sync Tracking" in Provider & Operations to fetch the latest carrier updates.</p>
+                        <div>
+                          <p className="text-xs text-sky-700 font-medium">
+                            {isPostDispatch(selectedShip.status) ? 'Carrier scan not yet received' : 'No provider tracking events yet'}
+                          </p>
+                          <p className="text-[10px] text-sky-600 mt-0.5">
+                            {isPostDispatch(selectedShip.status)
+                              ? 'This shipment has been dispatched but no carrier acceptance/scan event has been recorded yet. Use "Sync Tracking" to check for updates. Post-dispatch status changes (In Transit, Delivered, Exception) will be applied automatically when carrier events arrive.'
+                              : 'Use "Sync Tracking" in Provider & Operations to fetch the latest carrier updates.'
+                            }
+                          </p>
+                        </div>
                       </div>
                     )}
 

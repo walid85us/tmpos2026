@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
@@ -23,6 +24,9 @@ export default function ShippingProvidersPage() {
   const { setShippingProviderConfig } = useStoreLocalState();
   const { checkSubPermission, isWriteBlocked } = useAccess();
   const canManage = checkSubPermission('manage_shipping_settings');
+  const location = useLocation();
+  const navigate = useNavigate();
+  const isShippingContext = location.pathname.startsWith('/shipping/');
 
   const availableProviders = getAvailableProviders();
 
@@ -236,6 +240,18 @@ export default function ShippingProvidersPage() {
 
   return (
     <PageShell title="Shipping Providers">
+      {isShippingContext && (
+        <div className="mb-4 flex items-center gap-2">
+          <button onClick={() => navigate('/shipping')}
+            className="flex items-center gap-1 text-xs font-bold text-primary hover:text-primary/80 transition-all">
+            <span className="material-symbols-outlined text-sm">arrow_back</span>
+            Back to Shipping Center
+          </button>
+          <span className="text-slate-300">|</span>
+          <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Shipping &gt; Providers</span>
+        </div>
+      )}
+
       {isWriteBlocked && (
         <div className="mb-6 px-5 py-3 bg-amber-50 border border-amber-200 rounded-2xl flex items-center gap-2">
           <span className="material-symbols-outlined text-amber-500 text-sm">visibility</span>
