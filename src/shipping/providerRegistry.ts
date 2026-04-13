@@ -1,19 +1,3 @@
-import type { ShippingProviderAdapter } from './types';
-import { EasyPostAdapter } from './adapters/easypost';
-import { ShippoAdapter } from './adapters/shippo';
-import { ShipStationAdapter } from './adapters/shipstation';
-
-const adapters: Record<string, () => ShippingProviderAdapter> = {
-  easypost: () => new EasyPostAdapter(),
-  shippo: () => new ShippoAdapter(),
-  shipstation: () => new ShipStationAdapter(),
-};
-
-export function getProvider(providerId: string): ShippingProviderAdapter | null {
-  const factory = adapters[providerId];
-  return factory ? factory() : null;
-}
-
 export function getAvailableProviders(): { id: string; name: string; description: string; requiredFields: { key: string; label: string; type: 'text' | 'password'; placeholder: string }[] }[] {
   return [
     {
@@ -44,11 +28,11 @@ export function getAvailableProviders(): { id: string; name: string; description
   ];
 }
 
-export function getActiveProviderId(): string | null {
+export async function getActiveProviderId(): Promise<string | null> {
   try {
-    const state = sessionStorage.getItem('shipping_providers_state');
-    if (!state) return null;
-    return JSON.parse(state).activeProviderId || null;
+    const response = await fetch('/api/shipping/active-provider');
+    const data = await response.json();
+    return data.activeProviderId || null;
   } catch {
     return null;
   }

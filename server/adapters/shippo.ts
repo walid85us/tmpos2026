@@ -7,35 +7,23 @@ import type {
   PurchaseLabelResponse,
   GetTrackingRequest,
   GetTrackingResponse,
+  ShipmentAddress,
+  ShippingRate,
+  LabelArtifact,
+  ProviderTrackingEvent,
   ProviderError,
 } from '../types';
-import type { ShipmentAddress, ShippingRate, LabelArtifact, ProviderTrackingEvent } from '../../types';
+import { getCredentials } from '../credential-store';
 
 const NO_CREDENTIALS_ERROR: ProviderError = {
   code: 'PROVIDER_NOT_CONFIGURED',
-  message: 'Shippo API token is not configured. Configure your shipping provider in Settings to enable live shipping operations.',
+  message: 'Shippo API token is not configured. Configure your shipping provider in Settings.',
   retryable: false,
 };
 
-function hasCredentials(): boolean {
-  try {
-    const config = sessionStorage.getItem('shipping_provider_shippo');
-    if (!config) return false;
-    const parsed = JSON.parse(config);
-    return !!parsed.apiKey;
-  } catch {
-    return false;
-  }
-}
-
 function getApiToken(): string | null {
-  try {
-    const config = sessionStorage.getItem('shipping_provider_shippo');
-    if (!config) return null;
-    return JSON.parse(config).apiKey || null;
-  } catch {
-    return null;
-  }
+  const creds = getCredentials('shippo');
+  return creds?.apiKey || null;
 }
 
 function mapAddressToShippo(addr: ShipmentAddress) {
@@ -73,11 +61,9 @@ export class ShippoAdapter implements ShippingProviderAdapter {
   readonly providerName = 'Shippo';
 
   async validateAddress(address: ShipmentAddress): Promise<AddressValidationResponse> {
-    if (!hasCredentials()) {
-      return { success: false, error: NO_CREDENTIALS_ERROR };
-    }
-
     const token = getApiToken();
+    if (!token) return { success: false, error: NO_CREDENTIALS_ERROR };
+
     try {
       const response = await fetch('https://api.goshippo.com/addresses/', {
         method: 'POST',
@@ -128,11 +114,9 @@ export class ShippoAdapter implements ShippingProviderAdapter {
   }
 
   async getRates(params: GetRatesRequest): Promise<GetRatesResponse> {
-    if (!hasCredentials()) {
-      return { success: false, error: NO_CREDENTIALS_ERROR };
-    }
-
     const token = getApiToken();
+    if (!token) return { success: false, error: NO_CREDENTIALS_ERROR };
+
     const parcel = params.packages[0];
     try {
       const response = await fetch('https://api.goshippo.com/shipments/', {
@@ -196,11 +180,9 @@ export class ShippoAdapter implements ShippingProviderAdapter {
   }
 
   async purchaseLabel(params: PurchaseLabelRequest): Promise<PurchaseLabelResponse> {
-    if (!hasCredentials()) {
-      return { success: false, error: NO_CREDENTIALS_ERROR };
-    }
-
     const token = getApiToken();
+    if (!token) return { success: false, error: NO_CREDENTIALS_ERROR };
+
     const parcel = params.packages[0];
     try {
       const shipResponse = await fetch('https://api.goshippo.com/shipments/', {
@@ -308,11 +290,9 @@ export class ShippoAdapter implements ShippingProviderAdapter {
   }
 
   async getTracking(params: GetTrackingRequest): Promise<GetTrackingResponse> {
-    if (!hasCredentials()) {
-      return { success: false, error: NO_CREDENTIALS_ERROR };
-    }
-
     const token = getApiToken();
+    if (!token) return { success: false, error: NO_CREDENTIALS_ERROR };
+
     try {
       const response = await fetch(
         `https://api.goshippo.com/tracks/${params.carrier}/${params.trackingNumber}`,

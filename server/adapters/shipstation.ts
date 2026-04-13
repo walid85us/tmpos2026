@@ -7,37 +7,24 @@ import type {
   PurchaseLabelResponse,
   GetTrackingRequest,
   GetTrackingResponse,
+  ShipmentAddress,
+  ShippingRate,
+  LabelArtifact,
+  ProviderTrackingEvent,
   ProviderError,
 } from '../types';
-import type { ShipmentAddress, ShippingRate, LabelArtifact, ProviderTrackingEvent } from '../../types';
+import { getCredentials } from '../credential-store';
 
 const NO_CREDENTIALS_ERROR: ProviderError = {
   code: 'PROVIDER_NOT_CONFIGURED',
-  message: 'ShipStation API credentials are not configured. Configure your shipping provider in Settings to enable live shipping operations.',
+  message: 'ShipStation API credentials are not configured. Configure your shipping provider in Settings.',
   retryable: false,
 };
 
-function hasCredentials(): boolean {
-  try {
-    const config = sessionStorage.getItem('shipping_provider_shipstation');
-    if (!config) return false;
-    const parsed = JSON.parse(config);
-    return !!parsed.apiKey && !!parsed.apiSecret;
-  } catch {
-    return false;
-  }
-}
-
 function getAuthHeader(): string | null {
-  try {
-    const config = sessionStorage.getItem('shipping_provider_shipstation');
-    if (!config) return null;
-    const parsed = JSON.parse(config);
-    if (!parsed.apiKey || !parsed.apiSecret) return null;
-    return 'Basic ' + btoa(`${parsed.apiKey}:${parsed.apiSecret}`);
-  } catch {
-    return null;
-  }
+  const creds = getCredentials('shipstation');
+  if (!creds?.apiKey || !creds?.apiSecret) return null;
+  return 'Basic ' + Buffer.from(`${creds.apiKey}:${creds.apiSecret}`).toString('base64');
 }
 
 function mapAddressToShipStation(addr: ShipmentAddress) {
@@ -59,16 +46,14 @@ export class ShipStationAdapter implements ShippingProviderAdapter {
   readonly providerName = 'ShipStation';
 
   async validateAddress(address: ShipmentAddress): Promise<AddressValidationResponse> {
-    if (!hasCredentials()) {
-      return { success: false, error: NO_CREDENTIALS_ERROR };
-    }
-
     const auth = getAuthHeader();
+    if (!auth) return { success: false, error: NO_CREDENTIALS_ERROR };
+
     try {
       const response = await fetch('https://ssapi.shipstation.com/addresses/validate', {
         method: 'POST',
         headers: {
-          'Authorization': auth!,
+          'Authorization': auth,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(mapAddressToShipStation(address)),
@@ -114,17 +99,15 @@ export class ShipStationAdapter implements ShippingProviderAdapter {
   }
 
   async getRates(params: GetRatesRequest): Promise<GetRatesResponse> {
-    if (!hasCredentials()) {
-      return { success: false, error: NO_CREDENTIALS_ERROR };
-    }
-
     const auth = getAuthHeader();
+    if (!auth) return { success: false, error: NO_CREDENTIALS_ERROR };
+
     const parcel = params.packages[0];
     try {
       const response = await fetch('https://ssapi.shipstation.com/shipments/getrates', {
         method: 'POST',
         headers: {
-          'Authorization': auth!,
+          'Authorization': auth,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -187,17 +170,15 @@ export class ShipStationAdapter implements ShippingProviderAdapter {
   }
 
   async purchaseLabel(params: PurchaseLabelRequest): Promise<PurchaseLabelResponse> {
-    if (!hasCredentials()) {
-      return { success: false, error: NO_CREDENTIALS_ERROR };
-    }
-
     const auth = getAuthHeader();
+    if (!auth) return { success: false, error: NO_CREDENTIALS_ERROR };
+
     const parcel = params.packages[0];
     try {
       const response = await fetch('https://ssapi.shipstation.com/orders/createlabelfororder', {
         method: 'POST',
         headers: {
-          'Authorization': auth!,
+          'Authorization': auth,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -260,16 +241,14 @@ export class ShipStationAdapter implements ShippingProviderAdapter {
   }
 
   async getTracking(params: GetTrackingRequest): Promise<GetTrackingResponse> {
-    if (!hasCredentials()) {
-      return { success: false, error: NO_CREDENTIALS_ERROR };
-    }
-
     const auth = getAuthHeader();
+    if (!auth) return { success: false, error: NO_CREDENTIALS_ERROR };
+
     try {
       const response = await fetch(
         `https://ssapi.shipstation.com/shipments?trackingNumber=${encodeURIComponent(params.trackingNumber)}`,
         {
-          headers: { 'Authorization': auth! },
+          headers: { 'Authorization': auth },
         }
       );
 

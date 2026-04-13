@@ -2,23 +2,10 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
-import { getAvailableProviders, getProvider } from '../shipping/providerRegistry';
+import { getAvailableProviders } from '../shipping/providerRegistry';
+import * as shippingApi from '../shipping/shippingApiClient';
 import type { ShippingProviderConfig, ShippingProviderCredentials } from '../types';
 import PageShell from './PageShell';
-
-function maskSecret(value: string | undefined): string {
-  if (!value) return '';
-  if (value.length <= 8) return '••••••••';
-  return value.slice(0, 4) + '••••••••' + value.slice(-4);
-}
-
-function buildMaskedDisplay(creds: ShippingProviderCredentials) {
-  return {
-    apiKey: creds.apiKey ? maskSecret(creds.apiKey) : undefined,
-    apiSecret: creds.apiSecret ? maskSecret(creds.apiSecret) : undefined,
-    accountId: creds.accountId ? maskSecret(creds.accountId) : undefined,
-  };
-}
 
 const PROVIDER_ICONS: Record<string, string> = {
   easypost: 'local_shipping',
@@ -33,22 +20,27 @@ const PROVIDER_COLORS: Record<string, { bg: string; border: string; text: string
 };
 
 export default function ShippingProvidersPage() {
-  const { shippingProviderConfig, setShippingProviderConfig } = useStoreLocalState();
+  const { setShippingProviderConfig } = useStoreLocalState();
   const { checkSubPermission, isWriteBlocked } = useAccess();
   const canManage = checkSubPermission('manage_shipping_settings');
 
   const availableProviders = getAvailableProviders();
 
   const [providersState, setProvidersState] = useState<{
-    providers: ShippingProviderConfig[];
+    providers: {
+      providerId: string;
+      providerName: string;
+      status: 'configured' | 'not_configured';
+      environment?: string;
+      configuredAt?: string;
+      updatedAt?: string;
+      maskedCredentials?: Record<string, string>;
+      testResult?: 'success' | 'failure';
+      testMessage?: string;
+      lastTestedAt?: string;
+    }[];
     activeProviderId: string | null;
-  }>(() => {
-    try {
-      const stored = sessionStorage.getItem('shipping_providers_state');
-      if (stored) return JSON.parse(stored);
-    } catch {}
-    return { providers: [], activeProviderId: null };
-  });
+  }>({ providers: [], activeProviderId: null });
 
   const [editingProvider, setEditingProvider] = useState<string | null>(null);
   const [credentialInputs, setCredentialInputs] = useState<Record<string, string>>({});
@@ -56,109 +48,121 @@ export default function ShippingProvidersPage() {
   const [testingProvider, setTestingProvider] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ providerId: string; success: boolean; message: string } | null>(null);
   const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  const persistState = useCallback((newState: typeof providersState) => {
-    setProvidersState(newState);
-    const sanitized = {
-      ...newState,
-      providers: newState.providers.map(p => ({
-        ...p,
-        credentials: {} as ShippingProviderCredentials,
-      })),
-    };
-    sessionStorage.setItem('shipping_providers_state', JSON.stringify(sanitized));
-    const active = newState.providers.find(p => p.providerId === newState.activeProviderId);
-    setShippingProviderConfig(active || null);
-  }, [setShippingProviderConfig]);
+  const fetchStatus = useCallback(async () => {
+    try {
+      const status = await shippingApi.getProvidersStatus();
+      setProvidersState({
+        providers: status.providers.map(p => ({
+          providerId: p.providerId,
+          providerName: availableProviders.find(ap => ap.id === p.providerId)?.name || p.providerId,
+          status: 'configured' as const,
+          environment: p.environment,
+          configuredAt: p.configuredAt,
+          updatedAt: p.updatedAt,
+          maskedCredentials: p.maskedCredentials,
+        })),
+        activeProviderId: status.activeProviderId,
+      });
 
-  function getProviderConfig(providerId: string): ShippingProviderConfig | undefined {
+      if (status.activeProviderId) {
+        const activeProv = status.providers.find(p => p.providerId === status.activeProviderId);
+        if (activeProv) {
+          setShippingProviderConfig({
+            providerId: activeProv.providerId,
+            providerName: availableProviders.find(ap => ap.id === activeProv.providerId)?.name || activeProv.providerId,
+            status: 'configured',
+            isDefault: false,
+            credentials: {} as ShippingProviderCredentials,
+            credentialsMasked: activeProv.maskedCredentials || {},
+            environment: (activeProv.environment as 'test' | 'production') || 'test',
+            configuredAt: activeProv.configuredAt || '',
+            configuredBy: 'Current User',
+            updatedAt: activeProv.updatedAt || '',
+          });
+        }
+      } else {
+        setShippingProviderConfig(null);
+      }
+    } catch {
+    } finally {
+      setLoading(false);
+    }
+  }, [availableProviders, setShippingProviderConfig]);
+
+  useEffect(() => { fetchStatus(); }, [fetchStatus]);
+
+  function getProviderConfig(providerId: string) {
     return providersState.providers.find(p => p.providerId === providerId);
   }
 
   function openConfigurePanel(providerId: string) {
     const existing = getProviderConfig(providerId);
     setCredentialInputs({});
-    setEnvironmentInput(existing?.environment || 'test');
+    setEnvironmentInput((existing?.environment as 'test' | 'production') || 'test');
     setEditingProvider(providerId);
     setTestResult(null);
   }
 
-  function handleSaveCredentials(providerId: string) {
+  async function handleSaveCredentials(providerId: string) {
     if (isWriteBlocked || !canManage) return;
 
     const providerDef = availableProviders.find(p => p.id === providerId);
     if (!providerDef) return;
 
     const existing = getProviderConfig(providerId);
-    const newCredentials: ShippingProviderCredentials = {
-      ...(existing?.credentials || {}),
-      environment: environmentInput,
-    };
+    const credentials: Record<string, string> = {};
 
     for (const field of providerDef.requiredFields) {
       const inputValue = credentialInputs[field.key];
       if (inputValue && inputValue.trim()) {
-        (newCredentials as Record<string, string>)[field.key] = inputValue.trim();
-      } else if (!existing?.credentials?.[field.key as keyof ShippingProviderCredentials]) {
+        credentials[field.key] = inputValue.trim();
+      } else if (!existing) {
         return;
       }
     }
 
-    const hasAllRequired = providerDef.requiredFields.every(
-      f => (newCredentials as Record<string, string>)[f.key]
-    );
+    if (!existing && !providerDef.requiredFields.every(f => credentials[f.key])) {
+      return;
+    }
 
-    const now = new Date().toISOString();
-    const updatedConfig: ShippingProviderConfig = {
-      providerId,
-      providerName: providerDef.name,
-      status: hasAllRequired ? 'configured' : 'not_configured',
-      isDefault: false,
-      credentials: newCredentials,
-      credentialsMasked: buildMaskedDisplay(newCredentials),
-      environment: environmentInput,
-      configuredAt: existing?.configuredAt || now,
-      configuredBy: 'Current User',
-      updatedAt: now,
-      lastTestedAt: existing?.lastTestedAt,
-      testResult: existing?.testResult,
-      testMessage: existing?.testMessage,
-    };
+    try {
+      const result = await shippingApi.storeProviderCredentials(
+        providerId,
+        credentials as { apiKey?: string; apiSecret?: string; accountId?: string },
+        environmentInput,
+      );
 
-    sessionStorage.setItem(`shipping_provider_${providerId}`, JSON.stringify(newCredentials));
-
-    const newProviders = providersState.providers.filter(p => p.providerId !== providerId);
-    newProviders.push(updatedConfig);
-
-    persistState({
-      ...providersState,
-      providers: newProviders,
-    });
-
-    setCredentialInputs({});
-    setSaveSuccess(providerId);
-    setTimeout(() => setSaveSuccess(null), 2500);
+      if (result.success) {
+        setCredentialInputs({});
+        setSaveSuccess(providerId);
+        setTimeout(() => setSaveSuccess(null), 2500);
+        await fetchStatus();
+      }
+    } catch {
+      setTestResult({ providerId, success: false, message: 'Failed to save credentials. Please try again.' });
+    }
   }
 
-  function handleSetActive(providerId: string) {
+  async function handleSetActive(providerId: string) {
     if (isWriteBlocked || !canManage) return;
-
     const config = getProviderConfig(providerId);
-    if (!config || config.status === 'not_configured') return;
-
-    persistState({
-      ...providersState,
-      activeProviderId: providerId,
-    });
+    if (!config) return;
+    try {
+      await shippingApi.setActiveProvider(providerId);
+      await fetchStatus();
+    } catch {
+      setTestResult({ providerId, success: false, message: 'Failed to set active provider.' });
+    }
   }
 
-  function handleDeactivate() {
+  async function handleDeactivate() {
     if (isWriteBlocked || !canManage) return;
-
-    persistState({
-      ...providersState,
-      activeProviderId: null,
-    });
+    try {
+      await shippingApi.setActiveProvider(null);
+      await fetchStatus();
+    } catch {}
   }
 
   async function handleTestConnection(providerId: string) {
@@ -168,7 +172,7 @@ export default function ShippingProvidersPage() {
     setTestResult(null);
 
     const config = getProviderConfig(providerId);
-    if (!config || config.status === 'not_configured') {
+    if (!config) {
       setTestResult({
         providerId,
         success: false,
@@ -178,67 +182,57 @@ export default function ShippingProvidersPage() {
       return;
     }
 
-    const provider = getProvider(providerId);
-    if (!provider) {
-      setTestResult({
-        providerId,
-        success: false,
-        message: 'Provider adapter not available.',
-      });
-      setTestingProvider(null);
-      return;
+    try {
+      const result = await shippingApi.testConnection(providerId);
+      const success = result.success;
+      const message = success
+        ? result.message || 'Connection successful.'
+        : result.error?.message || 'Connection test failed.';
+
+      setTestResult({ providerId, success, message });
+
+      const newProviders = providersState.providers.map(p =>
+        p.providerId === providerId
+          ? {
+              ...p,
+              lastTestedAt: new Date().toISOString(),
+              testResult: (success ? 'success' : 'failure') as 'success' | 'failure',
+              testMessage: message,
+            }
+          : p
+      );
+
+      setProvidersState(prev => ({ ...prev, providers: newProviders }));
+    } catch {
+      setTestResult({ providerId, success: false, message: 'Connection test failed — could not reach server.' });
     }
-
-    const testAddress = {
-      name: 'Test User',
-      line1: '417 Montgomery St',
-      city: 'San Francisco',
-      state: 'CA',
-      postalCode: '94104',
-      country: 'US',
-    };
-
-    const result = await provider.validateAddress(testAddress);
-
-    const now = new Date().toISOString();
-    const success = result.success;
-    const message = success
-      ? 'Connection successful — provider responded to address validation test.'
-      : result.error?.message || 'Connection test failed.';
-
-    setTestResult({ providerId, success, message });
-
-    const newProviders = providersState.providers.map(p =>
-      p.providerId === providerId
-        ? {
-            ...p,
-            lastTestedAt: now,
-            testResult: (success ? 'success' : 'failure') as 'success' | 'failure',
-            testMessage: message,
-            status: (success ? 'configured' : p.status) as ShippingProviderConfig['status'],
-          }
-        : p
-    );
-
-    persistState({ ...providersState, providers: newProviders });
     setTestingProvider(null);
   }
 
-  function handleRemoveConfig(providerId: string) {
+  async function handleRemoveConfig(providerId: string) {
     if (isWriteBlocked || !canManage) return;
-
-    sessionStorage.removeItem(`shipping_provider_${providerId}`);
-
-    const newProviders = providersState.providers.filter(p => p.providerId !== providerId);
-    const newActive = providersState.activeProviderId === providerId ? null : providersState.activeProviderId;
-
-    persistState({ providers: newProviders, activeProviderId: newActive });
-    setEditingProvider(null);
+    try {
+      await shippingApi.removeProviderCredentials(providerId);
+      setEditingProvider(null);
+      await fetchStatus();
+    } catch {
+      setTestResult({ providerId, success: false, message: 'Failed to remove provider configuration.' });
+    }
   }
 
   const activeProvider = providersState.providers.find(
     p => p.providerId === providersState.activeProviderId
   );
+
+  if (loading) {
+    return (
+      <PageShell title="Shipping Providers">
+        <div className="flex items-center justify-center py-20">
+          <span className="material-symbols-outlined text-slate-300 animate-spin text-2xl">progress_activity</span>
+        </div>
+      </PageShell>
+    );
+  }
 
   return (
     <PageShell title="Shipping Providers">
@@ -306,7 +300,7 @@ export default function ShippingProvidersPage() {
         {availableProviders.map(providerDef => {
           const config = getProviderConfig(providerDef.id);
           const isActive = providersState.activeProviderId === providerDef.id;
-          const isConfigured = config && config.status !== 'not_configured';
+          const isConfigured = !!config;
           const isEditing = editingProvider === providerDef.id;
           const colors = PROVIDER_COLORS[providerDef.id] || PROVIDER_COLORS.easypost;
 
@@ -372,11 +366,11 @@ export default function ShippingProvidersPage() {
                     className="overflow-hidden"
                   >
                     <div className="px-6 pb-6 pt-2 border-t border-slate-100 space-y-5">
-                      {isConfigured && config.credentialsMasked && (
+                      {isConfigured && config.maskedCredentials && (
                         <div className="bg-slate-50 rounded-2xl p-4 space-y-2">
                           <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Current Credentials</p>
                           {providerDef.requiredFields.map(field => {
-                            const maskedVal = config.credentialsMasked?.[field.key as keyof typeof config.credentialsMasked];
+                            const maskedVal = config.maskedCredentials?.[field.key];
                             return maskedVal ? (
                               <div key={field.key} className="flex items-center justify-between">
                                 <span className="text-xs text-slate-500 font-bold">{field.label}</span>

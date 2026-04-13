@@ -1,0 +1,252 @@
+Project: Multi-Tenant Repair / POS SaaS
+Workstream: Secure Provider Call Validation + Real Provider Testing Through Existing Provider Configuration
+Mode: Strict isolated workstream implementation
+Priority: Critical for real provider-backed Shipping Phase 1 validation
+
+You are a principal-level full-stack SaaS architect, senior React/TypeScript engineer, Firebase/Firestore data architect, backend integration architect, enterprise shipping systems architect, secure API integration engineer, and QA-minded refactoring expert.
+
+You must also operate in two parallel modes throughout this task:
+1) Side Auditor — continuously inspect for secret leakage, client-side provider calls, fake provider success, preview mode write leaks, permission leakage, tenant/store leakage, lifecycle inconsistency, and shallow integration shortcuts.
+2) Systems Thinker — design this workstream as part of the whole platform, making sure it fits the existing auth model, preview mode, RBAC, lifecycle gating, platform/store hierarchy, commercial plan gating, completed Shipping Center, completed Shipping Phase 1 Expansion, completed Provider Configuration work, and completed provider/rate/label workflow polish.
+
+Read and understand the existing codebase first, especially:
+- Ref.txt
+- replit.md
+
+Before changing anything, inspect the current architecture and identify:
+- where provider API calls are currently being made
+- whether any shipping provider requests are currently initiated directly from browser/client code
+- how provider configuration is currently stored and resolved
+- how active provider selection works
+- how preview mode/write blocking is enforced
+- how shipment lifecycle and edit locks currently work
+- how tracking sync is currently structured
+- whether there is already a backend/server endpoint layer available in the app architecture
+- whether any webhook or event ingestion pattern already exists elsewhere in the app
+
+Do not redesign the app.
+Do not broaden scope into Phase 2 or Phase 3 shipping work.
+Do not hardcode secrets.
+Do not expose provider API keys to the browser.
+Do not fake provider success.
+Do not bypass preview mode, RBAC, plan gating, or lifecycle gating.
+Do not weaken the completed shipping core flow.
+
+--------------------------------------------------
+WORKSTREAM GOAL
+--------------------------------------------------
+
+Make the shipping provider integration ready for real testing through the app’s existing provider configuration system.
+
+This workstream must:
+- validate that provider-backed operations run through a secure server-side/backend boundary rather than insecure browser-side secret usage
+- preserve provider-agnostic architecture
+- allow real testing using whichever provider the user manually configures and activates through the existing system design
+- keep Shipping Center provider actions operationally coherent with the selected active provider
+- make the app ready for real provider-backed Phase 1 validation without hardwiring the solution to a single provider
+
+The user will manually configure API credentials through the system while testing, using the current provider configuration UX and active-provider selection flow.
+
+--------------------------------------------------
+MANDATORY IMPLEMENTATION REQUIREMENTS
+--------------------------------------------------
+
+1) SERVER-SIDE PROVIDER CALL CHECK AND FIX
+This is the top priority.
+
+You must inspect every provider operation path and determine whether any of the following are currently happening directly from the browser/client:
+- address validation
+- get rates
+- purchase label
+- sync tracking
+- connection test / provider validation
+
+If any provider call is currently client-side or leaks secrets/client credentials exposure risk:
+- refactor it so the provider call goes through a secure server-side path/backend endpoint
+- ensure the browser never needs direct access to provider secret credentials
+- ensure request/response handling still fits the app architecture cleanly
+- ensure preview mode, permissions, and tenant/store scoping are still enforced correctly
+
+2) PROVIDER-AGNOSTIC REAL TESTING READINESS
+Keep multi-provider architecture intact.
+
+Required:
+- do not hardwire the app to a single provider
+- active provider selection from the existing provider configuration system must remain the source of truth
+- Shipping Center provider operations must use the currently selected provider
+- real testing should work through the provider configured by the user in the app
+- do not remove or degrade existing support for EasyPost, Shippo, or ShipStation
+
+3) REAL TESTING THROUGH EXISTING PROVIDER CONFIGURATION
+The current provider configuration UX/design must remain the operational path for testing.
+
+Required:
+- user can manually configure provider credentials through the existing governed provider configuration system
+- user can choose the active provider through the existing design
+- provider-backed actions use that configured active provider
+- do not create a second disconnected testing/configuration flow
+- do not require hardcoded environment-only switching for normal provider testing if the system already supports governed config
+
+4) PROVIDER CONFIGURATION COMPATIBILITY
+Preserve the completed provider configuration work:
+- provider config area
+- active provider selection
+- credential masking
+- connection testing
+- Shipping Center provider resolution
+- native Shipping Center path to provider configuration
+
+Do not regress any of that.
+
+5) CONNECTION TEST IMPROVEMENT THROUGH SECURE PATH
+For the selected configured provider:
+- Test Connection / Validate Provider Config must use the secure provider path
+- success/failure feedback must be clear and honest
+- no fake success
+- no shipment/label creation during config validation
+
+6) PROVIDER OPERATIONS THROUGH SECURE PATH
+The following operations must use the secure server-side provider boundary:
+- Validate Address
+- Get Rates
+- Select/Use Rate context for downstream purchase
+- Purchase Label
+- Sync Tracking
+- any provider-backed connection validation
+
+7) TRACKING / EVENT SAFETY
+If tracking sync is already part of this phase:
+- keep provider tracking/event ingestion coherent
+- do not corrupt shipment lifecycle
+- do not overwrite shipment history destructively
+- preserve manual/provider status consistency
+
+8) PRE-LIVE VALIDATION SAFETY CHECK
+Before considering the integration ready for real validation, confirm:
+- no provider secrets exposed in client code
+- no raw provider secret sent to the browser unnecessarily
+- no client-side direct provider call path remains
+- selected-provider test path is operational through the app’s provider config system
+- preview mode still blocks writes
+- permissions and feature gating still work
+- existing shipping core flow is not broken
+
+--------------------------------------------------
+UI / UX REQUIREMENTS
+--------------------------------------------------
+
+Keep the current app design baseline exactly.
+
+Required:
+- no redesign
+- no fake enterprise complexity
+- no deceptive success banners
+- clear operational feedback for provider-backed actions
+- if an operation now runs through server/backend integration, the UX should still feel immediate and coherent
+
+If helpful, add subtle but clean operational feedback such as:
+- provider configured
+- using active provider
+- test connection failed
+- provider request failed
+Only if that fits the current UX baseline naturally.
+
+--------------------------------------------------
+SECURITY REQUIREMENTS
+--------------------------------------------------
+
+These are mandatory:
+- API secrets must not be exposed in browser source, client bundles, or visible request logic
+- masked credentials must remain masked in the UI
+- sensitive provider config must remain governed by permissions and preview mode
+- no logs, banners, or debug output should leak secrets
+- any webhook/event readiness work must preserve secure design assumptions
+
+If webhook preparation or tracking sync validation touches event security:
+- structure it cleanly for future secure validation flow
+- do not overbuild the full webhook system in this pass unless required to make real provider testing coherent
+
+--------------------------------------------------
+NON-REGRESSION REQUIREMENTS
+--------------------------------------------------
+
+Do not break:
+1. Platform Command Center & Commercial Plan System
+2. Tenant Management & Provisioning
+3. Store Dashboard & POS Refinement
+4. Customers, Invoices & Services Improvements
+5. Repairs Module Deep Refinement
+6. Inventory & Supply Chain Improvements
+7. Shipping Module / Shipping Center
+8. Shipping Phase 1 Expansion
+9. Shipping Provider Configuration & Provider Selection
+10. Shipping Provider & Rate/Label Workflow Polish
+
+Specifically preserve:
+- source-routed shipment creation
+- source reference resolution
+- create/save/edit behavior
+- package persistence
+- status transitions
+- preview mode safety
+- edit lock from Label Created onward
+- provider configuration UX path from Shipping Center
+- package prerequisite for rates
+- rate selection logic
+- label purchase prerequisites
+- tracking number auto-population and lock rule
+- manual carrier/service fallback rule
+
+--------------------------------------------------
+IMPLEMENTATION DISCIPLINE
+--------------------------------------------------
+
+Follow this exact execution discipline:
+
+1) Audit current provider call architecture and identify any client-side secret risk.
+2) Refactor provider-backed operations behind a secure server-side boundary where needed.
+3) Preserve provider-agnostic active-provider resolution through the existing configuration system.
+4) Verify provider config and connection testing still work honestly through that secure path.
+5) Verify Shipping Center provider actions use the selected provider securely.
+6) Run a regression-oriented review across shipping core flow, provider config, preview mode, permissions, and lifecycle behavior.
+7) Update documentation.
+
+Do not claim completion unless the secure provider call path is genuinely corrected and the app is ready for real provider testing through the existing configuration system.
+
+--------------------------------------------------
+DOCUMENTATION REQUIREMENTS
+--------------------------------------------------
+
+Update replit.md with:
+- provider call architecture
+- which provider actions run through server-side/backend paths
+- how the active provider is resolved from existing configuration
+- real testing assumptions through the in-app provider configuration system
+- security rationale for secret handling
+- connection testing path
+- any tracking/event integration implications
+- affected modules and rationale
+
+--------------------------------------------------
+OUTPUT FORMAT REQUIRED
+--------------------------------------------------
+
+When finished, reply in this structure:
+
+1. Workstream Completion Status
+2. Exact Provider Call Architecture Findings
+3. Server-Side Provider Call Fixes Implemented
+4. Active Provider Real-Testing Path Confirmed
+5. Provider Configuration / Connection Test Compatibility
+6. Shipping Center Provider Operation Wiring Confirmed
+7. Security / Preview Mode / RBAC / Plan Gating Enforcement Added
+8. Non-Regression Notes
+9. Documentation Updated
+
+Before finalizing, self-audit and verify:
+- no direct browser-side provider secret usage remains
+- no fake provider success
+- no preview mode write leaks
+- no tenant/store leakage
+- no regression to completed shipping workstreams
+- real provider testing is ready through the existing provider configuration system

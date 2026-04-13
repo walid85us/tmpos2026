@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
 import { Shipment, ShipmentStatus, ShipmentSourceType, ShipmentType, ShipmentAddress, ShipmentPackage, ShipmentEvent, ShippingRate, AddressValidationResult } from '../types';
-import { getProvider, getActiveProviderId } from '../shipping/providerRegistry';
+import * as shippingApi from '../shipping/shippingApiClient';
 import type { ProviderError } from '../shipping/types';
 import PageShell from './PageShell';
 
@@ -105,6 +105,11 @@ export default function ShippingCenter() {
   const [addEventModal, setAddEventModal] = useState<string | null>(null);
   const [eventDescription, setEventDescription] = useState('');
   const [eventLocation, setEventLocation] = useState('');
+  const [activeProviderId, setActiveProviderId] = useState<string | null>(null);
+
+  useEffect(() => {
+    shippingApi.getActiveProvider().then(r => setActiveProviderId(r.activeProviderId));
+  }, []);
 
   const [newCarrier, setNewCarrier] = useState('');
   const [newService, setNewService] = useState('');
@@ -465,29 +470,13 @@ export default function ShippingCenter() {
     return shipment.packages.length > 0 && shipment.packages.some(p => p.weight || p.contentsSummary || p.declaredValue);
   }
 
-  function resolveActiveProvider() {
-    const activeId = getActiveProviderId();
-    if (!activeId) {
-      setProviderError({ code: 'NO_PROVIDER', message: 'No active shipping provider selected. Configure a provider in Settings → Shipping Providers.', retryable: false });
-      return null;
-    }
-    const provider = getProvider(activeId);
-    if (!provider) {
-      setProviderError({ code: 'NO_PROVIDER', message: `Provider "${activeId}" is not available.`, retryable: false });
-      return null;
-    }
-    return provider;
-  }
-
   async function handleValidateAddress(shipmentId: string) {
     if (isWriteBlocked) return;
     const shipment = shipments.find(s => s.id === shipmentId);
     if (!shipment) return;
     clearProviderFeedback();
     setProviderLoading('validate');
-    const provider = resolveActiveProvider();
-    if (!provider) { setProviderLoading(null); return; }
-    const result = await provider.validateAddress(shipment.destinationAddress);
+    const result = await shippingApi.validateAddress(shipment.destinationAddress);
     if (result.success && result.result) {
       const validationResult: AddressValidationResult = result.result;
       const now = new Date().toISOString();
@@ -527,13 +516,11 @@ export default function ShippingCenter() {
     setProviderLoading('rates');
     setShowRatesPanel(false);
     setAvailableRates([]);
-    const provider = resolveActiveProvider();
-    if (!provider) { setProviderLoading(null); return; }
-    const result = await provider.getRates({
-      originAddress: shipment.originAddress,
-      destinationAddress: shipment.destinationAddress,
-      packages: shipment.packages,
-    });
+    const result = await shippingApi.getRates(
+      shipment.originAddress,
+      shipment.destinationAddress,
+      shipment.packages,
+    );
     if (result.success && result.rates) {
       const sorted = [...result.rates].sort((a, b) => a.rate - b.rate);
       setAvailableRates(sorted);
@@ -579,17 +566,15 @@ export default function ShippingCenter() {
     }
     clearProviderFeedback();
     setProviderLoading('label');
-    const provider = resolveActiveProvider();
-    if (!provider) { setProviderLoading(null); return; }
-    const result = await provider.purchaseLabel({
-      originAddress: shipment.originAddress,
-      destinationAddress: shipment.destinationAddress,
-      packages: shipment.packages,
-      selectedRateId: shipment.selectedRate?.providerRateRef || '',
-      carrier: shipment.carrier || shipment.selectedRate?.carrier || '',
-      service: shipment.serviceLevel || shipment.selectedRate?.serviceName || '',
-      shipmentRef: shipment.shipmentNumber,
-    });
+    const result = await shippingApi.purchaseLabel(
+      shipment.originAddress,
+      shipment.destinationAddress,
+      shipment.packages,
+      shipment.selectedRate?.providerRateRef || '',
+      shipment.carrier || shipment.selectedRate?.carrier || '',
+      shipment.serviceLevel || shipment.selectedRate?.serviceName || '',
+      shipment.shipmentNumber,
+    );
     if (result.success && result.label) {
       const now = new Date().toISOString();
       const newEvent: ShipmentEvent = {
@@ -624,13 +609,11 @@ export default function ShippingCenter() {
     if (!shipment || !shipment.trackingNumber) return;
     clearProviderFeedback();
     setProviderLoading('tracking');
-    const provider = resolveActiveProvider();
-    if (!provider) { setProviderLoading(null); return; }
-    const result = await provider.getTracking({
-      trackingNumber: shipment.trackingNumber,
-      carrier: shipment.carrier || '',
-      providerShipmentId: shipment.providerShipmentId,
-    });
+    const result = await shippingApi.syncTracking(
+      shipment.trackingNumber,
+      shipment.carrier || '',
+      shipment.providerShipmentId,
+    );
     if (result.success) {
       const now = new Date().toISOString();
       const updates: Partial<Shipment> = {
@@ -950,11 +933,11 @@ export default function ShippingCenter() {
                       <div className="flex items-center justify-between">
                         <p className="text-[10px] font-black text-indigo-500 uppercase tracking-widest flex items-center gap-1"><span className="material-symbols-outlined text-xs">hub</span>Provider & Operations</p>
                         <div className="flex items-center gap-2">
-                          {(() => { const aid = getActiveProviderId(); return aid ? (
-                            <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest bg-indigo-100 text-indigo-600 rounded-md">{aid}</span>
+                          {activeProviderId ? (
+                            <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest bg-indigo-100 text-indigo-600 rounded-md">{activeProviderId}</span>
                           ) : (
                             <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest bg-slate-100 text-slate-400 rounded-md">No Provider</span>
-                          ); })()}
+                          )}
                           <button
                             onClick={() => navigate('/settings/shipping-providers')}
                             className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest text-indigo-500 hover:text-indigo-700 hover:bg-indigo-50 rounded-md transition-all flex items-center gap-0.5"

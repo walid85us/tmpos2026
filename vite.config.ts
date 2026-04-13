@@ -23,6 +23,12 @@ export default defineConfig(({mode}) => {
       watch: {
         ignored: ['**/.local/**', '**/.git/**', '**/.cache/**', '**/.agents/**', '**/node_modules/**'],
       },
+      proxy: {
+        '/api/shipping': {
+          target: 'http://localhost:5001',
+          changeOrigin: true,
+        },
+      },
     },
   };
 });
