@@ -135,3 +135,10 @@ export async function syncTracking(
 ): Promise<GetTrackingResponse> {
   return apiCall('/api/shipping/tracking', { trackingNumber, carrier, providerShipmentId });
 }
+
+export async function simulateTrackingEvent(
+  trackingNumber: string,
+  carrier: string
+): Promise<GetTrackingResponse & { isSimulated?: boolean }> {
+  return apiCall('/api/shipping/simulate-tracking-event', { trackingNumber, carrier });
+}

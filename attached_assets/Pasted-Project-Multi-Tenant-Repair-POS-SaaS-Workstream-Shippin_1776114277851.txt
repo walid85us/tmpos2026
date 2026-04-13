@@ -1,0 +1,345 @@
+Project: Multi-Tenant Repair / POS SaaS
+Workstream: Shipping Center Fulfillment Enhancement — Narrow Correction Pass with Mandatory Fulfillment-Expert Review
+Mode: Strict isolated workstream implementation
+Priority: High operational value, fulfillment-grade workflow correctness, preserve current product baseline exactly
+
+You are a principal-level full-stack SaaS architect, senior React/TypeScript engineer, Firebase/Firestore data architect, enterprise shipping systems architect, and senior shipping & fulfillment operations expert with more than 20 years of experience designing parcel shipping, warehouse execution, returns, repair logistics, label operations, dispatch control, tracking-event workflows, and fulfillment-center operational systems.
+
+You must also operate in two parallel modes throughout this task:
+1) Side Auditor — continuously inspect for regression risk, permission leakage, tenant leakage, preview-mode write leaks, lifecycle inconsistency, fake provider success, fulfillment workflow gaps, and shallow implementation shortcuts.
+2) Systems Thinker — design this workstream as part of the whole platform, making sure it fits the existing auth model, preview mode, RBAC, lifecycle gating, platform/store hierarchy, commercial plan gating, completed Shipping Center, provider configuration, provider actions, secure provider-call architecture, and all previously completed shipping improvements.
+
+Read and understand the existing codebase first, especially:
+- Ref.txt
+- replit.md
+
+--------------------------------------------------
+MANDATORY FULFILLMENT-EXPERT RESEARCH AND ADAPTATION REQUIREMENT
+--------------------------------------------------
+
+Before you implement anything, you must do all of the following and treat it as a required part of the workstream, not optional context:
+
+1) Act as a senior shipping and fulfillment expert with more than 20 years of experience in:
+- parcel shipping operations
+- warehouse / fulfillment-center workflows
+- repair-return logistics
+- label and dispatch operations
+- carrier integration design
+- tracking-event operations
+- post-label operational controls
+- multi-step operational shipping workflows
+
+2) Visit, read, and understand this reference:
+- https://help.repairdesk.co/portal/en/kb/articles/shipstation-integration
+
+3) Extract the useful operational ideas from that reference and adapt them to OUR app.
+Do NOT copy RepairDesk literally.
+Do NOT rebuild ShipStation-specific UX.
+Do NOT force concepts that do not fit our architecture.
+But you MUST study the operational ideas and apply the relevant ones to our Shipping Center where appropriate.
+
+4) You must explicitly identify:
+- what RepairDesk-style shipping/fulfillment concepts are useful
+- which of those concepts should be implemented now in this pass
+- which should be documented as future improvements
+- which should NOT be implemented because they do not fit our app yet
+
+5) You must not mark this task complete unless this research-and-adaptation step is reflected in both:
+- the actual implementation decisions, and
+- your final output summary
+
+--------------------------------------------------
+WORKSTREAM GOAL
+--------------------------------------------------
+
+This is a narrow correction pass, not a redesign and not a broad expansion.
+
+The goal is to close the remaining fulfillment gaps in Shipping Center while also applying the right fulfillment-thinking extracted from the RepairDesk reference in a way that fits our app.
+
+You must improve:
+- Shipping Center ownership of provider settings access
+- PDF-first label handling
+- full tracking-number visibility for authorized operational users
+- provider-fed tracking/timeline visibility
+- test-safe provider-event validation path
+- clearer test-mode vs live-mode event messaging
+- fulfillment-grade thinking for what is still missing and should improve later
+
+Preserve all working behavior that already passed QA.
+
+--------------------------------------------------
+CURRENT QA SOURCE OF TRUTH — REMAINING FAILURES
+--------------------------------------------------
+
+Treat the following as the exact truth that must be fixed:
+
+1) Shipping Center still does NOT provide a true native provider-settings path
+- QA still sees provider configuration as living under store/settings
+- The expected Shipping Center-native path is still missing in practice
+
+2) Label output is still not PDF-first
+- QA still sees label opening as PNG
+- Required behavior is PDF-first operational label handling
+
+3) Tracking number still does not display in full
+- QA confirms tracking number visibility is still incomplete
+- It must display in full for authorized operational users after label purchase
+
+4) Tracking & Events is not yet behaving like a provider-fed fulfillment timeline
+- QA still sees all events as manual
+- The current experience does not demonstrate automatic provider/backend-fed event behavior after dispatch/carrier scans
+- Webhook foundation exists, but operational tracking ingestion is not materially visible in the Shipping Center yet
+
+5) Test-mode provider event behavior is still not operationally demonstrated
+- The system needs a truthful, test-safe way to validate provider-fed event ingestion without pretending real live scans occurred
+
+--------------------------------------------------
+MANDATORY CORRECTIONS
+--------------------------------------------------
+
+A) SHIPPING CENTER-NATIVE PROVIDER SETTINGS PATH
+Implement an actual native provider-settings access path inside Shipping Center.
+
+Required:
+- Shipping Center must include a clear Settings / Providers / Configure path inside the module itself
+- This path must feel native to Shipping Center operations
+- Governance/security can still remain in the existing admin/settings architecture
+- Do not duplicate provider config logic
+- Do not leave Shipping Center users feeling forced to discover provider setup only through unrelated settings areas
+
+B) PDF-FIRST LABEL OUTPUT FIX
+Required:
+- The primary label artifact handling/open action must use PDF-first behavior
+- If the provider returns multiple label formats, prefer the PDF artifact for the main operational open/print action
+- UI should reflect PDF as the primary label format
+- Do not leave the main operational path opening PNG when PDF-first was required
+
+C) FULL TRACKING NUMBER VISIBILITY
+Required:
+- Show the full tracking number to authorized operational users
+- Remove truncation/masking in shipment detail and list views where operationally needed
+- Keep lock behavior after label purchase
+- Do not leak tracking data to unauthorized users, but for authorized shipping users the full value should be visible
+
+D) MAKE TRACKING & EVENTS OPERATIONALLY PROVIDER-FED
+This is the most important missing fulfillment behavior.
+
+Current problem:
+- Tracking tab still looks manual-only in practice
+- Webhook foundation exists but does not create a visible provider-fed operational timeline
+- QA expects that once shipment reaches dispatched and the carrier/provider has events, Tracking & Events reflects those provider events automatically
+
+Required:
+- Make provider-sourced events clearly visible in the Tracking & Events tab when available
+- Ensure provider events are visually distinguishable from manual events
+- Ensure the timeline is genuinely unified, not only conceptually
+- Ensure provider event ingestion updates latest tracking state and mapped shipment state coherently
+- Ensure provider-origin events are not all appearing as manual
+
+Because QA is being done in test mode and real carrier scans may not naturally happen:
+- add a safe, non-production test validation path for provider event ingestion
+- this can be a controlled provider test-event sync path, webhook replay/test-event ingestion path, or equivalent admin/test-only validation mechanism
+- the goal is to prove the provider-fed tracking pipeline actually works without waiting for real live carrier scans
+
+Important:
+- do NOT fake provider events in a misleading way
+- do NOT pretend live carrier scans happened when they did not
+- do provide a truthful, test-safe way to validate that webhook/provider event ingestion updates the shipment timeline correctly
+
+E) TEST MODE VS LIVE MODE CLARITY
+Required:
+- In test mode, clearly explain when provider event limitations are due to the provider’s test environment
+- Keep the UI honest and operationally understandable
+- Distinguish:
+  - manual event
+  - synced provider event
+  - no provider event available yet
+  - provider test-mode limitation
+
+--------------------------------------------------
+REPAIRDESK / SHIPSTATION REFERENCE — EXTRACT THE RIGHT IDEAS
+--------------------------------------------------
+
+From the RepairDesk ShipStation integration reference, study and adapt the useful operational concepts into our app architecture where appropriate, without copying their product literally.
+
+Examples of idea categories to evaluate:
+- centralized shipping integration management
+- invoice/ticket data flowing into shipping
+- data re-sync concepts for carriers/packages/options
+- two-way syncing via webhook/event flow
+- tracking ID synchronization
+- invoice/ticket status synchronization from shipping events
+- label printing from the core product
+- markup / handling-fee / flat-rate concepts where they fit the future architecture
+- operational smoothness for repair + shipping workflows
+
+Extract the ideas that are appropriate for our system and adapt them to:
+- Shipping Center
+- Invoices
+- Repairs
+- Transfers
+- RMA
+- future provider-backed automation
+
+Do not force in concepts that do not fit the current app.
+
+--------------------------------------------------
+OPTIONAL FUTURE NOTE — DO NOT OVERBUILD NOW
+--------------------------------------------------
+
+QA also suggested a destination-address autocomplete experience using Google-style address suggestion/prefill.
+
+This is a valid future enhancement, but treat it as:
+- future UX enhancement / separate pass
+- not the primary blocker for closing this fulfillment correction pass
+
+You may document it in replit.md as a future recommendation, but do not expand the scope heavily into maps/autocomplete integration unless it is needed for a minimal coherent improvement.
+
+--------------------------------------------------
+IMPORTANT IMPLEMENTATION RULES
+--------------------------------------------------
+
+- Do not redesign the app
+- Do not broaden scope into Phase 2 or Phase 3 shipping work
+- Do not touch unrelated workstreams
+- Do not break preview mode safety
+- Do not break permissions or plan gating
+- Do not break shipping core flow
+- Do not break provider configuration
+- Do not fake provider success
+- Do not fake provider event sync
+- Keep the design baseline consistent
+- Preserve source-routed shipment creation, source reference resolution, selected-rate behavior, label purchase prerequisites, and tracking lock rules
+
+--------------------------------------------------
+MULTI-TENANT / SECURITY / GATING REQUIREMENTS
+--------------------------------------------------
+
+Preserve and correctly enforce:
+- auth behavior
+- preview mode
+- RBAC/sub-permissions
+- lifecycle gating
+- platform/store hierarchy
+- System Owner Plans & Features matrix
+- Store Permissions Matrix
+- provider configuration governance
+- secure server-side provider call boundary
+
+Do not expose provider actions when unavailable or unauthorized.
+Do not show writable actions in preview mode.
+
+--------------------------------------------------
+NON-REGRESSION REQUIREMENTS
+--------------------------------------------------
+
+Do not break:
+1. Platform Command Center & Commercial Plan System
+2. Tenant Management & Provisioning
+3. Store Dashboard & POS Refinement
+4. Customers, Invoices & Services Improvements
+5. Repairs Module Deep Refinement
+6. Inventory & Supply Chain Improvements
+7. Shipping Module / Shipping Center
+8. Shipping Phase 1 Expansion
+9. Shipping Provider Configuration & Provider Selection
+10. Shipping Provider & Rate/Label Workflow Polish
+11. Secure Provider Call Validation / real provider testing readiness
+
+Specifically preserve:
+- source-routed shipment creation
+- source reference resolution
+- create/save/edit behavior
+- package persistence
+- status transitions
+- preview mode safety
+- edit lock from Label Created onward
+- provider configuration governance
+- package prerequisite for rates
+- selected-rate update logic
+- label purchase prerequisites
+- tracking number auto-population and lock rule
+- manual carrier/service fallback rule
+
+--------------------------------------------------
+IMPLEMENTATION DISCIPLINE
+--------------------------------------------------
+
+Follow this exact execution discipline:
+
+1) Review the linked RepairDesk reference and extract only the concepts that improve our system.
+2) Audit the current Shipping Center against real fulfillment workflow needs.
+3) Improve Shipping Center settings/provider ownership UX.
+4) Fix PDF-first label behavior.
+5) Fix full tracking-number visibility.
+6) Make provider-fed tracking/timeline behavior materially visible and testable.
+7) Improve test-mode vs live-mode event messaging.
+8) Document what was implemented now vs what should come later.
+9) Run a regression-oriented review across shipping core flows and provider-backed actions.
+10) Update documentation.
+
+Do NOT mark this task complete unless the RepairDesk reference review, fulfillment-expert analysis, and adaptation mapping are visibly present in both the implementation and the final response structure.
+
+--------------------------------------------------
+DOCUMENTATION REQUIREMENTS
+--------------------------------------------------
+
+Update replit.md with:
+- Shipping Center-native provider settings entry path
+- PDF-first label behavior
+- full tracking number visibility rule
+- provider-fed tracking/event display behavior
+- test-safe provider event ingestion/replay validation path
+- distinction between manual vs provider events
+- extracted lessons adapted from the RepairDesk reference
+- future fulfillment improvements recommended but not yet implemented
+- future recommendation for address autocomplete
+
+--------------------------------------------------
+MANDATORY OUTPUT PROOF OF COMPLIANCE
+--------------------------------------------------
+
+In your final reply, you MUST include these exact sections:
+
+A) RepairDesk Reference Insights Extracted
+- List the concrete operational ideas you extracted from the reference
+
+B) How Those Insights Were Adapted To Our Shipping Center
+- For each insight, explain how it was adapted to our app architecture
+
+C) Implemented Now vs Deferred For Future
+- Separate into:
+  - Implemented in this pass
+  - Deferred as future enhancement
+  - Not adopted and why
+
+D) Fulfillment-Expert Recommendations
+- Give your senior shipping/fulfillment recommendations for what is still missing from our Shipping Center and what should improve in future phases
+
+--------------------------------------------------
+OUTPUT FORMAT REQUIRED
+--------------------------------------------------
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. RepairDesk Reference Insights Extracted
+3. How Those Insights Were Adapted To Our Shipping Center
+4. Implemented Now vs Deferred For Future
+5. Shipping Center Provider Settings Path Fix
+6. PDF Label Output Fix
+7. Full Tracking Visibility Fix
+8. Provider Event / Tracking Timeline Fix
+9. Test Mode vs Live Mode Messaging Improvement
+10. Fulfillment-Expert Recommendations
+11. Files Changed
+12. Documentation Updated
+13. Non-Regression Notes
+
+Do not give a generic completion summary.
+Do not say “done” unless you explicitly prove:
+- you reviewed the reference
+- you extracted ideas from it
+- you mapped those ideas to our app
+- you implemented the relevant ones for this pass
+- you documented the rest as future improvements

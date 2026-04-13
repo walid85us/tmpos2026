@@ -93,6 +93,7 @@ export default function ShippingCenter() {
   const canPurchaseLabel = checkSubPermission('purchase_shipping_label');
   const canPrintLabel = checkSubPermission('print_shipping_label');
   const canSyncTracking = checkSubPermission('sync_shipping_tracking');
+  const canManageProviderSettings = checkSubPermission('manage_shipping_settings');
 
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<ShipmentStatus | 'all'>('all');
@@ -138,6 +139,10 @@ export default function ShippingCenter() {
   const [providerSuccess, setProviderSuccess] = useState<string | null>(null);
   const [showRatesPanel, setShowRatesPanel] = useState(false);
   const [availableRates, setAvailableRates] = useState<ShippingRate[]>([]);
+  const [showProviderSettings, setShowProviderSettings] = useState(false);
+  const [providerStatuses, setProviderStatuses] = useState<any[]>([]);
+  const [providerSettingsLoading, setProviderSettingsLoading] = useState(false);
+  const [trackingCopied, setTrackingCopied] = useState(false);
 
   const STORE_ADDRESS: ShipmentAddress = { name: 'Main Warehouse', line1: '100 Commerce Dr', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US', phone: '555-0100' };
 
@@ -628,6 +633,62 @@ export default function ShippingCenter() {
     setProviderLoading(null);
   }
 
+  async function loadProviderStatuses() {
+    setProviderSettingsLoading(true);
+    try {
+      const result = await shippingApi.getProvidersStatus();
+      setProviderStatuses(result.providers || []);
+    } catch { /* ignore */ }
+    setProviderSettingsLoading(false);
+  }
+
+  async function handleTestConnection(providerId: string) {
+    clearProviderFeedback();
+    setProviderLoading('test-connection');
+    try {
+      const result = await shippingApi.testConnection(providerId);
+      if (result.success) {
+        setProviderSuccess(`Connection to ${providerId} verified successfully.`);
+      } else {
+        setProviderError({ code: 'TEST_FAILED', message: result.error?.message || 'Connection test failed.', retryable: true });
+      }
+    } catch (e: any) {
+      setProviderError({ code: 'TEST_FAILED', message: e.message || 'Connection test failed.', retryable: true });
+    }
+    setProviderLoading(null);
+  }
+
+  function copyTrackingNumber(trackingNumber: string) {
+    navigator.clipboard.writeText(trackingNumber).then(() => {
+      setTrackingCopied(true);
+      setTimeout(() => setTrackingCopied(false), 2000);
+    });
+  }
+
+  async function handleSimulateTrackingEvent(shipmentId: string) {
+    if (isWriteBlocked) return;
+    const shipment = shipments.find(s => s.id === shipmentId);
+    if (!shipment || !shipment.trackingNumber) return;
+    clearProviderFeedback();
+    setProviderLoading('simulate');
+    const result = await shippingApi.simulateTrackingEvent(
+      shipment.trackingNumber,
+      shipment.carrier || '',
+    );
+    if (result.success && result.events) {
+      const now = new Date().toISOString();
+      updateShipment(shipmentId, {
+        providerTrackingEvents: result.events.map(e => ({ ...e, source: 'test_provider' as any })),
+        lastTrackingSyncAt: now,
+        updatedAt: now,
+      });
+      setProviderSuccess(`Simulated ${result.events.length} test provider event(s). These are test data only — no real carrier activity occurred.`);
+    } else {
+      setProviderError(friendlyProviderError(result.error || { code: 'UNKNOWN', message: 'Simulation failed.' }));
+    }
+    setProviderLoading(null);
+  }
+
   async function handleSyncTracking(shipmentId: string) {
     if (isWriteBlocked) return;
     const shipment = shipments.find(s => s.id === shipmentId);
@@ -939,7 +1000,18 @@ export default function ShippingCenter() {
                         <div className="flex justify-between py-2 border-b border-slate-100"><span className="text-xs text-slate-400 font-bold">Service</span><span className="text-xs font-black text-slate-700">{selectedShip.serviceLevel}</span></div>
                       )}
                       {selectedShip.trackingNumber && (
-                        <div className="flex justify-between py-2 border-b border-slate-100"><span className="text-xs text-slate-400 font-bold">Tracking</span><span className="text-xs font-black text-slate-700 font-mono">{selectedShip.trackingNumber}</span></div>
+                        <div className="flex justify-between py-2 border-b border-slate-100">
+                          <span className="text-xs text-slate-400 font-bold">Tracking</span>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs font-black text-slate-700 font-mono select-all">{selectedShip.trackingNumber}</span>
+                            <button onClick={() => copyTrackingNumber(selectedShip.trackingNumber!)} title="Copy tracking number"
+                              className="p-0.5 hover:bg-slate-100 rounded transition-all">
+                              <span className="material-symbols-outlined text-xs text-slate-400 hover:text-slate-600">
+                                {trackingCopied ? 'check' : 'content_copy'}
+                              </span>
+                            </button>
+                          </div>
+                        </div>
                       )}
                       {canViewCosts && selectedShip.shippingCost !== undefined && (
                         <div className="flex justify-between py-2 border-b border-slate-100"><span className="text-xs text-slate-400 font-bold">Cost</span><span className="text-xs font-black text-primary">${selectedShip.shippingCost.toFixed(2)}</span></div>
@@ -977,14 +1049,16 @@ export default function ShippingCenter() {
                           ) : (
                             <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest bg-slate-100 text-slate-400 rounded-md">No Provider</span>
                           )}
+                          {canManageProviderSettings && (
                           <button
-                            onClick={() => navigate('/settings/shipping-providers')}
-                            className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest text-indigo-500 hover:text-indigo-700 hover:bg-indigo-50 rounded-md transition-all flex items-center gap-0.5"
-                            title="Configure shipping providers"
+                            onClick={() => { setShowProviderSettings(!showProviderSettings); if (!showProviderSettings) loadProviderStatuses(); }}
+                            className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md transition-all flex items-center gap-0.5 ${showProviderSettings ? 'bg-indigo-100 text-indigo-700' : 'text-indigo-500 hover:text-indigo-700 hover:bg-indigo-50'}`}
+                            title="Provider settings"
                           >
-                            <span className="material-symbols-outlined text-xs">settings</span>
-                            Configure
+                            <span className="material-symbols-outlined text-xs">{showProviderSettings ? 'expand_less' : 'settings'}</span>
+                            {showProviderSettings ? 'Hide Settings' : 'Provider Settings'}
                           </button>
+                          )}
                         </div>
                       </div>
 
@@ -1011,6 +1085,46 @@ export default function ShippingCenter() {
                             <p className="text-xs text-amber-700 font-medium">Test Mode Active</p>
                             <p className="text-[10px] text-amber-600 mt-0.5">Labels, rates, and tracking use test credentials. No real charges will be made. Switch to production credentials in Provider Settings for live shipments.</p>
                           </div>
+                        </div>
+                      )}
+
+                      {showProviderSettings && canManageProviderSettings && (
+                        <div className="bg-white rounded-xl border border-indigo-200 p-4 space-y-3">
+                          <div className="flex items-center justify-between">
+                            <p className="text-[10px] font-black text-indigo-600 uppercase tracking-widest">Provider Configuration</p>
+                            {providerSettingsLoading && <span className="material-symbols-outlined text-xs text-indigo-400 animate-spin">progress_activity</span>}
+                          </div>
+                          {providerStatuses.length === 0 && !providerSettingsLoading && (
+                            <p className="text-xs text-slate-500">No providers configured. Go to full settings to add carrier API credentials.</p>
+                          )}
+                          {providerStatuses.map(ps => (
+                            <div key={ps.providerId} className={`flex items-center justify-between p-3 rounded-lg border ${ps.isActive ? 'border-indigo-200 bg-indigo-50/50' : 'border-slate-100 bg-slate-50/50'}`}>
+                              <div className="flex items-center gap-2">
+                                <span className={`w-2 h-2 rounded-full ${ps.isActive ? 'bg-indigo-500' : 'bg-slate-300'}`} />
+                                <span className="text-xs font-black text-slate-700 capitalize">{ps.providerId}</span>
+                                {ps.isActive && <span className="px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest bg-indigo-100 text-indigo-600 rounded">Active</span>}
+                                {ps.environment && (
+                                  <span className={`px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest rounded ${ps.environment === 'test' ? 'bg-amber-100 text-amber-600' : 'bg-emerald-100 text-emerald-600'}`}>
+                                    {ps.environment === 'test' ? 'Test' : 'Live'}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-2">
+                                {ps.maskedCredentials && Object.values(ps.maskedCredentials).some(Boolean) && (
+                                  <span className="text-[9px] text-slate-400">Credentials set</span>
+                                )}
+                                <button onClick={() => handleTestConnection(ps.providerId)} disabled={providerLoading !== null}
+                                  className="px-2 py-1 text-[9px] font-bold text-indigo-500 hover:bg-indigo-50 rounded transition-all disabled:opacity-40">
+                                  {providerLoading === 'test-connection' ? 'Testing...' : 'Test'}
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                          <button onClick={() => navigate('/settings/shipping-providers')}
+                            className="w-full py-2 text-[10px] font-black uppercase tracking-widest text-indigo-500 hover:text-indigo-700 hover:bg-indigo-50 rounded-lg border border-dashed border-indigo-200 transition-all flex items-center justify-center gap-1">
+                            <span className="material-symbols-outlined text-xs">open_in_new</span>
+                            Full Provider Settings
+                          </button>
                         </div>
                       )}
 
@@ -1189,58 +1303,102 @@ export default function ShippingCenter() {
 
                 {detailTab === 'tracking' && (() => {
                   const manualEvents = [...selectedShip.events].map(e => ({ ...e, _source: 'manual' as const }));
-                  const providerEvents = (selectedShip.providerTrackingEvents || []).map(e => ({
+                  const rawProviderEvents = selectedShip.providerTrackingEvents || [];
+                  const isTestProvider = providerEnvironment === 'test';
+                  const hasTestEvents = rawProviderEvents.some((e: any) => e.source === 'test_provider' || e.description?.startsWith('[TEST]'));
+                  const providerEvents = rawProviderEvents.map(e => ({
                     id: e.id,
                     timestamp: e.timestamp,
                     status: e.status,
                     description: e.description,
                     location: e.location,
                     performedBy: undefined as string | undefined,
-                    _source: 'provider' as const,
+                    _source: ((e as any).source === 'test_provider' || e.description?.startsWith('[TEST]')) ? 'test_provider' as const : 'provider' as const,
                   }));
                   const allEvents = [...manualEvents, ...providerEvents]
                     .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+                  const hasProviderEvents = providerEvents.length > 0;
                   return (
                   <>
-                    {canUpdateTracking && selectedShip.status !== 'Delivered' && selectedShip.status !== 'Cancelled' && (
-                      <button onClick={() => { setEventDescription(''); setEventLocation(''); setAddEventModal(selectedShip.id); }} className="px-4 py-2.5 bg-primary/10 text-primary font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-primary/20 transition-all flex items-center gap-1">
-                        <span className="material-symbols-outlined text-sm">add</span>Add Event
-                      </button>
-                    )}
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {canUpdateTracking && selectedShip.status !== 'Delivered' && selectedShip.status !== 'Cancelled' && (
+                        <button onClick={() => { setEventDescription(''); setEventLocation(''); setAddEventModal(selectedShip.id); }} className="px-4 py-2.5 bg-primary/10 text-primary font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-primary/20 transition-all flex items-center gap-1">
+                          <span className="material-symbols-outlined text-sm">add</span>Add Event
+                        </button>
+                      )}
+                      {canSyncTracking && isTestProvider && activeProviderId && selectedShip.trackingNumber && !isWriteBlocked && (
+                        <button onClick={() => handleSimulateTrackingEvent(selectedShip.id)} disabled={providerLoading !== null}
+                          className="px-4 py-2.5 bg-amber-50 text-amber-700 border border-amber-200 font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-amber-100 transition-all disabled:opacity-40 flex items-center gap-1">
+                          <span className="material-symbols-outlined text-sm">{providerLoading === 'simulate' ? 'hourglass_top' : 'science'}</span>
+                          {providerLoading === 'simulate' ? 'Simulating...' : 'Simulate Provider Events'}
+                        </button>
+                      )}
+                    </div>
 
                     {selectedShip.lastTrackingSyncAt && (
                       <div className="flex items-center gap-2 text-[10px] text-slate-400">
                         <span className="material-symbols-outlined text-xs">sync</span>
                         Last synced: {formatDateTime(selectedShip.lastTrackingSyncAt)}
-                        {providerEnvironment === 'test' && <span className="px-1.5 py-0.5 bg-amber-100 text-amber-600 rounded text-[9px] font-black uppercase">Test</span>}
+                        {isTestProvider && <span className="px-1.5 py-0.5 bg-amber-100 text-amber-600 rounded text-[9px] font-black uppercase">Test Mode</span>}
+                      </div>
+                    )}
+
+                    {isTestProvider && !hasProviderEvents && selectedShip.trackingNumber && (
+                      <div className="px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2">
+                        <span className="material-symbols-outlined text-amber-500 text-sm mt-0.5">info</span>
+                        <div>
+                          <p className="text-xs text-amber-700 font-medium">No provider tracking events yet</p>
+                          <p className="text-[10px] text-amber-600 mt-0.5">You are in test mode. Test tracking numbers may not return real carrier data. Use "Simulate Provider Events" to generate test events and verify your tracking timeline display.</p>
+                        </div>
+                      </div>
+                    )}
+
+                    {hasTestEvents && (
+                      <div className="px-3 py-2 bg-amber-50/60 border border-amber-100 rounded-lg flex items-start gap-2">
+                        <span className="material-symbols-outlined text-amber-400 text-sm mt-0.5">science</span>
+                        <p className="text-[10px] text-amber-600">Events marked <span className="font-black">Test Provider</span> are simulated data generated in test mode. They do not represent real carrier activity.</p>
+                      </div>
+                    )}
+
+                    {!isTestProvider && providerEnvironment === 'production' && !hasProviderEvents && selectedShip.trackingNumber && (
+                      <div className="px-3 py-2 bg-sky-50 border border-sky-200 rounded-lg flex items-start gap-2">
+                        <span className="material-symbols-outlined text-sky-500 text-sm mt-0.5">info</span>
+                        <p className="text-xs text-sky-700">No provider tracking events yet. Use "Sync Tracking" in Provider & Operations to fetch the latest carrier updates.</p>
                       </div>
                     )}
 
                     <div className="relative pl-8 space-y-0">
                       <div className="absolute left-3 top-2 bottom-2 w-px bg-slate-200" />
-                      {allEvents.map((evt, i) => (
+                      {allEvents.map((evt, i) => {
+                        const isTest = evt._source === 'test_provider';
+                        const isProvider = evt._source === 'provider' || isTest;
+                        return (
                         <div key={evt.id} className="relative pb-6 last:pb-0">
                           <div className={`absolute left-[-23px] top-1 w-5 h-5 rounded-full border-2 flex items-center justify-center ${
                             i === 0 ? 'bg-primary border-primary' :
-                            evt._source === 'provider' ? 'bg-sky-50 border-sky-300' :
+                            isTest ? 'bg-amber-50 border-amber-300' :
+                            isProvider ? 'bg-sky-50 border-sky-300' :
                             'bg-white border-slate-300'
                           }`}>
                             {i === 0 && <div className="w-2 h-2 rounded-full bg-white" />}
                           </div>
                           <div className="ml-2">
-                            <div className="flex items-center gap-2 mb-0.5">
+                            <div className="flex items-center gap-2 mb-0.5 flex-wrap">
                               <span className="text-xs font-black text-slate-700">{evt.status}</span>
                               <span className="text-[10px] text-slate-400">{formatDateTime(evt.timestamp)}</span>
                               <span className={`px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-widest ${
-                                evt._source === 'provider' ? 'bg-sky-100 text-sky-600' : 'bg-slate-100 text-slate-500'
-                              }`}>{evt._source === 'provider' ? 'Provider' : 'Manual'}</span>
+                                isTest ? 'bg-amber-100 text-amber-600' :
+                                isProvider ? 'bg-sky-100 text-sky-600' :
+                                'bg-slate-100 text-slate-500'
+                              }`}>{isTest ? 'Test Provider' : isProvider ? 'Provider' : 'Manual'}</span>
                             </div>
                             <p className="text-xs text-slate-600">{evt.description}</p>
                             {evt.location && <p className="text-[10px] text-slate-400 mt-0.5">{evt.location}</p>}
                             {evt.performedBy && <p className="text-[10px] text-slate-400">by {evt.performedBy}</p>}
                           </div>
                         </div>
-                      ))}
+                        );
+                      })}
                       {allEvents.length === 0 && (
                         <div className="flex flex-col items-center py-8 ml-[-32px]">
                           <span className="material-symbols-outlined text-3xl text-slate-300 mb-2">timeline</span>

@@ -152,6 +152,50 @@ app.post('/api/shipping/tracking', async (req, res) => {
   res.json(result);
 });
 
+app.post('/api/shipping/simulate-tracking-event', (req, res) => {
+  const activeId = getActiveProvider();
+  if (!activeId) {
+    res.json({ success: false, error: { code: 'NO_PROVIDER', message: 'No active provider configured.' } });
+    return;
+  }
+  const env = getProviderEnvironment(activeId);
+  if (env !== 'test') {
+    res.json({ success: false, error: { code: 'NOT_TEST_MODE', message: 'Simulated events are only available in test mode. Switch your provider to test credentials first.' } });
+    return;
+  }
+  const { trackingNumber, carrier } = req.body;
+  if (!trackingNumber) {
+    res.status(400).json({ success: false, error: { code: 'MISSING_TRACKING', message: 'Tracking number is required.' } });
+    return;
+  }
+
+  const testStatuses = [
+    { status: 'pre_transit', description: 'Shipping label created, package not yet received by carrier' },
+    { status: 'accepted', description: 'Package accepted by carrier facility' },
+    { status: 'in_transit', description: 'Package in transit to destination' },
+    { status: 'out_for_delivery', description: 'Package out for delivery' },
+    { status: 'delivered', description: 'Package delivered to recipient' },
+  ];
+  const now = new Date();
+  const events = testStatuses.map((s, i) => ({
+    id: `test-evt-${Date.now()}-${i}`,
+    timestamp: new Date(now.getTime() - (testStatuses.length - 1 - i) * 3600000).toISOString(),
+    status: s.status,
+    description: `[TEST] ${s.description}`,
+    location: ['Origin Facility', 'Regional Hub', 'Distribution Center', 'Local Post Office', 'Destination'][i],
+    source: 'test_provider' as const,
+  }));
+
+  res.json({
+    success: true,
+    events,
+    status: 'delivered',
+    estimatedDelivery: new Date(now.getTime() + 86400000).toISOString(),
+    carrier: carrier || 'TestCarrier',
+    isSimulated: true,
+  });
+});
+
 app.post('/api/shipping/webhook/:providerId', (req, res) => {
   const { providerId } = req.params;
   const knownProviders = ['easypost', 'shippo', 'shipstation'];
