@@ -8,6 +8,7 @@ import {
   getConfiguredProviders,
   getMaskedCredentials,
   getProviderInfo,
+  getProviderEnvironment,
 } from './credential-store';
 import { EasyPostAdapter } from './adapters/easypost';
 import { ShippoAdapter } from './adapters/shippo';
@@ -58,7 +59,9 @@ app.post('/api/shipping/active-provider', (req, res) => {
 });
 
 app.get('/api/shipping/active-provider', (_req, res) => {
-  res.json({ activeProviderId: getActiveProvider() });
+  const id = getActiveProvider();
+  const environment = id ? getProviderEnvironment(id) : null;
+  res.json({ activeProviderId: id, environment });
 });
 
 app.get('/api/shipping/providers-status', (_req, res) => {
@@ -147,6 +150,30 @@ app.post('/api/shipping/tracking', async (req, res) => {
   }
   const result = await provider.getTracking({ trackingNumber, carrier, providerShipmentId });
   res.json(result);
+});
+
+app.post('/api/shipping/webhook/:providerId', (req, res) => {
+  const { providerId } = req.params;
+  const knownProviders = ['easypost', 'shippo', 'shipstation'];
+  if (!knownProviders.includes(providerId)) {
+    res.status(400).json({ error: 'Unknown provider.' });
+    return;
+  }
+  if (!hasCredentials(providerId)) {
+    res.status(403).json({ error: 'Provider not configured.' });
+    return;
+  }
+  const webhookSecret = process.env[`SHIPPING_WEBHOOK_SECRET_${providerId.toUpperCase()}`];
+  if (webhookSecret) {
+    const signature = req.headers['x-webhook-signature'] || req.headers['x-shippo-signature'] || req.headers['x-easypost-signature'] || '';
+    if (!signature) {
+      console.warn(`[Shipping API] Webhook from ${providerId} rejected: missing signature header.`);
+      res.status(401).json({ error: 'Missing webhook signature.' });
+      return;
+    }
+  }
+  console.log(`[Shipping API] Webhook received from ${providerId} at ${new Date().toISOString()}`);
+  res.json({ received: true, providerId, timestamp: new Date().toISOString() });
 });
 
 const PORT = parseInt(process.env.SHIPPING_API_PORT || '5001', 10);

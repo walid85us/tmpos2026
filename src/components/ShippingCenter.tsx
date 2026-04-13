@@ -106,9 +106,13 @@ export default function ShippingCenter() {
   const [eventDescription, setEventDescription] = useState('');
   const [eventLocation, setEventLocation] = useState('');
   const [activeProviderId, setActiveProviderId] = useState<string | null>(null);
+  const [providerEnvironment, setProviderEnvironment] = useState<'test' | 'production' | null>(null);
 
   useEffect(() => {
-    shippingApi.getActiveProvider().then(r => setActiveProviderId(r.activeProviderId));
+    shippingApi.getActiveProvider().then(r => {
+      setActiveProviderId(r.activeProviderId);
+      setProviderEnvironment(r.environment || null);
+    });
   }, []);
 
   const [newCarrier, setNewCarrier] = useState('');
@@ -470,6 +474,29 @@ export default function ShippingCenter() {
     return shipment.packages.length > 0 && shipment.packages.some(p => p.weight || p.contentsSummary || p.declaredValue);
   }
 
+  function isAddressAccepted(shipment: Shipment): boolean {
+    const av = shipment.addressValidation;
+    if (!av) return false;
+    return av.status === 'validated' || (av.status === 'corrected' && av.accepted === true);
+  }
+
+  function getRatePrerequisites(shipment: Shipment): string[] {
+    const missing: string[] = [];
+    if (!isAddressAccepted(shipment)) missing.push('Validate destination address');
+    if (!hasShippablePackages(shipment)) missing.push('Add packages with weight or contents');
+    if (!activeProviderId) missing.push('Configure a shipping provider');
+    return missing;
+  }
+
+  function getLabelPrerequisites(shipment: Shipment): string[] {
+    const missing: string[] = [];
+    if (!isAddressAccepted(shipment)) missing.push('Validate destination address');
+    if (!hasShippablePackages(shipment)) missing.push('Add packages with weight or contents');
+    if (!shipment.selectedRate && (!shipment.carrier || !shipment.serviceLevel)) missing.push('Select a shipping rate or set carrier and service level');
+    if (!activeProviderId) missing.push('Configure a shipping provider');
+    return missing;
+  }
+
   async function handleValidateAddress(shipmentId: string) {
     if (isWriteBlocked) return;
     const shipment = shipments.find(s => s.id === shipmentId);
@@ -508,8 +535,9 @@ export default function ShippingCenter() {
     if (isWriteBlocked) return;
     const shipment = shipments.find(s => s.id === shipmentId);
     if (!shipment) return;
-    if (!hasShippablePackages(shipment)) {
-      setProviderError({ code: 'NO_PACKAGES', message: 'Add at least one package with weight or contents before requesting rates. Go to the Packages tab to add package details.', retryable: false });
+    const prereqs = getRatePrerequisites(shipment);
+    if (prereqs.length > 0) {
+      setProviderError({ code: 'PREREQUISITES', message: `Before getting rates: ${prereqs.join('; ')}.`, retryable: false });
       return;
     }
     clearProviderFeedback();
@@ -556,12 +584,9 @@ export default function ShippingCenter() {
     if (isWriteBlocked) return;
     const shipment = shipments.find(s => s.id === shipmentId);
     if (!shipment) return;
-    if (!hasShippablePackages(shipment)) {
-      setProviderError({ code: 'NO_PACKAGES', message: 'Add at least one package before purchasing a label. Go to the Packages tab.', retryable: false });
-      return;
-    }
-    if (!shipment.selectedRate && (!shipment.carrier || !shipment.serviceLevel)) {
-      setProviderError({ code: 'NO_RATE', message: 'Select a shipping rate or set both a carrier and service level before purchasing a label.', retryable: false });
+    const prereqs = getLabelPrerequisites(shipment);
+    if (prereqs.length > 0) {
+      setProviderError({ code: 'PREREQUISITES', message: `Before purchasing a label: ${prereqs.join('; ')}.`, retryable: false });
       return;
     }
     clearProviderFeedback();
@@ -643,9 +668,18 @@ export default function ShippingCenter() {
         }
       }
       updateShipment(shipmentId, updates);
-      setProviderSuccess(`Tracking synced. ${(result.events || []).length} event(s) from provider.`);
+      const eventCount = (result.events || []).length;
+      let successMsg = `Tracking synced. ${eventCount} event(s) from provider.`;
+      if (providerEnvironment === 'test') {
+        successMsg += ' (Test mode — tracking data may be simulated or limited.)';
+      }
+      setProviderSuccess(successMsg);
     } else {
-      setProviderError(friendlyProviderError(result.error || { code: 'UNKNOWN', message: 'Tracking sync failed.' }));
+      const err = result.error || { code: 'UNKNOWN', message: 'Tracking sync failed.' };
+      if (providerEnvironment === 'test') {
+        err.message += ' Note: You are using test-mode credentials. Test tracking numbers may not return real carrier data.';
+      }
+      setProviderError(friendlyProviderError(err));
     }
     setProviderLoading(null);
   }
@@ -813,7 +847,7 @@ export default function ShippingCenter() {
                         {s.destinationAddress.name}
                       </span>
                       {s.carrier && <span className="flex items-center gap-1"><span className="material-symbols-outlined text-xs">local_shipping</span>{s.carrier}</span>}
-                      {s.trackingNumber && <span className="font-mono text-[10px] text-slate-400">{s.trackingNumber.slice(0, 15)}{s.trackingNumber.length > 15 ? '...' : ''}</span>}
+                      {s.trackingNumber && <span className="font-mono text-[10px] text-slate-400">{s.trackingNumber}</span>}
                     </div>
                   </div>
                   <div className="text-right shrink-0">
@@ -934,7 +968,12 @@ export default function ShippingCenter() {
                         <p className="text-[10px] font-black text-indigo-500 uppercase tracking-widest flex items-center gap-1"><span className="material-symbols-outlined text-xs">hub</span>Provider & Operations</p>
                         <div className="flex items-center gap-2">
                           {activeProviderId ? (
-                            <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest bg-indigo-100 text-indigo-600 rounded-md">{activeProviderId}</span>
+                            <>
+                              <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest bg-indigo-100 text-indigo-600 rounded-md">{activeProviderId}</span>
+                              <span className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md ${providerEnvironment === 'test' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                                {providerEnvironment === 'test' ? 'Test Mode' : 'Live'}
+                              </span>
+                            </>
                           ) : (
                             <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest bg-slate-100 text-slate-400 rounded-md">No Provider</span>
                           )}
@@ -965,6 +1004,16 @@ export default function ShippingCenter() {
                         </div>
                       )}
 
+                      {providerEnvironment === 'test' && activeProviderId && (
+                        <div className="px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2">
+                          <span className="material-symbols-outlined text-amber-500 text-sm mt-0.5">science</span>
+                          <div>
+                            <p className="text-xs text-amber-700 font-medium">Test Mode Active</p>
+                            <p className="text-[10px] text-amber-600 mt-0.5">Labels, rates, and tracking use test credentials. No real charges will be made. Switch to production credentials in Provider Settings for live shipments.</p>
+                          </div>
+                        </div>
+                      )}
+
                       {selectedShip.addressValidation && (
                         <div className="flex items-center gap-2 text-xs">
                           <span className="text-slate-400 font-bold">Address</span>
@@ -992,7 +1041,7 @@ export default function ShippingCenter() {
                           <span className="text-slate-400 font-bold">Label</span>
                           <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-md text-[10px] font-black uppercase tracking-widest">Purchased</span>
                           <span className="text-slate-500 font-mono text-[10px]">{selectedShip.label.trackingNumber}</span>
-                          <span className="text-slate-400 text-[10px]">{selectedShip.label.format.toUpperCase()}</span>
+                          <span className={`px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-widest ${selectedShip.label.format === 'pdf' ? 'bg-red-100 text-red-600' : 'bg-slate-100 text-slate-500'}`}>{selectedShip.label.format.toUpperCase()}</span>
                         </div>
                       )}
 
@@ -1019,29 +1068,55 @@ export default function ShippingCenter() {
                           </button>
                         )}
 
-                        {canFetchRates && !isWriteBlocked && ['Draft', 'Ready'].includes(selectedShip.status) && (
-                          <button onClick={() => handleFetchRates(selectedShip.id)} disabled={providerLoading !== null}
-                            className="px-3 py-2 bg-white text-indigo-600 border border-indigo-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50 transition-all disabled:opacity-40 flex items-center gap-1"
-                            title={!hasShippablePackages(selectedShip) ? 'Add packages first' : 'Get shipping rates from provider'}>
-                            <span className="material-symbols-outlined text-sm">{providerLoading === 'rates' ? 'hourglass_top' : 'request_quote'}</span>
-                            {providerLoading === 'rates' ? 'Fetching...' : 'Get Rates'}
-                          </button>
-                        )}
+                        {canFetchRates && !isWriteBlocked && ['Draft', 'Ready'].includes(selectedShip.status) && (() => {
+                          const ratePrereqs = getRatePrerequisites(selectedShip);
+                          const disabled = providerLoading !== null || ratePrereqs.length > 0;
+                          return (
+                            <div className="relative group">
+                              <button onClick={() => handleFetchRates(selectedShip.id)} disabled={disabled}
+                                className="px-3 py-2 bg-white text-indigo-600 border border-indigo-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50 transition-all disabled:opacity-40 flex items-center gap-1"
+                                title={ratePrereqs.length > 0 ? ratePrereqs.join(', ') : 'Get shipping rates from provider'}>
+                                <span className="material-symbols-outlined text-sm">{providerLoading === 'rates' ? 'hourglass_top' : 'request_quote'}</span>
+                                {providerLoading === 'rates' ? 'Fetching...' : 'Get Rates'}
+                              </button>
+                              {ratePrereqs.length > 0 && (
+                                <div className="absolute bottom-full left-0 mb-1 hidden group-hover:block z-10">
+                                  <div className="bg-slate-800 text-white text-[10px] rounded-lg px-3 py-2 whitespace-nowrap shadow-lg">
+                                    {ratePrereqs.map((p, i) => <div key={i}>• {p}</div>)}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
 
-                        {canPurchaseLabel && !isWriteBlocked && selectedShip.status === 'Ready' && !selectedShip.label && (
-                          <button onClick={() => handlePurchaseLabel(selectedShip.id)} disabled={providerLoading !== null}
-                            className="px-3 py-2 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-700 transition-all disabled:opacity-40 flex items-center gap-1 shadow-sm"
-                            title={!hasShippablePackages(selectedShip) ? 'Add packages first' : !selectedShip.selectedRate && (!selectedShip.carrier || !selectedShip.serviceLevel) ? 'Select a rate or set carrier and service' : 'Purchase shipping label'}>
-                            <span className="material-symbols-outlined text-sm">{providerLoading === 'label' ? 'hourglass_top' : 'receipt'}</span>
-                            {providerLoading === 'label' ? 'Purchasing...' : 'Purchase Label'}
-                          </button>
-                        )}
+                        {canPurchaseLabel && !isWriteBlocked && selectedShip.status === 'Ready' && !selectedShip.label && (() => {
+                          const labelPrereqs = getLabelPrerequisites(selectedShip);
+                          const disabled = providerLoading !== null || labelPrereqs.length > 0;
+                          return (
+                            <div className="relative group">
+                              <button onClick={() => handlePurchaseLabel(selectedShip.id)} disabled={disabled}
+                                className="px-3 py-2 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-700 transition-all disabled:opacity-40 flex items-center gap-1 shadow-sm"
+                                title={labelPrereqs.length > 0 ? labelPrereqs.join(', ') : 'Purchase shipping label'}>
+                                <span className="material-symbols-outlined text-sm">{providerLoading === 'label' ? 'hourglass_top' : 'receipt'}</span>
+                                {providerLoading === 'label' ? 'Purchasing...' : 'Purchase Label'}
+                              </button>
+                              {labelPrereqs.length > 0 && (
+                                <div className="absolute bottom-full left-0 mb-1 hidden group-hover:block z-10">
+                                  <div className="bg-slate-800 text-white text-[10px] rounded-lg px-3 py-2 whitespace-nowrap shadow-lg">
+                                    {labelPrereqs.map((p, i) => <div key={i}>• {p}</div>)}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
 
                         {canPrintLabel && selectedShip.label?.url && (
                           <button onClick={() => window.open(selectedShip.label!.url, '_blank')}
                             className="px-3 py-2 bg-white text-slate-600 border border-slate-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-slate-50 transition-all flex items-center gap-1">
-                            <span className="material-symbols-outlined text-sm">print</span>
-                            Open Label
+                            <span className="material-symbols-outlined text-sm">{selectedShip.label!.format === 'pdf' ? 'picture_as_pdf' : 'print'}</span>
+                            {selectedShip.label!.format === 'pdf' ? 'Open PDF Label' : 'Open Label'}
                           </button>
                         )}
 
@@ -1112,24 +1187,53 @@ export default function ShippingCenter() {
                   </>
                 )}
 
-                {detailTab === 'tracking' && (
+                {detailTab === 'tracking' && (() => {
+                  const manualEvents = [...selectedShip.events].map(e => ({ ...e, _source: 'manual' as const }));
+                  const providerEvents = (selectedShip.providerTrackingEvents || []).map(e => ({
+                    id: e.id,
+                    timestamp: e.timestamp,
+                    status: e.status,
+                    description: e.description,
+                    location: e.location,
+                    performedBy: undefined as string | undefined,
+                    _source: 'provider' as const,
+                  }));
+                  const allEvents = [...manualEvents, ...providerEvents]
+                    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+                  return (
                   <>
                     {canUpdateTracking && selectedShip.status !== 'Delivered' && selectedShip.status !== 'Cancelled' && (
                       <button onClick={() => { setEventDescription(''); setEventLocation(''); setAddEventModal(selectedShip.id); }} className="px-4 py-2.5 bg-primary/10 text-primary font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-primary/20 transition-all flex items-center gap-1">
                         <span className="material-symbols-outlined text-sm">add</span>Add Event
                       </button>
                     )}
+
+                    {selectedShip.lastTrackingSyncAt && (
+                      <div className="flex items-center gap-2 text-[10px] text-slate-400">
+                        <span className="material-symbols-outlined text-xs">sync</span>
+                        Last synced: {formatDateTime(selectedShip.lastTrackingSyncAt)}
+                        {providerEnvironment === 'test' && <span className="px-1.5 py-0.5 bg-amber-100 text-amber-600 rounded text-[9px] font-black uppercase">Test</span>}
+                      </div>
+                    )}
+
                     <div className="relative pl-8 space-y-0">
                       <div className="absolute left-3 top-2 bottom-2 w-px bg-slate-200" />
-                      {[...selectedShip.events].reverse().map((evt, i) => (
+                      {allEvents.map((evt, i) => (
                         <div key={evt.id} className="relative pb-6 last:pb-0">
-                          <div className={`absolute left-[-23px] top-1 w-5 h-5 rounded-full border-2 flex items-center justify-center ${i === 0 ? 'bg-primary border-primary' : 'bg-white border-slate-300'}`}>
+                          <div className={`absolute left-[-23px] top-1 w-5 h-5 rounded-full border-2 flex items-center justify-center ${
+                            i === 0 ? 'bg-primary border-primary' :
+                            evt._source === 'provider' ? 'bg-sky-50 border-sky-300' :
+                            'bg-white border-slate-300'
+                          }`}>
                             {i === 0 && <div className="w-2 h-2 rounded-full bg-white" />}
                           </div>
                           <div className="ml-2">
                             <div className="flex items-center gap-2 mb-0.5">
                               <span className="text-xs font-black text-slate-700">{evt.status}</span>
                               <span className="text-[10px] text-slate-400">{formatDateTime(evt.timestamp)}</span>
+                              <span className={`px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-widest ${
+                                evt._source === 'provider' ? 'bg-sky-100 text-sky-600' : 'bg-slate-100 text-slate-500'
+                              }`}>{evt._source === 'provider' ? 'Provider' : 'Manual'}</span>
                             </div>
                             <p className="text-xs text-slate-600">{evt.description}</p>
                             {evt.location && <p className="text-[10px] text-slate-400 mt-0.5">{evt.location}</p>}
@@ -1137,9 +1241,17 @@ export default function ShippingCenter() {
                           </div>
                         </div>
                       ))}
+                      {allEvents.length === 0 && (
+                        <div className="flex flex-col items-center py-8 ml-[-32px]">
+                          <span className="material-symbols-outlined text-3xl text-slate-300 mb-2">timeline</span>
+                          <p className="text-sm font-bold text-slate-400">No tracking events yet</p>
+                          <p className="text-xs text-slate-400 mt-1">Add an event manually or sync from your shipping provider.</p>
+                        </div>
+                      )}
                     </div>
                   </>
-                )}
+                  );
+                })()}
 
                 {detailTab === 'packages' && (
                   <>

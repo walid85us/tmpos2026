@@ -90,7 +90,7 @@ export async function setActiveProvider(providerId: string | null): Promise<{ su
   return apiCall('/api/shipping/active-provider', { providerId });
 }
 
-export async function getActiveProvider(): Promise<{ activeProviderId: string | null }> {
+export async function getActiveProvider(): Promise<{ activeProviderId: string | null; environment?: 'test' | 'production' | null }> {
   return apiCall('/api/shipping/active-provider');
 }
 

@@ -245,7 +245,7 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
           'Authorization': `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ rate: { id: targetRate.id } }),
+        body: JSON.stringify({ rate: { id: targetRate.id }, label_format: 'PDF' }),
       });
 
       if (!buyResponse.ok) {
@@ -261,10 +261,12 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
       }
 
       const buyData = await buyResponse.json();
+      const labelUrl = buyData.postage_label?.label_pdf_url || buyData.postage_label?.label_url || '';
+      const labelFormat = labelUrl.toLowerCase().endsWith('.pdf') || labelUrl.includes('pdf') ? 'pdf' : 'png';
       const label: LabelArtifact = {
         id: `lbl-${Date.now()}`,
-        format: 'png',
-        url: buyData.postage_label?.label_url || '',
+        format: labelFormat,
+        url: labelUrl,
         trackingNumber: buyData.tracking_code || '',
         carrier: buyData.selected_rate?.carrier || params.carrier,
         service: buyData.selected_rate?.service || params.service,
