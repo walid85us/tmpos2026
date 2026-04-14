@@ -622,6 +622,11 @@ const SEED_SHIPMENTS: Shipment[] = [
     destinationAddress: { name: 'Alexander Wright', company: 'Wright Tech Solutions', line1: '500 Corporate Blvd', city: 'Austin', state: 'TX', postalCode: '78702', country: 'US', phone: '555-0123', email: 'alex@wright.com' },
     packages: [{ id: 'pkg-001', weight: 2.5, weightUnit: 'lb', length: 12, width: 8, height: 4, dimensionUnit: 'in', contentsSummary: 'iPhone 15 Pro + accessories' }],
     carrier: 'UPS', serviceLevel: 'Ground', trackingNumber: '1Z999AA10123456784', shippingCost: 12.50,
+    label: {
+      id: 'lbl-001', format: 'pdf', url: 'https://easypost-files.s3-us-west-2.amazonaws.com/files/postage_label/demo_label.pdf',
+      trackingNumber: '1Z999AA10123456784', carrier: 'UPS', service: 'Ground',
+      purchasedAt: '2026-03-20T12:00:00Z', cost: 12.50, providerLabelRef: 'el_demo001',
+    },
     events: [
       { id: 'evt-001', timestamp: '2026-03-20T10:00:00Z', status: 'Created', description: 'Shipment created', performedBy: 'Sarah Johnson' },
       { id: 'evt-002', timestamp: '2026-03-20T14:00:00Z', status: 'Packed', description: 'Package packed and labeled', performedBy: 'Sarah Johnson' },
@@ -665,6 +670,11 @@ const SEED_SHIPMENTS: Shipment[] = [
     destinationAddress: { name: 'Global Parts Inc.', company: 'Global Parts Inc.', line1: '800 Industrial Pkwy', city: 'Dallas', state: 'TX', postalCode: '75201', country: 'US', phone: '555-9000' },
     packages: [{ id: 'pkg-004', weight: 0.5, weightUnit: 'lb', length: 6, width: 4, height: 2, dimensionUnit: 'in', contentsSummary: '1x Defective iPhone 13 Screen' }],
     carrier: 'USPS', serviceLevel: 'Priority Mail', trackingNumber: '9400111899223100001234', shippingCost: 8.75,
+    label: {
+      id: 'lbl-004', format: 'pdf', url: 'https://easypost-files.s3-us-west-2.amazonaws.com/files/postage_label/demo_usps.pdf',
+      trackingNumber: '9400111899223100001234', carrier: 'USPS', service: 'Priority Mail',
+      purchasedAt: '2026-04-05T14:00:00Z', cost: 8.75, providerLabelRef: 'el_demo004',
+    },
     events: [
       { id: 'evt-011', timestamp: '2026-04-05T11:00:00Z', status: 'Created', description: 'RMA return shipment created', performedBy: 'Alex Kim' },
       { id: 'evt-012', timestamp: '2026-04-06T09:00:00Z', status: 'Dispatched', description: 'Dropped off at USPS', performedBy: 'Alex Kim' },

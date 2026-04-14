@@ -20,7 +20,7 @@ const PROVIDER_COLORS: Record<string, { bg: string; border: string; text: string
   shipstation: { bg: 'bg-orange-50', border: 'border-orange-200', text: 'text-orange-700', activeBg: 'bg-orange-600' },
 };
 
-export default function ShippingProvidersPage() {
+export default function ShippingProvidersPage({ embedded = false }: { embedded?: boolean }) {
   const { setShippingProviderConfig } = useStoreLocalState();
   const { checkSubPermission, isWriteBlocked } = useAccess();
   const canManage = checkSubPermission('manage_shipping_settings');
@@ -228,19 +228,21 @@ export default function ShippingProvidersPage() {
     p => p.providerId === providersState.activeProviderId
   );
 
+  const Wrapper = embedded ? React.Fragment : ({ children }: { children: React.ReactNode }) => <PageShell title="Shipping Providers">{children}</PageShell>;
+
   if (loading) {
     return (
-      <PageShell title="Shipping Providers">
+      <Wrapper>
         <div className="flex items-center justify-center py-20">
           <span className="material-symbols-outlined text-slate-300 animate-spin text-2xl">progress_activity</span>
         </div>
-      </PageShell>
+      </Wrapper>
     );
   }
 
   return (
-    <PageShell title="Shipping Providers">
-      {isShippingContext && (
+    <Wrapper>
+      {!embedded && isShippingContext && (
         <div className="mb-4 flex items-center gap-2">
           <button onClick={() => navigate('/shipping')}
             className="flex items-center gap-1 text-xs font-bold text-primary hover:text-primary/80 transition-all">
@@ -503,6 +505,6 @@ export default function ShippingProvidersPage() {
           );
         })}
       </div>
-    </PageShell>
+    </Wrapper>
   );
 }

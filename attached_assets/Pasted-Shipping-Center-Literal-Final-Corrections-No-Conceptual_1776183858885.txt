@@ -1,0 +1,208 @@
+Shipping Center Literal Final Corrections — No Conceptual Compliance
+
+This is a literal bug-fix and implementation pass.
+Do not answer conceptually.
+Do not satisfy requirements “close enough.”
+Do not mark complete unless each item below is visibly fixed in the UI exactly as written.
+
+You are acting as:
+- Principal product engineer
+- Senior React/TypeScript engineer
+- Senior shipping systems architect
+- Senior fulfillment operations expert with 20+ years of parcel shipping and fulfillment-center experience
+- Root-cause debugging specialist
+- QA-minded side auditor
+
+Read first:
+- Ref.txt
+- replit.md
+
+Also read and use this reference before changing anything:
+- https://help.repairdesk.co/portal/en/kb/articles/shipstation-integration
+
+Do not copy RepairDesk literally.
+Do extract useful operational ideas.
+Do adapt only what fits our app.
+
+==================================================
+THE REMAINING BLOCKERS ARE EXACT AND LITERAL
+==================================================
+
+BLOCKER 1 — SHIPPING PROVIDERS IS STILL NOT TRULY OWNED BY SHIPPING CENTER
+Current failure:
+- Shipping Providers still effectively lives under Settings
+- Shipping Center only shows a moved notice / link behavior
+Required literal fix:
+- Shipping Providers must be fully moved into Shipping Center as its real home
+- Preferred final ownership:
+  - Shipping Center > Providers
+  - or Shipping Center > Settings > Providers
+- This must be the primary and actual live management page
+- Settings must NOT remain a real provider-management page
+- If Settings keeps an entry for compatibility, it may only redirect into Shipping Center and must not behave like a management page
+Acceptance:
+- When the user manages providers, they are clearly inside Shipping Center, not Settings
+
+BLOCKER 2 — LABEL MUST OPEN AS REAL PDF, NOT PNG
+Current failure:
+- The label still opens as PNG in practice
+Required literal fix:
+- The primary operational label action must open a real PDF artifact
+- Do not use PNG as the primary label-open/print action
+- Do not say PDF and open PNG
+- If a shipment truly has no PDF artifact, the UI must say so honestly and must not label it as PDF
+- The primary print flow should be PDF-first and print-ready
+Acceptance:
+- Clicking the main label action opens an actual PDF file
+
+BLOCKER 3 — TRACKING NUMBER MUST BE FULLY VISIBLE
+Current failure:
+- Tracking number still displays as masked XXXXX/fragmented text
+Required literal fix:
+- Authorized operational users must see the full tracking number
+- Remove masking and truncation in all relevant places:
+  - shipment detail
+  - shipment list where relevant
+  - tracking/provider section where operators use it
+- Preserve permission safety for users who should not see it
+Acceptance:
+- QA can visually read the full tracking number
+
+BLOCKER 4 — REAL DESTINATION ADDRESS AUTOCOMPLETE
+Current failure:
+- Current suggestions are not the required real address experience
+Required literal fix:
+- When the user types destination address, show a real address suggestion dropdown
+- Selecting one suggestion must prefill:
+  - address line
+  - city
+  - state/region
+  - postal code
+- The expected experience should be Google-style address autocomplete or an equally real provider-backed autocomplete flow
+- Local city/state/zip hinting alone is NOT enough
+- Do not fake autocomplete
+- If external configuration is required, implement the real architecture path and UI honestly
+Acceptance:
+- QA types an address, sees real address suggestions, selects one, and city/state/postal fields are filled automatically
+
+BLOCKER 5 — KEEP REJECTED BY CARRIER / RETURNED, AND DISABLE + ADD EVENT AFTER DISPATCH
+Current requirement:
+- Preserve controlled outcomes for:
+  - Rejected by Carrier
+  - Returned
+- Preserve reason capture/selection
+Additional literal fix:
+- Under Tracking & Events, “+ Add Event” must be disabled after the shipment is Dispatched
+- After Dispatched, provider/test-provider events must remain the authoritative progression path
+- Manual notes/events must not masquerade as authoritative carrier progression
+Acceptance:
+- Rejected/Returned still work with reasons
+- “+ Add Event” is disabled after Dispatched
+
+==================================================
+FULFILLMENT RULES TO PRESERVE
+==================================================
+
+Do not weaken these rules:
+- Packed becomes available only after successful label purchase
+- After dispatch and provider/carrier progression, lifecycle remains provider-driven
+- Cancellation remains blocked after carrier progression
+- Preview mode must still block write actions
+- Existing shipping core flow must remain intact
+- Selected-rate logic must remain intact
+- Label purchase prerequisites must remain intact
+
+==================================================
+IMPORTANT IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden scope into Phase 2 or Phase 3
+- Do not touch unrelated workstreams
+- Do not break preview mode safety
+- Do not break permissions or feature gating
+- Do not break shipping core flow
+- Do not break provider configuration
+- Do not fake provider success
+- Do not fake provider event sync
+- Keep the design baseline consistent
+
+==================================================
+IMPLEMENTATION ORDER
+==================================================
+
+1) Review the RepairDesk article and extract only the concepts that improve our system
+2) Move provider management fully into Shipping Center as the actual live home
+3) Fix the primary label action so it opens a real PDF artifact
+4) Fix tracking-number display so authorized users can read the full value
+5) Replace the current destination-address suggestion behavior with real address autocomplete and field-prefill
+6) Preserve Rejected by Carrier / Returned and disable + Add Event after Dispatched
+7) Re-test all affected shipping core flows
+8) Update replit.md
+
+==================================================
+MANDATORY RESPONSE FORMAT
+==================================================
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+
+2. RepairDesk Article Reviewed
+- What was reviewed:
+
+3. RepairDesk Insights Extracted
+- Bullet each concrete insight:
+
+4. How Those Insights Were Adapted To Our Shipping Center
+- Map each useful insight to our implementation:
+
+5. Implemented Now vs Deferred vs Not Adopted
+- Implemented now:
+- Deferred:
+- Not adopted and why:
+
+6. Shipping Center Provider Ownership Fix
+- Exact route/page now used:
+- Exact files changed:
+- Exact visible UI change:
+
+7. PDF-Only Primary Label Fix
+- Exact artifact type now opened:
+- Exact files changed:
+- Exact visible UI change:
+
+8. Full Tracking Visibility Fix
+- Exact screens now showing full tracking:
+- Exact files changed:
+- Exact visible UI change:
+
+9. Destination Address Autocomplete Fix
+- Exact autocomplete source/mechanism used:
+- Exact fields auto-filled:
+- Exact files changed:
+- Exact visible UI change:
+
+10. Rejected by Carrier / Returned Outcome Fix
+- Exact lifecycle behavior preserved:
+- Exact reason-capture behavior:
+- Exact files changed:
+- Exact visible UI change:
+
+11. Add Event Disable-After-Dispatch Fix
+- Exact lifecycle rule enforced:
+- Exact files changed:
+- Exact visible UI change:
+
+12. Fulfillment-Expert Recommendations
+- What still should improve in future phases:
+
+13. Files Changed
+
+14. Documentation Updated
+
+15. Non-Regression Notes
+
+Do not give a generic completion summary.
+Do not say “fixed” unless the literal UI behavior changed.
+If any blocker is not fully fixed, say NOT FIXED clearly.

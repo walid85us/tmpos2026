@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState } from '../context/StoreLocalState';
@@ -7,6 +7,7 @@ import { Shipment, ShipmentStatus, ShipmentSourceType, ShipmentType, ShipmentAdd
 import * as shippingApi from '../shipping/shippingApiClient';
 import type { ProviderError } from '../shipping/types';
 import PageShell from './PageShell';
+import ShippingProvidersPage from './ShippingProvidersPage';
 
 export interface ShipmentPrefill {
   sourceType: ShipmentSourceType;
@@ -84,10 +85,10 @@ interface AddressSuggestion {
   city: string;
   state: string;
   postalCode: string;
-  source: 'local' | 'provider';
+  source: 'local' | 'nominatim';
 }
 
-function searchAddressSuggestions(query: string, zipDb: Record<string, { city: string; state: string }>): AddressSuggestion[] {
+function searchAddressSuggestionsLocal(query: string, zipDb: Record<string, { city: string; state: string }>): AddressSuggestion[] {
   if (!query || query.trim().length < 2) return [];
   const q = query.trim().toLowerCase();
   const results: AddressSuggestion[] = [];
@@ -109,6 +110,71 @@ function searchAddressSuggestions(query: string, zipDb: Record<string, { city: s
   }
   return results;
 }
+
+async function searchAddressNominatim(query: string, abortController: AbortController): Promise<AddressSuggestion[]> {
+  if (!query || query.trim().length < 3) return [];
+  try {
+    const params = new URLSearchParams({
+      q: query.trim(),
+      format: 'json',
+      addressdetails: '1',
+      countrycodes: 'us',
+      limit: '6',
+    });
+    const res = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, {
+      signal: abortController.signal,
+      headers: { 'Accept': 'application/json' },
+    });
+    if (!res.ok) return [];
+    const data = await res.json() as Array<{
+      display_name: string;
+      address: {
+        house_number?: string;
+        road?: string;
+        city?: string;
+        town?: string;
+        village?: string;
+        hamlet?: string;
+        state?: string;
+        postcode?: string;
+      };
+    }>;
+    const results: AddressSuggestion[] = [];
+    const seen = new Set<string>();
+    for (const item of data) {
+      const addr = item.address;
+      const houseNum = addr.house_number || '';
+      const road = addr.road || '';
+      const line1 = [houseNum, road].filter(Boolean).join(' ');
+      const city = addr.city || addr.town || addr.village || addr.hamlet || '';
+      const state = addr.state || '';
+      const postalCode = addr.postcode || '';
+      const stateAbbr = US_STATE_ABBR[state] || state;
+      if (!city) continue;
+      const key = `${line1}-${city}-${stateAbbr}-${postalCode}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      results.push({ line1, city, state: stateAbbr, postalCode, source: 'nominatim' });
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}
+
+const US_STATE_ABBR: Record<string, string> = {
+  'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR', 'California': 'CA',
+  'Colorado': 'CO', 'Connecticut': 'CT', 'Delaware': 'DE', 'Florida': 'FL', 'Georgia': 'GA',
+  'Hawaii': 'HI', 'Idaho': 'ID', 'Illinois': 'IL', 'Indiana': 'IN', 'Iowa': 'IA',
+  'Kansas': 'KS', 'Kentucky': 'KY', 'Louisiana': 'LA', 'Maine': 'ME', 'Maryland': 'MD',
+  'Massachusetts': 'MA', 'Michigan': 'MI', 'Minnesota': 'MN', 'Mississippi': 'MS', 'Missouri': 'MO',
+  'Montana': 'MT', 'Nebraska': 'NE', 'Nevada': 'NV', 'New Hampshire': 'NH', 'New Jersey': 'NJ',
+  'New Mexico': 'NM', 'New York': 'NY', 'North Carolina': 'NC', 'North Dakota': 'ND', 'Ohio': 'OH',
+  'Oklahoma': 'OK', 'Oregon': 'OR', 'Pennsylvania': 'PA', 'Rhode Island': 'RI', 'South Carolina': 'SC',
+  'South Dakota': 'SD', 'Tennessee': 'TN', 'Texas': 'TX', 'Utah': 'UT', 'Vermont': 'VT',
+  'Virginia': 'VA', 'Washington': 'WA', 'West Virginia': 'WV', 'Wisconsin': 'WI', 'Wyoming': 'WY',
+  'District of Columbia': 'DC',
+};
 
 const US_ZIP_CITY_STATE: Record<string, { city: string; state: string }> = {
   '10001': { city: 'New York', state: 'NY' }, '10002': { city: 'New York', state: 'NY' }, '10003': { city: 'New York', state: 'NY' },
@@ -337,6 +403,7 @@ export default function ShippingCenter() {
   const canSyncTracking = checkSubPermission('sync_shipping_tracking');
   const canManageProviderSettings = checkSubPermission('manage_shipping_settings');
 
+  const [activeTab, setActiveTab] = useState<'shipments' | 'settings'>('shipments');
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<ShipmentStatus | 'all'>('all');
   const [sourceFilter, setSourceFilter] = useState<ShipmentSourceType | 'all'>('all');
@@ -356,6 +423,47 @@ export default function ShippingCenter() {
   const [destSuggestions, setDestSuggestions] = useState<AddressSuggestion[]>([]);
   const [showDestSuggestions, setShowDestSuggestions] = useState(false);
   const [destCityQuery, setDestCityQuery] = useState('');
+  const nominatimTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const nominatimAbort = useRef<AbortController | null>(null);
+  const nominatimQueryId = useRef(0);
+
+  useEffect(() => {
+    return () => {
+      if (nominatimTimer.current) clearTimeout(nominatimTimer.current);
+      if (nominatimAbort.current) nominatimAbort.current.abort();
+    };
+  }, []);
+
+  const searchAddressDebounced = (query: string) => {
+    const localResults = searchAddressSuggestionsLocal(query, US_ZIP_CITY_STATE);
+    setDestSuggestions(localResults);
+    setShowDestSuggestions(localResults.length > 0);
+
+    if (nominatimTimer.current) clearTimeout(nominatimTimer.current);
+    if (nominatimAbort.current) nominatimAbort.current.abort();
+
+    if (query.trim().length >= 3) {
+      const qid = ++nominatimQueryId.current;
+      nominatimTimer.current = setTimeout(async () => {
+        const controller = new AbortController();
+        nominatimAbort.current = controller;
+        const nomResults = await searchAddressNominatim(query, controller);
+        if (qid !== nominatimQueryId.current) return;
+        if (nomResults.length > 0) {
+          setDestSuggestions(prev => {
+            const merged = [...nomResults];
+            for (const local of prev) {
+              if (local.source === 'local' && !merged.some(m => m.city === local.city && m.state === local.state && m.postalCode === local.postalCode)) {
+                merged.push(local);
+              }
+            }
+            return merged.slice(0, 8);
+          });
+          setShowDestSuggestions(true);
+        }
+      }, 350);
+    }
+  };
 
   useEffect(() => {
     shippingApi.getActiveProvider().then(r => {
@@ -1124,20 +1232,23 @@ export default function ShippingCenter() {
       <div className="space-y-6">
         <div className="flex items-center gap-1 border-b border-slate-200 mb-2">
           <button
-            onClick={() => {}}
-            className="px-4 py-2.5 text-[10px] font-black uppercase tracking-widest text-primary border-b-2 border-primary"
+            onClick={() => setActiveTab('shipments')}
+            className={`px-4 py-2.5 text-[10px] font-black uppercase tracking-widest border-b-2 transition-all ${activeTab === 'shipments' ? 'text-primary border-primary' : 'text-slate-400 hover:text-slate-600 border-transparent hover:border-slate-300'}`}
           >
             <span className="flex items-center gap-1"><span className="material-symbols-outlined text-sm">inventory_2</span>Shipments</span>
           </button>
           {canManageProviderSettings && (
             <button
-              onClick={() => navigate('/shipping/settings')}
-              className="px-4 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-slate-600 border-b-2 border-transparent hover:border-slate-300 transition-all"
+              onClick={() => setActiveTab('settings')}
+              className={`px-4 py-2.5 text-[10px] font-black uppercase tracking-widest border-b-2 transition-all ${activeTab === 'settings' ? 'text-primary border-primary' : 'text-slate-400 hover:text-slate-600 border-transparent hover:border-slate-300'}`}
             >
               <span className="flex items-center gap-1"><span className="material-symbols-outlined text-sm">settings</span>Settings</span>
             </button>
           )}
         </div>
+        {activeTab === 'settings' ? (
+          <ShippingProvidersPage embedded />
+        ) : (<>
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3 flex-1 min-w-0">
             <div className="relative flex-1 max-w-md">
@@ -1243,6 +1354,7 @@ export default function ShippingCenter() {
             </div>
           )}
         </div>
+        </>)}
       </div>
 
       <AnimatePresence>
@@ -1708,7 +1820,7 @@ export default function ShippingCenter() {
                   return (
                   <>
                     <div className="flex items-center gap-2 flex-wrap">
-                      {canUpdateTracking && selectedShip.status !== 'Delivered' && selectedShip.status !== 'Cancelled' && (
+                      {canUpdateTracking && !isPostDispatch(selectedShip.status) && selectedShip.status !== 'Cancelled' && (
                         <button onClick={() => { setEventDescription(''); setEventLocation(''); setAddEventModal(selectedShip.id); }} className="px-4 py-2.5 bg-primary/10 text-primary font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-primary/20 transition-all flex items-center gap-1">
                           <span className="material-symbols-outlined text-sm">add</span>Add Event
                         </button>
@@ -2128,12 +2240,8 @@ export default function ShippingCenter() {
                         <input value={newDest.line1} onChange={e => {
                           const val = e.target.value;
                           setNewDest({ ...newDest, line1: val });
-                          const words = val.trim().split(/[\s,]+/);
-                          const lastWord = words[words.length - 1];
-                          if (lastWord && lastWord.length >= 2) {
-                            const suggestions = searchAddressSuggestions(lastWord, US_ZIP_CITY_STATE);
-                            setDestSuggestions(suggestions);
-                            setShowDestSuggestions(suggestions.length > 0);
+                          if (val.trim().length >= 2) {
+                            searchAddressDebounced(val);
                           } else {
                             setShowDestSuggestions(false);
                           }
@@ -2145,24 +2253,33 @@ export default function ShippingCenter() {
                       {showDestSuggestions && destSuggestions.length > 0 && (
                         <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl z-30 max-h-56 overflow-y-auto">
                           {destSuggestions.map((s, i) => (
-                            <button key={`${s.city}-${s.state}-${i}`} type="button"
+                            <button key={`${s.line1}-${s.city}-${s.state}-${i}`} type="button"
                               onMouseDown={e => {
                                 e.preventDefault();
-                                setNewDest(prev => ({ ...prev, line1: prev.line1, city: s.city, state: s.state, postalCode: s.postalCode }));
+                                setNewDest(prev => ({
+                                  ...prev,
+                                  line1: s.line1 || prev.line1,
+                                  city: s.city,
+                                  state: s.state,
+                                  postalCode: s.postalCode,
+                                }));
                                 setShowDestSuggestions(false);
                               }}
                               className="w-full text-left px-3 py-2.5 text-xs hover:bg-primary/5 transition-all border-b border-slate-50 last:border-0 flex items-center gap-3">
                               <span className="material-symbols-outlined text-slate-300 text-sm shrink-0">location_on</span>
                               <div className="flex-1 min-w-0">
-                                <span className="font-bold text-slate-700">{s.city}, {s.state}</span>
-                                <span className="text-slate-400 ml-1.5">{s.postalCode}</span>
+                                {s.line1 && <span className="font-bold text-slate-700 block">{s.line1}</span>}
+                                <span className={`${s.line1 ? 'text-slate-500' : 'font-bold text-slate-700'}`}>{s.city}, {s.state}</span>
+                                {s.postalCode && <span className="text-slate-400 ml-1.5">{s.postalCode}</span>}
                               </div>
-                              <span className="text-[9px] text-slate-300 uppercase tracking-wider shrink-0">select</span>
+                              <span className={`text-[9px] uppercase tracking-wider shrink-0 ${s.source === 'nominatim' ? 'text-emerald-400' : 'text-slate-300'}`}>
+                                {s.source === 'nominatim' ? 'OSM' : 'local'}
+                              </span>
                             </button>
                           ))}
                           <div className="px-3 py-1.5 bg-slate-50 text-[9px] text-slate-400 flex items-center gap-1 border-t border-slate-100">
-                            <span className="material-symbols-outlined text-[10px]">database</span>
-                            City/state from local database — street-level suggestions require provider integration
+                            <span className="material-symbols-outlined text-[10px]">public</span>
+                            Address suggestions powered by OpenStreetMap
                           </div>
                         </div>
                       )}
@@ -2173,15 +2290,11 @@ export default function ShippingCenter() {
                           const val = e.target.value;
                           setNewDest({ ...newDest, city: val });
                           setDestCityQuery(val);
-                          const suggestions = searchAddressSuggestions(val, US_ZIP_CITY_STATE);
-                          setDestSuggestions(suggestions);
-                          setShowDestSuggestions(suggestions.length > 0);
+                          searchAddressDebounced(val);
                         }}
                         onFocus={() => {
                           if (newDest.city.length >= 2) {
-                            const suggestions = searchAddressSuggestions(newDest.city, US_ZIP_CITY_STATE);
-                            setDestSuggestions(suggestions);
-                            setShowDestSuggestions(suggestions.length > 0);
+                            searchAddressDebounced(newDest.city);
                           }
                         }}
                         onBlur={() => setTimeout(() => setShowDestSuggestions(false), 200)}
