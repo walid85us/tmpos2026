@@ -19,7 +19,7 @@ export interface ShipmentPrefill {
   sourceItems?: { id: string; name: string; quantity: number; price?: number }[];
 }
 
-const STATUS_ORDER: ShipmentStatus[] = ['Draft', 'Ready', 'Label Created', 'Packed', 'Dispatched', 'In Transit', 'Delivered', 'Exception', 'Cancelled'];
+const STATUS_ORDER: ShipmentStatus[] = ['Draft', 'Ready', 'Label Created', 'Packed', 'Dispatched', 'In Transit', 'Delivered', 'Exception', 'Rejected', 'Returned', 'Cancelled'];
 
 const STATUS_COLORS: Record<ShipmentStatus, string> = {
   'Draft': 'bg-slate-100 text-slate-600 border-slate-200',
@@ -30,6 +30,8 @@ const STATUS_COLORS: Record<ShipmentStatus, string> = {
   'In Transit': 'bg-sky-50 text-sky-700 border-sky-200',
   'Delivered': 'bg-emerald-50 text-emerald-700 border-emerald-200',
   'Exception': 'bg-red-50 text-red-700 border-red-200',
+  'Rejected': 'bg-orange-50 text-orange-700 border-orange-200',
+  'Returned': 'bg-pink-50 text-pink-700 border-pink-200',
   'Cancelled': 'bg-slate-50 text-slate-400 border-slate-200',
 };
 
@@ -57,6 +59,56 @@ const SOURCE_ICONS: Record<ShipmentSourceType, string> = {
 
 const CARRIERS = ['UPS', 'FedEx', 'USPS', 'DHL', 'Internal Courier', 'Other'];
 const SERVICE_LEVELS = ['Ground', 'Express', 'Priority Overnight', 'Priority Mail', '2-Day', 'Same Day', 'Economy', 'Freight'];
+
+const REJECTION_REASONS = [
+  'Invalid or undeliverable address',
+  'Package refused by recipient',
+  'Carrier unable to accept — size/weight restrictions',
+  'Hazardous or restricted contents',
+  'Customs clearance failure',
+  'Carrier service disruption',
+  'Other operational reason',
+];
+const RETURN_REASONS = [
+  'Delivery failed — recipient unavailable',
+  'Customer refused delivery',
+  'Incorrect or incomplete address',
+  'Package damaged in transit',
+  'Unclaimed package — holding period expired',
+  'Customs rejection — return to sender',
+  'Other operational reason',
+];
+
+interface AddressSuggestion {
+  line1: string;
+  city: string;
+  state: string;
+  postalCode: string;
+  source: 'local' | 'provider';
+}
+
+function searchAddressSuggestions(query: string, zipDb: Record<string, { city: string; state: string }>): AddressSuggestion[] {
+  if (!query || query.trim().length < 2) return [];
+  const q = query.trim().toLowerCase();
+  const results: AddressSuggestion[] = [];
+  const seen = new Set<string>();
+
+  for (const [zip, data] of Object.entries(zipDb)) {
+    const cityLower = data.city.toLowerCase();
+    const matchesCity = cityLower.startsWith(q) || cityLower.includes(q);
+    const matchesState = data.state.toLowerCase() === q;
+    const matchesZip = zip.startsWith(q);
+    if (matchesCity || matchesState || matchesZip) {
+      const key = `${data.city}-${data.state}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        results.push({ line1: '', city: data.city, state: data.state, postalCode: zip, source: 'local' });
+      }
+    }
+    if (results.length >= 8) break;
+  }
+  return results;
+}
 
 const US_ZIP_CITY_STATE: Record<string, { city: string; state: string }> = {
   '10001': { city: 'New York', state: 'NY' }, '10002': { city: 'New York', state: 'NY' }, '10003': { city: 'New York', state: 'NY' },
@@ -298,6 +350,12 @@ export default function ShippingCenter() {
   const [eventLocation, setEventLocation] = useState('');
   const [activeProviderId, setActiveProviderId] = useState<string | null>(null);
   const [providerEnvironment, setProviderEnvironment] = useState<'test' | 'production' | null>(null);
+  const [reasonModal, setReasonModal] = useState<{ id: string; newStatus: 'Rejected' | 'Returned' } | null>(null);
+  const [selectedReason, setSelectedReason] = useState('');
+  const [reasonNotes, setReasonNotes] = useState('');
+  const [destSuggestions, setDestSuggestions] = useState<AddressSuggestion[]>([]);
+  const [showDestSuggestions, setShowDestSuggestions] = useState(false);
+  const [destCityQuery, setDestCityQuery] = useState('');
 
   useEffect(() => {
     shippingApi.getActiveProvider().then(r => {
@@ -533,8 +591,8 @@ export default function ShippingCenter() {
   const isPreDispatch = (status: ShipmentStatus) => ['Draft', 'Ready', 'Label Created', 'Packed'].includes(status);
   const isEditable = (status: ShipmentStatus) => ['Draft', 'Ready'].includes(status);
 
-  function handleStatusTransition(id: string, newStatus: ShipmentStatus) {
-    if (isWriteBlocked) { setShowStatusConfirm(null); return; }
+  function handleStatusTransition(id: string, newStatus: ShipmentStatus, reason?: string, notes?: string) {
+    if (isWriteBlocked) { setShowStatusConfirm(null); setReasonModal(null); return; }
     const shipment = shipments.find(s => s.id === id);
     if (!shipment) return;
 
@@ -548,22 +606,35 @@ export default function ShippingCenter() {
       return;
     }
 
+    if ((newStatus === 'Rejected' || newStatus === 'Returned') && !reason) {
+      setReasonModal({ id, newStatus });
+      setShowStatusConfirm(null);
+      return;
+    }
+
     const now = new Date().toISOString();
     const updates: Partial<Shipment> = { status: newStatus, updatedAt: now };
 
     if (newStatus === 'Dispatched') updates.dispatchedAt = now;
     if (newStatus === 'Delivered') updates.deliveredAt = now;
 
+    let description = `Status changed to ${newStatus}`;
+    if (reason) description += ` — Reason: ${reason}`;
+    if (notes) description += ` — Notes: ${notes}`;
+
     const newEvent: ShipmentEvent = {
       id: `evt-${Date.now()}`,
       timestamp: now,
       status: newStatus,
-      description: `Status changed to ${newStatus}`,
+      description,
       performedBy: 'Current User',
     };
     updates.events = [...shipment.events, newEvent];
     updateShipment(id, updates);
     setShowStatusConfirm(null);
+    setReasonModal(null);
+    setSelectedReason('');
+    setReasonNotes('');
   }
 
   function handleCreateShipment() {
@@ -987,16 +1058,18 @@ export default function ShippingCenter() {
       'Ready': ['Cancelled'],
       'Label Created': ['Packed', 'Cancelled'],
       'Packed': ['Dispatched', 'Cancelled'],
-      'Dispatched': [],
-      'In Transit': [],
-      'Delivered': [],
-      'Exception': [],
+      'Dispatched': ['Rejected'],
+      'In Transit': ['Rejected'],
+      'Delivered': ['Returned'],
+      'Exception': ['Rejected', 'Returned'],
+      'Rejected': [],
+      'Returned': [],
       'Cancelled': [],
     };
-    const allowed = transitions[current] || [];
+    let allowed = transitions[current] || [];
 
     if (current === 'Dispatched' && shipment && !hasCarrierAcceptance(shipment)) {
-      return ['Cancelled'];
+      allowed = ['Cancelled', ...allowed.filter(s => s !== 'Cancelled')];
     }
 
     return allowed;
@@ -1008,6 +1081,7 @@ export default function ShippingCenter() {
       if (shipment && hasCarrierAcceptance(shipment)) return false;
       return true;
     }
+    if (newStatus === 'Rejected' || newStatus === 'Returned') return canDispatch;
     if (newStatus === 'Dispatched') return canDispatch;
     if (['In Transit', 'Delivered', 'Exception'].includes(newStatus)) return false;
     return canEditPreDispatch;
@@ -1033,7 +1107,7 @@ export default function ShippingCenter() {
   }
 
   function isPostDispatch(status: ShipmentStatus): boolean {
-    return ['Dispatched', 'In Transit', 'Delivered', 'Exception'].includes(status);
+    return ['Dispatched', 'In Transit', 'Delivered', 'Exception', 'Rejected', 'Returned'].includes(status);
   }
 
   function getLabelActualFormat(label: { format: string; url: string }): 'pdf' | 'png' | 'other' {
@@ -1539,10 +1613,18 @@ export default function ShippingCenter() {
                           <p className="text-xs text-sky-700 font-medium">Post-dispatch status control</p>
                           <p className="text-[10px] text-sky-600 mt-0.5">
                             {selectedShip.status === 'Dispatched' && !hasCarrierAcceptance(selectedShip)
-                              ? 'Shipment dispatched. Status updates (In Transit, Delivered, Exception) will be driven by carrier tracking events via Sync Tracking. Cancellation is available until the carrier accepts the package.'
+                              ? 'Shipment dispatched. Status updates (In Transit, Delivered, Exception) will be driven by carrier tracking events via Sync Tracking. Cancellation is available until the carrier accepts the package. You may mark the shipment as Rejected by Carrier if applicable.'
                               : selectedShip.status === 'Dispatched' && hasCarrierAcceptance(selectedShip)
-                                ? 'Carrier has accepted the package. Status updates are now provider-driven only. Cancellation is no longer available.'
-                                : `Status "${selectedShip.status}" is managed by carrier tracking events. Use Sync Tracking to get the latest carrier updates.`
+                                ? 'Carrier has accepted the package. Status updates are now provider-driven only. Cancellation is no longer available. You may mark as Rejected by Carrier if applicable.'
+                                : selectedShip.status === 'Rejected'
+                                  ? 'This shipment was rejected by the carrier. No further transitions are available.'
+                                  : selectedShip.status === 'Returned'
+                                    ? 'This shipment has been returned. No further transitions are available.'
+                                    : selectedShip.status === 'Delivered'
+                                      ? 'Shipment delivered. You may mark as Returned if the package was sent back.'
+                                      : selectedShip.status === 'Exception'
+                                        ? 'An exception occurred. You may mark as Rejected by Carrier or Returned if applicable.'
+                                        : `Status "${selectedShip.status}" is managed by carrier tracking events. Use Sync Tracking to get the latest carrier updates.`
                             }
                           </p>
                         </div>
@@ -1555,15 +1637,25 @@ export default function ShippingCenter() {
                           canDoTransition(selectedShip.status, next, selectedShip) && (
                             <button
                               key={next}
-                              onClick={() => setShowStatusConfirm({ id: selectedShip.id, newStatus: next, label: `Move shipment to "${next}"?` })}
+                              onClick={() => {
+                                if (next === 'Rejected' || next === 'Returned') {
+                                  setReasonModal({ id: selectedShip.id, newStatus: next });
+                                } else {
+                                  setShowStatusConfirm({ id: selectedShip.id, newStatus: next, label: `Move shipment to "${next}"?` });
+                                }
+                              }}
                               className={`px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all active:scale-95 ${
                                 next === 'Cancelled'
                                   ? 'bg-red-50 text-red-600 border border-red-200 hover:bg-red-100'
-                                  : next === 'Dispatched'
-                                    ? 'bg-primary text-white shadow-lg shadow-primary/20 hover:bg-primary/90'
-                                    : next === 'Delivered'
-                                      ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20 hover:bg-emerald-600'
-                                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                  : next === 'Rejected'
+                                    ? 'bg-orange-50 text-orange-600 border border-orange-200 hover:bg-orange-100'
+                                    : next === 'Returned'
+                                      ? 'bg-pink-50 text-pink-600 border border-pink-200 hover:bg-pink-100'
+                                      : next === 'Dispatched'
+                                        ? 'bg-primary text-white shadow-lg shadow-primary/20 hover:bg-primary/90'
+                                        : next === 'Delivered'
+                                          ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20 hover:bg-emerald-600'
+                                          : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                               }`}
                             >
                               {next}
@@ -1733,6 +1825,72 @@ export default function ShippingCenter() {
               <div className="flex gap-3">
                 <button onClick={() => setShowStatusConfirm(null)} className="flex-1 py-3 bg-white text-slate-500 rounded-xl font-black text-[10px] uppercase tracking-widest border border-slate-200">Cancel</button>
                 <button onClick={() => handleStatusTransition(showStatusConfirm.id, showStatusConfirm.newStatus)} className="flex-1 py-3 bg-primary text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-primary/20">Confirm</button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {reasonModal && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-md p-8">
+              <div className="flex items-center gap-3 mb-6">
+                <span className={`material-symbols-outlined text-3xl ${reasonModal.newStatus === 'Rejected' ? 'text-orange-500' : 'text-pink-500'}`}>
+                  {reasonModal.newStatus === 'Rejected' ? 'block' : 'assignment_return'}
+                </span>
+                <div>
+                  <h3 className="text-lg font-black text-slate-800">
+                    {reasonModal.newStatus === 'Rejected' ? 'Rejected by Carrier' : 'Mark as Returned'}
+                  </h3>
+                  <p className="text-xs text-slate-500">Select a reason to proceed. This action will be recorded in the shipment timeline.</p>
+                </div>
+              </div>
+              <div className="space-y-4">
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Reason *</label>
+                  <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                    {(reasonModal.newStatus === 'Rejected' ? REJECTION_REASONS : RETURN_REASONS).map(reason => (
+                      <button
+                        key={reason}
+                        onClick={() => setSelectedReason(reason)}
+                        className={`w-full text-left px-3 py-2.5 rounded-xl text-xs transition-all border ${
+                          selectedReason === reason
+                            ? reasonModal.newStatus === 'Rejected'
+                              ? 'bg-orange-50 border-orange-300 text-orange-700 font-bold'
+                              : 'bg-pink-50 border-pink-300 text-pink-700 font-bold'
+                            : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                        }`}
+                      >
+                        {reason}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Additional Notes (Optional)</label>
+                  <textarea
+                    value={reasonNotes}
+                    onChange={e => setReasonNotes(e.target.value)}
+                    placeholder="Any additional details..."
+                    rows={2}
+                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 resize-none"
+                  />
+                </div>
+              </div>
+              <div className="flex gap-3 mt-6">
+                <button onClick={() => { setReasonModal(null); setSelectedReason(''); setReasonNotes(''); }} className="flex-1 py-3 bg-white text-slate-500 rounded-xl font-black text-[10px] uppercase tracking-widest border border-slate-200">Cancel</button>
+                <button
+                  onClick={() => handleStatusTransition(reasonModal.id, reasonModal.newStatus, selectedReason, reasonNotes || undefined)}
+                  disabled={!selectedReason}
+                  className={`flex-1 py-3 rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg transition-all ${
+                    selectedReason
+                      ? reasonModal.newStatus === 'Rejected'
+                        ? 'bg-orange-500 text-white shadow-orange-500/20 hover:bg-orange-600'
+                        : 'bg-pink-500 text-white shadow-pink-500/20 hover:bg-pink-600'
+                      : 'bg-slate-200 text-slate-400 cursor-not-allowed shadow-none'
+                  }`}
+                >
+                  Confirm {reasonModal.newStatus === 'Rejected' ? 'Rejection' : 'Return'}
+                </button>
               </div>
             </motion.div>
           </div>
@@ -1938,11 +2096,47 @@ export default function ShippingCenter() {
                     <input value={newOrigin.postalCode} onChange={e => setNewOrigin({ ...newOrigin, postalCode: e.target.value })} placeholder="Postal Code *" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
                   </div>
                   <div className="space-y-3">
-                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Destination Address</p>
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
+                      Destination Address
+                      <span className="text-[9px] font-bold text-slate-300 normal-case tracking-normal">(type city or zip for suggestions)</span>
+                    </p>
                     <input value={newDest.name} onChange={e => setNewDest({ ...newDest, name: e.target.value })} placeholder="Name *" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
                     <input value={newDest.line1} onChange={e => setNewDest({ ...newDest, line1: e.target.value })} placeholder="Address Line 1 *" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
                     <div className="grid grid-cols-2 gap-2">
-                      <input value={newDest.city} onChange={e => setNewDest({ ...newDest, city: e.target.value })} placeholder="City *" className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                      <div className="relative">
+                        <input value={newDest.city} onChange={e => {
+                          const val = e.target.value;
+                          setNewDest({ ...newDest, city: val });
+                          setDestCityQuery(val);
+                          const suggestions = searchAddressSuggestions(val, US_ZIP_CITY_STATE);
+                          setDestSuggestions(suggestions);
+                          setShowDestSuggestions(suggestions.length > 0);
+                        }}
+                        onFocus={() => { if (destSuggestions.length > 0) setShowDestSuggestions(true); }}
+                        onBlur={() => setTimeout(() => setShowDestSuggestions(false), 200)}
+                        placeholder="City * (type to search)" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                        {showDestSuggestions && destSuggestions.length > 0 && (
+                          <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl z-30 max-h-48 overflow-y-auto">
+                            {destSuggestions.map((s, i) => (
+                              <button key={`${s.city}-${s.state}-${i}`} type="button"
+                                onMouseDown={e => {
+                                  e.preventDefault();
+                                  setNewDest(prev => ({ ...prev, city: s.city, state: s.state, postalCode: s.postalCode }));
+                                  setShowDestSuggestions(false);
+                                  setDestCityQuery('');
+                                }}
+                                className="w-full text-left px-3 py-2 text-xs hover:bg-primary/5 transition-all border-b border-slate-50 last:border-0 flex items-center justify-between">
+                                <span className="font-bold text-slate-700">{s.city}, {s.state}</span>
+                                <span className="text-slate-400 font-mono text-[10px]">{s.postalCode}</span>
+                              </button>
+                            ))}
+                            <div className="px-3 py-1.5 bg-slate-50 text-[9px] text-slate-400 flex items-center gap-1 border-t border-slate-100">
+                              <span className="material-symbols-outlined text-[10px]">database</span>
+                              Local database — {destSuggestions[0].source === 'local' ? 'street-level autocomplete available with provider integration' : 'provider-powered'}
+                            </div>
+                          </div>
+                        )}
+                      </div>
                       <input value={newDest.state} onChange={e => setNewDest({ ...newDest, state: e.target.value })} placeholder="State *" className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
                     </div>
                     <div className="relative">
@@ -1958,6 +2152,13 @@ export default function ShippingCenter() {
                               updated.state = lookup.state;
                             }
                           }
+                          if (/^\d{1,5}$/.test(val.trim()) && val.trim().length >= 2) {
+                            const suggestions = searchAddressSuggestions(val.trim(), US_ZIP_CITY_STATE);
+                            setDestSuggestions(suggestions);
+                            setShowDestSuggestions(suggestions.length > 0);
+                          } else if (val.trim().length < 2) {
+                            setShowDestSuggestions(false);
+                          }
                           return updated;
                         });
                       }} placeholder="Postal Code * (auto-fills city/state)" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
@@ -1970,7 +2171,7 @@ export default function ShippingCenter() {
                     {newDest.postalCode.trim().length === 5 && !lookupZipCode(newDest.postalCode.trim()) && (
                       <p className="text-[10px] text-slate-400 -mt-1 flex items-center gap-1">
                         <span className="material-symbols-outlined text-xs">info</span>
-                        Zip code not in local database. Enter city and state manually. Full address autocomplete available with provider integration.
+                        Zip not in local database. Enter manually. Full address autocomplete available with provider integration.
                       </p>
                     )}
                   </div>

@@ -150,7 +150,7 @@ export default function Settings() {
                   <p className="text-xs text-slate-500">Configure carrier integrations, credentials, and select your active shipping provider.</p>
                 </div>
               </div>
-              <button onClick={() => navigate('/settings/shipping-providers')} className="px-6 py-3 text-[10px] font-black uppercase tracking-widest bg-primary text-white rounded-xl hover:bg-primary/90 transition-all shadow-sm">
+              <button onClick={() => navigate('/shipping/settings')} className="px-6 py-3 text-[10px] font-black uppercase tracking-widest bg-primary text-white rounded-xl hover:bg-primary/90 transition-all shadow-sm">
                 Manage Providers
               </button>
             </div>

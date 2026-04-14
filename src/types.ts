@@ -705,7 +705,7 @@ export interface DocumentTemplate {
   updatedAt: string;
 }
 
-export type ShipmentStatus = 'Draft' | 'Ready' | 'Label Created' | 'Packed' | 'Dispatched' | 'In Transit' | 'Delivered' | 'Exception' | 'Cancelled';
+export type ShipmentStatus = 'Draft' | 'Ready' | 'Label Created' | 'Packed' | 'Dispatched' | 'In Transit' | 'Delivered' | 'Exception' | 'Rejected' | 'Returned' | 'Cancelled';
 export type ShipmentType = 'customer_delivery' | 'repair_return' | 'store_transfer' | 'rma_outbound' | 'rma_return';
 export type ShipmentSourceType = 'invoice' | 'repair' | 'transfer' | 'rma';
 

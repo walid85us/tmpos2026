@@ -104,7 +104,7 @@ const router = createBrowserRouter([
       { path: '/reports', element: <AccessGuard feature="reports"><Reports /></AccessGuard> },
       { path: '/settings', element: <AccessGuard feature="settings"><Settings /></AccessGuard> },
       { path: '/settings/configurations', element: <Navigate to="/settings" replace /> },
-      { path: '/settings/shipping-providers', element: <AccessGuard feature="shipping"><ShippingProvidersPage /></AccessGuard> },
+      { path: '/settings/shipping-providers', element: <Navigate to="/shipping/settings" replace /> },
       { path: '/support', element: <AccessGuard feature="support"><Support /></AccessGuard> },
     ],
   },

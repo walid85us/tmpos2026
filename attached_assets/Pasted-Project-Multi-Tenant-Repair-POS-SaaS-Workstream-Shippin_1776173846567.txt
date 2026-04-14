@@ -1,0 +1,321 @@
+Project: Multi-Tenant Repair / POS SaaS
+Workstream: Shipping Center True Ownership + Final Operational Corrections Pass
+Mode: Strict isolated workstream implementation
+Priority: Critical
+This is a hard correction pass. Do not treat it as optional polish.
+
+You are a principal-level full-stack SaaS architect, senior React/TypeScript engineer, Firebase/Firestore data architect, enterprise shipping systems architect, and senior shipping & fulfillment operations expert with more than 20 years of experience in parcel shipping, warehouse execution, carrier integrations, dispatch control, tracking-event operations, label workflows, reverse logistics, and fulfillment-center lifecycle governance.
+
+You must also operate in two parallel modes throughout this task:
+1) Side Auditor — continuously inspect for regression risk, permission leakage, tenant leakage, preview-mode write leaks, lifecycle inconsistency, fake provider success, fake PDF behavior, masked operational data, incomplete ownership migration, and shallow implementation shortcuts.
+2) Systems Thinker — design this correction as part of the whole platform, making sure it fits the existing auth model, preview mode, RBAC, lifecycle gating, platform/store hierarchy, commercial plan gating, completed Shipping Center, provider configuration, secure provider-call architecture, and all previously completed shipping improvements.
+
+Read and understand the existing codebase first, especially:
+- Ref.txt
+- replit.md
+
+--------------------------------------------------
+MANDATORY EXTERNAL REFERENCE REVIEW — REPAIRDESK SHIPSTATION ARTICLE
+--------------------------------------------------
+
+Before you implement anything, you MUST do all of the following:
+
+1) Open, read, and understand this exact reference article:
+https://help.repairdesk.co/portal/en/kb/articles/shipstation-integration
+
+2) Treat that article as a required research input for this correction pass.
+This is NOT optional context.
+You must actually review it before coding.
+
+3) Extract the useful shipping and fulfillment ideas from that article and adapt them to OUR app.
+Do NOT copy RepairDesk literally.
+Do NOT rebuild ShipStation-specific UX one-to-one.
+Do NOT force concepts that do not fit our architecture.
+But you MUST identify the useful operational ideas and apply the relevant ones to our Shipping Center.
+
+4) At minimum, evaluate the article for ideas related to:
+- shipping settings ownership inside shipping operations
+- shipment creation from business records
+- rate selection and label workflow
+- dispatch and post-dispatch control
+- tracking sync and two-way update flow
+- status synchronization from shipping events
+- cancellation rules and shipment control boundaries
+- carrier rejection and return workflows
+- fulfillment workflow smoothness for repair + shipping operations
+
+5) You must explicitly separate:
+- ideas from the article that SHOULD be implemented now
+- ideas from the article that SHOULD be deferred for future phases
+- ideas from the article that SHOULD NOT be adopted and why
+
+--------------------------------------------------
+CURRENT QA SOURCE OF TRUTH — REMAINING FAILURES
+--------------------------------------------------
+
+Treat the following as exact truth that must be fixed:
+
+1) Shipping Providers is still not fully under Shipping Center
+- It is still effectively under Store Settings
+- The requirement is that Shipping Providers must be completely moved under Shipping Center and be part of it
+- Shipping must own provider management as its primary home in the user experience
+
+2) Label action is still not truly PDF-only
+- QA still sees PNG
+- Requirement is clean PDF-only primary label handling for the operational path
+
+3) Tracking number still shows masked with XXXXX
+- Requirement is full tracking-number visibility for authorized operational users
+
+4) Destination address autocomplete is still missing
+- Requirement is lightweight address suggestion and selection that prefills city, state, postal code, and related fields
+
+5) New operational requirement:
+- After carrier progression, cancellation is correctly blocked
+- Add controlled shipment outcomes for:
+  - Rejected by Carrier
+  - Returned
+- These must include clear reason capture / reason selection in a way that fits the current lifecycle architecture
+
+--------------------------------------------------
+MANDATORY CORRECTIONS
+--------------------------------------------------
+
+A) MOVE SHIPPING PROVIDERS FULLY UNDER SHIPPING CENTER
+This is non-negotiable.
+
+Required:
+- Shipping Providers must be fully owned under Shipping Center as a native subsection, such as Shipping > Settings > Providers
+- This must be the primary home for provider management in the UI
+- Do not leave the operational experience centered in Store Settings
+- The old store settings entry may remain only as a redirect or alias into the Shipping-owned experience if needed
+- There must not be two competing provider-management homes
+- Shipping Center users must manage providers without leaving Shipping context
+
+This must be materially true in the UI, not only conceptually true in code.
+
+B) PDF-ONLY PRIMARY LABEL HANDLING
+Required:
+- The main label artifact/action must use a real PDF artifact only
+- Do not use PNG for the main operational label path
+- Do not label a PNG as PDF
+- If a provider response includes multiple formats, choose PDF for the primary action
+- Keep the workflow operationally clean and thermal-label-ready
+
+C) FULL TRACKING NUMBER VISIBILITY
+Required:
+- Show the full tracking number to authorized operational users
+- Remove masking/truncation in all relevant shipment detail/list surfaces where operators need the full value
+- Preserve permission safety for unauthorized users
+- Preserve lock behavior after label purchase
+
+D) LIGHTWEIGHT DESTINATION ADDRESS AUTOCOMPLETE
+Required:
+- Add destination-address autocomplete/suggestion behavior in the shipment address flow
+- When the user starts typing an address, show a suggestion dropdown
+- When a suggestion is selected, prefill:
+  - address line
+  - city
+  - state/region
+  - postal code
+  - other relevant location fields if available
+- Keep this lightweight and operational
+- Do not redesign the full form
+- Do not overbuild a maps product
+- Use the cleanest architecture-ready path possible
+- Be truthful if a live autocomplete provider is not configured
+
+E) CARRIER REJECTION / RETURN OUTCOME PATHS
+This is a new required operational improvement.
+
+Required:
+- Add controlled shipment outcome handling for:
+  - Rejected by Carrier
+  - Returned
+- These must fit the shipping lifecycle cleanly
+- They must not behave like casual manual freeform status edits
+- They should be available only where lifecycle and permissions make sense
+- Require reason capture or reason selection where appropriate
+- Preserve provider-driven post-dispatch authority
+- Do not weaken the rule that normal post-dispatch progression comes from provider events
+
+Reason examples may include:
+- invalid address
+- package refused
+- carrier unable to accept
+- hazardous/restricted issue
+- delivery failed and returned
+- customer unavailable/refused
+- other operational reason
+
+Use the current product’s style and lifecycle discipline.
+
+--------------------------------------------------
+FULFILLMENT-EXPERT RULES TO APPLY
+--------------------------------------------------
+
+Approach this like a real shipping operation:
+
+- Shipping settings belong to the Shipping operation surface
+- Label purchase is the commitment point
+- Packed comes only after successful label purchase
+- Dispatch is the handoff point
+- After handoff + provider progression, lifecycle stays provider-driven
+- Tracking number must be visible and usable by operators
+- Label artifact must be truthful and PDF-clean
+- Destination address capture should reduce operator friction and improve correctness
+- Exception outcomes like carrier rejection and return need structured handling, not ad hoc edits
+
+Also identify any high-value future enhancements that should be documented but not overbuilt in this pass, such as:
+- shipment manifest/scan forms
+- dispatch batch workflows
+- carrier void/refund flow
+- return labels
+- customer-facing tracking portal
+- webhook retry/replay tooling
+- packing-station enhancements
+- delivery exception resolution workflows
+- more advanced address verification/autocomplete providers
+
+--------------------------------------------------
+IMPORTANT IMPLEMENTATION RULES
+--------------------------------------------------
+
+- Do not redesign the app
+- Do not broaden scope into Phase 2 or Phase 3 shipping work
+- Do not touch unrelated workstreams
+- Do not break preview mode safety
+- Do not break permissions or plan gating
+- Do not break shipping core flow
+- Do not break provider configuration
+- Do not fake provider success
+- Do not fake provider event sync
+- Keep the design baseline consistent
+- Preserve source-routed shipment creation, source reference resolution, selected-rate behavior, label purchase prerequisites, tracking lock rules, and provider-driven post-dispatch lifecycle control
+
+--------------------------------------------------
+MULTI-TENANT / SECURITY / GATING REQUIREMENTS
+--------------------------------------------------
+
+Preserve and correctly enforce:
+- auth behavior
+- preview mode
+- RBAC/sub-permissions
+- lifecycle gating
+- platform/store hierarchy
+- System Owner Plans & Features matrix
+- Store Permissions Matrix
+- provider configuration governance
+- secure server-side provider call boundary
+
+Do not expose provider actions when unavailable or unauthorized.
+Do not show writable actions in preview mode.
+
+--------------------------------------------------
+NON-REGRESSION REQUIREMENTS
+--------------------------------------------------
+
+Do not break:
+1. Platform Command Center & Commercial Plan System
+2. Tenant Management & Provisioning
+3. Store Dashboard & POS Refinement
+4. Customers, Invoices & Services Improvements
+5. Repairs Module Deep Refinement
+6. Inventory & Supply Chain Improvements
+7. Shipping Module / Shipping Center
+8. Shipping Phase 1 Expansion
+9. Shipping Provider Configuration & Provider Selection
+10. Shipping Provider & Rate/Label Workflow Polish
+11. Secure Provider Call Validation / real provider testing readiness
+12. Shipping Center Fulfillment Governance improvements already completed
+
+Specifically preserve:
+- source-routed shipment creation
+- source reference resolution
+- create/save/edit behavior
+- package persistence
+- rate selection and selected-rate update logic
+- label purchase prerequisites
+- preview mode safety
+- edit lock from Label Created onward
+- provider configuration governance
+- tracking number auto-population and lock rule
+- manual carrier/service fallback rule
+- provider-driven post-dispatch lifecycle control
+- cancellation blocking after carrier progression
+
+--------------------------------------------------
+IMPLEMENTATION DISCIPLINE
+--------------------------------------------------
+
+Follow this exact execution discipline:
+
+1) Review the linked RepairDesk reference and extract only the concepts that improve our system.
+2) Move provider management fully under Shipping Center as the primary owned experience.
+3) Fix PDF-only primary label handling.
+4) Fix full tracking-number visibility.
+5) Add lightweight destination-address autocomplete and field-prefill behavior.
+6) Add controlled Rejected by Carrier / Returned outcome handling with reasons.
+7) Document what was implemented now vs what should come later.
+8) Run a regression-oriented review across shipping core flows and provider-backed actions.
+9) Update documentation.
+
+--------------------------------------------------
+DOCUMENTATION REQUIREMENTS
+--------------------------------------------------
+
+Update replit.md with:
+- Shipping > Settings > Providers ownership model
+- PDF-only primary label behavior
+- full tracking number visibility rule
+- destination address autocomplete behavior
+- Rejected by Carrier / Returned controlled outcome rules
+- extracted lessons adapted from the RepairDesk reference
+- future fulfillment improvements recommended but not yet implemented
+
+--------------------------------------------------
+MANDATORY PROOF IN FINAL RESPONSE
+--------------------------------------------------
+
+In your final response, you MUST include all of these sections exactly:
+
+1. RepairDesk Article Reviewed
+2. RepairDesk Insights Extracted
+3. How Those Insights Were Adapted To Our Shipping Center
+4. Implemented Now vs Deferred vs Not Adopted
+5. Fulfillment-Expert Recommendations
+
+Do not give a generic completion summary.
+Do not say the task is complete unless these sections are present and specific.
+
+--------------------------------------------------
+NON-NEGOTIABLE COMPLETION GATE
+--------------------------------------------------
+
+Do NOT mark this task complete unless you explicitly prove in your final response that you:
+- visited and understood the RepairDesk article,
+- extracted concrete operational ideas from it,
+- adapted those ideas to our app,
+- implemented the relevant ones in this pass,
+- and documented what was deferred for future improvement.
+
+--------------------------------------------------
+OUTPUT FORMAT REQUIRED
+--------------------------------------------------
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. RepairDesk Article Reviewed
+3. RepairDesk Insights Extracted
+4. How Those Insights Were Adapted To Our Shipping Center
+5. Implemented Now vs Deferred vs Not Adopted
+6. Shipping Center Provider Ownership Fix
+7. PDF-Only Primary Label Fix
+8. Full Tracking Visibility Fix
+9. Destination Address Autocomplete Fix
+10. Rejected by Carrier / Returned Outcome Fix
+11. Fulfillment-Expert Recommendations
+12. Files Changed
+13. Documentation Updated
+14. Non-Regression Notes
