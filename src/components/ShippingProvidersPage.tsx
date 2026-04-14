@@ -248,7 +248,7 @@ export default function ShippingProvidersPage() {
             Back to Shipping Center
           </button>
           <span className="text-slate-300">|</span>
-          <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Shipping &gt; Providers</span>
+          <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Shipping &gt; Settings &gt; Providers</span>
         </div>
       )}
 

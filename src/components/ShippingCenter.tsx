@@ -58,6 +58,196 @@ const SOURCE_ICONS: Record<ShipmentSourceType, string> = {
 const CARRIERS = ['UPS', 'FedEx', 'USPS', 'DHL', 'Internal Courier', 'Other'];
 const SERVICE_LEVELS = ['Ground', 'Express', 'Priority Overnight', 'Priority Mail', '2-Day', 'Same Day', 'Economy', 'Freight'];
 
+const US_ZIP_CITY_STATE: Record<string, { city: string; state: string }> = {
+  '10001': { city: 'New York', state: 'NY' }, '10002': { city: 'New York', state: 'NY' }, '10003': { city: 'New York', state: 'NY' },
+  '10010': { city: 'New York', state: 'NY' }, '10011': { city: 'New York', state: 'NY' }, '10012': { city: 'New York', state: 'NY' },
+  '10016': { city: 'New York', state: 'NY' }, '10017': { city: 'New York', state: 'NY' }, '10018': { city: 'New York', state: 'NY' },
+  '10019': { city: 'New York', state: 'NY' }, '10020': { city: 'New York', state: 'NY' }, '10021': { city: 'New York', state: 'NY' },
+  '10022': { city: 'New York', state: 'NY' }, '10023': { city: 'New York', state: 'NY' }, '10024': { city: 'New York', state: 'NY' },
+  '10025': { city: 'New York', state: 'NY' }, '10026': { city: 'New York', state: 'NY' }, '10027': { city: 'New York', state: 'NY' },
+  '10028': { city: 'New York', state: 'NY' }, '10029': { city: 'New York', state: 'NY' }, '10030': { city: 'New York', state: 'NY' },
+  '10031': { city: 'New York', state: 'NY' }, '10032': { city: 'New York', state: 'NY' }, '10033': { city: 'New York', state: 'NY' },
+  '10034': { city: 'New York', state: 'NY' }, '10035': { city: 'New York', state: 'NY' }, '10036': { city: 'New York', state: 'NY' },
+  '10037': { city: 'New York', state: 'NY' }, '10038': { city: 'New York', state: 'NY' }, '10039': { city: 'New York', state: 'NY' },
+  '10040': { city: 'New York', state: 'NY' },
+  '11201': { city: 'Brooklyn', state: 'NY' }, '11211': { city: 'Brooklyn', state: 'NY' }, '11215': { city: 'Brooklyn', state: 'NY' },
+  '11101': { city: 'Long Island City', state: 'NY' },
+  '90001': { city: 'Los Angeles', state: 'CA' }, '90002': { city: 'Los Angeles', state: 'CA' }, '90003': { city: 'Los Angeles', state: 'CA' },
+  '90004': { city: 'Los Angeles', state: 'CA' }, '90005': { city: 'Los Angeles', state: 'CA' }, '90006': { city: 'Los Angeles', state: 'CA' },
+  '90007': { city: 'Los Angeles', state: 'CA' }, '90008': { city: 'Los Angeles', state: 'CA' }, '90010': { city: 'Los Angeles', state: 'CA' },
+  '90012': { city: 'Los Angeles', state: 'CA' }, '90013': { city: 'Los Angeles', state: 'CA' }, '90014': { city: 'Los Angeles', state: 'CA' },
+  '90015': { city: 'Los Angeles', state: 'CA' }, '90016': { city: 'Los Angeles', state: 'CA' }, '90017': { city: 'Los Angeles', state: 'CA' },
+  '90018': { city: 'Los Angeles', state: 'CA' }, '90019': { city: 'Los Angeles', state: 'CA' }, '90020': { city: 'Los Angeles', state: 'CA' },
+  '90024': { city: 'Los Angeles', state: 'CA' }, '90025': { city: 'Los Angeles', state: 'CA' }, '90027': { city: 'Los Angeles', state: 'CA' },
+  '90028': { city: 'Hollywood', state: 'CA' }, '90029': { city: 'Los Angeles', state: 'CA' },
+  '90034': { city: 'Los Angeles', state: 'CA' }, '90036': { city: 'Los Angeles', state: 'CA' }, '90038': { city: 'Los Angeles', state: 'CA' },
+  '90042': { city: 'Los Angeles', state: 'CA' }, '90045': { city: 'Los Angeles', state: 'CA' }, '90046': { city: 'Los Angeles', state: 'CA' },
+  '90048': { city: 'Los Angeles', state: 'CA' }, '90049': { city: 'Los Angeles', state: 'CA' },
+  '90210': { city: 'Beverly Hills', state: 'CA' }, '90211': { city: 'Beverly Hills', state: 'CA' },
+  '90401': { city: 'Santa Monica', state: 'CA' }, '90402': { city: 'Santa Monica', state: 'CA' },
+  '91101': { city: 'Pasadena', state: 'CA' }, '91201': { city: 'Glendale', state: 'CA' },
+  '91301': { city: 'Agoura Hills', state: 'CA' }, '91401': { city: 'Van Nuys', state: 'CA' },
+  '92101': { city: 'San Diego', state: 'CA' }, '92102': { city: 'San Diego', state: 'CA' }, '92103': { city: 'San Diego', state: 'CA' },
+  '94102': { city: 'San Francisco', state: 'CA' }, '94103': { city: 'San Francisco', state: 'CA' }, '94104': { city: 'San Francisco', state: 'CA' },
+  '94105': { city: 'San Francisco', state: 'CA' }, '94107': { city: 'San Francisco', state: 'CA' }, '94108': { city: 'San Francisco', state: 'CA' },
+  '94109': { city: 'San Francisco', state: 'CA' }, '94110': { city: 'San Francisco', state: 'CA' }, '94111': { city: 'San Francisco', state: 'CA' },
+  '94112': { city: 'San Francisco', state: 'CA' }, '94114': { city: 'San Francisco', state: 'CA' }, '94115': { city: 'San Francisco', state: 'CA' },
+  '94116': { city: 'San Francisco', state: 'CA' }, '94117': { city: 'San Francisco', state: 'CA' }, '94118': { city: 'San Francisco', state: 'CA' },
+  '94121': { city: 'San Francisco', state: 'CA' }, '94122': { city: 'San Francisco', state: 'CA' }, '94123': { city: 'San Francisco', state: 'CA' },
+  '94124': { city: 'San Francisco', state: 'CA' }, '94127': { city: 'San Francisco', state: 'CA' }, '94131': { city: 'San Francisco', state: 'CA' },
+  '94133': { city: 'San Francisco', state: 'CA' }, '94134': { city: 'San Francisco', state: 'CA' },
+  '95101': { city: 'San Jose', state: 'CA' }, '95110': { city: 'San Jose', state: 'CA' }, '95112': { city: 'San Jose', state: 'CA' },
+  '60601': { city: 'Chicago', state: 'IL' }, '60602': { city: 'Chicago', state: 'IL' }, '60603': { city: 'Chicago', state: 'IL' },
+  '60604': { city: 'Chicago', state: 'IL' }, '60605': { city: 'Chicago', state: 'IL' }, '60606': { city: 'Chicago', state: 'IL' },
+  '60607': { city: 'Chicago', state: 'IL' }, '60608': { city: 'Chicago', state: 'IL' }, '60609': { city: 'Chicago', state: 'IL' },
+  '60610': { city: 'Chicago', state: 'IL' }, '60611': { city: 'Chicago', state: 'IL' }, '60612': { city: 'Chicago', state: 'IL' },
+  '60613': { city: 'Chicago', state: 'IL' }, '60614': { city: 'Chicago', state: 'IL' }, '60615': { city: 'Chicago', state: 'IL' },
+  '60616': { city: 'Chicago', state: 'IL' }, '60617': { city: 'Chicago', state: 'IL' }, '60618': { city: 'Chicago', state: 'IL' },
+  '60619': { city: 'Chicago', state: 'IL' }, '60620': { city: 'Chicago', state: 'IL' }, '60621': { city: 'Chicago', state: 'IL' },
+  '60622': { city: 'Chicago', state: 'IL' }, '60623': { city: 'Chicago', state: 'IL' }, '60624': { city: 'Chicago', state: 'IL' },
+  '60625': { city: 'Chicago', state: 'IL' }, '60626': { city: 'Chicago', state: 'IL' }, '60628': { city: 'Chicago', state: 'IL' },
+  '60629': { city: 'Chicago', state: 'IL' }, '60630': { city: 'Chicago', state: 'IL' }, '60631': { city: 'Chicago', state: 'IL' },
+  '60632': { city: 'Chicago', state: 'IL' }, '60634': { city: 'Chicago', state: 'IL' }, '60636': { city: 'Chicago', state: 'IL' },
+  '60637': { city: 'Chicago', state: 'IL' }, '60638': { city: 'Chicago', state: 'IL' }, '60639': { city: 'Chicago', state: 'IL' },
+  '60640': { city: 'Chicago', state: 'IL' }, '60641': { city: 'Chicago', state: 'IL' }, '60642': { city: 'Chicago', state: 'IL' },
+  '60643': { city: 'Chicago', state: 'IL' }, '60644': { city: 'Chicago', state: 'IL' }, '60645': { city: 'Chicago', state: 'IL' },
+  '60646': { city: 'Chicago', state: 'IL' }, '60647': { city: 'Chicago', state: 'IL' },
+  '77001': { city: 'Houston', state: 'TX' }, '77002': { city: 'Houston', state: 'TX' }, '77003': { city: 'Houston', state: 'TX' },
+  '77004': { city: 'Houston', state: 'TX' }, '77005': { city: 'Houston', state: 'TX' }, '77006': { city: 'Houston', state: 'TX' },
+  '77007': { city: 'Houston', state: 'TX' }, '77008': { city: 'Houston', state: 'TX' }, '77009': { city: 'Houston', state: 'TX' },
+  '77010': { city: 'Houston', state: 'TX' }, '77011': { city: 'Houston', state: 'TX' }, '77012': { city: 'Houston', state: 'TX' },
+  '77019': { city: 'Houston', state: 'TX' }, '77020': { city: 'Houston', state: 'TX' }, '77021': { city: 'Houston', state: 'TX' },
+  '77022': { city: 'Houston', state: 'TX' }, '77023': { city: 'Houston', state: 'TX' }, '77024': { city: 'Houston', state: 'TX' },
+  '77025': { city: 'Houston', state: 'TX' }, '77026': { city: 'Houston', state: 'TX' }, '77027': { city: 'Houston', state: 'TX' },
+  '77028': { city: 'Houston', state: 'TX' }, '77029': { city: 'Houston', state: 'TX' }, '77030': { city: 'Houston', state: 'TX' },
+  '75201': { city: 'Dallas', state: 'TX' }, '75202': { city: 'Dallas', state: 'TX' }, '75203': { city: 'Dallas', state: 'TX' },
+  '75204': { city: 'Dallas', state: 'TX' }, '75205': { city: 'Dallas', state: 'TX' }, '75206': { city: 'Dallas', state: 'TX' },
+  '75207': { city: 'Dallas', state: 'TX' }, '75208': { city: 'Dallas', state: 'TX' }, '75209': { city: 'Dallas', state: 'TX' },
+  '75210': { city: 'Dallas', state: 'TX' }, '75211': { city: 'Dallas', state: 'TX' }, '75212': { city: 'Dallas', state: 'TX' },
+  '75214': { city: 'Dallas', state: 'TX' }, '75215': { city: 'Dallas', state: 'TX' }, '75216': { city: 'Dallas', state: 'TX' },
+  '78701': { city: 'Austin', state: 'TX' }, '78702': { city: 'Austin', state: 'TX' }, '78703': { city: 'Austin', state: 'TX' },
+  '78704': { city: 'Austin', state: 'TX' }, '78705': { city: 'Austin', state: 'TX' }, '78712': { city: 'Austin', state: 'TX' },
+  '78721': { city: 'Austin', state: 'TX' }, '78722': { city: 'Austin', state: 'TX' }, '78723': { city: 'Austin', state: 'TX' },
+  '78724': { city: 'Austin', state: 'TX' }, '78725': { city: 'Austin', state: 'TX' }, '78726': { city: 'Austin', state: 'TX' },
+  '78727': { city: 'Austin', state: 'TX' }, '78728': { city: 'Austin', state: 'TX' }, '78729': { city: 'Austin', state: 'TX' },
+  '78730': { city: 'Austin', state: 'TX' }, '78731': { city: 'Austin', state: 'TX' }, '78732': { city: 'Austin', state: 'TX' },
+  '78733': { city: 'Austin', state: 'TX' }, '78734': { city: 'Austin', state: 'TX' }, '78735': { city: 'Austin', state: 'TX' },
+  '78741': { city: 'Austin', state: 'TX' }, '78745': { city: 'Austin', state: 'TX' }, '78746': { city: 'Austin', state: 'TX' },
+  '78748': { city: 'Austin', state: 'TX' }, '78749': { city: 'Austin', state: 'TX' }, '78750': { city: 'Austin', state: 'TX' },
+  '78751': { city: 'Austin', state: 'TX' }, '78752': { city: 'Austin', state: 'TX' }, '78753': { city: 'Austin', state: 'TX' },
+  '78754': { city: 'Austin', state: 'TX' }, '78756': { city: 'Austin', state: 'TX' }, '78757': { city: 'Austin', state: 'TX' },
+  '78758': { city: 'Austin', state: 'TX' }, '78759': { city: 'Austin', state: 'TX' },
+  '78201': { city: 'San Antonio', state: 'TX' }, '78202': { city: 'San Antonio', state: 'TX' }, '78204': { city: 'San Antonio', state: 'TX' },
+  '78205': { city: 'San Antonio', state: 'TX' }, '78207': { city: 'San Antonio', state: 'TX' }, '78210': { city: 'San Antonio', state: 'TX' },
+  '85001': { city: 'Phoenix', state: 'AZ' }, '85003': { city: 'Phoenix', state: 'AZ' }, '85004': { city: 'Phoenix', state: 'AZ' },
+  '85006': { city: 'Phoenix', state: 'AZ' }, '85007': { city: 'Phoenix', state: 'AZ' }, '85008': { city: 'Phoenix', state: 'AZ' },
+  '19101': { city: 'Philadelphia', state: 'PA' }, '19102': { city: 'Philadelphia', state: 'PA' }, '19103': { city: 'Philadelphia', state: 'PA' },
+  '19104': { city: 'Philadelphia', state: 'PA' }, '19106': { city: 'Philadelphia', state: 'PA' }, '19107': { city: 'Philadelphia', state: 'PA' },
+  '19123': { city: 'Philadelphia', state: 'PA' }, '19125': { city: 'Philadelphia', state: 'PA' }, '19130': { city: 'Philadelphia', state: 'PA' },
+  '19146': { city: 'Philadelphia', state: 'PA' }, '19147': { city: 'Philadelphia', state: 'PA' },
+  '33101': { city: 'Miami', state: 'FL' }, '33109': { city: 'Miami Beach', state: 'FL' }, '33125': { city: 'Miami', state: 'FL' },
+  '33126': { city: 'Miami', state: 'FL' }, '33127': { city: 'Miami', state: 'FL' }, '33128': { city: 'Miami', state: 'FL' },
+  '33129': { city: 'Miami', state: 'FL' }, '33130': { city: 'Miami', state: 'FL' }, '33131': { city: 'Miami', state: 'FL' },
+  '33132': { city: 'Miami', state: 'FL' }, '33133': { city: 'Miami', state: 'FL' }, '33134': { city: 'Miami', state: 'FL' },
+  '33135': { city: 'Miami', state: 'FL' }, '33136': { city: 'Miami', state: 'FL' }, '33137': { city: 'Miami', state: 'FL' },
+  '33138': { city: 'Miami', state: 'FL' }, '33139': { city: 'Miami Beach', state: 'FL' }, '33140': { city: 'Miami Beach', state: 'FL' },
+  '33141': { city: 'Miami Beach', state: 'FL' }, '33142': { city: 'Miami', state: 'FL' }, '33145': { city: 'Miami', state: 'FL' },
+  '32801': { city: 'Orlando', state: 'FL' }, '32803': { city: 'Orlando', state: 'FL' }, '32806': { city: 'Orlando', state: 'FL' },
+  '30301': { city: 'Atlanta', state: 'GA' }, '30303': { city: 'Atlanta', state: 'GA' }, '30305': { city: 'Atlanta', state: 'GA' },
+  '30306': { city: 'Atlanta', state: 'GA' }, '30308': { city: 'Atlanta', state: 'GA' }, '30309': { city: 'Atlanta', state: 'GA' },
+  '30310': { city: 'Atlanta', state: 'GA' }, '30312': { city: 'Atlanta', state: 'GA' }, '30313': { city: 'Atlanta', state: 'GA' },
+  '30314': { city: 'Atlanta', state: 'GA' }, '30315': { city: 'Atlanta', state: 'GA' }, '30316': { city: 'Atlanta', state: 'GA' },
+  '30317': { city: 'Atlanta', state: 'GA' }, '30318': { city: 'Atlanta', state: 'GA' }, '30319': { city: 'Atlanta', state: 'GA' },
+  '30324': { city: 'Atlanta', state: 'GA' }, '30326': { city: 'Atlanta', state: 'GA' }, '30327': { city: 'Atlanta', state: 'GA' },
+  '98101': { city: 'Seattle', state: 'WA' }, '98102': { city: 'Seattle', state: 'WA' }, '98103': { city: 'Seattle', state: 'WA' },
+  '98104': { city: 'Seattle', state: 'WA' }, '98105': { city: 'Seattle', state: 'WA' }, '98106': { city: 'Seattle', state: 'WA' },
+  '98107': { city: 'Seattle', state: 'WA' }, '98108': { city: 'Seattle', state: 'WA' }, '98109': { city: 'Seattle', state: 'WA' },
+  '98112': { city: 'Seattle', state: 'WA' }, '98115': { city: 'Seattle', state: 'WA' }, '98116': { city: 'Seattle', state: 'WA' },
+  '98117': { city: 'Seattle', state: 'WA' }, '98118': { city: 'Seattle', state: 'WA' }, '98119': { city: 'Seattle', state: 'WA' },
+  '98121': { city: 'Seattle', state: 'WA' }, '98122': { city: 'Seattle', state: 'WA' }, '98125': { city: 'Seattle', state: 'WA' },
+  '98126': { city: 'Seattle', state: 'WA' }, '98133': { city: 'Seattle', state: 'WA' }, '98134': { city: 'Seattle', state: 'WA' },
+  '98136': { city: 'Seattle', state: 'WA' }, '98144': { city: 'Seattle', state: 'WA' }, '98199': { city: 'Seattle', state: 'WA' },
+  '97201': { city: 'Portland', state: 'OR' }, '97202': { city: 'Portland', state: 'OR' }, '97203': { city: 'Portland', state: 'OR' },
+  '97204': { city: 'Portland', state: 'OR' }, '97205': { city: 'Portland', state: 'OR' }, '97206': { city: 'Portland', state: 'OR' },
+  '97209': { city: 'Portland', state: 'OR' }, '97210': { city: 'Portland', state: 'OR' }, '97211': { city: 'Portland', state: 'OR' },
+  '97212': { city: 'Portland', state: 'OR' }, '97213': { city: 'Portland', state: 'OR' }, '97214': { city: 'Portland', state: 'OR' },
+  '97215': { city: 'Portland', state: 'OR' }, '97217': { city: 'Portland', state: 'OR' }, '97218': { city: 'Portland', state: 'OR' },
+  '97219': { city: 'Portland', state: 'OR' }, '97220': { city: 'Portland', state: 'OR' }, '97221': { city: 'Portland', state: 'OR' },
+  '80201': { city: 'Denver', state: 'CO' }, '80202': { city: 'Denver', state: 'CO' }, '80203': { city: 'Denver', state: 'CO' },
+  '80204': { city: 'Denver', state: 'CO' }, '80205': { city: 'Denver', state: 'CO' }, '80206': { city: 'Denver', state: 'CO' },
+  '80209': { city: 'Denver', state: 'CO' }, '80210': { city: 'Denver', state: 'CO' }, '80211': { city: 'Denver', state: 'CO' },
+  '80212': { city: 'Denver', state: 'CO' }, '80216': { city: 'Denver', state: 'CO' }, '80218': { city: 'Denver', state: 'CO' },
+  '80219': { city: 'Denver', state: 'CO' }, '80220': { city: 'Denver', state: 'CO' }, '80222': { city: 'Denver', state: 'CO' },
+  '80223': { city: 'Denver', state: 'CO' }, '80224': { city: 'Denver', state: 'CO' }, '80227': { city: 'Denver', state: 'CO' },
+  '89101': { city: 'Las Vegas', state: 'NV' }, '89102': { city: 'Las Vegas', state: 'NV' }, '89103': { city: 'Las Vegas', state: 'NV' },
+  '89104': { city: 'Las Vegas', state: 'NV' }, '89106': { city: 'Las Vegas', state: 'NV' }, '89109': { city: 'Las Vegas', state: 'NV' },
+  '37201': { city: 'Nashville', state: 'TN' }, '37203': { city: 'Nashville', state: 'TN' }, '37204': { city: 'Nashville', state: 'TN' },
+  '37205': { city: 'Nashville', state: 'TN' }, '37206': { city: 'Nashville', state: 'TN' }, '37207': { city: 'Nashville', state: 'TN' },
+  '37208': { city: 'Nashville', state: 'TN' }, '37209': { city: 'Nashville', state: 'TN' }, '37210': { city: 'Nashville', state: 'TN' },
+  '37211': { city: 'Nashville', state: 'TN' }, '37212': { city: 'Nashville', state: 'TN' }, '37213': { city: 'Nashville', state: 'TN' },
+  '37214': { city: 'Nashville', state: 'TN' }, '37215': { city: 'Nashville', state: 'TN' }, '37216': { city: 'Nashville', state: 'TN' },
+  '02101': { city: 'Boston', state: 'MA' }, '02102': { city: 'Boston', state: 'MA' }, '02108': { city: 'Boston', state: 'MA' },
+  '02109': { city: 'Boston', state: 'MA' }, '02110': { city: 'Boston', state: 'MA' }, '02111': { city: 'Boston', state: 'MA' },
+  '02113': { city: 'Boston', state: 'MA' }, '02114': { city: 'Boston', state: 'MA' }, '02115': { city: 'Boston', state: 'MA' },
+  '02116': { city: 'Boston', state: 'MA' }, '02118': { city: 'Boston', state: 'MA' }, '02119': { city: 'Boston', state: 'MA' },
+  '02120': { city: 'Boston', state: 'MA' }, '02121': { city: 'Boston', state: 'MA' }, '02122': { city: 'Boston', state: 'MA' },
+  '02124': { city: 'Boston', state: 'MA' }, '02125': { city: 'Boston', state: 'MA' }, '02126': { city: 'Boston', state: 'MA' },
+  '02127': { city: 'Boston', state: 'MA' }, '02128': { city: 'Boston', state: 'MA' }, '02129': { city: 'Boston', state: 'MA' },
+  '02130': { city: 'Boston', state: 'MA' }, '02131': { city: 'Boston', state: 'MA' }, '02132': { city: 'Boston', state: 'MA' },
+  '02134': { city: 'Boston', state: 'MA' }, '02135': { city: 'Boston', state: 'MA' },
+  '20001': { city: 'Washington', state: 'DC' }, '20002': { city: 'Washington', state: 'DC' }, '20003': { city: 'Washington', state: 'DC' },
+  '20004': { city: 'Washington', state: 'DC' }, '20005': { city: 'Washington', state: 'DC' }, '20006': { city: 'Washington', state: 'DC' },
+  '20007': { city: 'Washington', state: 'DC' }, '20008': { city: 'Washington', state: 'DC' }, '20009': { city: 'Washington', state: 'DC' },
+  '20010': { city: 'Washington', state: 'DC' }, '20011': { city: 'Washington', state: 'DC' }, '20012': { city: 'Washington', state: 'DC' },
+  '20015': { city: 'Washington', state: 'DC' }, '20016': { city: 'Washington', state: 'DC' }, '20017': { city: 'Washington', state: 'DC' },
+  '20018': { city: 'Washington', state: 'DC' }, '20019': { city: 'Washington', state: 'DC' }, '20020': { city: 'Washington', state: 'DC' },
+  '20024': { city: 'Washington', state: 'DC' }, '20032': { city: 'Washington', state: 'DC' }, '20036': { city: 'Washington', state: 'DC' },
+  '20037': { city: 'Washington', state: 'DC' },
+  '48201': { city: 'Detroit', state: 'MI' }, '48202': { city: 'Detroit', state: 'MI' }, '48204': { city: 'Detroit', state: 'MI' },
+  '48205': { city: 'Detroit', state: 'MI' }, '48206': { city: 'Detroit', state: 'MI' }, '48207': { city: 'Detroit', state: 'MI' },
+  '48208': { city: 'Detroit', state: 'MI' }, '48209': { city: 'Detroit', state: 'MI' }, '48210': { city: 'Detroit', state: 'MI' },
+  '55401': { city: 'Minneapolis', state: 'MN' }, '55402': { city: 'Minneapolis', state: 'MN' }, '55403': { city: 'Minneapolis', state: 'MN' },
+  '55404': { city: 'Minneapolis', state: 'MN' }, '55405': { city: 'Minneapolis', state: 'MN' }, '55406': { city: 'Minneapolis', state: 'MN' },
+  '55407': { city: 'Minneapolis', state: 'MN' }, '55408': { city: 'Minneapolis', state: 'MN' }, '55409': { city: 'Minneapolis', state: 'MN' },
+  '63101': { city: 'St. Louis', state: 'MO' }, '63102': { city: 'St. Louis', state: 'MO' }, '63103': { city: 'St. Louis', state: 'MO' },
+  '64101': { city: 'Kansas City', state: 'MO' }, '64102': { city: 'Kansas City', state: 'MO' }, '64105': { city: 'Kansas City', state: 'MO' },
+  '28201': { city: 'Charlotte', state: 'NC' }, '28202': { city: 'Charlotte', state: 'NC' }, '28203': { city: 'Charlotte', state: 'NC' },
+  '28204': { city: 'Charlotte', state: 'NC' }, '28205': { city: 'Charlotte', state: 'NC' }, '28206': { city: 'Charlotte', state: 'NC' },
+  '46201': { city: 'Indianapolis', state: 'IN' }, '46202': { city: 'Indianapolis', state: 'IN' }, '46203': { city: 'Indianapolis', state: 'IN' },
+  '46204': { city: 'Indianapolis', state: 'IN' }, '46205': { city: 'Indianapolis', state: 'IN' },
+  '43201': { city: 'Columbus', state: 'OH' }, '43202': { city: 'Columbus', state: 'OH' }, '43203': { city: 'Columbus', state: 'OH' },
+  '43204': { city: 'Columbus', state: 'OH' }, '43205': { city: 'Columbus', state: 'OH' }, '43206': { city: 'Columbus', state: 'OH' },
+  '53201': { city: 'Milwaukee', state: 'WI' }, '53202': { city: 'Milwaukee', state: 'WI' }, '53203': { city: 'Milwaukee', state: 'WI' },
+  '53204': { city: 'Milwaukee', state: 'WI' }, '53205': { city: 'Milwaukee', state: 'WI' },
+  '21201': { city: 'Baltimore', state: 'MD' }, '21202': { city: 'Baltimore', state: 'MD' }, '21205': { city: 'Baltimore', state: 'MD' },
+  '21206': { city: 'Baltimore', state: 'MD' }, '21207': { city: 'Baltimore', state: 'MD' },
+  '84101': { city: 'Salt Lake City', state: 'UT' }, '84102': { city: 'Salt Lake City', state: 'UT' }, '84103': { city: 'Salt Lake City', state: 'UT' },
+  '96801': { city: 'Honolulu', state: 'HI' }, '96813': { city: 'Honolulu', state: 'HI' }, '96814': { city: 'Honolulu', state: 'HI' },
+  '96815': { city: 'Honolulu', state: 'HI' }, '96816': { city: 'Honolulu', state: 'HI' }, '96817': { city: 'Honolulu', state: 'HI' },
+  '99501': { city: 'Anchorage', state: 'AK' }, '99502': { city: 'Anchorage', state: 'AK' }, '99503': { city: 'Anchorage', state: 'AK' },
+  '87101': { city: 'Albuquerque', state: 'NM' }, '87102': { city: 'Albuquerque', state: 'NM' }, '87104': { city: 'Albuquerque', state: 'NM' },
+  '68101': { city: 'Omaha', state: 'NE' }, '68102': { city: 'Omaha', state: 'NE' }, '68104': { city: 'Omaha', state: 'NE' },
+  '40201': { city: 'Louisville', state: 'KY' }, '40202': { city: 'Louisville', state: 'KY' }, '40203': { city: 'Louisville', state: 'KY' },
+  '73101': { city: 'Oklahoma City', state: 'OK' }, '73102': { city: 'Oklahoma City', state: 'OK' }, '73103': { city: 'Oklahoma City', state: 'OK' },
+  '06101': { city: 'Hartford', state: 'CT' }, '06103': { city: 'Hartford', state: 'CT' },
+  '02901': { city: 'Providence', state: 'RI' }, '02903': { city: 'Providence', state: 'RI' },
+  '29401': { city: 'Charleston', state: 'SC' }, '29403': { city: 'Charleston', state: 'SC' },
+  '23219': { city: 'Richmond', state: 'VA' }, '23220': { city: 'Richmond', state: 'VA' }, '23221': { city: 'Richmond', state: 'VA' },
+  '27601': { city: 'Raleigh', state: 'NC' }, '27603': { city: 'Raleigh', state: 'NC' }, '27604': { city: 'Raleigh', state: 'NC' },
+  '35201': { city: 'Birmingham', state: 'AL' }, '35203': { city: 'Birmingham', state: 'AL' }, '35204': { city: 'Birmingham', state: 'AL' },
+  '38101': { city: 'Memphis', state: 'TN' }, '38103': { city: 'Memphis', state: 'TN' }, '38104': { city: 'Memphis', state: 'TN' },
+  '70112': { city: 'New Orleans', state: 'LA' }, '70113': { city: 'New Orleans', state: 'LA' }, '70114': { city: 'New Orleans', state: 'LA' },
+  '70115': { city: 'New Orleans', state: 'LA' }, '70116': { city: 'New Orleans', state: 'LA' }, '70117': { city: 'New Orleans', state: 'LA' },
+  '15201': { city: 'Pittsburgh', state: 'PA' }, '15206': { city: 'Pittsburgh', state: 'PA' }, '15210': { city: 'Pittsburgh', state: 'PA' },
+  '15213': { city: 'Pittsburgh', state: 'PA' }, '15219': { city: 'Pittsburgh', state: 'PA' }, '15222': { city: 'Pittsburgh', state: 'PA' },
+  '44101': { city: 'Cleveland', state: 'OH' }, '44102': { city: 'Cleveland', state: 'OH' }, '44103': { city: 'Cleveland', state: 'OH' },
+  '45201': { city: 'Cincinnati', state: 'OH' }, '45202': { city: 'Cincinnati', state: 'OH' }, '45203': { city: 'Cincinnati', state: 'OH' },
+};
+
+function lookupZipCode(zip: string): { city: string; state: string } | null {
+  return US_ZIP_CITY_STATE[zip] || null;
+}
+
 function formatAddress(addr: ShipmentAddress): string {
   const parts = [addr.name];
   if (addr.company) parts.push(addr.company);
@@ -794,7 +984,7 @@ export default function ShippingCenter() {
   function getNextStatuses(current: ShipmentStatus, shipment?: Shipment | null): ShipmentStatus[] {
     const transitions: Record<ShipmentStatus, ShipmentStatus[]> = {
       'Draft': ['Ready', 'Cancelled'],
-      'Ready': ['Packed', 'Cancelled'],
+      'Ready': ['Cancelled'],
       'Label Created': ['Packed', 'Cancelled'],
       'Packed': ['Dispatched', 'Cancelled'],
       'Dispatched': [],
@@ -837,13 +1027,9 @@ export default function ShippingCenter() {
   const selectedShip = selectedShipment ? shipments.find(s => s.id === selectedShipment) : null;
 
   function hasCarrierAcceptance(shipment: Shipment): boolean {
-    if (providerEnvironment === 'test') return false;
     const provEvents = shipment.providerTrackingEvents || [];
     const acceptanceStatuses = ['accepted', 'in_transit', 'out_for_delivery', 'delivered', 'available_for_pickup'];
-    return provEvents.some(e => {
-      const isTestEvent = (e as any).source === 'test_provider' || (e.description || '').startsWith('[TEST]');
-      return !isTestEvent && acceptanceStatuses.includes((e.status || '').toLowerCase());
-    });
+    return provEvents.some(e => acceptanceStatuses.includes((e.status || '').toLowerCase()));
   }
 
   function isPostDispatch(status: ShipmentStatus): boolean {
@@ -871,10 +1057,10 @@ export default function ShippingCenter() {
           </button>
           {canManageProviderSettings && (
             <button
-              onClick={() => navigate('/shipping/providers')}
+              onClick={() => navigate('/shipping/settings')}
               className="px-4 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-slate-600 border-b-2 border-transparent hover:border-slate-300 transition-all"
             >
-              <span className="flex items-center gap-1"><span className="material-symbols-outlined text-sm">hub</span>Providers</span>
+              <span className="flex items-center gap-1"><span className="material-symbols-outlined text-sm">settings</span>Settings</span>
             </button>
           )}
         </div>
@@ -968,7 +1154,7 @@ export default function ShippingCenter() {
                         {s.destinationAddress.name}
                       </span>
                       {s.carrier && <span className="flex items-center gap-1"><span className="material-symbols-outlined text-xs">local_shipping</span>{s.carrier}</span>}
-                      {s.trackingNumber && <span className="font-mono text-[10px] text-slate-400">{s.trackingNumber}</span>}
+                      {s.trackingNumber && <span className="font-mono text-[10px] text-slate-400 select-all break-all">{s.trackingNumber}</span>}
                     </div>
                   </div>
                   <div className="text-right shrink-0">
@@ -1063,7 +1249,7 @@ export default function ShippingCenter() {
                         <div className="flex justify-between py-2 border-b border-slate-100">
                           <span className="text-xs text-slate-400 font-bold">Tracking</span>
                           <div className="flex items-center gap-1.5">
-                            <span className="text-xs font-black text-slate-700 font-mono select-all">{selectedShip.trackingNumber}</span>
+                            <span className="text-xs font-black text-slate-700 font-mono select-all break-all">{selectedShip.trackingNumber}</span>
                             <button onClick={() => copyTrackingNumber(selectedShip.trackingNumber!)} title="Copy tracking number"
                               className="p-0.5 hover:bg-slate-100 rounded transition-all">
                               <span className="material-symbols-outlined text-xs text-slate-400 hover:text-slate-600">
@@ -1180,10 +1366,10 @@ export default function ShippingCenter() {
                               </div>
                             </div>
                           ))}
-                          <button onClick={() => navigate('/shipping/providers')}
+                          <button onClick={() => navigate('/shipping/settings')}
                             className="w-full py-2 text-[10px] font-black uppercase tracking-widest text-indigo-500 hover:text-indigo-700 hover:bg-indigo-50 rounded-lg border border-dashed border-indigo-200 transition-all flex items-center justify-center gap-1">
                             <span className="material-symbols-outlined text-xs">settings</span>
-                            Full Provider Settings
+                            Shipping Settings — Providers
                           </button>
                         </div>
                       )}
@@ -1292,11 +1478,16 @@ export default function ShippingCenter() {
                         {canPrintLabel && selectedShip.label?.url && (() => {
                           const actualFormat = getLabelActualFormat(selectedShip.label!);
                           return (
+                          <div className="flex items-center gap-2">
                           <button onClick={() => window.open(selectedShip.label!.url, '_blank')}
-                            className="px-3 py-2 bg-white text-slate-600 border border-slate-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-slate-50 transition-all flex items-center gap-1">
+                            className={`px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1 ${actualFormat === 'pdf' ? 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50' : 'bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100'}`}>
                             <span className="material-symbols-outlined text-sm">{actualFormat === 'pdf' ? 'picture_as_pdf' : 'print'}</span>
                             {actualFormat === 'pdf' ? 'Open PDF Label' : actualFormat === 'png' ? 'Open Label (PNG)' : 'Open Label'}
                           </button>
+                          {actualFormat !== 'pdf' && (
+                            <span className="text-[9px] text-amber-600 font-medium max-w-[140px]" title="PDF format was requested but provider returned a different format. This may occur with test-mode credentials.">Non-PDF format</span>
+                          )}
+                          </div>
                           );
                         })()}
 
@@ -1754,7 +1945,34 @@ export default function ShippingCenter() {
                       <input value={newDest.city} onChange={e => setNewDest({ ...newDest, city: e.target.value })} placeholder="City *" className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
                       <input value={newDest.state} onChange={e => setNewDest({ ...newDest, state: e.target.value })} placeholder="State *" className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
                     </div>
-                    <input value={newDest.postalCode} onChange={e => setNewDest({ ...newDest, postalCode: e.target.value })} placeholder="Postal Code *" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                    <div className="relative">
+                      <input value={newDest.postalCode} onChange={e => {
+                        const val = e.target.value;
+                        setNewDest(prev => {
+                          const updated = { ...prev, postalCode: val };
+                          const zip = val.trim();
+                          if (zip.length === 5) {
+                            const lookup = lookupZipCode(zip);
+                            if (lookup) {
+                              updated.city = lookup.city;
+                              updated.state = lookup.state;
+                            }
+                          }
+                          return updated;
+                        });
+                      }} placeholder="Postal Code * (auto-fills city/state)" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                      {newDest.postalCode.trim().length === 5 && lookupZipCode(newDest.postalCode.trim()) && (
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-emerald-500">
+                          <span className="material-symbols-outlined text-sm">check_circle</span>
+                        </span>
+                      )}
+                    </div>
+                    {newDest.postalCode.trim().length === 5 && !lookupZipCode(newDest.postalCode.trim()) && (
+                      <p className="text-[10px] text-slate-400 -mt-1 flex items-center gap-1">
+                        <span className="material-symbols-outlined text-xs">info</span>
+                        Zip code not in local database. Enter city and state manually. Full address autocomplete available with provider integration.
+                      </p>
+                    )}
                   </div>
                 </div>
 
