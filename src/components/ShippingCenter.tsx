@@ -1551,15 +1551,36 @@ export default function ShippingCenter() {
 
                         {canPrintLabel && selectedShip.label?.url && (() => {
                           const actualFormat = getLabelActualFormat(selectedShip.label!);
+                          const labelUrl = selectedShip.label!.url;
                           return (
                           <div className="flex items-center gap-2">
-                          <button onClick={() => window.open(selectedShip.label!.url, '_blank')}
-                            className={`px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1 ${actualFormat === 'pdf' ? 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50' : 'bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100'}`}>
-                            <span className="material-symbols-outlined text-sm">{actualFormat === 'pdf' ? 'picture_as_pdf' : 'print'}</span>
-                            {actualFormat === 'pdf' ? 'Open PDF Label' : actualFormat === 'png' ? 'Open Label (PNG)' : 'Open Label'}
-                          </button>
-                          {actualFormat !== 'pdf' && (
-                            <span className="text-[9px] text-amber-600 font-medium max-w-[140px]" title="PDF format was requested but provider returned a different format. This may occur with test-mode credentials.">Non-PDF format</span>
+                          {actualFormat === 'pdf' ? (
+                            <>
+                              <button onClick={() => {
+                                const printWin = window.open(labelUrl, '_blank');
+                                if (printWin) { printWin.addEventListener('load', () => { try { printWin.print(); } catch {} }); }
+                              }}
+                                className="px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1 bg-primary text-white shadow-lg shadow-primary/20 hover:bg-primary/90">
+                                <span className="material-symbols-outlined text-sm">print</span>
+                                Print PDF Label
+                              </button>
+                              <button onClick={() => window.open(labelUrl, '_blank')}
+                                className="px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1 bg-white text-slate-600 border border-slate-200 hover:bg-slate-50">
+                                <span className="material-symbols-outlined text-sm">picture_as_pdf</span>
+                                View
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <button onClick={() => window.open(labelUrl, '_blank')}
+                                className="px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1 bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100">
+                                <span className="material-symbols-outlined text-sm">print</span>
+                                Open Label ({actualFormat === 'png' ? 'PNG' : 'Non-PDF'})
+                              </button>
+                              <span className="text-[9px] text-amber-600 font-medium max-w-[160px]" title="PDF format was requested but provider returned a different format. This may occur with test-mode credentials. The label is not PDF.">
+                                Not PDF — provider returned {actualFormat.toUpperCase()}
+                              </span>
+                            </>
                           )}
                           </div>
                           );
@@ -2098,10 +2119,54 @@ export default function ShippingCenter() {
                   <div className="space-y-3">
                     <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
                       Destination Address
-                      <span className="text-[9px] font-bold text-slate-300 normal-case tracking-normal">(type city or zip for suggestions)</span>
+                      <span className="text-[9px] font-bold text-slate-300 normal-case tracking-normal flex items-center gap-0.5"><span className="material-symbols-outlined text-[10px]">search</span>type to search</span>
                     </p>
-                    <input value={newDest.name} onChange={e => setNewDest({ ...newDest, name: e.target.value })} placeholder="Name *" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
-                    <input value={newDest.line1} onChange={e => setNewDest({ ...newDest, line1: e.target.value })} placeholder="Address Line 1 *" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                    <input value={newDest.name} onChange={e => setNewDest({ ...newDest, name: e.target.value })} placeholder="Recipient Name *" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                    <div className="relative">
+                      <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-300"><span className="material-symbols-outlined text-sm">search</span></span>
+                        <input value={newDest.line1} onChange={e => {
+                          const val = e.target.value;
+                          setNewDest({ ...newDest, line1: val });
+                          const words = val.trim().split(/[\s,]+/);
+                          const lastWord = words[words.length - 1];
+                          if (lastWord && lastWord.length >= 2) {
+                            const suggestions = searchAddressSuggestions(lastWord, US_ZIP_CITY_STATE);
+                            setDestSuggestions(suggestions);
+                            setShowDestSuggestions(suggestions.length > 0);
+                          } else {
+                            setShowDestSuggestions(false);
+                          }
+                        }}
+                        onFocus={() => { if (destSuggestions.length > 0) setShowDestSuggestions(true); }}
+                        onBlur={() => setTimeout(() => setShowDestSuggestions(false), 200)}
+                        placeholder="Start typing address, city, or zip..." className="w-full pl-9 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                      </div>
+                      {showDestSuggestions && destSuggestions.length > 0 && (
+                        <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl z-30 max-h-56 overflow-y-auto">
+                          {destSuggestions.map((s, i) => (
+                            <button key={`${s.city}-${s.state}-${i}`} type="button"
+                              onMouseDown={e => {
+                                e.preventDefault();
+                                setNewDest(prev => ({ ...prev, line1: prev.line1, city: s.city, state: s.state, postalCode: s.postalCode }));
+                                setShowDestSuggestions(false);
+                              }}
+                              className="w-full text-left px-3 py-2.5 text-xs hover:bg-primary/5 transition-all border-b border-slate-50 last:border-0 flex items-center gap-3">
+                              <span className="material-symbols-outlined text-slate-300 text-sm shrink-0">location_on</span>
+                              <div className="flex-1 min-w-0">
+                                <span className="font-bold text-slate-700">{s.city}, {s.state}</span>
+                                <span className="text-slate-400 ml-1.5">{s.postalCode}</span>
+                              </div>
+                              <span className="text-[9px] text-slate-300 uppercase tracking-wider shrink-0">select</span>
+                            </button>
+                          ))}
+                          <div className="px-3 py-1.5 bg-slate-50 text-[9px] text-slate-400 flex items-center gap-1 border-t border-slate-100">
+                            <span className="material-symbols-outlined text-[10px]">database</span>
+                            City/state from local database — street-level suggestions require provider integration
+                          </div>
+                        </div>
+                      )}
+                    </div>
                     <div className="grid grid-cols-2 gap-2">
                       <div className="relative">
                         <input value={newDest.city} onChange={e => {
@@ -2112,13 +2177,19 @@ export default function ShippingCenter() {
                           setDestSuggestions(suggestions);
                           setShowDestSuggestions(suggestions.length > 0);
                         }}
-                        onFocus={() => { if (destSuggestions.length > 0) setShowDestSuggestions(true); }}
+                        onFocus={() => {
+                          if (newDest.city.length >= 2) {
+                            const suggestions = searchAddressSuggestions(newDest.city, US_ZIP_CITY_STATE);
+                            setDestSuggestions(suggestions);
+                            setShowDestSuggestions(suggestions.length > 0);
+                          }
+                        }}
                         onBlur={() => setTimeout(() => setShowDestSuggestions(false), 200)}
-                        placeholder="City * (type to search)" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                        placeholder="City *" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
                         {showDestSuggestions && destSuggestions.length > 0 && (
                           <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl z-30 max-h-48 overflow-y-auto">
                             {destSuggestions.map((s, i) => (
-                              <button key={`${s.city}-${s.state}-${i}`} type="button"
+                              <button key={`city-${s.city}-${s.state}-${i}`} type="button"
                                 onMouseDown={e => {
                                   e.preventDefault();
                                   setNewDest(prev => ({ ...prev, city: s.city, state: s.state, postalCode: s.postalCode }));
@@ -2130,10 +2201,6 @@ export default function ShippingCenter() {
                                 <span className="text-slate-400 font-mono text-[10px]">{s.postalCode}</span>
                               </button>
                             ))}
-                            <div className="px-3 py-1.5 bg-slate-50 text-[9px] text-slate-400 flex items-center gap-1 border-t border-slate-100">
-                              <span className="material-symbols-outlined text-[10px]">database</span>
-                              Local database — {destSuggestions[0].source === 'local' ? 'street-level autocomplete available with provider integration' : 'provider-powered'}
-                            </div>
                           </div>
                         )}
                       </div>
@@ -2152,16 +2219,9 @@ export default function ShippingCenter() {
                               updated.state = lookup.state;
                             }
                           }
-                          if (/^\d{1,5}$/.test(val.trim()) && val.trim().length >= 2) {
-                            const suggestions = searchAddressSuggestions(val.trim(), US_ZIP_CITY_STATE);
-                            setDestSuggestions(suggestions);
-                            setShowDestSuggestions(suggestions.length > 0);
-                          } else if (val.trim().length < 2) {
-                            setShowDestSuggestions(false);
-                          }
                           return updated;
                         });
-                      }} placeholder="Postal Code * (auto-fills city/state)" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                      }} placeholder="Postal Code *" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
                       {newDest.postalCode.trim().length === 5 && lookupZipCode(newDest.postalCode.trim()) && (
                         <span className="absolute right-3 top-1/2 -translate-y-1/2 text-emerald-500">
                           <span className="material-symbols-outlined text-sm">check_circle</span>
@@ -2171,7 +2231,7 @@ export default function ShippingCenter() {
                     {newDest.postalCode.trim().length === 5 && !lookupZipCode(newDest.postalCode.trim()) && (
                       <p className="text-[10px] text-slate-400 -mt-1 flex items-center gap-1">
                         <span className="material-symbols-outlined text-xs">info</span>
-                        Zip not in local database. Enter manually. Full address autocomplete available with provider integration.
+                        Zip not in local database. Enter city/state manually.
                       </p>
                     )}
                   </div>
