@@ -774,6 +774,8 @@ export interface LabelArtifact {
   id: string;
   format: 'pdf' | 'png' | 'zpl' | 'epl';
   url: string;
+  pdfUrl?: string;
+  originalFormat?: string;
   trackingNumber: string;
   carrier: string;
   service: string;
@@ -857,6 +859,7 @@ export interface Shipment {
   deliveredAt?: string;
   addressValidation?: AddressValidationResult;
   selectedRate?: ShippingRate;
+  shipmentMode?: 'provider' | 'manual';
   label?: LabelArtifact;
   providerShipmentId?: string;
   providerTrackingId?: string;

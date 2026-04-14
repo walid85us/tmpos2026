@@ -1,0 +1,194 @@
+Shipping Center Final Two-Blocker Pass — Real PDF Label + True Manual Shipment Mode
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a narrow final correction pass.
+Only fix the two remaining blockers below.
+Do not broaden scope.
+Do not redesign the app.
+Do not change unrelated workstreams.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Firebase/Firestore data architect
+- Enterprise shipping systems architect
+- Senior shipping and fulfillment expert with 20+ years of experience in parcel shipping, carrier integrations, dispatch control, label workflows, tracking-event operations, and reverse logistics
+- Root-cause debugging specialist
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- RBAC/sub-permissions
+- lifecycle gating
+- platform/store hierarchy
+- System Owner Plans & Features matrix
+- Store Permissions Matrix
+- secure server-side provider call architecture
+- Shipping Center as the sole provider-management home
+- mandatory provider address validation before Get Rates
+- Ready disabled until rate selection
+- Rejected by Carrier / Returned with reasons
+- + Add Event disabled after Dispatched
+- existing shipping core flow
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — ONLY TWO BLOCKERS LEFT
+==================================================
+
+These are the only remaining blockers and must be fixed literally:
+
+1) Label action is still not PDF-only and truthful
+- QA still sees:
+  “Not PDF — provider returned PNG”
+- This is not acceptable as the final app behavior
+- The requirement is literal:
+  the primary operational label action must result in a real PDF artifact for the app workflow
+- The user must be able to open/print a real PDF from the primary label action
+
+2) Manual Carrier/Service mode split is still not implemented
+- If Carrier and Service Level are selected manually, then Provider & Operations must be disabled
+- The shipment must continue in full manual mode exactly as it did before provider integration
+- The store should continue updating the shipment manually in that case
+- Provider validation/rates/label/tracking sync must not remain active for that shipment if it is manual
+
+==================================================
+NON-NEGOTIABLE IMPLEMENTATION REQUIREMENTS
+==================================================
+
+1. Real PDF-only primary label artifact
+Required:
+- The main operational label action must end in a real PDF artifact only
+- Do not use PNG as the primary operational label-open/print action
+- Do not present PNG as the final app label format
+- Fix the actual provider artifact handling pipeline
+
+Acceptable implementation options:
+A) Request/store/select the real provider PDF artifact if available
+B) If the provider returns only PNG for a valid case, generate a real print-ready PDF artifact from that provider label on the server/app side and use that generated PDF as the app’s primary operational label artifact
+
+Important:
+- The final user-facing primary action must open a real PDF
+- If conversion/wrapping is used, keep implementation honest in metadata and documentation
+- Preserve print-readiness and thermal-label operational use as much as possible
+
+Acceptance:
+- Clicking the main label action opens a real PDF artifact
+- QA no longer sees the app blocked by “provider returned PNG” as the final result
+
+2. True manual shipment mode
+Required:
+- If the user selects Carrier and Service Level manually, and there is no provider-selected rate driving the shipment, the shipment must enter Manual Mode
+
+Manual Mode rules:
+- Provider & Operations must be disabled or clearly inactive
+- Provider-backed actions must not be usable:
+  - address validation
+  - get rates
+  - purchase label
+  - sync tracking
+- The shipment must continue in manual handling flow like before provider integration
+- Store-side manual shipment updating remains available according to the legacy manual workflow rules
+
+Provider Mode rules:
+- If a provider-returned rate is selected, provider mode remains active
+- Provider & Operations remains active
+- Provider-backed actions remain available according to prerequisites and lifecycle rules
+
+Switching rules:
+- If provider-selected rate is cleared and the user switches to manual carrier/service, shipment must transition coherently into Manual Mode
+- Do not leave confusing mixed states
+- Do not corrupt shipment data
+- Make it clear in the UI which mode the shipment is in
+
+Acceptance:
+- QA can manually select Carrier and Service Level
+- Provider & Operations becomes disabled or clearly inactive
+- Shipment continues in manual mode
+- QA can still verify provider mode remains active when a provider-selected rate is used
+
+==================================================
+FULFILLMENT RULES TO PRESERVE
+==================================================
+
+Do not weaken these rules:
+- Shipping Center remains the sole provider-management home
+- Address validation remains mandatory before Get Rates in provider mode
+- Ready remains disabled until rate selection in provider mode
+- Packed becomes available only after successful label purchase in provider mode
+- After dispatch and provider/carrier progression, lifecycle remains provider-driven in provider mode
+- Cancellation remains blocked after carrier progression
+- Existing shipping core flow remains intact
+- Rejected by Carrier / Returned remain controlled outcomes
+
+==================================================
+IMPORTANT IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden scope into Phase 2 or Phase 3 shipping work
+- Do not touch unrelated workstreams
+- Do not break preview mode safety
+- Do not break permissions or feature gating
+- Do not break shipping core flow
+- Do not break provider configuration
+- Do not fake provider success
+- Do not fake provider event sync
+- Keep the design baseline consistent
+- Do not create ambiguous mixed manual/provider shipment states
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact execution order:
+
+1) Fix the label artifact pipeline so the primary label action results in a real PDF artifact
+2) Implement explicit shipment mode-splitting:
+   - Provider Mode
+   - Manual Mode
+3) Ensure manual carrier/service selection disables Provider & Operations and returns the shipment to manual handling flow
+4) Re-test all affected shipping flows and lifecycle behaviors
+5) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- PDF-only primary label behavior and how it is achieved
+- explicit shipment mode-splitting:
+  - provider-managed mode
+  - manual mode
+- rule that manual carrier/service disables Provider & Operations
+- which fields/actions are authoritative in each mode
+- future fulfillment recommendations not implemented now
+
+==================================================
+MANDATORY OUTPUT PROOF
+==================================================
+
+Do not give a generic completion summary.
+Do not say this task is complete unless both blockers are visibly fixed in the actual product UI and behavior.
+
+OUTPUT FORMAT REQUIRED
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. PDF-Only Primary Label Fix
+3. Manual Mode vs Provider Mode Split Fix
+4. Files Changed
+5. Documentation Updated
+6. Non-Regression Notes

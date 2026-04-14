@@ -112,7 +112,7 @@ app.post('/api/shipping/validate-address', async (req, res) => {
   const { providerId, address } = req.body;
   const provider = resolveProvider(providerId);
   if (!provider) {
-    res.json({ success: false, error: { code: 'NO_PROVIDER', message: 'No active shipping provider. Configure a provider in Settings.' } });
+    res.json({ success: false, error: { code: 'NO_PROVIDER', message: 'No active shipping provider. Configure a provider in Shipping Center.' } });
     return;
   }
   const result = await provider.validateAddress(address);
@@ -123,7 +123,7 @@ app.post('/api/shipping/rates', async (req, res) => {
   const { providerId, originAddress, destinationAddress, packages } = req.body;
   const provider = resolveProvider(providerId);
   if (!provider) {
-    res.json({ success: false, error: { code: 'NO_PROVIDER', message: 'No active shipping provider. Configure a provider in Settings.' } });
+    res.json({ success: false, error: { code: 'NO_PROVIDER', message: 'No active shipping provider. Configure a provider in Shipping Center.' } });
     return;
   }
   const result = await provider.getRates({ originAddress, destinationAddress, packages });
@@ -134,7 +134,7 @@ app.post('/api/shipping/purchase-label', async (req, res) => {
   const { providerId, originAddress, destinationAddress, packages, selectedRateId, carrier, service, shipmentRef } = req.body;
   const provider = resolveProvider(providerId);
   if (!provider) {
-    res.json({ success: false, error: { code: 'NO_PROVIDER', message: 'No active shipping provider. Configure a provider in Settings.' } });
+    res.json({ success: false, error: { code: 'NO_PROVIDER', message: 'No active shipping provider. Configure a provider in Shipping Center.' } });
     return;
   }
   const result = await provider.purchaseLabel({ originAddress, destinationAddress, packages, selectedRateId, carrier, service, shipmentRef });
@@ -145,7 +145,7 @@ app.post('/api/shipping/tracking', async (req, res) => {
   const { providerId, trackingNumber, carrier, providerShipmentId } = req.body;
   const provider = resolveProvider(providerId);
   if (!provider) {
-    res.json({ success: false, error: { code: 'NO_PROVIDER', message: 'No active shipping provider. Configure a provider in Settings.' } });
+    res.json({ success: false, error: { code: 'NO_PROVIDER', message: 'No active shipping provider. Configure a provider in Shipping Center.' } });
     return;
   }
   const result = await provider.getTracking({ trackingNumber, carrier, providerShipmentId });

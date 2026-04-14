@@ -9,6 +9,73 @@ import type { ProviderError } from '../shipping/types';
 import PageShell from './PageShell';
 import ShippingProvidersPage from './ShippingProvidersPage';
 
+async function convertImageToPdfBlobUrl(imageUrl: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) { reject(new Error('Canvas not supported')); return; }
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0);
+        const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.95);
+        const jpegBase64 = jpegDataUrl.split(',')[1];
+        const jpegBytes = Uint8Array.from(atob(jpegBase64), c => c.charCodeAt(0));
+
+        const w = img.naturalWidth;
+        const h = img.naturalHeight;
+        const enc = new TextEncoder();
+        const parts: Uint8Array[] = [];
+
+        const writeStr = (s: string) => { parts.push(enc.encode(s)); };
+        const offsets: number[] = [0, 0, 0, 0, 0, 0];
+        let pos = 0;
+        const calcPos = () => { pos = parts.reduce((a, p) => a + p.length, 0); };
+
+        writeStr('%PDF-1.4\n');
+        calcPos(); offsets[1] = pos;
+        writeStr('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n');
+        calcPos(); offsets[2] = pos;
+        writeStr('2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n');
+        calcPos(); offsets[3] = pos;
+        writeStr(`3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${w} ${h}] /Contents 4 0 R /Resources << /XObject << /Img 5 0 R >> >> >>\nendobj\n`);
+        calcPos(); offsets[4] = pos;
+        const contentStream = `q\n${w} 0 0 ${h} 0 0 cm\n/Img Do\nQ\n`;
+        writeStr(`4 0 obj\n<< /Length ${contentStream.length} >>\nstream\n${contentStream}endstream\nendobj\n`);
+        calcPos(); offsets[5] = pos;
+        writeStr(`5 0 obj\n<< /Type /XObject /Subtype /Image /Width ${w} /Height ${h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpegBytes.length} >>\nstream\n`);
+        parts.push(jpegBytes);
+        writeStr('\nendstream\nendobj\n');
+
+        calcPos();
+        const xrefPos = pos;
+        writeStr(`xref\n0 6\n0000000000 65535 f \n`);
+        for (let i = 1; i <= 5; i++) {
+          writeStr(`${offsets[i].toString().padStart(10, '0')} 00000 n \n`);
+        }
+        writeStr(`trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xrefPos}\n%%EOF\n`);
+
+        const totalLen = parts.reduce((a, p) => a + p.length, 0);
+        const pdfBuffer = new Uint8Array(totalLen);
+        let offset = 0;
+        for (const p of parts) { pdfBuffer.set(p, offset); offset += p.length; }
+
+        const blob = new Blob([pdfBuffer], { type: 'application/pdf' });
+        resolve(URL.createObjectURL(blob));
+      } catch (e) {
+        reject(e);
+      }
+    };
+    img.onerror = () => reject(new Error('Failed to load label image'));
+    img.src = imageUrl;
+  });
+}
+
 export interface ShipmentPrefill {
   sourceType: ShipmentSourceType;
   sourceId: string;
@@ -652,6 +719,10 @@ export default function ShippingCenter() {
     if (!hasLabel && !hasRate) {
       updates.carrier = newCarrier || undefined;
       updates.serviceLevel = newService || undefined;
+      if (newCarrier && newService) {
+        updates.shipmentMode = 'manual';
+        updates.selectedRate = undefined;
+      }
     }
     if (!hasLabel) {
       updates.trackingNumber = newTracking || undefined;
@@ -819,6 +890,7 @@ export default function ShippingCenter() {
       serviceLevel: rate.serviceName,
       shippingCost: rate.rate,
       estimatedDelivery: rate.estimatedDelivery,
+      shipmentMode: 'provider',
       updatedAt: new Date().toISOString(),
     });
     setShowRatesPanel(false);
@@ -846,21 +918,35 @@ export default function ShippingCenter() {
       shipment.shipmentNumber,
     );
     if (result.success && result.label) {
+      const labelArtifact = { ...result.label };
+      const actualFmt = getLabelActualFormat(labelArtifact);
+      if (actualFmt !== 'pdf') {
+        labelArtifact.originalFormat = actualFmt;
+        try {
+          const pdfBlobUrl = await convertImageToPdfBlobUrl(labelArtifact.url);
+          labelArtifact.pdfUrl = pdfBlobUrl;
+          labelArtifact.format = 'pdf';
+        } catch (convErr) {
+          setProviderError({ code: 'PDF_CONVERSION_FAILED', message: `Label purchased but PDF conversion failed. Provider returned ${actualFmt.toUpperCase()}. Please retry or contact support.`, retryable: true });
+          setProviderLoading(null);
+          return;
+        }
+      }
       const now = new Date().toISOString();
       const newEvent: ShipmentEvent = {
         id: `evt-${Date.now()}`,
         timestamp: now,
         status: 'Label Created',
-        description: `Label purchased — ${result.label.carrier} ${result.label.service}, tracking: ${result.label.trackingNumber}`,
+        description: `Label purchased — ${labelArtifact.carrier} ${labelArtifact.service}, tracking: ${labelArtifact.trackingNumber}`,
         performedBy: 'Current User',
       };
       updateShipment(shipmentId, {
-        label: result.label,
-        labelUrl: result.label.url,
-        trackingNumber: result.label.trackingNumber,
-        carrier: result.label.carrier,
-        serviceLevel: result.label.service,
-        shippingCost: result.label.cost,
+        label: labelArtifact,
+        labelUrl: labelArtifact.pdfUrl || labelArtifact.url,
+        trackingNumber: labelArtifact.trackingNumber,
+        carrier: labelArtifact.carrier,
+        serviceLevel: labelArtifact.service,
+        shippingCost: labelArtifact.cost,
         providerShipmentId: result.providerShipmentId,
         status: 'Label Created',
         events: [...shipment.events, newEvent],
@@ -1020,15 +1106,27 @@ export default function ShippingCenter() {
     else setEditPackages(prev => prev.filter(p => p.id !== pkgId));
   }
 
+  function getShipmentMode(shipment: Shipment | null | undefined): 'provider' | 'manual' {
+    if (!shipment) return 'provider';
+    if (shipment.shipmentMode) return shipment.shipmentMode;
+    if (shipment.selectedRate) return 'provider';
+    if (shipment.carrier && shipment.serviceLevel && !shipment.selectedRate) return 'manual';
+    return 'provider';
+  }
+
   function hasRateSelected(shipment: Shipment | null | undefined): boolean {
     if (!shipment) return false;
+    if (getShipmentMode(shipment) === 'manual') return !!(shipment.carrier && shipment.serviceLevel);
     return !!shipment.selectedRate;
   }
 
   function getNextStatuses(current: ShipmentStatus, shipment?: Shipment | null): ShipmentStatus[] {
+    const mode = getShipmentMode(shipment);
+    const isManual = mode === 'manual';
+
     const transitions: Record<ShipmentStatus, ShipmentStatus[]> = {
       'Draft': ['Ready', 'Cancelled'],
-      'Ready': ['Cancelled'],
+      'Ready': isManual ? ['Packed', 'Dispatched', 'Cancelled'] : ['Cancelled'],
       'Label Created': ['Packed', 'Cancelled'],
       'Packed': ['Dispatched', 'Cancelled'],
       'Dispatched': ['Rejected'],
@@ -1093,7 +1191,7 @@ export default function ShippingCenter() {
     if (urlLower.includes('.png') || urlLower.includes('/png') || urlLower.includes('format=png')) return 'png';
     if (label.format === 'pdf') return 'pdf';
     if (label.format === 'png') return 'png';
-    return label.format as any || 'other';
+    return (label.format || 'other') as 'pdf' | 'png' | 'other';
   }
 
   return (
@@ -1336,11 +1434,20 @@ export default function ShippingCenter() {
                       </div>
                     )}
 
-                    <div className="bg-indigo-50/50 rounded-2xl p-5 border border-indigo-100 space-y-4">
+                    {(() => {
+                      const shipMode = getShipmentMode(selectedShip);
+                      const isManualMode = shipMode === 'manual';
+                      return (
+                    <div className={`rounded-2xl p-5 border space-y-4 ${isManualMode ? 'bg-slate-50/50 border-slate-200' : 'bg-indigo-50/50 border-indigo-100'}`}>
                       <div className="flex items-center justify-between">
-                        <p className="text-[10px] font-black text-indigo-500 uppercase tracking-widest flex items-center gap-1"><span className="material-symbols-outlined text-xs">hub</span>Provider & Operations</p>
+                        <p className={`text-[10px] font-black uppercase tracking-widest flex items-center gap-1 ${isManualMode ? 'text-slate-500' : 'text-indigo-500'}`}>
+                          <span className="material-symbols-outlined text-xs">{isManualMode ? 'edit_note' : 'hub'}</span>
+                          {isManualMode ? 'Manual Mode' : 'Provider & Operations'}
+                        </p>
                         <div className="flex items-center gap-2">
-                          {activeProviderId ? (
+                          {isManualMode ? (
+                            <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest bg-slate-200 text-slate-600 rounded-md">Manual</span>
+                          ) : activeProviderId ? (
                             <>
                               <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest bg-indigo-100 text-indigo-600 rounded-md">{activeProviderId}</span>
                               <span className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md ${providerEnvironment === 'test' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>
@@ -1350,7 +1457,7 @@ export default function ShippingCenter() {
                           ) : (
                             <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest bg-slate-100 text-slate-400 rounded-md">No Provider</span>
                           )}
-                          {canManageProviderSettings && (
+                          {!isManualMode && canManageProviderSettings && (
                           <button
                             onClick={() => { setShowProviderSettings(!showProviderSettings); if (!showProviderSettings) loadProviderStatuses(); }}
                             className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md transition-all flex items-center gap-0.5 ${showProviderSettings ? 'bg-indigo-100 text-indigo-700' : 'text-indigo-500 hover:text-indigo-700 hover:bg-indigo-50'}`}
@@ -1379,7 +1486,31 @@ export default function ShippingCenter() {
                         </div>
                       )}
 
-                      {providerEnvironment === 'test' && activeProviderId && (
+                      {isManualMode && (
+                        <div className="px-3 py-2 bg-slate-100 border border-slate-200 rounded-lg flex items-start gap-2">
+                          <span className="material-symbols-outlined text-slate-500 text-sm mt-0.5">edit_note</span>
+                          <div>
+                            <p className="text-xs text-slate-700 font-medium">Manual Shipment Mode</p>
+                            <p className="text-[10px] text-slate-500 mt-0.5">Carrier and service level were set manually. Provider actions are disabled.</p>
+                            {!isWriteBlocked && isEditable(selectedShip.status) && !selectedShip.label && activeProviderId && (
+                              <button onClick={() => {
+                                updateShipment(selectedShip.id, {
+                                  shipmentMode: 'provider',
+                                  carrier: undefined,
+                                  serviceLevel: undefined,
+                                  updatedAt: new Date().toISOString(),
+                                });
+                                clearProviderFeedback();
+                              }}
+                                className="text-[10px] text-indigo-600 font-bold underline decoration-dotted mt-1 hover:text-indigo-800 transition-colors">
+                                Switch to Provider Mode
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {!isManualMode && providerEnvironment === 'test' && activeProviderId && (
                         <div className="px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2">
                           <span className="material-symbols-outlined text-amber-500 text-sm mt-0.5">science</span>
                           <div>
@@ -1389,7 +1520,7 @@ export default function ShippingCenter() {
                         </div>
                       )}
 
-                      {showProviderSettings && canManageProviderSettings && (
+                      {!isManualMode && showProviderSettings && canManageProviderSettings && (
                         <div className="bg-white rounded-xl border border-indigo-200 p-4 space-y-3">
                           <div className="flex items-center justify-between">
                             <p className="text-[10px] font-black text-indigo-600 uppercase tracking-widest">Provider Configuration</p>
@@ -1448,17 +1579,33 @@ export default function ShippingCenter() {
                           <span className="font-black text-slate-700">{selectedShip.selectedRate.carrier} {selectedShip.selectedRate.serviceName}</span>
                           <span className="font-black text-primary">${selectedShip.selectedRate.rate.toFixed(2)}</span>
                           {selectedShip.selectedRate.estimatedDays && <span className="text-slate-400">({selectedShip.selectedRate.estimatedDays}d)</span>}
+                          {!isWriteBlocked && isEditable(selectedShip.status) && !selectedShip.label && (
+                            <button onClick={() => {
+                              updateShipment(selectedShip.id, {
+                                selectedRate: undefined,
+                                shipmentMode: 'manual',
+                                updatedAt: new Date().toISOString(),
+                              });
+                              clearProviderFeedback();
+                            }}
+                              className="text-[9px] text-slate-400 hover:text-red-500 font-bold underline decoration-dotted transition-colors"
+                              title="Clear provider rate and switch to manual carrier/service handling">
+                              Switch to Manual
+                            </button>
+                          )}
                         </div>
                       )}
 
                       {selectedShip.label && (() => {
-                        const fmt = getLabelActualFormat(selectedShip.label!);
+                        const lbl = selectedShip.label!;
+                        const displayFmt = lbl.pdfUrl ? 'pdf' : getLabelActualFormat(lbl);
                         return (
                         <div className="flex items-center gap-2 text-xs flex-wrap">
                           <span className="text-slate-400 font-bold">Label</span>
                           <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-md text-[10px] font-black uppercase tracking-widest">Purchased</span>
-                          <span className="text-slate-500 font-mono text-[10px]">{selectedShip.label.trackingNumber}</span>
-                          <span className={`px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-widest ${fmt === 'pdf' ? 'bg-red-100 text-red-600' : 'bg-slate-100 text-slate-500'}`}>{fmt.toUpperCase()}</span>
+                          <span className="text-slate-500 font-mono text-[10px]">{lbl.trackingNumber}</span>
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-widest bg-red-100 text-red-600">{displayFmt.toUpperCase()}</span>
+                          {lbl.originalFormat && <span className="text-[9px] text-slate-400">from {lbl.originalFormat.toUpperCase()}</span>}
                         </div>
                         );
                       })()}
@@ -1478,7 +1625,7 @@ export default function ShippingCenter() {
                       )}
 
                       <div className="flex gap-2 flex-wrap pt-1">
-                        {canValidateAddress && !isWriteBlocked && isEditable(selectedShip.status) && (
+                        {!isManualMode && canValidateAddress && !isWriteBlocked && isEditable(selectedShip.status) && (
                           <button onClick={() => handleValidateAddress(selectedShip.id)} disabled={providerLoading !== null}
                             className="px-3 py-2 bg-white text-indigo-600 border border-indigo-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50 transition-all disabled:opacity-40 flex items-center gap-1">
                             <span className="material-symbols-outlined text-sm">{providerLoading === 'validate' ? 'hourglass_top' : 'verified'}</span>
@@ -1486,7 +1633,7 @@ export default function ShippingCenter() {
                           </button>
                         )}
 
-                        {canFetchRates && !isWriteBlocked && ['Draft', 'Ready'].includes(selectedShip.status) && (() => {
+                        {!isManualMode && canFetchRates && !isWriteBlocked && ['Draft', 'Ready'].includes(selectedShip.status) && (() => {
                           const ratePrereqs = getRatePrerequisites(selectedShip);
                           const disabled = providerLoading !== null || ratePrereqs.length > 0;
                           return (
@@ -1508,7 +1655,7 @@ export default function ShippingCenter() {
                           );
                         })()}
 
-                        {canPurchaseLabel && !isWriteBlocked && selectedShip.status === 'Ready' && !selectedShip.label && (() => {
+                        {!isManualMode && canPurchaseLabel && !isWriteBlocked && selectedShip.status === 'Ready' && !selectedShip.label && (() => {
                           const labelPrereqs = getLabelPrerequisites(selectedShip);
                           const disabled = providerLoading !== null || labelPrereqs.length > 0;
                           return (
@@ -1531,43 +1678,34 @@ export default function ShippingCenter() {
                         })()}
 
                         {canPrintLabel && selectedShip.label?.url && (() => {
-                          const actualFormat = getLabelActualFormat(selectedShip.label!);
-                          const labelUrl = selectedShip.label!.url;
+                          const label = selectedShip.label!;
+                          const primaryUrl = label.pdfUrl || label.url;
+                          const hasPdf = !!label.pdfUrl || getLabelActualFormat(label) === 'pdf';
                           return (
                           <div className="flex items-center gap-2">
-                          {actualFormat === 'pdf' ? (
-                            <>
-                              <button onClick={() => {
-                                const printWin = window.open(labelUrl, '_blank');
-                                if (printWin) { printWin.addEventListener('load', () => { try { printWin.print(); } catch {} }); }
-                              }}
-                                className="px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1 bg-primary text-white shadow-lg shadow-primary/20 hover:bg-primary/90">
-                                <span className="material-symbols-outlined text-sm">print</span>
-                                Print PDF Label
-                              </button>
-                              <button onClick={() => window.open(labelUrl, '_blank')}
-                                className="px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1 bg-white text-slate-600 border border-slate-200 hover:bg-slate-50">
-                                <span className="material-symbols-outlined text-sm">picture_as_pdf</span>
-                                View
-                              </button>
-                            </>
-                          ) : (
-                            <>
-                              <button onClick={() => window.open(labelUrl, '_blank')}
-                                className="px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1 bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100">
-                                <span className="material-symbols-outlined text-sm">print</span>
-                                Open Label ({actualFormat === 'png' ? 'PNG' : 'Non-PDF'})
-                              </button>
-                              <span className="text-[9px] text-amber-600 font-medium max-w-[160px]" title="PDF format was requested but provider returned a different format. This may occur with test-mode credentials. The label is not PDF.">
-                                Not PDF — provider returned {actualFormat.toUpperCase()}
+                            <button onClick={() => {
+                              const printWin = window.open(primaryUrl, '_blank');
+                              if (printWin && hasPdf) { printWin.addEventListener('load', () => { try { printWin.print(); } catch {} }); }
+                            }}
+                              className="px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1 bg-primary text-white shadow-lg shadow-primary/20 hover:bg-primary/90">
+                              <span className="material-symbols-outlined text-sm">print</span>
+                              Print PDF Label
+                            </button>
+                            <button onClick={() => window.open(primaryUrl, '_blank')}
+                              className="px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1 bg-white text-slate-600 border border-slate-200 hover:bg-slate-50">
+                              <span className="material-symbols-outlined text-sm">picture_as_pdf</span>
+                              View
+                            </button>
+                            {label.originalFormat && (
+                              <span className="text-[9px] text-slate-400 font-medium" title={`Provider returned ${label.originalFormat.toUpperCase()} — converted to PDF for print-ready workflow`}>
+                                Converted from {label.originalFormat.toUpperCase()}
                               </span>
-                            </>
-                          )}
+                            )}
                           </div>
                           );
                         })()}
 
-                        {canSyncTracking && !isWriteBlocked && selectedShip.trackingNumber && !['Draft', 'Ready', 'Delivered', 'Cancelled'].includes(selectedShip.status) && (
+                        {!isManualMode && canSyncTracking && !isWriteBlocked && selectedShip.trackingNumber && !['Draft', 'Ready', 'Delivered', 'Cancelled'].includes(selectedShip.status) && (
                           <button onClick={() => handleSyncTracking(selectedShip.id)} disabled={providerLoading !== null}
                             className="px-3 py-2 bg-white text-sky-600 border border-sky-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-sky-50 transition-all disabled:opacity-40 flex items-center gap-1">
                             <span className="material-symbols-outlined text-sm">{providerLoading === 'tracking' ? 'hourglass_top' : 'sync'}</span>
@@ -1576,6 +1714,7 @@ export default function ShippingCenter() {
                         )}
                       </div>
                     </div>
+                      ); })()}
 
                     {showRatesPanel && availableRates.length > 0 && (
                       <div className="bg-sky-50/50 rounded-2xl p-5 border border-sky-100 space-y-3">
@@ -1636,7 +1775,11 @@ export default function ShippingCenter() {
                     {selectedShip.status === 'Draft' && !hasRateSelected(selectedShip) && (
                       <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-xl">
                         <span className="material-symbols-outlined text-amber-500 text-sm">info</span>
-                        <span className="text-[10px] font-bold text-amber-700">Select a shipping rate before marking as Ready</span>
+                        <span className="text-[10px] font-bold text-amber-700">
+                          {getShipmentMode(selectedShip) === 'manual'
+                            ? 'Set carrier and service level (via Edit) before marking as Ready'
+                            : 'Select a shipping rate or set carrier/service manually before marking as Ready'}
+                        </span>
                       </div>
                     )}
                     {getNextStatuses(selectedShip.status, selectedShip).length > 0 && (
@@ -1700,7 +1843,7 @@ export default function ShippingCenter() {
                           <span className="material-symbols-outlined text-sm">add</span>Add Event
                         </button>
                       )}
-                      {canSyncTracking && isTestProvider && activeProviderId && selectedShip.trackingNumber && !isWriteBlocked && (
+                      {getShipmentMode(selectedShip) !== 'manual' && canSyncTracking && isTestProvider && activeProviderId && selectedShip.trackingNumber && !isWriteBlocked && (
                         <button onClick={() => handleSimulateTrackingEvent(selectedShip.id)} disabled={providerLoading !== null}
                           className="px-4 py-2.5 bg-amber-50 text-amber-700 border border-amber-200 font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-amber-100 transition-all disabled:opacity-40 flex items-center gap-1">
                           <span className="material-symbols-outlined text-sm">{providerLoading === 'simulate' ? 'hourglass_top' : 'science'}</span>
