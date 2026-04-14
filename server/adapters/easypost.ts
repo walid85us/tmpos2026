@@ -261,10 +261,17 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
       }
 
       const buyData = await buyResponse.json();
-      const labelUrl = buyData.postage_label?.label_pdf_url || buyData.postage_label?.label_url || '';
+      const pdfUrl = buyData.postage_label?.label_pdf_url;
+      const fallbackUrl = buyData.postage_label?.label_url || '';
+      const labelUrl = pdfUrl || fallbackUrl;
+      const urlLower = labelUrl.toLowerCase();
+      const detectedFormat: 'pdf' | 'png' | 'zpl' | 'epl' =
+        (urlLower.includes('.pdf') || urlLower.includes('/pdf') || urlLower.includes('format=pdf')) ? 'pdf' :
+        (urlLower.includes('.png') || urlLower.includes('/png') || urlLower.includes('format=png')) ? 'png' :
+        pdfUrl ? 'pdf' : 'png';
       const label: LabelArtifact = {
         id: `lbl-${Date.now()}`,
-        format: 'pdf',
+        format: detectedFormat,
         url: labelUrl,
         trackingNumber: buyData.tracking_code || '',
         carrier: buyData.selected_rate?.carrier || params.carrier,

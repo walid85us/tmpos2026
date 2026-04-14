@@ -1,0 +1,254 @@
+Shipping Center Final Literal Corrections — Google Address Autocomplete, PDF Labels, Shipping Ownership, and Ready Gating
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a hard correction pass.
+Do not satisfy anything conceptually.
+Implement each requirement literally in the product UI and behavior.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Firebase/Firestore data architect
+- Enterprise shipping systems architect
+- Senior shipping and fulfillment expert with 20+ years of experience in parcel shipping, carrier integrations, warehouse execution, dispatch control, label workflows, tracking-event operations, and reverse logistics
+- Root-cause debugging specialist
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Mandatory external reference review:
+Before implementing anything, open, read, and understand this exact article:
+- https://help.repairdesk.co/portal/en/kb/articles/shipstation-integration
+
+This article review is mandatory.
+You must extract useful operational ideas from it and adapt them to our app.
+Do not copy RepairDesk literally.
+Do not rebuild ShipStation UX one-to-one.
+Do not force concepts that do not fit our architecture.
+But you must explicitly identify:
+- which ideas should be implemented now
+- which should be deferred
+- which should not be adopted and why
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- RBAC/sub-permissions
+- lifecycle gating
+- platform/store hierarchy
+- System Owner Plans & Features matrix
+- Store Permissions Matrix
+- secure server-side provider call architecture
+- all working shipping core behavior
+- provider-driven post-dispatch lifecycle control
+- selected-rate logic
+- label purchase prerequisites
+- packed-after-label-purchase gating
+- rejected by carrier / returned outcomes with reasons
+- + Add Event disabled after Dispatched
+- full tracking-number visibility already fixed
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — REMAINING FAILURES
+==================================================
+
+These are the exact remaining blockers and must be fixed literally:
+
+1) Shipping Providers still also appears in Settings
+- It now appears in Shipping Center, but it still remains in Settings
+- The requirement is literal:
+  Shipping Providers must be removed as a live management surface from Settings
+- Shipping Center must be the only real home for provider management
+- Settings must not still present provider management UI, cards, controls, or parallel access as a management destination
+
+2) Label action is still not PDF-only
+- QA still gets PNG
+- Requirement is literal:
+  the primary operational label action must open a real PDF artifact
+- The label should open immediately for printing within the app flow using the PDF artifact
+- The UI must not say PDF and open PNG
+- The integration/output-selection must be corrected, not explained away
+
+3) Destination address autocomplete still is not the required Google-style experience
+- Current behavior is still the old OpenStreetMap/local suggestion approach
+- Requirement is literal:
+  replace the current autocomplete approach with Google-powered address autocomplete behavior
+- When the user types destination address, a real Google-style address suggestion dropdown must appear
+- Selecting one suggestion must prefill:
+  - address line
+  - city
+  - state/region
+  - postal code
+  - other relevant address fields if available
+- This must be a real visible autocomplete experience, not city/zip hinting only
+- You may integrate Google Places / Google address autocomplete architecture or an equivalent Google-powered path that fits this app
+- Do not fake suggestions
+
+4) Ready button gating is still wrong
+- QA now requires:
+  Ready must be disabled until a shipping rate is selected
+- Once the rate is selected:
+  - Ready becomes enabled
+  - then the shipment can proceed toward label purchase
+- The workflow must be operationally coherent:
+  packages → validated address → get rates → select rate → Ready enabled → purchase label
+- Do not allow Ready prematurely before rate selection
+
+==================================================
+NON-NEGOTIABLE IMPLEMENTATION REQUIREMENTS
+==================================================
+
+1. Shipping Providers must exist only under Shipping Center
+Required:
+- Shipping Center must remain the one true home for provider management
+- Preferred final structure:
+  - Shipping Center > Providers
+  - or Shipping Center > Settings > Providers
+- Remove provider-management UI from the general Settings page
+- Settings may only contain a redirect stub or nothing at all, but must not remain a live provider-management surface
+- There must not be two competing provider-management homes
+Acceptance:
+- QA sees provider management only under Shipping Center
+
+2. Real PDF-only primary label artifact
+Required:
+- The main operational label action must open a real PDF artifact only
+- Do not use PNG for the main operational label-open/print action
+- Do not label a non-PDF artifact as PDF
+- Prefer/request/store/select PDF correctly in the provider pipeline
+- The primary print flow should be PDF-first and print-ready
+- Fix the actual provider response handling and artifact selection logic
+Acceptance:
+- Clicking the main label action opens an actual PDF file
+
+3. Google-powered destination address autocomplete
+Required:
+- Replace the current autocomplete implementation with a Google-style real address autocomplete flow
+- As soon as the user types destination address, show a real suggestion dropdown
+- Selecting a suggestion must prefill:
+  - address line
+  - city
+  - state/region
+  - postal code
+- Keep the implementation lightweight and operational
+- Do not redesign the whole form
+- Do not build a maps product
+- Use the cleanest architecture-ready Google-powered path that fits the app
+- If configuration is required for Google, wire it properly and honestly
+- Do not fake autocomplete
+Acceptance:
+- QA types an address, sees Google-style suggestions, selects one, and city/state/postal fields are filled automatically
+
+4. Ready button must be disabled until rate selection
+Required:
+- Ready must remain disabled until a valid shipping rate is selected
+- Preserve all other prerequisite logic already implemented
+- After rate selection, Ready becomes enabled
+- Purchase Label should then follow the correct readiness workflow
+- Do not allow manual bypass that breaks the shipping commitment pipeline
+Acceptance:
+- QA cannot move to Ready before selecting a rate
+- QA can move to Ready after selecting a rate
+
+5. Preserve and harden Rejected by Carrier / Returned outcomes
+Required:
+- Keep controlled outcomes for:
+  - Rejected by Carrier
+  - Returned
+- Keep reason capture / reason selection
+- Keep them lifecycle-aware and permission-aware
+- Do not let them become casual freeform edits
+- Preserve provider-driven post-dispatch authority
+
+==================================================
+FULFILLMENT RULES TO PRESERVE
+==================================================
+
+Do not weaken these rules:
+- Packed becomes available only after successful label purchase
+- After dispatch and provider/carrier progression, lifecycle remains provider-driven
+- Cancellation remains blocked after carrier progression
+- Preview mode must still block write actions
+- Existing shipping core flow must remain intact
+- Selected-rate logic must remain intact
+- Label purchase prerequisites must remain intact
+- Full tracking visibility must remain intact
+- + Add Event remains disabled after Dispatched
+
+==================================================
+IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden scope into Phase 2 or Phase 3 shipping work
+- Do not touch unrelated workstreams
+- Do not break preview mode safety
+- Do not break permissions or feature gating
+- Do not break shipping core flow
+- Do not break provider configuration
+- Do not fake provider success
+- Do not fake provider event sync
+- Keep the design baseline consistent
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact execution order:
+
+1) Review the RepairDesk article and extract only the concepts that improve our system
+2) Remove provider-management as a live surface from Settings and keep Shipping Center as the sole home
+3) Fix the label artifact pipeline so the main action opens a real PDF artifact
+4) Replace current destination-address autocomplete with Google-powered address autocomplete and field prefill
+5) Enforce Ready-disabled-until-rate-selected workflow
+6) Preserve Rejected by Carrier / Returned and verify lifecycle correctness
+7) Re-test all affected shipping core flows
+8) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Shipping Center as the sole provider-management home
+- removal of provider-management as a live Settings surface
+- PDF-only primary label behavior
+- Google-powered destination address autocomplete behavior and config assumptions
+- Ready gating rule tied to rate selection
+- lessons adapted from the RepairDesk article
+- future fulfillment recommendations not implemented now
+
+==================================================
+MANDATORY OUTPUT PROOF
+==================================================
+
+Do not give a generic completion summary.
+Do not say this task is complete unless each literal blocker is visibly fixed in the actual product UI and behavior.
+
+OUTPUT FORMAT REQUIRED
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. RepairDesk Article Reviewed
+3. RepairDesk Insights Extracted
+4. How Those Insights Were Adapted To Our Shipping Center
+5. Implemented Now vs Deferred vs Not Adopted
+6. Shipping Center Sole Provider Ownership Fix
+7. PDF-Only Primary Label Fix
+8. Google Address Autocomplete Fix
+9. Ready Gating Fix
+10. Rejected by Carrier / Returned Outcome Preservation
+11. Fulfillment-Expert Recommendations
+12. Files Changed
+13. Documentation Updated
+14. Non-Regression Notes

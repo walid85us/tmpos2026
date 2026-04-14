@@ -133,31 +133,6 @@ export default function Settings() {
         </div>
       </section>
 
-      {hasShippingAccess && (
-        <section className="space-y-6">
-          <div className="flex items-center gap-3 mb-2">
-            <span className="material-symbols-outlined text-primary">local_shipping</span>
-            <h3 className="text-xl font-black text-primary tracking-tight">Shipping</h3>
-          </div>
-          <div className="bg-slate-50/80 backdrop-blur-xl p-6 rounded-[2.5rem] border border-slate-200 shadow-sm">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-4">
-                <div className="w-12 h-12 bg-slate-100 rounded-2xl flex items-center justify-center">
-                  <span className="material-symbols-outlined text-slate-400">open_in_new</span>
-                </div>
-                <div>
-                  <p className="text-sm font-bold text-slate-500">Shipping provider management has moved</p>
-                  <p className="text-xs text-slate-400">Providers are now configured inside the Shipping Center under Settings.</p>
-                </div>
-              </div>
-              <button onClick={() => navigate('/shipping/settings')} className="px-6 py-3 text-[10px] font-black uppercase tracking-widest bg-slate-200 text-slate-600 rounded-xl hover:bg-slate-300 transition-all flex items-center gap-1.5">
-                <span className="material-symbols-outlined text-sm">arrow_forward</span>
-                Go to Shipping Center
-              </button>
-            </div>
-          </div>
-        </section>
-      )}
 
       {/* 3. Regional & Tax Settings */}
       <section className="space-y-6">
