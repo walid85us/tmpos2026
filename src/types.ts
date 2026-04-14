@@ -793,8 +793,29 @@ export interface ProviderTrackingEvent {
   statusDetail?: string;
   location?: string;
   description: string;
-  source: 'provider' | 'manual';
+  source: 'provider' | 'manual' | 'test_provider' | 'webhook' | 'replay';
   providerEventRef?: string;
+  receivedAt?: string;
+  processingResult?: 'processed' | 'ignored' | 'duplicate' | 'failed';
+  webhookEventId?: string;
+}
+
+export interface WebhookEventRecord {
+  id: string;
+  providerId: string;
+  providerEventId?: string;
+  eventType: string;
+  trackingNumber?: string;
+  shipmentRef?: string;
+  receivedAt: string;
+  processedAt?: string;
+  processingResult: 'processed' | 'ignored' | 'duplicate' | 'failed' | 'pending';
+  processingError?: string;
+  mappedStatus?: string;
+  source: 'webhook' | 'sync' | 'replay' | 'simulation';
+  isTestMode: boolean;
+  signatureVerified: boolean;
+  retryCount: number;
 }
 
 export type ShippingProviderStatus = 'not_configured' | 'configured' | 'active' | 'error';
@@ -867,6 +888,46 @@ export interface Shipment {
   lastTrackingSyncAt?: string;
   ratesRetrievedAt?: string;
   availableRates?: ShippingRate[];
+
+  lastWebhookEventAt?: string;
+  webhookEventsCount?: number;
+  syncFailureCount?: number;
+  lastSyncError?: string;
+
+  customsInfo?: {
+    contentsType?: string;
+    contentsExplanation?: string;
+    declaredValue?: number;
+    currency?: string;
+    hsCode?: string;
+    originCountry?: string;
+  };
+  insuranceInfo?: {
+    insured?: boolean;
+    insuredValue?: number;
+    currency?: string;
+    provider?: string;
+  };
+  returnInfo?: {
+    isReturn?: boolean;
+    originalShipmentId?: string;
+    returnReason?: string;
+    returnRequestedAt?: string;
+    returnLabelUrl?: string;
+  };
+  pickupInfo?: {
+    pickupRequested?: boolean;
+    pickupScheduledAt?: string;
+    pickupConfirmationNumber?: string;
+    servicePointId?: string;
+  };
+  slaInfo?: {
+    targetDeliveryAt?: string;
+    slaType?: string;
+    slaMet?: boolean;
+    transitBusinessDays?: number;
+  };
+  batchId?: string;
 }
 
 export type LogoPlacement = 'top-left' | 'top-center' | 'top-right';

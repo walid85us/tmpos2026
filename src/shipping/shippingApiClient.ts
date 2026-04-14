@@ -144,3 +144,50 @@ export async function simulateTrackingEvent(
 ): Promise<GetTrackingResponse & { isSimulated?: boolean }> {
   return apiCall('/api/shipping/simulate-tracking-event', { trackingNumber, carrier });
 }
+
+export interface WebhookLogResponse {
+  events: WebhookEventSummary[];
+  total: number;
+}
+
+export interface WebhookEventSummary {
+  id: string;
+  providerId: string;
+  providerEventId?: string;
+  eventType: string;
+  trackingNumber?: string;
+  shipmentRef?: string;
+  receivedAt: string;
+  processedAt?: string;
+  processingResult: 'processed' | 'ignored' | 'duplicate' | 'failed' | 'pending';
+  processingError?: string;
+  mappedStatus?: string;
+  source: 'webhook' | 'sync' | 'replay' | 'simulation';
+  isTestMode: boolean;
+  signatureVerified: boolean;
+  retryCount: number;
+}
+
+export async function getWebhookLog(filters?: {
+  providerId?: string;
+  trackingNumber?: string;
+  processingResult?: string;
+  limit?: number;
+}): Promise<WebhookLogResponse> {
+  const params = new URLSearchParams();
+  if (filters?.providerId) params.set('providerId', filters.providerId);
+  if (filters?.trackingNumber) params.set('trackingNumber', filters.trackingNumber);
+  if (filters?.processingResult) params.set('processingResult', filters.processingResult);
+  if (filters?.limit) params.set('limit', filters.limit.toString());
+  return apiCall(`/api/shipping/webhook-log?${params.toString()}`);
+}
+
+export async function replayWebhookEvent(webhookEventId: string): Promise<{
+  success: boolean;
+  replayEventId?: string;
+  originalEventId?: string;
+  processingResult?: string;
+  error?: ProviderError;
+}> {
+  return apiCall('/api/shipping/replay-event', { webhookEventId });
+}

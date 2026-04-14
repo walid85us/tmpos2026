@@ -15,6 +15,16 @@ import { EasyPostAdapter } from './adapters/easypost';
 import { ShippoAdapter } from './adapters/shippo';
 import { ShipStationAdapter } from './adapters/shipstation';
 import type { ShippingProviderAdapter } from './types';
+import {
+  recordWebhookEvent,
+  getWebhookLog,
+  getWebhookEventById,
+  parseEasyPostWebhook,
+  parseShippoWebhook,
+  parseShipStationWebhook,
+  mapProviderStatus,
+  type WebhookEventRecord,
+} from './event-processor';
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -226,17 +236,179 @@ app.post('/api/shipping/webhook/:providerId', (req, res) => {
     res.status(403).json({ error: 'Provider not configured.' });
     return;
   }
+
   const webhookSecret = process.env[`SHIPPING_WEBHOOK_SECRET_${providerId.toUpperCase()}`];
+  let signatureVerified = false;
   if (webhookSecret) {
-    const signature = req.headers['x-webhook-signature'] || req.headers['x-shippo-signature'] || req.headers['x-easypost-signature'] || '';
-    if (!signature) {
+    const signatureHeader = (req.headers['x-webhook-signature'] || req.headers['x-shippo-signature'] || req.headers['x-easypost-signature'] || '') as string;
+    if (!signatureHeader) {
       console.warn(`[Shipping API] Webhook from ${providerId} rejected: missing signature header.`);
       res.status(401).json({ error: 'Missing webhook signature.' });
       return;
     }
+    const crypto = require('crypto');
+    const expectedSig = crypto.createHmac('sha256', webhookSecret).update(JSON.stringify(req.body)).digest('hex');
+    const isValid = crypto.timingSafeEqual(
+      Buffer.from(signatureHeader.replace(/^sha256=/, ''), 'utf8'),
+      Buffer.from(expectedSig, 'utf8')
+    );
+    if (!isValid) {
+      console.warn(`[Shipping API] Webhook from ${providerId} rejected: invalid signature.`);
+      res.status(401).json({ error: 'Invalid webhook signature.' });
+      return;
+    }
+    signatureVerified = true;
   }
-  console.log(`[Shipping API] Webhook received from ${providerId} at ${new Date().toISOString()}`);
-  res.json({ received: true, providerId, timestamp: new Date().toISOString() });
+
+  const env = getProviderEnvironment(providerId);
+  const isTestMode = env === 'test';
+  const receivedAt = new Date().toISOString();
+
+  let parsed;
+  try {
+    if (providerId === 'easypost') parsed = parseEasyPostWebhook(req.body);
+    else if (providerId === 'shippo') parsed = parseShippoWebhook(req.body);
+    else parsed = parseShipStationWebhook(req.body);
+  } catch (err) {
+    const record: WebhookEventRecord = {
+      id: `wh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      providerId,
+      eventType: 'parse_error',
+      rawPayload: req.body,
+      receivedAt,
+      processedAt: receivedAt,
+      processingResult: 'failed',
+      processingError: err instanceof Error ? err.message : 'Failed to parse webhook payload',
+      source: 'webhook',
+      isTestMode,
+      signatureVerified,
+      retryCount: 0,
+    };
+    recordWebhookEvent(record);
+    res.json({ received: true, processingResult: 'failed' });
+    return;
+  }
+
+  const record: WebhookEventRecord = {
+    id: `wh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    providerId,
+    providerEventId: parsed.providerEventId,
+    eventType: parsed.eventType,
+    trackingNumber: parsed.trackingNumber,
+    rawPayload: req.body,
+    receivedAt,
+    processedAt: receivedAt,
+    processingResult: parsed.events.length > 0 ? 'processed' : 'ignored',
+    mappedStatus: parsed.overallStatus ? mapProviderStatus(parsed.overallStatus) : undefined,
+    source: 'webhook',
+    isTestMode,
+    signatureVerified,
+    retryCount: 0,
+  };
+  recordWebhookEvent(record);
+
+  console.log(`[Shipping API] Webhook from ${providerId}: type=${parsed.eventType}, tracking=${parsed.trackingNumber || 'n/a'}, events=${parsed.events.length}, result=${record.processingResult}`);
+
+  res.json({
+    received: true,
+    providerId,
+    timestamp: receivedAt,
+    processingResult: record.processingResult,
+    eventsProcessed: parsed.events.length,
+    webhookEventId: record.id,
+  });
+});
+
+app.get('/api/shipping/webhook-log', (_req, res) => {
+  const providerId = _req.query.providerId as string | undefined;
+  const trackingNumber = _req.query.trackingNumber as string | undefined;
+  const processingResult = _req.query.processingResult as string | undefined;
+  const limit = _req.query.limit ? parseInt(_req.query.limit as string, 10) : 100;
+  const log = getWebhookLog({ providerId, trackingNumber, processingResult, limit });
+  const redacted = log.map(({ rawPayload, ...rest }) => rest);
+  res.json({
+    events: redacted,
+    total: redacted.length,
+    filters: { providerId, trackingNumber, processingResult, limit },
+  });
+});
+
+app.get('/api/shipping/webhook-log/:eventId', (req, res) => {
+  const found = getWebhookEventById(req.params.eventId);
+  if (!found) {
+    res.status(404).json({ error: 'Webhook event not found.' });
+    return;
+  }
+  const { rawPayload, ...event } = found;
+  res.json({ event });
+});
+
+app.post('/api/shipping/replay-event', (req, res) => {
+  const { webhookEventId } = req.body;
+  if (!webhookEventId) {
+    res.status(400).json({ success: false, error: { code: 'MISSING_ID', message: 'webhookEventId is required.' } });
+    return;
+  }
+  const original = getWebhookEventById(webhookEventId);
+  if (!original) {
+    res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Original webhook event not found.' } });
+    return;
+  }
+
+  let replayParsed;
+  let replayResult: 'processed' | 'failed' = 'processed';
+  let replayError: string | undefined;
+  let replayMappedStatus: string | undefined;
+  let eventsCount = 0;
+
+  try {
+    if (original.providerId === 'easypost') replayParsed = parseEasyPostWebhook(original.rawPayload);
+    else if (original.providerId === 'shippo') replayParsed = parseShippoWebhook(original.rawPayload);
+    else replayParsed = parseShipStationWebhook(original.rawPayload);
+
+    eventsCount = replayParsed.events.length;
+    replayMappedStatus = replayParsed.overallStatus ? mapProviderStatus(replayParsed.overallStatus) : original.mappedStatus;
+  } catch (err) {
+    replayResult = 'failed';
+    replayError = err instanceof Error ? err.message : 'Replay parsing failed';
+  }
+
+  const replayRecord: WebhookEventRecord = {
+    id: `replay-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    providerId: original.providerId,
+    providerEventId: original.providerEventId,
+    eventType: `replay:${original.eventType}`,
+    trackingNumber: original.trackingNumber,
+    shipmentRef: original.shipmentRef,
+    rawPayload: original.rawPayload,
+    receivedAt: new Date().toISOString(),
+    processedAt: new Date().toISOString(),
+    processingResult: replayResult,
+    processingError: replayError,
+    mappedStatus: replayMappedStatus,
+    source: 'replay',
+    isTestMode: original.isTestMode,
+    signatureVerified: false,
+    retryCount: original.retryCount + 1,
+  };
+  recordWebhookEvent(replayRecord);
+
+  res.json({
+    success: replayResult === 'processed',
+    replayEventId: replayRecord.id,
+    originalEventId: webhookEventId,
+    processingResult: replayRecord.processingResult,
+    eventsProcessed: eventsCount,
+    ...(replayError ? { error: { code: 'REPLAY_FAILED', message: replayError } } : {}),
+  });
+});
+
+app.get('/api/shipping/event-processor/status-map', (_req, res) => {
+  const { getProviderStatusMap, getStatusProgressionOrder } = require('./event-processor') as typeof import('./event-processor');
+  res.json({
+    providerToInternal: getProviderStatusMap(),
+    progressionOrder: getStatusProgressionOrder(),
+  });
 });
 
 const PORT = parseInt(process.env.SHIPPING_API_PORT || '5001', 10);

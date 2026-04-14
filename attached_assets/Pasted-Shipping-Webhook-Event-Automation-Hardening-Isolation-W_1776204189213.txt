@@ -1,0 +1,335 @@
+Shipping Webhook & Event Automation Hardening — Isolation Workstream
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is the next shipping workstream after completion of Shipping Phase 1.
+The objective is to harden webhook/event automation and make provider-driven shipment lifecycle updates truly production-ready.
+
+This pass must also explicitly prepare for future shipping roadmap phases.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Firebase/Firestore data architect
+- Backend/webhook integration architect
+- Enterprise shipping systems architect
+- Senior shipping and fulfillment expert with 20+ years of experience in parcel shipping, warehouse execution, dispatch control, tracking-event operations, carrier integrations, reverse logistics, and operational automation
+- Reliability engineer focused on retries, idempotency, webhook safety, and event reconciliation
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Also review this reference before implementing:
+- https://help.repairdesk.co/portal/en/kb/articles/shipstation-integration
+
+Do not copy RepairDesk literally.
+Do extract useful operational ideas related to:
+- webhook/event sync
+- two-way status updates
+- shipment state synchronization
+- label/tracking operational workflows
+- returns/reverse logistics implications
+- operational management of shipping events
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- RBAC/sub-permissions
+- lifecycle gating
+- platform/store hierarchy
+- System Owner Plans & Features matrix
+- Store Permissions Matrix
+- secure server-side provider call architecture
+- Shipping Center as the sole provider-management home
+- provider/manual shipment mode split
+- mandatory provider address validation before Get Rates in provider mode
+- Ready disabled until rate selection in provider mode
+- Packed only after successful label purchase in provider mode
+- Rejected by Carrier / Returned with reasons
+- + Add Event disabled after Dispatched
+- PDF-first label flow
+- existing shipping core flow
+
+==================================================
+WORKSTREAM GOAL
+==================================================
+
+Strengthen Shipping Center so provider-driven webhook and tracking-event automation is reliable, auditable, replayable, and operationally trustworthy.
+
+This workstream must make shipment lifecycle progression after dispatch feel like a real carrier-integrated fulfillment system rather than a fragile API demo.
+
+This pass must also lay explicit foundations for future roadmap items from:
+
+Phase 2:
+- returns portal
+- service points
+- customs docs
+- pickup requests
+- insurance rules
+- carrier analytics
+
+Phase 3:
+- automation rules
+- batch labels
+- packing workflows
+- SLA optimization
+- carrier scorecards
+
+Do not fully implement all Phase 2 and Phase 3 features now.
+But you MUST design this webhook/event hardening pass so those future phases fit naturally into the architecture, data model, and operational workflow.
+
+==================================================
+MANDATORY CORE IMPLEMENTATION OBJECTIVES
+==================================================
+
+1) WEBHOOK HARDENING
+Strengthen provider webhook ingestion and event handling.
+
+Required:
+- secure provider webhook entry points
+- signature verification where provider supports it
+- idempotency protection so the same event cannot corrupt shipment state twice
+- event deduplication
+- retry-safe processing
+- event ordering awareness where possible
+- durable event persistence with timestamps/source/provider metadata
+- no destructive overwrite of shipment history
+
+2) PROVIDER-DRIVEN LIFECYCLE AUTOMATION
+After dispatch and provider progression, shipment lifecycle must update automatically and coherently from provider events.
+
+Required:
+- provider events can drive shipment state progression such as:
+  - accepted / scanned
+  - in transit
+  - exception
+  - delivered
+  - returned-related future-ready handling
+- provider-driven states must map safely into internal shipment lifecycle
+- manual notes/events must not override authoritative provider progression
+- shipment list, detail view, and tracking timeline must stay synchronized
+
+3) EVENT REPLAY / RE-SYNC / RECOVERY TOOLING
+Operational systems need recovery paths.
+
+Required:
+- add safe tooling for:
+  - replay webhook event processing
+  - re-sync tracking/events from provider
+  - recover from failed or missed webhook ingestion
+- this must be operator/admin-aware and permission-gated
+- do not create dangerous uncontrolled replay behavior
+- event recovery tools must be honest, logged, and auditable
+
+4) EVENT AUDITABILITY
+Required:
+- every provider event must preserve:
+  - provider source
+  - provider event identifier if available
+  - shipment linkage
+  - received timestamp
+  - processed timestamp if different
+  - resulting mapped shipment state if applicable
+  - processing result / success / ignored / duplicate / failed status
+- timeline/history must remain understandable to operators
+
+5) FAILURE HANDLING / OPERATIONAL TRUST
+Required:
+- failed webhook or sync events must not silently disappear
+- surface operationally useful error/retry states where appropriate
+- do not fake successful lifecycle progression
+- do not leave shipment state half-updated
+
+==================================================
+PHASE 2 AND PHASE 3 FORWARD-COMPATIBILITY — MUST BE INCLUDED
+==================================================
+
+This workstream must explicitly include architectural readiness for the following future items.
+
+A) PHASE 2 READINESS
+Design current event/webhook architecture so it can later support:
+- returns portal
+- service points
+- customs docs
+- pickup requests
+- insurance rules
+- carrier analytics
+
+Required now:
+- event model must be extensible enough for return-related and pickup-related provider events
+- shipment domain should allow future customs/insurance metadata attachment without immediate redesign
+- analytics-friendly event storage should support later carrier analytics
+- service-point / pickup / return event categories should have a forward-compatible place in the model or documented extension path
+
+B) PHASE 3 READINESS
+Design current event/webhook architecture so it can later support:
+- automation rules
+- batch labels
+- packing workflows
+- SLA optimization
+- carrier scorecards
+
+Required now:
+- event model and processing pipeline should be automation-rule-friendly
+- shipment state/event data should support future SLA measurement
+- provider performance and event timing should be stored in a way useful for future scorecards
+- architecture should not block future batch-label or packing workflow integration
+- document where automation hooks or rule triggers would attach later
+
+Important:
+Do not fully build all Phase 2/3 features in this pass.
+Do build the hardening/foundation so they can be added cleanly later.
+You must document this clearly.
+
+==================================================
+NON-NEGOTIABLE IMPLEMENTATION REQUIREMENTS
+==================================================
+
+1. Unified provider event processing pipeline
+Required:
+- webhook events, sync events, replayed events, and manual recovery flows must all use a coherent processing path
+- avoid fragmented one-off event logic
+- centralize event-to-shipment-state mapping where practical
+
+2. Idempotent shipment event processing
+Required:
+- duplicate provider events must not produce duplicate lifecycle transitions or corrupt shipment history
+- processing the same event twice must be safe
+
+3. Controlled operator/admin recovery tools
+Required:
+- add clear recovery actions where appropriate such as:
+  - Re-sync Tracking
+  - Replay Event
+  - Refresh Provider State
+- these must be permission-aware
+- they must not be exposed casually to unauthorized roles
+
+4. Clear distinction between event sources
+Required:
+- UI/timeline must continue to distinguish:
+  - provider events
+  - manual events
+  - test-provider events
+  - replay/recovered events if surfaced
+- operators should understand what changed the shipment and why
+
+5. Truthful test-mode vs live-mode behavior
+Required:
+- test mode must be explained honestly
+- replay/simulated/test-provider events must not be confused with true live carrier events
+- live mode must preserve clean operational visibility
+
+==================================================
+FULFILLMENT RULES TO PRESERVE
+==================================================
+
+Do not weaken these rules:
+- Shipping Center remains the sole provider-management home
+- Provider/manual mode split remains intact
+- Manual shipments remain manual and do not misuse provider automation
+- Address validation remains mandatory before Get Rates in provider mode
+- Ready remains disabled until rate selection in provider mode
+- Packed becomes available only after successful label purchase in provider mode
+- After dispatch and provider/carrier progression, lifecycle remains provider-driven in provider mode
+- Cancellation remains blocked after carrier progression
+- Existing shipping core flow remains intact
+- Rejected by Carrier / Returned remain controlled outcomes
+- + Add Event remains disabled after Dispatched
+- PDF-first label flow remains intact
+- full tracking visibility remains intact
+
+==================================================
+IMPORTANT IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into full Phase 2 or Phase 3 implementation
+- Do not touch unrelated workstreams
+- Do not break preview mode safety
+- Do not break permissions or feature gating
+- Do not break shipping core flow
+- Do not break provider configuration
+- Do not fake provider success
+- Do not fake webhook success
+- Do not fake event replay success
+- Keep the design baseline consistent
+- Do not create ambiguous mixed manual/provider shipment states
+- Do not leave stale shipment state after event processing
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact execution order:
+
+1) Review the RepairDesk article and extract only the concepts that improve our system
+2) Audit the current webhook, provider-event, tracking-sync, and replay architecture
+3) Build or harden a unified provider event processing pipeline
+4) Add idempotency, deduplication, and retry-safe behavior
+5) Add operator/admin-safe recovery tooling for replay/re-sync where appropriate
+6) Strengthen provider-driven lifecycle mapping and shipment synchronization
+7) Make the event/audit model future-ready for Phase 2 and Phase 3 roadmap items
+8) Re-test all affected shipping flows and lifecycle behaviors
+9) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- webhook/provider-event architecture
+- idempotency and duplicate-event handling
+- replay/re-sync/recovery tooling
+- provider-driven lifecycle mapping rules
+- audit/event metadata model
+- test-mode vs live-mode event behavior
+- explicit forward-compatibility notes for Phase 2:
+  - returns portal
+  - service points
+  - customs docs
+  - pickup requests
+  - insurance rules
+  - carrier analytics
+- explicit forward-compatibility notes for Phase 3:
+  - automation rules
+  - batch labels
+  - packing workflows
+  - SLA optimization
+  - carrier scorecards
+- lessons adapted from the RepairDesk article
+- future recommendations not implemented now
+
+==================================================
+MANDATORY OUTPUT PROOF
+==================================================
+
+Do not give a generic completion summary.
+Do not say this task is complete unless the webhook/event automation hardening is visibly implemented and the forward-compatibility for Phase 2 and Phase 3 is explicitly documented.
+
+OUTPUT FORMAT REQUIRED
+
+Reply ONLY in this structure:
+
+1. Workstream Completion Status
+2. RepairDesk Article Reviewed
+3. RepairDesk Insights Extracted
+4. How Those Insights Were Adapted To Our Shipping Center
+5. Implemented Now vs Deferred vs Not Adopted
+6. Webhook / Provider Event Hardening Added
+7. Idempotency / Replay / Re-Sync Recovery Added
+8. Provider-Driven Lifecycle Automation Improvements
+9. Phase 2 Forward-Compatibility Included
+10. Phase 3 Forward-Compatibility Included
+11. Fulfillment-Expert Recommendations
+12. Files Changed
+13. Documentation Updated
+14. Non-Regression Notes

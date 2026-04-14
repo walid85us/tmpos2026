@@ -435,6 +435,10 @@ export default function ShippingCenter() {
   const [providerStatuses, setProviderStatuses] = useState<any[]>([]);
   const [providerSettingsLoading, setProviderSettingsLoading] = useState(false);
   const [trackingCopied, setTrackingCopied] = useState(false);
+  const [showWebhookLog, setShowWebhookLog] = useState(false);
+  const [webhookLogEntries, setWebhookLogEntries] = useState<any[]>([]);
+  const [webhookLogLoading, setWebhookLogLoading] = useState(false);
+  const [webhookLogFilter, setWebhookLogFilter] = useState<string>('all');
 
   const STORE_ADDRESS: ShipmentAddress = { name: 'Main Warehouse', line1: '100 Commerce Dr', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US', phone: '555-0100' };
 
@@ -1051,6 +1055,38 @@ export default function ShippingCenter() {
     });
   }
 
+  async function loadWebhookLog(trackingNumber?: string) {
+    setWebhookLogLoading(true);
+    try {
+      const filters: any = { limit: 50 };
+      if (trackingNumber) filters.trackingNumber = trackingNumber;
+      if (webhookLogFilter !== 'all') filters.processingResult = webhookLogFilter;
+      const result = await shippingApi.getWebhookLog(filters);
+      setWebhookLogEntries(result.events || []);
+    } catch {
+      setWebhookLogEntries([]);
+    }
+    setWebhookLogLoading(false);
+  }
+
+  async function handleReplayEvent(webhookEventId: string) {
+    if (isWriteBlocked) return;
+    clearProviderFeedback();
+    setProviderLoading('replay');
+    try {
+      const result = await shippingApi.replayWebhookEvent(webhookEventId);
+      if (result.success) {
+        setProviderSuccess(`Event replayed successfully (replay ID: ${result.replayEventId}).`);
+        if (selectedShipment) loadWebhookLog(shipments.find(s => s.id === selectedShipment)?.trackingNumber);
+      } else {
+        setProviderError(friendlyProviderError(result.error || { code: 'UNKNOWN', message: 'Replay failed.' }));
+      }
+    } catch (err) {
+      setProviderError({ code: 'REPLAY_ERROR', message: err instanceof Error ? err.message : 'Replay failed.' });
+    }
+    setProviderLoading(null);
+  }
+
   async function handleSimulateTrackingEvent(shipmentId: string) {
     if (isWriteBlocked) return;
     const shipment = shipments.find(s => s.id === shipmentId);
@@ -1088,17 +1124,45 @@ export default function ShippingCenter() {
     );
     if (result.success) {
       const now = new Date().toISOString();
+      const incomingEvents = result.events || [];
+      const existingRefs = new Set(
+        (shipment.providerTrackingEvents || [])
+          .map(e => e.providerEventRef)
+          .filter(Boolean)
+      );
+      const existingTimestampStatus = new Set(
+        (shipment.providerTrackingEvents || [])
+          .map(e => `${e.timestamp}|${e.status}`)
+      );
+      const newEvents = incomingEvents.filter(e => {
+        if (e.providerEventRef && existingRefs.has(e.providerEventRef)) return false;
+        if (existingTimestampStatus.has(`${e.timestamp}|${e.status}`)) return false;
+        return true;
+      });
+      const mergedEvents = [
+        ...(shipment.providerTrackingEvents || []),
+        ...newEvents,
+      ];
       const updates: Partial<Shipment> = {
-        providerTrackingEvents: result.events || [],
+        providerTrackingEvents: mergedEvents,
         lastTrackingSyncAt: now,
         updatedAt: now,
+        syncFailureCount: 0,
+        lastSyncError: undefined,
       };
       if (result.estimatedDelivery) updates.estimatedDelivery = result.estimatedDelivery;
       if (result.status) {
         const statusMap: Record<string, ShipmentStatus> = {
-          'in_transit': 'In Transit', 'delivered': 'Delivered',
-          'out_for_delivery': 'In Transit', 'failure': 'Exception',
-          'return_to_sender': 'Exception', 'error': 'Exception',
+          'pre_transit': 'Label Created',
+          'accepted': 'Dispatched',
+          'in_transit': 'In Transit',
+          'out_for_delivery': 'In Transit',
+          'delivered': 'Delivered',
+          'failure': 'Exception',
+          'return_to_sender': 'Exception',
+          'returned': 'Returned',
+          'error': 'Exception',
+          'available_for_pickup': 'In Transit',
         };
         const mappedStatus = statusMap[result.status.toLowerCase()];
         if (mappedStatus && STATUS_ORDER.indexOf(mappedStatus) > STATUS_ORDER.indexOf(shipment.status)) {
@@ -1108,15 +1172,19 @@ export default function ShippingCenter() {
             id: `evt-sync-${Date.now()}`,
             timestamp: now,
             status: mappedStatus,
-            description: `Status updated to ${mappedStatus} via tracking sync`,
+            description: `Status updated to ${mappedStatus} via provider tracking sync`,
             performedBy: 'System (Provider Sync)',
           };
           updates.events = [...shipment.events, syncEvent];
         }
       }
       updateShipment(shipmentId, updates);
-      const eventCount = (result.events || []).length;
-      let successMsg = `Tracking synced. ${eventCount} event(s) from provider.`;
+      const totalEvents = mergedEvents.length;
+      const newCount = newEvents.length;
+      const dupCount = incomingEvents.length - newCount;
+      let successMsg = `Tracking synced. ${totalEvents} total event(s), ${newCount} new`;
+      if (dupCount > 0) successMsg += `, ${dupCount} duplicate(s) skipped`;
+      successMsg += '.';
       if (providerEnvironment === 'test') {
         successMsg += ' (Test mode — tracking data may be simulated or limited.)';
       }
@@ -1127,6 +1195,12 @@ export default function ShippingCenter() {
         err.message += ' Note: You are using test-mode credentials. Test tracking numbers may not return real carrier data.';
       }
       setProviderError(friendlyProviderError(err));
+      const failCount = (shipment.syncFailureCount || 0) + 1;
+      updateShipment(shipmentId, {
+        syncFailureCount: failCount,
+        lastSyncError: err.message,
+        updatedAt: new Date().toISOString(),
+      });
     }
     setProviderLoading(null);
   }
@@ -1538,6 +1612,16 @@ export default function ShippingCenter() {
                             {showProviderSettings ? 'Hide Settings' : 'Provider Settings'}
                           </button>
                           )}
+                          {!isManualMode && canManageProviderSettings && (
+                          <button
+                            onClick={() => { setShowWebhookLog(!showWebhookLog); if (!showWebhookLog) loadWebhookLog(selectedShip.trackingNumber || undefined); }}
+                            className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md transition-all flex items-center gap-0.5 ${showWebhookLog ? 'bg-violet-100 text-violet-700' : 'text-violet-500 hover:text-violet-700 hover:bg-violet-50'}`}
+                            title="Webhook event log"
+                          >
+                            <span className="material-symbols-outlined text-xs">{showWebhookLog ? 'expand_less' : 'webhook'}</span>
+                            {showWebhookLog ? 'Hide Log' : 'Webhook Log'}
+                          </button>
+                          )}
                         </div>
                       </div>
 
@@ -1627,6 +1711,93 @@ export default function ShippingCenter() {
                             <span className="material-symbols-outlined text-xs">settings</span>
                             Shipping Settings — Providers
                           </button>
+                        </div>
+                      )}
+
+                      {showWebhookLog && canManageProviderSettings && (
+                        <div className="bg-white rounded-xl border border-violet-200 p-4 space-y-3">
+                          <div className="flex items-center justify-between">
+                            <p className="text-[10px] font-black text-violet-600 uppercase tracking-widest">Webhook Event Log</p>
+                            <div className="flex items-center gap-2">
+                              <select value={webhookLogFilter} onChange={e => { setWebhookLogFilter(e.target.value); }}
+                                className="text-[10px] border border-violet-200 rounded px-1.5 py-0.5 text-violet-700 bg-violet-50">
+                                <option value="all">All</option>
+                                <option value="processed">Processed</option>
+                                <option value="ignored">Ignored</option>
+                                <option value="duplicate">Duplicate</option>
+                                <option value="failed">Failed</option>
+                              </select>
+                              <button onClick={() => loadWebhookLog(selectedShip.trackingNumber || undefined)} disabled={webhookLogLoading}
+                                className="text-[10px] font-bold text-violet-500 hover:text-violet-700 disabled:opacity-40">
+                                {webhookLogLoading ? 'Loading...' : 'Refresh'}
+                              </button>
+                            </div>
+                          </div>
+                          {webhookLogEntries.length === 0 && !webhookLogLoading && (
+                            <p className="text-xs text-slate-400 text-center py-4">No webhook events recorded yet.</p>
+                          )}
+                          {webhookLogLoading && (
+                            <div className="flex items-center justify-center py-4">
+                              <span className="material-symbols-outlined text-sm text-violet-400 animate-spin">progress_activity</span>
+                            </div>
+                          )}
+                          <div className="space-y-1.5 max-h-60 overflow-y-auto">
+                            {webhookLogEntries.map((entry: any) => (
+                              <div key={entry.id} className={`p-2.5 rounded-lg border text-[10px] ${
+                                entry.processingResult === 'failed' ? 'border-red-200 bg-red-50/50' :
+                                entry.processingResult === 'duplicate' ? 'border-amber-200 bg-amber-50/50' :
+                                entry.processingResult === 'ignored' ? 'border-slate-200 bg-slate-50/50' :
+                                'border-violet-100 bg-violet-50/30'
+                              }`}>
+                                <div className="flex items-center justify-between gap-2">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="font-black text-slate-700">{entry.eventType}</span>
+                                    <span className={`px-1.5 py-0.5 rounded text-[8px] font-black uppercase tracking-widest ${
+                                      entry.processingResult === 'processed' ? 'bg-emerald-100 text-emerald-600' :
+                                      entry.processingResult === 'failed' ? 'bg-red-100 text-red-600' :
+                                      entry.processingResult === 'duplicate' ? 'bg-amber-100 text-amber-600' :
+                                      'bg-slate-100 text-slate-500'
+                                    }`}>{entry.processingResult}</span>
+                                    {entry.source !== 'webhook' && (
+                                      <span className="px-1.5 py-0.5 rounded text-[8px] font-black uppercase tracking-widest bg-blue-100 text-blue-600">{entry.source}</span>
+                                    )}
+                                    {entry.isTestMode && (
+                                      <span className="px-1.5 py-0.5 rounded text-[8px] font-black uppercase tracking-widest bg-amber-100 text-amber-600">Test</span>
+                                    )}
+                                    {entry.signatureVerified && (
+                                      <span className="material-symbols-outlined text-emerald-500 text-xs" title="Signature verified">verified</span>
+                                    )}
+                                  </div>
+                                  {canManageProviderSettings && entry.processingResult === 'failed' && (
+                                    <button onClick={() => handleReplayEvent(entry.id)} disabled={providerLoading === 'replay'}
+                                      className="px-2 py-0.5 text-[9px] font-bold text-violet-500 hover:bg-violet-100 rounded transition-all disabled:opacity-40">
+                                      Replay
+                                    </button>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-3 mt-1 text-slate-400">
+                                  <span>{entry.providerId}</span>
+                                  {entry.trackingNumber && <span className="font-mono">{entry.trackingNumber}</span>}
+                                  {entry.mappedStatus && <span>→ {entry.mappedStatus}</span>}
+                                  <span>{new Date(entry.receivedAt).toLocaleString()}</span>
+                                  {entry.retryCount > 0 && <span className="text-amber-500">retry #{entry.retryCount}</span>}
+                                </div>
+                                {entry.processingError && (
+                                  <p className="text-red-500 mt-1">{entry.processingError}</p>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {(selectedShip.syncFailureCount || 0) > 0 && (
+                        <div className="px-3 py-2 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2">
+                          <span className="material-symbols-outlined text-red-500 text-sm mt-0.5">sync_problem</span>
+                          <div>
+                            <p className="text-xs text-red-600 font-medium">Tracking sync failures: {selectedShip.syncFailureCount}</p>
+                            {selectedShip.lastSyncError && <p className="text-[10px] text-red-400 mt-0.5">{selectedShip.lastSyncError}</p>}
+                          </div>
                         </div>
                       )}
 
@@ -1888,7 +2059,13 @@ export default function ShippingCenter() {
                     description: e.description,
                     location: e.location,
                     performedBy: undefined as string | undefined,
-                    _source: ((e as any).source === 'test_provider' || e.description?.startsWith('[TEST]')) ? 'test_provider' as const : 'provider' as const,
+                    _source: ((e as any).source === 'test_provider' || e.description?.startsWith('[TEST]')) ? 'test_provider' as const
+                      : (e as any).source === 'webhook' ? 'webhook' as const
+                      : (e as any).source === 'replay' ? 'replay' as const
+                      : 'provider' as const,
+                    _processingResult: (e as any).processingResult as string | undefined,
+                    _webhookEventId: (e as any).webhookEventId as string | undefined,
+                    _receivedAt: (e as any).receivedAt as string | undefined,
                   }));
                   const allEvents = [...manualEvents, ...providerEvents]
                     .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
@@ -1956,12 +2133,17 @@ export default function ShippingCenter() {
                       <div className="absolute left-3 top-2 bottom-2 w-px bg-slate-200" />
                       {allEvents.map((evt, i) => {
                         const isTest = evt._source === 'test_provider';
-                        const isProvider = evt._source === 'provider' || isTest;
+                        const isWebhook = evt._source === 'webhook';
+                        const isReplay = evt._source === 'replay';
+                        const isProvider = evt._source === 'provider' || isTest || isWebhook || isReplay;
+                        const sourceLabel = isTest ? 'Test Provider' : isWebhook ? 'Webhook' : isReplay ? 'Replay' : isProvider ? 'Provider' : 'Manual';
                         return (
                         <div key={evt.id} className="relative pb-6 last:pb-0">
                           <div className={`absolute left-[-23px] top-1 w-5 h-5 rounded-full border-2 flex items-center justify-center ${
                             i === 0 ? 'bg-primary border-primary' :
                             isTest ? 'bg-amber-50 border-amber-300' :
+                            isReplay ? 'bg-violet-50 border-violet-300' :
+                            isWebhook ? 'bg-purple-50 border-purple-300' :
                             isProvider ? 'bg-sky-50 border-sky-300' :
                             'bg-white border-slate-300'
                           }`}>
@@ -1973,13 +2155,25 @@ export default function ShippingCenter() {
                               <span className="text-[10px] text-slate-400">{formatDateTime(evt.timestamp)}</span>
                               <span className={`px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-widest ${
                                 isTest ? 'bg-amber-100 text-amber-600' :
+                                isReplay ? 'bg-violet-100 text-violet-600' :
+                                isWebhook ? 'bg-purple-100 text-purple-600' :
                                 isProvider ? 'bg-sky-100 text-sky-600' :
                                 'bg-slate-100 text-slate-500'
-                              }`}>{isTest ? 'Test Provider' : isProvider ? 'Provider' : 'Manual'}</span>
+                              }`}>{sourceLabel}</span>
+                              {(evt as any)._processingResult && (evt as any)._processingResult !== 'processed' && (
+                                <span className={`px-1 py-0.5 rounded text-[8px] font-black uppercase ${
+                                  (evt as any)._processingResult === 'duplicate' ? 'bg-amber-100 text-amber-600' :
+                                  (evt as any)._processingResult === 'failed' ? 'bg-red-100 text-red-600' :
+                                  'bg-slate-100 text-slate-500'
+                                }`}>{(evt as any)._processingResult}</span>
+                              )}
                             </div>
                             <p className="text-xs text-slate-600">{evt.description}</p>
                             {evt.location && <p className="text-[10px] text-slate-400 mt-0.5">{evt.location}</p>}
                             {evt.performedBy && <p className="text-[10px] text-slate-400">by {evt.performedBy}</p>}
+                            {(evt as any)._receivedAt && (evt as any)._receivedAt !== evt.timestamp && (
+                              <p className="text-[9px] text-slate-300 mt-0.5">received: {formatDateTime((evt as any)._receivedAt)}</p>
+                            )}
                           </div>
                         </div>
                         );

@@ -47,6 +47,21 @@ The frontend is built using React 19, TypeScript, Vite 6, and Tailwind CSS v4.
     -   **Provider Prerequisite Recalculation**: `getRatePrerequisites` and `getLabelPrerequisites` compute from live state on every render. Messages differentiate between "Configure a shipping provider" (no providers have credentials) vs "Set an active shipping provider" (providers configured but none activated). Prerequisites clear immediately after provider activation, address validation, package changes.
     -   **Post-Label Action Cleanup**: After label purchase, Validate Address is hidden (gated by `!selectedShip.label`). The address is considered committed once a label is purchased. Validate Address only reappears if the shipment is rolled back to a pre-label state and the address is changed. Address fields in the edit modal are also locked after label purchase.
     -   **Post-dispatch lifecycle**: Robust governance with carrier acceptance tracking, Rejected/Returned with reasons, Dispatched→Packed rollback (with required reason) when carrier has not yet accepted the package, and provider-driven progression in provider mode.
+    -   **Webhook/Event Processing Pipeline**: `server/event-processor.ts` provides a unified event processing pipeline for all shipping provider webhooks and tracking syncs.
+        -   **Idempotency**: Deduplication via `providerEventRef` matching (or timestamp+status fallback). Client-side tracking sync also deduplicates events before merging.
+        -   **Status Mapping**: Centralized `PROVIDER_TO_INTERNAL_STATUS` map converts provider-specific statuses (pre_transit, accepted, in_transit, etc.) to internal statuses. Used by both webhook processing and client-side sync.
+        -   **Status Progression Awareness**: `isStatusProgression()` prevents out-of-order status regression. Exception/Returned statuses only apply if shipment is already Dispatched+.
+        -   **Provider Parsers**: EasyPost, Shippo, ShipStation webhook payloads are normalized by provider-specific parsers into a common `ProviderTrackingEvent[]` format.
+        -   **Webhook Audit Log**: In-memory ring buffer (500 entries) records every webhook event with full metadata (providerId, eventType, trackingNumber, processingResult, signatureVerified, isTestMode, retryCount, source).
+        -   **Recovery Tooling**: Webhook log viewer (admin, permission-gated via `manage_shipping_settings`) with filtering by result type. Event replay endpoint re-processes failed events. Sync failure counter tracks consecutive failures per shipment.
+        -   **Enhanced Timeline**: Tracking events display source badges (Provider, Webhook, Replay, Test Provider, Manual) with color-coded dots. Processing metadata (result, received timestamp) visible on non-standard events.
+    -   **Phase 2/3 Forward-Compatible Fields**: Shipment type includes extension fields for customs, insurance, returns, pickup scheduling, SLA tracking, and batch processing. These are optional and unused by current UI but structurally ready for future features.
+    -   **API Endpoints (Event/Webhook)**:
+        -   `POST /api/shipping/webhook/:providerId` — Receives provider webhooks, parses payload, records to audit log, returns processing result.
+        -   `GET /api/shipping/webhook-log` — Admin endpoint returning filtered webhook event log.
+        -   `GET /api/shipping/webhook-log/:eventId` — Single webhook event detail.
+        -   `POST /api/shipping/replay-event` — Re-processes a failed webhook event from the log.
+        -   `GET /api/shipping/event-processor/status-map` — Returns the provider→internal status mapping and progression order.
 
 ## System Design Choices
 
