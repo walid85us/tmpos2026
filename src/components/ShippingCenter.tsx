@@ -146,6 +146,14 @@ const RETURN_REASONS = [
   'Customs rejection — return to sender',
   'Other operational reason',
 ];
+const ROLLBACK_REASONS = [
+  'Repackaging needed',
+  'Not actually dropped at carrier facility',
+  'Handoff mistake — incorrect package or label',
+  'Shipping paperwork issue',
+  'Internal operational correction',
+  'Other operational reason',
+];
 
 
 const US_ZIP_CITY_STATE: Record<string, { city: string; state: string }> = {
@@ -389,7 +397,7 @@ export default function ShippingCenter() {
   const [eventLocation, setEventLocation] = useState('');
   const [activeProviderId, setActiveProviderId] = useState<string | null>(null);
   const [providerEnvironment, setProviderEnvironment] = useState<'test' | 'production' | null>(null);
-  const [reasonModal, setReasonModal] = useState<{ id: string; newStatus: 'Rejected' | 'Returned' } | null>(null);
+  const [reasonModal, setReasonModal] = useState<{ id: string; newStatus: 'Rejected' | 'Returned' | 'Packed' } | null>(null);
   const [selectedReason, setSelectedReason] = useState('');
   const [reasonNotes, setReasonNotes] = useState('');
   useEffect(() => {
@@ -624,7 +632,7 @@ export default function ShippingCenter() {
   }, [shipments]);
 
   const isPreDispatch = (status: ShipmentStatus) => ['Draft', 'Ready', 'Label Created', 'Packed'].includes(status);
-  const isEditable = (status: ShipmentStatus) => ['Draft', 'Ready'].includes(status);
+  const isEditable = (status: ShipmentStatus) => ['Draft', 'Ready', 'Label Created', 'Packed'].includes(status);
 
   function handleStatusTransition(id: string, newStatus: ShipmentStatus, reason?: string, notes?: string) {
     if (isWriteBlocked) { setShowStatusConfirm(null); setReasonModal(null); return; }
@@ -647,11 +655,25 @@ export default function ShippingCenter() {
       return;
     }
 
+    if (newStatus === 'Packed' && shipment.status === 'Dispatched') {
+      if (hasCarrierAcceptance(shipment)) {
+        setShowStatusConfirm(null);
+        setReasonModal(null);
+        return;
+      }
+      if (!reason) {
+        setReasonModal({ id, newStatus: 'Packed' });
+        setShowStatusConfirm(null);
+        return;
+      }
+    }
+
     const now = new Date().toISOString();
     const updates: Partial<Shipment> = { status: newStatus, updatedAt: now };
 
     if (newStatus === 'Dispatched') updates.dispatchedAt = now;
     if (newStatus === 'Delivered') updates.deliveredAt = now;
+    if (newStatus === 'Packed' && shipment.status === 'Dispatched') updates.dispatchedAt = undefined;
 
     let description = `Status changed to ${newStatus}`;
     if (reason) description += ` — Reason: ${reason}`;
@@ -732,6 +754,17 @@ export default function ShippingCenter() {
     }
     if (!hasLabel) {
       updates.trackingNumber = newTracking || undefined;
+    }
+    updates.originAddress = newOrigin;
+    updates.destinationAddress = newDest;
+    const destChanged = shipment && (
+      newDest.line1 !== shipment.destinationAddress.line1 ||
+      newDest.city !== shipment.destinationAddress.city ||
+      newDest.state !== shipment.destinationAddress.state ||
+      newDest.postalCode !== shipment.destinationAddress.postalCode
+    );
+    if (destChanged && shipment?.addressValidation) {
+      updates.addressValidation = undefined;
     }
     updates.shippingCost = newCost ? parseFloat(newCost) : undefined;
     updateShipment(editingShipment, updates);
@@ -972,6 +1005,14 @@ export default function ShippingCenter() {
     setProviderSettingsLoading(false);
   }
 
+  function refreshProviderState() {
+    shippingApi.getActiveProvider().then(r => {
+      setActiveProviderId(r.activeProviderId);
+      setProviderEnvironment(r.environment || null);
+    });
+    loadProviderStatuses();
+  }
+
   async function handleTestConnection(providerId: string) {
     clearProviderFeedback();
     setProviderLoading('test-connection');
@@ -986,6 +1027,7 @@ export default function ShippingCenter() {
       setProviderError({ code: 'TEST_FAILED', message: e.message || 'Connection test failed.', retryable: true });
     }
     setProviderLoading(null);
+    refreshProviderState();
   }
 
   function copyTrackingNumber(trackingNumber: string) {
@@ -1090,6 +1132,8 @@ export default function ShippingCenter() {
     setNewTracking(s.trackingNumber || ''); setNewCost(s.shippingCost?.toString() || '');
     setNewNotes(s.notes || '');
     setEditPackages([...s.packages]);
+    setNewOrigin({ ...s.originAddress });
+    setNewDest({ ...s.destinationAddress });
     setEditingShipment(s.id);
   }
 
@@ -1147,7 +1191,7 @@ export default function ShippingCenter() {
     }
 
     if (current === 'Dispatched' && shipment && !hasCarrierAcceptance(shipment)) {
-      allowed = ['Cancelled', ...allowed.filter(s => s !== 'Cancelled')];
+      allowed = ['Packed', 'Cancelled', ...allowed.filter(s => s !== 'Cancelled' && s !== 'Packed')];
     }
 
     return allowed;
@@ -1532,6 +1576,15 @@ export default function ShippingCenter() {
                                   <span className={`px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest rounded ${ps.environment === 'test' ? 'bg-amber-100 text-amber-600' : 'bg-emerald-100 text-emerald-600'}`}>
                                     {ps.environment === 'test' ? 'Test' : 'Live'}
                                   </span>
+                                )}
+                                {ps.lastTestResult === 'success' && (
+                                  <span className="px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest bg-emerald-100 text-emerald-600 rounded">Verified</span>
+                                )}
+                                {ps.lastTestResult === 'failed' && (
+                                  <span className="px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest bg-red-100 text-red-600 rounded">Failed</span>
+                                )}
+                                {!ps.lastTestResult && (
+                                  <span className="px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest bg-slate-100 text-slate-400 rounded">Not Tested</span>
                                 )}
                               </div>
                               <div className="flex items-center gap-2">
@@ -1972,21 +2025,25 @@ export default function ShippingCenter() {
           <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
             <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-md p-8">
               <div className="flex items-center gap-3 mb-6">
-                <span className={`material-symbols-outlined text-3xl ${reasonModal.newStatus === 'Rejected' ? 'text-orange-500' : 'text-pink-500'}`}>
-                  {reasonModal.newStatus === 'Rejected' ? 'block' : 'assignment_return'}
+                <span className={`material-symbols-outlined text-3xl ${reasonModal.newStatus === 'Rejected' ? 'text-orange-500' : reasonModal.newStatus === 'Packed' ? 'text-amber-500' : 'text-pink-500'}`}>
+                  {reasonModal.newStatus === 'Rejected' ? 'block' : reasonModal.newStatus === 'Packed' ? 'undo' : 'assignment_return'}
                 </span>
                 <div>
                   <h3 className="text-lg font-black text-slate-800">
-                    {reasonModal.newStatus === 'Rejected' ? 'Rejected by Carrier' : 'Mark as Returned'}
+                    {reasonModal.newStatus === 'Rejected' ? 'Rejected by Carrier' : reasonModal.newStatus === 'Packed' ? 'Rollback to Packed' : 'Mark as Returned'}
                   </h3>
-                  <p className="text-xs text-slate-500">Select a reason to proceed. This action will be recorded in the shipment timeline.</p>
+                  <p className="text-xs text-slate-500">
+                    {reasonModal.newStatus === 'Packed'
+                      ? 'This will roll back from Dispatched to Packed. Select a reason for this operational correction.'
+                      : 'Select a reason to proceed. This action will be recorded in the shipment timeline.'}
+                  </p>
                 </div>
               </div>
               <div className="space-y-4">
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block">Reason *</label>
                   <div className="space-y-1.5 max-h-48 overflow-y-auto">
-                    {(reasonModal.newStatus === 'Rejected' ? REJECTION_REASONS : RETURN_REASONS).map(reason => (
+                    {(reasonModal.newStatus === 'Rejected' ? REJECTION_REASONS : reasonModal.newStatus === 'Packed' ? ROLLBACK_REASONS : RETURN_REASONS).map(reason => (
                       <button
                         key={reason}
                         onClick={() => setSelectedReason(reason)}
@@ -1994,6 +2051,8 @@ export default function ShippingCenter() {
                           selectedReason === reason
                             ? reasonModal.newStatus === 'Rejected'
                               ? 'bg-orange-50 border-orange-300 text-orange-700 font-bold'
+                              : reasonModal.newStatus === 'Packed'
+                              ? 'bg-amber-50 border-amber-300 text-amber-700 font-bold'
                               : 'bg-pink-50 border-pink-300 text-pink-700 font-bold'
                             : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
                         }`}
@@ -2023,11 +2082,13 @@ export default function ShippingCenter() {
                     selectedReason
                       ? reasonModal.newStatus === 'Rejected'
                         ? 'bg-orange-500 text-white shadow-orange-500/20 hover:bg-orange-600'
+                        : reasonModal.newStatus === 'Packed'
+                        ? 'bg-amber-500 text-white shadow-amber-500/20 hover:bg-amber-600'
                         : 'bg-pink-500 text-white shadow-pink-500/20 hover:bg-pink-600'
                       : 'bg-slate-200 text-slate-400 cursor-not-allowed shadow-none'
                   }`}
                 >
-                  Confirm {reasonModal.newStatus === 'Rejected' ? 'Rejection' : 'Return'}
+                  {reasonModal.newStatus === 'Rejected' ? 'Confirm Rejection' : reasonModal.newStatus === 'Packed' ? 'Confirm Rollback' : 'Confirm Return'}
                 </button>
               </div>
             </motion.div>
@@ -2063,6 +2124,7 @@ export default function ShippingCenter() {
           const hasSelectedRate = !!editShipData?.selectedRate;
           const trackingLocked = hasLabel;
           const carrierServiceLocked = hasLabel;
+          const addressLocked = hasLabel;
           return (
           <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
             <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col">
@@ -2098,6 +2160,30 @@ export default function ShippingCenter() {
                     </p>
                   </div>
                 )}
+                <div className="space-y-3">
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1"><span className="material-symbols-outlined text-xs">warehouse</span>Origin Address {addressLocked && <span className="text-amber-500 ml-1">(locked)</span>}</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <input value={newOrigin.name} onChange={e => setNewOrigin(p => ({ ...p, name: e.target.value }))} disabled={addressLocked} className="col-span-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Name" />
+                    <input value={newOrigin.line1} onChange={e => setNewOrigin(p => ({ ...p, line1: e.target.value }))} disabled={addressLocked} className="col-span-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Address line 1" />
+                    <input value={newOrigin.city} onChange={e => setNewOrigin(p => ({ ...p, city: e.target.value }))} disabled={addressLocked} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="City" />
+                    <div className="grid grid-cols-2 gap-2">
+                      <input value={newOrigin.state} onChange={e => setNewOrigin(p => ({ ...p, state: e.target.value }))} disabled={addressLocked} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="State" />
+                      <input value={newOrigin.postalCode} onChange={e => setNewOrigin(p => ({ ...p, postalCode: e.target.value }))} disabled={addressLocked} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="ZIP" />
+                    </div>
+                  </div>
+                </div>
+                <div className="space-y-3">
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1"><span className="material-symbols-outlined text-xs">local_shipping</span>Destination Address {addressLocked && <span className="text-amber-500 ml-1">(locked)</span>}</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <input value={newDest.name} onChange={e => setNewDest(p => ({ ...p, name: e.target.value }))} disabled={addressLocked} className="col-span-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Name" />
+                    <input value={newDest.line1} onChange={e => setNewDest(p => ({ ...p, line1: e.target.value }))} disabled={addressLocked} className="col-span-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Address line 1" />
+                    <input value={newDest.city} onChange={e => setNewDest(p => ({ ...p, city: e.target.value }))} disabled={addressLocked} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="City" />
+                    <div className="grid grid-cols-2 gap-2">
+                      <input value={newDest.state} onChange={e => setNewDest(p => ({ ...p, state: e.target.value }))} disabled={addressLocked} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="State" />
+                      <input value={newDest.postalCode} onChange={e => setNewDest(p => ({ ...p, postalCode: e.target.value }))} disabled={addressLocked} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="ZIP" />
+                    </div>
+                  </div>
+                </div>
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Carrier {carrierServiceLocked && <span className="text-amber-500 ml-1">(locked)</span>}</label>
                   <select value={newCarrier} onChange={e => setNewCarrier(e.target.value)} disabled={carrierServiceLocked} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed">

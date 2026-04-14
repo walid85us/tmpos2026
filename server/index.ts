@@ -9,6 +9,7 @@ import {
   getMaskedCredentials,
   getProviderInfo,
   getProviderEnvironment,
+  setTestResult,
 } from './credential-store';
 import { EasyPostAdapter } from './adapters/easypost';
 import { ShippoAdapter } from './adapters/shippo';
@@ -102,8 +103,10 @@ app.post('/api/shipping/test-connection', async (req, res) => {
   };
   const result = await provider.validateAddress(testAddress);
   if (result.success) {
+    setTestResult(providerId, 'success');
     res.json({ success: true, message: `Connection to ${provider.providerName} verified successfully.` });
   } else {
+    setTestResult(providerId, 'failed');
     res.json({ success: false, error: result.error });
   }
 });

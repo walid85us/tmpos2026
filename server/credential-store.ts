@@ -5,6 +5,8 @@ interface ProviderState {
   environment: 'test' | 'production';
   configuredAt: string;
   updatedAt: string;
+  lastTestedAt?: string;
+  lastTestResult?: 'success' | 'failed';
 }
 
 const providerStore = new Map<string, ProviderState>();
@@ -86,6 +88,14 @@ export function getMaskedCredentials(providerId: string): Record<string, string>
   };
 }
 
+export function setTestResult(providerId: string, result: 'success' | 'failed'): void {
+  const state = providerStore.get(providerId);
+  if (state) {
+    state.lastTestedAt = new Date().toISOString();
+    state.lastTestResult = result;
+  }
+}
+
 export function getProviderInfo(providerId: string) {
   const state = providerStore.get(providerId);
   if (!state) return null;
@@ -93,6 +103,8 @@ export function getProviderInfo(providerId: string) {
     environment: state.environment,
     configuredAt: state.configuredAt,
     updatedAt: state.updatedAt,
+    lastTestedAt: state.lastTestedAt || null,
+    lastTestResult: state.lastTestResult || null,
     maskedCredentials: getMaskedCredentials(providerId),
   };
 }

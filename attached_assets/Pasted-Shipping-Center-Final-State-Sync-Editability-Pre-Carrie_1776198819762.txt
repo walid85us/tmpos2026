@@ -1,0 +1,238 @@
+Shipping Center Final State-Sync + Editability + Pre-Carrier Rollback Pass
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a hard final correction pass.
+Do not satisfy anything conceptually.
+Implement each requirement literally in the product UI and behavior.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Firebase/Firestore data architect
+- Enterprise shipping systems architect
+- Senior shipping and fulfillment expert with 20+ years of experience in parcel shipping, carrier integrations, warehouse execution, dispatch control, label workflows, tracking-event operations, exception handling, and reverse logistics
+- Root-cause debugging specialist
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- RBAC/sub-permissions
+- lifecycle gating
+- platform/store hierarchy
+- System Owner Plans & Features matrix
+- Store Permissions Matrix
+- secure server-side provider call architecture
+- Shipping Center as the sole provider-management home
+- mandatory provider address validation before Get Rates in provider mode
+- Ready disabled until rate selection
+- Rejected by Carrier / Returned with reasons
+- + Add Event disabled after Dispatched
+- PDF-only primary label behavior now passing
+- manual mode vs provider mode split now passing
+- existing shipping core flow
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — REMAINING FAILURES
+==================================================
+
+These are the exact remaining blockers and must be fixed literally:
+
+1) Provider connection status is not syncing correctly
+- EasyPost can show success message:
+  “Connection to EasyPost verified successfully.”
+- But the provider still shows “Not Tested”
+- This is incorrect and confusing
+- Provider test/health status must update immediately and persist correctly after a successful test
+
+2) Provider prerequisite state is not recalculating correctly
+- Even when provider is configured and active, Get Rate can remain disabled
+- Tooltip incorrectly says “configure a shipping provider”
+- This happens even though provider is already configured
+- After repeated attempts it may eventually work, but that is not acceptable
+- This is a stale state / bad recalculation / incorrect source-of-truth bug
+
+3) Provider prerequisites do not refresh correctly after shipment edits
+- Shipment created without package → Get Rate correctly disabled
+- Package added later via Edit → Get Rate still incorrectly disabled
+- Tooltip still incorrectly says “configure a shipping provider”
+- This means shipment prerequisite state is not recomputed properly after edits
+
+4) Origin and Destination are not editable when they should be
+- Before shipment is Dispatched, operators need to be able to correct Origin and Destination if there is an error
+- Make Origin and Destination editable in the allowed pre-dispatch edit flow
+- If these fields already belong in Edit Shipment, make sure they are actually editable there
+
+5) Need controlled rollback from Dispatched back one step only before carrier scan/acceptance
+- If shipment was marked Dispatched but not actually dropped off / needs repackaging / operational exception occurred, there should be a way to go one step back
+- This rollback is allowed only if there is NO carrier scan / NO provider acceptance / NO received-by-carrier event
+- Once tracking history shows carrier scanned/received/accepted the shipment, rollback must be blocked
+- Rejected by Carrier logic should remain exactly as currently designed
+
+==================================================
+NON-NEGOTIABLE IMPLEMENTATION REQUIREMENTS
+==================================================
+
+1. Fix provider connection status synchronization
+Required:
+- Successful Test Connection must update provider status from “Not Tested” to the correct tested/healthy state
+- This must update immediately in the UI
+- This state must persist correctly
+- Do not require repeated attempts or refreshes for the status to become accurate
+- If test fails, show the correct failure state honestly
+
+Acceptance:
+- QA clicks Test Connection
+- success message appears
+- provider status no longer remains “Not Tested”
+
+2. Fix provider prerequisite source-of-truth and recalculation
+Required:
+- Get Rate enable/disable logic must use the true current provider state, not stale state
+- If provider is configured and active, the tooltip must not incorrectly say “configure a shipping provider”
+- Recompute prerequisites whenever any relevant dependency changes, including:
+  - provider configuration/test state
+  - selected provider
+  - package details
+  - address validation state
+  - shipment mode (manual vs provider)
+  - selected rate state
+- Tooltips/messages must reflect the true current missing prerequisite
+
+Acceptance:
+- QA sees correct enable/disable behavior
+- QA sees correct tooltip reason
+- no more false “configure a shipping provider” when provider is actually configured
+
+3. Fix prerequisite recalculation after editing shipment details
+Required:
+- If package details are added later through Edit Shipment, provider prerequisite state must refresh immediately
+- If provider-mode prerequisites are now satisfied, Get Rate must become enabled
+- Do not require multiple attempts, refreshes, or unrelated actions to wake the state up
+- This must work reliably after editing packages, addresses, and other prerequisite-driving fields
+
+Acceptance:
+- Shipment without package → Get Rate disabled
+- Add package later via edit → Get Rate reevaluates correctly right away
+
+4. Make Origin and Destination editable before Dispatched
+Required:
+- Origin and Destination must be editable while shipment is still pre-dispatch
+- Include these fields in Edit Shipment if not already present
+- Ensure edits save and persist correctly
+- Once shipment is Dispatched, these fields should no longer be freely editable under normal flow
+
+Acceptance:
+- QA can edit Origin/Destination before Dispatched
+- QA cannot freely edit them after Dispatched unless an allowed rollback occurs
+
+5. Add controlled rollback from Dispatched only before carrier scan/acceptance
+Required:
+- Add a controlled operational action to move one step back from Dispatched when needed
+- This rollback is only allowed if there is no provider/carrier scan/acceptance/received event yet
+- Once tracking history shows carrier scan/acceptance/received, rollback must be blocked
+- Keep this lifecycle-aware and permission-aware
+- Preserve Rejected by Carrier logic exactly as it is
+
+Typical valid rollback reasons:
+- repackaging needed
+- not actually dropped at carrier facility
+- handoff mistake
+- shipping paperwork issue
+- internal operational correction
+
+Acceptance:
+- QA can roll back one step from Dispatched only before carrier scan/acceptance
+- QA cannot roll back after carrier scan/acceptance appears in tracking history
+
+==================================================
+FULFILLMENT RULES TO PRESERVE
+==================================================
+
+Do not weaken these rules:
+- Shipping Center remains the sole provider-management home
+- Address validation remains mandatory before Get Rates in provider mode
+- Ready remains disabled until rate selection in provider mode
+- Packed becomes available only after successful label purchase in provider mode
+- After dispatch and provider/carrier progression, lifecycle remains provider-driven in provider mode
+- Cancellation remains blocked after carrier progression
+- Existing shipping core flow remains intact
+- Rejected by Carrier / Returned remain controlled outcomes
+- + Add Event remains disabled after Dispatched
+- Manual mode vs provider mode split remains intact
+- PDF-only primary label behavior remains intact
+
+==================================================
+IMPORTANT IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden scope into Phase 2 or Phase 3 shipping work
+- Do not touch unrelated workstreams
+- Do not break preview mode safety
+- Do not break permissions or feature gating
+- Do not break shipping core flow
+- Do not break provider configuration
+- Do not fake provider success
+- Do not fake provider event sync
+- Keep the design baseline consistent
+- Do not create ambiguous mixed manual/provider shipment states
+- Do not leave stale computed state after edits
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact execution order:
+
+1) Fix provider connection test state so success/failure state syncs immediately and persists
+2) Fix provider prerequisite source-of-truth and stale state recalculation
+3) Fix prerequisite recalculation after shipment edits such as package additions
+4) Make Origin and Destination editable before Dispatched
+5) Add controlled rollback from Dispatched only before carrier scan/acceptance
+6) Re-test all affected shipping flows and lifecycle behaviors
+7) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- provider test status synchronization behavior
+- provider prerequisite recalculation rules
+- editability rules for Origin and Destination before Dispatched
+- rollback-from-Dispatched rule before carrier scan/acceptance
+- preserved Rejected by Carrier behavior
+- future fulfillment recommendations not implemented now
+
+==================================================
+MANDATORY OUTPUT PROOF
+==================================================
+
+Do not give a generic completion summary.
+Do not say this task is complete unless each literal blocker is visibly fixed in the actual product UI and behavior.
+
+OUTPUT FORMAT REQUIRED
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Provider Test Status Sync Fix
+3. Provider Prerequisite Recalculation Fix
+4. Post-Edit Recalculation Fix
+5. Origin/Destination Editability Fix
+6. Dispatched Rollback Before Carrier Scan Fix
+7. Files Changed
+8. Documentation Updated
+9. Non-Regression Notes
