@@ -130,6 +130,22 @@ app.post('/api/shipping/rates', async (req, res) => {
   res.json(result);
 });
 
+app.get('/api/shipping/label-proxy', async (req, res) => {
+  const url = req.query.url as string;
+  if (!url) { res.status(400).json({ error: 'Missing url parameter' }); return; }
+  try {
+    const response = await fetch(url);
+    if (!response.ok) { res.status(502).json({ error: `Upstream returned ${response.status}` }); return; }
+    const contentType = response.headers.get('content-type') || 'application/octet-stream';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    const buffer = Buffer.from(await response.arrayBuffer());
+    res.send(buffer);
+  } catch (err) {
+    res.status(502).json({ error: 'Failed to fetch label from provider' });
+  }
+});
+
 app.post('/api/shipping/purchase-label', async (req, res) => {
   const { providerId, originAddress, destinationAddress, packages, selectedRateId, carrier, service, shipmentRef } = req.body;
   const provider = resolveProvider(providerId);

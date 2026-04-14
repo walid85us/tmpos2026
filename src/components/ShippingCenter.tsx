@@ -12,7 +12,7 @@ import ShippingProvidersPage from './ShippingProvidersPage';
 async function convertImageToPdfBlobUrl(imageUrl: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const img = new Image();
-    img.crossOrigin = 'anonymous';
+    const proxyUrl = `/api/shipping/label-proxy?url=${encodeURIComponent(imageUrl)}`;
     img.onload = () => {
       try {
         const canvas = document.createElement('canvas');
@@ -72,7 +72,7 @@ async function convertImageToPdfBlobUrl(imageUrl: string): Promise<string> {
       }
     };
     img.onerror = () => reject(new Error('Failed to load label image'));
-    img.src = imageUrl;
+    img.src = proxyUrl;
   });
 }
 
@@ -716,12 +716,18 @@ export default function ShippingCenter() {
       packages: editPackages,
       updatedAt: now,
     };
-    if (!hasLabel && !hasRate) {
+    if (!hasLabel) {
       updates.carrier = newCarrier || undefined;
       updates.serviceLevel = newService || undefined;
-      if (newCarrier && newService) {
-        updates.shipmentMode = 'manual';
+      if ((newCarrier || newService) && !hasRate) {
         updates.selectedRate = undefined;
+      }
+      if (newCarrier && newService && hasRate) {
+        const rateCarrier = shipment?.selectedRate?.carrier;
+        const rateService = shipment?.selectedRate?.serviceName;
+        if (newCarrier !== rateCarrier || newService !== rateService) {
+          updates.selectedRate = undefined;
+        }
       }
     }
     if (!hasLabel) {
@@ -890,7 +896,6 @@ export default function ShippingCenter() {
       serviceLevel: rate.serviceName,
       shippingCost: rate.rate,
       estimatedDelivery: rate.estimatedDelivery,
-      shipmentMode: 'provider',
       updatedAt: new Date().toISOString(),
     });
     setShowRatesPanel(false);
@@ -926,10 +931,9 @@ export default function ShippingCenter() {
           const pdfBlobUrl = await convertImageToPdfBlobUrl(labelArtifact.url);
           labelArtifact.pdfUrl = pdfBlobUrl;
           labelArtifact.format = 'pdf';
-        } catch (convErr) {
-          setProviderError({ code: 'PDF_CONVERSION_FAILED', message: `Label purchased but PDF conversion failed. Provider returned ${actualFmt.toUpperCase()}. Please retry or contact support.`, retryable: true });
-          setProviderLoading(null);
-          return;
+        } catch {
+          labelArtifact.pdfUrl = `/api/shipping/label-proxy?url=${encodeURIComponent(labelArtifact.url)}`;
+          labelArtifact.format = actualFmt;
         }
       }
       const now = new Date().toISOString();
@@ -1108,9 +1112,8 @@ export default function ShippingCenter() {
 
   function getShipmentMode(shipment: Shipment | null | undefined): 'provider' | 'manual' {
     if (!shipment) return 'provider';
-    if (shipment.shipmentMode) return shipment.shipmentMode;
     if (shipment.selectedRate) return 'provider';
-    if (shipment.carrier && shipment.serviceLevel && !shipment.selectedRate) return 'manual';
+    if (shipment.carrier && shipment.serviceLevel) return 'manual';
     return 'provider';
   }
 
@@ -1491,21 +1494,11 @@ export default function ShippingCenter() {
                           <span className="material-symbols-outlined text-slate-500 text-sm mt-0.5">edit_note</span>
                           <div>
                             <p className="text-xs text-slate-700 font-medium">Manual Shipment Mode</p>
-                            <p className="text-[10px] text-slate-500 mt-0.5">Carrier and service level were set manually. Provider actions are disabled.</p>
-                            {!isWriteBlocked && isEditable(selectedShip.status) && !selectedShip.label && activeProviderId && (
-                              <button onClick={() => {
-                                updateShipment(selectedShip.id, {
-                                  shipmentMode: 'provider',
-                                  carrier: undefined,
-                                  serviceLevel: undefined,
-                                  updatedAt: new Date().toISOString(),
-                                });
-                                clearProviderFeedback();
-                              }}
-                                className="text-[10px] text-indigo-600 font-bold underline decoration-dotted mt-1 hover:text-indigo-800 transition-colors">
-                                Switch to Provider Mode
-                              </button>
-                            )}
+                            <p className="text-[10px] text-slate-500 mt-0.5">
+                              {activeProviderId
+                                ? 'The shipping provider is active, but because carrier and service level were entered manually, this shipment is in manual mode. Provider-backed actions (address validation, rates, label purchase, tracking sync) are disabled for this shipment. Clear manual carrier and service level values to use provider features.'
+                                : 'Carrier and service level were set manually. Provider-backed actions are not available.'}
+                            </p>
                           </div>
                         </div>
                       )}
@@ -1579,20 +1572,14 @@ export default function ShippingCenter() {
                           <span className="font-black text-slate-700">{selectedShip.selectedRate.carrier} {selectedShip.selectedRate.serviceName}</span>
                           <span className="font-black text-primary">${selectedShip.selectedRate.rate.toFixed(2)}</span>
                           {selectedShip.selectedRate.estimatedDays && <span className="text-slate-400">({selectedShip.selectedRate.estimatedDays}d)</span>}
-                          {!isWriteBlocked && isEditable(selectedShip.status) && !selectedShip.label && (
-                            <button onClick={() => {
-                              updateShipment(selectedShip.id, {
-                                selectedRate: undefined,
-                                shipmentMode: 'manual',
-                                updatedAt: new Date().toISOString(),
-                              });
-                              clearProviderFeedback();
-                            }}
-                              className="text-[9px] text-slate-400 hover:text-red-500 font-bold underline decoration-dotted transition-colors"
-                              title="Clear provider rate and switch to manual carrier/service handling">
-                              Switch to Manual
-                            </button>
-                          )}
+                        </div>
+                      )}
+
+                      {!selectedShip.selectedRate && isManualMode && selectedShip.carrier && selectedShip.serviceLevel && (
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className="text-slate-400 font-bold">Manual Service</span>
+                          <span className="font-black text-slate-700">{selectedShip.carrier} {selectedShip.serviceLevel}</span>
+                          <span className="px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest bg-slate-200 text-slate-500 rounded">Manual</span>
                         </div>
                       )}
 
@@ -2075,7 +2062,7 @@ export default function ShippingCenter() {
           const hasLabel = !!editShipData?.label;
           const hasSelectedRate = !!editShipData?.selectedRate;
           const trackingLocked = hasLabel;
-          const carrierServiceLocked = hasLabel || hasSelectedRate;
+          const carrierServiceLocked = hasLabel;
           return (
           <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
             <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col">
@@ -2099,7 +2086,15 @@ export default function ShippingCenter() {
                   <div className="px-3 py-2 bg-indigo-50 border border-indigo-100 rounded-lg flex items-start gap-2">
                     <span className="material-symbols-outlined text-indigo-500 text-sm mt-0.5">info</span>
                     <p className="text-[10px] text-indigo-600 font-medium">
-                      {hasLabel ? 'Carrier, service, and tracking are locked after label purchase.' : 'Carrier and service are set from the selected rate.'}
+                      Carrier, service, and tracking are locked after label purchase.
+                    </p>
+                  </div>
+                )}
+                {!carrierServiceLocked && hasSelectedRate && (
+                  <div className="px-3 py-2 bg-amber-50 border border-amber-100 rounded-lg flex items-start gap-2">
+                    <span className="material-symbols-outlined text-amber-500 text-sm mt-0.5">info</span>
+                    <p className="text-[10px] text-amber-600 font-medium">
+                      Carrier and service are currently set from the provider-selected rate. Changing them manually will clear the selected rate and switch this shipment to manual mode.
                     </p>
                   </div>
                 )}
