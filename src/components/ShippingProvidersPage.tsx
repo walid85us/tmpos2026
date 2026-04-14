@@ -20,7 +20,7 @@ const PROVIDER_COLORS: Record<string, { bg: string; border: string; text: string
   shipstation: { bg: 'bg-orange-50', border: 'border-orange-200', text: 'text-orange-700', activeBg: 'bg-orange-600' },
 };
 
-export default function ShippingProvidersPage({ embedded = false }: { embedded?: boolean }) {
+export default function ShippingProvidersPage({ embedded = false, onProviderChange }: { embedded?: boolean; onProviderChange?: () => void }) {
   const { setShippingProviderConfig } = useStoreLocalState();
   const { checkSubPermission, isWriteBlocked } = useAccess();
   const canManage = checkSubPermission('manage_shipping_settings');
@@ -66,6 +66,8 @@ export default function ShippingProvidersPage({ embedded = false }: { embedded?:
           configuredAt: p.configuredAt,
           updatedAt: p.updatedAt,
           maskedCredentials: p.maskedCredentials,
+          testResult: p.lastTestResult === 'success' ? 'success' as const : p.lastTestResult === 'failed' ? 'failure' as const : undefined,
+          lastTestedAt: p.lastTestedAt,
         })),
         activeProviderId: status.activeProviderId,
       });
@@ -143,6 +145,7 @@ export default function ShippingProvidersPage({ embedded = false }: { embedded?:
         setSaveSuccess(providerId);
         setTimeout(() => setSaveSuccess(null), 2500);
         await fetchStatus();
+        onProviderChange?.();
       }
     } catch {
       setTestResult({ providerId, success: false, message: 'Failed to save credentials. Please try again.' });
@@ -156,6 +159,7 @@ export default function ShippingProvidersPage({ embedded = false }: { embedded?:
     try {
       await shippingApi.setActiveProvider(providerId);
       await fetchStatus();
+      onProviderChange?.();
     } catch {
       setTestResult({ providerId, success: false, message: 'Failed to set active provider.' });
     }
@@ -166,6 +170,7 @@ export default function ShippingProvidersPage({ embedded = false }: { embedded?:
     try {
       await shippingApi.setActiveProvider(null);
       await fetchStatus();
+      onProviderChange?.();
     } catch {}
   }
 
@@ -207,6 +212,7 @@ export default function ShippingProvidersPage({ embedded = false }: { embedded?:
       );
 
       setProvidersState(prev => ({ ...prev, providers: newProviders }));
+      onProviderChange?.();
     } catch {
       setTestResult({ providerId, success: false, message: 'Connection test failed — could not reach server.' });
     }
@@ -219,6 +225,7 @@ export default function ShippingProvidersPage({ embedded = false }: { embedded?:
       await shippingApi.removeProviderCredentials(providerId);
       setEditingProvider(null);
       await fetchStatus();
+      onProviderChange?.();
     } catch {
       setTestResult({ providerId, success: false, message: 'Failed to remove provider configuration.' });
     }

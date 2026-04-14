@@ -1,0 +1,229 @@
+Shipping Center Final Source-of-Truth + Post-Label UX Correction Pass
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a hard final correction pass.
+Only fix the remaining literal blockers below.
+Do not broaden scope.
+Do not redesign the app.
+Do not touch unrelated workstreams.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Firebase/Firestore data architect
+- Enterprise shipping systems architect
+- Senior shipping and fulfillment expert with 20+ years of experience in parcel shipping, carrier integrations, dispatch control, label workflows, tracking-event operations, and reverse logistics
+- Root-cause debugging specialist
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- RBAC/sub-permissions
+- lifecycle gating
+- platform/store hierarchy
+- System Owner Plans & Features matrix
+- Store Permissions Matrix
+- secure server-side provider call architecture
+- Shipping Center as the sole provider-management home
+- mandatory provider address validation before Get Rates in provider mode
+- Ready disabled until rate selection
+- Rejected by Carrier / Returned with reasons
+- + Add Event disabled after Dispatched
+- existing shipping core flow
+- manual mode vs provider mode split
+- PDF primary label behavior already implemented as far as possible
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — REMAINING FAILURES
+==================================================
+
+These are the exact remaining blockers and must be fixed literally:
+
+1) Provider test status is still not synchronized correctly
+- Provider config can show VERIFIED / successful connection
+- But top-level/provider-summary state can still show NOT TESTED
+- This is incorrect
+- The app must have one coherent provider health/status source of truth
+
+2) Get Rates still shows the false tooltip “configure a shipping provider”
+- even when the provider is configured, active, and verified
+- This is incorrect
+- Shipment action gating is using stale or wrong provider readiness state
+
+3) After label purchase, Validate Address still appears as an action
+- This is poor operational UX
+- After label purchase, the address should already be considered validated/locked as part of the committed shipment flow
+- Validate Address should not remain as a normal active action after label purchase unless the shipment is rolled back into an editable pre-dispatch state and the address is edited again
+
+4) PDF label workflow is still not clean enough
+- Even if the underlying artifact path begins from PNG, the operator-facing result must be a clean PDF print workflow
+- The app should not expose “Converted from PNG” as part of the normal operator experience if the final artifact is a usable real PDF
+- The final operator experience must be simple and trustworthy
+
+==================================================
+ROOT-CAUSE EXPECTATION
+==================================================
+
+Treat this as a source-of-truth and state-recalculation bug, not a cosmetic patch.
+
+You must audit and unify:
+- provider configured state
+- provider active state
+- provider verified/tested state
+- shipment mode state (provider mode vs manual mode)
+- provider action prerequisites
+- post-label committed shipment state
+
+There must not be multiple conflicting provider-status indicators powered by different stale state sources.
+
+==================================================
+NON-NEGOTIABLE IMPLEMENTATION REQUIREMENTS
+==================================================
+
+1. Single source of truth for provider status
+Required:
+- Unify provider status used by:
+  - provider summary/header
+  - provider configuration panel
+  - Provider & Operations section
+  - action gating for Get Rates / Purchase Label / Sync Tracking
+- If Test Connection succeeds, the provider must no longer show NOT TESTED anywhere for that active configuration
+- This must update immediately and persist correctly
+- No repeated attempts or refreshes should be required to make the state accurate
+
+Acceptance:
+- QA tests connection successfully
+- all provider status surfaces reflect the same correct verified/tested state
+
+2. Correct Get Rates prerequisite messaging
+Required:
+- If provider is configured, active, and verified, the app must not say “configure a shipping provider”
+- Tooltips/messages must reflect the true current blocker only
+- Recompute this from the real current state after:
+  - provider test success
+  - provider activation
+  - shipment edits
+  - package additions
+  - address validation result
+  - mode switching between manual and provider mode
+
+Acceptance:
+- QA sees the true missing prerequisite
+- false provider-config errors disappear
+
+3. Post-label action cleanup
+Required:
+- After label purchase, Validate Address must not remain a normal active next-step action
+- Replace it with the correct post-label state behavior, such as:
+  - read-only validated status
+  - hidden/disabled validate action
+  - action only restored if shipment is rolled back into editable pre-dispatch state and address changed
+- Keep this lifecycle-aware and truthful
+
+Acceptance:
+- After label purchase, Validate Address is no longer presented as a normal active action in the committed shipment flow
+
+4. Clean operator-facing PDF experience
+Required:
+- The primary label action must still result in a real PDF artifact for the operator
+- If the implementation uses a PNG-to-PDF conversion behind the scenes, that is acceptable only if:
+  - the final opened artifact is a real PDF
+  - the workflow is print-ready
+  - the operator-facing UI is clean
+- Remove implementation-noise messaging like “Converted from PNG” from the normal operator flow if the final artifact is a valid PDF
+- Keep honest internal metadata/documentation if conversion is used, but do not clutter the operator UI with technical conversion notes unless there is a real issue
+
+Acceptance:
+- QA clicks the primary label action
+- receives a real PDF print flow
+- does not see unnecessary conversion-noise in the normal operator path
+
+==================================================
+FULFILLMENT RULES TO PRESERVE
+==================================================
+
+Do not weaken these rules:
+- Shipping Center remains the sole provider-management home
+- Address validation remains mandatory before Get Rates in provider mode
+- Ready remains disabled until rate selection in provider mode
+- Packed becomes available only after successful label purchase in provider mode
+- After dispatch and provider/carrier progression, lifecycle remains provider-driven in provider mode
+- Cancellation remains blocked after carrier progression
+- Existing shipping core flow remains intact
+- Rejected by Carrier / Returned remain controlled outcomes
+- + Add Event remains disabled after Dispatched
+- Manual mode vs provider mode split remains intact
+
+==================================================
+IMPORTANT IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden scope into Phase 2 or Phase 3 shipping work
+- Do not touch unrelated workstreams
+- Do not break preview mode safety
+- Do not break permissions or feature gating
+- Do not break shipping core flow
+- Do not break provider configuration
+- Do not fake provider success
+- Do not fake provider event sync
+- Keep the design baseline consistent
+- Do not leave stale computed state in any provider-status surface
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact execution order:
+
+1) Audit all provider-status sources and unify them into one real source of truth
+2) Fix provider verified/tested state propagation after successful Test Connection
+3) Fix Get Rates prerequisite messaging to use that unified current state
+4) Clean up post-label actions so Validate Address is no longer active after label purchase
+5) Clean up operator-facing PDF flow so it remains a real PDF without unnecessary conversion-noise in the normal UI
+6) Re-test all affected shipping flows and lifecycle behaviors
+7) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- unified provider-status source of truth
+- provider verified/tested state propagation rules
+- provider prerequisite recalculation rules
+- post-label Validate Address behavior
+- clean PDF operator flow and whether internal conversion is used
+- future fulfillment recommendations not implemented now
+
+==================================================
+MANDATORY OUTPUT PROOF
+==================================================
+
+Do not give a generic completion summary.
+Do not say this task is complete unless each literal blocker is visibly fixed in the actual product UI and behavior.
+
+OUTPUT FORMAT REQUIRED
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Provider Status Source-of-Truth Fix
+3. Get Rates Prerequisite Messaging Fix
+4. Post-Label Validate Address UX Fix
+5. Clean PDF Operator Flow Fix
+6. Files Changed
+7. Documentation Updated
+8. Non-Regression Notes

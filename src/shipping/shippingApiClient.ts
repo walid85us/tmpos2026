@@ -48,6 +48,8 @@ interface ProvidersStatusResponse {
     configuredAt?: string;
     updatedAt?: string;
     maskedCredentials?: Record<string, string>;
+    lastTestedAt?: string | null;
+    lastTestResult?: 'success' | 'failed' | null;
   }[];
   activeProviderId: string | null;
 }

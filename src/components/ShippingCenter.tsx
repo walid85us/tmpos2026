@@ -405,6 +405,7 @@ export default function ShippingCenter() {
       setActiveProviderId(r.activeProviderId);
       setProviderEnvironment(r.environment || null);
     });
+    loadProviderStatuses();
   }, []);
 
   const [newCarrier, setNewCarrier] = useState('');
@@ -835,11 +836,18 @@ export default function ShippingCenter() {
     return av.status === 'validated' || (av.status === 'corrected' && av.accepted === true);
   }
 
+  function getProviderPrerequisiteMessage(): string | null {
+    if (activeProviderId) return null;
+    const hasAnyConfigured = providerStatuses.length > 0;
+    return hasAnyConfigured ? 'Set an active shipping provider' : 'Configure a shipping provider';
+  }
+
   function getRatePrerequisites(shipment: Shipment): string[] {
     const missing: string[] = [];
     if (!isAddressAccepted(shipment)) missing.push('Validate destination address');
     if (!hasShippablePackages(shipment)) missing.push('Add packages with weight or contents');
-    if (!activeProviderId) missing.push('Configure a shipping provider');
+    const providerMsg = getProviderPrerequisiteMessage();
+    if (providerMsg) missing.push(providerMsg);
     return missing;
   }
 
@@ -848,7 +856,8 @@ export default function ShippingCenter() {
     if (!isAddressAccepted(shipment)) missing.push('Validate destination address');
     if (!hasShippablePackages(shipment)) missing.push('Add packages with weight or contents');
     if (!shipment.selectedRate && (!shipment.carrier || !shipment.serviceLevel)) missing.push('Select a shipping rate or set carrier and service level');
-    if (!activeProviderId) missing.push('Configure a shipping provider');
+    const providerMsg = getProviderPrerequisiteMessage();
+    if (providerMsg) missing.push(providerMsg);
     return missing;
   }
 
@@ -1019,6 +1028,11 @@ export default function ShippingCenter() {
     try {
       const result = await shippingApi.testConnection(providerId);
       if (result.success) {
+        if (!activeProviderId) {
+          try {
+            await shippingApi.setActiveProvider(providerId);
+          } catch {}
+        }
         setProviderSuccess(`Connection to ${providerId} verified successfully.`);
       } else {
         setProviderError({ code: 'TEST_FAILED', message: result.error?.message || 'Connection test failed.', retryable: true });
@@ -1261,7 +1275,7 @@ export default function ShippingCenter() {
           )}
         </div>
         {activeTab === 'settings' ? (
-          <ShippingProvidersPage embedded />
+          <ShippingProvidersPage embedded onProviderChange={refreshProviderState} />
         ) : (<>
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3 flex-1 min-w-0">
@@ -1494,14 +1508,24 @@ export default function ShippingCenter() {
                         <div className="flex items-center gap-2">
                           {isManualMode ? (
                             <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest bg-slate-200 text-slate-600 rounded-md">Manual</span>
-                          ) : activeProviderId ? (
+                          ) : activeProviderId ? (() => {
+                            const activePs = providerStatuses.find((ps: any) => ps.providerId === activeProviderId);
+                            const testResult = activePs?.lastTestResult;
+                            return (
                             <>
                               <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest bg-indigo-100 text-indigo-600 rounded-md">{activeProviderId}</span>
                               <span className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md ${providerEnvironment === 'test' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>
                                 {providerEnvironment === 'test' ? 'Test Mode' : 'Live'}
                               </span>
+                              {testResult === 'success' && (
+                                <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest bg-emerald-100 text-emerald-600 rounded-md">Verified</span>
+                              )}
+                              {testResult === 'failed' && (
+                                <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest bg-red-100 text-red-600 rounded-md">Failed</span>
+                              )}
                             </>
-                          ) : (
+                            );
+                          })() : (
                             <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest bg-slate-100 text-slate-400 rounded-md">No Provider</span>
                           )}
                           {!isManualMode && canManageProviderSettings && (
@@ -1645,7 +1669,6 @@ export default function ShippingCenter() {
                           <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-md text-[10px] font-black uppercase tracking-widest">Purchased</span>
                           <span className="text-slate-500 font-mono text-[10px]">{lbl.trackingNumber}</span>
                           <span className="px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-widest bg-red-100 text-red-600">{displayFmt.toUpperCase()}</span>
-                          {lbl.originalFormat && <span className="text-[9px] text-slate-400">from {lbl.originalFormat.toUpperCase()}</span>}
                         </div>
                         );
                       })()}
@@ -1665,7 +1688,7 @@ export default function ShippingCenter() {
                       )}
 
                       <div className="flex gap-2 flex-wrap pt-1">
-                        {!isManualMode && canValidateAddress && !isWriteBlocked && isEditable(selectedShip.status) && (
+                        {!isManualMode && canValidateAddress && !isWriteBlocked && isEditable(selectedShip.status) && !selectedShip.label && (
                           <button onClick={() => handleValidateAddress(selectedShip.id)} disabled={providerLoading !== null}
                             className="px-3 py-2 bg-white text-indigo-600 border border-indigo-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50 transition-all disabled:opacity-40 flex items-center gap-1">
                             <span className="material-symbols-outlined text-sm">{providerLoading === 'validate' ? 'hourglass_top' : 'verified'}</span>
@@ -1736,11 +1759,6 @@ export default function ShippingCenter() {
                               <span className="material-symbols-outlined text-sm">picture_as_pdf</span>
                               View
                             </button>
-                            {label.originalFormat && (
-                              <span className="text-[9px] text-slate-400 font-medium" title={`Provider returned ${label.originalFormat.toUpperCase()} — converted to PDF for print-ready workflow`}>
-                                Converted from {label.originalFormat.toUpperCase()}
-                              </span>
-                            )}
                           </div>
                           );
                         })()}
