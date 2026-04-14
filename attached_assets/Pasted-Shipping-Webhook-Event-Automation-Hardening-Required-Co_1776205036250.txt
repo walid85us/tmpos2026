@@ -1,0 +1,87 @@
+Shipping Webhook & Event Automation Hardening — Required Completion Proof + Durability Correction
+
+Do not start a new workstream.
+Do not redesign anything.
+Do not broaden scope.
+This is a required correction/clarification pass because your last reply did not prove completion of the actual requested work.
+
+Your previous response is not sufficient yet for QA sign-off.
+
+==================================================
+WHY THIS IS NOT READY FOR QA YET
+==================================================
+
+Your summary did not explicitly prove several required deliverables from the prompt.
+
+Most importantly:
+- you stated “In-memory audit log (500 events)”
+- that does NOT satisfy a production-ready, durable, auditable webhook/event hardening requirement
+- in-memory audit history is lost on restart and is not sufficient for reliable replay/recovery/auditability
+
+Also your reply did not explicitly prove:
+- RepairDesk article reviewed
+- RepairDesk insights extracted
+- how those insights were adapted to our Shipping Center
+- implemented now vs deferred vs not adopted
+- explicit Phase 2 forward-compatibility included
+- explicit Phase 3 forward-compatibility included
+- documentation updated
+- non-regression notes
+- manual shipments remain manual and do not misuse provider automation
+- replay/re-sync tooling is permission-gated
+- preview mode / RBAC / plan gating remained correct
+
+==================================================
+REQUIRED ACTIONS
+==================================================
+
+1) FIX OR JUSTIFY EVENT AUDIT DURABILITY
+If the event/audit log is only in-memory, that is not sufficient.
+You must either:
+- implement durable event/audit persistence appropriate for this app architecture
+or
+- explicitly state what is durable vs what is only temporary dev tooling and then complete the durable path now
+
+At minimum, the provider event audit trail must be durable enough for:
+- restart-safe history
+- replay/recovery support
+- shipment-linked auditability
+- duplicate-event safety
+- operator/admin troubleshooting
+
+2) EXPLICITLY PROVE ALL REQUIRED PROMPT DELIVERABLES
+You must explicitly respond to every required section from the original prompt.
+
+3) CONFIRM THE FOLLOWING OPERATIONAL GUARANTEES
+You must explicitly confirm whether all of these are true after your implementation:
+- manual shipments remain manual and do not incorrectly use provider automation
+- replay/re-sync/recovery actions are permission-gated
+- preview mode safety is preserved
+- RBAC/sub-permission enforcement is preserved
+- plan/feature gating is preserved
+- existing shipping core flow is preserved
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Workstream Completion Status
+2. RepairDesk Article Reviewed
+3. RepairDesk Insights Extracted
+4. How Those Insights Were Adapted To Our Shipping Center
+5. Implemented Now vs Deferred vs Not Adopted
+6. Webhook / Provider Event Hardening Added
+7. Idempotency / Replay / Re-Sync Recovery Added
+8. Provider-Driven Lifecycle Automation Improvements
+9. Event Audit Durability Fix or Clarification
+10. Phase 2 Forward-Compatibility Included
+11. Phase 3 Forward-Compatibility Included
+12. Fulfillment-Expert Recommendations
+13. Files Changed
+14. Documentation Updated
+15. Non-Regression Notes
+
+Do not give a generic summary.
+Do not say complete unless every section above is addressed explicitly.

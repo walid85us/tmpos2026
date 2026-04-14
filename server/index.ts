@@ -19,6 +19,7 @@ import {
   recordWebhookEvent,
   getWebhookLog,
   getWebhookEventById,
+  getWebhookLogStats,
   parseEasyPostWebhook,
   parseShippoWebhook,
   parseShipStationWebhook,
@@ -317,6 +318,10 @@ app.post('/api/shipping/webhook/:providerId', (req, res) => {
     eventsProcessed: parsed.events.length,
     webhookEventId: record.id,
   });
+});
+
+app.get('/api/shipping/webhook-log/stats', (_req, res) => {
+  res.json(getWebhookLogStats());
 });
 
 app.get('/api/shipping/webhook-log', (_req, res) => {

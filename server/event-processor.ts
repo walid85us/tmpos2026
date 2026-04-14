@@ -1,4 +1,10 @@
+import * as fs from 'fs';
+import * as path from 'path';
+import { fileURLToPath } from 'url';
 import type { ProviderTrackingEvent } from './types';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 export interface WebhookEventRecord {
   id: string;
@@ -56,8 +62,49 @@ const STATUS_PROGRESSION_ORDER = [
   'In Transit', 'Delivered', 'Exception', 'Rejected', 'Returned', 'Cancelled',
 ];
 
-const webhookLog: WebhookEventRecord[] = [];
+const WEBHOOK_LOG_FILE = path.join(__dirname, '..', 'data', 'webhook-audit-log.json');
 const MAX_LOG_SIZE = 500;
+let webhookLog: WebhookEventRecord[] = [];
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+function ensureDataDir(): void {
+  const dir = path.dirname(WEBHOOK_LOG_FILE);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+}
+
+function loadWebhookLogFromDisk(): void {
+  try {
+    if (fs.existsSync(WEBHOOK_LOG_FILE)) {
+      const raw = fs.readFileSync(WEBHOOK_LOG_FILE, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        webhookLog = parsed.slice(0, MAX_LOG_SIZE);
+        console.log(`[Event Processor] Loaded ${webhookLog.length} webhook event(s) from durable storage.`);
+      }
+    }
+  } catch (err) {
+    console.warn(`[Event Processor] Failed to load webhook log from disk, starting fresh:`, err instanceof Error ? err.message : err);
+    webhookLog = [];
+  }
+}
+
+function persistWebhookLogToDisk(): void {
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    try {
+      ensureDataDir();
+      fs.writeFileSync(WEBHOOK_LOG_FILE, JSON.stringify(webhookLog, null, 2), 'utf-8');
+    } catch (err) {
+      console.warn(`[Event Processor] Failed to persist webhook log:`, err instanceof Error ? err.message : err);
+    }
+  }, 200);
+}
+
+ensureDataDir();
+loadWebhookLogFromDisk();
 
 export function mapProviderStatus(providerStatus: string): string | undefined {
   return PROVIDER_TO_INTERNAL_STATUS[providerStatus.toLowerCase()];
@@ -82,6 +129,17 @@ export function isDuplicateEvent(
   return existingEvents.some(
     e => e.timestamp === newEvent.timestamp && e.status === newEvent.status
   );
+}
+
+export function isDuplicateWebhookEvent(record: WebhookEventRecord): boolean {
+  if (record.providerEventId) {
+    return webhookLog.some(
+      r => r.providerEventId === record.providerEventId
+        && r.providerId === record.providerId
+        && r.source === 'webhook'
+    );
+  }
+  return false;
 }
 
 export function processProviderEvents(
@@ -114,7 +172,7 @@ export function processProviderEvents(
 
     results.push({
       event,
-      processingResult: duplicate ? 'duplicate' : 'processed',
+      processingResult: 'processed',
       mappedInternalStatus: isProgression ? mappedStatus : undefined,
       isDuplicate: false,
       isOutOfOrder,
@@ -127,10 +185,14 @@ export function processProviderEvents(
 }
 
 export function recordWebhookEvent(record: WebhookEventRecord): void {
+  if (isDuplicateWebhookEvent(record)) {
+    record.processingResult = 'duplicate';
+  }
   webhookLog.unshift(record);
   if (webhookLog.length > MAX_LOG_SIZE) {
     webhookLog.length = MAX_LOG_SIZE;
   }
+  persistWebhookLogToDisk();
 }
 
 export function getWebhookLog(filters?: {
@@ -149,6 +211,28 @@ export function getWebhookLog(filters?: {
 
 export function getWebhookEventById(id: string): WebhookEventRecord | undefined {
   return webhookLog.find(r => r.id === id);
+}
+
+export function getWebhookLogStats(): {
+  total: number;
+  byResult: Record<string, number>;
+  byProvider: Record<string, number>;
+  oldestEvent?: string;
+  newestEvent?: string;
+} {
+  const byResult: Record<string, number> = {};
+  const byProvider: Record<string, number> = {};
+  for (const r of webhookLog) {
+    byResult[r.processingResult] = (byResult[r.processingResult] || 0) + 1;
+    byProvider[r.providerId] = (byProvider[r.providerId] || 0) + 1;
+  }
+  return {
+    total: webhookLog.length,
+    byResult,
+    byProvider,
+    oldestEvent: webhookLog.length > 0 ? webhookLog[webhookLog.length - 1].receivedAt : undefined,
+    newestEvent: webhookLog.length > 0 ? webhookLog[0].receivedAt : undefined,
+  };
 }
 
 export function parseEasyPostWebhook(payload: any): {

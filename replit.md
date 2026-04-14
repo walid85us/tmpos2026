@@ -52,15 +52,18 @@ The frontend is built using React 19, TypeScript, Vite 6, and Tailwind CSS v4.
         -   **Status Mapping**: Centralized `PROVIDER_TO_INTERNAL_STATUS` map converts provider-specific statuses (pre_transit, accepted, in_transit, etc.) to internal statuses. Used by both webhook processing and client-side sync.
         -   **Status Progression Awareness**: `isStatusProgression()` prevents out-of-order status regression. Exception/Returned statuses only apply if shipment is already Dispatched+.
         -   **Provider Parsers**: EasyPost, Shippo, ShipStation webhook payloads are normalized by provider-specific parsers into a common `ProviderTrackingEvent[]` format.
-        -   **Webhook Audit Log**: In-memory ring buffer (500 entries) records every webhook event with full metadata (providerId, eventType, trackingNumber, processingResult, signatureVerified, isTestMode, retryCount, source).
-        -   **Recovery Tooling**: Webhook log viewer (admin, permission-gated via `manage_shipping_settings`) with filtering by result type. Event replay endpoint re-processes failed events. Sync failure counter tracks consecutive failures per shipment.
-        -   **Enhanced Timeline**: Tracking events display source badges (Provider, Webhook, Replay, Test Provider, Manual) with color-coded dots. Processing metadata (result, received timestamp) visible on non-standard events.
-    -   **Phase 2/3 Forward-Compatible Fields**: Shipment type includes extension fields for customs, insurance, returns, pickup scheduling, SLA tracking, and batch processing. These are optional and unused by current UI but structurally ready for future features.
+        -   **Webhook Audit Log (Durable)**: File-backed ring buffer (`data/webhook-audit-log.json`, 500 entries max) records every webhook event with full metadata (providerId, eventType, trackingNumber, processingResult, signatureVerified, isTestMode, retryCount, source). Loaded from disk on server startup, persisted asynchronously (200ms debounce) on every write. Survives server restarts — the first durable audit trail in the system. Duplicate webhook detection at audit level via `providerEventId` matching.
+        -   **Recovery Tooling**: Webhook log viewer (admin, permission-gated via `manage_shipping_settings`) with filtering by result type. Event replay endpoint re-parses original raw payload through the provider-specific parser. Sync failure counter tracks consecutive failures per shipment with `syncFailureCount` and `lastSyncError`.
+        -   **Enhanced Timeline**: Tracking events display source badges (Provider, Webhook, Replay, Test Provider, Manual) with color-coded dots and per-source colored timeline nodes. Processing metadata (result, received timestamp) visible on non-standard events.
+        -   **Security**: HMAC-SHA256 signature verification (timing-safe comparison) when `SHIPPING_WEBHOOK_SECRET_<PROVIDER>` env var is set. Raw payloads redacted from all webhook-log GET responses. Admin endpoints (webhook-log, replay) gated client-side by `manage_shipping_settings` sub-permission + `isWriteBlocked` guard on replay.
+    -   **Phase 2 Forward-Compatible Fields**: Shipment type includes extension fields for customs declarations (`customsInfo`), insurance (`insuranceInfo`), return management (`returnInfo`). These are typed and optional, ready for Phase 2 international/returns features without schema migration.
+    -   **Phase 3 Forward-Compatible Fields**: Shipment type includes extension fields for pickup scheduling (`pickupInfo`), SLA tracking (`slaInfo`), and batch processing (`batchId`). These are typed and optional, ready for Phase 3 operations/logistics features.
     -   **API Endpoints (Event/Webhook)**:
-        -   `POST /api/shipping/webhook/:providerId` — Receives provider webhooks, parses payload, records to audit log, returns processing result.
-        -   `GET /api/shipping/webhook-log` — Admin endpoint returning filtered webhook event log.
-        -   `GET /api/shipping/webhook-log/:eventId` — Single webhook event detail.
-        -   `POST /api/shipping/replay-event` — Re-processes a failed webhook event from the log.
+        -   `POST /api/shipping/webhook/:providerId` — Receives provider webhooks, parses payload, records to durable audit log, returns processing result. Signature verified when secret configured.
+        -   `GET /api/shipping/webhook-log` — Admin endpoint returning filtered webhook event log (rawPayload redacted).
+        -   `GET /api/shipping/webhook-log/stats` — Aggregate stats (total, by result, by provider, time range).
+        -   `GET /api/shipping/webhook-log/:eventId` — Single webhook event detail (rawPayload redacted).
+        -   `POST /api/shipping/replay-event` — Re-parses original raw payload through provider parser pipeline, records new audit entry with source='replay'.
         -   `GET /api/shipping/event-processor/status-map` — Returns the provider→internal status mapping and progression order.
 
 ## System Design Choices
