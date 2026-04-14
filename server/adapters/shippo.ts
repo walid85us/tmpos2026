@@ -17,7 +17,7 @@ import { getCredentials } from '../credential-store';
 
 const NO_CREDENTIALS_ERROR: ProviderError = {
   code: 'PROVIDER_NOT_CONFIGURED',
-  message: 'Shippo API token is not configured. Configure your shipping provider in Settings.',
+  message: 'Shippo API token is not configured. Configure your shipping provider in Shipping Center.',
   retryable: false,
 };
 

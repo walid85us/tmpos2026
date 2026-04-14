@@ -1,0 +1,268 @@
+Shipping Center Final Literal Corrections — Skip Address Autocomplete For Now, Enforce Mandatory Address Validation Before Rates
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a hard correction pass.
+Do not satisfy anything conceptually.
+Implement each requirement literally in the product UI and behavior.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Firebase/Firestore data architect
+- Enterprise shipping systems architect
+- Senior shipping and fulfillment expert with 20+ years of experience in parcel shipping, carrier integrations, warehouse execution, dispatch control, label workflows, tracking-event operations, and reverse logistics
+- Root-cause debugging specialist
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Mandatory external reference review:
+Before implementing anything, open, read, and understand this exact article:
+- https://help.repairdesk.co/portal/en/kb/articles/shipstation-integration
+
+This article review is mandatory.
+You must extract useful operational ideas from it and adapt them to our app.
+Do not copy RepairDesk literally.
+Do not rebuild ShipStation UX one-to-one.
+Do not force concepts that do not fit our architecture.
+But you must explicitly identify:
+- which ideas should be implemented now
+- which should be deferred
+- which should not be adopted and why
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- RBAC/sub-permissions
+- lifecycle gating
+- platform/store hierarchy
+- System Owner Plans & Features matrix
+- Store Permissions Matrix
+- secure server-side provider call architecture
+- all working shipping core behavior
+- provider-driven post-dispatch lifecycle control
+- selected-rate logic
+- label purchase prerequisites
+- packed-after-label-purchase gating
+- rejected by carrier / returned outcomes with reasons
+- + Add Event disabled after Dispatched
+- full tracking-number visibility if already fixed
+
+==================================================
+IMPORTANT SCOPE DECISION — SKIP ADDRESS AUTOCOMPLETE FOR NOW
+==================================================
+
+Do NOT implement Google autocomplete, Geoapify autocomplete, OpenStreetMap autocomplete, or any other address-autocomplete feature in this pass.
+
+We are intentionally skipping destination address autocomplete for now.
+
+Instead, the shipping provider’s existing address validation flow must be the required gate before the user can proceed to the next operational step.
+
+This means:
+- no more work on autocomplete in this pass
+- remove any half-finished or misleading autocomplete UI if needed
+- keep the destination address entry manual for now
+- make provider-based address validation mandatory before rates
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — REMAINING PRIORITIES
+==================================================
+
+These are the exact priorities for this pass:
+
+1) Shipping Providers still also appears in Settings
+- It now appears in Shipping Center, but it still remains in Settings
+- The requirement is literal:
+  Shipping Providers must be removed as a live management surface from Settings
+- Shipping Center must be the only real home for provider management
+- Settings must not still present provider management UI, cards, controls, or parallel access as a management destination
+
+2) Label action is still not PDF-only
+- QA still gets PNG
+- Requirement is literal:
+  the primary operational label action must open a real PDF artifact
+- The label should open immediately for printing within the app flow using the PDF artifact
+- The UI must not say PDF and open PNG
+- The integration/output-selection must be corrected, not explained away
+
+3) Address validation must become mandatory before Get Rates
+- Since autocomplete is being skipped for now, the shipping provider validation step becomes the required gate
+- The user must not be able to proceed to Get Rates until the destination address has been validated/accepted through the provider validation flow
+- This must be operationally clear in the UI
+- The user must understand what is missing and why Get Rates is blocked
+
+4) Ready button gating must remain correct
+- Ready must be disabled until a valid shipping rate is selected
+- Once the rate is selected:
+  - Ready becomes enabled
+  - then the shipment can proceed toward label purchase
+- The workflow must remain:
+  manual address entry → provider address validation → packages → get rates → select rate → Ready enabled → purchase label
+
+5) Rejected by Carrier / Returned must remain
+- Preserve these controlled outcomes
+- Preserve reason capture / reason selection
+- Keep them lifecycle-aware and permission-aware
+- Preserve provider-driven post-dispatch authority
+
+==================================================
+NON-NEGOTIABLE IMPLEMENTATION REQUIREMENTS
+==================================================
+
+1. Shipping Providers must exist only under Shipping Center
+Required:
+- Shipping Center must remain the one true home for provider management
+- Preferred final structure:
+  - Shipping Center > Providers
+  - or Shipping Center > Settings > Providers
+- Remove provider-management UI from the general Settings page
+- Settings may only contain a redirect stub or nothing at all, but must not remain a live provider-management surface
+- There must not be two competing provider-management homes
+Acceptance:
+- QA sees provider management only under Shipping Center
+
+2. Real PDF-only primary label artifact
+Required:
+- The main operational label action must open a real PDF artifact only
+- Do not use PNG for the main operational label-open/print action
+- Do not label a non-PDF artifact as PDF
+- Prefer/request/store/select PDF correctly in the provider pipeline
+- The primary print flow should be PDF-first and print-ready
+- Fix the actual provider response handling and artifact selection logic
+Acceptance:
+- Clicking the main label action opens an actual PDF file
+
+3. Provider address validation is mandatory before Get Rates
+Required:
+- Do not implement autocomplete in this pass
+- The destination address remains manually entered
+- The user must run provider-backed address validation before Get Rates is enabled
+- Get Rates must stay disabled until:
+  - required destination address fields are filled
+  - provider address validation has succeeded or been explicitly accepted according to your existing validation flow
+  - packages exist
+  - provider configuration is valid
+- The UI must clearly explain what is missing
+- Make the validation result visible and understandable
+- Do not allow the user to bypass validation and jump to rates
+
+Acceptance:
+- QA cannot click Get Rates before successful/accepted provider address validation
+- After validation succeeds and other prerequisites are satisfied, Get Rates becomes available
+
+4. Ready button must be disabled until rate selection
+Required:
+- Ready must remain disabled until a valid shipping rate is selected
+- Preserve all other prerequisite logic already implemented
+- After rate selection, Ready becomes enabled
+- Purchase Label should then follow the correct readiness workflow
+- Do not allow manual bypass that breaks the shipping commitment pipeline
+Acceptance:
+- QA cannot move to Ready before selecting a rate
+- QA can move to Ready after selecting a rate
+
+5. Preserve and harden Rejected by Carrier / Returned outcomes
+Required:
+- Keep controlled outcomes for:
+  - Rejected by Carrier
+  - Returned
+- Keep reason capture / reason selection
+- Keep them lifecycle-aware and permission-aware
+- Do not let them become casual freeform edits
+- Preserve provider-driven post-dispatch authority
+
+==================================================
+FULFILLMENT RULES TO PRESERVE
+==================================================
+
+Do not weaken these rules:
+- Packed becomes available only after successful label purchase
+- After dispatch and provider/carrier progression, lifecycle remains provider-driven
+- Cancellation remains blocked after carrier progression
+- Preview mode must still block write actions
+- Existing shipping core flow must remain intact
+- Selected-rate logic must remain intact
+- Label purchase prerequisites must remain intact
+- Full tracking visibility must remain intact if already fixed
+- + Add Event remains disabled after Dispatched
+
+==================================================
+IMPORTANT IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden scope into Phase 2 or Phase 3 shipping work
+- Do not touch unrelated workstreams
+- Do not break preview mode safety
+- Do not break permissions or feature gating
+- Do not break shipping core flow
+- Do not break provider configuration
+- Do not fake provider success
+- Do not fake provider event sync
+- Keep the design baseline consistent
+- Do not leave misleading autocomplete UI in place if it is no longer part of the plan for this pass
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact execution order:
+
+1) Review the RepairDesk article and extract only the concepts that improve our system
+2) Remove provider-management as a live surface from Settings and keep Shipping Center as the sole home
+3) Fix the label artifact pipeline so the main action opens a real PDF artifact
+4) Remove or neutralize any incomplete/misleading autocomplete behavior for this pass
+5) Make provider address validation mandatory before Get Rates
+6) Enforce Ready-disabled-until-rate-selected workflow
+7) Preserve Rejected by Carrier / Returned and verify lifecycle correctness
+8) Re-test all affected shipping core flows
+9) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Shipping Center as the sole provider-management home
+- removal of provider-management as a live Settings surface
+- PDF-only primary label behavior
+- destination address handled manually in this phase
+- provider address validation as mandatory prerequisite before Get Rates
+- Ready gating rule tied to rate selection
+- lessons adapted from the RepairDesk article
+- future fulfillment recommendations not implemented now, including deferred address autocomplete
+
+==================================================
+MANDATORY OUTPUT PROOF
+==================================================
+
+Do not give a generic completion summary.
+Do not say this task is complete unless each literal blocker is visibly fixed in the actual product UI and behavior.
+
+OUTPUT FORMAT REQUIRED
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. RepairDesk Article Reviewed
+3. RepairDesk Insights Extracted
+4. How Those Insights Were Adapted To Our Shipping Center
+5. Implemented Now vs Deferred vs Not Adopted
+6. Shipping Center Sole Provider Ownership Fix
+7. PDF-Only Primary Label Fix
+8. Address Validation Before Rates Fix
+9. Ready Gating Fix
+10. Rejected by Carrier / Returned Outcome Preservation
+11. Fulfillment-Expert Recommendations
+12. Files Changed
+13. Documentation Updated
+14. Non-Regression Notes

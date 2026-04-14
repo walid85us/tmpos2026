@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState } from '../context/StoreLocalState';
@@ -80,101 +80,6 @@ const RETURN_REASONS = [
   'Other operational reason',
 ];
 
-interface AddressSuggestion {
-  line1: string;
-  city: string;
-  state: string;
-  postalCode: string;
-  source: 'local' | 'nominatim';
-}
-
-function searchAddressSuggestionsLocal(query: string, zipDb: Record<string, { city: string; state: string }>): AddressSuggestion[] {
-  if (!query || query.trim().length < 2) return [];
-  const q = query.trim().toLowerCase();
-  const results: AddressSuggestion[] = [];
-  const seen = new Set<string>();
-
-  for (const [zip, data] of Object.entries(zipDb)) {
-    const cityLower = data.city.toLowerCase();
-    const matchesCity = cityLower.startsWith(q) || cityLower.includes(q);
-    const matchesState = data.state.toLowerCase() === q;
-    const matchesZip = zip.startsWith(q);
-    if (matchesCity || matchesState || matchesZip) {
-      const key = `${data.city}-${data.state}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        results.push({ line1: '', city: data.city, state: data.state, postalCode: zip, source: 'local' });
-      }
-    }
-    if (results.length >= 8) break;
-  }
-  return results;
-}
-
-async function searchAddressNominatim(query: string, abortController: AbortController): Promise<AddressSuggestion[]> {
-  if (!query || query.trim().length < 3) return [];
-  try {
-    const params = new URLSearchParams({
-      q: query.trim(),
-      format: 'json',
-      addressdetails: '1',
-      countrycodes: 'us',
-      limit: '6',
-    });
-    const res = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, {
-      signal: abortController.signal,
-      headers: { 'Accept': 'application/json' },
-    });
-    if (!res.ok) return [];
-    const data = await res.json() as Array<{
-      display_name: string;
-      address: {
-        house_number?: string;
-        road?: string;
-        city?: string;
-        town?: string;
-        village?: string;
-        hamlet?: string;
-        state?: string;
-        postcode?: string;
-      };
-    }>;
-    const results: AddressSuggestion[] = [];
-    const seen = new Set<string>();
-    for (const item of data) {
-      const addr = item.address;
-      const houseNum = addr.house_number || '';
-      const road = addr.road || '';
-      const line1 = [houseNum, road].filter(Boolean).join(' ');
-      const city = addr.city || addr.town || addr.village || addr.hamlet || '';
-      const state = addr.state || '';
-      const postalCode = addr.postcode || '';
-      const stateAbbr = US_STATE_ABBR[state] || state;
-      if (!city) continue;
-      const key = `${line1}-${city}-${stateAbbr}-${postalCode}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      results.push({ line1, city, state: stateAbbr, postalCode, source: 'nominatim' });
-    }
-    return results;
-  } catch {
-    return [];
-  }
-}
-
-const US_STATE_ABBR: Record<string, string> = {
-  'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR', 'California': 'CA',
-  'Colorado': 'CO', 'Connecticut': 'CT', 'Delaware': 'DE', 'Florida': 'FL', 'Georgia': 'GA',
-  'Hawaii': 'HI', 'Idaho': 'ID', 'Illinois': 'IL', 'Indiana': 'IN', 'Iowa': 'IA',
-  'Kansas': 'KS', 'Kentucky': 'KY', 'Louisiana': 'LA', 'Maine': 'ME', 'Maryland': 'MD',
-  'Massachusetts': 'MA', 'Michigan': 'MI', 'Minnesota': 'MN', 'Mississippi': 'MS', 'Missouri': 'MO',
-  'Montana': 'MT', 'Nebraska': 'NE', 'Nevada': 'NV', 'New Hampshire': 'NH', 'New Jersey': 'NJ',
-  'New Mexico': 'NM', 'New York': 'NY', 'North Carolina': 'NC', 'North Dakota': 'ND', 'Ohio': 'OH',
-  'Oklahoma': 'OK', 'Oregon': 'OR', 'Pennsylvania': 'PA', 'Rhode Island': 'RI', 'South Carolina': 'SC',
-  'South Dakota': 'SD', 'Tennessee': 'TN', 'Texas': 'TX', 'Utah': 'UT', 'Vermont': 'VT',
-  'Virginia': 'VA', 'Washington': 'WA', 'West Virginia': 'WV', 'Wisconsin': 'WI', 'Wyoming': 'WY',
-  'District of Columbia': 'DC',
-};
 
 const US_ZIP_CITY_STATE: Record<string, { city: string; state: string }> = {
   '10001': { city: 'New York', state: 'NY' }, '10002': { city: 'New York', state: 'NY' }, '10003': { city: 'New York', state: 'NY' },
@@ -420,51 +325,6 @@ export default function ShippingCenter() {
   const [reasonModal, setReasonModal] = useState<{ id: string; newStatus: 'Rejected' | 'Returned' } | null>(null);
   const [selectedReason, setSelectedReason] = useState('');
   const [reasonNotes, setReasonNotes] = useState('');
-  const [destSuggestions, setDestSuggestions] = useState<AddressSuggestion[]>([]);
-  const [showDestSuggestions, setShowDestSuggestions] = useState(false);
-  const [destCityQuery, setDestCityQuery] = useState('');
-  const nominatimTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const nominatimAbort = useRef<AbortController | null>(null);
-  const nominatimQueryId = useRef(0);
-
-  useEffect(() => {
-    return () => {
-      if (nominatimTimer.current) clearTimeout(nominatimTimer.current);
-      if (nominatimAbort.current) nominatimAbort.current.abort();
-    };
-  }, []);
-
-  const searchAddressDebounced = (query: string) => {
-    const localResults = searchAddressSuggestionsLocal(query, US_ZIP_CITY_STATE);
-    setDestSuggestions(localResults);
-    setShowDestSuggestions(localResults.length > 0);
-
-    if (nominatimTimer.current) clearTimeout(nominatimTimer.current);
-    if (nominatimAbort.current) nominatimAbort.current.abort();
-
-    if (query.trim().length >= 3) {
-      const qid = ++nominatimQueryId.current;
-      nominatimTimer.current = setTimeout(async () => {
-        const controller = new AbortController();
-        nominatimAbort.current = controller;
-        const nomResults = await searchAddressNominatim(query, controller);
-        if (qid !== nominatimQueryId.current) return;
-        if (nomResults.length > 0) {
-          setDestSuggestions(prev => {
-            const merged = [...nomResults];
-            for (const local of prev) {
-              if (local.source === 'local' && !merged.some(m => m.city === local.city && m.state === local.state && m.postalCode === local.postalCode)) {
-                merged.push(local);
-              }
-            }
-            return merged.slice(0, 8);
-          });
-          setShowDestSuggestions(true);
-        }
-      }, 350);
-    }
-  };
-
   useEffect(() => {
     shippingApi.getActiveProvider().then(r => {
       setActiveProviderId(r.activeProviderId);
@@ -1162,7 +1022,7 @@ export default function ShippingCenter() {
 
   function hasRateSelected(shipment: Shipment | null | undefined): boolean {
     if (!shipment) return false;
-    return !!(shipment.selectedRate || (shipment.carrier && shipment.serviceLevel));
+    return !!shipment.selectedRate;
   }
 
   function getNextStatuses(current: ShipmentStatus, shipment?: Shipment | null): ShipmentStatus[] {
@@ -2244,94 +2104,11 @@ export default function ShippingCenter() {
                     <input value={newOrigin.postalCode} onChange={e => setNewOrigin({ ...newOrigin, postalCode: e.target.value })} placeholder="Postal Code *" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
                   </div>
                   <div className="space-y-3">
-                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
-                      Destination Address
-                      <span className="text-[9px] font-bold text-slate-300 normal-case tracking-normal flex items-center gap-0.5"><span className="material-symbols-outlined text-[10px]">search</span>type to search</span>
-                    </p>
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Destination Address</p>
                     <input value={newDest.name} onChange={e => setNewDest({ ...newDest, name: e.target.value })} placeholder="Recipient Name *" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
-                    <div className="relative">
-                      <div className="relative">
-                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-300"><span className="material-symbols-outlined text-sm">search</span></span>
-                        <input value={newDest.line1} onChange={e => {
-                          const val = e.target.value;
-                          setNewDest({ ...newDest, line1: val });
-                          if (val.trim().length >= 2) {
-                            searchAddressDebounced(val);
-                          } else {
-                            setShowDestSuggestions(false);
-                          }
-                        }}
-                        onFocus={() => { if (destSuggestions.length > 0) setShowDestSuggestions(true); }}
-                        onBlur={() => setTimeout(() => setShowDestSuggestions(false), 200)}
-                        placeholder="Start typing address, city, or zip..." className="w-full pl-9 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
-                      </div>
-                      {showDestSuggestions && destSuggestions.length > 0 && (
-                        <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl z-30 max-h-56 overflow-y-auto">
-                          {destSuggestions.map((s, i) => (
-                            <button key={`${s.line1}-${s.city}-${s.state}-${i}`} type="button"
-                              onMouseDown={e => {
-                                e.preventDefault();
-                                setNewDest(prev => ({
-                                  ...prev,
-                                  line1: s.line1 || prev.line1,
-                                  city: s.city,
-                                  state: s.state,
-                                  postalCode: s.postalCode,
-                                }));
-                                setShowDestSuggestions(false);
-                              }}
-                              className="w-full text-left px-3 py-2.5 text-xs hover:bg-primary/5 transition-all border-b border-slate-50 last:border-0 flex items-center gap-3">
-                              <span className="material-symbols-outlined text-slate-300 text-sm shrink-0">location_on</span>
-                              <div className="flex-1 min-w-0">
-                                {s.line1 && <span className="font-bold text-slate-700 block">{s.line1}</span>}
-                                <span className={`${s.line1 ? 'text-slate-500' : 'font-bold text-slate-700'}`}>{s.city}, {s.state}</span>
-                                {s.postalCode && <span className="text-slate-400 ml-1.5">{s.postalCode}</span>}
-                              </div>
-                              <span className={`text-[9px] uppercase tracking-wider shrink-0 ${s.source === 'nominatim' ? 'text-emerald-400' : 'text-slate-300'}`}>
-                                {s.source === 'nominatim' ? 'OSM' : 'local'}
-                              </span>
-                            </button>
-                          ))}
-                          <div className="px-3 py-1.5 bg-slate-50 text-[9px] text-slate-400 flex items-center gap-1 border-t border-slate-100">
-                            <span className="material-symbols-outlined text-[10px]">public</span>
-                            Address suggestions powered by OpenStreetMap
-                          </div>
-                        </div>
-                      )}
-                    </div>
+                    <input value={newDest.line1} onChange={e => setNewDest({ ...newDest, line1: e.target.value })} placeholder="Address Line 1 *" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
                     <div className="grid grid-cols-2 gap-2">
-                      <div className="relative">
-                        <input value={newDest.city} onChange={e => {
-                          const val = e.target.value;
-                          setNewDest({ ...newDest, city: val });
-                          setDestCityQuery(val);
-                          searchAddressDebounced(val);
-                        }}
-                        onFocus={() => {
-                          if (newDest.city.length >= 2) {
-                            searchAddressDebounced(newDest.city);
-                          }
-                        }}
-                        onBlur={() => setTimeout(() => setShowDestSuggestions(false), 200)}
-                        placeholder="City *" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
-                        {showDestSuggestions && destSuggestions.length > 0 && (
-                          <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl z-30 max-h-48 overflow-y-auto">
-                            {destSuggestions.map((s, i) => (
-                              <button key={`city-${s.city}-${s.state}-${i}`} type="button"
-                                onMouseDown={e => {
-                                  e.preventDefault();
-                                  setNewDest(prev => ({ ...prev, city: s.city, state: s.state, postalCode: s.postalCode }));
-                                  setShowDestSuggestions(false);
-                                  setDestCityQuery('');
-                                }}
-                                className="w-full text-left px-3 py-2 text-xs hover:bg-primary/5 transition-all border-b border-slate-50 last:border-0 flex items-center justify-between">
-                                <span className="font-bold text-slate-700">{s.city}, {s.state}</span>
-                                <span className="text-slate-400 font-mono text-[10px]">{s.postalCode}</span>
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                      </div>
+                      <input value={newDest.city} onChange={e => setNewDest({ ...newDest, city: e.target.value })} placeholder="City *" className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
                       <input value={newDest.state} onChange={e => setNewDest({ ...newDest, state: e.target.value })} placeholder="State *" className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
                     </div>
                     <div className="relative">

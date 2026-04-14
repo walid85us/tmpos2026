@@ -17,7 +17,7 @@ import { getCredentials } from '../credential-store';
 
 const NO_CREDENTIALS_ERROR: ProviderError = {
   code: 'PROVIDER_NOT_CONFIGURED',
-  message: 'ShipStation API credentials are not configured. Configure your shipping provider in Settings.',
+  message: 'ShipStation API credentials are not configured. Configure your shipping provider in Shipping Center.',
   retryable: false,
 };
 

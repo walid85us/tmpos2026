@@ -1,8 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState } from '../context/StoreLocalState';
-import { useAccess } from '../context/AccessContext';
 import TemplateEditor from './TemplateEditor';
 import type { DocumentTemplate } from '../types';
 import { buildTemplateHtml, getDefaultEnabledTags } from '../utils/templateBuilder';
@@ -12,9 +10,6 @@ type SettingsTab = 'config' | 'hardware' | 'language';
 export default function Settings() {
   const [activeTab, setActiveTab] = useState<SettingsTab>('config');
   const { documentTemplates, updateDocumentTemplate, resetDocumentTemplate, storeBranding, updateStoreBranding } = useStoreLocalState();
-  const { checkPermission } = useAccess();
-  const navigate = useNavigate();
-  const hasShippingAccess = checkPermission('shipping', 'view');
   const [editingTemplate, setEditingTemplate] = useState<DocumentTemplate | null>(null);
 
   useEffect(() => {
