@@ -429,6 +429,7 @@ export default function ShippingCenter() {
   const [providerLoading, setProviderLoading] = useState<string | null>(null);
   const [providerError, setProviderError] = useState<ProviderError | null>(null);
   const [providerSuccess, setProviderSuccess] = useState<string | null>(null);
+  const [providerWarning, setProviderWarning] = useState<string | null>(null);
   const [showRatesPanel, setShowRatesPanel] = useState(false);
   const [availableRates, setAvailableRates] = useState<ShippingRate[]>([]);
   const [showProviderSettings, setShowProviderSettings] = useState(false);
@@ -798,6 +799,7 @@ export default function ShippingCenter() {
   function clearProviderFeedback() {
     setProviderError(null);
     setProviderSuccess(null);
+    setProviderWarning(null);
   }
 
   function friendlyProviderError(raw: ProviderError): ProviderError {
@@ -1233,7 +1235,7 @@ export default function ShippingCenter() {
         (err.message || '').toLowerCase().includes('no tracking')
       );
       if (isTestModeLimitation) {
-        setProviderError({ code: 'TEST_MODE_LIMITATION', message: 'Test-mode limitation: Test tracking numbers may not return real carrier data from the provider. This is expected — use "Simulate Provider Events" to test tracking workflows.', retryable: false });
+        setProviderWarning('Test-mode limitation: Test tracking numbers may not return real carrier data from the provider. This is expected — use "Simulate Provider Events" to test tracking workflows.');
       } else {
         const friendlyErr = friendlyProviderError(err);
         if (providerEnvironment === 'test') {
@@ -1678,6 +1680,12 @@ export default function ShippingCenter() {
                             <p className="text-xs text-red-600 font-medium">{providerError.message}</p>
                             {providerError.retryable && <p className="text-[10px] text-red-400 mt-0.5">This error may be temporary. You can retry.</p>}
                           </div>
+                        </div>
+                      )}
+                      {providerWarning && (
+                        <div className="px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2">
+                          <span className="material-symbols-outlined text-amber-500 text-sm mt-0.5">info</span>
+                          <p className="text-xs text-amber-700 font-medium">{providerWarning}</p>
                         </div>
                       )}
                       {providerSuccess && (
@@ -2141,12 +2149,12 @@ export default function ShippingCenter() {
                       </div>
                     )}
 
-                    {isTestProvider && !hasProviderEvents && selectedShip.trackingNumber && (
+                    {isTestProvider && !hasProviderEvents && selectedShip.trackingNumber && !providerWarning && (
                       <div className="px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2">
                         <span className="material-symbols-outlined text-amber-500 text-sm mt-0.5">info</span>
                         <div>
                           <p className="text-xs text-amber-700 font-medium">No provider tracking events yet</p>
-                          <p className="text-[10px] text-amber-600 mt-0.5">You are in test mode. Test tracking numbers may not return real carrier data. Use "Simulate Provider Events" to generate test events and verify your tracking timeline display.</p>
+                          <p className="text-[10px] text-amber-600 mt-0.5">Use "Simulate Provider Events" to generate test events and verify your tracking timeline display.</p>
                         </div>
                       </div>
                     )}

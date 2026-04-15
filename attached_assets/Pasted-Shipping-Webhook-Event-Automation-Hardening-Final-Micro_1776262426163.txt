@@ -1,0 +1,113 @@
+Shipping Webhook & Event Automation Hardening — Final Micro-Correction Pass
+
+Do not start a new workstream.
+Do not redesign anything.
+Do not broaden scope.
+This is a final micro-correction pass for one remaining blocker.
+
+Preserve all working behavior:
+- provider/test-provider lifecycle updates
+- duplicate-event safety
+- auditability
+- replay/re-sync tooling
+- manual shipment isolation
+- existing shipping core flow
+- Phase 2 / Phase 3 documentation already added
+
+==================================================
+QA SOURCE OF TRUTH — FINAL REMAINING FAILURE
+==================================================
+
+There is one remaining blocker:
+
+1) Test-mode sync messaging is still duplicated and noisy
+Observed QA result:
+- Clicking Sync Tracking in test mode still shows duplicated error/warning content
+- Example:
+  “In test mode, only test tracking numbers are valid...”
+  followed again by the same message
+- A failure counter is also shown:
+  “Tracking sync failures: 4”
+- For this known EasyPost test-mode limitation, the UX is still noisy and misleading
+
+==================================================
+REQUIRED FIX
+==================================================
+
+Clean up the Sync Tracking UX for known provider test-mode limitations.
+
+Required behavior:
+- For a known expected EasyPost test-mode limitation, show one clear consolidated message only
+- Do not render the same warning/error content twice for the same sync attempt
+- Do not make the UX look like multiple independent failures occurred when it is one known test-mode limitation
+- Distinguish clearly between:
+  - expected test-mode limitation
+  - actual sync failure
+  - duplicate event
+  - no new events found
+
+Failure count behavior:
+- Do not increment or surface the general sync failure counter for a known expected test-mode limitation in a misleading way
+- If you keep a counter, make it clear it is not a true provider failure but an expected test-mode limitation
+- Prefer a cleaner approach:
+  - treat this case as informational/warning state, not a regular failure state
+
+Operator UX goal:
+- one sync attempt
+- one clear message
+- no duplicated text
+- no misleading accumulated failure count for expected test-mode restrictions
+
+==================================================
+IMPORTANT ARCHITECTURE GUIDANCE
+==================================================
+
+For production/live operation:
+- automatic provider webhook/event updates should remain the primary status-update mechanism
+- shipment-level Sync Tracking remains a recovery tool
+- a main-page “Sync Shipment Statuses / Re-sync Eligible Shipments” capability is a good future operational enhancement, but do NOT broaden scope to implement it in this pass unless it is a tiny documentation-only note
+
+For this pass:
+- only clean up the current test-mode sync UX
+- optionally document the future main-page sync/reconciliation idea in replit.md as a recommended enhancement
+- do not build the full feature now
+
+==================================================
+IMPORTANT IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into another workstream
+- Do not break webhook/event automation
+- Do not break provider/test-provider lifecycle updates
+- Do not break replay/re-sync tooling
+- Do not break audit visibility
+- Do not break manual shipment isolation
+- Keep the design baseline consistent
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Fix duplicate test-mode sync messaging
+2) Fix misleading failure-count behavior for expected test-mode limitations
+3) Ensure one sync attempt results in one clear operator message
+4) Optionally document future “main-page shipment sync/reconciliation” as a later enhancement only
+5) Re-test the affected flow
+6) Update documentation if needed
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Test-Mode Sync Messaging Fix
+3. Failure Count / Warning-State Fix
+4. Future Main-Page Sync Recommendation Noted or Not
+5. Files Changed
+6. Documentation Updated
+7. Non-Regression Notes
