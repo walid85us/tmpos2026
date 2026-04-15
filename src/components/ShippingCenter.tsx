@@ -430,6 +430,7 @@ export default function ShippingCenter() {
   const [providerError, setProviderError] = useState<ProviderError | null>(null);
   const [providerSuccess, setProviderSuccess] = useState<string | null>(null);
   const [providerWarning, setProviderWarning] = useState<string | null>(null);
+  const [showTestTrackerMenu, setShowTestTrackerMenu] = useState(false);
   const [showRatesPanel, setShowRatesPanel] = useState(false);
   const [availableRates, setAvailableRates] = useState<ShippingRate[]>([]);
   const [showProviderSettings, setShowProviderSettings] = useState(false);
@@ -857,11 +858,33 @@ export default function ShippingCenter() {
     return missing;
   }
 
+  function isCarrierRequiringPhone(shipment: Shipment): boolean {
+    const carrier = (shipment.carrier || shipment.selectedRate?.carrier || '').toUpperCase();
+    return carrier.includes('UPS') || carrier.includes('FEDEX');
+  }
+
+  function isValidPhone(phone?: string): boolean {
+    if (!phone) return false;
+    const digits = phone.replace(/\D/g, '');
+    return digits.length >= 10;
+  }
+
+  const EASYPOST_TEST_CODES = new Set([
+    'EZ1000000001', 'EZ2000000002', 'EZ3000000003', 'EZ4000000004',
+    'EZ5000000005', 'EZ6000000006', 'EZ7000000007',
+  ]);
+  function isEasyPostTestTrackingCode(trackingNumber: string): boolean {
+    return EASYPOST_TEST_CODES.has(trackingNumber.toUpperCase());
+  }
+
   function getLabelPrerequisites(shipment: Shipment): string[] {
     const missing: string[] = [];
     if (!isAddressAccepted(shipment)) missing.push('Validate destination address');
     if (!hasShippablePackages(shipment)) missing.push('Add packages with weight or contents');
     if (!shipment.selectedRate && (!shipment.carrier || !shipment.serviceLevel)) missing.push('Select a shipping rate or set carrier and service level');
+    if (isCarrierRequiringPhone(shipment) && !isValidPhone(shipment.destinationAddress.phone)) {
+      missing.push('Recipient phone number required for UPS/FedEx (at least 10 digits) — add via Edit Shipment');
+    }
     const providerMsg = getProviderPrerequisiteMessage();
     if (providerMsg) missing.push(providerMsg);
     return missing;
@@ -1172,11 +1195,44 @@ export default function ShippingCenter() {
     setProviderLoading(null);
   }
 
+  const EASYPOST_TEST_TRACKERS = [
+    { code: 'EZ1000000001', description: 'Pre-transit → Delivered (standard)' },
+    { code: 'EZ2000000002', description: 'Pre-transit → In Transit (stops mid-journey)' },
+    { code: 'EZ3000000003', description: 'Pre-transit → Delivered (with return to sender)' },
+    { code: 'EZ4000000004', description: 'Pre-transit → Failure' },
+    { code: 'EZ5000000005', description: 'Pre-transit → Available for Pickup' },
+    { code: 'EZ6000000006', description: 'Pre-transit → Delivered (international)' },
+    { code: 'EZ7000000007', description: 'Pre-transit → Out for Delivery → Delivered' },
+  ];
+
+  function handleAttachTestTracker(shipmentId: string, testCode: string) {
+    if (isWriteBlocked) return;
+    const shipment = shipments.find(s => s.id === shipmentId);
+    if (!shipment) return;
+    clearProviderFeedback();
+    const now = new Date().toISOString();
+    updateShipment(shipmentId, {
+      trackingNumber: testCode,
+      updatedAt: now,
+    });
+    setProviderSuccess(`EasyPost test tracker "${testCode}" attached. You can now use "Sync Tracking" to pull real test tracking data from EasyPost.`);
+  }
+
   async function handleSyncTracking(shipmentId: string) {
     if (isWriteBlocked) return;
     const shipment = shipments.find(s => s.id === shipmentId);
     if (!shipment || !shipment.trackingNumber) return;
     clearProviderFeedback();
+
+    const isEasyPostProvider = activeProviderId?.toLowerCase() === 'easypost';
+    if (isEasyPostProvider && providerEnvironment === 'test' && !isEasyPostTestTrackingCode(shipment.trackingNumber)) {
+      setProviderWarning(`EasyPost test-mode limitation: "${shipment.trackingNumber}" is not a valid EasyPost test tracking code. In test mode, only EasyPost test codes are supported (EZ1000000001 through EZ7000000007). Use "Attach EasyPost Test Tracker" or "Simulate Provider Events" to test tracking workflows.`);
+      if (shipment.syncFailureCount && shipment.syncFailureCount > 0) {
+        updateShipment(shipmentId, { syncFailureCount: 0, lastSyncError: undefined, updatedAt: new Date().toISOString() });
+      }
+      return;
+    }
+
     setProviderLoading('tracking');
     const result = await shippingApi.syncTracking(
       shipment.trackingNumber,
@@ -1235,7 +1291,13 @@ export default function ShippingCenter() {
         (err.message || '').toLowerCase().includes('no tracking')
       );
       if (isTestModeLimitation) {
-        setProviderWarning('Test-mode limitation: Test tracking numbers may not return real carrier data from the provider. This is expected — use "Simulate Provider Events" to test tracking workflows.');
+        const isEasyPost = activeProviderId?.toLowerCase() === 'easypost';
+        const hasNonEzCode = isEasyPost && shipment.trackingNumber && !isEasyPostTestTrackingCode(shipment.trackingNumber);
+        if (hasNonEzCode) {
+          setProviderWarning(`EasyPost test-mode limitation: "${shipment.trackingNumber}" is not a valid EasyPost test tracking code. In test mode, only EasyPost test codes are supported (EZ1000000001 through EZ7000000007). Use "Attach EasyPost Test Tracker" or "Simulate Provider Events" to test tracking workflows.`);
+        } else {
+          setProviderWarning('Test-mode limitation: Test tracking numbers may not return real carrier data from the provider. This is expected — use "Simulate Provider Events" to test tracking workflows.');
+        }
         if (shipment.syncFailureCount && shipment.syncFailureCount > 0) {
           updateShipment(shipmentId, { syncFailureCount: 0, lastSyncError: undefined, updatedAt: new Date().toISOString() });
         }
@@ -1470,7 +1532,7 @@ export default function ShippingCenter() {
               {filtered.map(s => (
                 <div
                   key={s.id}
-                  onClick={() => { setSelectedShipment(s.id); setDetailTab('overview'); }}
+                  onClick={() => { setSelectedShipment(s.id); setDetailTab('overview'); setShowTestTrackerMenu(false); }}
                   className="px-8 py-5 hover:bg-slate-50/80 cursor-pointer transition-all flex items-center gap-6"
                 >
                   <div className="w-10 h-10 rounded-2xl bg-primary/5 flex items-center justify-center shrink-0">
@@ -1542,7 +1604,7 @@ export default function ShippingCenter() {
 
               <div className="flex border-b border-slate-100 bg-slate-50/30 shrink-0">
                 {(['overview', 'tracking', 'packages'] as const).map(tab => (
-                  <button key={tab} onClick={() => setDetailTab(tab)} className={`flex-1 py-3.5 text-[10px] font-black uppercase tracking-widest transition-all ${detailTab === tab ? 'text-primary border-b-2 border-primary bg-white/50' : 'text-slate-400 hover:text-slate-600'}`}>
+                  <button key={tab} onClick={() => { setDetailTab(tab); setShowTestTrackerMenu(false); }} className={`flex-1 py-3.5 text-[10px] font-black uppercase tracking-widest transition-all ${detailTab === tab ? 'text-primary border-b-2 border-primary bg-white/50' : 'text-slate-400 hover:text-slate-600'}`}>
                     {tab === 'overview' ? 'Overview' : tab === 'tracking' ? 'Tracking & Events' : 'Packages'}
                   </button>
                 ))}
@@ -2142,6 +2204,27 @@ export default function ShippingCenter() {
                           {providerLoading === 'simulate' ? 'Simulating...' : 'Simulate Provider Events'}
                         </button>
                       )}
+                      {getShipmentMode(selectedShip) !== 'manual' && canSyncTracking && isTestProvider && activeProviderId?.toLowerCase() === 'easypost' && !isWriteBlocked && (
+                        <div className="relative">
+                          <button onClick={() => setShowTestTrackerMenu(!showTestTrackerMenu)}
+                            className="px-4 py-2.5 bg-violet-50 text-violet-700 border border-violet-200 font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-violet-100 transition-all flex items-center gap-1">
+                            <span className="material-symbols-outlined text-sm">bug_report</span>
+                            Attach EasyPost Test Tracker
+                          </button>
+                          {showTestTrackerMenu && (
+                            <div className="absolute top-full left-0 mt-1 z-20 bg-white border border-violet-200 rounded-xl shadow-lg p-2 w-80">
+                              <p className="text-[9px] text-violet-500 font-bold uppercase tracking-widest px-2 py-1">Select Test Tracking Code</p>
+                              {EASYPOST_TEST_TRACKERS.map(t => (
+                                <button key={t.code} onClick={() => { handleAttachTestTracker(selectedShip.id, t.code); setShowTestTrackerMenu(false); }}
+                                  className="w-full text-left px-3 py-2 rounded-lg hover:bg-violet-50 transition-all">
+                                  <p className="text-xs font-mono font-bold text-violet-700">{t.code}</p>
+                                  <p className="text-[10px] text-slate-500">{t.description}</p>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
 
                     {selectedShip.lastTrackingSyncAt && (
@@ -2451,6 +2534,7 @@ export default function ShippingCenter() {
                       <input value={newDest.state} onChange={e => setNewDest(p => ({ ...p, state: e.target.value }))} disabled={addressLocked} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="State" />
                       <input value={newDest.postalCode} onChange={e => setNewDest(p => ({ ...p, postalCode: e.target.value }))} disabled={addressLocked} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="ZIP" />
                     </div>
+                    <input value={newDest.phone || ''} onChange={e => setNewDest(p => ({ ...p, phone: e.target.value || undefined }))} disabled={addressLocked} className="col-span-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Phone (required for UPS/FedEx)" />
                   </div>
                 </div>
                 <div>

@@ -1,0 +1,126 @@
+Shipping Webhook & Event Automation Hardening — Final Test-Mode Tracking + Carrier Phone Prerequisite Cleanup
+
+Do not start a new workstream.
+Do not redesign anything.
+Do not broaden scope.
+This is a tiny final operational cleanup pass.
+
+Preserve all working behavior:
+- webhook/event automation
+- provider-driven lifecycle updates
+- replay/re-sync tooling
+- auditability
+- manual shipment isolation
+- shipping core flow
+- provider/manual mode split
+- PDF label flow
+- existing provider gating and lifecycle rules
+
+==================================================
+ROOT ISSUE ANALYSIS
+==================================================
+
+There are two separate remaining issues:
+
+1) EasyPost test-mode tracking behavior
+EasyPost test mode only accepts EasyPost test tracking codes such as:
+EZ1000000001, EZ2000000002, ... , EZ7000000007
+Ordinary shipment tracking numbers in test mode will not behave like live tracking sync.
+
+This means the current Sync Tracking UX in test mode is still not ideal for QA.
+
+2) Carrier-specific phone requirement for UPS/FedEx label purchase
+When UPS or FedEx is selected and label purchase is attempted, the carrier/provider can fail with:
+“ShipTo PhoneNumber must be at least 10 alphanumeric characters”
+This should be prevented by UI preflight validation, not left to fail deep in provider/carrier response handling.
+
+==================================================
+REQUIRED FIXES
+==================================================
+
+1. EASYPOST TEST-MODE TRACKING UX CLEANUP
+Required:
+- In EasyPost test mode, ordinary Sync Tracking should not present confusing behavior for non-EZ test tracking numbers
+- If the shipment’s tracking number is not a valid EasyPost test tracking code, the UI should clearly explain that
+- Prefer one clean informational message, not noisy failure UX
+
+2. QA-FRIENDLY TEST TRACKING HELPER
+Required:
+- Add a safe test-mode-only helper for EasyPost test credentials
+- Allow QA to test Sync Tracking using official EasyPost test tracking codes
+- Example acceptable UX:
+  - “Use EasyPost Test Tracking Number”
+  - or “Attach Test Tracker”
+  - or another clearly named QA helper
+- This helper must be clearly limited to test mode
+- It must not affect production behavior
+
+Goal:
+- QA can actually validate Sync Tracking behavior in EasyPost test mode without relying only on Simulate Provider Event
+
+3. UPS/FEDEX PHONE PREREQUISITE GATING
+Required:
+- If carrier/service is UPS or FedEx, require recipient phone before Purchase Label
+- Validate the phone in a clean preflight way
+- Block Purchase Label with a clear UI explanation if phone is missing/invalid
+- Do not wait for the provider/carrier API to fail first
+- Normalize phone formatting if appropriate, but do not fake success
+
+4. CLEAN OPERATOR MESSAGING
+Required:
+- Distinguish clearly between:
+  - expected EasyPost test-mode limitation
+  - valid test-tracker workflow
+  - real provider/carrier failure
+  - carrier phone prerequisite missing
+- Keep messaging operational, clean, and non-duplicative
+
+==================================================
+IMPORTANT IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into another workstream
+- Do not break webhook/event automation
+- Do not break provider-driven lifecycle updates
+- Do not break replay/re-sync tooling
+- Do not break audit visibility
+- Do not break manual shipment isolation
+- Do not break shipping core flow
+- Keep the design baseline consistent
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Improve EasyPost test-mode sync messaging for non-EZ tracking codes
+2) Add a test-mode-only helper to validate Sync Tracking with EasyPost test tracking numbers
+3) Add UPS/FedEx recipient phone prerequisite gating before Purchase Label
+4) Re-test the affected flows
+5) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- EasyPost test-mode tracking limitation
+- supported EasyPost test-tracker QA flow
+- carrier-specific phone prerequisite behavior for UPS/FedEx
+- distinction between test-mode limitation vs real provider failure
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. EasyPost Test-Mode Tracking UX Fix
+3. EasyPost Test Tracking Helper Added
+4. UPS/FedEx Phone Prerequisite Fix
+5. Files Changed
+6. Documentation Updated
+7. Non-Regression Notes
