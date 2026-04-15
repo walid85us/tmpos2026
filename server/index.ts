@@ -209,6 +209,7 @@ app.post('/api/shipping/simulate-tracking-event', (req, res) => {
   const now = new Date();
   const events = testStatuses.map((s, i) => ({
     id: `test-evt-${Date.now()}-${i}`,
+    providerEventRef: `test-sim-${trackingNumber}-${s.status}`,
     timestamp: new Date(now.getTime() - (testStatuses.length - 1 - i) * 3600000).toISOString(),
     status: s.status,
     description: `[TEST] ${s.description}`,

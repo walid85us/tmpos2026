@@ -1,0 +1,160 @@
+Shipping Webhook & Event Automation Hardening — Narrow Correction Pass
+
+Do not start a new workstream.
+Do not redesign anything.
+Do not broaden scope.
+This is a narrow correction pass to fix the remaining blockers from QA.
+
+Preserve all working behavior:
+- webhook ingestion
+- durable file-backed audit log
+- replay/re-sync tooling
+- manual shipment mode isolation
+- existing shipping core flow
+- provider/manual mode split
+- source-routed shipment creation
+- preview mode safety
+- RBAC/permission gating already implemented
+
+==================================================
+QA SOURCE OF TRUTH — REMAINING FAILURES
+==================================================
+
+1) Provider/test-provider event does not update shipment lifecycle coherently
+Observed QA result:
+- Clicking “Simulate Provider Event” adds a Delivered event with source “Test Provider”
+- But the shipment status still remains Dispatched
+Required fix:
+- If provider/test-provider event mapping says the shipment progressed to a later lifecycle state, the shipment status shown in detail/list must update coherently as well
+- Shipment timeline and shipment status must not disagree
+- This must use the same authoritative status-mapping logic across:
+  - simulated provider events
+  - synced provider events
+  - replayed provider events
+- Do not leave timeline saying Delivered while shipment header says Dispatched
+
+2) Test-mode tracking sync UX is duplicating error noise
+Observed QA result:
+- Clicking Sync Tracking shows the same test-mode limitation message twice
+- A generic failure counter also increments:
+  “Tracking sync failures: 4”
+- This is noisy and misleading for a known EasyPost test-mode limitation
+Required fix:
+- Treat this known test-mode limitation more cleanly
+- Do not show duplicate error banners/messages for the same sync attempt
+- Do not inflate failure count repeatedly for a known, expected, test-mode-only limitation unless that is truly intended and clearly differentiated
+- Replace noisy duplicate failure UX with one consolidated, clear, truthful message
+- Distinguish:
+  - expected test-mode limitation
+  - actual sync failure
+  - duplicate sync attempt
+- The operator should clearly understand what happened without seeing redundant repeated error output
+
+3) Phase 2 / Phase 3 documentation is not visibly updated in replit.md
+Observed QA result:
+- User does not see clear Phase 2 / Phase 3 forward-readiness updates in replit.md
+Required fix:
+- Update replit.md explicitly and visibly
+- Add a clearly labeled section for:
+  - Phase 2 forward-compatibility
+    - returns portal
+    - service points
+    - customs docs
+    - pickup requests
+    - insurance rules
+    - carrier analytics
+  - Phase 3 forward-compatibility
+    - automation rules
+    - batch labels
+    - packing workflows
+    - SLA optimization
+    - carrier scorecards
+- This must be easy to verify in the file, not buried or implied
+
+4) Duplicate-event safety still needs a QA-verifiable path
+Observed QA result:
+- Duplicate handling could not really be tested
+Required fix:
+- Make duplicate-event behavior QA-verifiable in a safe way
+- This can be done by:
+  - allowing replay of the same simulated/test-provider event
+  - or replaying the same webhook-log event
+  - or exposing a visible duplicate result in the log/timeline tooling
+- The goal is to let QA verify that the same event does not corrupt state twice
+- Do not create a dangerous production loophole; keep it permission-gated and safe
+
+==================================================
+NON-NEGOTIABLE IMPLEMENTATION REQUIREMENTS
+==================================================
+
+1. Unified status mapping must actually update shipment state
+Required:
+- The authoritative shipment status must update when provider/test-provider/replayed event mapping says it should
+- Timeline and shipment status must stay synchronized
+- Existing progression guards must still prevent invalid backward regression
+Acceptance:
+- Delivered event in timeline cannot coexist with shipment header still stuck at Dispatched
+
+2. Test-mode limitation messaging must be single, clean, and truthful
+Required:
+- One sync attempt should not generate duplicated banners for the same known test-mode limitation
+- Failure counting should not become misleading noise for expected test-mode restrictions
+- If failure count remains, it must distinguish real failures from expected test-mode limitations
+Acceptance:
+- User sees one clear message, not duplicated noise
+
+3. replit.md must visibly document Phase 2 and Phase 3 readiness
+Required:
+- Add explicit visible headings/sections
+- Make the future-readiness easy to verify manually
+Acceptance:
+- QA can open replit.md and clearly see the listed Phase 2 and Phase 3 items
+
+4. Duplicate-event handling must be QA-verifiable
+Required:
+- Provide a safe way to demonstrate duplicate-event handling
+- Show duplicate safely ignored / deduplicated / no lifecycle corruption
+Acceptance:
+- QA can intentionally replay/re-trigger the same event and verify safe duplicate handling
+
+==================================================
+IMPORTANT IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into Phase 2 or Phase 3 full implementation
+- Do not break shipping core flow
+- Do not break manual shipment mode isolation
+- Do not break preview mode safety
+- Do not break provider configuration
+- Do not fake provider success
+- Do not fake event progression
+- Keep the design baseline consistent
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Fix authoritative shipment status update from provider/test-provider/replay events
+2) Clean up test-mode sync messaging and failure-count behavior
+3) Make duplicate-event handling QA-verifiable
+4) Update replit.md with explicit visible Phase 2 / Phase 3 readiness sections
+5) Re-test all affected flows
+6) Report exact fixes
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Shipment Status Sync Fix
+3. Test-Mode Sync Messaging Fix
+4. Duplicate-Event QA Verification Fix
+5. Phase 2 / Phase 3 Documentation Fix
+6. Files Changed
+7. Documentation Updated
+8. Non-Regression Notes

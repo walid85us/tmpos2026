@@ -3,7 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
-import { Shipment, ShipmentStatus, ShipmentSourceType, ShipmentType, ShipmentAddress, ShipmentPackage, ShipmentEvent, ShippingRate, AddressValidationResult } from '../types';
+import { Shipment, ShipmentStatus, ShipmentSourceType, ShipmentType, ShipmentAddress, ShipmentPackage, ShipmentEvent, ShippingRate, AddressValidationResult, ProviderTrackingEvent } from '../types';
 import * as shippingApi from '../shipping/shippingApiClient';
 import type { ProviderError } from '../shipping/types';
 import PageShell from './PageShell';
@@ -1087,6 +1087,44 @@ export default function ShippingCenter() {
     setProviderLoading(null);
   }
 
+  const PROVIDER_STATUS_TO_SHIPMENT: Record<string, ShipmentStatus> = {
+    'pre_transit': 'Label Created',
+    'accepted': 'Dispatched',
+    'in_transit': 'In Transit',
+    'out_for_delivery': 'In Transit',
+    'delivered': 'Delivered',
+    'failure': 'Exception',
+    'return_to_sender': 'Exception',
+    'returned': 'Returned',
+    'error': 'Exception',
+    'cancelled': 'Cancelled',
+    'available_for_pickup': 'In Transit',
+  };
+
+  function applyTrackingStatusToShipment(
+    shipment: Shipment,
+    events: ProviderTrackingEvent[],
+    updates: Partial<Shipment>,
+    source: string,
+  ) {
+    if (!events.length) return;
+    const latestEvent = events.reduce((best, e) =>
+      new Date(e.timestamp) > new Date(best.timestamp) ? e : best, events[0]);
+    const mappedStatus = PROVIDER_STATUS_TO_SHIPMENT[latestEvent.status?.toLowerCase()];
+    if (mappedStatus && STATUS_ORDER.indexOf(mappedStatus) > STATUS_ORDER.indexOf(shipment.status)) {
+      updates.status = mappedStatus;
+      if (mappedStatus === 'Delivered') updates.deliveredAt = updates.updatedAt || new Date().toISOString();
+      const syncEvent: ShipmentEvent = {
+        id: `evt-${source}-${Date.now()}`,
+        timestamp: updates.updatedAt || new Date().toISOString(),
+        status: mappedStatus,
+        description: `Status updated to ${mappedStatus} via ${source}`,
+        performedBy: `System (${source})`,
+      };
+      updates.events = [...shipment.events, syncEvent];
+    }
+  }
+
   async function handleSimulateTrackingEvent(shipmentId: string) {
     if (isWriteBlocked) return;
     const shipment = shipments.find(s => s.id === shipmentId);
@@ -1099,12 +1137,33 @@ export default function ShippingCenter() {
     );
     if (result.success && result.events) {
       const now = new Date().toISOString();
-      updateShipment(shipmentId, {
-        providerTrackingEvents: result.events.map(e => ({ ...e, source: 'test_provider' as any })),
+      const incomingEvents = result.events.map(e => ({ ...e, source: 'test_provider' as any }));
+      const existingRefs = new Set(
+        (shipment.providerTrackingEvents || []).map(e => e.providerEventRef).filter(Boolean)
+      );
+      const existingTimestampStatus = new Set(
+        (shipment.providerTrackingEvents || []).map(e => `${e.timestamp}|${e.status}`)
+      );
+      const newEvents = incomingEvents.filter(e => {
+        if (e.providerEventRef && existingRefs.has(e.providerEventRef)) return false;
+        if (existingTimestampStatus.has(`${e.timestamp}|${e.status}`)) return false;
+        return true;
+      });
+      const mergedEvents = [...(shipment.providerTrackingEvents || []), ...newEvents];
+      const dupCount = incomingEvents.length - newEvents.length;
+      const updates: Partial<Shipment> = {
+        providerTrackingEvents: mergedEvents,
         lastTrackingSyncAt: now,
         updatedAt: now,
-      });
-      setProviderSuccess(`Simulated ${result.events.length} test provider event(s). These are test data only — no real carrier activity occurred.`);
+      };
+      applyTrackingStatusToShipment(shipment, mergedEvents, updates, 'Test Provider Simulation');
+      updateShipment(shipmentId, updates);
+      let msg = `Simulated ${incomingEvents.length} test provider event(s).`;
+      if (dupCount > 0) msg += ` ${dupCount} duplicate(s) safely skipped.`;
+      if (newEvents.length > 0) msg += ` ${newEvents.length} new event(s) applied.`;
+      if (updates.status && updates.status !== shipment.status) msg += ` Status updated: ${shipment.status} → ${updates.status}.`;
+      msg += ' These are test data only — no real carrier activity occurred.';
+      setProviderSuccess(msg);
     } else {
       setProviderError(friendlyProviderError(result.error || { code: 'UNKNOWN', message: 'Simulation failed.' }));
     }
@@ -1151,33 +1210,7 @@ export default function ShippingCenter() {
         lastSyncError: undefined,
       };
       if (result.estimatedDelivery) updates.estimatedDelivery = result.estimatedDelivery;
-      if (result.status) {
-        const statusMap: Record<string, ShipmentStatus> = {
-          'pre_transit': 'Label Created',
-          'accepted': 'Dispatched',
-          'in_transit': 'In Transit',
-          'out_for_delivery': 'In Transit',
-          'delivered': 'Delivered',
-          'failure': 'Exception',
-          'return_to_sender': 'Exception',
-          'returned': 'Returned',
-          'error': 'Exception',
-          'available_for_pickup': 'In Transit',
-        };
-        const mappedStatus = statusMap[result.status.toLowerCase()];
-        if (mappedStatus && STATUS_ORDER.indexOf(mappedStatus) > STATUS_ORDER.indexOf(shipment.status)) {
-          updates.status = mappedStatus;
-          if (mappedStatus === 'Delivered') updates.deliveredAt = now;
-          const syncEvent: ShipmentEvent = {
-            id: `evt-sync-${Date.now()}`,
-            timestamp: now,
-            status: mappedStatus,
-            description: `Status updated to ${mappedStatus} via provider tracking sync`,
-            performedBy: 'System (Provider Sync)',
-          };
-          updates.events = [...shipment.events, syncEvent];
-        }
-      }
+      applyTrackingStatusToShipment(shipment, mergedEvents, updates, 'Provider Sync');
       updateShipment(shipmentId, updates);
       const totalEvents = mergedEvents.length;
       const newCount = newEvents.length;
@@ -1185,22 +1218,35 @@ export default function ShippingCenter() {
       let successMsg = `Tracking synced. ${totalEvents} total event(s), ${newCount} new`;
       if (dupCount > 0) successMsg += `, ${dupCount} duplicate(s) skipped`;
       successMsg += '.';
+      if (updates.status && updates.status !== shipment.status) successMsg += ` Status updated: ${shipment.status} → ${updates.status}.`;
       if (providerEnvironment === 'test') {
         successMsg += ' (Test mode — tracking data may be simulated or limited.)';
       }
       setProviderSuccess(successMsg);
     } else {
       const err = result.error || { code: 'UNKNOWN', message: 'Tracking sync failed.' };
-      if (providerEnvironment === 'test') {
-        err.message += ' Note: You are using test-mode credentials. Test tracking numbers may not return real carrier data.';
+      const isTestModeLimitation = providerEnvironment === 'test' && (
+        err.code === 'TRACKER_NOT_FOUND' ||
+        err.code === 'NOT_FOUND' ||
+        err.code === 'INVALID_TRACKING' ||
+        (err.message || '').toLowerCase().includes('not found') ||
+        (err.message || '').toLowerCase().includes('no tracking')
+      );
+      if (isTestModeLimitation) {
+        setProviderError({ code: 'TEST_MODE_LIMITATION', message: 'Test-mode limitation: Test tracking numbers may not return real carrier data from the provider. This is expected — use "Simulate Provider Events" to test tracking workflows.', retryable: false });
+      } else {
+        const friendlyErr = friendlyProviderError(err);
+        if (providerEnvironment === 'test') {
+          friendlyErr.message += ' (Test mode — results may differ from production.)';
+        }
+        setProviderError(friendlyErr);
+        const failCount = (shipment.syncFailureCount || 0) + 1;
+        updateShipment(shipmentId, {
+          syncFailureCount: failCount,
+          lastSyncError: err.message,
+          updatedAt: new Date().toISOString(),
+        });
       }
-      setProviderError(friendlyProviderError(err));
-      const failCount = (shipment.syncFailureCount || 0) + 1;
-      updateShipment(shipmentId, {
-        syncFailureCount: failCount,
-        lastSyncError: err.message,
-        updatedAt: new Date().toISOString(),
-      });
     }
     setProviderLoading(null);
   }
@@ -1795,7 +1841,7 @@ export default function ShippingCenter() {
                         <div className="px-3 py-2 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2">
                           <span className="material-symbols-outlined text-red-500 text-sm mt-0.5">sync_problem</span>
                           <div>
-                            <p className="text-xs text-red-600 font-medium">Tracking sync failures: {selectedShip.syncFailureCount}</p>
+                            <p className="text-xs text-red-600 font-medium">Tracking sync failed ({selectedShip.syncFailureCount} attempt{selectedShip.syncFailureCount === 1 ? '' : 's'})</p>
                             {selectedShip.lastSyncError && <p className="text-[10px] text-red-400 mt-0.5">{selectedShip.lastSyncError}</p>}
                           </div>
                         </div>

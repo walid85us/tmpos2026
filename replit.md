@@ -58,6 +58,8 @@ The frontend is built using React 19, TypeScript, Vite 6, and Tailwind CSS v4.
         -   **Security**: HMAC-SHA256 signature verification (timing-safe comparison) when `SHIPPING_WEBHOOK_SECRET_<PROVIDER>` env var is set. Raw payloads redacted from all webhook-log GET responses. Admin endpoints (webhook-log, replay) gated client-side by `manage_shipping_settings` sub-permission + `isWriteBlocked` guard on replay.
     -   **Phase 2 Forward-Compatible Fields**: Shipment type includes extension fields for customs declarations (`customsInfo`), insurance (`insuranceInfo`), return management (`returnInfo`). These are typed and optional, ready for Phase 2 international/returns features without schema migration.
     -   **Phase 3 Forward-Compatible Fields**: Shipment type includes extension fields for pickup scheduling (`pickupInfo`), SLA tracking (`slaInfo`), and batch processing (`batchId`). These are typed and optional, ready for Phase 3 operations/logistics features.
+    -   **Unified Status Mapping**: Shared `PROVIDER_STATUS_TO_SHIPMENT` map and `applyTrackingStatusToShipment()` function used by all tracking event sources (sync, simulate, replay). Ensures shipment header status and timeline always agree. Status progression guards prevent backward regression.
+    -   **Duplicate-Event Safety (QA-Verifiable)**: Clicking "Simulate Provider Events" a second time deduplicates incoming events against existing timeline events via `providerEventRef` and `timestamp|status` matching. The success message reports how many duplicates were safely skipped. Webhook log also displays `duplicate` result entries with amber styling. Both paths are permission-gated and safe for QA verification.
     -   **API Endpoints (Event/Webhook)**:
         -   `POST /api/shipping/webhook/:providerId` — Receives provider webhooks, parses payload, records to durable audit log, returns processing result. Signature verified when secret configured.
         -   `GET /api/shipping/webhook-log` — Admin endpoint returning filtered webhook event log (rawPayload redacted).
@@ -84,3 +86,24 @@ The frontend is built using React 19, TypeScript, Vite 6, and Tailwind CSS v4.
 -   **EasyPost**: Shipping API for label generation and tracking.
 -   **Shippo**: Shipping API for label generation and tracking.
 -   **ShipStation**: Shipping API for label generation and tracking.
+
+# Phase 2 Forward-Readiness
+
+The following capabilities are structurally prepared in the current codebase (typed fields on `Shipment` in `src/types.ts`, no UI yet). No schema migration needed when Phase 2 activates.
+
+-   **Returns Portal**: `returnInfo` field — `isReturn`, `originalShipmentId`, `returnReason`, `returnRequestedAt`, `returnLabelUrl`. Ready for return label generation, return-to-original-shipment linking, and return reason tracking.
+-   **Service Points**: `pickupInfo.servicePointId` field. Ready for carrier service point / drop-off location selection during shipment creation.
+-   **Customs Documents**: `customsInfo` field — `contentsType`, `contentsExplanation`, `declaredValue`, `currency`, `hsCode`, `originCountry`. Ready for international shipment customs declarations and commercial invoices.
+-   **Pickup Requests**: `pickupInfo` field — `pickupRequested`, `pickupScheduledAt`, `pickupConfirmationNumber`. Ready for carrier pickup scheduling and confirmation tracking.
+-   **Insurance Rules**: `insuranceInfo` field — `insured`, `insuredValue`, `currency`, `provider`. Ready for shipment insurance enrollment and value declaration.
+-   **Carrier Analytics**: `lastWebhookEventAt`, `webhookEventsCount` on Shipment. Status progression tracking via `applyTrackingStatusToShipment()`. Ready for carrier performance dashboards, delivery time analysis, and exception rate reporting.
+
+# Phase 3 Forward-Readiness
+
+The following capabilities are structurally prepared for Phase 3 (typed fields on `Shipment` in `src/types.ts`, no UI yet).
+
+-   **Automation Rules**: Webhook/event processing pipeline (`server/event-processor.ts`) provides the ingestion and parsing foundation. Provider-specific parsers normalize all inbound events. Status mapping and progression guards are centralized. Ready for rule-based automation (e.g., auto-notify customer on delivery, auto-flag exceptions).
+-   **Batch Labels**: `batchId` field on Shipment. Ready for grouping shipments into fulfillment batches and purchasing labels in bulk via a single provider API call.
+-   **Packing Workflows**: Shipment lifecycle includes Packed status with explicit Pack/Unpack transitions. Package array with dimensions/weight already tracked per shipment. Ready for barcode-driven packing station workflows.
+-   **SLA Optimization**: `slaInfo` field — `targetDeliveryAt`, `slaType` (standard/express/overnight/economy), `slaMet`, `transitBusinessDays`. Ready for SLA commitment tracking, breach alerting, and carrier selection optimization based on SLA requirements.
+-   **Carrier Scorecards**: Webhook audit log (`data/webhook-audit-log.json`) with per-provider stats endpoint (`/api/shipping/webhook-log/stats`). Combined with `slaInfo.slaMet` and exception tracking, ready for carrier reliability scoring, on-time delivery rates, and cost-per-delivery analysis.
