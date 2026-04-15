@@ -26,6 +26,15 @@ function getApiToken(): string | null {
   return creds?.apiKey || null;
 }
 
+function normalizePhone(phone?: string): string {
+  if (!phone) return '';
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length < 10) return '';
+  if (digits.length === 11 && digits.startsWith('1')) return digits;
+  if (digits.length === 10) return '1' + digits;
+  return digits;
+}
+
 function mapAddressToShippo(addr: ShipmentAddress) {
   return {
     name: addr.name,
@@ -36,7 +45,7 @@ function mapAddressToShippo(addr: ShipmentAddress) {
     state: addr.state,
     zip: addr.postalCode,
     country: addr.country,
-    phone: addr.phone || '',
+    phone: normalizePhone(addr.phone),
     email: addr.email || '',
   };
 }

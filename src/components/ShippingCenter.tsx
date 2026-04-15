@@ -895,7 +895,7 @@ export default function ShippingCenter() {
     if (!hasShippablePackages(shipment)) missing.push('Add packages with weight or contents');
     if (!shipment.selectedRate && (!shipment.carrier || !shipment.serviceLevel)) missing.push('Select a shipping rate or set carrier and service level');
     if (isCarrierRequiringPhone(shipment) && !isValidPhone(shipment.destinationAddress.phone)) {
-      missing.push('Recipient phone number required for UPS/FedEx (at least 10 digits) — add via Edit Shipment');
+      missing.push('Recipient phone number required for UPS/FedEx (at least 10 digits)');
     }
     const providerMsg = getProviderPrerequisiteMessage();
     if (providerMsg) missing.push(providerMsg);
@@ -2706,6 +2706,7 @@ export default function ShippingCenter() {
                       <input value={newOrigin.state} onChange={e => setNewOrigin(p => ({ ...p, state: e.target.value }))} disabled={addressLocked} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="State" />
                       <input value={newOrigin.postalCode} onChange={e => setNewOrigin(p => ({ ...p, postalCode: e.target.value }))} disabled={addressLocked} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="ZIP" />
                     </div>
+                    <input value={newOrigin.phone || ''} onChange={e => setNewOrigin(p => ({ ...p, phone: e.target.value || undefined }))} disabled={addressLocked} className="col-span-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Phone" />
                   </div>
                 </div>
                 <div className="space-y-3">
@@ -2863,6 +2864,7 @@ export default function ShippingCenter() {
                       <input value={newOrigin.state} onChange={e => setNewOrigin({ ...newOrigin, state: e.target.value })} placeholder="State *" className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
                     </div>
                     <input value={newOrigin.postalCode} onChange={e => setNewOrigin({ ...newOrigin, postalCode: e.target.value })} placeholder="Postal Code *" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                    <input value={newOrigin.phone || ''} onChange={e => setNewOrigin({ ...newOrigin, phone: e.target.value || undefined })} placeholder="Phone" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
                   </div>
                   <div className="space-y-3">
                     <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Destination Address</p>
@@ -2900,6 +2902,7 @@ export default function ShippingCenter() {
                         Zip not in local database. Enter city/state manually.
                       </p>
                     )}
+                    <input value={newDest.phone || ''} onChange={e => setNewDest({ ...newDest, phone: e.target.value || undefined })} placeholder="Phone (required for UPS/FedEx)" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
                   </div>
                 </div>
 

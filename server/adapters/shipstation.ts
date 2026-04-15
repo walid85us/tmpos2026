@@ -27,6 +27,15 @@ function getAuthHeader(): string | null {
   return 'Basic ' + Buffer.from(`${creds.apiKey}:${creds.apiSecret}`).toString('base64');
 }
 
+function normalizePhone(phone?: string): string | null {
+  if (!phone) return null;
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length < 10) return null;
+  if (digits.length === 11 && digits.startsWith('1')) return digits;
+  if (digits.length === 10) return '1' + digits;
+  return digits;
+}
+
 function mapAddressToShipStation(addr: ShipmentAddress) {
   return {
     name: addr.name,
@@ -37,7 +46,7 @@ function mapAddressToShipStation(addr: ShipmentAddress) {
     state: addr.state,
     postalCode: addr.postalCode,
     country: addr.country,
-    phone: addr.phone || null,
+    phone: normalizePhone(addr.phone),
   };
 }
 

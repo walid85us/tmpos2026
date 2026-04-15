@@ -1,0 +1,159 @@
+Shipping Carrier Phone Validation — FedEx Phone Requirement Narrow Correction Pass
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a narrow correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Only fix the remaining carrier phone validation issue.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Firebase/Firestore data architect
+- Enterprise shipping systems architect
+- Senior shipping and fulfillment expert with 20+ years of experience in parcel shipping, carrier integrations, label workflows, dispatch control, and carrier-specific shipment requirements
+- Root-cause debugging specialist
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- RBAC/sub-permissions
+- lifecycle gating
+- platform/store hierarchy
+- System Owner Plans & Features matrix
+- Store Permissions Matrix
+- secure server-side provider call architecture
+- Shipping Center as the sole provider-management home
+- provider/manual shipment mode split
+- mandatory provider address validation before Get Rates in provider mode
+- Ready disabled until rate selection
+- Packed only after successful label purchase in provider mode
+- Rejected by Carrier / Returned with reasons
+- + Add Event disabled after Dispatched
+- existing shipping core flow
+- webhook/event automation
+- bulk sync / reconciliation
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — REMAINING ISSUE
+==================================================
+
+Observed QA result:
+- UPS works when a phone number is entered
+- FedEx fails with:
+  “PHONENUMBER.EMPTY: Phone number is empty. Please update and try again.”
+- This happens even when the operator entered a phone number such as:
+  - 10 digits
+  - or 111-111-1111 format
+
+This means the current FedEx shipment payload or preflight validation logic is not handling recipient phone correctly.
+
+==================================================
+REQUIRED FIX
+==================================================
+
+1) FIX FEDEX PHONE HANDLING
+Required:
+- When FedEx is selected, recipient phone must be correctly read, normalized, validated, and passed through to the shipment/label request payload
+- Do not allow the UI to appear valid while the provider request still sends an empty or unusable phone field
+- Normalize common user-entered formats such as:
+  - 1111111111
+  - 111-111-1111
+  - (111) 111-1111
+  - 111 111 1111
+- Strip formatting noise as needed before provider submission while preserving the correct number value
+
+2) CARRIER-SPECIFIC PREFLIGHT VALIDATION
+Required:
+- Keep carrier-specific phone prerequisite behavior clean and explicit
+- If FedEx requires phone, validate it before Purchase Label
+- If the phone is missing/invalid, block Purchase Label with a clear UI message
+- Do not wait for the provider/carrier API to fail first if the issue is detectable in the app
+- If UPS and FedEx have different accepted formatting behavior, normalize to the provider-safe format before submission
+
+3) SINGLE SOURCE OF TRUTH FOR PHONE FIELD
+Required:
+- Ensure the same phone value is used consistently across:
+  - shipment form/edit flow
+  - provider preflight validation
+  - provider payload generation
+  - carrier-specific label purchase request
+- Do not let one part of the app read a different/empty phone value than the UI shows
+
+4) CLEAR OPERATOR FEEDBACK
+Required:
+- If the number is invalid for FedEx, the operator should get one clear prerequisite message
+- Avoid opaque provider-only failure if the app can detect it earlier
+- If the number is valid and normalized, FedEx label purchase should proceed without the current false “Phone number is empty” failure
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- QA selects FedEx
+- QA enters a valid recipient phone number
+- QA can proceed without receiving the false “PHONENUMBER.EMPTY” error
+- QA can still see clean blocking if the phone is genuinely missing/invalid
+- UPS behavior must remain intact
+
+==================================================
+IMPORTANT IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into another workstream
+- Do not change unrelated shipping logic
+- Do not break UPS behavior
+- Do not break provider/manual mode split
+- Do not break rate selection, label purchase prerequisites, or shipment lifecycle logic
+- Keep the design baseline consistent
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact execution order:
+
+1) Audit the phone field source used in shipment UI, shipment state, and provider payload generation
+2) Fix phone normalization and carrier-specific payload mapping for FedEx
+3) Add/clean preflight validation so the UI catches truly invalid phone before provider failure
+4) Verify UPS still works unchanged
+5) Re-test FedEx and UPS purchase-label flows
+6) Update documentation if needed
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- carrier-specific phone prerequisite behavior
+- phone normalization/submission behavior for provider label purchase
+- any FedEx-specific payload or validation notes
+- confirmation that UPS behavior remains preserved
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. FedEx Phone Handling Fix
+3. Carrier-Specific Preflight Validation Fix
+4. Phone Source-of-Truth / Payload Mapping Fix
+5. Files Changed
+6. Documentation Updated
+7. Non-Regression Notes

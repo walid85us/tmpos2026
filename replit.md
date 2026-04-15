@@ -1,6 +1,6 @@
 # Overview
 
-This project is a multi-tenant SaaS frontend platform designed for small to medium-sized businesses. It offers a comprehensive solution for business management, integrating Point-of-Sale (POS), employee and customer relationship management (CRM), inventory control, reporting, and marketing functionalities. The platform aims to streamline operations, provide valuable insights, and automate tasks through scalability, customization, and a rich feature set.
+This project is a multi-tenant SaaS frontend platform for small to medium-sized businesses. It provides a unified solution for business management, including Point-of-Sale (POS), employee and customer relationship management (CRM), inventory control, reporting, and marketing functionalities. The platform's core purpose is to streamline operations, offer actionable insights, and automate tasks through its scalable, customizable, and feature-rich design.
 
 # User Preferences
 
@@ -18,9 +18,9 @@ The frontend is built using React 19, TypeScript, Vite 6, and Tailwind CSS v4.
 
 ## UI/UX Decisions
 
--   **Design System**: Consistent design language with `rounded-[2.5rem]` or `rounded-[3rem]` cards, `bg-white/80 backdrop-blur-xl` glass effect, and a primary color theme with a `ghost-border` utility.
+-   **Design System**: Consistent design language featuring rounded cards, a glass effect (`bg-white/80 backdrop-blur-xl`), and a primary color theme with a `ghost-border` utility.
 -   **Typography**: `font-black uppercase tracking-widest` for labels.
--   **Animations**: Framer Motion (`motion/react`) for smooth UI transitions and consistent modal patterns with `AnimatePresence`.
+-   **Animations**: Framer Motion for smooth UI transitions and consistent modal patterns.
 -   **Notifications**: Toast notifications for user feedback.
 -   **Accessibility**: Focus on semantic accessibility for forms, tables, and modals.
 
@@ -28,7 +28,7 @@ The frontend is built using React 19, TypeScript, Vite 6, and Tailwind CSS v4.
 
 -   **Authentication & Access Control**: Firebase Authentication with a 7-level hierarchical permission model.
 -   **Tenant Management**: Full lifecycle management including provisioning, subscriptions, feature overrides, billing, and audit logging.
--   **Point of Sale (POS)**: Comprehensive system covering cart management, diverse payment options, tax/discount calculations, customer management, repair intake, held orders, quick add stock, operator switching with RBAC, refund workflows, and warranty claims.
+-   **Point of Sale (POS)**: Comprehensive system for cart management, diverse payment options, tax/discount calculations, customer management, repair intake, held orders, quick add stock, operator switching with RBAC, refund workflows, and warranty claims.
 -   **Employee Management**: Features employee, role, time tracking, and payroll management with granular permissions.
 -   **CRM (Customers)**: Enriched CRM with multi-field search, loyalty management, duplicate detection, and integrated order/invoice history.
 -   **Invoices**: Full invoice lifecycle management with dynamic line items, searchable catalog, payment processing, supervisor PIN-authorized reopen, and configurable document templates.
@@ -37,57 +37,23 @@ The frontend is built using React 19, TypeScript, Vite 6, and Tailwind CSS v4.
 -   **Reporting**: Dashboard with data visualizations.
 -   **Onboarding**: Multi-step process for new tenants including plan selection, pre-configured settings, and an activation checklist.
 -   **Document Template Editor**: Structured template builder for 5 document types with deterministic HTML generation, branding, and visual preview.
--   **Inventory Management**: Comprehensive system for managing `StockItem` types (serialized, non-serialized, handset) with flags, UPC/manufacturer/location, min/max stock, cost price, serial number tracking, advanced filtering, stock adjustment, global movements log, inventory transfer lifecycle, stock count, and trade-in management. Integrates repair parts and POS sales movements with RBAC.
--   **Supply Chain Management**: Manages suppliers, purchase orders (PO) lifecycle, Goods Received Notes (GRN), and Return Merchandise Authorization (RMA) with detailed tracking and financial recording, all RBAC-gated.
--   **Shipping Center**: Centralized fulfillment-ready module for managing shipments across all source documents, supporting various shipment types and source documents. Features include a shipment list with filters, a 3-tab detail view, create/edit modals with package management, status transition workflow, tracking event timeline, carrier/service level configuration, cost tracking, and integration for pre-populating data from source modules. Includes a provider adapter layer for external shipping carriers and a runtime mode architecture for write guards.
-    -   **PDF-Only Primary Label**: The label artifact pipeline ensures the primary label action always results in a real PDF. The server requests `label_format: 'PDF'` from EasyPost. If the provider returns PNG (common in test mode), a server-side label proxy (`/api/shipping/label-proxy`) bypasses CORS, and client-side Canvas→JPEG→DCTDecode PDF construction produces a real PDF blob. Fallback: if client-side conversion fails, the proxied image URL is used directly. Label metadata internally records `originalFormat` for audit purposes but this is never shown to the operator — the operator UI presents a clean "Print PDF Label" / "View" flow without conversion noise.
-    -   **Shipment Mode Split (Provider vs Manual)**: Mode is purely computed, not stored as a field. Rule: if `selectedRate` exists → provider mode; if `carrier && serviceLevel` without `selectedRate` → manual mode; otherwise provider (default). Manual carrier/service entry in the edit modal automatically forces manual mode. Clearing carrier/service reverts to provider mode. In manual mode: all provider-backed actions (Validate Address, Get Rates, Purchase Label, Sync Tracking, Simulate Provider Events) are hidden. The manual mode banner explains why provider actions are disabled and instructs user to clear carrier/service to restore provider features. In provider mode: full workflow (address validation → Get Rates → rate selection → Purchase Label → tracking sync). Provider prerequisites (address validation, packages, provider configured) recalculate on every render from live shipment state.
-    -   **Address Editability**: Origin and destination addresses are editable in the edit modal for statuses Draft, Ready, Label Created, and Packed (i.e., before Dispatched). Changing the destination address clears any previous address validation to force re-validation. The edit modal includes full address form fields (name, line1, city, state, postal code) for both origin and destination.
-    -   **Unified Provider Status Source of Truth**: Provider status (configured, active, verified/tested, environment) is powered by a single state source — `providerStatuses` array loaded eagerly on component mount and refreshed after every provider operation (test, activate, configure). The provider header summary badge, provider settings panel badges, and action prerequisite gating all derive from this same array. After a successful Test Connection, the provider is auto-activated if no active provider exists. The header displays Verified/Failed badges inline with the provider name and environment.
-    -   **Provider Prerequisite Recalculation**: `getRatePrerequisites` and `getLabelPrerequisites` compute from live state on every render. Messages differentiate between "Configure a shipping provider" (no providers have credentials) vs "Set an active shipping provider" (providers configured but none activated). Prerequisites clear immediately after provider activation, address validation, package changes.
-    -   **Post-Label Action Cleanup**: After label purchase, Validate Address is hidden (gated by `!selectedShip.label`). The address is considered committed once a label is purchased. Validate Address only reappears if the shipment is rolled back to a pre-label state and the address is changed. Address fields in the edit modal are also locked after label purchase.
-    -   **Post-dispatch lifecycle**: Robust governance with carrier acceptance tracking, Rejected/Returned with reasons, Dispatched→Packed rollback (with required reason) when carrier has not yet accepted the package, and provider-driven progression in provider mode.
-    -   **Webhook/Event Processing Pipeline**: `server/event-processor.ts` provides a unified event processing pipeline for all shipping provider webhooks and tracking syncs.
-        -   **Idempotency**: Deduplication via `providerEventRef` matching (or timestamp+status fallback). Client-side tracking sync also deduplicates events before merging.
-        -   **Status Mapping**: Centralized `PROVIDER_TO_INTERNAL_STATUS` map converts provider-specific statuses (pre_transit, accepted, in_transit, etc.) to internal statuses. Used by both webhook processing and client-side sync.
-        -   **Status Progression Awareness**: `isStatusProgression()` prevents out-of-order status regression. Exception/Returned statuses only apply if shipment is already Dispatched+.
-        -   **Provider Parsers**: EasyPost, Shippo, ShipStation webhook payloads are normalized by provider-specific parsers into a common `ProviderTrackingEvent[]` format.
-        -   **Webhook Audit Log (Durable)**: File-backed ring buffer (`data/webhook-audit-log.json`, 500 entries max) records every webhook event with full metadata (providerId, eventType, trackingNumber, processingResult, signatureVerified, isTestMode, retryCount, source). Loaded from disk on server startup, persisted asynchronously (200ms debounce) on every write. Survives server restarts — the first durable audit trail in the system. Duplicate webhook detection at audit level via `providerEventId` matching.
-        -   **Recovery Tooling**: Webhook log viewer (admin, permission-gated via `manage_shipping_settings`) with filtering by result type. Event replay endpoint re-parses original raw payload through the provider-specific parser. Sync failure counter tracks consecutive failures per shipment with `syncFailureCount` and `lastSyncError`.
-        -   **Enhanced Timeline**: Tracking events display source badges (Provider, Webhook, Replay, Test Provider, Manual) with color-coded dots and per-source colored timeline nodes. Processing metadata (result, received timestamp) visible on non-standard events.
-        -   **Security**: HMAC-SHA256 signature verification (timing-safe comparison) when `SHIPPING_WEBHOOK_SECRET_<PROVIDER>` env var is set. Raw payloads redacted from all webhook-log GET responses. Admin endpoints (webhook-log, replay) gated client-side by `manage_shipping_settings` sub-permission + `isWriteBlocked` guard on replay.
-    -   **Phase 2 Forward-Compatible Fields**: Shipment type includes extension fields for customs declarations (`customsInfo`), insurance (`insuranceInfo`), return management (`returnInfo`). These are typed and optional, ready for Phase 2 international/returns features without schema migration.
-    -   **Phase 3 Forward-Compatible Fields**: Shipment type includes extension fields for pickup scheduling (`pickupInfo`), SLA tracking (`slaInfo`), and batch processing (`batchId`). These are typed and optional, ready for Phase 3 operations/logistics features.
-    -   **Unified Status Mapping**: Shared `PROVIDER_STATUS_TO_SHIPMENT` map and `applyTrackingStatusToShipment()` function used by all tracking event sources (sync, simulate, replay). Ensures shipment header status and timeline always agree. Status progression guards prevent backward regression.
-    -   **Duplicate-Event Safety (QA-Verifiable)**: Clicking "Simulate Provider Events" a second time deduplicates incoming events against existing timeline events via `providerEventRef` and `timestamp|status` matching. The success message reports how many duplicates were safely skipped. Webhook log also displays `duplicate` result entries with amber styling. Both paths are permission-gated and safe for QA verification.
-    -   **Phone Prerequisites**: `getLabelPrerequisites()` checks for phone number on destination address when carrier is UPS or FedEx (via `isCarrierRequiringPhone()` helper). Phone validation (`isValidPhone()`) requires ≥10 digits. Edit modal includes phone field in destination address section so operators can add it before label purchase.
-    -   **EasyPost Test Tracking UX**: "Attach EasyPost Test Tracker" dropdown (violet, bug_report icon) in tracking tab lets operators attach valid EasyPost test codes (EZ1000000001–EZ7000000007) to a shipment. `isEasyPostTestTrackingCode()` helper validates the format. `handleSyncTracking` detects non-EZ codes when using EasyPost in test mode and shows a specific warning directing operators to use test codes or simulate. Test-mode sync failures reset `syncFailureCount` and show amber `providerWarning` (not red error).
-    -   **Bulk Sync / Reconciliation**: Main-page "Reconcile Shipments" button (indigo themed, `sync_shipping_tracking` permission-gated) opens a modal for bulk tracking sync of eligible provider-mode shipments. This is a **secondary recovery/reconciliation tool** — webhook automation remains the primary status update mechanism.
-        -   **Design Hierarchy**: (1) Primary: provider webhook/event automation → (2) Per-shipment: Sync Tracking on detail page → (3) Recovery/admin: Bulk Reconcile from main page.
-        -   **Eligibility Scoping**: Filters exclude manual shipments, pre-dispatch statuses, and shipments without tracking numbers. Configurable filters: in-flight only (Dispatched/In Transit/Exception), include terminal statuses, sync failures only, stale threshold (1–30 days since last sync).
-        -   **Batch Processing**: Server-side batching (3 shipments per batch, 500ms inter-batch delay, configurable within safe limits 1–10 batch size, 200–5000ms delay). Client-side progress bar shows real-time batch completion.
-        -   **Result Categories**: Per-shipment results: `updated` (new tracking events applied), `unchanged` (already up to date), `failed` (provider error), `test_limitation` (expected test-mode behavior). Aggregate summary with color-coded counts.
-        -   **Event Application**: Reuses existing `applyTrackingStatusToShipment()` with full deduplication (providerEventRef + timestamp|status matching), status progression guards, and timeline merge. No separate logic path.
-        -   **Safety**: Preview mode blocks bulk sync (disabled button with "Preview" label). Manual shipments always excluded. Test-mode limitations counted separately (amber) from real failures (red). `syncFailureCount` reset on test limitations, incremented on real failures.
-        -   **Auditability**: Results table shows per-shipment outcome with clickable rows that navigate to the shipment's tracking tab. Operators can verify what changed via existing timeline and event history.
-        -   **Phase 2/3 Forward-Compatibility**: Stale-shipment identification compatible with future SLA monitoring (`slaInfo.targetDeliveryAt`). Batch architecture extensible for automation rules (Phase 3). Result metadata useful for carrier analytics and scorecards.
-        -   **RepairDesk Insights Adapted**: Data Re-Sync concept (operator-triggered reconciliation), two-way sync visibility (per-shipment result reporting), shipment-scoped sync (not blind global sync). Not adopted: auto-sync on invoice creation (our webhook model is superior), flat-rate label limitations (not applicable).
-    -   **API Endpoints (Event/Webhook/Bulk Sync)**:
-        -   `POST /api/shipping/webhook/:providerId` — Receives provider webhooks, parses payload, records to durable audit log, returns processing result. Signature verified when secret configured.
-        -   `GET /api/shipping/webhook-log` — Admin endpoint returning filtered webhook event log (rawPayload redacted).
-        -   `GET /api/shipping/webhook-log/stats` — Aggregate stats (total, by result, by provider, time range).
-        -   `GET /api/shipping/webhook-log/:eventId` — Single webhook event detail (rawPayload redacted).
-        -   `POST /api/shipping/replay-event` — Re-parses original raw payload through provider parser pipeline, records new audit entry with source='replay'.
-        -   `GET /api/shipping/event-processor/status-map` — Returns the provider→internal status mapping and progression order.
-        -   `POST /api/shipping/bulk-sync` — Bulk tracking sync for multiple shipments. Accepts array of `{shipmentId, trackingNumber, carrier?, providerShipmentId?}` with configurable `batchSize` (1–10, default 3) and `delayMs` (200–5000, default 500). Returns per-shipment results and aggregate summary.
+-   **Inventory Management**: Comprehensive system for managing various `StockItem` types (serialized, non-serialized, handset) with features like UPC/manufacturer/location tracking, min/max stock, serial number tracking, advanced filtering, stock adjustments, global movements log, inventory transfer lifecycle, stock counts, and trade-in management, all integrated with RBAC.
+-   **Supply Chain Management**: Manages suppliers, purchase orders, Goods Received Notes (GRN), and Return Merchandise Authorization (RMA) with detailed tracking and financial recording, gated by RBAC.
+-   **Shipping Center**: Centralized fulfillment module for managing shipments across all source documents, supporting various shipment types. Features include shipment listing with filters, detailed views, create/edit modals with package management, status transition workflows, tracking event timelines, carrier/service level configuration, cost tracking, and integration for data pre-population. Includes a provider adapter layer for external shipping carriers and a runtime mode architecture. Key features include:
+    -   **PDF-Only Primary Label**: Ensures primary label generation always results in a PDF, handling conversions if necessary.
+    -   **Shipment Mode Split (Provider vs Manual)**: Dynamically computes shipment mode based on rate selection, enabling or disabling provider-backed actions accordingly.
+    -   **Address Editability**: Allows editing of origin and destination addresses for specific shipment statuses.
+    -   **Unified Provider Status Source of Truth**: Manages and displays shipping provider statuses consistently across the UI.
+    -   **Webhook/Event Processing Pipeline**: A unified pipeline for all shipping provider webhooks and tracking syncs, featuring idempotency, status mapping, status progression awareness, provider-specific parsers, a durable webhook audit log, and security measures (HMAC-SHA256 signature verification).
+    -   **Bulk Sync / Reconciliation**: A secondary recovery tool for bulk tracking synchronization of eligible provider-mode shipments, featuring eligibility scoping, batch processing, and detailed result reporting.
 
 ## System Design Choices
 
 -   **Routing**: React Router v7.
--   **State Management**: Primarily React Context API and extensive local component state.
+-   **State Management**: Primarily React Context API and local component state.
 -   **Firebase Integration**: Firestore for backend data persistence and Firebase Authentication for user management.
 -   **AI Integration**: Gemini API for AI functionalities.
--   **Server-Side Shipping API**: Express server (`server/index.ts`) on port 5001 handles all shipping provider operations. Credentials are stored securely server-side. Vite proxies `/api/shipping/*` requests in development.
+-   **Server-Side Shipping API**: Express server on port 5001 handles all shipping provider operations, with credentials stored securely server-side.
 -   **Configuration**: `firebase-applet-config.json` for Firebase project configuration and `firebase-blueprint.json` for Firestore schema definition.
 
 # External Dependencies
@@ -99,31 +65,3 @@ The frontend is built using React 19, TypeScript, Vite 6, and Tailwind CSS v4.
 -   **EasyPost**: Shipping API for label generation and tracking.
 -   **Shippo**: Shipping API for label generation and tracking.
 -   **ShipStation**: Shipping API for label generation and tracking.
-
-# Phase 2 Forward-Readiness
-
-The following capabilities are structurally prepared in the current codebase (typed fields on `Shipment` in `src/types.ts`, no UI yet). No schema migration needed when Phase 2 activates.
-
--   **Returns Portal**: `returnInfo` field — `isReturn`, `originalShipmentId`, `returnReason`, `returnRequestedAt`, `returnLabelUrl`. Ready for return label generation, return-to-original-shipment linking, and return reason tracking.
--   **Service Points**: `pickupInfo.servicePointId` field. Ready for carrier service point / drop-off location selection during shipment creation.
--   **Customs Documents**: `customsInfo` field — `contentsType`, `contentsExplanation`, `declaredValue`, `currency`, `hsCode`, `originCountry`. Ready for international shipment customs declarations and commercial invoices.
--   **Pickup Requests**: `pickupInfo` field — `pickupRequested`, `pickupScheduledAt`, `pickupConfirmationNumber`. Ready for carrier pickup scheduling and confirmation tracking.
--   **Insurance Rules**: `insuranceInfo` field — `insured`, `insuredValue`, `currency`, `provider`. Ready for shipment insurance enrollment and value declaration.
--   **Carrier Analytics**: `lastWebhookEventAt`, `webhookEventsCount` on Shipment. Status progression tracking via `applyTrackingStatusToShipment()`. Ready for carrier performance dashboards, delivery time analysis, and exception rate reporting.
-
-# Phase 3 Forward-Readiness
-
-The following capabilities are structurally prepared for Phase 3 (typed fields on `Shipment` in `src/types.ts`, no UI yet).
-
--   **Automation Rules**: Webhook/event processing pipeline (`server/event-processor.ts`) provides the ingestion and parsing foundation. Provider-specific parsers normalize all inbound events. Status mapping and progression guards are centralized. Ready for rule-based automation (e.g., auto-notify customer on delivery, auto-flag exceptions).
--   **Batch Labels**: `batchId` field on Shipment. Ready for grouping shipments into fulfillment batches and purchasing labels in bulk via a single provider API call.
--   **Packing Workflows**: Shipment lifecycle includes Packed status with explicit Pack/Unpack transitions. Package array with dimensions/weight already tracked per shipment. Ready for barcode-driven packing station workflows.
--   **SLA Optimization**: `slaInfo` field — `targetDeliveryAt`, `slaType` (standard/express/overnight/economy), `slaMet`, `transitBusinessDays`. Ready for SLA commitment tracking, breach alerting, and carrier selection optimization based on SLA requirements.
--   **Carrier Scorecards**: Webhook audit log (`data/webhook-audit-log.json`) with per-provider stats endpoint (`/api/shipping/webhook-log/stats`). Combined with `slaInfo.slaMet` and exception tracking, ready for carrier reliability scoring, on-time delivery rates, and cost-per-delivery analysis.
-
-# Recommended Future Enhancements
-
--   ~~**Main-Page Shipment Sync / Reconciliation**~~: **IMPLEMENTED** — "Reconcile Shipments" button on main Shipping Center page with eligibility filters, batch processing, per-shipment results, and aggregate summary.
--   **Scheduled Auto-Reconciliation**: Add a scheduled/cron-triggered version of the bulk sync that runs automatically (e.g., daily at 2 AM) for in-flight shipments not updated in >24 hours. Would use the same `POST /api/shipping/bulk-sync` endpoint with pre-configured filters. Requires server-side scheduler (node-cron or cloud scheduler).
--   **Bulk Sync Audit Log**: Persist bulk sync run metadata (timestamp, filter criteria, summary counts, operator) to a durable log for compliance and operational review. Could extend the existing webhook audit log or use a dedicated collection.
--   **Carrier-Specific Bulk Sync Rate Limits**: Add per-carrier rate limit awareness (e.g., EasyPost 20 req/min, UPS 100 req/min) to the bulk sync batching so it automatically adjusts batch size and delay based on the active provider's documented API limits.
