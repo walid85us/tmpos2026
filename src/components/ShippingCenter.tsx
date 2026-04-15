@@ -1236,6 +1236,9 @@ export default function ShippingCenter() {
       );
       if (isTestModeLimitation) {
         setProviderWarning('Test-mode limitation: Test tracking numbers may not return real carrier data from the provider. This is expected — use "Simulate Provider Events" to test tracking workflows.');
+        if (shipment.syncFailureCount && shipment.syncFailureCount > 0) {
+          updateShipment(shipmentId, { syncFailureCount: 0, lastSyncError: undefined, updatedAt: new Date().toISOString() });
+        }
       } else {
         const friendlyErr = friendlyProviderError(err);
         if (providerEnvironment === 'test') {
