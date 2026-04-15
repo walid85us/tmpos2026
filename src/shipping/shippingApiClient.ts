@@ -138,6 +138,45 @@ export async function syncTracking(
   return apiCall('/api/shipping/tracking', { trackingNumber, carrier, providerShipmentId });
 }
 
+export interface BulkSyncShipmentInput {
+  shipmentId: string;
+  trackingNumber: string;
+  carrier?: string;
+  providerShipmentId?: string;
+}
+
+export interface BulkSyncResult {
+  shipmentId: string;
+  trackingNumber: string;
+  result: 'updated' | 'unchanged' | 'failed' | 'test_limitation';
+  events?: ProviderTrackingEvent[];
+  status?: string;
+  estimatedDelivery?: string;
+  error?: { code: string; message: string };
+  newEventCount?: number;
+}
+
+export interface BulkSyncResponse {
+  success: boolean;
+  results?: BulkSyncResult[];
+  summary?: {
+    total: number;
+    updated: number;
+    unchanged: number;
+    failed: number;
+    testLimitation: number;
+  };
+  error?: { code: string; message: string };
+}
+
+export async function bulkSyncTracking(
+  shipments: BulkSyncShipmentInput[],
+  batchSize?: number,
+  delayMs?: number
+): Promise<BulkSyncResponse> {
+  return apiCall('/api/shipping/bulk-sync', { shipments, batchSize, delayMs });
+}
+
 export async function simulateTrackingEvent(
   trackingNumber: string,
   carrier: string

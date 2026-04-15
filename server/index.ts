@@ -182,6 +182,125 @@ app.post('/api/shipping/tracking', async (req, res) => {
   res.json(result);
 });
 
+app.post('/api/shipping/bulk-sync', async (req, res) => {
+  const { shipments, batchSize = 3, delayMs = 500 } = req.body as {
+    shipments: { shipmentId: string; trackingNumber: string; carrier?: string; providerShipmentId?: string }[];
+    batchSize?: number;
+    delayMs?: number;
+  };
+
+  if (!Array.isArray(shipments) || shipments.length === 0) {
+    res.json({ success: false, error: { code: 'EMPTY_REQUEST', message: 'No shipments provided for bulk sync.' } });
+    return;
+  }
+
+  const MAX_BULK_SYNC = 100;
+  if (shipments.length > MAX_BULK_SYNC) {
+    res.json({ success: false, error: { code: 'TOO_MANY_SHIPMENTS', message: `Bulk sync limited to ${MAX_BULK_SYNC} shipments per request. Received ${shipments.length}.` } });
+    return;
+  }
+
+  const validShipments = shipments.filter(s => s.shipmentId && s.trackingNumber && typeof s.trackingNumber === 'string' && s.trackingNumber.trim().length > 0);
+  if (validShipments.length === 0) {
+    res.json({ success: false, error: { code: 'NO_VALID_SHIPMENTS', message: 'No shipments with valid tracking numbers provided.' } });
+    return;
+  }
+
+  const provider = resolveProvider();
+  if (!provider) {
+    res.json({ success: false, error: { code: 'NO_PROVIDER', message: 'No active shipping provider. Configure a provider in Shipping Center.' } });
+    return;
+  }
+
+  const effectiveBatchSize = Math.min(Math.max(batchSize, 1), 10);
+  const effectiveDelay = Math.min(Math.max(delayMs, 200), 5000);
+
+  type BulkSyncResult = {
+    shipmentId: string;
+    trackingNumber: string;
+    result: 'updated' | 'unchanged' | 'failed' | 'test_limitation';
+    events?: unknown[];
+    status?: string;
+    estimatedDelivery?: string;
+    error?: { code: string; message: string };
+    newEventCount?: number;
+  };
+
+  const results: BulkSyncResult[] = [];
+  const activeId = getActiveProvider();
+  const env = activeId ? getProviderEnvironment(activeId) : null;
+
+  for (let i = 0; i < validShipments.length; i += effectiveBatchSize) {
+    const batch = validShipments.slice(i, i + effectiveBatchSize);
+    const batchResults = await Promise.all(
+      batch.map(async (s): Promise<BulkSyncResult> => {
+        try {
+          const trackingResult = await provider.getTracking({
+            trackingNumber: s.trackingNumber,
+            carrier: s.carrier,
+            providerShipmentId: s.providerShipmentId,
+          });
+          if (trackingResult.success) {
+            const eventCount = trackingResult.events?.length || 0;
+            return {
+              shipmentId: s.shipmentId,
+              trackingNumber: s.trackingNumber,
+              result: eventCount > 0 ? 'updated' : 'unchanged',
+              events: trackingResult.events,
+              status: trackingResult.status,
+              estimatedDelivery: trackingResult.estimatedDelivery,
+              newEventCount: eventCount,
+            };
+          } else {
+            const err = trackingResult.error || { code: 'UNKNOWN', message: 'Tracking fetch failed.' };
+            const isTestLimitation = env === 'test' && (
+              err.code === 'TRACKING_NOT_FOUND' ||
+              err.code === 'INVALID_TRACKING' ||
+              (err.message || '').toLowerCase().includes('not found') ||
+              (err.message || '').toLowerCase().includes('no tracking')
+            );
+            if (isTestLimitation) {
+              return {
+                shipmentId: s.shipmentId,
+                trackingNumber: s.trackingNumber,
+                result: 'test_limitation',
+                error: { code: 'TEST_LIMITATION', message: 'Test-mode tracking limitation — expected behavior.' },
+              };
+            }
+            return {
+              shipmentId: s.shipmentId,
+              trackingNumber: s.trackingNumber,
+              result: 'failed',
+              error: { code: err.code || 'UNKNOWN', message: err.message || 'Unknown error' },
+            };
+          }
+        } catch (e: any) {
+          return {
+            shipmentId: s.shipmentId,
+            trackingNumber: s.trackingNumber,
+            result: 'failed',
+            error: { code: 'EXCEPTION', message: e.message || 'Unexpected error during tracking fetch.' },
+          };
+        }
+      })
+    );
+    results.push(...batchResults);
+    if (i + effectiveBatchSize < validShipments.length) {
+      await new Promise(resolve => setTimeout(resolve, effectiveDelay));
+    }
+  }
+
+  const summary = {
+    total: results.length,
+    updated: results.filter(r => r.result === 'updated').length,
+    unchanged: results.filter(r => r.result === 'unchanged').length,
+    failed: results.filter(r => r.result === 'failed').length,
+    testLimitation: results.filter(r => r.result === 'test_limitation').length,
+  };
+
+  res.json({ success: true, results, summary });
+});
+
 app.post('/api/shipping/simulate-tracking-event', (req, res) => {
   const activeId = getActiveProvider();
   if (!activeId) {

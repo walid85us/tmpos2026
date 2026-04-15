@@ -1,0 +1,322 @@
+Shipping Bulk Sync / Reconciliation — Isolation Workstream
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is the next shipping workstream after Shipping Webhook & Event Automation Hardening.
+The objective is to add a main-page Bulk Sync / Reconciliation capability to Shipping Center for provider-mode shipments.
+
+This is NOT the primary status-update mechanism.
+Automatic provider webhook/event updates remain the primary source of truth.
+Bulk Sync / Reconciliation is a secondary operational recovery and reconciliation tool.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Firebase/Firestore data architect
+- Backend/webhook integration architect
+- Enterprise shipping systems architect
+- Senior shipping and fulfillment expert with 20+ years of experience in parcel shipping, warehouse execution, dispatch control, tracking-event operations, carrier integrations, reverse logistics, and operational recovery workflows
+- Reliability engineer focused on retries, batching, deduplication, and sync reconciliation
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Also review this reference before implementing:
+- https://help.repairdesk.co/portal/en/kb/articles/shipstation-integration
+
+Do not copy RepairDesk literally.
+Do extract useful operational ideas related to:
+- shipment sync/reconciliation
+- two-way status updates
+- operational shipping control
+- tracking sync
+- recovery flows
+- shipping management for repair-driven operations
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- RBAC/sub-permissions
+- lifecycle gating
+- platform/store hierarchy
+- System Owner Plans & Features matrix
+- Store Permissions Matrix
+- secure server-side provider call architecture
+- Shipping Center as the sole provider-management home
+- provider/manual shipment mode split
+- mandatory provider address validation before Get Rates in provider mode
+- Ready disabled until rate selection in provider mode
+- Packed only after successful label purchase in provider mode
+- Rejected by Carrier / Returned with reasons
+- + Add Event disabled after Dispatched
+- PDF-first label flow
+- webhook/event automation hardening already completed
+- existing shipping core flow
+
+==================================================
+WORKSTREAM GOAL
+==================================================
+
+Add a main-page Bulk Sync / Reconciliation capability inside Shipping Center so operators can reconcile multiple provider-mode shipments in one controlled workflow.
+
+This tool must:
+- operate from the main Shipping Center page
+- sync only eligible shipments
+- exclude manual shipments by default
+- avoid blindly syncing everything
+- batch and process safely
+- show clear results per shipment
+- use the existing provider event / tracking sync architecture
+- remain a recovery/reconciliation tool, not a replacement for webhook automation
+
+==================================================
+NON-NEGOTIABLE PRODUCT DIRECTION
+==================================================
+
+The intended model is:
+
+1. Primary source of truth
+- provider webhook/event automation
+
+2. Secondary per-shipment tool
+- Sync Tracking on a single shipment
+
+3. Recovery/admin operations tool
+- Bulk Sync / Reconcile Shipments from the main Shipping Center page
+
+This workstream must preserve that design hierarchy.
+
+==================================================
+MANDATORY IMPLEMENTATION REQUIREMENTS
+==================================================
+
+1) MAIN-PAGE BULK SYNC ENTRY
+Add a clearly visible main-page bulk sync / reconciliation action inside Shipping Center.
+
+Preferred UX:
+- a top-level action such as:
+  - Bulk Sync
+  - Reconcile Shipments
+  - Sync Eligible Shipments
+- located in the main Shipping Center operational surface, not buried in settings
+
+Required:
+- the action must feel native to Shipping Center operations
+- it must not be the default primary operator action for every shipment
+- it should clearly read as a recovery/reconciliation tool
+
+2) ELIGIBLE SHIPMENT SCOPING
+Bulk sync must not act on every shipment blindly.
+
+Required:
+- by default, target only eligible provider-mode shipments
+- exclude manual shipments by default
+- exclude shipments with no tracking/provider context
+- exclude terminal shipments by default unless explicitly included
+- support sensible filtering such as:
+  - in-flight only
+  - provider mode only
+  - shipments with tracking number
+  - shipments with sync failures
+  - shipments updated before a selected cutoff / stale shipments
+- do not create dangerous broad sync behavior
+
+3) USE EXISTING UNIFIED EVENT / SYNC PIPELINE
+Do not create separate fragmented logic.
+
+Required:
+- bulk sync must reuse the existing shipment-level sync/event pipeline where practical
+- provider event mapping, deduplication, and status progression logic must stay consistent
+- bulk sync must not invent a second contradictory source of truth
+
+4) SAFE BATCH PROCESSING
+Required:
+- process shipments in controlled batches
+- avoid hammering providers
+- avoid freezing the UI
+- show progress during the batch run
+- keep results understandable
+- if batching limits are configurable in code, keep them sensible and documented
+
+5) CLEAR RESULTS PER SHIPMENT
+Operators must understand what happened.
+
+Required:
+- show a per-shipment result state such as:
+  - updated
+  - no new events
+  - duplicate only
+  - skipped
+  - failed
+- show aggregate summary counts such as:
+  - total scanned
+  - updated
+  - unchanged
+  - skipped
+  - failed
+- where appropriate, preserve links/opening path back to the shipment
+
+6) PERMISSION / ROLE GATING
+This must be controlled.
+
+Required:
+- bulk sync / reconciliation must be permission-gated
+- only appropriate roles/users should be able to run it
+- reuse existing permission architecture coherently
+- do not create a disconnected permission system
+
+7) PREVIEW MODE SAFETY
+Required:
+- preview mode must not commit bulk sync changes
+- bulk sync action should be blocked or clearly read-only in preview mode
+- do not allow accidental multi-shipment mutation in preview mode
+
+8) MANUAL SHIPMENTS MUST REMAIN MANUAL
+Required:
+- manual shipments must not incorrectly enter provider automation through bulk sync
+- bulk sync must clearly ignore manual shipments unless there is an explicitly justified future path
+- preserve manual mode isolation completely
+
+9) TEST MODE VS LIVE MODE CLARITY
+Required:
+- if bulk sync runs in provider test mode, messages must remain clear and non-misleading
+- expected test-mode limitations must not flood the operator with noisy failure output
+- distinguish:
+  - updated via provider/test-provider event
+  - no changes
+  - known test-mode limitation
+  - real failure
+
+10) AUDITABILITY
+Required:
+- bulk sync results should remain auditable enough for operators/admins
+- if shipments were updated, operators should be able to tell what changed
+- reuse the event log / sync result architecture where practical
+- do not create black-box bulk behavior
+
+==================================================
+PHASE 2 AND PHASE 3 FORWARD-COMPATIBILITY
+==================================================
+
+This workstream must continue supporting the roadmap.
+
+Phase 2 readiness must remain compatible with:
+- returns portal
+- service points
+- customs docs
+- pickup requests
+- insurance rules
+- carrier analytics
+
+Phase 3 readiness must remain compatible with:
+- automation rules
+- batch labels
+- packing workflows
+- SLA optimization
+- carrier scorecards
+
+Required now:
+- bulk sync architecture should not block future automation rules
+- result summaries and sync metadata should be useful later for carrier analytics and scorecards
+- stale-shipment identification should be compatible with future SLA monitoring
+- document where future automation hooks could later attach
+
+Do not fully implement all of those now.
+Do make sure this workstream fits them cleanly.
+
+==================================================
+NON-NEGOTIABLE IMPLEMENTATION REQUIREMENTS FOR LIFECYCLE
+==================================================
+
+Bulk sync must respect current lifecycle discipline.
+
+Required:
+- provider-driven status progression must remain authoritative in provider mode
+- progression guards must still prevent invalid backward regression
+- manual notes/events must not override authoritative provider progression
+- cancellation rules after carrier progression must remain intact
+- Rejected by Carrier / Returned logic must remain intact
+- do not let bulk sync create impossible lifecycle states
+
+==================================================
+IMPORTANT IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into Phase 2 or Phase 3 full implementation
+- Do not touch unrelated workstreams
+- Do not break preview mode safety
+- Do not break permissions or feature gating
+- Do not break shipping core flow
+- Do not break provider configuration
+- Do not fake provider success
+- Do not fake webhook success
+- Do not fake bulk sync success
+- Keep the design baseline consistent
+- Do not create ambiguous mixed manual/provider shipment states
+- Do not leave stale shipment state after bulk processing
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact execution order:
+
+1) Review the RepairDesk article and extract only the concepts that improve our system
+2) Design the main-page Bulk Sync / Reconciliation UX inside Shipping Center
+3) Implement eligible shipment scoping and filtering
+4) Wire bulk sync through the existing unified provider event/sync pipeline
+5) Add safe batch processing, progress feedback, and per-shipment result reporting
+6) Ensure permission gating, preview safety, and manual-shipment exclusion
+7) Re-test all affected shipping flows and lifecycle behaviors
+8) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- main-page Bulk Sync / Reconciliation purpose
+- why webhook automation remains primary and bulk sync remains secondary
+- eligibility rules for bulk sync
+- manual shipment exclusion rules
+- batch processing behavior
+- result categories and operator feedback model
+- Phase 2 and Phase 3 forward-compatibility implications
+- lessons adapted from the RepairDesk article
+- future recommendations not implemented now
+
+==================================================
+MANDATORY OUTPUT PROOF
+==================================================
+
+Do not give a generic completion summary.
+Do not say this task is complete unless the bulk sync/reconciliation tool is visibly implemented in Shipping Center and behaves as a controlled recovery tool.
+
+OUTPUT FORMAT REQUIRED
+
+Reply ONLY in this structure:
+
+1. Workstream Completion Status
+2. RepairDesk Article Reviewed
+3. RepairDesk Insights Extracted
+4. How Those Insights Were Adapted To Our Shipping Center
+5. Implemented Now vs Deferred vs Not Adopted
+6. Main-Page Bulk Sync / Reconciliation Added
+7. Eligible Shipment Scoping / Filtering Added
+8. Batch Processing / Result Reporting Added
+9. Permission / Preview / Manual-Mode Safeguards Added
+10. Phase 2 Forward-Compatibility Included
+11. Phase 3 Forward-Compatibility Included
+12. Fulfillment-Expert Recommendations
+13. Files Changed
+14. Documentation Updated
+15. Non-Regression Notes

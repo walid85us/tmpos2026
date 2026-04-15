@@ -442,6 +442,18 @@ export default function ShippingCenter() {
   const [webhookLogLoading, setWebhookLogLoading] = useState(false);
   const [webhookLogFilter, setWebhookLogFilter] = useState<string>('all');
 
+  const [showBulkSyncModal, setShowBulkSyncModal] = useState(false);
+  const [bulkSyncRunning, setBulkSyncRunning] = useState(false);
+  const [bulkSyncProgress, setBulkSyncProgress] = useState<{ current: number; total: number } | null>(null);
+  const [bulkSyncResults, setBulkSyncResults] = useState<shippingApi.BulkSyncResult[] | null>(null);
+  const [bulkSyncSummary, setBulkSyncSummary] = useState<{ total: number; updated: number; unchanged: number; failed: number; testLimitation: number } | null>(null);
+  const [bulkSyncFilters, setBulkSyncFilters] = useState({
+    inFlightOnly: true,
+    includeTerminal: false,
+    syncFailuresOnly: false,
+    staleDays: 0,
+  });
+
   const STORE_ADDRESS: ShipmentAddress = { name: 'Main Warehouse', line1: '100 Commerce Dr', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US', phone: '555-0100' };
 
   const ELIGIBLE_INVOICE_STATUSES = ['Paid', 'Partially Paid'];
@@ -1218,6 +1230,139 @@ export default function ShippingCenter() {
     setProviderSuccess(`EasyPost test tracker "${testCode}" attached. You can now use "Sync Tracking" to pull real test tracking data from EasyPost.`);
   }
 
+  const IN_FLIGHT_STATUSES: ShipmentStatus[] = ['Dispatched', 'In Transit', 'Exception'];
+  const TERMINAL_STATUSES: ShipmentStatus[] = ['Delivered', 'Rejected', 'Returned', 'Cancelled'];
+  const PRE_DISPATCH_STATUSES: ShipmentStatus[] = ['Draft', 'Ready', 'Label Created', 'Packed'];
+
+  function getBulkSyncEligibleShipments() {
+    return shipments.filter(s => {
+      if (getShipmentMode(s) === 'manual') return false;
+      if (!s.trackingNumber) return false;
+      if (PRE_DISPATCH_STATUSES.includes(s.status)) return false;
+      if (bulkSyncFilters.inFlightOnly && !IN_FLIGHT_STATUSES.includes(s.status)) {
+        if (!bulkSyncFilters.includeTerminal || !TERMINAL_STATUSES.includes(s.status)) return false;
+      }
+      if (!bulkSyncFilters.inFlightOnly && TERMINAL_STATUSES.includes(s.status) && !bulkSyncFilters.includeTerminal) return false;
+      if (bulkSyncFilters.syncFailuresOnly && (!s.syncFailureCount || s.syncFailureCount === 0)) return false;
+      if (bulkSyncFilters.staleDays > 0) {
+        const lastSync = s.lastTrackingSyncAt ? new Date(s.lastTrackingSyncAt).getTime() : 0;
+        const cutoff = Date.now() - bulkSyncFilters.staleDays * 24 * 60 * 60 * 1000;
+        if (lastSync > cutoff) return false;
+      }
+      return true;
+    });
+  }
+
+  async function handleBulkSync() {
+    if (isWriteBlocked) return;
+    const eligible = getBulkSyncEligibleShipments();
+    if (eligible.length === 0) return;
+
+    setBulkSyncRunning(true);
+    setBulkSyncResults(null);
+    setBulkSyncSummary(null);
+    setBulkSyncProgress({ current: 0, total: eligible.length });
+
+    const BATCH_SIZE = 3;
+    const BATCH_DELAY = 500;
+    const allResults: shippingApi.BulkSyncResult[] = [];
+
+    for (let i = 0; i < eligible.length; i += BATCH_SIZE) {
+      const batch = eligible.slice(i, i + BATCH_SIZE);
+      const batchInput = batch.map(s => ({
+        shipmentId: s.id,
+        trackingNumber: s.trackingNumber!,
+        carrier: s.carrier,
+        providerShipmentId: s.providerShipmentId,
+      }));
+
+      try {
+        const response = await shippingApi.bulkSyncTracking(batchInput, BATCH_SIZE, BATCH_DELAY);
+        if (response.success && response.results) {
+          for (const r of response.results) {
+            const shipment = shipments.find(s => s.id === r.shipmentId);
+            if (!shipment) { allResults.push(r); continue; }
+
+            if (r.result === 'updated' && r.events && r.events.length > 0) {
+              const existingRefs = new Set(
+                (shipment.providerTrackingEvents || []).map(e => e.providerEventRef).filter(Boolean)
+              );
+              const existingTimestampStatus = new Set(
+                (shipment.providerTrackingEvents || []).map(e => `${e.timestamp}|${e.status}`)
+              );
+              const newEvents = (r.events as any[]).filter(e => {
+                if (e.providerEventRef && existingRefs.has(e.providerEventRef)) return false;
+                if (existingTimestampStatus.has(`${e.timestamp}|${e.status}`)) return false;
+                return true;
+              });
+
+              if (newEvents.length === 0) {
+                const now = new Date().toISOString();
+                updateShipment(r.shipmentId, { lastTrackingSyncAt: now, syncFailureCount: 0, lastSyncError: undefined, updatedAt: now });
+                allResults.push({ ...r, result: 'unchanged', newEventCount: 0 });
+              } else {
+                const mergedEvents = [...(shipment.providerTrackingEvents || []), ...newEvents]
+                  .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+                const now = new Date().toISOString();
+                const updates: Partial<Shipment> = {
+                  providerTrackingEvents: mergedEvents,
+                  lastTrackingSyncAt: now,
+                  syncFailureCount: 0,
+                  lastSyncError: undefined,
+                  estimatedDelivery: r.estimatedDelivery || shipment.estimatedDelivery,
+                  updatedAt: now,
+                };
+                applyTrackingStatusToShipment(shipment, mergedEvents, updates, 'Bulk Reconciliation');
+                updateShipment(r.shipmentId, updates);
+                allResults.push({ ...r, newEventCount: newEvents.length });
+              }
+            } else if (r.result === 'test_limitation') {
+              if (shipment.syncFailureCount && shipment.syncFailureCount > 0) {
+                updateShipment(r.shipmentId, { syncFailureCount: 0, lastSyncError: undefined, updatedAt: new Date().toISOString() });
+              }
+              allResults.push(r);
+            } else if (r.result === 'failed') {
+              updateShipment(r.shipmentId, {
+                syncFailureCount: (shipment.syncFailureCount || 0) + 1,
+                lastSyncError: r.error?.message,
+                updatedAt: new Date().toISOString(),
+              });
+              allResults.push(r);
+            } else {
+              const now = new Date().toISOString();
+              updateShipment(r.shipmentId, { lastTrackingSyncAt: now, syncFailureCount: 0, lastSyncError: undefined, updatedAt: now });
+              allResults.push(r);
+            }
+          }
+        }
+      } catch (e: any) {
+        for (const s of batch) {
+          allResults.push({
+            shipmentId: s.id,
+            trackingNumber: s.trackingNumber!,
+            result: 'failed',
+            error: { code: 'BATCH_ERROR', message: e.message || 'Batch request failed.' },
+          });
+        }
+      }
+
+      setBulkSyncProgress({ current: Math.min(i + BATCH_SIZE, eligible.length), total: eligible.length });
+    }
+
+    const summary = {
+      total: allResults.length,
+      updated: allResults.filter(r => r.result === 'updated').length,
+      unchanged: allResults.filter(r => r.result === 'unchanged').length,
+      failed: allResults.filter(r => r.result === 'failed').length,
+      testLimitation: allResults.filter(r => r.result === 'test_limitation').length,
+    };
+
+    setBulkSyncResults(allResults);
+    setBulkSyncSummary(summary);
+    setBulkSyncRunning(false);
+    setBulkSyncProgress(null);
+  }
+
   async function handleSyncTracking(shipmentId: string) {
     if (isWriteBlocked) return;
     const shipment = shipments.find(s => s.id === shipmentId);
@@ -1477,15 +1622,32 @@ export default function ShippingCenter() {
               />
             </div>
           </div>
-          {canCreate && (
-            <button
-              onClick={() => { resetCreateForm(); setShowCreateModal(true); }}
-              className="px-6 py-3 bg-primary text-white font-black text-[10px] uppercase tracking-widest rounded-2xl hover:bg-primary/90 transition-all active:scale-95 flex items-center gap-2 shadow-lg shadow-primary/20"
-            >
-              <span className="material-symbols-outlined text-sm">add</span>
-              New Shipment
-            </button>
-          )}
+          <div className="flex items-center gap-2">
+            {canSyncTracking && activeProviderId && !isWriteBlocked && (
+              <button
+                onClick={() => { setBulkSyncResults(null); setBulkSyncSummary(null); setShowBulkSyncModal(true); }}
+                className="px-5 py-3 bg-indigo-50 text-indigo-700 border border-indigo-200 font-black text-[10px] uppercase tracking-widest rounded-2xl hover:bg-indigo-100 transition-all active:scale-95 flex items-center gap-2"
+              >
+                <span className="material-symbols-outlined text-sm">sync</span>
+                Reconcile Shipments
+              </button>
+            )}
+            {canSyncTracking && activeProviderId && isWriteBlocked && (
+              <div className="px-5 py-3 bg-slate-50 text-slate-400 border border-slate-200 font-black text-[10px] uppercase tracking-widest rounded-2xl flex items-center gap-2 cursor-not-allowed" title="Bulk sync is disabled in preview mode">
+                <span className="material-symbols-outlined text-sm">sync_disabled</span>
+                Reconcile (Preview)
+              </div>
+            )}
+            {canCreate && (
+              <button
+                onClick={() => { resetCreateForm(); setShowCreateModal(true); }}
+                className="px-6 py-3 bg-primary text-white font-black text-[10px] uppercase tracking-widest rounded-2xl hover:bg-primary/90 transition-all active:scale-95 flex items-center gap-2 shadow-lg shadow-primary/20"
+              >
+                <span className="material-symbols-outlined text-sm">add</span>
+                New Shipment
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="flex gap-2 overflow-x-auto pb-1">
@@ -2805,6 +2967,251 @@ export default function ShippingCenter() {
                 >
                   {isWriteBlocked ? 'Preview Only' : 'Create Shipment'}
                 </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showBulkSyncModal && (
+          <div className="fixed inset-0 bg-black/30 backdrop-blur-sm z-50 flex items-center justify-center p-6">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-3xl shadow-2xl max-w-2xl w-full max-h-[85vh] overflow-hidden flex flex-col"
+            >
+              <div className="p-6 border-b border-slate-100 flex items-center justify-between shrink-0">
+                <div>
+                  <h2 className="text-lg font-black text-slate-800 flex items-center gap-2">
+                    <span className="material-symbols-outlined text-indigo-500">sync</span>
+                    Reconcile Shipments
+                  </h2>
+                  <p className="text-xs text-slate-400 mt-1">Bulk sync tracking data for eligible provider-mode shipments. This is a recovery/reconciliation tool — webhook automation remains the primary update mechanism.</p>
+                </div>
+                <button onClick={() => { if (!bulkSyncRunning) { setShowBulkSyncModal(false); } }} className="w-8 h-8 rounded-xl bg-slate-100 flex items-center justify-center text-slate-400 hover:text-slate-600 transition-all">
+                  <span className="material-symbols-outlined text-lg">close</span>
+                </button>
+              </div>
+
+              <div className="p-6 overflow-y-auto flex-1 space-y-5">
+                {providerEnvironment === 'test' && (
+                  <div className="flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-xl">
+                    <span className="material-symbols-outlined text-amber-500 text-sm mt-0.5">warning</span>
+                    <p className="text-xs text-amber-700">Provider is in <strong>test mode</strong>. Some shipments may return test-mode limitations instead of real tracking data. This is expected.</p>
+                  </div>
+                )}
+
+                {!bulkSyncResults && (
+                  <>
+                    <div className="space-y-3">
+                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Eligibility Filters</p>
+                      <div className="grid grid-cols-2 gap-3">
+                        <label className="flex items-center gap-2 p-3 bg-slate-50 rounded-xl cursor-pointer hover:bg-slate-100 transition-all">
+                          <input type="checkbox" checked={bulkSyncFilters.inFlightOnly} onChange={e => setBulkSyncFilters(f => ({ ...f, inFlightOnly: e.target.checked }))} className="rounded" />
+                          <div>
+                            <p className="text-xs font-bold text-slate-700">In-flight only</p>
+                            <p className="text-[10px] text-slate-400">Dispatched, In Transit, Exception</p>
+                          </div>
+                        </label>
+                        <label className="flex items-center gap-2 p-3 bg-slate-50 rounded-xl cursor-pointer hover:bg-slate-100 transition-all">
+                          <input type="checkbox" checked={bulkSyncFilters.includeTerminal} onChange={e => setBulkSyncFilters(f => ({ ...f, includeTerminal: e.target.checked }))} className="rounded" />
+                          <div>
+                            <p className="text-xs font-bold text-slate-700">Include terminal</p>
+                            <p className="text-[10px] text-slate-400">Delivered, Rejected, Returned</p>
+                          </div>
+                        </label>
+                        <label className="flex items-center gap-2 p-3 bg-slate-50 rounded-xl cursor-pointer hover:bg-slate-100 transition-all">
+                          <input type="checkbox" checked={bulkSyncFilters.syncFailuresOnly} onChange={e => setBulkSyncFilters(f => ({ ...f, syncFailuresOnly: e.target.checked }))} className="rounded" />
+                          <div>
+                            <p className="text-xs font-bold text-slate-700">Sync failures only</p>
+                            <p className="text-[10px] text-slate-400">Only shipments with past sync errors</p>
+                          </div>
+                        </label>
+                        <div className="flex items-center gap-2 p-3 bg-slate-50 rounded-xl">
+                          <div className="flex-1">
+                            <p className="text-xs font-bold text-slate-700">Stale threshold</p>
+                            <p className="text-[10px] text-slate-400">Only if last sync older than N days</p>
+                          </div>
+                          <select value={bulkSyncFilters.staleDays} onChange={e => setBulkSyncFilters(f => ({ ...f, staleDays: parseInt(e.target.value) }))} className="px-2 py-1 bg-white border border-slate-200 rounded-lg text-xs">
+                            <option value={0}>Any</option>
+                            <option value={1}>1 day</option>
+                            <option value={3}>3 days</option>
+                            <option value={7}>7 days</option>
+                            <option value={14}>14 days</option>
+                            <option value={30}>30 days</option>
+                          </select>
+                        </div>
+                      </div>
+                    </div>
+
+                    {(() => {
+                      const eligible = getBulkSyncEligibleShipments();
+                      const manualCount = shipments.filter(s => getShipmentMode(s) === 'manual').length;
+                      return (
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between p-4 bg-indigo-50 border border-indigo-200 rounded-xl">
+                            <div>
+                              <p className="text-sm font-black text-indigo-700">{eligible.length} eligible shipment{eligible.length !== 1 ? 's' : ''}</p>
+                              <p className="text-[10px] text-indigo-400 mt-0.5">
+                                {shipments.length} total · {manualCount} manual (excluded) · Provider mode with tracking number
+                              </p>
+                            </div>
+                            {eligible.length > 0 && (
+                              <span className="material-symbols-outlined text-indigo-400">checklist</span>
+                            )}
+                          </div>
+
+                          {eligible.length > 20 && (
+                            <div className="flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-xl">
+                              <span className="material-symbols-outlined text-amber-500 text-sm mt-0.5">info</span>
+                              <p className="text-xs text-amber-700">Large batch ({eligible.length} shipments). Processing will take approximately {Math.ceil(eligible.length / 3 * 1.5)} seconds with provider rate-limiting.</p>
+                            </div>
+                          )}
+
+                          {eligible.length > 0 && (
+                            <div className="max-h-40 overflow-y-auto border border-slate-200 rounded-xl">
+                              <table className="w-full text-xs">
+                                <thead className="bg-slate-50 sticky top-0">
+                                  <tr>
+                                    <th className="text-left px-3 py-2 font-black text-[10px] text-slate-400 uppercase tracking-widest">Shipment</th>
+                                    <th className="text-left px-3 py-2 font-black text-[10px] text-slate-400 uppercase tracking-widest">Tracking</th>
+                                    <th className="text-left px-3 py-2 font-black text-[10px] text-slate-400 uppercase tracking-widest">Status</th>
+                                    <th className="text-left px-3 py-2 font-black text-[10px] text-slate-400 uppercase tracking-widest">Last Sync</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                  {eligible.map(s => (
+                                    <tr key={s.id} className="hover:bg-slate-50">
+                                      <td className="px-3 py-2 font-mono text-slate-600">{s.destinationAddress.name || s.id.slice(0, 8)}</td>
+                                      <td className="px-3 py-2 font-mono text-slate-500">{s.trackingNumber?.slice(0, 16)}{(s.trackingNumber?.length || 0) > 16 ? '…' : ''}</td>
+                                      <td className="px-3 py-2"><span className={`px-2 py-0.5 rounded-full text-[9px] font-black uppercase ${STATUS_COLORS[s.status]}`}>{s.status}</span></td>
+                                      <td className="px-3 py-2 text-slate-400">{s.lastTrackingSyncAt ? new Date(s.lastTrackingSyncAt).toLocaleDateString() : 'Never'}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </>
+                )}
+
+                {bulkSyncRunning && bulkSyncProgress && (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-3">
+                      <div className="animate-spin">
+                        <span className="material-symbols-outlined text-indigo-500">sync</span>
+                      </div>
+                      <div className="flex-1">
+                        <p className="text-sm font-bold text-slate-700">Syncing tracking data...</p>
+                        <p className="text-xs text-slate-400">{bulkSyncProgress.current} of {bulkSyncProgress.total} shipments processed</p>
+                      </div>
+                    </div>
+                    <div className="w-full bg-slate-200 rounded-full h-2.5">
+                      <div
+                        className="bg-indigo-500 h-2.5 rounded-full transition-all duration-300"
+                        style={{ width: `${bulkSyncProgress.total > 0 ? (bulkSyncProgress.current / bulkSyncProgress.total) * 100 : 0}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {bulkSyncSummary && bulkSyncResults && (
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-5 gap-2">
+                      <div className="text-center p-3 bg-slate-50 rounded-xl">
+                        <p className="text-lg font-black text-slate-700">{bulkSyncSummary.total}</p>
+                        <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Total</p>
+                      </div>
+                      <div className="text-center p-3 bg-emerald-50 rounded-xl">
+                        <p className="text-lg font-black text-emerald-600">{bulkSyncSummary.updated}</p>
+                        <p className="text-[9px] font-black text-emerald-400 uppercase tracking-widest">Updated</p>
+                      </div>
+                      <div className="text-center p-3 bg-slate-50 rounded-xl">
+                        <p className="text-lg font-black text-slate-500">{bulkSyncSummary.unchanged}</p>
+                        <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Unchanged</p>
+                      </div>
+                      <div className="text-center p-3 bg-red-50 rounded-xl">
+                        <p className="text-lg font-black text-red-600">{bulkSyncSummary.failed}</p>
+                        <p className="text-[9px] font-black text-red-400 uppercase tracking-widest">Failed</p>
+                      </div>
+                      <div className="text-center p-3 bg-amber-50 rounded-xl">
+                        <p className="text-lg font-black text-amber-600">{bulkSyncSummary.testLimitation}</p>
+                        <p className="text-[9px] font-black text-amber-400 uppercase tracking-widest">Test Limit</p>
+                      </div>
+                    </div>
+
+                    <div className="max-h-60 overflow-y-auto border border-slate-200 rounded-xl">
+                      <table className="w-full text-xs">
+                        <thead className="bg-slate-50 sticky top-0">
+                          <tr>
+                            <th className="text-left px-3 py-2 font-black text-[10px] text-slate-400 uppercase tracking-widest">Shipment</th>
+                            <th className="text-left px-3 py-2 font-black text-[10px] text-slate-400 uppercase tracking-widest">Tracking</th>
+                            <th className="text-left px-3 py-2 font-black text-[10px] text-slate-400 uppercase tracking-widest">Result</th>
+                            <th className="text-left px-3 py-2 font-black text-[10px] text-slate-400 uppercase tracking-widest">Details</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {bulkSyncResults.map((r, i) => {
+                            const resultColors: Record<string, string> = {
+                              updated: 'bg-emerald-100 text-emerald-700',
+                              unchanged: 'bg-slate-100 text-slate-500',
+                              failed: 'bg-red-100 text-red-700',
+                              test_limitation: 'bg-amber-100 text-amber-700',
+                            };
+                            const resultLabels: Record<string, string> = {
+                              updated: 'Updated',
+                              unchanged: 'No Changes',
+                              failed: 'Failed',
+                              test_limitation: 'Test Limit',
+                            };
+                            const ship = shipments.find(s => s.id === r.shipmentId);
+                            return (
+                              <tr key={i} className="hover:bg-slate-50 cursor-pointer" onClick={() => { setShowBulkSyncModal(false); setSelectedShipment(r.shipmentId); setDetailTab('tracking'); }}>
+                                <td className="px-3 py-2 font-mono text-slate-600">{ship?.destinationAddress.name || r.shipmentId.slice(0, 8)}</td>
+                                <td className="px-3 py-2 font-mono text-slate-500">{r.trackingNumber.slice(0, 16)}{r.trackingNumber.length > 16 ? '…' : ''}</td>
+                                <td className="px-3 py-2"><span className={`px-2 py-0.5 rounded-full text-[9px] font-black uppercase ${resultColors[r.result] || 'bg-slate-100 text-slate-500'}`}>{resultLabels[r.result] || r.result}</span></td>
+                                <td className="px-3 py-2 text-slate-400">
+                                  {r.result === 'updated' && r.newEventCount ? `${r.newEventCount} new event${r.newEventCount > 1 ? 's' : ''}` : ''}
+                                  {r.result === 'failed' && r.error ? r.error.message : ''}
+                                  {r.result === 'test_limitation' ? 'Expected in test mode' : ''}
+                                  {r.result === 'unchanged' ? 'Already up to date' : ''}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="p-6 border-t border-slate-100 flex gap-3 shrink-0">
+                {!bulkSyncResults ? (
+                  <>
+                    <button onClick={() => setShowBulkSyncModal(false)} disabled={bulkSyncRunning} className="flex-1 py-3 bg-white text-slate-500 rounded-xl font-black text-[10px] uppercase tracking-widest border border-slate-200 disabled:opacity-50">Cancel</button>
+                    <button
+                      onClick={handleBulkSync}
+                      disabled={bulkSyncRunning || getBulkSyncEligibleShipments().length === 0}
+                      className="flex-1 py-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-indigo-500/20 disabled:opacity-50 flex items-center justify-center gap-2"
+                    >
+                      {bulkSyncRunning ? (
+                        <><span className="material-symbols-outlined text-sm animate-spin">sync</span>Syncing...</>
+                      ) : (
+                        <><span className="material-symbols-outlined text-sm">sync</span>Start Reconciliation ({getBulkSyncEligibleShipments().length})</>
+                      )}
+                    </button>
+                  </>
+                ) : (
+                  <button onClick={() => { setShowBulkSyncModal(false); setBulkSyncResults(null); setBulkSyncSummary(null); }} className="flex-1 py-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-indigo-500/20">
+                    Done
+                  </button>
+                )}
               </div>
             </motion.div>
           </div>
