@@ -1,0 +1,421 @@
+Shipping Phase 2 — Returns Portal / Reverse Logistics — Isolation Workstream
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is the first Shipping Phase 2 workstream.
+The objective is to add a real Returns Portal / Reverse Logistics capability on top of the completed Shipping Center, provider integration, webhook/event automation, and bulk reconciliation foundation.
+
+This pass must implement a usable Phase 2 returns capability while also preparing the architecture for the remaining Phase 2 items:
+- service points
+- customs docs
+- pickup requests
+- insurance rules
+- carrier analytics
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Firebase/Firestore data architect
+- Enterprise shipping systems architect
+- Senior reverse-logistics / returns expert with 20+ years of experience in parcel returns, repair returns, RMA workflows, customer return portals, return labels, carrier integrations, warehouse intake, and fulfillment-center exception handling
+- Reliability engineer focused on state consistency, status synchronization, and auditability
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Mandatory external reference review:
+Before implementing anything, open, read, and understand this exact article:
+- https://help.repairdesk.co/portal/en/kb/articles/shipstation-integration
+
+This article review is mandatory.
+You must extract useful operational ideas from it and adapt them to our app.
+Do not copy RepairDesk literally.
+Do not rebuild ShipStation UX one-to-one.
+Do not force concepts that do not fit our architecture.
+But you must explicitly identify:
+- which ideas should be implemented now
+- which should be deferred
+- which should not be adopted and why
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- RBAC/sub-permissions
+- lifecycle gating
+- platform/store hierarchy
+- System Owner Plans & Features matrix
+- Store Permissions Matrix
+- secure server-side provider call architecture
+- Shipping Center as the sole provider-management home
+- provider/manual shipment mode split
+- mandatory provider address validation before Get Rates in provider mode
+- Ready disabled until rate selection in provider mode
+- Packed only after successful label purchase in provider mode
+- Rejected by Carrier / Returned with reasons
+- + Add Event disabled after Dispatched
+- PDF-first label flow
+- webhook/event automation hardening
+- bulk sync / reconciliation
+- FedEx/UPS phone prerequisite behavior
+- existing shipping core flow
+
+==================================================
+WORKSTREAM GOAL
+==================================================
+
+Add a real Returns Portal / Reverse Logistics capability that fits this app’s existing repair/POS/shipping architecture.
+
+The result should let the business:
+- create and manage customer/product returns in a structured way
+- initiate returns from appropriate sources such as invoices, repairs, shipments, and RMA contexts
+- generate and manage return shipments/return labels where provider mode is used
+- track return progress through a coherent reverse-logistics lifecycle
+- capture reasons, condition, requested outcome, and intake decisions
+- keep return statuses synchronized with shipping/tracking activity where appropriate
+
+This workstream must also explicitly prepare the architecture for remaining Phase 2 items:
+- service points
+- customs docs
+- pickup requests
+- insurance rules
+- carrier analytics
+
+Do not fully implement all remaining Phase 2 items now.
+Do make this returns workstream architecturally compatible with them.
+
+==================================================
+PRODUCT DIRECTION — REQUIRED
+==================================================
+
+The app should now support a first-class return flow with two complementary surfaces:
+
+1) Returns Portal / Return Intake Experience
+A dedicated return initiation/intake flow where returns can be created and managed clearly.
+
+2) Reverse Logistics Operational Management
+Shipping Center and related operational modules should understand and manage return shipments, return status, and intake outcomes coherently.
+
+This workstream must feel native to the product and not like a disconnected mini-app.
+
+==================================================
+MANDATORY IMPLEMENTATION OBJECTIVES
+==================================================
+
+1) RETURNS OBJECT / DOMAIN MODEL
+Add a robust returns domain model that can support:
+- return reference number
+- source linkage
+- customer linkage
+- original shipment/order/invoice/repair/RMA linkage where applicable
+- return reason
+- return category/type
+- requested resolution/outcome
+- item-level return contents where applicable
+- return shipment linkage
+- intake/inspection results
+- disposition outcome
+- audit timestamps / status history metadata
+
+The model must be forward-compatible with future:
+- service points
+- customs docs
+- pickup requests
+- insurance rules
+- carrier analytics
+
+2) RETURN SOURCES / ENTRY POINTS
+Support returns initiation from the most relevant operational sources.
+
+At minimum, evaluate and implement the correct entry points where they fit the current system:
+- invoice-related customer return
+- shipment-related return
+- repair-related return / send-back / reverse flow
+- existing RMA/reverse service context
+
+Do not force every source if the current app structure does not support it cleanly.
+But the app must have a coherent path to initiate and manage returns, not just a hidden admin record.
+
+3) RETURNS PORTAL / INTAKE EXPERIENCE
+Implement a dedicated returns interface.
+
+Minimum expectations:
+- a dedicated Returns area or Returns Portal surface inside the product
+- ability to create / review / edit / process returns
+- clear statuses
+- return reason selection
+- requested resolution selection
+- visible linkage to source documents and shipments
+- clean operator workflow for reverse logistics
+
+If you decide to include a customer-facing or external-share return request surface, keep it minimal and secure.
+Do not overbuild a public portal unless it clearly fits the current app.
+A strong internal portal/workspace is acceptable for this pass.
+
+4) RETURN SHIPMENT / REVERSE SHIPPING INTEGRATION
+Returns must integrate with shipping cleanly.
+
+Required:
+- return shipments must fit the Shipping Center architecture
+- provider mode/manual mode rules must remain coherent
+- return labels should be supported where appropriate in provider mode
+- reverse shipment tracking must be visible and lifecycle-aware
+- return shipping must not break the existing outbound shipping model
+
+5) RETURN LIFECYCLE / REVERSE LOGISTICS STATUS MODEL
+Implement a coherent reverse-logistics lifecycle.
+
+At minimum, define and support statuses such as:
+- Draft
+- Requested / Initiated
+- Approved / Authorized
+- Label Created
+- In Transit Back
+- Received
+- Inspecting / Processing
+- Completed / Resolved
+- Rejected / Closed / Cancelled where appropriate
+
+Do not force these exact names if your app architecture needs slightly different wording.
+But the lifecycle must be structured, audit-friendly, and operationally clear.
+
+6) RETURN REASONS / RESOLUTION OUTCOMES
+Returns are not just shipments.
+They need business meaning.
+
+Required:
+- structured return reason selection
+- optionally categorized reasons if that fits
+- requested outcome / resolution capture, such as:
+  - refund
+  - exchange
+  - repair
+  - store credit
+  - inspection only
+  - send back to customer
+- clear final disposition/outcome after intake
+
+7) INTAKE / INSPECTION / DISPOSITION
+Reverse logistics must not end at label creation.
+
+Required:
+- support receiving the return
+- support intake inspection state
+- support condition/result capture
+- support final disposition
+- keep this lightweight but real
+- do not overbuild warehouse software, but do not stop at “return label created”
+
+8) SHIPPING / TRACKING / EVENT SYNCHRONIZATION
+Required:
+- return shipment tracking must stay synchronized where provider mode is used
+- webhook/event automation should be compatible with return shipments
+- bulk sync/reconciliation should not break return shipments
+- reverse-logistics statuses should update coherently when return shipment events arrive
+
+9) AUDITABILITY
+Required:
+- return creation, status changes, labels, intake results, and disposition outcomes must be auditable
+- source linkage and return-shipment linkage must remain clear
+- operators must understand what happened and why
+
+==================================================
+PHASE 2 FORWARD-COMPATIBILITY — MUST BE INCLUDED
+==================================================
+
+This workstream must explicitly include architectural readiness for the remaining Phase 2 items:
+
+1. Service points
+- returns model should be ready for future drop-off / pickup point data
+- document where service-point selection would attach later
+
+2. Customs docs
+- return shipment model should be ready for future international-return metadata
+- document where customs info would attach later
+
+3. Pickup requests
+- return flow should be ready for future carrier pickup scheduling
+- document where pickup request state would attach later
+
+4. Insurance rules
+- return shipment/claim model should be ready for future insurance metadata and rules
+- document where insurance fields or logic would attach later
+
+5. Carrier analytics
+- return events/status timings should be stored/documented in a way useful for future carrier analytics
+
+Do not fully implement all five now.
+Do make sure the returns architecture clearly fits them.
+
+==================================================
+PHASE 3 COMPATIBILITY — MUST NOT BE BROKEN
+==================================================
+
+Do not block future:
+- automation rules
+- batch labels
+- packing workflows
+- SLA optimization
+- carrier scorecards
+
+Required now:
+- return lifecycle and event model should be automation-friendly
+- return shipment status timings should be useful later for SLA optimization and scorecards
+- document where Phase 3 automation hooks would attach later
+
+==================================================
+NON-NEGOTIABLE IMPLEMENTATION REQUIREMENTS
+==================================================
+
+1) REAL RETURNS HOME IN THE PRODUCT
+Required:
+- create a clear Returns area / Returns Portal surface
+- it must be visible and native to the product
+- not buried in a generic settings page
+- not only inferred through shipping records
+
+2) SOURCE LINKAGE
+Required:
+- returns must link clearly to their source where applicable
+- shipments, invoices, repairs, RMAs, or customer context must be visible and navigable
+
+3) SHIPPING MODE CONSISTENCY
+Required:
+- provider-managed return shipments remain provider-managed
+- manual return shipments remain manual
+- do not create ambiguous mixed states
+- preserve the current provider/manual mode rules
+
+4) RETURN LABEL / SHIPMENT CONSISTENCY
+Required:
+- return label generation must fit the current provider shipping rules
+- PDF-first label flow must remain consistent
+- reverse shipment creation must not bypass existing shipping discipline
+
+5) LIFECYCLE DISCIPLINE
+Required:
+- return statuses and return-shipment statuses must remain coherent
+- do not create impossible reverse-logistics states
+- status progression should stay understandable and auditable
+
+6) PERMISSION / PREVIEW / ROLE GATING
+Required:
+- return creation/edit/approval/intake/disposition actions must be permission-aware
+- preview mode must not commit writes
+- do not create a disconnected permission system
+
+==================================================
+FULFILLMENT RULES TO PRESERVE
+==================================================
+
+Do not weaken these rules:
+- Shipping Center remains the sole provider-management home
+- provider/manual mode split remains intact
+- manual shipments remain manual and do not misuse provider automation
+- address validation remains mandatory before Get Rates in provider mode
+- Ready remains disabled until rate selection in provider mode
+- Packed becomes available only after successful label purchase in provider mode
+- after dispatch and provider/carrier progression, outbound shipment lifecycle remains provider-driven in provider mode
+- cancellation remains blocked after carrier progression
+- existing shipping core flow remains intact
+- Rejected by Carrier / Returned remain controlled outcomes
+- + Add Event remains disabled after Dispatched
+- PDF-first label flow remains intact
+- full tracking visibility remains intact
+- bulk sync/reconciliation remains a secondary recovery tool
+
+==================================================
+IMPORTANT IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into full implementation of all remaining Phase 2 features
+- Do not touch unrelated workstreams
+- Do not break preview mode safety
+- Do not break permissions or feature gating
+- Do not break shipping core flow
+- Do not break provider configuration
+- Do not fake provider success
+- Do not fake webhook success
+- Keep the design baseline consistent
+- Do not create ambiguous mixed manual/provider return-shipment states
+- Do not leave stale return/shipment state after provider updates
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact execution order:
+
+1) Review the RepairDesk article and extract only the concepts that improve our system
+2) Design and implement the Returns domain model
+3) Add a real Returns area / Returns Portal surface
+4) Add the correct source entry points and source linkage
+5) Implement reverse-logistics lifecycle, reasons, requested outcomes, and disposition handling
+6) Integrate return shipments / return labels into Shipping Center coherently
+7) Ensure provider/manual mode consistency and tracking/event synchronization
+8) Make the model/documentation forward-compatible with the remaining Phase 2 and Phase 3 roadmap
+9) Re-test all affected flows
+10) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Returns / Reverse Logistics architecture
+- returns object model
+- source linkage model
+- return lifecycle
+- return reasons / requested outcomes / final disposition
+- return shipment / return label integration
+- provider/manual mode behavior for return shipments
+- webhook/event implications for reverse logistics
+- explicit forward-compatibility notes for remaining Phase 2 items:
+  - service points
+  - customs docs
+  - pickup requests
+  - insurance rules
+  - carrier analytics
+- explicit forward-compatibility notes for Phase 3:
+  - automation rules
+  - batch labels
+  - packing workflows
+  - SLA optimization
+  - carrier scorecards
+- lessons adapted from the RepairDesk article
+- future recommendations not implemented now
+
+==================================================
+MANDATORY OUTPUT PROOF
+==================================================
+
+Do not give a generic completion summary.
+Do not say this task is complete unless the Returns Portal / Reverse Logistics capability is visibly implemented and the Phase 2 / Phase 3 readiness is explicitly documented.
+
+OUTPUT FORMAT REQUIRED
+
+Reply ONLY in this structure:
+
+1. Workstream Completion Status
+2. RepairDesk Article Reviewed
+3. RepairDesk Insights Extracted
+4. How Those Insights Were Adapted To Our Shipping Center
+5. Implemented Now vs Deferred vs Not Adopted
+6. Returns Portal / Reverse Logistics Added
+7. Return Sources / Linkage Added
+8. Return Lifecycle / Reasons / Disposition Added
+9. Return Shipment / Return Label Integration Added
+10. Phase 2 Forward-Compatibility Included
+11. Phase 3 Forward-Compatibility Included
+12. Fulfillment-Expert Recommendations
+13. Files Changed
+14. Documentation Updated
+15. Non-Regression Notes

@@ -930,6 +930,112 @@ export interface Shipment {
   batchId?: string;
 }
 
+export type ReturnStatus = 'Draft' | 'Requested' | 'Approved' | 'Label Created' | 'In Transit' | 'Received' | 'Inspecting' | 'Completed' | 'Rejected' | 'Cancelled';
+
+export type ReturnReason =
+  | 'defective'
+  | 'wrong_item'
+  | 'not_as_described'
+  | 'damaged_in_transit'
+  | 'customer_changed_mind'
+  | 'warranty_claim'
+  | 'repair_return'
+  | 'exchange_request'
+  | 'missing_parts'
+  | 'other';
+
+export type ReturnResolution =
+  | 'refund'
+  | 'exchange'
+  | 'repair'
+  | 'store_credit'
+  | 'inspection_only'
+  | 'send_back'
+  | 'dispose';
+
+export type ReturnSourceType = 'invoice' | 'repair' | 'shipment' | 'rma' | 'walk_in';
+
+export type ReturnDisposition =
+  | 'restock'
+  | 'refurbish'
+  | 'dispose'
+  | 'return_to_vendor'
+  | 'send_back_to_customer'
+  | 'warranty_replacement';
+
+export interface ReturnItem {
+  id: string;
+  productId?: string;
+  name: string;
+  sku?: string;
+  quantity: number;
+  condition?: 'New' | 'Like New' | 'Good' | 'Fair' | 'Poor' | 'Damaged' | 'Defective';
+  reason?: ReturnReason;
+  notes?: string;
+  inspectionNotes?: string;
+  disposition?: ReturnDisposition;
+}
+
+export interface ReturnStatusHistoryEntry {
+  id: string;
+  status: ReturnStatus;
+  timestamp: string;
+  performedBy: string;
+  notes?: string;
+}
+
+export interface Return {
+  id: string;
+  returnNumber: string;
+  status: ReturnStatus;
+
+  sourceType: ReturnSourceType;
+  sourceId: string;
+  sourceNumber: string;
+
+  customerId: string;
+  customerName: string;
+  customerEmail?: string;
+  customerPhone?: string;
+
+  reason: ReturnReason;
+  reasonDetails?: string;
+  requestedResolution: ReturnResolution;
+
+  items: ReturnItem[];
+
+  originalShipmentId?: string;
+  returnShipmentId?: string;
+
+  receivedAt?: string;
+  receivedBy?: string;
+  inspectionNotes?: string;
+  inspectionCompletedAt?: string;
+  inspectedBy?: string;
+  itemCondition?: string;
+
+  finalResolution?: ReturnResolution;
+  finalDisposition?: ReturnDisposition;
+  dispositionNotes?: string;
+  dispositionCompletedAt?: string;
+  dispositionCompletedBy?: string;
+
+  refundAmount?: number;
+  storeCreditAmount?: number;
+  restockingFee?: number;
+
+  servicePointId?: string;
+  customsInfo?: Record<string, unknown>;
+  pickupRequestId?: string;
+  insuranceClaimId?: string;
+
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  statusHistory: ReturnStatusHistoryEntry[];
+  notes?: string;
+}
+
 export type LogoPlacement = 'top-left' | 'top-center' | 'top-right';
 
 export interface StoreBranding {

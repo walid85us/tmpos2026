@@ -19,6 +19,7 @@ const navItems = [
   { id: 'services', label: 'Services', icon: 'settings_suggest', path: '/services' },
   { id: 'supply-chain', label: 'Supply Chain', icon: 'local_shipping', path: '/supply-chain' },
   { id: 'shipping', label: 'Shipping', icon: 'package_2', path: '/shipping' },
+  { id: 'returns', label: 'Returns', icon: 'assignment_return', path: '/returns' },
   { id: 'prospects', label: 'Prospects', icon: 'contact_mail', path: '/prospects' },
   { id: 'marketing', label: 'Marketing', icon: 'campaign', path: '/marketing' },
   { id: 'reports', label: 'Reports', icon: 'bar_chart', path: '/reports' },

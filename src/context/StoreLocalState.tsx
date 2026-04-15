@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useMemo, useEffect, useRef } from 'react';
-import { Customer, HeldOrder, CartItem, PaymentMethod, Discount, RepairTicket, RepairTicketStatus, Invoice, RepairService, RepairCategory, DocumentTemplate, StoreBranding, LogoPlacement, Supplier, StockMovement, StockMovementType, PurchaseOrder, GoodsReceivedNote, RMA, InventoryTransfer, InventoryCount, TradeInItem, RefurbishmentJob, SupplierRefundEntry, Shipment, ShippingProviderConfig } from '../types';
+import { Customer, HeldOrder, CartItem, PaymentMethod, Discount, RepairTicket, RepairTicketStatus, Invoice, RepairService, RepairCategory, DocumentTemplate, StoreBranding, LogoPlacement, Supplier, StockMovement, StockMovementType, PurchaseOrder, GoodsReceivedNote, RMA, InventoryTransfer, InventoryCount, TradeInItem, RefurbishmentJob, SupplierRefundEntry, Shipment, ShippingProviderConfig, Return } from '../types';
 import { useAccess } from './AccessContext';
 import { buildTemplateHtml, getDefaultEnabledTags } from '../utils/templateBuilder';
 
@@ -241,6 +241,9 @@ interface StoreLocalStateContextType {
   updateShipment: (id: string, updates: Partial<Shipment>) => void;
   shippingProviderConfig: ShippingProviderConfig | null;
   setShippingProviderConfig: (config: ShippingProviderConfig | null) => void;
+  returns: Return[];
+  addReturn: (r: Return) => void;
+  updateReturn: (id: string, updates: Partial<Return>) => void;
   storeLocations: string[];
   getItemMovements: (stockItemId: string) => StockMovement[];
 }
@@ -760,6 +763,129 @@ const DEFAULT_TEMPLATES: DocumentTemplate[] = [
   makeDefaultTemplate('tmpl-estimate', 'estimate', 'Price Estimate'),
 ];
 
+const SEED_RETURNS: Return[] = [
+  {
+    id: 'ret-001',
+    returnNumber: 'RTN-2026-001',
+    status: 'Completed',
+    sourceType: 'invoice',
+    sourceId: 'inv-001',
+    sourceNumber: 'INV-2026-0042',
+    customerId: 'c1',
+    customerName: 'Alexander Wright',
+    customerEmail: 'alex@wright.com',
+    customerPhone: '512-555-0123',
+    reason: 'defective',
+    reasonDetails: 'Screen flickering after 2 weeks of use',
+    requestedResolution: 'refund',
+    items: [
+      { id: 'ri-001', productId: 'stk-002', name: 'USB-C Charging Cable', sku: 'USB-C-CBL-01', quantity: 1, condition: 'Defective', reason: 'defective', notes: 'Cable fraying at connector end' }
+    ],
+    originalShipmentId: 'shp-001',
+    receivedAt: '2026-04-02T14:00:00Z',
+    receivedBy: 'Marcus Chen',
+    inspectionNotes: 'Confirmed cable defect at USB-C connector. Manufacturing fault.',
+    inspectionCompletedAt: '2026-04-02T15:30:00Z',
+    inspectedBy: 'Marcus Chen',
+    itemCondition: 'Defective',
+    finalResolution: 'refund',
+    finalDisposition: 'return_to_vendor',
+    dispositionNotes: 'Returned to supplier for credit. Batch defect reported.',
+    dispositionCompletedAt: '2026-04-03T10:00:00Z',
+    dispositionCompletedBy: 'Marcus Chen',
+    refundAmount: 12.99,
+    createdBy: 'Marcus Chen',
+    createdAt: '2026-03-30T09:00:00Z',
+    updatedAt: '2026-04-03T10:00:00Z',
+    statusHistory: [
+      { id: 'rsh-001', status: 'Draft', timestamp: '2026-03-30T09:00:00Z', performedBy: 'Marcus Chen' },
+      { id: 'rsh-002', status: 'Requested', timestamp: '2026-03-30T09:05:00Z', performedBy: 'Marcus Chen' },
+      { id: 'rsh-003', status: 'Approved', timestamp: '2026-03-30T11:00:00Z', performedBy: 'Marcus Chen' },
+      { id: 'rsh-004', status: 'Received', timestamp: '2026-04-02T14:00:00Z', performedBy: 'Marcus Chen' },
+      { id: 'rsh-005', status: 'Inspecting', timestamp: '2026-04-02T14:30:00Z', performedBy: 'Marcus Chen' },
+      { id: 'rsh-006', status: 'Completed', timestamp: '2026-04-03T10:00:00Z', performedBy: 'Marcus Chen' },
+    ],
+  },
+  {
+    id: 'ret-002',
+    returnNumber: 'RTN-2026-002',
+    status: 'In Transit',
+    sourceType: 'invoice',
+    sourceId: 'inv-002',
+    sourceNumber: 'INV-2026-0045',
+    customerId: 'c2',
+    customerName: 'Sarah Jenkins',
+    customerEmail: 'sarah.j@gmail.com',
+    customerPhone: '512-555-0456',
+    reason: 'wrong_item',
+    reasonDetails: 'Received Samsung cable instead of iPhone cable',
+    requestedResolution: 'exchange',
+    items: [
+      { id: 'ri-002', name: 'Lightning Cable (wrong item sent)', quantity: 1, condition: 'New', reason: 'wrong_item' }
+    ],
+    originalShipmentId: 'shp-002',
+    returnShipmentId: 'shp-003',
+    createdBy: 'Marcus Chen',
+    createdAt: '2026-04-08T11:00:00Z',
+    updatedAt: '2026-04-10T08:00:00Z',
+    statusHistory: [
+      { id: 'rsh-010', status: 'Draft', timestamp: '2026-04-08T11:00:00Z', performedBy: 'Marcus Chen' },
+      { id: 'rsh-011', status: 'Requested', timestamp: '2026-04-08T11:15:00Z', performedBy: 'Marcus Chen' },
+      { id: 'rsh-012', status: 'Approved', timestamp: '2026-04-08T14:00:00Z', performedBy: 'Marcus Chen' },
+      { id: 'rsh-013', status: 'Label Created', timestamp: '2026-04-09T09:00:00Z', performedBy: 'Marcus Chen' },
+      { id: 'rsh-014', status: 'In Transit', timestamp: '2026-04-10T08:00:00Z', performedBy: 'System' },
+    ],
+  },
+  {
+    id: 'ret-003',
+    returnNumber: 'RTN-2026-003',
+    status: 'Requested',
+    sourceType: 'repair',
+    sourceId: 'tk-001',
+    sourceNumber: 'TK-2026-001',
+    customerId: 'c3',
+    customerName: 'Mike Rodriguez',
+    customerEmail: 'mike@example.com',
+    customerPhone: '512-555-0789',
+    reason: 'repair_return',
+    reasonDetails: 'Device needs to be shipped back after screen repair',
+    requestedResolution: 'send_back',
+    items: [
+      { id: 'ri-003', name: 'Samsung S21 (repaired)', quantity: 1, condition: 'Good', reason: 'repair_return', notes: 'Screen replacement completed' }
+    ],
+    createdBy: 'Marcus Chen',
+    createdAt: '2026-04-12T10:00:00Z',
+    updatedAt: '2026-04-12T10:00:00Z',
+    statusHistory: [
+      { id: 'rsh-020', status: 'Draft', timestamp: '2026-04-12T10:00:00Z', performedBy: 'Marcus Chen' },
+      { id: 'rsh-021', status: 'Requested', timestamp: '2026-04-12T10:30:00Z', performedBy: 'Marcus Chen' },
+    ],
+  },
+  {
+    id: 'ret-004',
+    returnNumber: 'RTN-2026-004',
+    status: 'Draft',
+    sourceType: 'walk_in',
+    sourceId: 'walk-001',
+    sourceNumber: 'WALK-001',
+    customerId: 'c4',
+    customerName: 'Emma Chen',
+    customerEmail: 'emma@example.com',
+    customerPhone: '512-555-0321',
+    reason: 'customer_changed_mind',
+    requestedResolution: 'store_credit',
+    items: [
+      { id: 'ri-004', productId: 'stk-004', name: 'iPhone 14 Case', quantity: 1, condition: 'New', reason: 'customer_changed_mind' }
+    ],
+    createdBy: 'Marcus Chen',
+    createdAt: '2026-04-14T16:00:00Z',
+    updatedAt: '2026-04-14T16:00:00Z',
+    statusHistory: [
+      { id: 'rsh-030', status: 'Draft', timestamp: '2026-04-14T16:00:00Z', performedBy: 'Marcus Chen' },
+    ],
+  },
+];
+
 const EMPTY_DRAFT: DraftCart = { cart: [], selectedCustomer: null, payments: [], discounts: [] };
 
 const StoreLocalStateContext = createContext<StoreLocalStateContextType | null>(null);
@@ -895,6 +1021,10 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const addShipment = useCallback((s: Shipment) => { setShipments(prev => [s, ...prev]); }, []);
   const updateShipment = useCallback((id: string, updates: Partial<Shipment>) => { setShipments(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s)); }, []);
 
+  const [returns, setReturns] = useState<Return[]>(SEED_RETURNS);
+  const addReturn = useCallback((r: Return) => { setReturns(prev => [r, ...prev]); }, []);
+  const updateReturn = useCallback((id: string, updates: Partial<Return>) => { setReturns(prev => prev.map(r => r.id === id ? { ...r, ...updates } : r)); }, []);
+
   const findDuplicateCustomers = useCallback((name: string, email: string, phone: string) => {
     const e = email.trim().toLowerCase();
     const p = phone.trim();
@@ -947,6 +1077,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
       supplierRefundEntries, addSupplierRefundEntry,
       shipments, addShipment, updateShipment,
       shippingProviderConfig, setShippingProviderConfig,
+      returns, addReturn, updateReturn,
       storeLocations, getItemMovements,
     }}>
       {children}
