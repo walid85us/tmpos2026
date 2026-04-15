@@ -454,7 +454,7 @@ export default function ShippingCenter() {
     staleDays: 0,
   });
 
-  const STORE_ADDRESS: ShipmentAddress = { name: 'Main Warehouse', line1: '100 Commerce Dr', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US', phone: '555-0100' };
+  const STORE_ADDRESS: ShipmentAddress = { name: 'Main Warehouse', line1: '100 Commerce Dr', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US', phone: '512-555-0100' };
 
   const ELIGIBLE_INVOICE_STATUSES = ['Paid', 'Partially Paid'];
   const ELIGIBLE_REPAIR_STATUSES = ['Ready for Pickup', 'Completed'];
@@ -894,8 +894,13 @@ export default function ShippingCenter() {
     if (!isAddressAccepted(shipment)) missing.push('Validate destination address');
     if (!hasShippablePackages(shipment)) missing.push('Add packages with weight or contents');
     if (!shipment.selectedRate && (!shipment.carrier || !shipment.serviceLevel)) missing.push('Select a shipping rate or set carrier and service level');
-    if (isCarrierRequiringPhone(shipment) && !isValidPhone(shipment.destinationAddress.phone)) {
-      missing.push('Recipient phone number required for UPS/FedEx (at least 10 digits)');
+    if (isCarrierRequiringPhone(shipment)) {
+      if (!isValidPhone(shipment.destinationAddress.phone)) {
+        missing.push('Recipient phone number required for UPS/FedEx (at least 10 digits)');
+      }
+      if (!isValidPhone(shipment.originAddress.phone)) {
+        missing.push('Shipper phone number required for UPS/FedEx (at least 10 digits)');
+      }
     }
     const providerMsg = getProviderPrerequisiteMessage();
     if (providerMsg) missing.push(providerMsg);

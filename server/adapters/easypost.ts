@@ -200,6 +200,9 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
 
     const parcel = params.packages[0];
     try {
+      const fromAddr = mapAddressToEasyPost(params.originAddress);
+      const toAddr = mapAddressToEasyPost(params.destinationAddress);
+      console.log(`[EasyPost] purchaseLabel from_address.phone=${JSON.stringify(fromAddr.phone)} to_address.phone=${JSON.stringify(toAddr.phone)}`);
       const createResponse = await fetch('https://api.easypost.com/v2/shipments', {
         method: 'POST',
         headers: {
@@ -208,8 +211,8 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
         },
         body: JSON.stringify({
           shipment: {
-            from_address: mapAddressToEasyPost(params.originAddress),
-            to_address: mapAddressToEasyPost(params.destinationAddress),
+            from_address: fromAddr,
+            to_address: toAddr,
             parcel: {
               weight: (parcel?.weight || 1) * (parcel?.weightUnit === 'kg' ? 35.274 : 16),
               length: parcel?.length || 10,

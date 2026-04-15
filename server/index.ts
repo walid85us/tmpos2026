@@ -162,12 +162,17 @@ app.get('/api/shipping/label-proxy', async (req, res) => {
 
 app.post('/api/shipping/purchase-label', async (req, res) => {
   const { providerId, originAddress, destinationAddress, packages, selectedRateId, carrier, service, shipmentRef } = req.body;
+  console.log(`[purchase-label] carrier=${carrier} service=${service} ref=${shipmentRef}`);
+  console.log(`[purchase-label] origin.phone=${JSON.stringify(originAddress?.phone)} dest.phone=${JSON.stringify(destinationAddress?.phone)}`);
   const provider = resolveProvider(providerId);
   if (!provider) {
     res.json({ success: false, error: { code: 'NO_PROVIDER', message: 'No active shipping provider. Configure a provider in Shipping Center.' } });
     return;
   }
   const result = await provider.purchaseLabel({ originAddress, destinationAddress, packages, selectedRateId, carrier, service, shipmentRef });
+  if (!result.success) {
+    console.log(`[purchase-label] FAILED: ${result.error?.code} — ${result.error?.message}`);
+  }
   res.json(result);
 });
 

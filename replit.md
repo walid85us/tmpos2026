@@ -46,6 +46,7 @@ The frontend is built using React 19, TypeScript, Vite 6, and Tailwind CSS v4.
     -   **Unified Provider Status Source of Truth**: Manages and displays shipping provider statuses consistently across the UI.
     -   **Webhook/Event Processing Pipeline**: A unified pipeline for all shipping provider webhooks and tracking syncs, featuring idempotency, status mapping, status progression awareness, provider-specific parsers, a durable webhook audit log, and security measures (HMAC-SHA256 signature verification).
     -   **Bulk Sync / Reconciliation**: A secondary recovery tool for bulk tracking synchronization of eligible provider-mode shipments, featuring eligibility scoping, batch processing, and detailed result reporting.
+    -   **Phone Prerequisites & Normalization**: `getLabelPrerequisites()` checks for phone on **both origin (shipper) and destination (recipient)** for UPS/FedEx. FedEx requires both — missing either triggers `PHONENUMBER.EMPTY`. Validation requires ≥10 digits. All three adapters (EasyPost, Shippo, ShipStation) normalize phones at the adapter boundary: strip non-digits, reject <10, prepend country code 1 for 10-digit US numbers. Phone source-of-truth flows: UI state → shipment object → `handlePurchaseLabel` → server → adapter `normalizePhone()` → provider API. Server-side `[purchase-label]` and `[EasyPost]` logs trace phone values at each boundary. Seed data and `STORE_ADDRESS` use proper 10-digit phones.
 
 ## System Design Choices
 

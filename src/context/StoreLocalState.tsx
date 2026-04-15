@@ -618,8 +618,8 @@ const SEED_SHIPMENTS: Shipment[] = [
   {
     id: 'shp-001', shipmentNumber: 'SHP-2026-001', type: 'customer_delivery', status: 'Delivered',
     sourceType: 'invoice', sourceId: 'inv-001', sourceNumber: 'INV-1001',
-    originAddress: { name: 'Main Warehouse', line1: '100 Commerce Dr', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US', phone: '555-0100' },
-    destinationAddress: { name: 'Alexander Wright', company: 'Wright Tech Solutions', line1: '500 Corporate Blvd', city: 'Austin', state: 'TX', postalCode: '78702', country: 'US', phone: '555-0123', email: 'alex@wright.com' },
+    originAddress: { name: 'Main Warehouse', line1: '100 Commerce Dr', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US', phone: '512-555-0100' },
+    destinationAddress: { name: 'Alexander Wright', company: 'Wright Tech Solutions', line1: '500 Corporate Blvd', city: 'Austin', state: 'TX', postalCode: '78702', country: 'US', phone: '512-555-0123', email: 'alex@wright.com' },
     packages: [{ id: 'pkg-001', weight: 2.5, weightUnit: 'lb', length: 12, width: 8, height: 4, dimensionUnit: 'in', contentsSummary: 'iPhone 15 Pro + accessories' }],
     carrier: 'UPS', serviceLevel: 'Ground', trackingNumber: '1Z999AA10123456784', shippingCost: 12.50,
     label: {
@@ -639,8 +639,8 @@ const SEED_SHIPMENTS: Shipment[] = [
   {
     id: 'shp-002', shipmentNumber: 'SHP-2026-002', type: 'repair_return', status: 'In Transit',
     sourceType: 'repair', sourceId: 'rep-001', sourceNumber: 'REP-1001',
-    originAddress: { name: 'Downtown Branch', line1: '200 Main St', city: 'Austin', state: 'TX', postalCode: '78703', country: 'US' },
-    destinationAddress: { name: 'Sarah Jenkins', line1: '350 Oak Lane', city: 'Austin', state: 'TX', postalCode: '78704', country: 'US', phone: '555-0456', email: 'sarah.j@gmail.com' },
+    originAddress: { name: 'Downtown Branch', line1: '200 Main St', city: 'Austin', state: 'TX', postalCode: '78703', country: 'US', phone: '512-555-0200' },
+    destinationAddress: { name: 'Sarah Jenkins', line1: '350 Oak Lane', city: 'Austin', state: 'TX', postalCode: '78704', country: 'US', phone: '512-555-0456', email: 'sarah.j@gmail.com' },
     packages: [{ id: 'pkg-002', weight: 1.0, weightUnit: 'lb', length: 8, width: 6, height: 3, dimensionUnit: 'in', contentsSummary: 'Repaired Samsung S21', declaredValue: 450 }],
     carrier: 'FedEx', serviceLevel: 'Priority Overnight', trackingNumber: '794644790138', shippingCost: 24.95, estimatedDelivery: '2026-04-10',
     events: [
@@ -653,8 +653,8 @@ const SEED_SHIPMENTS: Shipment[] = [
   {
     id: 'shp-003', shipmentNumber: 'SHP-2026-003', type: 'store_transfer', status: 'Ready',
     sourceType: 'transfer', sourceId: 'tr-001', sourceNumber: 'TRF-2026-001',
-    originAddress: { name: 'Main Warehouse', line1: '100 Commerce Dr', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US' },
-    destinationAddress: { name: 'Downtown Branch', line1: '200 Main St', city: 'Austin', state: 'TX', postalCode: '78703', country: 'US' },
+    originAddress: { name: 'Main Warehouse', line1: '100 Commerce Dr', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US', phone: '512-555-0100' },
+    destinationAddress: { name: 'Downtown Branch', line1: '200 Main St', city: 'Austin', state: 'TX', postalCode: '78703', country: 'US', phone: '512-555-0200' },
     packages: [{ id: 'pkg-003', weight: 5.0, weightUnit: 'lb', length: 18, width: 12, height: 6, dimensionUnit: 'in', contentsSummary: '3x iPhone 13 Screen, 10x Tempered Glass' }],
     carrier: 'Internal Courier', serviceLevel: 'Same Day',
     events: [
@@ -666,8 +666,8 @@ const SEED_SHIPMENTS: Shipment[] = [
   {
     id: 'shp-004', shipmentNumber: 'SHP-2026-004', type: 'rma_outbound', status: 'Dispatched',
     sourceType: 'rma', sourceId: 'rma-001', sourceNumber: 'RMA-2026-001',
-    originAddress: { name: 'Main Warehouse', line1: '100 Commerce Dr', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US' },
-    destinationAddress: { name: 'Global Parts Inc.', company: 'Global Parts Inc.', line1: '800 Industrial Pkwy', city: 'Dallas', state: 'TX', postalCode: '75201', country: 'US', phone: '555-9000' },
+    originAddress: { name: 'Main Warehouse', line1: '100 Commerce Dr', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US', phone: '512-555-0100' },
+    destinationAddress: { name: 'Global Parts Inc.', company: 'Global Parts Inc.', line1: '800 Industrial Pkwy', city: 'Dallas', state: 'TX', postalCode: '75201', country: 'US', phone: '214-555-9000' },
     packages: [{ id: 'pkg-004', weight: 0.5, weightUnit: 'lb', length: 6, width: 4, height: 2, dimensionUnit: 'in', contentsSummary: '1x Defective iPhone 13 Screen' }],
     carrier: 'USPS', serviceLevel: 'Priority Mail', trackingNumber: '9400111899223100001234', shippingCost: 8.75,
     label: {
@@ -684,8 +684,8 @@ const SEED_SHIPMENTS: Shipment[] = [
   {
     id: 'shp-005', shipmentNumber: 'SHP-2026-005', type: 'customer_delivery', status: 'Draft',
     sourceType: 'invoice', sourceId: 'inv-002', sourceNumber: 'INV-1002',
-    originAddress: { name: 'Main Warehouse', line1: '100 Commerce Dr', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US' },
-    destinationAddress: { name: 'Mike Rodriguez', line1: '720 Elm Street', city: 'Austin', state: 'TX', postalCode: '78705', country: 'US', phone: '555-0789' },
+    originAddress: { name: 'Main Warehouse', line1: '100 Commerce Dr', city: 'Austin', state: 'TX', postalCode: '78701', country: 'US', phone: '512-555-0100' },
+    destinationAddress: { name: 'Mike Rodriguez', line1: '720 Elm Street', city: 'Austin', state: 'TX', postalCode: '78705', country: 'US', phone: '512-555-0789' },
     packages: [],
     events: [
       { id: 'evt-013', timestamp: '2026-04-08T14:00:00Z', status: 'Created', description: 'Shipment drafted for invoice INV-1002', performedBy: 'Sarah Johnson' },

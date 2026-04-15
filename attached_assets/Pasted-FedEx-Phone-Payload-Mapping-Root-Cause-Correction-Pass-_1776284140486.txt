@@ -1,0 +1,159 @@
+FedEx Phone Payload Mapping — Root Cause Correction Pass
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a narrow root-cause correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Only fix the remaining FedEx phone issue.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Firebase/Firestore data architect
+- Enterprise shipping systems architect
+- Senior shipping and fulfillment expert with 20+ years of experience in parcel shipping, carrier integrations, label workflows, and carrier-specific shipment requirements
+- Root-cause debugging specialist
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- RBAC/sub-permissions
+- lifecycle gating
+- platform/store hierarchy
+- System Owner Plans & Features matrix
+- Store Permissions Matrix
+- secure server-side provider call architecture
+- existing shipping core flow
+- UPS behavior already passing
+- current phone validation/normalization behavior already passing
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — ROOT CAUSE
+==================================================
+
+Observed QA result:
+- FedEx still fails with:
+  “PHONENUMBER.EMPTY”
+- This happens even when a valid phone number is entered
+- Validation and normalization now appear to work
+- UPS still works
+- Therefore this is no longer a validation-only problem
+
+Root-cause expectation:
+- the FedEx shipment/label request payload is still missing the recipient phone
+- or the phone is being sent in the wrong field/path
+- or the normalized phone value is not the same value actually used in the FedEx request
+- or the request is using stale shipment/customer data instead of the current edited value
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIX
+==================================================
+
+1) TRACE THE ACTUAL FEDEX REQUEST PAYLOAD
+Required:
+- Audit the exact payload path used when purchasing a FedEx label
+- Identify exactly where recipient phone is supposed to be mapped
+- Verify whether the current normalized UI/state value is reaching that field
+- Fix the real payload mapping, not just UI validation
+
+2) SINGLE SOURCE OF TRUTH FOR RECIPIENT PHONE
+Required:
+- The same normalized recipient phone value must be used consistently across:
+  - shipment form/edit UI
+  - shipment state
+  - preflight validation
+  - provider payload generation
+  - FedEx label purchase request
+- Do not let FedEx read a different/empty field than what the UI shows
+
+3) FEDEX-SPECIFIC PAYLOAD CORRECTION
+Required:
+- Ensure the FedEx purchase-label request receives the recipient phone in the exact field/path expected by the provider/carrier integration
+- If the integration has a carrier-specific block for FedEx shipment data, fix that block directly
+- If the app is constructing a generic shipment object and then transforming it for provider submission, fix the FedEx transform layer
+
+4) RELOAD / EDIT / SAVE CONSISTENCY
+Required:
+- If the recipient phone is edited before purchase, the latest saved value must be the value sent to FedEx
+- Do not let stale cached data cause the purchase request to omit the phone
+
+5) OPERATOR FEEDBACK
+Required:
+- If the phone is genuinely missing, continue showing the clean prerequisite message
+- If the phone is present and valid, FedEx should no longer fail with false PHONENUMBER.EMPTY
+- Do not hide the real provider error if another genuine issue exists
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- QA selects FedEx
+- QA enters a valid recipient phone number
+- QA attempts the label purchase flow
+- The false “PHONENUMBER.EMPTY” error no longer appears
+- UPS behavior remains intact
+- Existing shipping core flow remains intact
+
+==================================================
+IMPORTANT IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into another workstream
+- Do not change unrelated shipping logic
+- Do not break UPS behavior
+- Do not break provider/manual mode split
+- Do not break rate selection, label purchase prerequisites, or shipment lifecycle logic
+- Keep the design baseline consistent
+- Do not stop at “validation looks correct”; fix the actual FedEx request path
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact execution order:
+
+1) Trace the exact FedEx label request payload and identify where recipient phone is lost or mapped incorrectly
+2) Fix the phone source-of-truth so the current normalized phone is the one used in the FedEx request
+3) Fix any FedEx-specific transform/payload path
+4) Verify latest edited/saved phone value is what is actually submitted
+5) Re-test FedEx and UPS flows
+6) Update documentation if needed
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- FedEx recipient phone requirement
+- exact source-of-truth for recipient phone in shipment purchase flow
+- FedEx-specific payload mapping note if applicable
+- confirmation that UPS behavior remains preserved
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. FedEx Payload Trace Findings
+3. FedEx Phone Payload Mapping Fix
+4. Phone Source-of-Truth Fix
+5. UPS Non-Regression Confirmation
+6. Files Changed
+7. Documentation Updated
+8. Non-Regression Notes
