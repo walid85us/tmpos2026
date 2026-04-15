@@ -1,0 +1,80 @@
+Shipping Bulk Sync / Reconciliation — Narrow Eligibility Correction Pass
+
+Do not start a new workstream.
+Do not redesign anything.
+Do not broaden scope.
+This is a narrow correction pass for bulk sync eligibility/results QA.
+
+Preserve all working behavior:
+- main-page Reconcile Shipments action
+- safe filtering/scoping
+- manual shipment exclusion
+- preview mode blocking
+- existing shipping core flow
+- Phase 2 / Phase 3 documentation
+- webhook-first / bulk-sync-secondary design
+
+==================================================
+QA SOURCE OF TRUTH — REMAINING ISSUE
+==================================================
+
+Observed QA result:
+- Bulk Sync exists and mostly works
+- But when “Include Terminal” is selected, at least one Delivered shipment was expected to be included and was not
+- Because of that, there were no eligible shipments available to actually test:
+  - batch processing/progress
+  - per-shipment result reporting
+
+This means eligibility/filter logic is still not fully correct or not fully transparent.
+
+==================================================
+REQUIRED FIX
+==================================================
+
+1) FIX INCLUDE TERMINAL ELIGIBILITY
+Required:
+- When “Include Terminal” is enabled, eligible Delivered / Rejected / Returned shipments that otherwise meet the rules should actually be included
+- Do not silently exclude them incorrectly
+- Respect other intended rules, but make terminal inclusion behave literally as labeled
+
+2) MAKE ELIGIBILITY LOGIC TRANSPARENT
+Required:
+- If a shipment is excluded, the reason should be understandable
+- At minimum, the UI/preview should make it clearer why shipments are excluded, such as:
+  - manual mode
+  - no tracking number
+  - pre-dispatch
+  - stale filter mismatch
+  - terminal filter off
+  - sync failures only mismatch
+- Avoid black-box filtering
+
+3) MAKE QA OF BATCH PROCESSING / RESULTS POSSIBLE
+Required:
+- After fixing eligibility, QA must be able to run Bulk Sync on at least a valid subset when the filters logically allow it
+- Batch processing and result reporting should then be testable in the UI
+- Do not fake shipments; just make the real eligibility logic correct and transparent
+
+==================================================
+IMPORTANT RULES
+==================================================
+
+- Do not redesign the app
+- Do not change unrelated workstreams
+- Do not weaken manual shipment exclusion
+- Do not weaken preview mode safety
+- Do not broaden scope into new shipping features
+- Keep the design baseline consistent
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Include Terminal Eligibility Fix
+3. Eligibility Transparency Improvement
+4. Batch/Result QA Unblock Fix
+5. Files Changed
+6. Non-Regression Notes

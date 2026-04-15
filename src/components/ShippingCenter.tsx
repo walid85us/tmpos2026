@@ -1231,26 +1231,48 @@ export default function ShippingCenter() {
   }
 
   const IN_FLIGHT_STATUSES: ShipmentStatus[] = ['Dispatched', 'In Transit', 'Exception'];
-  const TERMINAL_STATUSES: ShipmentStatus[] = ['Delivered', 'Rejected', 'Returned', 'Cancelled'];
+  const SYNCABLE_TERMINAL_STATUSES: ShipmentStatus[] = ['Delivered', 'Rejected', 'Returned'];
   const PRE_DISPATCH_STATUSES: ShipmentStatus[] = ['Draft', 'Ready', 'Label Created', 'Packed'];
 
-  function getBulkSyncEligibleShipments() {
-    return shipments.filter(s => {
-      if (getShipmentMode(s) === 'manual') return false;
-      if (!s.trackingNumber) return false;
-      if (PRE_DISPATCH_STATUSES.includes(s.status)) return false;
-      if (bulkSyncFilters.inFlightOnly && !IN_FLIGHT_STATUSES.includes(s.status)) {
-        if (!bulkSyncFilters.includeTerminal || !TERMINAL_STATUSES.includes(s.status)) return false;
+  type BulkSyncExclusion = { shipment: Shipment; reason: string };
+
+  function classifyBulkSyncShipments(): { eligible: Shipment[]; excluded: BulkSyncExclusion[] } {
+    const eligible: Shipment[] = [];
+    const excluded: BulkSyncExclusion[] = [];
+    for (const s of shipments) {
+      if (getShipmentMode(s) === 'manual') { excluded.push({ shipment: s, reason: 'Manual mode (no provider)' }); continue; }
+      if (!s.trackingNumber) { excluded.push({ shipment: s, reason: 'No tracking number' }); continue; }
+      if (PRE_DISPATCH_STATUSES.includes(s.status)) { excluded.push({ shipment: s, reason: `Pre-dispatch status (${s.status})` }); continue; }
+      if (s.status === 'Cancelled') { excluded.push({ shipment: s, reason: 'Cancelled (not syncable)' }); continue; }
+
+      const isInFlight = IN_FLIGHT_STATUSES.includes(s.status);
+      const isTerminal = SYNCABLE_TERMINAL_STATUSES.includes(s.status);
+
+      if (bulkSyncFilters.inFlightOnly && !isInFlight && !isTerminal) {
+        excluded.push({ shipment: s, reason: `Status "${s.status}" not in-flight or terminal` }); continue;
       }
-      if (!bulkSyncFilters.inFlightOnly && TERMINAL_STATUSES.includes(s.status) && !bulkSyncFilters.includeTerminal) return false;
-      if (bulkSyncFilters.syncFailuresOnly && (!s.syncFailureCount || s.syncFailureCount === 0)) return false;
+      if (isTerminal && !bulkSyncFilters.includeTerminal) {
+        excluded.push({ shipment: s, reason: `Terminal status (${s.status}) — enable "Include terminal"` }); continue;
+      }
+      if (!bulkSyncFilters.inFlightOnly && !isInFlight && !isTerminal) {
+        excluded.push({ shipment: s, reason: `Status "${s.status}" not eligible` }); continue;
+      }
+
+      if (bulkSyncFilters.syncFailuresOnly && (!s.syncFailureCount || s.syncFailureCount === 0)) {
+        excluded.push({ shipment: s, reason: 'No sync failures (filter active)' }); continue;
+      }
       if (bulkSyncFilters.staleDays > 0) {
         const lastSync = s.lastTrackingSyncAt ? new Date(s.lastTrackingSyncAt).getTime() : 0;
         const cutoff = Date.now() - bulkSyncFilters.staleDays * 24 * 60 * 60 * 1000;
-        if (lastSync > cutoff) return false;
+        if (lastSync > cutoff) { excluded.push({ shipment: s, reason: `Synced recently (within ${bulkSyncFilters.staleDays}d)` }); continue; }
       }
-      return true;
-    });
+      eligible.push(s);
+    }
+    return { eligible, excluded };
+  }
+
+  function getBulkSyncEligibleShipments() {
+    return classifyBulkSyncShipments().eligible;
   }
 
   async function handleBulkSync() {
@@ -3047,21 +3069,55 @@ export default function ShippingCenter() {
                     </div>
 
                     {(() => {
-                      const eligible = getBulkSyncEligibleShipments();
-                      const manualCount = shipments.filter(s => getShipmentMode(s) === 'manual').length;
+                      const { eligible, excluded } = classifyBulkSyncShipments();
+                      const reasonCounts: Record<string, number> = {};
+                      excluded.forEach(e => { const key = e.reason.replace(/\s*\(.*?\)\s*/g, '').split(' — ')[0]; reasonCounts[key] = (reasonCounts[key] || 0) + 1; });
                       return (
                         <div className="space-y-3">
                           <div className="flex items-center justify-between p-4 bg-indigo-50 border border-indigo-200 rounded-xl">
                             <div>
                               <p className="text-sm font-black text-indigo-700">{eligible.length} eligible shipment{eligible.length !== 1 ? 's' : ''}</p>
                               <p className="text-[10px] text-indigo-400 mt-0.5">
-                                {shipments.length} total · {manualCount} manual (excluded) · Provider mode with tracking number
+                                {shipments.length} total · {excluded.length} excluded · Provider mode with tracking number
                               </p>
                             </div>
                             {eligible.length > 0 && (
                               <span className="material-symbols-outlined text-indigo-400">checklist</span>
                             )}
                           </div>
+
+                          {excluded.length > 0 && (
+                            <details className="group">
+                              <summary className="text-[10px] font-black text-slate-400 uppercase tracking-widest cursor-pointer hover:text-slate-600 flex items-center gap-1">
+                                <span className="material-symbols-outlined text-xs group-open:rotate-90 transition-transform">chevron_right</span>
+                                {excluded.length} excluded — why?
+                              </summary>
+                              <div className="mt-2 space-y-1.5">
+                                {Object.entries(reasonCounts).map(([reason, count]) => (
+                                  <div key={reason} className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 rounded-lg">
+                                    <span className="material-symbols-outlined text-slate-300 text-xs">block</span>
+                                    <span className="text-[10px] text-slate-500 flex-1">{reason}</span>
+                                    <span className="text-[10px] font-bold text-slate-400">{count}</span>
+                                  </div>
+                                ))}
+                                {excluded.length <= 20 && (
+                                  <div className="max-h-32 overflow-y-auto border border-slate-100 rounded-lg mt-1">
+                                    <table className="w-full text-[10px]">
+                                      <tbody className="divide-y divide-slate-50">
+                                        {excluded.map((e, i) => (
+                                          <tr key={i} className="text-slate-400">
+                                            <td className="px-2 py-1 font-mono">{e.shipment.destinationAddress.name || e.shipment.id.slice(0, 8)}</td>
+                                            <td className="px-2 py-1"><span className={`px-1.5 py-0.5 rounded-full text-[8px] font-black uppercase ${STATUS_COLORS[e.shipment.status]}`}>{e.shipment.status}</span></td>
+                                            <td className="px-2 py-1 text-slate-400 italic">{e.reason}</td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                )}
+                              </div>
+                            </details>
+                          )}
 
                           {eligible.length > 20 && (
                             <div className="flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-xl">
