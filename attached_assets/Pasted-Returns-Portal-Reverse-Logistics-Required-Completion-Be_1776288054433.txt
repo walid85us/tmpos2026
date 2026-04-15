@@ -1,0 +1,59 @@
+Returns Portal / Reverse Logistics — Required Completion Before QA
+
+Do not start a new workstream.
+Do not redesign anything.
+Do not broaden scope.
+This is a required completion pass before QA.
+
+Your current reply shows that core required parts of the workstream are still being treated as follow-up tasks, which means the workstream is not complete yet.
+
+The following items were required in the original workstream and must be implemented before QA:
+
+1) Return shipment / return label integration
+Required:
+- returns must integrate with Shipping Center
+- return shipment creation flow must exist
+- return labels must work coherently where provider mode is used
+- manual/provider mode consistency must remain intact
+- reverse shipment tracking must be visible and lifecycle-aware
+
+2) Return source entry points
+Required:
+- returns must be initiable from the relevant source contexts implemented in this pass
+- at minimum, implement the correct source entry points where they fit the current system, such as:
+  - invoice-related return
+  - shipment-related return
+  - repair-related return
+  - existing RMA/reverse service context where applicable
+- source linkage must be visible and navigable
+
+3) Complete the full required implementation proof
+You must explicitly confirm:
+- RepairDesk article reviewed
+- RepairDesk insights extracted
+- how those insights were adapted
+- implemented now vs deferred vs not adopted
+- Phase 2 forward-compatibility included
+- Phase 3 forward-compatibility included
+- documentation updated
+- non-regression notes
+
+Do not say this workstream is complete unless the return shipment flow and source entry points are actually implemented.
+
+Reply ONLY in this structure:
+
+1. Workstream Completion Status
+2. RepairDesk Article Reviewed
+3. RepairDesk Insights Extracted
+4. How Those Insights Were Adapted To Our Shipping Center
+5. Implemented Now vs Deferred vs Not Adopted
+6. Returns Portal / Reverse Logistics Added
+7. Return Sources / Linkage Added
+8. Return Lifecycle / Reasons / Disposition Added
+9. Return Shipment / Return Label Integration Added
+10. Phase 2 Forward-Compatibility Included
+11. Phase 3 Forward-Compatibility Included
+12. Fulfillment-Expert Recommendations
+13. Files Changed
+14. Documentation Updated
+15. Non-Regression Notes

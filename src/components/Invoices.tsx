@@ -6,6 +6,7 @@ import { useAccess } from '../context/AccessContext';
 import { tenantRoles } from '../context/accessConfig';
 import type { Invoice, RepairService } from '../types';
 import type { ShipmentPrefill } from './ShippingCenter';
+import type { ReturnPrefill } from './ReturnsPortal';
 import { renderTemplate, buildLineItemsHtml, buildReceiptLineItemsHtml } from '../utils/templateBuilder';
 
 export default function Invoices() {
@@ -831,6 +832,25 @@ export default function Invoices() {
                       </button>
                     );
                   })()}
+                  {canAccess('returns') && checkSubPermission('create_return') && detailInvoice.status === 'Paid' && (
+                    <button onClick={() => {
+                      const customer = customers.find(c => c.id === detailInvoice.customerId);
+                      const prefill: ReturnPrefill = {
+                        sourceType: 'invoice',
+                        sourceId: detailInvoice.id,
+                        sourceNumber: detailInvoice.invoiceNumber,
+                        customerId: detailInvoice.customerId || '',
+                        customerName: customer?.name || detailInvoice.customerName || '',
+                        customerEmail: customer?.email,
+                        customerPhone: customer?.phone,
+                        items: detailInvoice.items.map(i => ({ name: i.name, quantity: i.quantity, sku: i.stockItemId })),
+                      };
+                      navigate('/returns', { state: { openCreate: true, prefill } });
+                    }}
+                      className="px-4 py-2 bg-white text-teal-600 border border-teal-200 rounded-xl font-black text-[10px] uppercase tracking-widest shadow-sm hover:bg-teal-50 transition-all flex items-center gap-1.5">
+                      <span className="material-symbols-outlined text-sm">assignment_return</span> Initiate Return
+                    </button>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">

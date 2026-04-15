@@ -6,6 +6,7 @@ import { useAccess } from '../context/AccessContext';
 import { Shipment, ShipmentStatus, ShipmentSourceType, ShipmentType, ShipmentAddress, ShipmentPackage, ShipmentEvent, ShippingRate, AddressValidationResult, ProviderTrackingEvent } from '../types';
 import * as shippingApi from '../shipping/shippingApiClient';
 import type { ProviderError } from '../shipping/types';
+import type { ReturnPrefill } from './ReturnsPortal';
 import PageShell from './PageShell';
 import ShippingProvidersPage from './ShippingProvidersPage';
 
@@ -365,7 +366,7 @@ function formatDateTime(iso: string): string {
 
 export default function ShippingCenter() {
   const { shipments, addShipment, updateShipment, invoices, repairTickets, rmas, inventoryTransfers, suppliers, customers } = useStoreLocalState();
-  const { checkPermission, checkSubPermission, isWriteBlocked } = useAccess();
+  const { checkPermission, checkSubPermission, isWriteBlocked, canAccess } = useAccess();
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -1732,6 +1733,11 @@ export default function ShippingCenter() {
                       <span className="text-sm font-black text-slate-800">{s.shipmentNumber}</span>
                       <span className={`px-2.5 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-lg border ${STATUS_COLORS[s.status]}`}>{s.status}</span>
                       <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">{TYPE_LABELS[s.type]}</span>
+                      {s.returnInfo?.isReturn && (
+                        <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md bg-teal-100 text-teal-700 border border-teal-200 flex items-center gap-0.5">
+                          <span className="material-symbols-outlined" style={{ fontSize: 10 }}>assignment_return</span>Return
+                        </span>
+                      )}
                     </div>
                     <div className="flex items-center gap-4 text-xs text-slate-500">
                       <span className="flex items-center gap-1">
@@ -2351,6 +2357,33 @@ export default function ShippingCenter() {
                           )
                         ))}
                       </div>
+                    )}
+                    {canAccess('returns') && checkSubPermission('create_return') && selectedShip.status === 'Delivered' && !selectedShip.returnInfo?.isReturn && (
+                      <button onClick={() => {
+                        const customer = customers.find(c =>
+                          c.name === selectedShip.destinationAddress.name ||
+                          c.email === selectedShip.destinationAddress.email
+                        );
+                        const prefill: ReturnPrefill = {
+                          sourceType: 'shipment',
+                          sourceId: selectedShip.id,
+                          sourceNumber: selectedShip.shipmentNumber,
+                          customerId: customer?.id || '',
+                          customerName: customer?.name || selectedShip.destinationAddress.name,
+                          customerEmail: customer?.email || selectedShip.destinationAddress.email,
+                          customerPhone: customer?.phone || selectedShip.destinationAddress.phone,
+                          originalShipmentId: selectedShip.id,
+                          items: selectedShip.packages.map(pkg => ({
+                            name: pkg.contentsSummary || 'Package contents',
+                            quantity: 1,
+                          })),
+                        };
+                        navigate('/returns', { state: { openCreate: true, prefill } });
+                      }}
+                        className="px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest bg-teal-50 text-teal-600 border border-teal-200 hover:bg-teal-100 transition-all active:scale-95 flex items-center gap-1.5">
+                        <span className="material-symbols-outlined text-sm">assignment_return</span>
+                        Initiate Return
+                      </button>
                     )}
                   </>
                 )}

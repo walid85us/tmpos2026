@@ -5,6 +5,7 @@ import { RepairTicket, RepairTicketStatus, TicketComment, RepairServiceLineItem,
 import { useStoreLocalState, SEED_POS_OPERATORS } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
 import type { ShipmentPrefill } from './ShippingCenter';
+import type { ReturnPrefill } from './ReturnsPortal';
 import ContextualHelp from './ContextualHelp';
 
 const ALL_STATUSES: RepairTicketStatus[] = ['Pending', 'Diagnosed', 'In Progress', 'Awaiting Parts', 'Ready for Pickup', 'Completed', 'Delivered', 'Cancelled'];
@@ -1014,6 +1015,27 @@ export default function RepairTickets() {
                           </div>
                         );
                       })()}
+
+                      {canAccess('returns') && checkSubPermission('create_return') && (selectedTicket.status === 'Completed' || selectedTicket.status === 'Delivered') && (
+                        <button onClick={() => {
+                          const customer = customers.find(c => c.id === selectedTicket.customerId);
+                          const prefill: ReturnPrefill = {
+                            sourceType: 'repair',
+                            sourceId: selectedTicket.id,
+                            sourceNumber: selectedTicket.ticketNumber,
+                            customerId: selectedTicket.customerId || '',
+                            customerName: customer?.name || selectedTicket.customerName,
+                            customerEmail: customer?.email || selectedTicket.customerEmail,
+                            customerPhone: customer?.phone || selectedTicket.customerPhone,
+                            reason: 'repair_return',
+                            items: [{ name: `${selectedTicket.device} - ${selectedTicket.issue.slice(0, 80)}`, quantity: 1 }],
+                          };
+                          navigate('/returns', { state: { openCreate: true, prefill } });
+                        }}
+                          className="w-full py-2.5 bg-white text-teal-600 border border-teal-200 rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-teal-50 transition-all flex items-center justify-center gap-1.5">
+                          <span className="material-symbols-outlined text-sm">assignment_return</span> Initiate Return
+                        </button>
+                      )}
 
                       {canManageTickets && !warrantyRepairTickets.some(wt => wt.id === selectedTicket.id) && (
                         <button onClick={() => setDeleteConfirm(selectedTicket.id)}
