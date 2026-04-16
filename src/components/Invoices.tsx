@@ -843,7 +843,7 @@ export default function Invoices() {
                         customerName: customer?.name || detailInvoice.customerName || '',
                         customerEmail: customer?.email,
                         customerPhone: customer?.phone,
-                        items: detailInvoice.items.map(i => ({ name: i.name, quantity: i.quantity, sku: i.stockItemId })),
+                        items: detailInvoice.items.map(i => ({ name: i.name, quantity: i.quantity, sku: i.stockItemId, unitPrice: i.price, maxQuantity: i.quantity })),
                       };
                       navigate('/returns', { state: { openCreate: true, prefill } });
                     }}

@@ -879,6 +879,7 @@ export interface Shipment {
   dispatchedAt?: string;
   deliveredAt?: string;
   addressValidation?: AddressValidationResult;
+  originAddressValidation?: AddressValidationResult;
   selectedRate?: ShippingRate;
   shipmentMode?: 'provider' | 'manual';
   label?: LabelArtifact;
@@ -930,7 +931,7 @@ export interface Shipment {
   batchId?: string;
 }
 
-export type ReturnStatus = 'Draft' | 'Requested' | 'Approved' | 'Label Created' | 'In Transit' | 'Received' | 'Inspecting' | 'Completed' | 'Rejected' | 'Cancelled';
+export type ReturnStatus = 'Draft' | 'Requested' | 'Approved' | 'Label Created' | 'In Transit' | 'Delivered' | 'Received' | 'Inspecting' | 'Completed' | 'Rejected' | 'Cancelled';
 
 export type ReturnReason =
   | 'defective'
@@ -969,6 +970,8 @@ export interface ReturnItem {
   name: string;
   sku?: string;
   quantity: number;
+  maxQuantity?: number;
+  unitPrice?: number;
   condition?: 'New' | 'Like New' | 'Good' | 'Fair' | 'Poor' | 'Damaged' | 'Defective';
   reason?: ReturnReason;
   notes?: string;

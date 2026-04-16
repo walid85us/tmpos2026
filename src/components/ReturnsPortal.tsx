@@ -31,7 +31,7 @@ export interface ReturnPrefill {
   customerEmail?: string;
   customerPhone?: string;
   reason?: ReturnReason;
-  items?: { name: string; quantity: number; sku?: string }[];
+  items?: { name: string; quantity: number; sku?: string; unitPrice?: number; maxQuantity?: number }[];
   originalShipmentId?: string;
 }
 
@@ -41,6 +41,7 @@ const RETURN_STATUS_CONFIG: Record<ReturnStatus, { color: string; icon: string }
   'Approved': { color: 'bg-emerald-100 text-emerald-700 border-emerald-200', icon: 'check_circle' },
   'Label Created': { color: 'bg-indigo-100 text-indigo-700 border-indigo-200', icon: 'label' },
   'In Transit': { color: 'bg-amber-100 text-amber-700 border-amber-200', icon: 'local_shipping' },
+  'Delivered': { color: 'bg-emerald-100 text-emerald-700 border-emerald-200', icon: 'home_storage' },
   'Received': { color: 'bg-cyan-100 text-cyan-700 border-cyan-200', icon: 'inventory' },
   'Inspecting': { color: 'bg-purple-100 text-purple-700 border-purple-200', icon: 'search' },
   'Completed': { color: 'bg-lime-100 text-lime-700 border-lime-200', icon: 'task_alt' },
@@ -108,7 +109,8 @@ function getNextStatuses(current: ReturnStatus): ReturnStatus[] {
     'Requested': ['Approved', 'Rejected', 'Cancelled'],
     'Approved': ['Label Created', 'Cancelled'],
     'Label Created': ['In Transit', 'Cancelled'],
-    'In Transit': ['Received'],
+    'In Transit': ['Delivered', 'Received'],
+    'Delivered': ['Received'],
     'Received': ['Inspecting', 'Completed'],
     'Inspecting': ['Completed', 'Rejected'],
     'Completed': [],
@@ -163,15 +165,16 @@ export default function ReturnsPortal() {
       'Packed': 'Label Created',
       'Dispatched': 'In Transit',
       'In Transit': 'In Transit',
+      'Delivered': 'Delivered',
     };
-    const SYNC_ELIGIBLE: ReturnStatus[] = ['Approved', 'Label Created', 'In Transit'];
+    const SYNC_ELIGIBLE: ReturnStatus[] = ['Approved', 'Label Created', 'In Transit', 'Delivered'];
     returns.forEach(ret => {
       if (!ret.returnShipmentId || !SYNC_ELIGIBLE.includes(ret.status)) return;
       const linkedShip = shipments.find(s => s.id === ret.returnShipmentId);
       if (!linkedShip) return;
       const mappedStatus = SHIPMENT_TO_RETURN_STATUS[linkedShip.status];
       if (!mappedStatus) return;
-      const statusOrder: ReturnStatus[] = ['Draft', 'Requested', 'Approved', 'Label Created', 'In Transit'];
+      const statusOrder: ReturnStatus[] = ['Draft', 'Requested', 'Approved', 'Label Created', 'In Transit', 'Delivered'];
       const currentIdx = statusOrder.indexOf(ret.status);
       const targetIdx = statusOrder.indexOf(mappedStatus);
       if (targetIdx > currentIdx) {
@@ -537,18 +540,28 @@ function ReturnDetailModal({ ret, shipments, onClose, onStatusTransition, onOpen
   canCreateShipment: boolean;
   isWriteBlocked: boolean;
 }) {
+  const navigate = useNavigate();
   const nextStatuses = getNextStatuses(ret.status);
   const linkedShipment = ret.returnShipmentId ? shipments.find(s => s.id === ret.returnShipmentId) : null;
   const originalShipment = ret.originalShipmentId ? shipments.find(s => s.id === ret.originalShipmentId) : null;
   const linkedShipmentDelivered = linkedShipment?.status === 'Delivered';
+  const linkedShipmentDrivesShippingLeg = !!linkedShipment;
+
+  const handleOpenShipment = (shipmentId: string) => {
+    onClose();
+    navigate('/shipping', { state: { openShipmentId: shipmentId } });
+  };
 
   const canTransition = (status: ReturnStatus) => {
     if (isWriteBlocked) return false;
     if (status === 'Requested') return canCreate;
     if (status === 'Approved' || status === 'Rejected') return canApprove;
-    if (status === 'Label Created') return canCreateShipment;
-    if (status === 'In Transit') return canCreateShipment;
-    if (status === 'Received') return canReceive && linkedShipmentDelivered;
+    // When a linked return shipment exists, the shipping-leg statuses are driven by the shipment auto-sync
+    // — manual Label Created / In Transit / Delivered actions are not allowed.
+    if (status === 'Label Created') return canCreateShipment && !linkedShipmentDrivesShippingLeg;
+    if (status === 'In Transit') return canCreateShipment && !linkedShipmentDrivesShippingLeg;
+    if (status === 'Delivered') return canCreateShipment && !linkedShipmentDrivesShippingLeg;
+    if (status === 'Received') return canReceive && (ret.status === 'Delivered' || linkedShipmentDelivered || !linkedShipmentDrivesShippingLeg);
     if (status === 'Inspecting') return canInspect;
     if (status === 'Completed') return canDispose;
     if (status === 'Cancelled') return canCancel;
@@ -589,7 +602,12 @@ function ReturnDetailModal({ ret, shipments, onClose, onStatusTransition, onOpen
               <p className="font-bold text-slate-900">{SOURCE_TYPE_LABELS[ret.sourceType]}</p>
               <p className="text-xs font-mono text-teal-600">{ret.sourceNumber}</p>
               {originalShipment && (
-                <p className="text-xs text-slate-400 mt-1">Original Shipment: <span className="font-mono text-slate-600">{originalShipment.shipmentNumber}</span></p>
+                <p className="text-xs text-slate-400 mt-1">Original Shipment:{' '}
+                  <button onClick={() => handleOpenShipment(originalShipment.id)}
+                    className="font-mono text-indigo-600 hover:text-indigo-800 underline-offset-2 hover:underline">
+                    {originalShipment.shipmentNumber}
+                  </button>
+                </p>
               )}
             </div>
           </div>
@@ -618,9 +636,12 @@ function ReturnDetailModal({ ret, shipments, onClose, onStatusTransition, onOpen
                 <div key={item.id} className="bg-white rounded-xl p-3 border border-slate-100 flex items-center justify-between">
                   <div>
                     <p className="font-semibold text-sm text-slate-800">{item.name}</p>
-                    <div className="flex items-center gap-2 mt-0.5">
+                    <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                       {item.sku && <span className="text-[10px] font-mono text-slate-400">{item.sku}</span>}
-                      <span className="text-[10px] text-slate-400">Qty: {item.quantity}</span>
+                      <span className="text-[10px] text-slate-400">Qty: {item.quantity}{item.maxQuantity && item.maxQuantity > 1 ? ` of ${item.maxQuantity}` : ''}</span>
+                      {item.unitPrice != null && (
+                        <span className="text-[10px] text-slate-500">@ <span className="font-mono font-bold text-slate-700">${item.unitPrice.toFixed(2)}</span> = <span className="font-bold text-emerald-700">${(item.unitPrice * item.quantity).toFixed(2)}</span></span>
+                      )}
                       {item.condition && (
                         <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold ${item.condition === 'Defective' || item.condition === 'Damaged' ? 'bg-red-50 text-red-600' : item.condition === 'New' || item.condition === 'Like New' ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'}`}>
                           {item.condition}
@@ -648,9 +669,13 @@ function ReturnDetailModal({ ret, shipments, onClose, onStatusTransition, onOpen
               </div>
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="font-bold text-indigo-800">{linkedShipment.shipmentNumber}</p>
+                  <button onClick={() => handleOpenShipment(linkedShipment.id)}
+                    className="font-bold text-indigo-800 hover:text-indigo-900 underline-offset-2 hover:underline inline-flex items-center gap-1">
+                    {linkedShipment.shipmentNumber}
+                    <span className="material-symbols-outlined" style={{ fontSize: 14 }}>open_in_new</span>
+                  </button>
                   <p className="text-xs text-indigo-600">Carrier: {linkedShipment.carrier || 'N/A'} • Service: {linkedShipment.serviceLevel || 'N/A'}</p>
-                  <p className="text-xs text-indigo-600">Tracking: <span className="font-mono">{linkedShipment.trackingNumber || 'Pending'}</span></p>
+                  <p className="text-xs text-indigo-600">Tracking: <span className="font-mono break-all">{linkedShipment.trackingNumber || 'Pending'}</span></p>
                   {linkedShipment.returnInfo?.returnLabelUrl && (
                     <a href={linkedShipment.returnInfo.returnLabelUrl} target="_blank" rel="noopener noreferrer"
                       className="inline-flex items-center gap-1 text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold mt-1">
@@ -675,11 +700,11 @@ function ReturnDetailModal({ ret, shipments, onClose, onStatusTransition, onOpen
                   </p>
                 </div>
               )}
-              {ret.status === 'In Transit' && linkedShipment.status === 'Delivered' && canReceive && (
+              {ret.status === 'Delivered' && canReceive && (
                 <div className="mt-2 px-3 py-2 bg-emerald-50 border border-emerald-200 rounded-lg">
                   <p className="text-[11px] text-emerald-700 font-medium">
                     <span className="material-symbols-outlined align-middle mr-1" style={{ fontSize: 14 }}>check_circle</span>
-                    Shipment delivered — you can now mark this return as Received.
+                    Package delivered to your facility — awaiting intake. Click <span className="font-bold">Received</span> below to begin inspection.
                   </p>
                 </div>
               )}
@@ -687,7 +712,15 @@ function ReturnDetailModal({ ret, shipments, onClose, onStatusTransition, onOpen
                 <div className="mt-2 px-3 py-2 bg-slate-100 border border-slate-200 rounded-lg">
                   <p className="text-[11px] text-slate-600 font-medium">
                     <span className="material-symbols-outlined align-middle mr-1" style={{ fontSize: 14 }}>hourglass_top</span>
-                    Received will be available once shipment shows Delivered.
+                    Reverse shipping leg is driven by the linked shipment. Return will advance to Delivered (Awaiting Receipt) automatically when the carrier marks the shipment Delivered.
+                  </p>
+                </div>
+              )}
+              {linkedShipmentDrivesShippingLeg && (ret.status === 'Approved' || ret.status === 'Label Created' || ret.status === 'In Transit') && (
+                <div className="mt-2 px-3 py-2 bg-indigo-50/60 border border-indigo-200 rounded-lg">
+                  <p className="text-[10px] text-indigo-600 font-medium">
+                    <span className="material-symbols-outlined align-middle mr-1" style={{ fontSize: 12 }}>sync</span>
+                    Shipping-leg statuses are auto-synced from the linked shipment. Manual progression is disabled while the linked shipment is authoritative.
                   </p>
                 </div>
               )}
@@ -849,6 +882,8 @@ function CreateReturnModal({ customers, invoices, repairTickets, shipments, rmas
         name: pi.name,
         quantity: pi.quantity,
         sku: pi.sku,
+        unitPrice: pi.unitPrice,
+        maxQuantity: pi.maxQuantity ?? pi.quantity,
         reason: prefill.reason || 'defective',
       }));
     }
@@ -884,7 +919,7 @@ function CreateReturnModal({ customers, invoices, repairTickets, shipments, rmas
       setSourceId(invoice.id);
       setSourceNumber(invoice.invoiceNumber);
       setCustomerId(invoice.customerId);
-      setItems(invoice.items.map((it, idx) => ({ id: `ri-res-${idx}`, name: it.name, quantity: it.quantity, sku: it.stockItemId, reason })));
+      setItems(invoice.items.map((it, idx) => ({ id: `ri-res-${idx}`, name: it.name, quantity: it.quantity, maxQuantity: it.quantity, unitPrice: it.price, sku: it.stockItemId, reason })));
       setSourceResolved(`Resolved: ${invoice.invoiceNumber} — ${invoice.customerName} (${invoice.status})`);
     } else if (sourceType === 'repair') {
       const ticket = repairTickets.find(t => t.ticketNumber.toLowerCase() === ref.toLowerCase());
@@ -1054,19 +1089,42 @@ function CreateReturnModal({ customers, invoices, repairTickets, shipments, rmas
             <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-3">Return Items *</h3>
             {items.length > 0 && (
               <div className="space-y-2 mb-3">
-                {items.map((item, i) => (
-                  <div key={item.id} className="bg-white rounded-xl p-3 border border-slate-100 flex items-center justify-between">
-                    <div>
-                      <span className="font-semibold text-sm">{item.name}</span>
-                      <span className="text-xs text-slate-400 ml-2">x{item.quantity}</span>
-                      {item.condition && <span className="text-[10px] ml-2 text-slate-500">({item.condition})</span>}
+                {items.map((item, i) => {
+                  const lineTotal = (item.unitPrice ?? 0) * item.quantity;
+                  const max = item.maxQuantity || 99;
+                  return (
+                    <div key={item.id} className="bg-white rounded-xl p-3 border border-slate-100 flex items-center gap-3">
+                      <div className="flex-1 min-w-0">
+                        <p className="font-semibold text-sm truncate">{item.name}</p>
+                        <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                          {item.unitPrice != null && (
+                            <span className="text-[10px] text-slate-500">@ <span className="font-mono font-bold text-slate-700">${item.unitPrice.toFixed(2)}</span></span>
+                          )}
+                          {item.maxQuantity != null && item.maxQuantity > 1 && (
+                            <span className="text-[10px] text-slate-400">of {item.maxQuantity} originally purchased</span>
+                          )}
+                          {item.condition && <span className="text-[10px] text-slate-500">({item.condition})</span>}
+                          {item.unitPrice != null && (
+                            <span className="text-[10px] font-bold text-emerald-700">Refund context: ${lineTotal.toFixed(2)}</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <label className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Qty</label>
+                        <input type="number" min={1} max={max} value={item.quantity}
+                          onChange={e => {
+                            const v = Math.max(1, Math.min(max, Number(e.target.value) || 1));
+                            setItems(prev => prev.map((it, idx) => idx === i ? { ...it, quantity: v } : it));
+                          }}
+                          className="w-14 px-2 py-1 rounded-lg border border-slate-200 text-xs text-center focus:outline-none focus:ring-2 focus:ring-teal-500/30" />
+                        <button onClick={() => setItems(prev => prev.filter((_, idx) => idx !== i))}
+                          className="p-1 rounded hover:bg-red-50 text-red-400 hover:text-red-600" aria-label="Remove item">
+                          <span className="material-symbols-outlined" style={{ fontSize: 16 }}>close</span>
+                        </button>
+                      </div>
                     </div>
-                    <button onClick={() => setItems(prev => prev.filter((_, idx) => idx !== i))}
-                      className="p-1 rounded hover:bg-red-50 text-red-400 hover:text-red-600">
-                      <span className="material-symbols-outlined" style={{ fontSize: 16 }}>close</span>
-                    </button>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
             <div className="flex gap-2 items-end">
@@ -1339,20 +1397,22 @@ function CreateReturnShipmentModal({ ret, customers, onClose, onSave, createdBy 
     phone: customer?.phone || ret.customerPhone || '',
     email: customer?.email || ret.customerEmail || '',
   });
-  const [destination] = useState<ShipmentAddress>(STORE_RETURN_ADDRESS);
-  const [carrier, setCarrier] = useState('');
-  const [serviceLevel, setServiceLevel] = useState('');
-  const [trackingNumber, setTrackingNumber] = useState('');
+  const [destination, setDestination] = useState<ShipmentAddress>(STORE_RETURN_ADDRESS);
   const [notes, setNotes] = useState(`Return shipment for ${ret.returnNumber}`);
   const [packages, setPackages] = useState<ShipmentPackage[]>([{
     id: `pkg-${Date.now()}`,
     contentsSummary: ret.items.map(i => `${i.name} x${i.quantity}`).join(', '),
   }]);
 
-  const canSave = origin.name && origin.line1 && origin.city && origin.state && origin.postalCode;
+  const canSave = !!(origin.name && origin.line1 && origin.city && origin.state && origin.postalCode
+    && destination.name && destination.line1 && destination.city && destination.state && destination.postalCode);
 
   const handleSave = () => {
     if (!canSave) return;
+    // Defense-in-depth: hard-fail if any required field is somehow missing despite UI guards.
+    const missingOrigin = !origin.name || !origin.line1 || !origin.city || !origin.state || !origin.postalCode;
+    const missingDestination = !destination.name || !destination.line1 || !destination.city || !destination.state || !destination.postalCode;
+    if (missingOrigin || missingDestination) return;
     const now = new Date().toISOString();
     const shipNum = `SHP-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 9000) + 1000)}`;
     const shipment: Shipment = {
@@ -1366,11 +1426,9 @@ function CreateReturnShipmentModal({ ret, customers, onClose, onSave, createdBy 
       originAddress: origin,
       destinationAddress: destination,
       packages,
-      carrier: carrier.trim() || undefined,
-      serviceLevel: serviceLevel.trim() || undefined,
-      trackingNumber: trackingNumber.trim() || undefined,
       notes: notes.trim() || undefined,
       events: [{ id: `evt-${Date.now()}`, status: 'Created', timestamp: now, description: `Return shipment created for ${ret.returnNumber}` }],
+      createdBy,
       createdAt: now,
       updatedAt: now,
       returnInfo: {
@@ -1399,10 +1457,8 @@ function CreateReturnShipmentModal({ ret, customers, onClose, onSave, createdBy 
         <div className="p-6 space-y-5 max-h-[70vh] overflow-y-auto">
           <div className="bg-indigo-50 rounded-2xl p-4 border border-indigo-100">
             <p className="text-xs text-indigo-700">
-              <span className="font-bold">Return shipments travel from the customer back to your warehouse.</span> The customer's address is the origin, and your store is the destination.
-              {carrier.trim() || serviceLevel.trim()
-                ? ' Manual mode: carrier and service entered by hand. Provider label purchase can be done from the Shipping Center after creation.'
-                : ' Leave carrier/service empty to use provider-backed label purchase from the Shipping Center.'}
+              <span className="font-bold">Return shipments travel from the customer back to your warehouse.</span> The customer's address is the origin, and your store is the destination — both are editable below before dispatch.
+              {' '}Carrier, service level, and tracking number are set later in the Shipping Center when you fetch rates and purchase the label.
             </p>
           </div>
 
@@ -1427,29 +1483,19 @@ function CreateReturnShipmentModal({ ret, customers, onClose, onSave, createdBy 
 
             <div className="space-y-3">
               <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Destination (Store)</h3>
-              <div className="bg-slate-50 rounded-xl p-4 border border-slate-100 text-sm text-slate-700 space-y-0.5">
-                <p className="font-bold">{destination.name}</p>
-                <p>{destination.line1}</p>
-                <p>{destination.city}, {destination.state} {destination.postalCode}</p>
-                {destination.phone && <p className="text-xs text-slate-400">{destination.phone}</p>}
+              <input value={destination.name} onChange={e => setDestination(p => ({ ...p, name: e.target.value }))} placeholder="Store / Warehouse Name *"
+                className="w-full px-4 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/30" />
+              <input value={destination.line1} onChange={e => setDestination(p => ({ ...p, line1: e.target.value }))} placeholder="Address Line 1 *"
+                className="w-full px-4 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/30" />
+              <div className="grid grid-cols-3 gap-2">
+                <input value={destination.city} onChange={e => setDestination(p => ({ ...p, city: e.target.value }))} placeholder="City *"
+                  className="px-3 py-2 rounded-lg border border-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/30" />
+                <input value={destination.state} onChange={e => setDestination(p => ({ ...p, state: e.target.value }))} placeholder="State *"
+                  className="px-3 py-2 rounded-lg border border-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/30" />
+                <input value={destination.postalCode} onChange={e => setDestination(p => ({ ...p, postalCode: e.target.value }))} placeholder="ZIP *"
+                  className="px-3 py-2 rounded-lg border border-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/30" />
               </div>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-3 gap-4">
-            <div>
-              <label className="block text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-1.5">Carrier</label>
-              <input value={carrier} onChange={e => setCarrier(e.target.value)} placeholder="e.g. USPS, UPS, FedEx"
-                className="w-full px-4 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/30" />
-            </div>
-            <div>
-              <label className="block text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-1.5">Service Level</label>
-              <input value={serviceLevel} onChange={e => setServiceLevel(e.target.value)} placeholder="e.g. Priority, Ground"
-                className="w-full px-4 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/30" />
-            </div>
-            <div>
-              <label className="block text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-1.5">Tracking #</label>
-              <input value={trackingNumber} onChange={e => setTrackingNumber(e.target.value)} placeholder="If pre-assigned"
+              <input value={destination.phone || ''} onChange={e => setDestination(p => ({ ...p, phone: e.target.value }))} placeholder="Phone"
                 className="w-full px-4 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/30" />
             </div>
           </div>
@@ -1531,7 +1577,7 @@ function LabelDeliveryModal({ ret, shipment, onClose }: {
         <div className="px-6 py-5 border-b border-slate-100 flex items-center justify-between">
           <h2 className="text-xl font-black text-slate-900 flex items-center gap-2">
             <span className="material-symbols-outlined text-indigo-600">send</span>
-            Send Return Label — {ret.returnNumber}
+            Share Return Label — {ret.returnNumber}
           </h2>
           <button onClick={onClose} className="p-2 rounded-xl hover:bg-slate-100 text-slate-400">
             <span className="material-symbols-outlined">close</span>
@@ -1571,6 +1617,13 @@ function LabelDeliveryModal({ ret, shipment, onClose }: {
               {customerInstructions}
             </pre>
           </div>
+
+          <div className="bg-amber-50 rounded-xl p-3 border border-amber-200 flex items-start gap-2">
+            <span className="material-symbols-outlined text-amber-600 text-sm mt-0.5">info</span>
+            <div className="text-[11px] text-amber-800 leading-relaxed">
+              <p><span className="font-bold">Heads up:</span> the email button opens a draft in your default mail app — it does not send automatically. Direct send-from-server email is on the future roadmap.</p>
+            </div>
+          </div>
         </div>
 
         <div className="px-6 py-4 border-t border-slate-100 flex flex-wrap justify-end gap-3">
@@ -1582,9 +1635,10 @@ function LabelDeliveryModal({ ret, shipment, onClose }: {
           </button>
           {ret.customerEmail && (
             <button onClick={handleEmailCustomer}
+              title="Opens an email draft in your default mail app. Does not send automatically."
               className={`flex items-center gap-1.5 px-5 py-2.5 rounded-xl text-sm font-bold transition-all shadow-lg ${emailSent ? 'bg-emerald-600 text-white shadow-emerald-600/20' : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-600/20'}`}>
-              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>{emailSent ? 'check' : 'email'}</span>
-              {emailSent ? 'Email Opened' : 'Email Customer'}
+              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>{emailSent ? 'check' : 'drafts'}</span>
+              {emailSent ? 'Draft Opened' : 'Open Email Draft'}
             </button>
           )}
         </div>

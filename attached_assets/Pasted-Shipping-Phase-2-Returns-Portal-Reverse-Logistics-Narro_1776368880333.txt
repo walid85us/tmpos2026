@@ -1,0 +1,284 @@
+Shipping Phase 2 Returns Portal / Reverse Logistics — Narrow Reverse-Logistics Sync + Usability Correction Pass
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a narrow correction pass for the Returns Portal / Reverse Logistics workstream.
+Do not redesign the app.
+Do not broaden scope.
+Fix the remaining reverse-logistics synchronization, usability, and regression issues exactly as described below.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Firebase/Firestore data architect
+- Enterprise shipping systems architect
+- Senior reverse-logistics / returns expert with 20+ years of experience in customer returns, RMA operations, return labels, return intake, inspection workflows, carrier-integrated reverse shipping, and warehouse receiving
+- Root-cause debugging specialist
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- RBAC/sub-permissions
+- lifecycle gating
+- platform/store hierarchy
+- System Owner Plans & Features matrix
+- Store Permissions Matrix
+- secure server-side provider call architecture
+- Shipping Center as the sole provider-management home
+- provider/manual shipment mode split
+- webhook/event automation
+- bulk sync / reconciliation
+- existing outbound shipping core flow
+- current Returns Portal area, return model, inspection/disposition flow, permissions, and source-linkage work already implemented
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — REMAINING FAILURES
+==================================================
+
+These are the exact remaining blockers and must be fixed literally:
+
+1) Return creation from invoice/source still needs item-level improvement
+Observed QA result:
+- return can be created from invoice
+- items can be included/excluded
+Required behavior:
+- if the same item quantity is greater than 1, the quantity selected for return must be editable
+- item price must be visible in the return flow where refund/reimbursement context matters
+- operator should not have to infer price manually
+
+2) Return status is not synchronized correctly with linked return shipment
+Observed QA result:
+- linked return shipment can show Ready while the return still shows Approved
+- linked shipment can show later shipping progress while return action buttons still allow manual progression such as Label Created / In Transit
+Required behavior:
+- when the return is using a linked return shipment, the reverse-shipping phase of the return must be driven by the linked shipment status, not by manual button clicks
+- return must not falsely stay at Approved when the linked shipment is already Ready
+- return must not allow clickable Label Created / In Transit actions in provider-managed reverse-shipping flow
+- manual progression for those shipping-leg statuses is acceptable only when the return shipment is fully manual/no provider-driven shipping flow exists
+
+3) Return should not show Label Created before actual label purchase
+Observed QA result:
+- operator can still move the return to Label Created manually even when provider-managed shipment has not actually purchased the label yet
+Required behavior:
+- if shipping provider flow is active, Label Created must only appear when the linked return shipment label is actually purchased/created
+- manual Label Created action is only acceptable in manual/no-provider mode
+
+4) Return shipment creation flow needs better field behavior
+Required behavior:
+- when creating a return shipment from the return section:
+  - customer address must populate from customer/profile/source data
+  - origin and destination must be editable before dispatch
+  - Carrier, Service Level, and Tracking # must not be manually pre-entered in the return-shipment create step if those are meant to be driven later in Shipping Center
+- keep the create flow clean and consistent with the shipping architecture
+
+5) Linked shipment access should be easier
+Required behavior:
+- shipment number shown inside the return should be clickable
+- clicking it should open the linked shipment detail/workflow, respecting role and permission rules
+
+6) Reverse shipping progression should follow linked shipment state coherently
+Observed QA result:
+- when linked shipment progresses, return status can still be confusing or out of sync
+- when linked shipment is Delivered, the return still shows In Transit
+Required behavior:
+- between shipment creation and shipment delivered, the reverse-shipping leg of the return must reflect the live linked shipment status coherently
+- once the linked shipment is Delivered, the return must no longer still show In Transit
+- use a clear synchronized state such as Delivered / Awaiting Receipt or equivalent that fits the current architecture
+- then Received becomes the next operator step
+
+7) Received gating needs one more refinement
+Observed QA result:
+- Received is enabled after linked shipment Delivered, which is good
+- but the return status still showing In Transit at that moment is confusing
+Required behavior:
+- once linked shipment is Delivered, return must show an appropriate delivered-to-facility / awaiting-receipt state before the operator clicks Received
+- Received must remain the operator action that begins intake, but the pre-Received state must be clear
+
+8) Return label delivery to customer
+Observed QA result:
+- current path opens the user’s email app, which is acceptable for now
+Required behavior for this pass:
+- keep a lightweight operator path to give the label to the customer
+- do NOT build full direct email infrastructure in this pass
+- improve wording/UX if needed so the operator understands whether it opens an email draft vs sends directly
+- document full direct-send email as a future workstream, not this correction pass
+
+9) Outbound shipping regression — tracking number masking returned
+Observed QA result:
+- tracking number is masked again with XXXXX in shipping/return contexts
+Required behavior:
+- full tracking number must remain visible to authorized operational users everywhere it should be visible
+- fix this regression without breaking permission safety
+
+10) Address validation should cover both origin and destination in provider mode
+Observed QA result:
+- current shipping center validates destination only
+Required behavior:
+- for provider-mode rating, validate both origin and destination
+- Get Rates should depend on the correct address-validation readiness for both sides where applicable
+- if you decide on combined validation UX, make it clear and operator-friendly
+- do not leave rate accuracy dependent on destination-only validation if origin materially matters
+
+==================================================
+NON-NEGOTIABLE IMPLEMENTATION REQUIREMENTS
+==================================================
+
+1. Item-level return quantity + price visibility
+Required:
+- return item quantity is editable for multi-quantity source items
+- item price is visible where refund context matters
+Acceptance:
+- QA can create a return for 1 out of 2 identical items and see item pricing
+
+2. Linked shipment-driven reverse-shipping status
+Required:
+- if a linked return shipment exists in provider/manual shipping flow, the return’s shipping-leg statuses must synchronize from that linked shipment
+- manual Label Created / In Transit buttons must not remain active when linked shipment is authoritative
+Acceptance:
+- QA no longer sees return and linked shipment disagree on shipping-leg progression
+
+3. Label Created only when label truly exists
+Required:
+- provider-managed return cannot show Label Created before label purchase
+Acceptance:
+- QA only sees Label Created once the linked return label truly exists
+
+4. Return shipment create flow cleanup
+Required:
+- prefill customer address
+- origin/destination editable before dispatch
+- remove premature manual Carrier / Service Level / Tracking # inputs from the return-shipment creation step if they are supposed to be driven later in Shipping Center
+Acceptance:
+- QA sees a cleaner return-shipment creation flow aligned to the shipping architecture
+
+5. Clickable linked shipment
+Required:
+- linked shipment number in return detail opens linked shipment workflow/detail if user has permission
+Acceptance:
+- QA can click shipment number and navigate/open shipment cleanly
+
+6. Delivered / Awaiting Receipt synchronization
+Required:
+- once linked return shipment is Delivered, return must no longer show In Transit
+- return must show a clear pre-Received state, such as Delivered / Awaiting Receipt or equivalent
+- Received remains the next operator-controlled action
+Acceptance:
+- QA sees a coherent status after linked shipment Delivered
+
+7. Keep lightweight label-to-customer path only
+Required:
+- keep the current lightweight operator path (email draft / similar) if it works
+- improve wording if needed
+- do not implement full direct email sending in this pass
+- document direct email as future work
+Acceptance:
+- QA sees a clear lightweight label-sharing path and no misleading “sent directly” implication if it only opens an email draft
+
+8. Restore full tracking visibility
+Required:
+- full tracking number visible to authorized operators in both Shipping Center and return-related linked shipment surfaces
+Acceptance:
+- QA no longer sees tracking masked with XXXXX where it should be visible
+
+9. Validate both origin and destination for provider-mode rating
+Required:
+- provider-mode address readiness for Get Rates must account for both origin and destination where applicable
+- operator messaging must be clear
+Acceptance:
+- QA can see that rating readiness depends on the proper address-validation state, not destination-only when origin matters
+
+==================================================
+FULFILLMENT RULES TO PRESERVE
+==================================================
+
+Do not weaken these rules:
+- existing outbound shipping core flow remains intact
+- provider/manual mode split remains intact
+- provider-driven shipment lifecycle remains intact
+- manual shipments remain manual
+- PDF-first label flow remains intact
+- webhook/event automation remains intact
+- bulk sync/reconciliation remains intact
+- return inspection/disposition flow already implemented remains intact
+- preview mode safety remains intact
+- permissions and plan gating remain intact
+
+==================================================
+IMPORTANT IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into full direct email infrastructure
+- Do not touch unrelated workstreams
+- Do not break outbound shipping
+- Do not break provider/manual mode split
+- Do not create conflicting state between Returns and Shipping Center
+- Keep the design baseline consistent
+- Keep operator workflow practical and auditable
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact execution order:
+
+1) Improve return item quantity editing and price visibility
+2) Fix linked shipment-driven reverse-shipping status synchronization
+3) Remove premature manual shipping-leg actions in provider-managed return flow
+4) Fix return-shipment creation field behavior and prefill
+5) Add clickable linked shipment access
+6) Refine Delivered / Awaiting Receipt behavior before Received
+7) Keep lightweight label-to-customer path and clarify wording if needed
+8) Restore full tracking visibility where regressed
+9) Add/clarify origin + destination validation readiness for provider-mode rates
+10) Re-test all affected reverse-logistics and outbound shipping flows
+11) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- return item quantity editing and price visibility
+- linked shipment-driven reverse shipping progression rules
+- removal of manual shipping-leg actions when linked shipment is authoritative
+- Delivered / Awaiting Receipt pre-Received behavior
+- lightweight label-to-customer path and future direct-email note
+- full tracking visibility requirement in returns-linked shipment surfaces
+- origin + destination validation readiness for provider-mode rating
+- future recommendations not implemented now
+
+==================================================
+MANDATORY OUTPUT PROOF
+==================================================
+
+Do not give a generic completion summary.
+Do not say this task is complete unless each literal blocker is visibly fixed in the actual product UI and behavior.
+
+OUTPUT FORMAT REQUIRED
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Return Item Quantity / Price Visibility Fix
+3. Linked Shipment Status Synchronization Fix
+4. Return Shipment Create Flow Cleanup
+5. Clickable Linked Shipment Fix
+6. Delivered / Awaiting Receipt Fix
+7. Label-to-Customer Path Clarification
+8. Tracking Visibility Regression Fix
+9. Origin + Destination Validation Readiness Fix
+10. Files Changed
+11. Documentation Updated
+12. Non-Regression Notes

@@ -601,7 +601,16 @@ export default function ShippingCenter() {
   }
 
   useEffect(() => {
-    const state = location.state as { openCreate?: boolean; prefill?: ShipmentPrefill } | null;
+    const state = location.state as { openCreate?: boolean; prefill?: ShipmentPrefill; openShipmentId?: string } | null;
+    if (state?.openShipmentId) {
+      const exists = shipments.some(s => s.id === state.openShipmentId);
+      if (exists) {
+        setSelectedShipment(state.openShipmentId);
+        setDetailTab('overview');
+        navigate(location.pathname, { replace: true, state: null });
+        return;
+      }
+    }
     if (state?.openCreate && state.prefill && canCreate) {
       const p = state.prefill;
       setNewSourceType(p.sourceType);
@@ -786,6 +795,15 @@ export default function ShippingCenter() {
     if (destChanged && shipment?.addressValidation) {
       updates.addressValidation = undefined;
     }
+    const originChanged = shipment && (
+      newOrigin.line1 !== shipment.originAddress.line1 ||
+      newOrigin.city !== shipment.originAddress.city ||
+      newOrigin.state !== shipment.originAddress.state ||
+      newOrigin.postalCode !== shipment.originAddress.postalCode
+    );
+    if (originChanged && shipment?.originAddressValidation) {
+      updates.originAddressValidation = undefined;
+    }
     updates.shippingCost = newCost ? parseFloat(newCost) : undefined;
     updateShipment(editingShipment, updates);
     setEditingShipment(null);
@@ -856,6 +874,12 @@ export default function ShippingCenter() {
     return av.status === 'validated' || (av.status === 'corrected' && av.accepted === true);
   }
 
+  function isOriginAddressAccepted(shipment: Shipment): boolean {
+    const av = shipment.originAddressValidation;
+    if (!av) return false;
+    return av.status === 'validated' || (av.status === 'corrected' && av.accepted === true);
+  }
+
   function getProviderPrerequisiteMessage(): string | null {
     if (activeProviderId) return null;
     const hasAnyConfigured = providerStatuses.length > 0;
@@ -864,6 +888,7 @@ export default function ShippingCenter() {
 
   function getRatePrerequisites(shipment: Shipment): string[] {
     const missing: string[] = [];
+    if (!isOriginAddressAccepted(shipment)) missing.push('Validate origin address');
     if (!isAddressAccepted(shipment)) missing.push('Validate destination address');
     if (!hasShippablePackages(shipment)) missing.push('Add packages with weight or contents');
     const providerMsg = getProviderPrerequisiteMessage();
@@ -892,6 +917,7 @@ export default function ShippingCenter() {
 
   function getLabelPrerequisites(shipment: Shipment): string[] {
     const missing: string[] = [];
+    if (!isOriginAddressAccepted(shipment)) missing.push('Validate origin address');
     if (!isAddressAccepted(shipment)) missing.push('Validate destination address');
     if (!hasShippablePackages(shipment)) missing.push('Add packages with weight or contents');
     if (!shipment.selectedRate && (!shipment.carrier || !shipment.serviceLevel)) missing.push('Select a shipping rate or set carrier and service level');
@@ -908,35 +934,48 @@ export default function ShippingCenter() {
     return missing;
   }
 
-  async function handleValidateAddress(shipmentId: string) {
+  async function handleValidateAddress(shipmentId: string, side: 'origin' | 'destination' = 'destination') {
     if (isWriteBlocked) return;
     const shipment = shipments.find(s => s.id === shipmentId);
     if (!shipment) return;
     clearProviderFeedback();
     setProviderLoading('validate');
-    const result = await shippingApi.validateAddress(shipment.destinationAddress);
+    const targetAddress = side === 'origin' ? shipment.originAddress : shipment.destinationAddress;
+    const result = await shippingApi.validateAddress(targetAddress);
     if (result.success && result.result) {
       const validationResult: AddressValidationResult = result.result;
       const now = new Date().toISOString();
-      const updates: Partial<Shipment> = { addressValidation: validationResult, updatedAt: now };
-      if (validationResult.status === 'corrected' && validationResult.suggestedAddress) {
-        updates.destinationAddress = validationResult.suggestedAddress;
-        validationResult.accepted = true;
+      const updates: Partial<Shipment> = { updatedAt: now };
+      if (side === 'origin') {
+        updates.originAddressValidation = validationResult;
+        if (validationResult.status === 'corrected' && validationResult.suggestedAddress) {
+          updates.originAddress = validationResult.suggestedAddress;
+          validationResult.accepted = true;
+        }
+      } else {
+        updates.addressValidation = validationResult;
+        if (validationResult.status === 'corrected' && validationResult.suggestedAddress) {
+          updates.destinationAddress = validationResult.suggestedAddress;
+          validationResult.accepted = true;
+        }
       }
       updateShipment(shipmentId, updates);
       setProviderSuccess(
-        validationResult.status === 'validated' ? 'Address validated successfully.'
-        : validationResult.status === 'corrected' ? 'Address corrected and updated from provider suggestion.'
-        : 'Address validation completed.'
+        validationResult.status === 'validated' ? `${side === 'origin' ? 'Origin' : 'Destination'} address validated successfully.`
+        : validationResult.status === 'corrected' ? `${side === 'origin' ? 'Origin' : 'Destination'} address corrected and updated from provider suggestion.`
+        : `${side === 'origin' ? 'Origin' : 'Destination'} address validation completed.`
       );
     } else {
       const failedValidation: AddressValidationResult = {
         status: 'failed',
         validatedAt: new Date().toISOString(),
-        originalAddress: shipment.destinationAddress,
+        originalAddress: targetAddress,
         messages: [result.error?.message || 'Validation failed'],
       };
-      updateShipment(shipmentId, { addressValidation: failedValidation, updatedAt: new Date().toISOString() });
+      const updates: Partial<Shipment> = { updatedAt: new Date().toISOString() };
+      if (side === 'origin') updates.originAddressValidation = failedValidation;
+      else updates.addressValidation = failedValidation;
+      updateShipment(shipmentId, updates);
       setProviderError(friendlyProviderError(result.error || { code: 'UNKNOWN', message: 'Address validation failed.' }));
     }
     setProviderLoading(null);
@@ -2115,9 +2154,21 @@ export default function ShippingCenter() {
                         </div>
                       )}
 
+                      {selectedShip.originAddressValidation && (
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className="text-slate-400 font-bold">Origin Addr</span>
+                          <span className={`px-2 py-0.5 rounded-md text-[10px] font-black uppercase tracking-widest ${
+                            selectedShip.originAddressValidation.status === 'validated' ? 'bg-emerald-100 text-emerald-700' :
+                            selectedShip.originAddressValidation.status === 'corrected' ? 'bg-blue-100 text-blue-700' :
+                            selectedShip.originAddressValidation.status === 'failed' ? 'bg-red-100 text-red-700' :
+                            'bg-slate-100 text-slate-500'
+                          }`}>{selectedShip.originAddressValidation.status}</span>
+                          {selectedShip.originAddressValidation.validatedAt && <span className="text-[10px] text-slate-400">{formatDateTime(selectedShip.originAddressValidation.validatedAt)}</span>}
+                        </div>
+                      )}
                       {selectedShip.addressValidation && (
                         <div className="flex items-center gap-2 text-xs">
-                          <span className="text-slate-400 font-bold">Address</span>
+                          <span className="text-slate-400 font-bold">Dest Addr</span>
                           <span className={`px-2 py-0.5 rounded-md text-[10px] font-black uppercase tracking-widest ${
                             selectedShip.addressValidation.status === 'validated' ? 'bg-emerald-100 text-emerald-700' :
                             selectedShip.addressValidation.status === 'corrected' ? 'bg-blue-100 text-blue-700' :
@@ -2174,11 +2225,18 @@ export default function ShippingCenter() {
 
                       <div className="flex gap-2 flex-wrap pt-1">
                         {!isManualMode && canValidateAddress && !isWriteBlocked && isEditable(selectedShip.status) && !selectedShip.label && (
-                          <button onClick={() => handleValidateAddress(selectedShip.id)} disabled={providerLoading !== null}
-                            className="px-3 py-2 bg-white text-indigo-600 border border-indigo-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50 transition-all disabled:opacity-40 flex items-center gap-1">
-                            <span className="material-symbols-outlined text-sm">{providerLoading === 'validate' ? 'hourglass_top' : 'verified'}</span>
-                            {providerLoading === 'validate' ? 'Validating...' : 'Validate Address'}
-                          </button>
+                          <>
+                            <button onClick={() => handleValidateAddress(selectedShip.id, 'origin')} disabled={providerLoading !== null}
+                              className="px-3 py-2 bg-white text-indigo-600 border border-indigo-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50 transition-all disabled:opacity-40 flex items-center gap-1">
+                              <span className="material-symbols-outlined text-sm">{providerLoading === 'validate' ? 'hourglass_top' : 'verified'}</span>
+                              {providerLoading === 'validate' ? 'Validating...' : 'Validate Origin'}
+                            </button>
+                            <button onClick={() => handleValidateAddress(selectedShip.id, 'destination')} disabled={providerLoading !== null}
+                              className="px-3 py-2 bg-white text-indigo-600 border border-indigo-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50 transition-all disabled:opacity-40 flex items-center gap-1">
+                              <span className="material-symbols-outlined text-sm">{providerLoading === 'validate' ? 'hourglass_top' : 'verified'}</span>
+                              {providerLoading === 'validate' ? 'Validating...' : 'Validate Destination'}
+                            </button>
+                          </>
                         )}
 
                         {!isManualMode && canFetchRates && !isWriteBlocked && ['Draft', 'Ready'].includes(selectedShip.status) && (() => {
@@ -3182,7 +3240,7 @@ export default function ShippingCenter() {
                                   {eligible.map(s => (
                                     <tr key={s.id} className="hover:bg-slate-50">
                                       <td className="px-3 py-2 font-mono text-slate-600">{s.destinationAddress.name || s.id.slice(0, 8)}</td>
-                                      <td className="px-3 py-2 font-mono text-slate-500">{s.trackingNumber?.slice(0, 16)}{(s.trackingNumber?.length || 0) > 16 ? '…' : ''}</td>
+                                      <td className="px-3 py-2 font-mono text-slate-500 break-all">{s.trackingNumber}</td>
                                       <td className="px-3 py-2"><span className={`px-2 py-0.5 rounded-full text-[9px] font-black uppercase ${STATUS_COLORS[s.status]}`}>{s.status}</span></td>
                                       <td className="px-3 py-2 text-slate-400">{s.lastTrackingSyncAt ? new Date(s.lastTrackingSyncAt).toLocaleDateString() : 'Never'}</td>
                                     </tr>
@@ -3270,7 +3328,7 @@ export default function ShippingCenter() {
                             return (
                               <tr key={i} className="hover:bg-slate-50 cursor-pointer" onClick={() => { setShowBulkSyncModal(false); setSelectedShipment(r.shipmentId); setDetailTab('tracking'); }}>
                                 <td className="px-3 py-2 font-mono text-slate-600">{ship?.destinationAddress.name || r.shipmentId.slice(0, 8)}</td>
-                                <td className="px-3 py-2 font-mono text-slate-500">{r.trackingNumber.slice(0, 16)}{r.trackingNumber.length > 16 ? '…' : ''}</td>
+                                <td className="px-3 py-2 font-mono text-slate-500 break-all">{r.trackingNumber}</td>
                                 <td className="px-3 py-2"><span className={`px-2 py-0.5 rounded-full text-[9px] font-black uppercase ${resultColors[r.result] || 'bg-slate-100 text-slate-500'}`}>{resultLabels[r.result] || r.result}</span></td>
                                 <td className="px-3 py-2 text-slate-400">
                                   {r.result === 'updated' && r.newEventCount ? `${r.newEventCount} new event${r.newEventCount > 1 ? 's' : ''}` : ''}
