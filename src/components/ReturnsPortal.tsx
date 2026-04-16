@@ -39,7 +39,10 @@ const RETURN_STATUS_CONFIG: Record<ReturnStatus, { color: string; icon: string }
   'Draft': { color: 'bg-slate-100 text-slate-700 border-slate-200', icon: 'edit_note' },
   'Requested': { color: 'bg-blue-100 text-blue-700 border-blue-200', icon: 'send' },
   'Approved': { color: 'bg-emerald-100 text-emerald-700 border-emerald-200', icon: 'check_circle' },
+  'Ready': { color: 'bg-sky-100 text-sky-700 border-sky-200', icon: 'inventory_2' },
   'Label Created': { color: 'bg-indigo-100 text-indigo-700 border-indigo-200', icon: 'label' },
+  'Packed': { color: 'bg-violet-100 text-violet-700 border-violet-200', icon: 'inbox' },
+  'Dispatched': { color: 'bg-orange-100 text-orange-700 border-orange-200', icon: 'outbox' },
   'In Transit': { color: 'bg-amber-100 text-amber-700 border-amber-200', icon: 'local_shipping' },
   'Delivered': { color: 'bg-emerald-100 text-emerald-700 border-emerald-200', icon: 'home_storage' },
   'Received': { color: 'bg-cyan-100 text-cyan-700 border-cyan-200', icon: 'inventory' },
@@ -107,8 +110,11 @@ function getNextStatuses(current: ReturnStatus): ReturnStatus[] {
   const transitions: Record<ReturnStatus, ReturnStatus[]> = {
     'Draft': ['Requested', 'Cancelled'],
     'Requested': ['Approved', 'Rejected', 'Cancelled'],
-    'Approved': ['Label Created', 'Cancelled'],
-    'Label Created': ['In Transit', 'Cancelled'],
+    'Approved': ['Ready', 'Label Created', 'Cancelled'],
+    'Ready': ['Label Created', 'Cancelled'],
+    'Label Created': ['Packed', 'In Transit', 'Cancelled'],
+    'Packed': ['Dispatched', 'In Transit', 'Cancelled'],
+    'Dispatched': ['In Transit'],
     'In Transit': ['Delivered', 'Received'],
     'Delivered': ['Received'],
     'Received': ['Inspecting', 'Completed'],
@@ -160,21 +166,24 @@ export default function ReturnsPortal() {
   }, [location.state, canCreate, canView, navigate, location.pathname]);
 
   useEffect(() => {
+    // 1:1 mapping — do not collapse Packed into Label Created, do not collapse Dispatched into In Transit.
+    // In Transit is only reached when the shipment itself reports In Transit (driven by actual carrier/provider events).
     const SHIPMENT_TO_RETURN_STATUS: Record<string, ReturnStatus> = {
+      'Ready': 'Ready',
       'Label Created': 'Label Created',
-      'Packed': 'Label Created',
-      'Dispatched': 'In Transit',
+      'Packed': 'Packed',
+      'Dispatched': 'Dispatched',
       'In Transit': 'In Transit',
       'Delivered': 'Delivered',
     };
-    const SYNC_ELIGIBLE: ReturnStatus[] = ['Approved', 'Label Created', 'In Transit', 'Delivered'];
+    const SYNC_ELIGIBLE: ReturnStatus[] = ['Approved', 'Ready', 'Label Created', 'Packed', 'Dispatched', 'In Transit', 'Delivered'];
     returns.forEach(ret => {
       if (!ret.returnShipmentId || !SYNC_ELIGIBLE.includes(ret.status)) return;
       const linkedShip = shipments.find(s => s.id === ret.returnShipmentId);
       if (!linkedShip) return;
       const mappedStatus = SHIPMENT_TO_RETURN_STATUS[linkedShip.status];
       if (!mappedStatus) return;
-      const statusOrder: ReturnStatus[] = ['Draft', 'Requested', 'Approved', 'Label Created', 'In Transit', 'Delivered'];
+      const statusOrder: ReturnStatus[] = ['Draft', 'Requested', 'Approved', 'Ready', 'Label Created', 'Packed', 'Dispatched', 'In Transit', 'Delivered'];
       const currentIdx = statusOrder.indexOf(ret.status);
       const targetIdx = statusOrder.indexOf(mappedStatus);
       if (targetIdx > currentIdx) {
@@ -556,9 +565,13 @@ function ReturnDetailModal({ ret, shipments, onClose, onStatusTransition, onOpen
     if (isWriteBlocked) return false;
     if (status === 'Requested') return canCreate;
     if (status === 'Approved' || status === 'Rejected') return canApprove;
-    // When a linked return shipment exists, the shipping-leg statuses are driven by the shipment auto-sync
-    // — manual Label Created / In Transit / Delivered actions are not allowed.
+    // When a linked return shipment exists, the shipping-leg statuses (Ready / Label Created / Packed /
+    // Dispatched / In Transit / Delivered) are exclusively driven by shipment auto-sync — manual buttons
+    // for these are suppressed to keep the return in lock-step with the shipment.
+    if (status === 'Ready') return canCreateShipment && !linkedShipmentDrivesShippingLeg;
     if (status === 'Label Created') return canCreateShipment && !linkedShipmentDrivesShippingLeg;
+    if (status === 'Packed') return canCreateShipment && !linkedShipmentDrivesShippingLeg;
+    if (status === 'Dispatched') return canCreateShipment && !linkedShipmentDrivesShippingLeg;
     if (status === 'In Transit') return canCreateShipment && !linkedShipmentDrivesShippingLeg;
     if (status === 'Delivered') return canCreateShipment && !linkedShipmentDrivesShippingLeg;
     if (status === 'Received') return canReceive && (ret.status === 'Delivered' || linkedShipmentDelivered || !linkedShipmentDrivesShippingLeg);
@@ -675,7 +688,19 @@ function ReturnDetailModal({ ret, shipments, onClose, onStatusTransition, onOpen
                     <span className="material-symbols-outlined" style={{ fontSize: 14 }}>open_in_new</span>
                   </button>
                   <p className="text-xs text-indigo-600">Carrier: {linkedShipment.carrier || 'N/A'} • Service: {linkedShipment.serviceLevel || 'N/A'}</p>
-                  <p className="text-xs text-indigo-600">Tracking: <span className="font-mono break-all">{linkedShipment.trackingNumber || 'Pending'}</span></p>
+                  {linkedShipment.trackingNumber ? (
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <span className="text-xs text-indigo-600">Tracking:</span>
+                      <code className="font-mono text-xs text-indigo-900 bg-white/60 px-2 py-0.5 rounded border border-indigo-100 break-all select-all">{linkedShipment.trackingNumber}</code>
+                      <button onClick={() => navigator.clipboard.writeText(linkedShipment.trackingNumber!)}
+                        title="Copy full tracking number"
+                        className="p-0.5 rounded hover:bg-indigo-100 text-indigo-500 hover:text-indigo-700">
+                        <span className="material-symbols-outlined" style={{ fontSize: 14 }}>content_copy</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-indigo-600">Tracking: <span className="font-mono">Pending</span></p>
+                  )}
                   {linkedShipment.returnInfo?.returnLabelUrl && (
                     <a href={linkedShipment.returnInfo.returnLabelUrl} target="_blank" rel="noopener noreferrer"
                       className="inline-flex items-center gap-1 text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold mt-1">
@@ -716,7 +741,7 @@ function ReturnDetailModal({ ret, shipments, onClose, onStatusTransition, onOpen
                   </p>
                 </div>
               )}
-              {linkedShipmentDrivesShippingLeg && (ret.status === 'Approved' || ret.status === 'Label Created' || ret.status === 'In Transit') && (
+              {linkedShipmentDrivesShippingLeg && (['Approved', 'Ready', 'Label Created', 'Packed', 'Dispatched', 'In Transit'] as ReturnStatus[]).includes(ret.status) && (
                 <div className="mt-2 px-3 py-2 bg-indigo-50/60 border border-indigo-200 rounded-lg">
                   <p className="text-[10px] text-indigo-600 font-medium">
                     <span className="material-symbols-outlined align-middle mr-1" style={{ fontSize: 12 }}>sync</span>

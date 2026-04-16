@@ -934,18 +934,15 @@ export default function ShippingCenter() {
     return missing;
   }
 
-  async function handleValidateAddress(shipmentId: string, side: 'origin' | 'destination' = 'destination') {
-    if (isWriteBlocked) return;
-    const shipment = shipments.find(s => s.id === shipmentId);
-    if (!shipment) return;
-    clearProviderFeedback();
-    setProviderLoading('validate');
+  async function validateSingleSide(
+    shipment: Shipment,
+    side: 'origin' | 'destination'
+  ): Promise<{ ok: boolean; status?: AddressValidationResult['status']; message?: string; updates: Partial<Shipment> }> {
     const targetAddress = side === 'origin' ? shipment.originAddress : shipment.destinationAddress;
     const result = await shippingApi.validateAddress(targetAddress);
+    const updates: Partial<Shipment> = {};
     if (result.success && result.result) {
       const validationResult: AddressValidationResult = result.result;
-      const now = new Date().toISOString();
-      const updates: Partial<Shipment> = { updatedAt: now };
       if (side === 'origin') {
         updates.originAddressValidation = validationResult;
         if (validationResult.status === 'corrected' && validationResult.suggestedAddress) {
@@ -959,27 +956,80 @@ export default function ShippingCenter() {
           validationResult.accepted = true;
         }
       }
-      updateShipment(shipmentId, updates);
-      setProviderSuccess(
-        validationResult.status === 'validated' ? `${side === 'origin' ? 'Origin' : 'Destination'} address validated successfully.`
-        : validationResult.status === 'corrected' ? `${side === 'origin' ? 'Origin' : 'Destination'} address corrected and updated from provider suggestion.`
-        : `${side === 'origin' ? 'Origin' : 'Destination'} address validation completed.`
-      );
+      return { ok: true, status: validationResult.status, updates };
+    }
+    const failedValidation: AddressValidationResult = {
+      status: 'failed',
+      validatedAt: new Date().toISOString(),
+      originalAddress: targetAddress,
+      messages: [result.error?.message || 'Validation failed'],
+    };
+    if (side === 'origin') updates.originAddressValidation = failedValidation;
+    else updates.addressValidation = failedValidation;
+    return { ok: false, status: 'failed', message: result.error?.message, updates };
+  }
+
+  // Combined origin + destination validation in a single operator action.
+  // Validates origin and destination sequentially, merges both result updates into a single
+  // updateShipment call, and surfaces one consolidated feedback message.
+  async function handleValidateAddresses(shipmentId: string) {
+    if (isWriteBlocked) return;
+    const shipment = shipments.find(s => s.id === shipmentId);
+    if (!shipment) return;
+    clearProviderFeedback();
+    setProviderLoading('validate');
+
+    const originResult = await validateSingleSide(shipment, 'origin');
+    // Re-fetch to pick up any origin suggested-address swap before validating destination.
+    const refreshed: Shipment = { ...shipment, ...originResult.updates } as Shipment;
+    const destResult = await validateSingleSide(refreshed, 'destination');
+
+    const now = new Date().toISOString();
+    updateShipment(shipmentId, {
+      ...originResult.updates,
+      ...destResult.updates,
+      updatedAt: now,
+    });
+
+    const summarize = (label: string, r: { ok: boolean; status?: AddressValidationResult['status']; message?: string }) => {
+      if (!r.ok) return `${label}: failed${r.message ? ` (${r.message})` : ''}`;
+      if (r.status === 'validated') return `${label}: validated`;
+      if (r.status === 'corrected') return `${label}: corrected & accepted`;
+      return `${label}: ${r.status ?? 'completed'}`;
+    };
+
+    const anyFailed = !originResult.ok || !destResult.ok;
+    const summary = `${summarize('Origin', originResult)} • ${summarize('Destination', destResult)}`;
+    if (anyFailed) {
+      setProviderError(friendlyProviderError({ code: 'ADDRESS_VALIDATION_PARTIAL', message: summary }));
     } else {
-      const failedValidation: AddressValidationResult = {
-        status: 'failed',
-        validatedAt: new Date().toISOString(),
-        originalAddress: targetAddress,
-        messages: [result.error?.message || 'Validation failed'],
-      };
-      const updates: Partial<Shipment> = { updatedAt: new Date().toISOString() };
-      if (side === 'origin') updates.originAddressValidation = failedValidation;
-      else updates.addressValidation = failedValidation;
-      updateShipment(shipmentId, updates);
-      setProviderError(friendlyProviderError(result.error || { code: 'UNKNOWN', message: 'Address validation failed.' }));
+      setProviderSuccess(`Addresses validated — ${summary}.`);
     }
     setProviderLoading(null);
   }
+
+  // Legacy single-side validator retained for internal/programmatic use. The operator-facing
+  // UX uses the combined handleValidateAddresses action above.
+  async function handleValidateAddress(shipmentId: string, side: 'origin' | 'destination' = 'destination') {
+    if (isWriteBlocked) return;
+    const shipment = shipments.find(s => s.id === shipmentId);
+    if (!shipment) return;
+    clearProviderFeedback();
+    setProviderLoading('validate');
+    const result = await validateSingleSide(shipment, side);
+    updateShipment(shipmentId, { ...result.updates, updatedAt: new Date().toISOString() });
+    if (!result.ok) {
+      setProviderError(friendlyProviderError({ code: 'UNKNOWN', message: result.message || 'Address validation failed.' }));
+    } else if (result.status === 'validated') {
+      setProviderSuccess(`${side === 'origin' ? 'Origin' : 'Destination'} address validated successfully.`);
+    } else if (result.status === 'corrected') {
+      setProviderSuccess(`${side === 'origin' ? 'Origin' : 'Destination'} address corrected and updated from provider suggestion.`);
+    } else {
+      setProviderSuccess(`${side === 'origin' ? 'Origin' : 'Destination'} address validation completed.`);
+    }
+    setProviderLoading(null);
+  }
+  void handleValidateAddress;
 
   async function handleFetchRates(shipmentId: string) {
     if (isWriteBlocked) return;
@@ -2225,18 +2275,12 @@ export default function ShippingCenter() {
 
                       <div className="flex gap-2 flex-wrap pt-1">
                         {!isManualMode && canValidateAddress && !isWriteBlocked && isEditable(selectedShip.status) && !selectedShip.label && (
-                          <>
-                            <button onClick={() => handleValidateAddress(selectedShip.id, 'origin')} disabled={providerLoading !== null}
-                              className="px-3 py-2 bg-white text-indigo-600 border border-indigo-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50 transition-all disabled:opacity-40 flex items-center gap-1">
-                              <span className="material-symbols-outlined text-sm">{providerLoading === 'validate' ? 'hourglass_top' : 'verified'}</span>
-                              {providerLoading === 'validate' ? 'Validating...' : 'Validate Origin'}
-                            </button>
-                            <button onClick={() => handleValidateAddress(selectedShip.id, 'destination')} disabled={providerLoading !== null}
-                              className="px-3 py-2 bg-white text-indigo-600 border border-indigo-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50 transition-all disabled:opacity-40 flex items-center gap-1">
-                              <span className="material-symbols-outlined text-sm">{providerLoading === 'validate' ? 'hourglass_top' : 'verified'}</span>
-                              {providerLoading === 'validate' ? 'Validating...' : 'Validate Destination'}
-                            </button>
-                          </>
+                          <button onClick={() => handleValidateAddresses(selectedShip.id)} disabled={providerLoading !== null}
+                            title="Validates both origin (shipper) and destination (recipient) addresses with the active shipping provider in a single action. Required for Get Rates."
+                            className="px-3 py-2 bg-white text-indigo-600 border border-indigo-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50 transition-all disabled:opacity-40 flex items-center gap-1">
+                            <span className="material-symbols-outlined text-sm">{providerLoading === 'validate' ? 'hourglass_top' : 'verified'}</span>
+                            {providerLoading === 'validate' ? 'Validating Addresses...' : 'Validate Addresses'}
+                          </button>
                         )}
 
                         {!isManualMode && canFetchRates && !isWriteBlocked && ['Draft', 'Ready'].includes(selectedShip.status) && (() => {

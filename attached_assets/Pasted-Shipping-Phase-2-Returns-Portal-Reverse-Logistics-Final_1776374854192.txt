@@ -1,0 +1,197 @@
+Shipping Phase 2 Returns Portal / Reverse Logistics — Final Narrow Sync + Validation UX Correction Pass
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a narrow final correction pass for the Returns Portal / Reverse Logistics workstream.
+Do not redesign the app.
+Do not broaden scope.
+Fix the remaining reverse-logistics synchronization, tracking visibility, and address-validation UX issues exactly as described below.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Firebase/Firestore data architect
+- Enterprise shipping systems architect
+- Senior reverse-logistics / returns expert with 20+ years of experience in customer returns, RMA operations, return labels, return intake, inspection workflows, carrier-integrated reverse shipping, and warehouse receiving
+- Root-cause debugging specialist
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- RBAC/sub-permissions
+- lifecycle gating
+- platform/store hierarchy
+- System Owner Plans & Features matrix
+- Store Permissions Matrix
+- secure server-side provider call architecture
+- Shipping Center as the sole provider-management home
+- provider/manual shipment mode split
+- webhook/event automation
+- bulk sync / reconciliation
+- existing outbound shipping core flow
+- Returns Portal area, return model, inspection/disposition flow, permissions, source linkage, shipment linkage, and label-sharing path already implemented
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — REMAINING FAILURES
+==================================================
+
+These are the exact remaining blockers and must be fixed literally:
+
+1) Tracking number is still masked in return-linked shipment surfaces
+Observed QA result:
+- UPS tracking is still shown with XXXXX in return-linked shipment/shipping surfaces
+Required behavior:
+- full tracking number must remain visible to authorized operational users everywhere it should be visible
+- no masking/truncation regression in return-linked shipment views
+
+2) Address validation UX is too fragmented
+Observed QA result:
+- there are two separate buttons:
+  - Validate Origin
+  - Validate Destination
+- this creates a clunky operator workflow
+Required behavior:
+- use one combined validation action for provider-mode rate readiness
+- operator should have one clear button/action that handles address validation readiness for both Origin and Destination
+- the flow can still:
+  - correct/suggest address fixes
+  - then ask for validation/confirmation if needed
+- but the operator-facing entry should be one coherent action, not two separate buttons
+- Get Rates must remain blocked until both Origin and Destination are validated/accepted where applicable
+
+3) Return status still does not mirror linked shipment precisely enough
+Observed QA result:
+- when linked shipment is Packed, return still shows Label Created
+- when linked shipment is Dispatched, return jumps to In Transit
+Required behavior:
+- return shipping-leg status must mirror the linked shipment status more faithfully
+- expected mapping for the reverse-shipping leg should be:
+  - linked shipment Ready -> return Ready (or equivalent shipping-leg state, not stale Approved)
+  - linked shipment Label Created -> return Label Created
+  - linked shipment Packed -> return Packed
+  - linked shipment Dispatched -> return Dispatched
+  - only after actual carrier/provider progression/scan should return become In Transit
+  - linked shipment Delivered -> return Delivered / Awaiting Receipt (or the current equivalent pre-Received state)
+- do not skip directly from Dispatched to In Transit unless carrier/provider events actually justify it
+
+==================================================
+NON-NEGOTIABLE IMPLEMENTATION REQUIREMENTS
+==================================================
+
+1. Restore full tracking visibility in return-linked shipment surfaces
+Required:
+- remove masking/truncation for authorized operators in all return-linked shipment contexts
+- ensure UPS/FedEx/other provider tracking is fully visible where operationally required
+Acceptance:
+- QA no longer sees XXXXX in linked shipment/return shipping surfaces
+
+2. Combined address validation action for provider mode
+Required:
+- replace the two-button operator experience with one combined validation action
+- the system may still validate/correct origin and destination separately under the hood
+- but the operator-facing UX must be one coherent Validate Addresses action (or equivalent)
+- after edits, readiness must reset appropriately
+- Get Rates must depend on both origin and destination being validated/accepted
+Acceptance:
+- QA sees one clear address validation action for provider-mode rating readiness
+- rates remain blocked until both ends are valid/accepted
+
+3. Precise linked shipment → return shipping-leg status mapping
+Required:
+- reverse-shipping portion of the return must follow the linked shipment status exactly enough to avoid confusing the user
+- introduce/adjust mapping so return reflects:
+  - Ready
+  - Label Created
+  - Packed
+  - Dispatched
+  - In Transit only after actual provider/carrier progression
+  - Delivered / Awaiting Receipt after shipment Delivered
+- do not collapse Packed into Label Created
+- do not collapse Dispatched into In Transit
+- manual shipping-leg buttons must remain suppressed when linked shipment is authoritative
+
+Acceptance:
+- QA sees return status track linked shipment correctly across Ready / Label Created / Packed / Dispatched / In Transit / Delivered
+
+==================================================
+FULFILLMENT RULES TO PRESERVE
+==================================================
+
+Do not weaken these rules:
+- existing outbound shipping core flow remains intact
+- provider/manual mode split remains intact
+- provider-driven shipment lifecycle remains intact
+- manual shipments remain manual
+- PDF-first label flow remains intact
+- webhook/event automation remains intact
+- bulk sync/reconciliation remains intact
+- return inspection/disposition flow already implemented remains intact
+- preview mode safety remains intact
+- permissions and plan gating remain intact
+- Received remains gated appropriately after linked shipment Delivered
+
+==================================================
+IMPORTANT IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into full direct email infrastructure
+- Do not touch unrelated workstreams
+- Do not break outbound shipping
+- Do not break provider/manual mode split
+- Do not create conflicting state between Returns and Shipping Center
+- Keep the design baseline consistent
+- Keep operator workflow practical and auditable
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact execution order:
+
+1) Restore full tracking visibility in all return-linked shipment surfaces
+2) Replace the two-button address-validation UX with one combined validation action
+3) Fix linked shipment → return shipping-leg mapping for Ready / Label Created / Packed / Dispatched / In Transit / Delivered
+4) Re-test all affected reverse-logistics and outbound shipping flows
+5) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- full tracking visibility requirement in return-linked shipment surfaces
+- combined origin+destination validation UX and readiness behavior
+- precise linked shipment → return shipping-leg mapping rules
+- clarification that In Transit only begins after actual provider/carrier progression
+- future recommendations not implemented now
+
+==================================================
+MANDATORY OUTPUT PROOF
+==================================================
+
+Do not give a generic completion summary.
+Do not say this task is complete unless each literal blocker is visibly fixed in the actual product UI and behavior.
+
+OUTPUT FORMAT REQUIRED
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Tracking Visibility Regression Fix
+3. Combined Address Validation UX Fix
+4. Linked Shipment Status Mapping Fix
+5. Files Changed
+6. Documentation Updated
+7. Non-Regression Notes

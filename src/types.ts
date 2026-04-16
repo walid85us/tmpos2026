@@ -931,7 +931,7 @@ export interface Shipment {
   batchId?: string;
 }
 
-export type ReturnStatus = 'Draft' | 'Requested' | 'Approved' | 'Label Created' | 'In Transit' | 'Delivered' | 'Received' | 'Inspecting' | 'Completed' | 'Rejected' | 'Cancelled';
+export type ReturnStatus = 'Draft' | 'Requested' | 'Approved' | 'Ready' | 'Label Created' | 'Packed' | 'Dispatched' | 'In Transit' | 'Delivered' | 'Received' | 'Inspecting' | 'Completed' | 'Rejected' | 'Cancelled';
 
 export type ReturnReason =
   | 'defective'
