@@ -1,0 +1,239 @@
+Shipping Phase 2 Returns Portal / Reverse Logistics — Narrow Correction Pass
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a narrow correction pass for the Returns Portal / Reverse Logistics workstream.
+Do not redesign the app.
+Do not broaden scope.
+Fix the remaining reverse-logistics behavior exactly as described below.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Firebase/Firestore data architect
+- Enterprise shipping systems architect
+- Senior reverse-logistics / returns expert with 20+ years of experience in customer returns, RMA operations, return labels, return intake, inspection workflows, carrier-integrated reverse shipping, and warehouse receiving
+- Root-cause debugging specialist
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- RBAC/sub-permissions
+- lifecycle gating
+- platform/store hierarchy
+- System Owner Plans & Features matrix
+- Store Permissions Matrix
+- secure server-side provider call architecture
+- Shipping Center as the sole provider-management home
+- provider/manual shipment mode split
+- webhook/event automation
+- bulk sync / reconciliation
+- existing outbound shipping core flow
+- current Returns Portal area, return model, inspection/disposition flow, and permissions already implemented
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — REMAINING FAILURES
+==================================================
+
+These are the exact remaining blockers and must be fixed literally:
+
+1) Return creation from source is not good enough
+Observed QA result:
+- Return creation exists, but the user wants it to work like Create Shipment using Source Reference Number
+Required behavior:
+- Return creation should support Source Reference Number resolution
+- When the user enters/selects a valid source reference, the return form should resolve and prefill all relevant return data from that source
+- This should work similarly to how shipment creation resolves source references
+
+2) Return linkage is only partial until source resolution is improved
+Required behavior:
+- Return should clearly store and show the source reference number
+- Source/customer/item linkage should be correct and visible after resolution
+- The return detail should make the source reference easy to see and use
+
+3) Return shipment / return status linkage is incorrect
+Observed QA result:
+- Return shows Label Created even while linked shipment still looks like draft / before actual label purchase
+Required behavior:
+- Return must not show Label Created until the linked return shipment label is actually purchased/created
+- Do not advance the return lifecycle early
+- Return lifecycle must follow the real linked shipment state where appropriate
+
+4) Reverse-logistics lifecycle must synchronize with live shipment status
+Required behavior:
+- Once the return shipment label is created, shipment progress between Label Created and Delivered should follow the live linked shipment/tracking status
+- Shipping Center and Returns Portal should stay synchronized
+- Return should not require duplicate manual progression for the shipping leg where shipment status already exists
+
+5) Received must be blocked until linked shipment is Delivered
+Required behavior:
+- The return status “Received” must not be enabled until the linked return shipment status shows Delivered
+- Once shipment is Delivered, the operator can then move the return to Received and begin intake/inspection
+- Do not allow Received prematurely
+
+6) Return label delivery to customer needs an operational path
+Required behavior:
+- Add a practical operator path to provide the return label to the customer
+- At minimum, support one or both of:
+  - send the label to the customer by email
+  - provide a usable carrier/label reference the customer can use with the carrier office to print the label
+- Keep it operational and realistic
+- Do not overbuild a full notification system if not needed, but there must be a real usable path
+
+==================================================
+NON-NEGOTIABLE IMPLEMENTATION REQUIREMENTS
+==================================================
+
+1. Source Reference Number return creation flow
+Required:
+- Add Source Reference Number as a first-class return creation mechanism
+- Resolve and prefill return data from the source record
+- Reuse the strongest patterns from shipment source resolution where appropriate
+- Prefill relevant fields such as:
+  - customer
+  - source type
+  - source reference
+  - linked shipment/invoice/repair/RMA context
+  - item information where available
+- Do not make the operator retype data that the source record already knows
+
+Acceptance:
+- QA can create a return by using Source Reference Number and sees the return prefilled correctly
+
+2. Source reference visibility
+Required:
+- Show Source Reference Number clearly on the return
+- Keep linkage visible in return detail and relevant list/detail surfaces
+Acceptance:
+- QA can clearly see and verify the source reference on the return
+
+3. Correct return shipment / return lifecycle synchronization
+Required:
+- Return must not move to Label Created until the linked return shipment label is truly created/purchased
+- If the linked shipment is still draft/not purchased, the return must not falsely show Label Created
+- Keep the return and return shipment relationship truthful and state-driven
+
+Acceptance:
+- QA no longer sees return Label Created before the linked label actually exists
+
+4. Live shipment-status-driven reverse shipping progression
+Required:
+- For the return shipping leg, the return should reflect the live linked shipment status where appropriate
+- Between label creation and delivered, the reverse-shipment movement should be driven by the linked shipment/tracking status rather than separate conflicting manual return states
+- Shipping Center and Returns Portal must stay coherent
+
+Acceptance:
+- QA can observe linked shipment status driving the reverse-logistics shipping portion coherently
+
+5. Received gating
+Required:
+- Received must remain disabled until linked return shipment status is Delivered
+- After Delivered, Received becomes available
+- Intake/inspection then follows normally
+
+Acceptance:
+- QA cannot set Received before shipment Delivered
+- QA can set Received after shipment Delivered
+
+6. Return label delivery to customer
+Required:
+- Add an operator path to provide the return label to the customer
+- Acceptable implementations:
+  - Send Label by Email action
+  - or a clean customer-facing reference/instructions path using shipment/label/tracking/carrier details
+- Keep it lightweight and operational
+- If email is implemented, keep it consistent with the app’s current mail/send patterns if any exist
+- If not, provide a clearly usable carrier/label reference path
+
+Acceptance:
+- QA can see a real operator option to get the return label to the customer
+
+==================================================
+FULFILLMENT RULES TO PRESERVE
+==================================================
+
+Do not weaken these rules:
+- existing outbound shipping core flow remains intact
+- provider/manual mode split remains intact
+- provider-driven shipment lifecycle remains intact
+- manual shipments remain manual
+- PDF-first label flow remains intact
+- webhook/event automation remains intact
+- bulk sync/reconciliation remains intact
+- return inspection/disposition flow already implemented remains intact
+- preview mode safety remains intact
+- permissions and plan gating remain intact
+
+==================================================
+IMPORTANT IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into full customer notification platform or full public portal
+- Do not touch unrelated workstreams
+- Do not break outbound shipping
+- Do not break provider/manual mode split
+- Do not create conflicting state between Returns and Shipping Center
+- Keep the design baseline consistent
+- Keep operator workflow practical and auditable
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact execution order:
+
+1) Add Source Reference Number resolution/prefill to return creation
+2) Make Source Reference Number clearly visible on return records
+3) Fix return shipment / return lifecycle synchronization so Label Created is only set when truly created
+4) Link reverse shipping progression to live linked shipment status
+5) Enforce Received only after linked shipment Delivered
+6) Add an operator path to provide the return label to the customer
+7) Re-test all affected reverse-logistics and outbound shipping flows
+8) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- return creation via Source Reference Number
+- source linkage and source reference visibility
+- return shipment / return lifecycle synchronization rules
+- linked shipment-driven reverse shipping progression
+- Received gating after shipment Delivered
+- operator path for giving return labels to customers
+- future recommendations not implemented now
+
+==================================================
+MANDATORY OUTPUT PROOF
+==================================================
+
+Do not give a generic completion summary.
+Do not say this task is complete unless each literal blocker is visibly fixed in the actual product UI and behavior.
+
+OUTPUT FORMAT REQUIRED
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Source Reference Number Return Creation Fix
+3. Source Linkage / Visibility Fix
+4. Return Shipment / Return Lifecycle Sync Fix
+5. Linked Shipment Status Progression Fix
+6. Received Gating Fix
+7. Return Label Delivery to Customer Fix
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes

@@ -17,6 +17,9 @@ import type {
   ShipmentAddress,
   ShipmentPackage,
   Customer,
+  Invoice,
+  RepairTicket,
+  RMA,
 } from '../types';
 
 export interface ReturnPrefill {
@@ -103,7 +106,7 @@ function getNextStatuses(current: ReturnStatus): ReturnStatus[] {
   const transitions: Record<ReturnStatus, ReturnStatus[]> = {
     'Draft': ['Requested', 'Cancelled'],
     'Requested': ['Approved', 'Rejected', 'Cancelled'],
-    'Approved': ['Label Created', 'Received', 'Cancelled'],
+    'Approved': ['Label Created', 'Cancelled'],
     'Label Created': ['In Transit', 'Cancelled'],
     'In Transit': ['Received'],
     'Received': ['Inspecting', 'Completed'],
@@ -116,7 +119,7 @@ function getNextStatuses(current: ReturnStatus): ReturnStatus[] {
 }
 
 export default function ReturnsPortal() {
-  const { returns, addReturn, updateReturn, shipments, addShipment, customers } = useStoreLocalState();
+  const { returns, addReturn, updateReturn, shipments, addShipment, customers, invoices, repairTickets, rmas } = useStoreLocalState();
   const { session, checkPermission, checkSubPermission, isWriteBlocked, canAccess } = useAccess();
   const location = useLocation();
   const navigate = useNavigate();
@@ -132,6 +135,7 @@ export default function ReturnsPortal() {
   const [showIntakeModal, setShowIntakeModal] = useState(false);
   const [showDispositionModal, setShowDispositionModal] = useState(false);
   const [showReturnShipmentModal, setShowReturnShipmentModal] = useState(false);
+  const [showLabelDeliveryModal, setShowLabelDeliveryModal] = useState(false);
   const [prefillData, setPrefillData] = useState<ReturnPrefill | null>(null);
 
   const canCreate = checkSubPermission('create_return') && !isWriteBlocked;
@@ -152,6 +156,44 @@ export default function ReturnsPortal() {
       }
     }
   }, [location.state, canCreate, canView, navigate, location.pathname]);
+
+  useEffect(() => {
+    const SHIPMENT_TO_RETURN_STATUS: Record<string, ReturnStatus> = {
+      'Label Created': 'Label Created',
+      'Packed': 'Label Created',
+      'Dispatched': 'In Transit',
+      'In Transit': 'In Transit',
+    };
+    const SYNC_ELIGIBLE: ReturnStatus[] = ['Approved', 'Label Created', 'In Transit'];
+    returns.forEach(ret => {
+      if (!ret.returnShipmentId || !SYNC_ELIGIBLE.includes(ret.status)) return;
+      const linkedShip = shipments.find(s => s.id === ret.returnShipmentId);
+      if (!linkedShip) return;
+      const mappedStatus = SHIPMENT_TO_RETURN_STATUS[linkedShip.status];
+      if (!mappedStatus) return;
+      const statusOrder: ReturnStatus[] = ['Draft', 'Requested', 'Approved', 'Label Created', 'In Transit'];
+      const currentIdx = statusOrder.indexOf(ret.status);
+      const targetIdx = statusOrder.indexOf(mappedStatus);
+      if (targetIdx > currentIdx) {
+        const now = new Date().toISOString();
+        const entry: ReturnStatusHistoryEntry = {
+          id: `rsh-sync-${Date.now()}-${ret.id}`,
+          status: mappedStatus,
+          timestamp: now,
+          performedBy: 'System',
+          notes: `Auto-synced from shipment ${linkedShip.shipmentNumber} (${linkedShip.status})`,
+        };
+        updateReturn(ret.id, {
+          status: mappedStatus,
+          updatedAt: now,
+          statusHistory: [...ret.statusHistory, entry],
+        });
+        if (selectedReturn?.id === ret.id) {
+          setSelectedReturn(prev => prev ? { ...prev, status: mappedStatus, updatedAt: now, statusHistory: [...prev.statusHistory, entry] } : null);
+        }
+      }
+    });
+  }, [shipments]);
 
   const filteredReturns = useMemo(() => {
     let list = [...returns];
@@ -339,7 +381,7 @@ export default function ReturnsPortal() {
       </div>
 
       {/* Return Detail Modal */}
-      {selectedReturn && !showReturnShipmentModal && (
+      {selectedReturn && !showReturnShipmentModal && !showLabelDeliveryModal && (
         <ReturnDetailModal
           ret={selectedReturn}
           shipments={shipments}
@@ -348,6 +390,7 @@ export default function ReturnsPortal() {
           onOpenIntake={() => setShowIntakeModal(true)}
           onOpenDisposition={() => setShowDispositionModal(true)}
           onOpenReturnShipment={() => setShowReturnShipmentModal(true)}
+          onOpenLabelDelivery={() => setShowLabelDeliveryModal(true)}
           canCreate={canCreate}
           canApprove={canApprove}
           canReceive={canReceive}
@@ -363,6 +406,10 @@ export default function ReturnsPortal() {
       {showCreateModal && (
         <CreateReturnModal
           customers={customers}
+          invoices={invoices}
+          repairTickets={repairTickets}
+          shipments={shipments}
+          rmas={rmas}
           prefill={prefillData}
           onClose={() => { setShowCreateModal(false); setPrefillData(null); }}
           onSave={(ret) => { addReturn(ret); setShowCreateModal(false); setPrefillData(null); }}
@@ -380,14 +427,17 @@ export default function ReturnsPortal() {
             if (selectedReturn.status !== 'Approved') return;
             addShipment(shipment);
             const now = new Date().toISOString();
+            const entry: ReturnStatusHistoryEntry = {
+              id: `rsh-${Date.now()}`,
+              status: 'Approved' as ReturnStatus,
+              timestamp: now,
+              performedBy: session?.name || 'System',
+              notes: `Return shipment ${shipment.shipmentNumber} created — awaiting label purchase in Shipping Center`,
+            };
             const updates: Partial<Return> = {
               returnShipmentId: shipment.id,
-              status: 'Label Created' as ReturnStatus,
               updatedAt: now,
-              statusHistory: [
-                ...selectedReturn.statusHistory,
-                { id: `rsh-${Date.now()}`, status: 'Label Created' as ReturnStatus, timestamp: now, performedBy: session?.name || 'System', notes: `Return shipment ${shipment.shipmentNumber} created` },
-              ],
+              statusHistory: [...selectedReturn.statusHistory, entry],
             };
             updateReturn(selectedReturn.id, updates);
             setSelectedReturn({ ...selectedReturn, ...updates } as Return);
@@ -434,6 +484,17 @@ export default function ReturnsPortal() {
           performedBy={session?.name || 'System'}
         />
       )}
+
+      {showLabelDeliveryModal && selectedReturn && (() => {
+        const linkedShip = selectedReturn.returnShipmentId ? shipments.find(s => s.id === selectedReturn.returnShipmentId) : null;
+        return linkedShip ? (
+          <LabelDeliveryModal
+            ret={selectedReturn}
+            shipment={linkedShip}
+            onClose={() => setShowLabelDeliveryModal(false)}
+          />
+        ) : null;
+      })()}
     </PageShell>
   );
 }
@@ -458,7 +519,7 @@ function ShipmentStatusBadge({ status }: { status: ShipmentStatus }) {
   );
 }
 
-function ReturnDetailModal({ ret, shipments, onClose, onStatusTransition, onOpenIntake, onOpenDisposition, onOpenReturnShipment, canCreate, canApprove, canReceive, canInspect, canDispose, canCancel, canCreateShipment, isWriteBlocked }: {
+function ReturnDetailModal({ ret, shipments, onClose, onStatusTransition, onOpenIntake, onOpenDisposition, onOpenReturnShipment, onOpenLabelDelivery, canCreate, canApprove, canReceive, canInspect, canDispose, canCancel, canCreateShipment, isWriteBlocked }: {
   ret: Return;
   shipments: Shipment[];
   onClose: () => void;
@@ -466,6 +527,7 @@ function ReturnDetailModal({ ret, shipments, onClose, onStatusTransition, onOpen
   onOpenIntake: () => void;
   onOpenDisposition: () => void;
   onOpenReturnShipment: () => void;
+  onOpenLabelDelivery: () => void;
   canCreate: boolean;
   canApprove: boolean;
   canReceive: boolean;
@@ -478,6 +540,7 @@ function ReturnDetailModal({ ret, shipments, onClose, onStatusTransition, onOpen
   const nextStatuses = getNextStatuses(ret.status);
   const linkedShipment = ret.returnShipmentId ? shipments.find(s => s.id === ret.returnShipmentId) : null;
   const originalShipment = ret.originalShipmentId ? shipments.find(s => s.id === ret.originalShipmentId) : null;
+  const linkedShipmentDelivered = linkedShipment?.status === 'Delivered';
 
   const canTransition = (status: ReturnStatus) => {
     if (isWriteBlocked) return false;
@@ -485,7 +548,7 @@ function ReturnDetailModal({ ret, shipments, onClose, onStatusTransition, onOpen
     if (status === 'Approved' || status === 'Rejected') return canApprove;
     if (status === 'Label Created') return canCreateShipment;
     if (status === 'In Transit') return canCreateShipment;
-    if (status === 'Received') return canReceive;
+    if (status === 'Received') return canReceive && linkedShipmentDelivered;
     if (status === 'Inspecting') return canInspect;
     if (status === 'Completed') return canDispose;
     if (status === 'Cancelled') return canCancel;
@@ -579,11 +642,15 @@ function ReturnDetailModal({ ret, shipments, onClose, onStatusTransition, onOpen
           {/* Return Shipment */}
           {linkedShipment ? (
             <div className="bg-indigo-50 rounded-2xl p-4 border border-indigo-100">
-              <h3 className="text-[10px] font-bold uppercase tracking-widest text-indigo-400 mb-2">Return Shipment</h3>
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-[10px] font-bold uppercase tracking-widest text-indigo-400">Return Shipment</h3>
+                <ShipmentStatusBadge status={linkedShipment.status} />
+              </div>
               <div className="flex items-center justify-between">
                 <div>
                   <p className="font-bold text-indigo-800">{linkedShipment.shipmentNumber}</p>
-                  <p className="text-xs text-indigo-600">Carrier: {linkedShipment.carrier || 'N/A'} • Tracking: {linkedShipment.trackingNumber || 'Pending'}</p>
+                  <p className="text-xs text-indigo-600">Carrier: {linkedShipment.carrier || 'N/A'} • Service: {linkedShipment.serviceLevel || 'N/A'}</p>
+                  <p className="text-xs text-indigo-600">Tracking: <span className="font-mono">{linkedShipment.trackingNumber || 'Pending'}</span></p>
                   {linkedShipment.returnInfo?.returnLabelUrl && (
                     <a href={linkedShipment.returnInfo.returnLabelUrl} target="_blank" rel="noopener noreferrer"
                       className="inline-flex items-center gap-1 text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold mt-1">
@@ -592,8 +659,38 @@ function ReturnDetailModal({ ret, shipments, onClose, onStatusTransition, onOpen
                     </a>
                   )}
                 </div>
-                <ShipmentStatusBadge status={linkedShipment.status} />
+                {(linkedShipment.status === 'Label Created' || linkedShipment.trackingNumber || linkedShipment.returnInfo?.returnLabelUrl) && !isWriteBlocked && (
+                  <button onClick={onOpenLabelDelivery}
+                    className="flex items-center gap-1.5 px-3 py-2 bg-indigo-600 text-white rounded-xl text-[11px] font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-600/20">
+                    <span className="material-symbols-outlined" style={{ fontSize: 14 }}>send</span>
+                    Send Label to Customer
+                  </button>
+                )}
               </div>
+              {linkedShipment.status === 'Draft' && (
+                <div className="mt-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg">
+                  <p className="text-[11px] text-amber-700 font-medium">
+                    <span className="material-symbols-outlined align-middle mr-1" style={{ fontSize: 14 }}>info</span>
+                    Shipment is still Draft — purchase a label in the Shipping Center to advance the return lifecycle.
+                  </p>
+                </div>
+              )}
+              {ret.status === 'In Transit' && linkedShipment.status === 'Delivered' && canReceive && (
+                <div className="mt-2 px-3 py-2 bg-emerald-50 border border-emerald-200 rounded-lg">
+                  <p className="text-[11px] text-emerald-700 font-medium">
+                    <span className="material-symbols-outlined align-middle mr-1" style={{ fontSize: 14 }}>check_circle</span>
+                    Shipment delivered — you can now mark this return as Received.
+                  </p>
+                </div>
+              )}
+              {ret.status === 'In Transit' && !linkedShipmentDelivered && (
+                <div className="mt-2 px-3 py-2 bg-slate-100 border border-slate-200 rounded-lg">
+                  <p className="text-[11px] text-slate-600 font-medium">
+                    <span className="material-symbols-outlined align-middle mr-1" style={{ fontSize: 14 }}>hourglass_top</span>
+                    Received will be available once shipment shows Delivered.
+                  </p>
+                </div>
+              )}
               {linkedShipment.events && linkedShipment.events.length > 0 && (
                 <div className="mt-3 pt-3 border-t border-indigo-200/50">
                   <p className="text-[10px] font-bold text-indigo-400 mb-1.5">Latest Activity</p>
@@ -724,8 +821,12 @@ function ReturnDetailModal({ ret, shipments, onClose, onStatusTransition, onOpen
   );
 }
 
-function CreateReturnModal({ customers, prefill, onClose, onSave, createdBy }: {
+function CreateReturnModal({ customers, invoices, repairTickets, shipments, rmas, prefill, onClose, onSave, createdBy }: {
   customers: Customer[];
+  invoices: Invoice[];
+  repairTickets: RepairTicket[];
+  shipments: Shipment[];
+  rmas: RMA[];
   prefill?: ReturnPrefill | null;
   onClose: () => void;
   onSave: (ret: Return) => void;
@@ -733,6 +834,7 @@ function CreateReturnModal({ customers, prefill, onClose, onSave, createdBy }: {
 }) {
   const [sourceType, setSourceType] = useState<ReturnSourceType>(prefill?.sourceType || 'invoice');
   const [sourceNumber, setSourceNumber] = useState(prefill?.sourceNumber || '');
+  const [sourceId, setSourceId] = useState(prefill?.sourceId || '');
   const [customerId, setCustomerId] = useState(prefill?.customerId || '');
   const [reason, setReason] = useState<ReturnReason>(prefill?.reason || 'defective');
   const [reasonDetails, setReasonDetails] = useState('');
@@ -753,8 +855,68 @@ function CreateReturnModal({ customers, prefill, onClose, onSave, createdBy }: {
     return [];
   });
   const [notes, setNotes] = useState('');
+  const [originalShipmentId, setOriginalShipmentId] = useState(prefill?.originalShipmentId || '');
+  const [sourceResolved, setSourceResolved] = useState<string | null>(prefill ? `Prefilled from ${SOURCE_TYPE_LABELS[prefill.sourceType]} ${prefill.sourceNumber}` : null);
+  const [sourceResolveError, setSourceResolveError] = useState<string | null>(null);
+  const [isResolving, setIsResolving] = useState(false);
 
   const selectedCustomer = customers.find(c => c.id === customerId);
+
+  const ELIGIBLE_INVOICE_STATUSES = ['Paid', 'Partially Paid'];
+  const ELIGIBLE_REPAIR_STATUSES = ['Completed', 'Delivered', 'Ready for Pickup'];
+  const ELIGIBLE_SHIPMENT_STATUSES = ['Delivered'];
+
+  function resolveSourceReference() {
+    const ref = sourceNumber.trim();
+    if (!ref) {
+      setSourceResolveError('Enter a source reference number to resolve.');
+      setSourceResolved(null);
+      return;
+    }
+    setIsResolving(true);
+    setSourceResolveError(null);
+    setSourceResolved(null);
+
+    if (sourceType === 'invoice') {
+      const invoice = invoices.find(inv => inv.invoiceNumber.toLowerCase() === ref.toLowerCase());
+      if (!invoice) { setSourceResolveError(`No invoice found with reference "${ref}".`); setIsResolving(false); return; }
+      if (!ELIGIBLE_INVOICE_STATUSES.includes(invoice.status)) { setSourceResolveError(`Invoice ${invoice.invoiceNumber} has status "${invoice.status}" — only Paid or Partially Paid invoices are eligible for returns.`); setIsResolving(false); return; }
+      setSourceId(invoice.id);
+      setSourceNumber(invoice.invoiceNumber);
+      setCustomerId(invoice.customerId);
+      setItems(invoice.items.map((it, idx) => ({ id: `ri-res-${idx}`, name: it.name, quantity: it.quantity, sku: it.stockItemId, reason })));
+      setSourceResolved(`Resolved: ${invoice.invoiceNumber} — ${invoice.customerName} (${invoice.status})`);
+    } else if (sourceType === 'repair') {
+      const ticket = repairTickets.find(t => t.ticketNumber.toLowerCase() === ref.toLowerCase());
+      if (!ticket) { setSourceResolveError(`No repair ticket found with reference "${ref}".`); setIsResolving(false); return; }
+      if (!ELIGIBLE_REPAIR_STATUSES.includes(ticket.status)) { setSourceResolveError(`Repair ticket ${ticket.ticketNumber} has status "${ticket.status}" — only Completed, Delivered, or Ready for Pickup tickets are eligible for returns.`); setIsResolving(false); return; }
+      setSourceId(ticket.id);
+      setSourceNumber(ticket.ticketNumber);
+      setCustomerId(ticket.customerId);
+      setItems([{ id: `ri-res-0`, name: `${ticket.device} — ${ticket.issue}`, quantity: 1, reason }]);
+      setSourceResolved(`Resolved: ${ticket.ticketNumber} — ${ticket.customerName}, ${ticket.device} (${ticket.status})`);
+    } else if (sourceType === 'shipment') {
+      const ship = shipments.find(s => s.shipmentNumber.toLowerCase() === ref.toLowerCase() && !s.returnInfo?.isReturn);
+      if (!ship) { setSourceResolveError(`No outbound shipment found with reference "${ref}".`); setIsResolving(false); return; }
+      if (!ELIGIBLE_SHIPMENT_STATUSES.includes(ship.status)) { setSourceResolveError(`Shipment ${ship.shipmentNumber} has status "${ship.status}" — only Delivered shipments are eligible for returns.`); setIsResolving(false); return; }
+      setSourceId(ship.id);
+      setSourceNumber(ship.shipmentNumber);
+      setOriginalShipmentId(ship.id);
+      const destCustomer = customers.find(c => c.name === ship.destinationAddress?.name || c.email === ship.destinationAddress?.email);
+      if (destCustomer) setCustomerId(destCustomer.id);
+      const pkgItems = ship.packages?.flatMap(p => p.contentsSummary ? [{ id: `ri-res-${Math.random()}`, name: p.contentsSummary, quantity: 1, reason }] : []) || [];
+      if (pkgItems.length > 0) setItems(pkgItems as ReturnItem[]);
+      setSourceResolved(`Resolved: ${ship.shipmentNumber} — ${ship.destinationAddress?.name || 'Customer'} (${ship.status})`);
+    } else if (sourceType === 'rma') {
+      const rma = rmas.find(r => r.rmaNumber.toLowerCase() === ref.toLowerCase());
+      if (!rma) { setSourceResolveError(`No RMA found with reference "${ref}".`); setIsResolving(false); return; }
+      setSourceId(rma.id);
+      setSourceNumber(rma.rmaNumber);
+      setItems(rma.items.map((it, idx) => ({ id: `ri-res-${idx}`, name: it.name, quantity: it.quantity, reason })));
+      setSourceResolved(`Resolved: ${rma.rmaNumber} — ${rma.supplierName} (${rma.status})`);
+    }
+    setIsResolving(false);
+  }
 
   const handleAddItem = () => {
     if (!itemName.trim()) return;
@@ -779,13 +941,13 @@ function CreateReturnModal({ customers, prefill, onClose, onSave, createdBy }: {
       returnNumber: retNum,
       status: 'Draft',
       sourceType,
-      sourceId: prefill?.sourceId || `src-${Date.now()}`,
+      sourceId: sourceId || `src-${Date.now()}`,
       sourceNumber: sourceNumber.trim(),
       customerId,
       customerName: selectedCustomer?.name || prefill?.customerName || '',
       customerEmail: selectedCustomer?.email || prefill?.customerEmail,
       customerPhone: selectedCustomer?.phone || prefill?.customerPhone,
-      originalShipmentId: prefill?.originalShipmentId,
+      originalShipmentId: originalShipmentId || prefill?.originalShipmentId,
       reason,
       reasonDetails: reasonDetails.trim() || undefined,
       requestedResolution,
@@ -813,6 +975,46 @@ function CreateReturnModal({ customers, prefill, onClose, onSave, createdBy }: {
         </div>
 
         <div className="p-6 space-y-5 max-h-[70vh] overflow-y-auto">
+          {/* Source Reference Resolution */}
+          <div className="bg-teal-50 rounded-2xl p-4 border border-teal-100">
+            <h3 className="text-[10px] font-bold uppercase tracking-widest text-teal-500 mb-3">Source Reference</h3>
+            <div className="grid grid-cols-5 gap-3">
+              <div className="col-span-2">
+                <label className="block text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-1.5">Source Type</label>
+                <select value={sourceType} onChange={e => { setSourceType(e.target.value as ReturnSourceType); setSourceResolved(null); setSourceResolveError(null); setSourceId(''); }}
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500/30">
+                  {(Object.keys(SOURCE_TYPE_LABELS) as ReturnSourceType[]).map(s => <option key={s} value={s}>{SOURCE_TYPE_LABELS[s]}</option>)}
+                </select>
+              </div>
+              <div className="col-span-3">
+                <label className="block text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-1.5">Source Reference # *</label>
+                <div className="flex gap-2">
+                  <input type="text" value={sourceNumber} onChange={e => { setSourceNumber(e.target.value); setSourceResolved(null); setSourceResolveError(null); }}
+                    onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); resolveSourceReference(); } }}
+                    placeholder={sourceType === 'invoice' ? 'e.g. INV-2026-001' : sourceType === 'repair' ? 'e.g. T-1001' : sourceType === 'shipment' ? 'e.g. SHP-2026-001' : sourceType === 'rma' ? 'e.g. RMA-2026-001' : 'Reference #'}
+                    className="flex-1 px-4 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500/30" />
+                  <button type="button" onClick={resolveSourceReference} disabled={isResolving || !sourceNumber.trim() || sourceType === 'walk_in'}
+                    className="px-4 py-2.5 bg-teal-600 text-white font-bold text-[10px] uppercase tracking-widest rounded-xl hover:bg-teal-700 transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5 shrink-0">
+                    <span className="material-symbols-outlined text-sm">{isResolving ? 'hourglass_top' : 'search'}</span>
+                    Resolve
+                  </button>
+                </div>
+              </div>
+            </div>
+            {sourceResolveError && (
+              <div className="mt-2 px-3 py-2 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2">
+                <span className="material-symbols-outlined text-red-500 text-sm mt-0.5">error</span>
+                <p className="text-xs text-red-600 font-medium">{sourceResolveError}</p>
+              </div>
+            )}
+            {sourceResolved && (
+              <div className="mt-2 px-3 py-2 bg-emerald-50 border border-emerald-200 rounded-lg flex items-start gap-2">
+                <span className="material-symbols-outlined text-emerald-500 text-sm mt-0.5">check_circle</span>
+                <p className="text-xs text-emerald-700 font-medium">{sourceResolved}</p>
+              </div>
+            )}
+          </div>
+
           {/* Customer Selection */}
           <div>
             <label className="block text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-1.5">Customer *</label>
@@ -821,22 +1023,6 @@ function CreateReturnModal({ customers, prefill, onClose, onSave, createdBy }: {
               <option value="">Select customer...</option>
               {customers.map(c => <option key={c.id} value={c.id}>{c.name} — {c.email}</option>)}
             </select>
-          </div>
-
-          {/* Source */}
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-1.5">Source Type</label>
-              <select value={sourceType} onChange={e => setSourceType(e.target.value as ReturnSourceType)}
-                className="w-full px-4 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500/30">
-                {(Object.keys(SOURCE_TYPE_LABELS) as ReturnSourceType[]).map(s => <option key={s} value={s}>{SOURCE_TYPE_LABELS[s]}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="block text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-1.5">Source # *</label>
-              <input type="text" value={sourceNumber} onChange={e => setSourceNumber(e.target.value)} placeholder="e.g. INV-2026-0042"
-                className="w-full px-4 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500/30" />
-            </div>
           </div>
 
           {/* Reason & Resolution */}
@@ -872,7 +1058,7 @@ function CreateReturnModal({ customers, prefill, onClose, onSave, createdBy }: {
                   <div key={item.id} className="bg-white rounded-xl p-3 border border-slate-100 flex items-center justify-between">
                     <div>
                       <span className="font-semibold text-sm">{item.name}</span>
-                      <span className="text-xs text-slate-400 ml-2">×{item.quantity}</span>
+                      <span className="text-xs text-slate-400 ml-2">x{item.quantity}</span>
                       {item.condition && <span className="text-[10px] ml-2 text-slate-500">({item.condition})</span>}
                     </div>
                     <button onClick={() => setItems(prev => prev.filter((_, idx) => idx !== i))}
@@ -1290,6 +1476,117 @@ function CreateReturnShipmentModal({ ret, customers, onClose, onSave, createdBy 
             className="px-5 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-bold hover:bg-indigo-700 shadow-lg shadow-indigo-600/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed">
             Create Return Shipment
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LabelDeliveryModal({ ret, shipment, onClose }: {
+  ret: Return;
+  shipment: Shipment;
+  onClose: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const [emailSent, setEmailSent] = useState(false);
+
+  const labelUrl = shipment.returnInfo?.returnLabelUrl || shipment.labelUrl;
+  const tracking = shipment.trackingNumber || 'N/A';
+  const carrier = shipment.carrier || 'N/A';
+  const service = shipment.serviceLevel || '';
+
+  const customerInstructions = [
+    `Return Authorization: ${ret.returnNumber}`,
+    `Carrier: ${carrier}${service ? ` (${service})` : ''}`,
+    `Tracking Number: ${tracking}`,
+    labelUrl ? `Label: ${labelUrl}` : 'Label: Please print the label provided by the store.',
+    '',
+    'Instructions:',
+    labelUrl ? '1. Download and print the return label from the link above.' : '1. Visit your nearest carrier location with this tracking number.',
+    '2. Securely package the return item(s).',
+    '3. Affix the return label to the outside of the package.',
+    labelUrl ? '4. Drop off the package at any carrier location or schedule a pickup.' : `4. Provide the tracking number (${tracking}) to the carrier agent.`,
+    '',
+    `Items being returned: ${ret.items.map(i => `${i.name} x${i.quantity}`).join(', ')}`,
+  ].join('\n');
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(customerInstructions).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    });
+  };
+
+  const handleEmailCustomer = () => {
+    if (!ret.customerEmail) return;
+    const subject = encodeURIComponent(`Return Label — ${ret.returnNumber}`);
+    const body = encodeURIComponent(customerInstructions);
+    window.open(`mailto:${ret.customerEmail}?subject=${subject}&body=${body}`, '_blank');
+    setEmailSent(true);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-start justify-center z-50 p-4 overflow-y-auto">
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg my-8 border border-slate-200">
+        <div className="px-6 py-5 border-b border-slate-100 flex items-center justify-between">
+          <h2 className="text-xl font-black text-slate-900 flex items-center gap-2">
+            <span className="material-symbols-outlined text-indigo-600">send</span>
+            Send Return Label — {ret.returnNumber}
+          </h2>
+          <button onClick={onClose} className="p-2 rounded-xl hover:bg-slate-100 text-slate-400">
+            <span className="material-symbols-outlined">close</span>
+          </button>
+        </div>
+
+        <div className="p-6 space-y-5 max-h-[70vh] overflow-y-auto">
+          <div className="bg-indigo-50 rounded-2xl p-4 border border-indigo-100 space-y-2">
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-indigo-400">Shipment Details</p>
+              <ShipmentStatusBadge status={shipment.status} />
+            </div>
+            <p className="text-sm font-bold text-indigo-800">{shipment.shipmentNumber}</p>
+            <div className="grid grid-cols-2 gap-2 text-xs text-indigo-700">
+              <p>Carrier: <span className="font-bold">{carrier}</span></p>
+              <p>Service: <span className="font-bold">{service || 'N/A'}</span></p>
+              <p>Tracking: <span className="font-mono font-bold">{tracking}</span></p>
+            </div>
+            {labelUrl && (
+              <a href={labelUrl} target="_blank" rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold">
+                <span className="material-symbols-outlined" style={{ fontSize: 14 }}>download</span>
+                Download Return Label
+              </a>
+            )}
+          </div>
+
+          <div className="bg-slate-50 rounded-2xl p-4 border border-slate-100">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-2">Customer: {ret.customerName}</p>
+            {ret.customerEmail && <p className="text-xs text-slate-600">{ret.customerEmail}</p>}
+            {ret.customerPhone && <p className="text-xs text-slate-600">{ret.customerPhone}</p>}
+          </div>
+
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-2">Customer Instructions Preview</p>
+            <pre className="bg-slate-50 rounded-xl p-4 border border-slate-200 text-[11px] text-slate-700 whitespace-pre-wrap font-mono leading-relaxed max-h-48 overflow-y-auto">
+              {customerInstructions}
+            </pre>
+          </div>
+        </div>
+
+        <div className="px-6 py-4 border-t border-slate-100 flex flex-wrap justify-end gap-3">
+          <button onClick={onClose} className="px-5 py-2.5 rounded-xl text-sm font-bold text-slate-600 hover:bg-slate-100 transition-all">Close</button>
+          <button onClick={handleCopy}
+            className={`flex items-center gap-1.5 px-5 py-2.5 rounded-xl text-sm font-bold transition-all shadow-lg ${copied ? 'bg-emerald-600 text-white shadow-emerald-600/20' : 'bg-slate-700 text-white hover:bg-slate-800 shadow-slate-700/20'}`}>
+            <span className="material-symbols-outlined" style={{ fontSize: 16 }}>{copied ? 'check' : 'content_copy'}</span>
+            {copied ? 'Copied!' : 'Copy Instructions'}
+          </button>
+          {ret.customerEmail && (
+            <button onClick={handleEmailCustomer}
+              className={`flex items-center gap-1.5 px-5 py-2.5 rounded-xl text-sm font-bold transition-all shadow-lg ${emailSent ? 'bg-emerald-600 text-white shadow-emerald-600/20' : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-600/20'}`}>
+              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>{emailSent ? 'check' : 'email'}</span>
+              {emailSent ? 'Email Opened' : 'Email Customer'}
+            </button>
+          )}
         </div>
       </div>
     </div>
