@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useStoreLocalState } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
 import PageShell from './PageShell';
+import { TrackingNumber } from './shared/TrackingNumber';
 import type {
   Return,
   ReturnStatus,
@@ -690,13 +691,7 @@ function ReturnDetailModal({ ret, shipments, onClose, onStatusTransition, onOpen
                   <p className="text-xs text-indigo-600">Carrier: {linkedShipment.carrier || 'N/A'} • Service: {linkedShipment.serviceLevel || 'N/A'}</p>
                   {linkedShipment.trackingNumber ? (
                     <div className="flex items-center gap-2 mt-0.5">
-                      <span className="text-xs text-indigo-600">Tracking:</span>
-                      <code className="font-mono text-xs text-indigo-900 bg-white/60 px-2 py-0.5 rounded border border-indigo-100 break-all select-all">{linkedShipment.trackingNumber}</code>
-                      <button onClick={() => navigator.clipboard.writeText(linkedShipment.trackingNumber!)}
-                        title="Copy full tracking number"
-                        className="p-0.5 rounded hover:bg-indigo-100 text-indigo-500 hover:text-indigo-700">
-                        <span className="material-symbols-outlined" style={{ fontSize: 14 }}>content_copy</span>
-                      </button>
+                      <TrackingNumber value={linkedShipment.trackingNumber} size="md" colorClass="text-indigo-900" copyable label="Tracking:" />
                     </div>
                   ) : (
                     <p className="text-xs text-indigo-600">Tracking: <span className="font-mono">Pending</span></p>

@@ -8,6 +8,7 @@ import * as shippingApi from '../shipping/shippingApiClient';
 import type { ProviderError } from '../shipping/types';
 import type { ReturnPrefill } from './ReturnsPortal';
 import PageShell from './PageShell';
+import { TrackingNumber } from './shared/TrackingNumber';
 import ShippingProvidersPage from './ShippingProvidersPage';
 
 async function convertImageToPdfBlobUrl(imageUrl: string): Promise<string> {
@@ -1838,7 +1839,7 @@ export default function ShippingCenter() {
                         {s.destinationAddress.name}
                       </span>
                       {s.carrier && <span className="flex items-center gap-1"><span className="material-symbols-outlined text-xs">local_shipping</span>{s.carrier}</span>}
-                      {s.trackingNumber && <span className="font-mono text-[10px] text-slate-400 select-all break-all">{s.trackingNumber}</span>}
+                      {s.trackingNumber && <TrackingNumber value={s.trackingNumber} size="sm" colorClass="text-slate-400" />}
                     </div>
                   </div>
                   <div className="text-right shrink-0">
@@ -1933,15 +1934,7 @@ export default function ShippingCenter() {
                       {selectedShip.trackingNumber && (
                         <div className="flex justify-between py-2 border-b border-slate-100">
                           <span className="text-xs text-slate-400 font-bold">Tracking</span>
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-xs font-black text-slate-700 font-mono select-all break-all">{selectedShip.trackingNumber}</span>
-                            <button onClick={() => copyTrackingNumber(selectedShip.trackingNumber!)} title="Copy tracking number"
-                              className="p-0.5 hover:bg-slate-100 rounded transition-all">
-                              <span className="material-symbols-outlined text-xs text-slate-400 hover:text-slate-600">
-                                {trackingCopied ? 'check' : 'content_copy'}
-                              </span>
-                            </button>
-                          </div>
+                          <TrackingNumber value={selectedShip.trackingNumber} size="md" colorClass="text-slate-700" copyable />
                         </div>
                       )}
                       {canViewCosts && selectedShip.shippingCost !== undefined && (

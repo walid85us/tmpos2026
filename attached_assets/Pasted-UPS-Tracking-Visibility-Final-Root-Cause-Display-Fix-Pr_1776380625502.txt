@@ -1,0 +1,138 @@
+UPS Tracking Visibility — Final Root-Cause Display Fix
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a narrow final regression fix.
+Do not redesign the app.
+Do not broaden scope.
+Only fix the remaining UPS tracking visibility regression.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Enterprise shipping systems architect
+- Root-cause debugging specialist
+- QA-minded side auditor
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- RBAC/sub-permissions
+- lifecycle gating
+- platform/store hierarchy
+- Shipping Center behavior
+- Returns Portal behavior
+- existing shipping core flow
+- existing reverse-logistics flow
+- USPS and FedEx tracking visibility already working correctly
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — REMAINING FAILURE
+==================================================
+
+Observed QA result:
+- UPS tracking is still shown masked like:
+  1ZXXXXXXXXXXXXXXXX
+- This is visible in Provider & Operations and return-linked shipment surfaces
+- USPS and FedEx show full tracking correctly
+- Therefore this is a UPS-specific display/masking regression in the app
+
+This must be treated as an app-side rendering/formatting bug, not a provider/test-mode limitation.
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIX
+==================================================
+
+1) TRACE THE EXACT RENDER PATH
+Required:
+- Find the exact render/formatting path used for UPS tracking display
+- Audit all tracking display helpers/utilities/components used in:
+  - Shipping Center detail
+  - Provider & Operations section
+  - linked shipment surfaces in Returns Portal
+  - any tracking badges/summary rows
+- Identify where UPS tracking is being masked/truncated while other carriers are not
+
+2) REMOVE UPS-SPECIFIC MASKING
+Required:
+- Show the full UPS tracking number to authorized operational users everywhere tracking should be visible
+- Remove any UPS-only masking/truncation logic
+- If there is a generic “mask tracking” helper, ensure authorized operational surfaces do not use it incorrectly
+
+3) KEEP PERMISSION SAFETY
+Required:
+- Preserve permission safety for users who should not see tracking
+- But for authorized operational users, the full UPS number must be visible
+
+4) FIX ALL RELEVANT SURFACES
+Required:
+- Do not fix only one screen
+- Confirm full UPS tracking is visible in:
+  - Shipping Center detail
+  - Provider & Operations section
+  - return-linked shipment surfaces
+  - any other operational shipment detail surface that currently uses the same render path
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- QA opens a UPS shipment in Shipping Center
+- QA sees the full UPS tracking number, not 1ZXXXXXXXXXXXXXXXX
+- QA opens a return-linked UPS shipment surface
+- QA sees the full UPS tracking number there too
+- USPS/FedEx behavior remains correct
+- No other shipping/returns behavior regresses
+
+==================================================
+IMPORTANT IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into another workstream
+- Do not change unrelated shipping logic
+- Do not break USPS/FedEx behavior
+- Do not break provider/manual mode split
+- Do not break return linkage
+- Keep the design baseline consistent
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact execution order:
+
+1) Trace the exact UPS tracking render/masking path
+2) Remove the incorrect masking/truncation for authorized operational views
+3) Fix all relevant surfaces, not only one screen
+4) Re-test UPS, USPS, and FedEx tracking visibility
+5) Update documentation if needed
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- tracking visibility rule for authorized operational users
+- confirmation that UPS/FedEx/USPS tracking display follows the same visibility rule
+- note any tracking display helper/utility corrected in this pass
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. UPS Tracking Render Path Findings
+3. UPS Tracking Visibility Fix
+4. Surfaces Fixed
+5. Files Changed
+6. Documentation Updated
+7. Non-Regression Notes
