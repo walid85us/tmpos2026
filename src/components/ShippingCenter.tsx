@@ -869,16 +869,18 @@ export default function ShippingCenter() {
     return shipment.packages.length > 0 && shipment.packages.some(p => p.weight || p.contentsSummary || p.declaredValue);
   }
 
+  // Strict validated-only readiness. Per operational policy, a `corrected` result
+  // (provider returned a suggested/normalized address) is an INTERMEDIATE state and
+  // must NOT unlock Get Rates. The suggested address is swapped into the shipment
+  // fields by `validateSingleSide`, but the operator must explicitly re-run Validate
+  // Addresses on the corrected address and receive a `validated` result before rate
+  // fetching, label purchase, or rate display becomes available.
   function isAddressAccepted(shipment: Shipment): boolean {
-    const av = shipment.addressValidation;
-    if (!av) return false;
-    return av.status === 'validated' || (av.status === 'corrected' && av.accepted === true);
+    return shipment.addressValidation?.status === 'validated';
   }
 
   function isOriginAddressAccepted(shipment: Shipment): boolean {
-    const av = shipment.originAddressValidation;
-    if (!av) return false;
-    return av.status === 'validated' || (av.status === 'corrected' && av.accepted === true);
+    return shipment.originAddressValidation?.status === 'validated';
   }
 
   function getProviderPrerequisiteMessage(): string | null {
@@ -944,17 +946,21 @@ export default function ShippingCenter() {
     const updates: Partial<Shipment> = {};
     if (result.success && result.result) {
       const validationResult: AddressValidationResult = result.result;
+      // For `corrected` results, swap the provider's suggested address into the shipment
+      // fields so the operator can re-validate against the cleaned address. Do NOT mark
+      // the result as accepted — `corrected` is an intermediate state and must not
+      // satisfy isAddressAccepted/isOriginAddressAccepted. The operator must explicitly
+      // re-run Validate Addresses on the corrected address and receive a `validated`
+      // status before Get Rates / Purchase Label become enabled.
       if (side === 'origin') {
         updates.originAddressValidation = validationResult;
         if (validationResult.status === 'corrected' && validationResult.suggestedAddress) {
           updates.originAddress = validationResult.suggestedAddress;
-          validationResult.accepted = true;
         }
       } else {
         updates.addressValidation = validationResult;
         if (validationResult.status === 'corrected' && validationResult.suggestedAddress) {
           updates.destinationAddress = validationResult.suggestedAddress;
-          validationResult.accepted = true;
         }
       }
       return { ok: true, status: validationResult.status, updates };
@@ -995,7 +1001,7 @@ export default function ShippingCenter() {
     const summarize = (label: string, r: { ok: boolean; status?: AddressValidationResult['status']; message?: string }) => {
       if (!r.ok) return `${label}: failed${r.message ? ` (${r.message})` : ''}`;
       if (r.status === 'validated') return `${label}: validated`;
-      if (r.status === 'corrected') return `${label}: corrected & accepted`;
+      if (r.status === 'corrected') return `${label}: corrected — re-validate the suggested address to enable rates`;
       return `${label}: ${r.status ?? 'completed'}`;
     };
 
@@ -1024,7 +1030,7 @@ export default function ShippingCenter() {
     } else if (result.status === 'validated') {
       setProviderSuccess(`${side === 'origin' ? 'Origin' : 'Destination'} address validated successfully.`);
     } else if (result.status === 'corrected') {
-      setProviderSuccess(`${side === 'origin' ? 'Origin' : 'Destination'} address corrected and updated from provider suggestion.`);
+      setProviderSuccess(`${side === 'origin' ? 'Origin' : 'Destination'} address corrected from provider suggestion. Re-run Validate Addresses to confirm and enable rate fetching.`);
     } else {
       setProviderSuccess(`${side === 'origin' ? 'Origin' : 'Destination'} address validation completed.`);
     }

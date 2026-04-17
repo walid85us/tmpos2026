@@ -1,0 +1,137 @@
+Shipping Center — Get Rates Must Require Validated, Not Merely Corrected — Narrow Logic Fix
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a narrow logic correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Only fix the Get Rates enablement rule described below.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Enterprise shipping systems architect
+- Root-cause debugging specialist
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- RBAC/sub-permissions
+- lifecycle gating
+- platform/store hierarchy
+- Shipping Center behavior
+- Returns Portal behavior
+- provider/manual mode split
+- existing rate-selection flow
+- existing origin+destination validation flow
+- existing shipping core flow
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — REMAINING FAILURE
+==================================================
+
+Observed QA result:
+- Get Rates becomes enabled once addresses are marked as Corrected
+- This is wrong
+
+Required rule:
+- Get Rates must remain disabled until BOTH:
+  - Origin Addr status is Validated
+  - Dest Addr status is Validated
+- Corrected is not enough
+- Suggested / corrected / normalized address state must not be treated as final validation readiness
+- The operator must still explicitly validate/accept the address before Get Rates is enabled
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIX
+==================================================
+
+1) STRICT VALIDATED-ONLY GATING
+Required:
+- Trace the current prerequisite logic for Get Rates
+- Remove any logic that treats Corrected as equivalent to Validated
+- Only a true Validated state should satisfy address-readiness for rate fetching
+- This must apply to both Origin and Destination
+
+2) KEEP CORRECTED AS INTERMEDIATE STATE
+Required:
+- Corrected can remain as an intermediate helpful state
+- But it must not unlock Get Rates
+- The operator must still explicitly move from Corrected to Validated/accepted before rates are allowed
+
+3) CLEAR STATE TRANSITIONS
+Required:
+- The operator workflow should remain:
+  address entered → corrected/suggested if needed → validated/accepted → Get Rates enabled
+- Do not collapse corrected and validated into one state unless that is explicitly visible and true in the UI
+
+4) PRESERVE EXISTING SHIPPING DISCIPLINE
+Required:
+- do not break Get Rates behavior after true validation
+- do not break rate selection flow
+- do not break manual mode behavior
+- do not break label purchase prerequisites
+- do not break existing origin+destination validation UX
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- If one or both addresses are only Corrected, Get Rates stays disabled
+- If one side is Validated and the other is only Corrected, Get Rates stays disabled
+- Only after both are truly Validated does Get Rates become enabled
+- Existing shipping behavior remains intact
+
+==================================================
+IMPORTANT IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into another workstream
+- Do not change unrelated shipping logic
+- Keep the design baseline consistent
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact execution order:
+
+1) Trace the current Get Rates prerequisite logic
+2) Remove Corrected-as-Valid logic
+3) Enforce Validated-only gating for both Origin and Destination
+4) Re-test the affected provider-mode flow
+5) Update documentation if needed
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Get Rates requires Origin and Destination in Validated state
+- Corrected is an intermediate state only and does not unlock rate fetching
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Validated-Only Get Rates Gating Fix
+3. Corrected-State Handling Fix
+4. Files Changed
+5. Documentation Updated
+6. Non-Regression Notes
