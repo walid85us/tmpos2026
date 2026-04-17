@@ -1,0 +1,124 @@
+Returns Feature — Add to System Owner Plans & Features Matrix — Narrow Correction Pass
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a narrow correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Only add the Returns / Returns Portal feature correctly into the System Owner Plans & Features matrix and preserve consistency with the existing Shipping Center feature setup.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Data model / permissions architect
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- RBAC/sub-permissions
+- lifecycle gating
+- platform/store hierarchy
+- System Owner Plans & Features matrix
+- Store Permissions Matrix
+- existing Shipping Center feature setup
+- Returns Portal / Reverse Logistics implementation already completed
+- all existing shipping and returns flows
+
+==================================================
+CURRENT REQUIREMENT
+==================================================
+
+Before closing this workstream, the Returns model / Returns Portal capability must be added to the System Owner Plans & Features matrix.
+
+Shipping Center is already added.
+Returns must now be added in the same coherent architecture.
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIX
+==================================================
+
+1) ADD RETURNS TO SYSTEM OWNER PLANS & FEATURES MATRIX
+Required:
+- Add Returns / Returns Portal as its own feature entry in the System Owner Plans & Features matrix
+- It must appear consistently with how Shipping Center is represented
+- Use the correct lifecycle/status field conventions already used in the matrix
+- Use coherent plan availability rules for Returns
+
+2) KEEP FEATURE MODEL COHERENT
+Required:
+- Do not incorrectly merge Returns into Shipping Center as one feature
+- Returns must be represented as a distinct capability
+- Maintain consistency with the existing feature matrix architecture and UI rendering behavior
+
+3) KEEP PLAN / FEATURE GATING CONSISTENT
+Required:
+- Ensure the feature entry matches the intended plan availability for Returns
+- Ensure this does not break existing access behavior
+- Do not weaken or bypass feature gating
+
+4) DOCUMENT THE ADDITION
+Required:
+- Update replit.md if needed so the Returns feature is explicitly reflected in the feature-model documentation or relevant architecture notes
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- System Owner Plans & Features matrix shows Returns as its own feature
+- Shipping Center remains intact
+- Returns is not hidden inside Shipping
+- Existing returns/shipping behavior remains intact
+
+==================================================
+IMPORTANT IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into another workstream
+- Do not change unrelated shipping/returns logic
+- Keep the design baseline consistent
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact execution order:
+
+1) Trace how Shipping Center is currently represented in the System Owner Plans & Features matrix
+2) Add Returns as a distinct feature entry using the same architectural pattern
+3) Verify plan availability / lifecycle fields are coherent
+4) Update documentation if needed
+5) Re-test the matrix rendering and non-regression
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Returns / Returns Portal as a distinct feature in the System Owner Plans & Features model
+- confirmation that Shipping Center remains a separate feature entry
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Returns Feature Matrix Fix
+3. Plan / Feature Gating Consistency Check
+4. Files Changed
+5. Documentation Updated
+6. Non-Regression Notes
