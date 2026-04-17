@@ -961,9 +961,57 @@ export default function ShippingCenter() {
   // handoff method is meaningful only pre-dispatch). Pickup request requires a label
   // so the carrier has something to scan, and is also blocked once dispatched. Cancelling
   // a pickup is allowed up until the pickup completes.
-  const SERVICE_POINT_EDITABLE_STATUSES: ShipmentStatus[] = ['Draft', 'Ready', 'Label Created', 'Packed'];
-  const PICKUP_REQUESTABLE_STATUSES: ShipmentStatus[] = ['Label Created', 'Packed'];
+  // Per QA business rule (Phase 2.2): Service Point and Carrier Pickup actions
+  // are only meaningful when the shipment is fully Packed and ready for handoff.
+  // Earlier statuses (Draft / Ready / Label Created) keep the controls locked
+  // with a clear "shipment must be Packed" message. Manual-mode shipments are
+  // unaffected because the entire Logistics tab is gated by provider capability.
+  const SERVICE_POINT_EDITABLE_STATUSES: ShipmentStatus[] = ['Packed'];
+  const PICKUP_REQUESTABLE_STATUSES: ShipmentStatus[] = ['Packed'];
   const PICKUP_CANCELLABLE_STATUSES: PickupRequestStatus[] = ['requested', 'scheduled', 'confirmed'];
+
+  // Unified eligibility evaluators. Used everywhere — UI gating, action-handler
+  // pre-checks, ZIP search activation — to guarantee a single source of truth.
+  // Reason ordering matches operator priority: provider → plan → permission →
+  // lifecycle → mutex. The first failing reason is surfaced.
+  type Eligibility = { eligible: boolean; reason?: string; category?: 'provider' | 'plan' | 'permission' | 'lifecycle' | 'mutex' };
+  function getServicePointEligibility(shipment: Shipment): Eligibility {
+    const caps = getProviderCapabilities(shipment);
+    if (!caps.servicePoints) {
+      const isManual = getShipmentMode(shipment) === 'manual';
+      const isProviderMissing = !activeProviderId;
+      if (isManual || isProviderMissing) return { eligible: false, reason: caps.spReason || caps.reason, category: 'provider' };
+      if (!planAllowsServicePoints) return { eligible: false, reason: 'Service points are not included in your current plan.', category: 'plan' };
+      return { eligible: false, reason: caps.spReason || caps.reason, category: 'provider' };
+    }
+    if (!canSelectServicePoint) return { eligible: false, reason: 'You do not have permission to select a service point.', category: 'permission' };
+    if (!SERVICE_POINT_EDITABLE_STATUSES.includes(shipment.status)) {
+      return { eligible: false, reason: `Shipment must be Packed before a service point can be selected. Current status: ${shipment.status}.`, category: 'lifecycle' };
+    }
+    const pr = shipment.pickupRequest;
+    if (pr && PICKUP_CANCELLABLE_STATUSES.includes(pr.status)) {
+      return { eligible: false, reason: 'A carrier pickup is active. Cancel it first to switch to a service-point drop-off.', category: 'mutex' };
+    }
+    return { eligible: true };
+  }
+  function getPickupEligibility(shipment: Shipment): Eligibility {
+    const caps = getProviderCapabilities(shipment);
+    if (!caps.pickupRequests) {
+      const isManual = getShipmentMode(shipment) === 'manual';
+      const isProviderMissing = !activeProviderId;
+      if (isManual || isProviderMissing) return { eligible: false, reason: caps.puReason || caps.reason, category: 'provider' };
+      if (!planAllowsPickupRequests) return { eligible: false, reason: 'Carrier pickup is not included in your current plan.', category: 'plan' };
+      return { eligible: false, reason: caps.puReason || caps.reason, category: 'provider' };
+    }
+    if (!canRequestPickup) return { eligible: false, reason: 'You do not have permission to request a carrier pickup.', category: 'permission' };
+    if (!PICKUP_REQUESTABLE_STATUSES.includes(shipment.status)) {
+      return { eligible: false, reason: `Shipment must be Packed before a carrier pickup can be requested. Current status: ${shipment.status}.`, category: 'lifecycle' };
+    }
+    if (shipment.servicePoint) {
+      return { eligible: false, reason: 'A service-point drop-off is selected. Clear it first to switch to a carrier pickup.', category: 'mutex' };
+    }
+    return { eligible: true };
+  }
 
   function getMockServicePoints(shipment: Shipment): ServicePoint[] {
     // Provider-stub list. In production each provider adapter would query the carrier
@@ -1023,22 +1071,12 @@ export default function ShippingCenter() {
 
   async function handleSelectServicePoint(shipmentId: string, sp: ServicePoint) {
     if (isWriteBlocked) return;
-    if (!canSelectServicePoint) {
-      setProviderError(friendlyProviderError({ code: 'PERMISSION_DENIED', message: 'You do not have permission to select a service point.' }));
-      return;
-    }
     const ship0 = shipments.find(s => s.id === shipmentId);
-    if (ship0) {
-      const caps0 = getProviderCapabilities(ship0);
-      if (!caps0.servicePoints) {
-        setProviderError(friendlyProviderError({ code: 'NOT_AVAILABLE', message: caps0.spReason || 'Service points not available.' }));
-        return;
-      }
-      const activePr = ship0.pickupRequest && PICKUP_CANCELLABLE_STATUSES.includes(ship0.pickupRequest.status);
-      if (activePr) {
-        setProviderError(friendlyProviderError({ code: 'MUTEX', message: 'Cancel the active carrier pickup request before selecting a service point — a shipment can use only one handoff method.' }));
-        return;
-      }
+    if (!ship0) return;
+    const elig = getServicePointEligibility(ship0);
+    if (!elig.eligible) {
+      setProviderError(friendlyProviderError({ code: (elig.category || 'NOT_AVAILABLE').toUpperCase(), message: elig.reason || 'Service point not available.' }));
+      return;
     }
     const now = new Date().toISOString();
     const selected: ServicePoint = {
@@ -1086,19 +1124,11 @@ export default function ShippingCenter() {
 
   async function handleRequestPickup(shipmentId: string) {
     if (isWriteBlocked) return;
-    if (!canRequestPickup) {
-      setProviderError(friendlyProviderError({ code: 'PERMISSION_DENIED', message: 'You do not have permission to request a carrier pickup.' }));
-      return;
-    }
     const ship = shipments.find(s => s.id === shipmentId);
     if (!ship) return;
-    const caps0 = getProviderCapabilities(ship);
-    if (!caps0.pickupRequests) {
-      setProviderError(friendlyProviderError({ code: 'NOT_AVAILABLE', message: caps0.puReason || 'Carrier pickup not available.' }));
-      return;
-    }
-    if (ship.servicePoint) {
-      setProviderError(friendlyProviderError({ code: 'MUTEX', message: 'Clear the selected service point before requesting a carrier pickup — a shipment can use only one handoff method.' }));
+    const elig = getPickupEligibility(ship);
+    if (!elig.eligible) {
+      setProviderError(friendlyProviderError({ code: (elig.category || 'NOT_AVAILABLE').toUpperCase(), message: elig.reason || 'Carrier pickup not available.' }));
       return;
     }
     if (!pickupForm.date) {
@@ -2635,14 +2665,27 @@ export default function ShippingCenter() {
                       )}
 
                       <div className="flex gap-2 flex-wrap pt-1">
-                        {!isManualMode && canValidateAddress && !isWriteBlocked && isEditable(selectedShip.status) && !selectedShip.label && (
-                          <button onClick={() => handleValidateAddresses(selectedShip.id)} disabled={providerLoading !== null}
-                            title="Validates both origin (shipper) and destination (recipient) addresses with the active shipping provider in a single action. Required for Get Rates."
-                            className="px-3 py-2 bg-white text-indigo-600 border border-indigo-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50 transition-all disabled:opacity-40 flex items-center gap-1">
-                            <span className="material-symbols-outlined text-sm">{providerLoading === 'validate' ? 'hourglass_top' : 'verified'}</span>
-                            {providerLoading === 'validate' ? 'Validating Addresses...' : 'Validate Addresses'}
-                          </button>
-                        )}
+                        {!isManualMode && canValidateAddress && !isWriteBlocked && isEditable(selectedShip.status) && !selectedShip.label && (() => {
+                          const validateDisabled = providerLoading !== null || !activeProviderId;
+                          const validateTitle = !activeProviderId
+                            ? 'No active shipping provider configured. Configure a provider in Shipping Center → Settings before validating addresses.'
+                            : 'Validates both origin (shipper) and destination (recipient) addresses with the active shipping provider in a single action. Required for Get Rates.';
+                          return (
+                          <div className="relative group">
+                            <button onClick={() => handleValidateAddresses(selectedShip.id)} disabled={validateDisabled}
+                              title={validateTitle}
+                              className="px-3 py-2 bg-white text-indigo-600 border border-indigo-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50 transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1">
+                              <span className="material-symbols-outlined text-sm">{providerLoading === 'validate' ? 'hourglass_top' : !activeProviderId ? 'lock' : 'verified'}</span>
+                              {providerLoading === 'validate' ? 'Validating Addresses...' : 'Validate Addresses'}
+                            </button>
+                            {!activeProviderId && (
+                              <div className="absolute bottom-full left-0 mb-1 hidden group-hover:block z-10">
+                                <div className="bg-slate-800 text-white text-[10px] rounded-lg px-3 py-2 whitespace-nowrap shadow-lg">No active shipping provider configured.</div>
+                              </div>
+                            )}
+                          </div>
+                          );
+                        })()}
 
                         {!isManualMode && canFetchRates && !isWriteBlocked && ['Draft', 'Ready'].includes(selectedShip.status) && (() => {
                           const ratePrereqs = getRatePrerequisites(selectedShip);
@@ -3039,8 +3082,10 @@ export default function ShippingCenter() {
                   const pr = selectedShip.pickupRequest;
                   const prActive = pr && PICKUP_CANCELLABLE_STATUSES.includes(pr.status);
                   const prTerminated = pr && ['cancelled', 'failed', 'rejected'].includes(pr.status);
-                  const spEditable = SERVICE_POINT_EDITABLE_STATUSES.includes(selectedShip.status) && !prActive;
-                  const pickupRequestable = PICKUP_REQUESTABLE_STATUSES.includes(selectedShip.status) && !sp;
+                  const spElig = getServicePointEligibility(selectedShip);
+                  const puElig = getPickupEligibility(selectedShip);
+                  const spEditable = spElig.eligible;
+                  const pickupRequestable = puElig.eligible;
                   const pickupCancellable = pr && PICKUP_CANCELLABLE_STATUSES.includes(pr.status);
                   return (
                   <div className="space-y-6">
@@ -3071,21 +3116,24 @@ export default function ShippingCenter() {
                         </div>
                         <span className={`px-2 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest ${sp ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{sp ? 'Selected' : 'None'}</span>
                       </div>
-                      {!caps.servicePoints && (
-                        <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-start gap-2">
-                          <span className="material-symbols-outlined text-amber-500 text-sm mt-0.5">lock</span>
-                          <div className="text-xs text-amber-700">
-                            <p className="font-black">Service points not available for this shipment</p>
-                            <p className="mt-0.5">{caps.spReason || caps.reason}</p>
+                      {!spElig.eligible && !sp && (() => {
+                        const tone = spElig.category === 'mutex'
+                          ? { bg: 'bg-sky-50', border: 'border-sky-200', icon: 'text-sky-500', text: 'text-sky-700', label: 'Service point selection blocked' }
+                          : spElig.category === 'lifecycle'
+                          ? { bg: 'bg-slate-50', border: 'border-slate-200', icon: 'text-slate-500', text: 'text-slate-600', label: 'Service point not yet available' }
+                          : spElig.category === 'permission'
+                          ? { bg: 'bg-rose-50', border: 'border-rose-200', icon: 'text-rose-500', text: 'text-rose-700', label: 'Service point selection denied' }
+                          : { bg: 'bg-amber-50', border: 'border-amber-200', icon: 'text-amber-500', text: 'text-amber-700', label: spElig.category === 'plan' ? 'Service points disabled by plan' : 'Service points not available for this shipment' };
+                        return (
+                          <div className={`${tone.bg} border ${tone.border} rounded-xl p-3 flex items-start gap-2`}>
+                            <span className={`material-symbols-outlined ${tone.icon} text-sm mt-0.5`}>lock</span>
+                            <div className={`text-xs ${tone.text}`}>
+                              <p className="font-black">{tone.label}</p>
+                              <p className="mt-0.5">{spElig.reason}</p>
+                            </div>
                           </div>
-                        </div>
-                      )}
-                      {caps.servicePoints && prActive && !sp && (
-                        <div className="bg-sky-50 border border-sky-200 rounded-xl p-3 flex items-start gap-2 mb-3">
-                          <span className="material-symbols-outlined text-sky-500 text-sm mt-0.5">info</span>
-                          <p className="text-xs text-sky-700">A carrier pickup is active for this shipment. Cancel the pickup first to switch to a service-point drop-off.</p>
-                        </div>
-                      )}
+                        );
+                      })()}
                       {caps.servicePoints && sp && (
                         <div className="bg-emerald-50/50 border border-emerald-200 rounded-xl p-4 space-y-2">
                           <div className="flex items-start justify-between gap-3">
@@ -3101,17 +3149,16 @@ export default function ShippingCenter() {
                           {sp.selectedAt && <p className="text-[10px] text-slate-400">Selected by {sp.selectedBy || 'operator'} at {formatDateTime(sp.selectedAt)}</p>}
                         </div>
                       )}
-                      {caps.servicePoints && (
+                      {(spElig.eligible || sp) && (
                         <div className="flex gap-2 mt-4">
-                          {canSelectServicePoint && spEditable && !isWriteBlocked && (
+                          {spEditable && !isWriteBlocked && (
                             <button onClick={() => openServicePointModal(selectedShip.id)} className="px-4 py-2.5 bg-primary/10 text-primary font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-primary/20 transition-all">
                               {sp ? 'Change Service Point' : 'Select Service Point'}
                             </button>
                           )}
-                          {canSelectServicePoint && sp && spEditable && !isWriteBlocked && (
+                          {sp && canSelectServicePoint && !isWriteBlocked && (
                             <button onClick={() => handleClearServicePoint(selectedShip.id)} className="px-4 py-2.5 bg-slate-100 text-slate-600 font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-slate-200 transition-all">Clear</button>
                           )}
-                          {!spEditable && <p className="text-[11px] text-slate-400 italic">Locked — shipment past dispatch lifecycle</p>}
                         </div>
                       )}
                     </div>
@@ -3131,21 +3178,24 @@ export default function ShippingCenter() {
                           'bg-rose-100 text-rose-700'
                         }`}>{pr ? pr.status : 'Not Requested'}</span>
                       </div>
-                      {!caps.pickupRequests && (
-                        <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-start gap-2">
-                          <span className="material-symbols-outlined text-amber-500 text-sm mt-0.5">lock</span>
-                          <div className="text-xs text-amber-700">
-                            <p className="font-black">Carrier pickup not available for this shipment</p>
-                            <p className="mt-0.5">{caps.puReason || caps.reason}</p>
+                      {!puElig.eligible && !pr && (() => {
+                        const tone = puElig.category === 'mutex'
+                          ? { bg: 'bg-emerald-50', border: 'border-emerald-200', icon: 'text-emerald-600', text: 'text-emerald-700', label: 'Carrier pickup blocked' }
+                          : puElig.category === 'lifecycle'
+                          ? { bg: 'bg-slate-50', border: 'border-slate-200', icon: 'text-slate-500', text: 'text-slate-600', label: 'Carrier pickup not yet available' }
+                          : puElig.category === 'permission'
+                          ? { bg: 'bg-rose-50', border: 'border-rose-200', icon: 'text-rose-500', text: 'text-rose-700', label: 'Carrier pickup denied' }
+                          : { bg: 'bg-amber-50', border: 'border-amber-200', icon: 'text-amber-500', text: 'text-amber-700', label: puElig.category === 'plan' ? 'Carrier pickup disabled by plan' : 'Carrier pickup not available for this shipment' };
+                        return (
+                          <div className={`${tone.bg} border ${tone.border} rounded-xl p-3 flex items-start gap-2`}>
+                            <span className={`material-symbols-outlined ${tone.icon} text-sm mt-0.5`}>lock</span>
+                            <div className={`text-xs ${tone.text}`}>
+                              <p className="font-black">{tone.label}</p>
+                              <p className="mt-0.5">{puElig.reason}</p>
+                            </div>
                           </div>
-                        </div>
-                      )}
-                      {caps.pickupRequests && sp && !pr && (
-                        <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 flex items-start gap-2 mb-3">
-                          <span className="material-symbols-outlined text-emerald-600 text-sm mt-0.5">info</span>
-                          <p className="text-xs text-emerald-700">A service-point drop-off is selected for this shipment. Clear the service point first to switch to a carrier pickup.</p>
-                        </div>
-                      )}
+                        );
+                      })()}
                       {caps.pickupRequests && pr && (
                         <div className={`rounded-xl p-4 space-y-2 border ${
                           pr.status === 'cancelled' || pr.status === 'failed' || pr.status === 'rejected'
@@ -3197,13 +3247,13 @@ export default function ShippingCenter() {
                           <p className="text-[10px] text-slate-400 italic mt-2">Live carrier pickup events (en-route / arrived / picked up) will surface here once the active provider streams pickup webhooks. For now, status reflects the request lifecycle only.</p>
                         </div>
                       )}
-                      {caps.pickupRequests && prTerminated && pickupRequestable && canRequestPickup && !isWriteBlocked && (
+                      {prTerminated && pickupRequestable && !isWriteBlocked && (
                         <div className="bg-sky-50 border border-sky-200 rounded-xl p-3 mt-3 flex items-start gap-2">
                           <span className="material-symbols-outlined text-sky-500 text-sm mt-0.5">restart_alt</span>
                           <p className="text-xs text-sky-700">Previous pickup is {pr!.status}. You can re-schedule a new carrier pickup below — the cancelled record stays in the timeline for audit.</p>
                         </div>
                       )}
-                      {caps.pickupRequests && (!pr || prTerminated) && pickupRequestable && canRequestPickup && !isWriteBlocked && (
+                      {(!pr || prTerminated) && pickupRequestable && !isWriteBlocked && (
                         <div className="grid grid-cols-2 gap-3 mt-4">
                           <div>
                             <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Pickup Date</label>
@@ -3238,14 +3288,11 @@ export default function ShippingCenter() {
                           </div>
                         </div>
                       )}
-                      {caps.pickupRequests && pickupCancellable && canCancelPickup && !isWriteBlocked && (
+                      {pickupCancellable && canCancelPickup && !isWriteBlocked && (
                         <div className="mt-4 pt-4 border-t border-slate-100 space-y-2">
                           <input type="text" value={pickupCancelReason} onChange={e => setPickupCancelReason(e.target.value)} placeholder="Cancellation reason (optional)" className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs" />
                           <button onClick={() => handleCancelPickup(selectedShip.id)} className="px-4 py-2.5 bg-rose-50 text-rose-600 font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-rose-100 transition-all">Cancel Pickup</button>
                         </div>
-                      )}
-                      {caps.pickupRequests && !pr && !pickupRequestable && (
-                        <p className="text-[11px] text-slate-400 italic mt-2">Pickup request requires a purchased label (Label Created or Packed status). Current status: {selectedShip.status}.</p>
                       )}
                     </div>
 
@@ -3298,10 +3345,27 @@ export default function ShippingCenter() {
                   <button onClick={() => setShowServicePointModal(null)} className="text-slate-400 hover:text-slate-600"><span className="material-symbols-outlined">close</span></button>
                 </div>
                 <div className="p-6 overflow-y-auto space-y-3">
-                  <div className="bg-sky-50 border border-sky-200 rounded-xl p-3 flex items-start gap-2">
-                    <span className="material-symbols-outlined text-sky-500 text-sm mt-0.5">info</span>
-                    <p className="text-[11px] text-sky-700">Preview list — production deployments query the live carrier service-point API. Selection is recorded in the shipment timeline regardless.</p>
-                  </div>
+                  {(() => {
+                    const modalElig = getServicePointEligibility(ship);
+                    const searchEnabled = modalElig.eligible && !isWriteBlocked;
+                    return (
+                  <>
+                  {!searchEnabled && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-start gap-2">
+                      <span className="material-symbols-outlined text-amber-500 text-sm mt-0.5">lock</span>
+                      <div className="text-xs text-amber-700">
+                        <p className="font-black">Service-point selection is not available</p>
+                        <p className="mt-0.5">{modalElig.reason || 'Search is disabled until this shipment is eligible.'}</p>
+                        <p className="mt-1 text-[10px] text-amber-600">ZIP-code search is gated behind actual eligibility — disabled inputs prevent confusing dry-run flows.</p>
+                      </div>
+                    </div>
+                  )}
+                  {searchEnabled && (
+                    <div className="bg-sky-50 border border-sky-200 rounded-xl p-3 flex items-start gap-2">
+                      <span className="material-symbols-outlined text-sky-500 text-sm mt-0.5">info</span>
+                      <p className="text-[11px] text-sky-700">Preview list — production deployments query the live carrier service-point API. Selection is recorded in the shipment timeline regardless.</p>
+                    </div>
+                  )}
                   <div className="grid grid-cols-2 gap-3">
                     <div>
                       <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Search by ZIP / postal code</label>
@@ -3310,25 +3374,27 @@ export default function ShippingCenter() {
                           type="text"
                           value={servicePointZipSearch}
                           onChange={e => setServicePointZipSearch(e.target.value)}
-                          onKeyDown={e => { if (e.key === 'Enter') searchServicePointsByZip(ship.id, servicePointZipSearch); }}
+                          onKeyDown={e => { if (e.key === 'Enter' && searchEnabled) searchServicePointsByZip(ship.id, servicePointZipSearch); }}
                           placeholder={ship.originAddress.postalCode || 'e.g. 94105'}
-                          className="flex-1 px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                          disabled={!searchEnabled}
+                          className="flex-1 px-3 py-2 border border-slate-200 rounded-xl text-xs disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-50"
                         />
                         <button
                           type="button"
                           onClick={() => searchServicePointsByZip(ship.id, servicePointZipSearch)}
-                          className="px-3 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 transition-all"
+                          disabled={!searchEnabled}
+                          className="px-3 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                         >Search</button>
                       </div>
-                      <p className="text-[10px] text-slate-400 mt-1">Default search is around the shipment origin.</p>
+                      <p className="text-[10px] text-slate-400 mt-1">{searchEnabled ? 'Default search is around the shipment origin.' : 'Resolve the eligibility issue above to enable search.'}</p>
                     </div>
                     <div>
                       <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Selection notes (optional)</label>
-                      <input type="text" value={servicePointNotes} onChange={e => setServicePointNotes(e.target.value)} placeholder="e.g. Customer preferred location" className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs" />
+                      <input type="text" value={servicePointNotes} onChange={e => setServicePointNotes(e.target.value)} disabled={!searchEnabled} placeholder="e.g. Customer preferred location" className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-50" />
                     </div>
                   </div>
-                  {servicePointLoading && <p className="text-xs text-slate-500 text-center py-4">Loading service points...</p>}
-                  {!servicePointLoading && servicePointSearchResults.map(sp => (
+                  {searchEnabled && servicePointLoading && <p className="text-xs text-slate-500 text-center py-4">Loading service points...</p>}
+                  {searchEnabled && !servicePointLoading && servicePointSearchResults.map(sp => (
                     <button key={sp.id} onClick={() => handleSelectServicePoint(ship.id, sp)} className="w-full text-left bg-white border border-slate-200 hover:border-primary hover:bg-primary/5 rounded-2xl p-4 transition-all">
                       <div className="flex items-start justify-between gap-3 mb-1">
                         <p className="text-sm font-black text-slate-800">{sp.name}</p>
@@ -3339,9 +3405,12 @@ export default function ShippingCenter() {
                       {sp.contactPhone && <p className="text-[11px] text-slate-500 mt-0.5">{sp.contactPhone}</p>}
                     </button>
                   ))}
-                  {!servicePointLoading && servicePointSearchResults.length === 0 && (
+                  {searchEnabled && !servicePointLoading && servicePointSearchResults.length === 0 && (
                     <p className="text-xs text-slate-500 text-center py-6">No service points found near this origin.</p>
                   )}
+                  </>
+                  );
+                  })()}
                 </div>
               </motion.div>
             </div>

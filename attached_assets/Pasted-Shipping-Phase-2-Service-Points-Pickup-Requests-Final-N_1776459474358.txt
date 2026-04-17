@@ -1,0 +1,146 @@
+Shipping Phase 2 — Service Points & Pickup Requests — Final Narrow Gating + Eligibility Correction Pass
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a narrow final correction pass for the Service Points & Pickup Requests workstream.
+Do not redesign the app.
+Do not broaden scope.
+Fix the remaining live behavior issues exactly as described below.
+
+Preserve all working behavior:
+- Service Points and Pickup Requests module surfaces already added
+- Shipment Overview handoff-method card
+- pickup cancellation/reschedule flow
+- reverse-logistics compatibility
+- existing outbound shipping core flow
+- preview mode safety
+- provider/manual mode split
+- Shipping Center as the sole provider-management home
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — REMAINING FAILURES
+==================================================
+
+1) Plan gating is still not enforced in live behavior
+Observed QA result:
+- disabling Service Point / Drop-Off or Carrier Pickup Request in System Owner Plans & Features does not remove/disable the capability in practice
+Required behavior:
+- if disabled at plan level, the capability must not be usable for that tenant/plan
+- UI and handlers must respect the plan state
+- do not show a contradictory “not included in your current plan” state when the plan actually includes it
+- fix the real source-of-truth / evaluation path
+
+2) Store permission denial is still not enforced in live behavior
+Observed QA result:
+- denying Service Point / Drop-Off or Carrier Pickup Request still leaves the user able to see/use the feature incorrectly
+Required behavior:
+- if denied in Store Permissions, the user must not be able to edit/select/use the capability
+- UI and handlers must both enforce the denial
+- do not show misleading plan-disabled messaging when the real issue is permission state or vice versa
+
+3) Provider-unavailable behavior is still inconsistent
+Observed QA result:
+- when no provider is configured, Provider & Operations still leaves Validate Addresses enabled
+Required behavior:
+- in provider-dependent mode, when there is no active provider, provider-dependent actions must be disabled
+- Provider & Operations should show aligned honest messaging with Service Points and Pickup Requests
+- no provider-dependent actions should appear falsely active
+
+4) Service Point / Pickup should only be active when the shipment is at the correct lifecycle stage
+Required behavior:
+- Service Point / Drop-Off and Carrier Pickup Request should only be active when the shipment is in the intended eligible lifecycle stage
+- based on the current business rule from QA, this should be when the shipment is PACKED
+- before PACKED, they should not be active/selectable
+- preserve provider/manual mode logic
+
+5) ZIP-code search should only be meaningful when service-point selection is actually eligible
+Required behavior:
+- ZIP-code search should be enabled only when the shipment is actually eligible to use Service Point / Drop-Off
+- if provider is missing, plan disabled, permission denied, wrong lifecycle, or shipment otherwise ineligible, the search should not behave like a live usable flow
+- keep the UI honest
+- if current provider capability is limited, message that clearly
+
+6) Mutual exclusivity must remain intact
+Required behavior:
+- if one of Service Point / Drop-Off or Carrier Pickup Request is used, the other remains disabled/cleared
+- preserve this while fixing the other gating issues
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIXES
+==================================================
+
+1. Correct the real feature/permission source of truth
+Required:
+- trace the full plan + permission + provider capability evaluation path used in ShippingCenter
+- fix the live source of truth so plan gating and store permission gating both evaluate correctly
+- make sure the correct reason is shown:
+  - plan disabled
+  - permission denied
+  - no provider
+  - wrong shipment lifecycle
+  - provider API unsupported
+
+2. Provider-dependent actions must disable cleanly when no provider is configured
+Required:
+- Validate Addresses, Service Points, and Carrier Pickup Request must not appear falsely actionable without an active provider
+- use one coherent disabled/locked UX with honest messaging
+
+3. Lifecycle gating for Service Points and Pickup
+Required:
+- Service Point / Drop-Off and Carrier Pickup Request become active only at the correct shipment stage
+- per QA, use PACKED as the activation point
+- before PACKED, the controls should be disabled/locked with clear messaging
+
+4. ZIP-code search only in eligible state
+Required:
+- ZIP-code search should be active only when service-point selection itself is eligible
+- otherwise the UI should clearly explain why search is unavailable
+
+5. Preserve mutual exclusivity and existing non-regression behavior
+Required:
+- keep Service Point vs Pickup mutual exclusion working
+- do not break outbound shipping or reverse-logistics flows
+
+==================================================
+IMPORTANT RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into customs / insurance / analytics implementation
+- Do not touch unrelated workstreams
+- Do not break outbound shipping
+- Do not break provider/manual mode split
+- Keep the design baseline consistent
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Fix the live plan/permission source-of-truth and reason mapping
+2) Disable provider-dependent actions cleanly when no provider is configured
+3) Enforce PACKED-only activation for Service Point / Drop-Off and Carrier Pickup Request
+4) Gate ZIP search behind actual service-point eligibility
+5) Re-test all affected shipping and reverse-logistics flows
+6) Update documentation
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Plan / Feature Source-of-Truth Fix
+3. Store Permission Enforcement Fix
+4. No-Provider Action Disable Fix
+5. PACKED-Only Activation Fix
+6. ZIP Search Eligibility Fix
+7. Mutual Exclusivity Non-Regression Check
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes
