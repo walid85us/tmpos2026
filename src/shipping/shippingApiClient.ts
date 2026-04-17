@@ -130,6 +130,13 @@ export async function purchaseLabel(
   });
 }
 
+// Service-point locator entry point. Routes to carrier-specific adapters in
+// src/shipping/locators/. Provider aggregators (EasyPost / Shippo / ShipStation)
+// do not expose a unified locator API, so this dispatcher bypasses them entirely
+// and talks directly to USPS / UPS / FedEx adapters when their credentials are set.
+export { findServicePoints, isAnyLocatorConfigured, getConfiguredCarriers } from './locators';
+export type { LocatorQuery, LocatorResult, DispatcherQuery } from './locators';
+
 export async function syncTracking(
   trackingNumber: string,
   carrier: string,

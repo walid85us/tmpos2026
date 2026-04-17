@@ -437,6 +437,13 @@ export default function ShippingCenter() {
   // Service Points & Pickup Requests (Phase 2) — UI state
   const [showServicePointModal, setShowServicePointModal] = useState<string | null>(null);
   const [servicePointSearchResults, setServicePointSearchResults] = useState<ServicePoint[]>([]);
+  // Manual service-point entry form. Used when live carrier locator is unavailable
+  // (i.e. no carrier-specific locator adapter is configured for this carrier). Operator
+  // types in the carrier-issued service-point reference they obtained out-of-band.
+  const [manualSpForm, setManualSpForm] = useState<{ id: string; name: string; type: string; line1: string; city: string; state: string; postalCode: string; phone: string }>({
+    id: '', name: '', type: 'parcel_locker', line1: '', city: '', state: '', postalCode: '', phone: '',
+  });
+  const [manualSpSubmitting, setManualSpSubmitting] = useState(false);
   const [servicePointLoading, setServicePointLoading] = useState(false);
   const [servicePointNotes, setServicePointNotes] = useState('');
   const [servicePointZipSearch, setServicePointZipSearch] = useState('');
@@ -950,10 +957,62 @@ export default function ShippingCenter() {
   // not orchestrated through a provider API. To enable a provider, set the flag here AND
   // implement the corresponding adapter calls (this UI talks to a stub for now — clearly
   // labeled in the modal so operators understand the data is not live carrier inventory).
-  const PROVIDER_CAPABILITIES: Record<string, { servicePoints: boolean; pickupRequests: boolean }> = {
-    easypost: { servicePoints: true, pickupRequests: true },    // EasyPost: UPS Access Point + carrier pickup APIs
-    shippo:    { servicePoints: false, pickupRequests: true },
-    shipstation: { servicePoints: false, pickupRequests: true },
+  // Provider capability map. Each provider differs in what it actually supports.
+  // Service-point lookup is intentionally false everywhere because no provider in our
+  // current stack exposes a unified service-point locator (see Phase 2.4 audit notes
+  // in replit.md and the Carrier Locator Settings card in Settings → Carrier Locators).
+  // Live service-point search requires carrier-specific adapters (USPS / UPS / FedEx)
+  // configured per store; until those adapters are wired, the modal shows an honest
+  // unavailable state with a manual-entry fallback.
+  //
+  // Pickup capability fields are provider-specific and reflect real-world behavior:
+  //   - supportsPickupRequests:           does the provider expose a pickup API at all
+  //   - supportsPickupCancellation:       can the pickup be cancelled via API
+  //   - pickupRequiresProviderConfirmation: true => UI must wait for carrier confirmation
+  //   - pickupMayRequireRateSelectionOrPurchase: true => carrier may bill per pickup
+  //   - pickupCarrierCoverage:            list of carriers the provider can schedule pickups for
+  //   - pickupStatusModel:                'request_lifecycle' | 'webhook_streamed'
+  type ProviderCaps = {
+    servicePoints: boolean;
+    pickupRequests: boolean;
+    supportsPickupCancellation: boolean;
+    pickupRequiresProviderConfirmation: boolean;
+    pickupMayRequireRateSelectionOrPurchase: boolean;
+    pickupCarrierCoverage: string[];
+    pickupStatusModel: 'request_lifecycle' | 'webhook_streamed';
+    pickupAuditNote: string;
+  };
+  const PROVIDER_CAPABILITIES: Record<string, ProviderCaps> = {
+    easypost: {
+      servicePoints: false,
+      pickupRequests: true,
+      supportsPickupCancellation: true,
+      pickupRequiresProviderConfirmation: true,
+      pickupMayRequireRateSelectionOrPurchase: true,
+      pickupCarrierCoverage: ['USPS', 'UPS', 'FedEx', 'DHL'],
+      pickupStatusModel: 'webhook_streamed',
+      pickupAuditNote: 'EasyPost pickups require Pickup → Buy (rate selection + purchase). Carrier may charge a pickup fee. Live API call is not yet wired in this app — current flow records a local pickup request only.',
+    },
+    shippo: {
+      servicePoints: false,
+      pickupRequests: true,
+      supportsPickupCancellation: true,
+      pickupRequiresProviderConfirmation: false,
+      pickupMayRequireRateSelectionOrPurchase: false,
+      pickupCarrierCoverage: ['USPS', 'UPS', 'DHL Express'],
+      pickupStatusModel: 'request_lifecycle',
+      pickupAuditNote: 'Shippo schedules pickups via /pickups; no separate rate purchase. Carrier coverage narrower than EasyPost. Live API call is not yet wired in this app.',
+    },
+    shipstation: {
+      servicePoints: false,
+      pickupRequests: false,
+      supportsPickupCancellation: false,
+      pickupRequiresProviderConfirmation: false,
+      pickupMayRequireRateSelectionOrPurchase: false,
+      pickupCarrierCoverage: [],
+      pickupStatusModel: 'request_lifecycle',
+      pickupAuditNote: 'ShipStation does not expose a generic pickup API; pickups are scheduled directly with the carrier or via ShipStation\'s own UI workflows. Disabled here.',
+    },
   };
 
   function getProviderCapabilities(shipment: Shipment): { servicePoints: boolean; pickupRequests: boolean; reason?: string; spReason?: string; puReason?: string } {
@@ -1014,14 +1073,38 @@ export default function ShippingCenter() {
   // lifecycle → mutex. The first failing reason is surfaced.
   type Eligibility = { eligible: boolean; reason?: string; category?: 'provider' | 'plan' | 'permission' | 'lifecycle' | 'mutex' };
   function getServicePointEligibility(shipment: Shipment): Eligibility {
+    // LIVE locator eligibility. Currently always fails at the provider category until
+    // a carrier-specific locator adapter is configured under Settings → Carrier Locators.
     const caps = getProviderCapabilities(shipment);
     if (!caps.servicePoints) {
       const isManual = getShipmentMode(shipment) === 'manual';
       const isProviderMissing = !activeProviderId;
       if (isManual || isProviderMissing) return { eligible: false, reason: caps.spReason || caps.reason, category: 'provider' };
       if (!planAllowsServicePoints) return { eligible: false, reason: 'Service points are not included in your current plan.', category: 'plan' };
-      return { eligible: false, reason: caps.spReason || caps.reason, category: 'provider' };
+      return {
+        eligible: false,
+        reason: 'Live carrier service-point lookup requires carrier-specific production credentials and a carrier-specific locator adapter (USPS Locations, UPS Locator, FedEx Locations). Currently unavailable. Use manual entry below.',
+        category: 'provider',
+      };
     }
+    if (!canSelectServicePoint) return { eligible: false, reason: 'You do not have permission to select a service point.', category: 'permission' };
+    if (!SERVICE_POINT_EDITABLE_STATUSES.includes(shipment.status)) {
+      return { eligible: false, reason: `Shipment must be Packed before a service point can be selected. Current status: ${shipment.status}.`, category: 'lifecycle' };
+    }
+    const pr = shipment.pickupRequest;
+    if (pr && PICKUP_CANCELLABLE_STATUSES.includes(pr.status)) {
+      return { eligible: false, reason: 'A carrier pickup is active. Cancel it first to switch to a service-point drop-off.', category: 'mutex' };
+    }
+    return { eligible: true };
+  }
+  // Manual entry eligibility — does NOT require provider locator capability, because
+  // manual entry is the operator typing in a carrier-issued service-point reference
+  // they obtained out-of-band (carrier website, customer email, etc.). Plan,
+  // permission, lifecycle, and mutex still apply identically.
+  function getServicePointManualEntryEligibility(shipment: Shipment): Eligibility {
+    if (getShipmentMode(shipment) === 'manual') return { eligible: false, reason: 'Manual mode shipments are not provider-orchestrated. Service-point handoff is recorded directly on the shipment.', category: 'provider' };
+    if (!activeProviderId) return { eligible: false, reason: 'No active shipping provider configured.', category: 'provider' };
+    if (!planAllowsServicePoints) return { eligible: false, reason: 'Service points are not included in your current plan.', category: 'plan' };
     if (!canSelectServicePoint) return { eligible: false, reason: 'You do not have permission to select a service point.', category: 'permission' };
     if (!SERVICE_POINT_EDITABLE_STATUSES.includes(shipment.status)) {
       return { eligible: false, reason: `Shipment must be Packed before a service point can be selected. Current status: ${shipment.status}.`, category: 'lifecycle' };
@@ -1080,39 +1163,78 @@ export default function ShippingCenter() {
     setShowServicePointModal(shipmentId);
     setServicePointNotes('');
     setServicePointZipSearch('');
-    setServicePointLoading(true);
+    setServicePointSearchResults([]);
+    setServicePointLoading(false);
     const ship = shipments.find(s => s.id === shipmentId);
-    if (ship) {
-      setTimeout(() => {
-        setServicePointSearchResults(getMockServicePoints(ship));
-        setServicePointLoading(false);
-      }, 250);
-    }
+    setManualSpForm({
+      id: '', name: '', type: 'parcel_locker',
+      line1: '', city: '', state: '',
+      postalCode: ship?.originAddress.postalCode || '',
+      phone: '',
+    });
   }
 
-  function searchServicePointsByZip(shipmentId: string, zip: string) {
+  // Live carrier service-point lookup is not available until carrier-specific locator
+  // adapters (USPS Locations, UPS Locator, FedEx Locations) are wired and credentialed
+  // per store. Until then this is a no-op that surfaces a clear unavailable state in
+  // the UI rather than fabricating fake "preview" results that look real to operators.
+  function searchServicePointsByZip(_shipmentId: string, _zip: string) {
+    setServicePointSearchResults([]);
+    setServicePointLoading(false);
+    setProviderError(friendlyProviderError({ code: 'PROVIDER_UNAVAILABLE', message: 'Live carrier service-point lookup is not available. Configure a carrier-specific locator adapter under Settings → Carrier Locators, or use manual entry below.' }));
+  }
+
+  async function handleSelectServicePointManual(shipmentId: string) {
+    if (isWriteBlocked) return;
     const ship = shipments.find(s => s.id === shipmentId);
     if (!ship) return;
-    setServicePointLoading(true);
-    setTimeout(() => {
-      const trimmed = zip.trim();
-      const base = getMockServicePoints(ship);
-      // In production this would call shippingApi.findServicePoints({ postalCode: zip }).
-      // Here we synthesize a near-match by overriding the postal code on the preview list.
-      const results = trimmed
-        ? base.map((s, i) => ({ ...s, address: { ...s.address, postalCode: trimmed }, distanceKm: 0.5 + i * 0.7 }))
-        : base;
-      setServicePointSearchResults(results);
-      setServicePointLoading(false);
-    }, 250);
+    const elig = getServicePointManualEntryEligibility(ship);
+    if (!elig.eligible) {
+      setProviderError(friendlyProviderError({ code: (elig.category || 'NOT_AVAILABLE').toUpperCase(), message: elig.reason || 'Manual service-point entry not available.' }));
+      return;
+    }
+    const id = manualSpForm.id.trim();
+    const name = manualSpForm.name.trim();
+    const line1 = manualSpForm.line1.trim();
+    const city = manualSpForm.city.trim();
+    const state = manualSpForm.state.trim();
+    const postalCode = manualSpForm.postalCode.trim();
+    if (!id || !name || !line1 || !city || !state || !postalCode) {
+      setProviderError(friendlyProviderError({ code: 'VALIDATION', message: 'Service-point ID, name, and full address are required.' }));
+      return;
+    }
+    setManualSpSubmitting(true);
+    const carrier = ship.carrier || ship.selectedRate?.carrier || 'UPS';
+    const sp: ServicePoint = {
+      id,
+      providerId: activeProviderId || undefined,
+      carrier,
+      name,
+      type: (manualSpForm.type as any) || 'parcel_locker',
+      address: {
+        line1,
+        city,
+        state,
+        postalCode,
+        country: ship.originAddress.country || 'US',
+      },
+      contactPhone: manualSpForm.phone.trim() || undefined,
+      source: 'manual',
+    } as ServicePoint;
+    await handleSelectServicePoint(shipmentId, sp);
+    setManualSpSubmitting(false);
   }
 
   async function handleSelectServicePoint(shipmentId: string, sp: ServicePoint) {
     if (isWriteBlocked) return;
     const ship0 = shipments.find(s => s.id === shipmentId);
     if (!ship0) return;
-    const elig = getServicePointEligibility(ship0);
-    if (!elig.eligible) {
+    // Accept either live-locator eligibility OR manual-entry eligibility. Manual entry
+    // is the only path while no carrier-specific locator adapter is configured.
+    const live = getServicePointEligibility(ship0);
+    const manual = getServicePointManualEntryEligibility(ship0);
+    if (!live.eligible && !manual.eligible) {
+      const elig = live.eligible ? live : manual;
       setProviderError(friendlyProviderError({ code: (elig.category || 'NOT_AVAILABLE').toUpperCase(), message: elig.reason || 'Service point not available.' }));
       return;
     }
@@ -1175,19 +1297,21 @@ export default function ShippingCenter() {
     }
     setPickupSubmitting(true);
     const now = new Date().toISOString();
-    // Simulate provider call: in production this would call shippingApi.requestPickup
-    // and persist the carrier-issued confirmation number. The capability flag in
-    // PROVIDER_CAPABILITIES gates this UI, so we never invoke an unsupported provider.
-    await new Promise(r => setTimeout(r, 400));
-    const confirmation = `PU${Date.now().toString().slice(-8)}`;
+    // Honest local-only path: no live shippingApi.requestPickup call is wired yet.
+    // Persist the operator's intent as status='requested' (NOT 'confirmed') with no
+    // confirmation number — confirmation only happens when a real provider response
+    // arrives. UX copy/timeline must clearly state this is a local schedule, not a
+    // booked carrier pickup. This will be replaced with a real provider call when
+    // the pickup adapter lands; until then the status remains 'requested'.
+    await new Promise(r => setTimeout(r, 200));
     const totalWeight = ship.packages.reduce((sum, p) => sum + (p.weight || 0), 0);
     const pickupRequest: PickupRequest = {
       id: `pr_${Date.now()}`,
       shipmentId,
       providerId: activeProviderId || undefined,
       carrier: ship.carrier || ship.selectedRate?.carrier || 'UPS',
-      status: 'confirmed',
-      confirmationNumber: confirmation,
+      status: 'requested',
+      // confirmationNumber intentionally omitted — only set after a real carrier confirmation
       requestedDate: pickupForm.date,
       windowStart: pickupForm.windowStart || undefined,
       windowEnd: pickupForm.windowEnd || undefined,
@@ -1199,7 +1323,7 @@ export default function ShippingCenter() {
       handlingNotes: pickupForm.notes.trim() || undefined,
       requestedAt: now,
       requestedBy: 'current_operator',
-      confirmedAt: now,
+      // confirmedAt intentionally omitted — set only when carrier confirms
     };
     updateShipment(shipmentId, {
       pickupRequest,
@@ -1207,16 +1331,16 @@ export default function ShippingCenter() {
         ...(ship.pickupInfo || {}),
         pickupRequested: true,
         pickupScheduledAt: pickupForm.date,
-        pickupConfirmationNumber: confirmation,
+        // pickupConfirmationNumber intentionally omitted — local-only request
       },
       events: [
         ...ship.events,
-        { id: `evt_pu_${Date.now()}`, status: 'Pickup Requested' as any, description: `Carrier pickup confirmed (${confirmation}) for ${pickupForm.date} ${pickupForm.windowStart || ''}–${pickupForm.windowEnd || ''}`, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent,
+        { id: `evt_pu_${Date.now()}`, status: 'Pickup Requested' as any, description: `Pickup recorded LOCALLY (not yet sent to carrier) for ${pickupForm.date} ${pickupForm.windowStart || ''}–${pickupForm.windowEnd || ''}. No carrier confirmation number issued.`, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent,
       ],
       updatedAt: now,
     });
     setPickupSubmitting(false);
-    setProviderSuccess(`Carrier pickup confirmed — confirmation ${confirmation}.`);
+    setProviderSuccess('Pickup recorded locally — not yet booked with carrier. Live carrier pickup API call is not wired in this app.');
   }
 
   async function handleCancelPickup(shipmentId: string) {
@@ -2100,7 +2224,44 @@ export default function ShippingCenter() {
           )}
         </div>
         {activeTab === 'settings' ? (
-          <ShippingProvidersPage embedded onProviderChange={refreshProviderState} />
+          <div className="space-y-6">
+            <ShippingProvidersPage embedded onProviderChange={refreshProviderState} />
+            {/* Carrier Locator Settings — direct carrier credentials for live service-point lookup. */}
+            <div className="bg-white rounded-2xl border border-slate-200 p-6">
+              <div className="flex items-start justify-between mb-4">
+                <div>
+                  <p className="text-[10px] font-black text-primary uppercase tracking-widest flex items-center gap-1.5"><span className="material-symbols-outlined text-sm">explore</span>Carrier Locators</p>
+                  <p className="text-xs text-slate-500 mt-1">Direct carrier credentials for live service-point lookup. Each adapter is independent — configure only the carriers you ship with.</p>
+                </div>
+                <span className="px-2 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest bg-amber-100 text-amber-700">Not configured</span>
+              </div>
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-start gap-2 mb-4">
+                <span className="material-symbols-outlined text-amber-500 text-sm mt-0.5">warning</span>
+                <div className="text-xs text-amber-700">
+                  <p className="font-black">No locator adapter is configured</p>
+                  <p className="mt-0.5">Live service-point lookup requires direct carrier credentials. Until at least one adapter is configured, the service-point modal falls back to manual entry. Provider aggregators (EasyPost / Shippo / ShipStation) do not expose a unified service-point locator.</p>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                {[
+                  { id: 'usps', name: 'USPS Locations', desc: 'Post offices, contract postal units, parcel lockers (gopost).', envKey: 'USPS_USER_ID', docs: 'https://developer.usps.com/' },
+                  { id: 'ups', name: 'UPS Locator', desc: 'UPS Access Points, UPS Stores, drop boxes.', envKey: 'UPS_CLIENT_ID + UPS_CLIENT_SECRET', docs: 'https://developer.ups.com/' },
+                  { id: 'fedex', name: 'FedEx Locations', desc: 'FedEx Office, FedEx Ship Centers, Authorized ShipCenters, Drop Boxes.', envKey: 'FEDEX_CLIENT_ID + FEDEX_CLIENT_SECRET', docs: 'https://developer.fedex.com/' },
+                ].map(adapter => (
+                  <div key={adapter.id} className="border border-slate-200 rounded-2xl p-4">
+                    <div className="flex items-start justify-between mb-1">
+                      <p className="text-sm font-black text-slate-800">{adapter.name}</p>
+                      <span className="text-[9px] font-black text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded uppercase tracking-widest">Not wired</span>
+                    </div>
+                    <p className="text-[11px] text-slate-500">{adapter.desc}</p>
+                    <p className="text-[10px] text-slate-400 mt-2 font-mono break-all">Required: {adapter.envKey}</p>
+                    <button type="button" disabled className="mt-3 w-full px-3 py-2 bg-slate-100 text-slate-400 text-[10px] font-black uppercase tracking-widest rounded-xl cursor-not-allowed">Connect (coming soon)</button>
+                  </div>
+                ))}
+              </div>
+              <p className="text-[10px] text-slate-400 mt-3">Adapters are scaffolded in <span className="font-mono">src/shipping/locators/</span>. Connecting credentials and per-store enablement are part of an upcoming task.</p>
+            </div>
+          </div>
         ) : (<>
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3 flex-1 min-w-0">
@@ -3121,8 +3282,12 @@ export default function ShippingCenter() {
                   const prActive = pr && PICKUP_CANCELLABLE_STATUSES.includes(pr.status);
                   const prTerminated = pr && ['cancelled', 'failed', 'rejected'].includes(pr.status);
                   const spElig = getServicePointEligibility(selectedShip);
+                  const spManualElig = getServicePointManualEntryEligibility(selectedShip);
                   const puElig = getPickupEligibility(selectedShip);
-                  const spEditable = spElig.eligible;
+                  // Selection is editable if EITHER the live locator path OR the manual
+                  // entry path is eligible. While no carrier-specific locator adapter is
+                  // configured, manual entry is the only path available.
+                  const spEditable = spElig.eligible || spManualElig.eligible;
                   const pickupRequestable = puElig.eligible;
                   const pickupCancellable = pr && PICKUP_CANCELLABLE_STATUSES.includes(pr.status);
                   return (
@@ -3154,29 +3319,43 @@ export default function ShippingCenter() {
                         </div>
                         <span className={`px-2 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest ${sp ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{sp ? 'Selected' : 'None'}</span>
                       </div>
-                      {!spElig.eligible && !sp && (() => {
-                        const tone = spElig.category === 'mutex'
+                      {!sp && !spManualElig.eligible && (() => {
+                        const elig = spManualElig;
+                        const tone = elig.category === 'mutex'
                           ? { bg: 'bg-sky-50', border: 'border-sky-200', icon: 'text-sky-500', text: 'text-sky-700', label: 'Service point selection blocked' }
-                          : spElig.category === 'lifecycle'
+                          : elig.category === 'lifecycle'
                           ? { bg: 'bg-slate-50', border: 'border-slate-200', icon: 'text-slate-500', text: 'text-slate-600', label: 'Service point not yet available' }
-                          : spElig.category === 'permission'
+                          : elig.category === 'permission'
                           ? { bg: 'bg-rose-50', border: 'border-rose-200', icon: 'text-rose-500', text: 'text-rose-700', label: 'Service point selection denied' }
-                          : { bg: 'bg-amber-50', border: 'border-amber-200', icon: 'text-amber-500', text: 'text-amber-700', label: spElig.category === 'plan' ? 'Service points disabled by plan' : 'Service points not available for this shipment' };
+                          : { bg: 'bg-amber-50', border: 'border-amber-200', icon: 'text-amber-500', text: 'text-amber-700', label: elig.category === 'plan' ? 'Service points disabled by plan' : 'Service points not available for this shipment' };
                         return (
                           <div className={`${tone.bg} border ${tone.border} rounded-xl p-3 flex items-start gap-2`}>
                             <span className={`material-symbols-outlined ${tone.icon} text-sm mt-0.5`}>lock</span>
                             <div className={`text-xs ${tone.text}`}>
                               <p className="font-black">{tone.label}</p>
-                              <p className="mt-0.5">{spElig.reason}</p>
+                              <p className="mt-0.5">{elig.reason}</p>
                             </div>
                           </div>
                         );
                       })()}
-                      {caps.servicePoints && sp && (
+                      {!sp && spManualElig.eligible && !spElig.eligible && (
+                        <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-start gap-2">
+                          <span className="material-symbols-outlined text-amber-500 text-sm mt-0.5">info</span>
+                          <div className="text-xs text-amber-700">
+                            <p className="font-black">Live carrier locator unavailable</p>
+                            <p className="mt-0.5">No carrier-specific locator adapter is configured (USPS / UPS / FedEx). Use the <span className="font-bold">Select Service Point</span> button to record a service-point reference manually. Configure live lookup under <span className="font-bold">Settings → Carrier Locators</span>.</p>
+                          </div>
+                        </div>
+                      )}
+                      {sp && (
                         <div className="bg-emerald-50/50 border border-emerald-200 rounded-xl p-4 space-y-2">
                           <div className="flex items-start justify-between gap-3">
                             <div>
-                              <p className="text-sm font-black text-slate-800">{sp.name}</p>
+                              <p className="text-sm font-black text-slate-800 flex items-center gap-2">
+                                {sp.name}
+                                {sp.source === 'manual' && <span className="text-[9px] font-black text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded uppercase tracking-widest">Manual</span>}
+                                {sp.source === 'live_locator' && <span className="text-[9px] font-black text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded uppercase tracking-widest">Live</span>}
+                              </p>
                               <p className="text-[10px] text-slate-500 mt-0.5 font-mono">{sp.id} · {sp.carrier}{sp.type ? ` · ${sp.type.replace('_', ' ')}` : ''}</p>
                             </div>
                             {sp.distanceKm !== undefined && <span className="text-[10px] font-black text-emerald-700 bg-emerald-100 px-2 py-1 rounded-lg">{sp.distanceKm} km</span>}
@@ -3187,7 +3366,7 @@ export default function ShippingCenter() {
                           {sp.selectedAt && <p className="text-[10px] text-slate-400">Selected by {sp.selectedBy || 'operator'} at {formatDateTime(sp.selectedAt)}</p>}
                         </div>
                       )}
-                      {(spElig.eligible || sp) && (
+                      {(spEditable || sp) && (
                         <div className="flex gap-2 mt-4">
                           {spEditable && !isWriteBlocked && (
                             <button onClick={() => openServicePointModal(selectedShip.id)} className="px-4 py-2.5 bg-primary/10 text-primary font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-primary/20 transition-all">
@@ -3207,6 +3386,15 @@ export default function ShippingCenter() {
                         <div>
                           <p className="text-[10px] font-black text-primary uppercase tracking-widest flex items-center gap-1.5"><span className="material-symbols-outlined text-sm">local_shipping</span>Carrier Pickup Request</p>
                           <p className="text-xs text-slate-500 mt-1">Schedule the carrier to pick up the parcel from the origin address.</p>
+                          {(() => {
+                            const audit = activeProviderId ? PROVIDER_CAPABILITIES[activeProviderId.toLowerCase()] : null;
+                            return audit?.pickupAuditNote ? (
+                              <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5 mt-2 inline-block">
+                                <span className="font-black uppercase tracking-widest mr-1">Provider note ({activeProviderId}):</span>
+                                {audit.pickupAuditNote}
+                              </p>
+                            ) : null;
+                          })()}
                         </div>
                         <span className={`px-2 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest ${
                           !pr ? 'bg-slate-100 text-slate-500' :
@@ -3234,13 +3422,19 @@ export default function ShippingCenter() {
                           </div>
                         );
                       })()}
-                      {caps.pickupRequests && pr && (
+                      {pr && (
                         <div className={`rounded-xl p-4 space-y-2 border ${
                           pr.status === 'cancelled' || pr.status === 'failed' || pr.status === 'rejected'
                             ? 'bg-rose-50/50 border-rose-200'
                             : pr.status === 'completed' ? 'bg-violet-50/50 border-violet-200'
                             : 'bg-sky-50/50 border-sky-200'
                         }`}>
+                          {!pr.confirmationNumber && pr.status !== 'cancelled' && pr.status !== 'failed' && pr.status !== 'rejected' && (
+                            <div className="bg-amber-100 border border-amber-300 rounded-lg p-2 flex items-start gap-2">
+                              <span className="material-symbols-outlined text-amber-600 text-sm mt-0.5">warning</span>
+                              <p className="text-[11px] text-amber-800"><span className="font-black">Local-only request — not booked with carrier.</span> No confirmation number has been issued. The live carrier pickup API call is not wired in this app yet.</p>
+                            </div>
+                          )}
                           <div className="flex items-center justify-between">
                             <p className="text-sm font-black text-slate-800">{pr.carrier} pickup · <span className="capitalize">{pr.status}</span></p>
                             {pr.confirmationNumber && <span className="text-[10px] font-mono font-black text-slate-700 bg-white px-2 py-1 rounded-lg border border-slate-200 select-all">{pr.confirmationNumber}</span>}
@@ -3382,69 +3576,104 @@ export default function ShippingCenter() {
                   </div>
                   <button onClick={() => setShowServicePointModal(null)} className="text-slate-400 hover:text-slate-600"><span className="material-symbols-outlined">close</span></button>
                 </div>
-                <div className="p-6 overflow-y-auto space-y-3">
+                <div className="p-6 overflow-y-auto space-y-4">
                   {(() => {
-                    const modalElig = getServicePointEligibility(ship);
-                    const searchEnabled = modalElig.eligible && !isWriteBlocked;
+                    const liveElig = getServicePointEligibility(ship);
+                    const manualElig = getServicePointManualEntryEligibility(ship);
+                    const liveEnabled = liveElig.eligible && !isWriteBlocked;
+                    const manualEnabled = manualElig.eligible && !isWriteBlocked;
                     return (
                   <>
-                  {!searchEnabled && (
-                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-start gap-2">
-                      <span className="material-symbols-outlined text-amber-500 text-sm mt-0.5">lock</span>
-                      <div className="text-xs text-amber-700">
-                        <p className="font-black">Service-point selection is not available</p>
-                        <p className="mt-0.5">{modalElig.reason || 'Search is disabled until this shipment is eligible.'}</p>
-                        <p className="mt-1 text-[10px] text-amber-600">ZIP-code search is gated behind actual eligibility — disabled inputs prevent confusing dry-run flows.</p>
-                      </div>
-                    </div>
-                  )}
-                  {searchEnabled && (
-                    <div className="bg-sky-50 border border-sky-200 rounded-xl p-3 flex items-start gap-2">
-                      <span className="material-symbols-outlined text-sky-500 text-sm mt-0.5">info</span>
-                      <p className="text-[11px] text-sky-700">Preview list — production deployments query the live carrier service-point API. Selection is recorded in the shipment timeline regardless.</p>
-                    </div>
-                  )}
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Search by ZIP / postal code</label>
-                      <div className="flex gap-2 mt-1">
-                        <input
-                          type="text"
-                          value={servicePointZipSearch}
-                          onChange={e => setServicePointZipSearch(e.target.value)}
-                          onKeyDown={e => { if (e.key === 'Enter' && searchEnabled) searchServicePointsByZip(ship.id, servicePointZipSearch); }}
-                          placeholder={ship.originAddress.postalCode || 'e.g. 94105'}
-                          disabled={!searchEnabled}
-                          className="flex-1 px-3 py-2 border border-slate-200 rounded-xl text-xs disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-50"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => searchServicePointsByZip(ship.id, servicePointZipSearch)}
-                          disabled={!searchEnabled}
-                          className="px-3 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-                        >Search</button>
-                      </div>
-                      <p className="text-[10px] text-slate-400 mt-1">{searchEnabled ? 'Default search is around the shipment origin.' : 'Resolve the eligibility issue above to enable search.'}</p>
-                    </div>
-                    <div>
-                      <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Selection notes (optional)</label>
-                      <input type="text" value={servicePointNotes} onChange={e => setServicePointNotes(e.target.value)} disabled={!searchEnabled} placeholder="e.g. Customer preferred location" className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-50" />
+                  <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-start gap-2">
+                    <span className="material-symbols-outlined text-amber-500 text-sm mt-0.5">policy</span>
+                    <div className="text-xs text-amber-700">
+                      <p className="font-black">Live carrier service-point lookup is not available</p>
+                      <p className="mt-0.5">No carrier-specific locator adapter is configured. Live lookup requires direct USPS Locations, UPS Locator, or FedEx Locations credentials per store. Configure under <span className="font-bold">Settings → Carrier Locators</span>.</p>
+                      <p className="mt-1 text-[10px] text-amber-600">Manual entry below records a carrier-issued service-point reference operator obtained from the carrier directly (carrier website, customer email, etc.).</p>
                     </div>
                   </div>
-                  {searchEnabled && servicePointLoading && <p className="text-xs text-slate-500 text-center py-4">Loading service points...</p>}
-                  {searchEnabled && !servicePointLoading && servicePointSearchResults.map(sp => (
-                    <button key={sp.id} onClick={() => handleSelectServicePoint(ship.id, sp)} className="w-full text-left bg-white border border-slate-200 hover:border-primary hover:bg-primary/5 rounded-2xl p-4 transition-all">
-                      <div className="flex items-start justify-between gap-3 mb-1">
-                        <p className="text-sm font-black text-slate-800">{sp.name}</p>
-                        {sp.distanceKm !== undefined && <span className="text-[10px] font-black text-primary bg-primary/10 px-2 py-0.5 rounded-lg shrink-0">{sp.distanceKm} km</span>}
+                  {!manualEnabled && (
+                    <div className="bg-rose-50 border border-rose-200 rounded-xl p-3 flex items-start gap-2">
+                      <span className="material-symbols-outlined text-rose-500 text-sm mt-0.5">lock</span>
+                      <div className="text-xs text-rose-700">
+                        <p className="font-black">Manual entry is also locked</p>
+                        <p className="mt-0.5">{manualElig.reason || 'Manual entry is unavailable for this shipment.'}</p>
                       </div>
-                      <p className="text-[10px] font-mono text-slate-400">{sp.id} · {sp.type?.replace('_', ' ')}</p>
-                      <p className="text-xs text-slate-600 mt-1">{sp.address.line1}, {sp.address.city}, {sp.address.state} {sp.address.postalCode}</p>
-                      {sp.contactPhone && <p className="text-[11px] text-slate-500 mt-0.5">{sp.contactPhone}</p>}
-                    </button>
-                  ))}
-                  {searchEnabled && !servicePointLoading && servicePointSearchResults.length === 0 && (
-                    <p className="text-xs text-slate-500 text-center py-6">No service points found near this origin.</p>
+                    </div>
+                  )}
+                  {/* Disabled live ZIP search retained for visual context — clearly labeled */}
+                  <fieldset disabled className="opacity-60">
+                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-2">
+                      Live ZIP search
+                      <span className="text-[9px] font-black text-amber-600 bg-amber-100 px-1.5 py-0.5 rounded">Unavailable</span>
+                    </label>
+                    <div className="flex gap-2 mt-1">
+                      <input type="text" placeholder={ship.originAddress.postalCode || 'e.g. 94105'} disabled className="flex-1 px-3 py-2 border border-slate-200 rounded-xl text-xs bg-slate-50 cursor-not-allowed" />
+                      <button type="button" disabled className="px-3 py-2 bg-slate-300 text-white text-[10px] font-black uppercase tracking-widest rounded-xl cursor-not-allowed">Search</button>
+                    </div>
+                    <p className="text-[10px] text-slate-400 mt-1">Activates once a carrier-specific locator adapter is configured.</p>
+                  </fieldset>
+                  <div className="border-t border-slate-100 pt-4">
+                    <p className="text-[11px] font-black text-slate-700 uppercase tracking-widest mb-2">Manual service-point entry</p>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Service-point ID *</label>
+                        <input type="text" value={manualSpForm.id} onChange={e => setManualSpForm(f => ({ ...f, id: e.target.value }))} disabled={!manualEnabled} placeholder="e.g. UPS_AP_12345" className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs disabled:opacity-50 disabled:bg-slate-50" />
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Type</label>
+                        <select value={manualSpForm.type} onChange={e => setManualSpForm(f => ({ ...f, type: e.target.value }))} disabled={!manualEnabled} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs disabled:opacity-50 disabled:bg-slate-50">
+                          <option value="access_point">Access Point</option>
+                          <option value="parcel_locker">Parcel Locker</option>
+                          <option value="locker">Locker</option>
+                          <option value="office">Carrier Office</option>
+                          <option value="retail_partner">Retail Partner</option>
+                          <option value="other">Other</option>
+                        </select>
+                      </div>
+                      <div className="col-span-2">
+                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Name *</label>
+                        <input type="text" value={manualSpForm.name} onChange={e => setManualSpForm(f => ({ ...f, name: e.target.value }))} disabled={!manualEnabled} placeholder="e.g. UPS Access Point — 5th Ave Pharmacy" className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs disabled:opacity-50 disabled:bg-slate-50" />
+                      </div>
+                      <div className="col-span-2">
+                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Street address *</label>
+                        <input type="text" value={manualSpForm.line1} onChange={e => setManualSpForm(f => ({ ...f, line1: e.target.value }))} disabled={!manualEnabled} placeholder="123 Main St" className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs disabled:opacity-50 disabled:bg-slate-50" />
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">City *</label>
+                        <input type="text" value={manualSpForm.city} onChange={e => setManualSpForm(f => ({ ...f, city: e.target.value }))} disabled={!manualEnabled} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs disabled:opacity-50 disabled:bg-slate-50" />
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">State *</label>
+                        <input type="text" value={manualSpForm.state} onChange={e => setManualSpForm(f => ({ ...f, state: e.target.value }))} disabled={!manualEnabled} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs disabled:opacity-50 disabled:bg-slate-50" />
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Postal code *</label>
+                        <input type="text" value={manualSpForm.postalCode} onChange={e => setManualSpForm(f => ({ ...f, postalCode: e.target.value }))} disabled={!manualEnabled} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs disabled:opacity-50 disabled:bg-slate-50" />
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Phone (optional)</label>
+                        <input type="text" value={manualSpForm.phone} onChange={e => setManualSpForm(f => ({ ...f, phone: e.target.value }))} disabled={!manualEnabled} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs disabled:opacity-50 disabled:bg-slate-50" />
+                      </div>
+                      <div className="col-span-2">
+                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Selection notes (optional)</label>
+                        <input type="text" value={servicePointNotes} onChange={e => setServicePointNotes(e.target.value)} disabled={!manualEnabled} placeholder="e.g. Customer preferred location" className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs disabled:opacity-50 disabled:bg-slate-50" />
+                      </div>
+                    </div>
+                    <div className="flex justify-end gap-2 mt-4">
+                      <button type="button" onClick={() => setShowServicePointModal(null)} className="px-4 py-2 bg-white text-slate-500 rounded-xl font-black text-[10px] uppercase tracking-widest border border-slate-200">Cancel</button>
+                      <button
+                        type="button"
+                        onClick={() => handleSelectServicePointManual(ship.id)}
+                        disabled={!manualEnabled || manualSpSubmitting}
+                        className="px-4 py-2 bg-primary text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-primary/20 disabled:opacity-40 disabled:cursor-not-allowed"
+                      >{manualSpSubmitting ? 'Saving…' : 'Save manual entry'}</button>
+                    </div>
+                    <p className="text-[10px] text-slate-400 mt-2">Selection is recorded in the shipment timeline and marked <span className="font-black">source=manual</span> for audit.</p>
+                  </div>
+                  {/* Future: when liveEnabled becomes true (adapter configured), surface results from shippingApi.findServicePoints here. */}
+                  {liveEnabled && false && (
+                    <p className="text-xs text-slate-500">Live results placeholder.</p>
                   )}
                   </>
                   );

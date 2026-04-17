@@ -963,7 +963,8 @@ export interface ServicePoint {
   carrier: string;                         // 'UPS', 'FedEx', 'USPS', 'DHL', etc.
   providerId?: string;                     // app provider id ('easypost' | 'shippo' | 'shipstation')
   name: string;                            // 'UPS Access Point — 5th Ave Pharmacy'
-  type?: 'access_point' | 'locker' | 'office' | 'retail_partner' | 'other';
+  type?: 'access_point' | 'locker' | 'parcel_locker' | 'office' | 'retail_partner' | 'other';
+  source?: 'live_locator' | 'manual' | 'preview';   // provenance of the selection
   address: ShipmentAddress;
   distanceKm?: number;                     // distance from origin if known
   hours?: ServicePointHours[];

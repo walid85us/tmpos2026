@@ -1,0 +1,313 @@
+Shipping Phase 2 — Service Points Honest Search + Carrier Locator Settings + Pickup Capability Standardization
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is the next correction/completion pass for Shipping Phase 2 Service Points & Pickup Requests.
+Do not redesign the app.
+Do not broaden scope into unrelated modules.
+Implement the approved low-waste / low-cost direction exactly as described below.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Firebase/Firestore data architect
+- Enterprise shipping systems architect
+- Senior parcel-network / carrier-integration / service-point / pickup-operations expert with 20+ years of experience in drop-off networks, pickup scheduling, reverse logistics, carrier API strategy, and production shipping UX
+- Reliability engineer
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- RBAC/sub-permissions
+- lifecycle gating
+- System Owner Plans & Features matrix
+- Store Permissions Matrix
+- Shipping Center as the sole provider-management home
+- Returns Portal / Reverse Logistics
+- provider/manual shipment mode split
+- mandatory provider address validation before Get Rates in provider mode
+- Get Rates requires both Origin and Destination in Validated state
+- Ready disabled until rate selection in provider mode
+- Packed only after successful label purchase in provider mode
+- existing Service Points and Pickup Requests work
+- Part A gating/source-of-truth fixes already completed and passed QA
+- existing outbound shipping core flow
+- existing reverse-logistics flow
+
+==================================================
+APPROVED DIRECTION — DO NOT DEVIATE
+==================================================
+
+We agreed on the following:
+
+1) Service Point ZIP search must stop pretending to be real
+- remove fake ZIP-based result rewriting
+- do not show mock lists as if they are live carrier results
+
+2) Service Point search must be honest
+- if live carrier-specific locator support is not configured, the UI must clearly say so
+- keep a practical manual entry fallback
+- do not fake live search
+
+3) Carrier-specific locator adapters should be prepared through Shipping Settings
+- add carrier locator adapter configuration architecture under Shipping Center → Settings
+- this is for store owners who want to configure carrier-specific lookup adapters later
+- do not fully implement live USPS/UPS/FedEx locator adapters in this pass
+- do create the proper settings architecture and honest readiness state
+
+4) Carrier Pickup Request is a real provider-specific capability and should not be treated the same way as Service Point lookup
+- pickup support differs by provider
+- the app must model provider pickup capabilities honestly
+- do not assume EasyPost, Shippo, and ShipStation all work the same
+
+5) The current EasyPost pickup behavior needs to be audited and represented honestly
+- determine whether the app is:
+  - only creating the pickup object
+  - auto-selecting/auto-buying a pickup rate
+  - or relying on zero-cost/default scheduling behavior
+- do not guess
+- inspect the actual current implementation and surface the truth in the UI and documentation where relevant
+
+==================================================
+MANDATORY IMPLEMENTATION OBJECTIVES
+==================================================
+
+PART A — SERVICE POINT SEARCH HONESTY
+
+1) REMOVE FAKE ZIP SEARCH BEHAVIOR
+Required:
+- eliminate the current fake behavior where typing a ZIP just mutates/relabels the same mock list
+- do not present preview/mock results as real carrier-authoritative service points
+
+2) HONEST LIVE-LOCATOR-UNAVAILABLE STATE
+Required:
+- when live carrier-specific service-point lookup is not configured, show a clear message such as:
+  "Live carrier service-point lookup requires carrier-specific production credentials and a carrier-specific locator adapter. Currently unavailable."
+- keep this wording honest, concise, and operator-friendly
+- do not show active search UI that implies real live lookup if the app cannot actually perform it
+
+3) MANUAL SERVICE-POINT ENTRY FALLBACK
+Required:
+- operators must still have a usable fallback path
+- allow manual service-point details entry / manual service-point reference handling where appropriate
+- keep it lightweight and auditable
+- do not create a dead-end when live lookup is unavailable
+
+4) ELIGIBILITY-AWARE SEARCH / LOOKUP UX
+Required:
+- service-point lookup/search UI must only be active when the shipment is otherwise eligible:
+  - plan allows it
+  - permission allows it
+  - provider mode is active
+  - provider is configured
+  - shipment is PACKED
+  - mutual exclusivity allows it
+  - origin and destination validation/business rules are satisfied
+  - carrier/service context exists if needed
+- if any prerequisite is missing, the UI must honestly explain why lookup is unavailable
+
+==================================================
+PART B — CARRIER LOCATOR SETTINGS ARCHITECTURE
+
+Add a new subsection inside Shipping Center → Settings for:
+
+Carrier Locator Adapters
+
+Required:
+- USPS Locator
+- UPS Locator
+- FedEx Locations
+
+For each adapter card, provide architecture-ready settings fields such as:
+- enabled toggle
+- environment (sandbox/test or production where applicable)
+- credential placeholders / config fields
+- connection status
+- last verified time
+- readiness note / not yet active note if live adapter is not implemented yet
+
+Important:
+- do not fake working locator adapters in this pass
+- if live implementation is not yet present, the settings must say so honestly
+- the purpose now is to create the correct store-owner configuration architecture and future-ready settings home
+
+Also required:
+- keep this under Shipping Center Settings
+- do not create a new unrelated settings surface
+- do not imply the adapters are fully live if they are not
+
+==================================================
+PART C — PROVIDER-SPECIFIC PICKUP CAPABILITY MODEL
+
+Pickup is not the same as service-point search.
+
+Required:
+- add/clarify provider capability modeling for pickup, including concepts like:
+  - supportsPickupRequests
+  - supportsPickupCancellation
+  - pickupRequiresProviderConfirmation
+  - pickupMayRequireRateSelectionOrPurchase
+  - pickupCarrierCoverage
+  - pickupStatusModel / webhook support
+- the UI must adapt honestly by provider
+- do not assume EasyPost, Shippo, and ShipStation share identical pickup behavior
+
+At minimum:
+- inspect the current EasyPost pickup implementation and determine the real flow
+- determine whether the app is:
+  - just creating the pickup
+  - auto-selecting / auto-buying the pickup rate
+  - or scheduling in a zero-cost/default path
+- surface that truth in the app and/or documentation appropriately
+- do not change behavior blindly if the current implementation is already correct
+- do make the behavior understandable
+
+Provider behavior expectations:
+- EasyPost pickup is a real provider-backed feature
+- Shippo and ShipStation pickup support may differ in workflow shape and carrier coverage
+- the app should reflect those differences honestly through capability/configuration, not fake uniformity
+
+==================================================
+PART D — KEEP THE CURRENT SUCCESSFUL GATING MODEL
+
+Do not break the work that already passed QA:
+- plan gating
+- store permission gating
+- no-provider disable behavior
+- PACKED-only activation
+- mutual exclusivity
+- reverse-logistics inheritance
+
+All of the above must remain intact after this pass.
+
+==================================================
+NON-NEGOTIABLE IMPLEMENTATION REQUIREMENTS
+==================================================
+
+1. Service Point search is no longer fake
+Required:
+- no fake ZIP-based results
+Acceptance:
+- QA no longer sees mock results pretending to be real carrier locations
+
+2. Honest unavailable state + manual fallback
+Required:
+- operator clearly understands when live locator is unavailable
+- operator still has a usable manual fallback
+Acceptance:
+- QA sees an honest disabled state and a practical fallback path
+
+3. Carrier Locator Settings exist under Shipping Settings
+Required:
+- USPS / UPS / FedEx locator adapter settings subsection exists
+- clearly future-ready, honest, and store-owner configurable
+Acceptance:
+- QA sees the settings architecture and understands what is configured vs not yet live
+
+4. Pickup behavior is modeled honestly by provider
+Required:
+- current provider capability differences are not hidden
+- EasyPost pickup flow is audited and represented honestly
+Acceptance:
+- QA/admin can understand what pickup behavior is actually supported by the active provider
+
+5. Existing shipping / returns behavior stays intact
+Required:
+- do not break any of the already-passing shipping and reverse-logistics flows
+Acceptance:
+- outbound shipping and reverse-logistics remain stable
+
+==================================================
+PHASE 2 / PHASE 3 READINESS
+==================================================
+
+Continue to preserve forward-compatibility for:
+- customs docs
+- insurance rules
+- carrier analytics
+- automation rules
+- batch labels
+- packing workflows
+- SLA optimization
+- carrier scorecards
+
+Do not implement them now.
+Do keep the architecture compatible with them.
+
+==================================================
+IMPORTANT IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not implement live USPS/UPS/FedEx locator adapters yet unless explicitly trivial and production-safe
+- Do not waste time/money on fake search behavior
+- Do not touch unrelated workstreams
+- Do not break outbound shipping
+- Do not break reverse logistics
+- Keep the design baseline consistent
+- Keep operator workflow honest and auditable
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact execution order:
+
+1) Remove fake ZIP-based service-point search behavior
+2) Replace it with an honest live-locator-unavailable state plus manual fallback
+3) Add Carrier Locator Adapters settings architecture under Shipping Center → Settings
+4) Audit and standardize provider-specific pickup capability modeling
+5) Inspect the current EasyPost pickup implementation and represent it honestly
+6) Re-test all affected service-point, pickup, shipping, and reverse-logistics flows
+7) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- fake ZIP search removed
+- live carrier locator currently unavailable without carrier-specific credentials/adapters
+- manual service-point fallback
+- Carrier Locator Adapters settings architecture
+- provider-specific pickup capability model
+- findings from the EasyPost pickup flow audit
+- note that Shippo and ShipStation pickup capability differs and is not assumed identical
+- future live carrier-adapter roadmap:
+  - USPS first
+  - UPS second
+  - FedEx third
+- future recommendations not implemented now
+
+==================================================
+MANDATORY OUTPUT PROOF
+==================================================
+
+Do not give a generic completion summary.
+Do not say this task is complete unless the fake search is removed, the honest fallback is in place, the carrier-locator settings architecture exists, and the pickup behavior is represented honestly.
+
+OUTPUT FORMAT REQUIRED
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Fake ZIP Search Removal Fix
+3. Honest Live-Locator-Unavailable UX Fix
+4. Manual Service-Point Fallback Fix
+5. Carrier Locator Settings Architecture Added
+6. Provider-Specific Pickup Capability Model Fix
+7. EasyPost Pickup Flow Audit Findings
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes
