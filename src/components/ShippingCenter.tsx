@@ -10,6 +10,7 @@ import type { ReturnPrefill } from './ReturnsPortal';
 import PageShell from './PageShell';
 import { TrackingNumber } from './shared/TrackingNumber';
 import ShippingProvidersPage from './ShippingProvidersPage';
+import { featureMatrix as staticFeatureMatrix } from '../owner/mockData';
 
 async function convertImageToPdfBlobUrl(imageUrl: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -367,7 +368,23 @@ function formatDateTime(iso: string): string {
 
 export default function ShippingCenter() {
   const { shipments, addShipment, updateShipment, invoices, repairTickets, rmas, inventoryTransfers, suppliers, customers } = useStoreLocalState();
-  const { checkPermission, checkSubPermission, hasPermission, isWriteBlocked, canAccess } = useAccess();
+  const { checkPermission, checkSubPermission, hasPermission, isWriteBlocked, canAccess, tenant } = useAccess();
+  // Force re-render when System Owner Plans & Features matrix changes via sessionStorage.
+  // Without this, toggling a feature in the System Owner UI in another tab would leave
+  // ShippingCenter's gating stale until next mount. Storage events fire on cross-document
+  // writes; we also listen for a same-document custom 'features_data:changed' event so
+  // PlansPage edits in the same tab propagate immediately.
+  const [, setFeatureStateTick] = useState(0);
+  useEffect(() => {
+    const bump = () => setFeatureStateTick(t => t + 1);
+    const onStorage = (e: StorageEvent) => { if (e.key === 'features_data') bump(); };
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('features_data:changed', bump as EventListener);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('features_data:changed', bump as EventListener);
+    };
+  }, []);
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -387,8 +404,29 @@ export default function ShippingCenter() {
   const canSelectServicePoint = checkSubPermission('select_service_point');
   const canRequestPickup = checkSubPermission('request_carrier_pickup');
   const canCancelPickup = checkSubPermission('cancel_carrier_pickup');
-  const planAllowsServicePoints = hasPermission('service_points');
-  const planAllowsPickupRequests = hasPermission('pickup_requests');
+  // Live plan-feature gating. Reads the System Owner matrix override directly from
+  // sessionStorage on every render (the storage/custom-event listener above triggers
+  // a re-render when PlansPage saves), then falls back to the static `featureMatrix`
+  // import. This is the SINGLE source of truth used by both UI gating and action
+  // handlers, so a feature toggled off by a System Owner cannot leave a stale UI
+  // showing the capability as available.
+  function isPlanFeatureLive(featureId: string): boolean {
+    if (!tenant) return false;
+    const planKey = (tenant.plan as string) === 'starter' ? 'essential' : (tenant.plan as string);
+    let matrix: Array<{ id: string; planAvailability?: Record<string, boolean>; lifecycle?: string }> = [];
+    try {
+      const raw = sessionStorage.getItem('features_data');
+      if (raw) matrix = JSON.parse(raw);
+    } catch {}
+    if (!Array.isArray(matrix) || matrix.length === 0) {
+      matrix = staticFeatureMatrix as typeof matrix;
+    }
+    const entry = matrix.find(f => f.id === featureId);
+    if (!entry || !entry.planAvailability) return hasPermission(featureId);
+    return !!entry.planAvailability[planKey];
+  }
+  const planAllowsServicePoints = isPlanFeatureLive('service_points');
+  const planAllowsPickupRequests = isPlanFeatureLive('pickup_requests');
 
   const [activeTab, setActiveTab] = useState<'shipments' | 'settings'>('shipments');
   const [search, setSearch] = useState('');

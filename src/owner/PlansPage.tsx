@@ -64,7 +64,15 @@ const PlansPage: React.FC = () => {
   });
 
   useEffect(() => { try { sessionStorage.setItem('plans_data', JSON.stringify(plansData)); } catch {} }, [plansData]);
-  useEffect(() => { try { sessionStorage.setItem('features_data', JSON.stringify(featuresData)); } catch {} }, [featuresData]);
+  useEffect(() => {
+    try {
+      sessionStorage.setItem('features_data', JSON.stringify(featuresData));
+      // Notify same-tab listeners (e.g. ShippingCenter eligibility evaluators) that
+      // the live plan/feature matrix changed. Storage events only fire cross-tab,
+      // so this custom event covers the in-tab case.
+      window.dispatchEvent(new Event('features_data:changed'));
+    } catch {}
+  }, [featuresData]);
   useEffect(() => { try { sessionStorage.setItem('addons_data', JSON.stringify(addOnsData)); } catch {} }, [addOnsData]);
   const [showPlanModal, setShowPlanModal] = useState(false);
   const [editingPlan, setEditingPlan] = useState<PlanData | null>(null);

@@ -1,0 +1,167 @@
+Shipping Phase 2 — Service Points & Pickup Requests — Root-Cause Gating Fix + Service-Point Search Solution Proposal
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+Do NOT start a new workstream.
+Do NOT redesign the app.
+Do NOT implement speculative search behavior yet.
+This is a two-part pass:
+
+Part A:
+Fix the live feature-gating / permission-gating source-of-truth issue.
+
+Part B:
+Do NOT implement service-point search changes yet.
+Instead, study the correct solution carefully and return a decision proposal for approval before coding that part.
+
+Your job is to stop wasting time and money on fake behavior and come back with a real, technically honest plan.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Firebase/Firestore data architect
+- Enterprise shipping systems architect
+- Senior parcel-network / service-point / carrier-operations expert with 20+ years of experience in drop-off networks, pickup scheduling, reverse logistics, and carrier integration strategy
+- Reliability engineer
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Mandatory research before answering:
+Study how official carrier location finding should work and compare it to our current implementation.
+At minimum, analyze the practical implications of:
+- USPS locations search / USPS location-finder pattern
+- FedEx location search / hold/drop-off finder pattern
+- UPS locator / access point / store locator pattern
+- whether the current provider stack gives us a true unified service-point finder
+- what is realistically possible in test mode versus production mode
+
+Do NOT copy any carrier website UX literally.
+Do extract the right operational model.
+
+==================================================
+PART A — FIX THE LIVE GATING BUG NOW
+==================================================
+
+Current QA source of truth:
+- disabling Service Point / Drop-Off or Carrier Pickup Request at the System Owner Plans & Features level still leaves those capabilities visible in the Logistics tab
+- store permission grant/deny behavior is also still wrong or conflated with plan-disabled messaging
+- the reason shown to the operator is not trustworthy
+
+Required fix:
+1) Correct the true source of truth for:
+- plan gating
+- store permission gating
+- provider availability
+- lifecycle eligibility
+
+2) UI and handlers must both use that same source of truth
+
+3) The operator must see the correct reason:
+- disabled by current plan
+- denied by store permission
+- no provider configured
+- wrong lifecycle state
+- provider capability unavailable
+
+4) Do not leave the Logistics tab showing misleading capability cards that imply the feature is available when it is not
+
+Acceptance:
+- when disabled in System Owner Plans & Features, the capability is not usable for that plan
+- when denied in Store Permissions, the capability is not usable for that user
+- the correct reason is shown and not conflated with another cause
+
+==================================================
+PART B — DO NOT IMPLEMENT SEARCH YET; RETURN A SOLUTION PROPOSAL
+==================================================
+
+Current QA source of truth:
+- ZIP-code search is not real
+- changing ZIP code just changes the ZIP shown on the same mock list
+- this is unacceptable
+- the user wants real carrier location behavior, not fake list rewriting
+
+Your task:
+Study the correct solution and return the best implementation proposal BEFORE writing code for it.
+
+The proposal must answer:
+
+1) What is the right architecture for service-point search in this app?
+Choose and justify between:
+- carrier-specific location adapters
+- provider-unified adapter if truly available
+- hybrid approach
+- or temporary honest disablement until production credentials/providers support it
+
+2) Can the current provider stack truly support real service-point search?
+If yes:
+- explain exactly how
+If not:
+- say that clearly and do not fake it
+
+3) When should service-point search be enabled?
+At minimum evaluate:
+- only when shipment is PACKED
+- only when provider mode is active
+- only when plan + permission allow
+- only when provider is active
+- only when a carrier/service has been selected
+- only when origin and destination are validated
+
+4) What should happen in test mode?
+- be honest about what can and cannot be tested
+- do not fake live carrier location behavior
+
+5) What is the lowest-cost correct solution?
+You must explicitly weigh:
+- engineering effort
+- provider/carrier dependencies
+- production readiness
+- testability
+- ongoing maintenance
+- user trust
+
+6) What should the operator-facing UX be?
+Define:
+- where search appears
+- when it is enabled
+- what fields are required before searching
+- how results should be displayed
+- what happens if the carrier does not support search
+- what happens if production credentials are required
+
+==================================================
+NON-NEGOTIABLE RULES
+==================================================
+
+- Part A must be fixed now
+- Part B must NOT be implemented yet
+- Part B must come back as a recommendation / design decision only
+- do not fake service-point results
+- do not keep mock ZIP rewriting
+- do not broaden into unrelated workstreams
+- keep existing outbound shipping and returns flows intact
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Part A Correction Pass Status
+2. Part A Source-of-Truth / Gating Fix
+3. Part A Files Changed
+4. Part A Non-Regression Notes
+
+5. Part B Service-Point Search Research Summary
+6. Part B Feasible Options Compared
+7. Part B Recommended Solution
+8. Part B Why This Is The Best Low-Waste / Low-Cost Path
+9. Part B What Would Be Implemented Later If Approved
+10. Part B Risks / Constraints / Production vs Test Mode Notes
