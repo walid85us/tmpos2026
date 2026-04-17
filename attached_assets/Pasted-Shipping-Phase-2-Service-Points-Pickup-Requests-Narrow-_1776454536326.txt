@@ -1,0 +1,257 @@
+Shipping Phase 2 — Service Points & Pickup Requests — Narrow Gating + Operational Correction Pass
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a narrow correction pass for the Service Points & Pickup Requests workstream.
+Do not redesign the app.
+Do not broaden scope.
+Fix the remaining gating, mutual-exclusivity, overview visibility, provider-unavailable messaging, and pickup lifecycle issues exactly as described below.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Firebase/Firestore data architect
+- Enterprise shipping systems architect
+- Senior shipping / carrier-operations expert with 20+ years of experience in parcel handoff operations, service points, pickup scheduling, reverse logistics, and operational governance
+- Root-cause debugging specialist
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- RBAC/sub-permissions
+- lifecycle gating
+- platform/store hierarchy
+- System Owner Plans & Features matrix
+- Store Permissions Matrix
+- secure server-side provider call architecture
+- Shipping Center as the sole provider-management home
+- Returns Portal / Reverse Logistics
+- provider/manual shipment mode split
+- mandatory provider address validation before Get Rates in provider mode
+- Get Rates requires both Origin and Destination in Validated state
+- Ready disabled until rate selection in provider mode
+- Packed only after successful label purchase in provider mode
+- existing outbound shipping core flow
+- existing Service Points and Pickup Requests implementation already added
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — REMAINING FAILURES
+==================================================
+
+These are the exact remaining blockers and must be fixed literally:
+
+1) Plan/feature gating is not enforced correctly
+Observed QA result:
+- Service Point / Drop-Off or Carrier Pickup Request can still appear/useable even when disabled in System Owner Plans & Features
+Required behavior:
+- if disabled at plan level, the capability must not be useable for that tenant/plan
+- UI should hide/disable it coherently and not allow editing/selection
+
+2) Store permission denial is not enforced correctly
+Observed QA result:
+- when store permissions are denied for Service Point / Drop-Off or Carrier Pickup Request, the user can still edit/select them
+Required behavior:
+- if denied at store-role/permission level, the capability must not be editable/useable for that user
+- UI and action handlers must both enforce the denial
+
+3) Service Point / Drop-Off and Carrier Pickup Request are not mutually exclusive
+Required behavior:
+- the shipment cannot use both at the same time
+- if Service Point / Drop-Off is selected, Carrier Pickup Request must be disabled/cleared
+- if Carrier Pickup Request is selected/requested, Service Point / Drop-Off must be disabled/cleared
+- operator must clearly understand that these are mutually exclusive shipment handoff methods
+
+4) Shipment Overview should show which handoff method is being used
+Required behavior:
+- Shipment Overview must clearly show whether the shipment is:
+  - Service Point / Drop-Off
+  - Carrier Pickup Request
+  - neither
+- this should be easy for operators to see without drilling deep into separate sections
+
+5) Pickup cancellation / re-schedule behavior needs refinement
+Required behavior:
+- if Carrier Pickup Request is cancelled, show pickup cancellation confirmation/status clearly
+- after cancellation, operator must be able to re-schedule a new Carrier Pickup Request
+- keep lifecycle coherent and auditable
+
+6) Provider-unavailable messaging should be consistent
+Observed QA result:
+- when no provider is configured, Provider & Operations validation area messaging is not aligned with Service Point / Drop-Off and Carrier Pickup Request messaging
+Required behavior:
+- use consistent honest messaging such as:
+  “Service points not available for this shipment. No active shipping provider configured.”
+  and the equivalent for pickup
+- Provider & Operations should align with the rest of the shipment UX
+
+7) Service Point search can be better
+Operator improvement requested:
+- add search by ZIP code for Service Point / Drop-Off where the current implementation supports it
+Required behavior:
+- keep this lightweight and useful
+- do not redesign the full service-point UX
+- if ZIP-based search is feasible in the current provider flow, implement it
+- if provider capability is limited, keep the UI honest
+
+8) Pickup tracking/history visibility
+Requested behavior:
+- show pickup-related tracking/event/history where carrier/provider updates are available
+Required behavior for this pass:
+- surface pickup status/history coherently where supported by current provider flow
+- do not fake live provider pickup events
+- keep the UI honest in test mode vs production mode
+- at minimum, make pickup request status/history clearer and future-ready
+
+==================================================
+NON-NEGOTIABLE IMPLEMENTATION REQUIREMENTS
+==================================================
+
+1. Enforce System Owner Plans & Features gating
+Required:
+- Service Point / Drop-Off and Carrier Pickup Request must respect plan-level availability
+- if disabled in the plan, they must not remain useable in shipment UI/actions
+Acceptance:
+- QA disables the feature in System Owner Plans & Features and it is no longer available in practice
+
+2. Enforce Store Permissions gating
+Required:
+- denied permission must block both UI editing and action execution
+- do not rely on visual hiding only
+Acceptance:
+- QA denies the permission and the user cannot edit/use the feature
+
+3. Mutual exclusivity between Service Point and Carrier Pickup
+Required:
+- only one handoff method can be active at a time
+- selection of one disables or clears the other
+Acceptance:
+- QA cannot keep both simultaneously active on the same shipment
+
+4. Shipment Overview visibility
+Required:
+- show selected handoff method clearly in Shipment Overview
+Acceptance:
+- QA can quickly see whether the shipment is Service Point / Drop-Off or Carrier Pickup
+
+5. Pickup cancellation + re-schedule
+Required:
+- cancelled pickup shows a clear cancelled/confirmation state
+- operator can re-schedule after cancellation
+Acceptance:
+- QA can cancel and then re-request/reschedule coherently
+
+6. Consistent provider-unavailable messaging
+Required:
+- when provider is not configured/active, related shipping-provider-dependent surfaces show consistent honest messaging
+Acceptance:
+- QA sees aligned, understandable messaging across Service Points, Pickup, and Provider & Operations
+
+7. ZIP-code search improvement for Service Points
+Required:
+- support ZIP-code based search/filter where feasible in the current implementation
+Acceptance:
+- QA can search service points by ZIP if supported by the current provider flow
+
+8. Pickup status/history clarity
+Required:
+- show pickup-related state/history more clearly
+- keep live-vs-test/provider support honest
+Acceptance:
+- QA sees a clearer pickup status/history experience without fake live updates
+
+==================================================
+FULFILLMENT RULES TO PRESERVE
+==================================================
+
+Do not weaken these rules:
+- existing outbound shipping core flow remains intact
+- provider/manual mode split remains intact
+- provider-driven shipment lifecycle remains intact
+- manual shipments remain manual
+- PDF-first label flow remains intact
+- webhook/event automation remains intact
+- bulk sync/reconciliation remains intact
+- Returns Portal / reverse logistics remains intact
+- preview mode safety remains intact
+- permissions and plan gating remain intact globally
+- full tracking visibility remains intact
+
+==================================================
+IMPORTANT IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into customs / insurance / analytics implementation
+- Do not touch unrelated workstreams
+- Do not break outbound shipping
+- Do not break provider/manual mode split
+- Do not create conflicting state between Shipping Center and Returns Portal
+- Keep the design baseline consistent
+- Keep operator workflow practical and auditable
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact execution order:
+
+1) Fix plan-level gating enforcement
+2) Fix store-permission gating enforcement
+3) Enforce Service Point / Pickup mutual exclusivity
+4) Add Shipment Overview handoff-method visibility
+5) Refine pickup cancel/reschedule flow
+6) Unify provider-unavailable messaging
+7) Add ZIP-code search improvement for Service Points if feasible
+8) Improve pickup status/history clarity
+9) Re-test all affected shipping and reverse-logistics flows
+10) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- plan/feature gating behavior for Service Points and Pickup Requests
+- store-permission gating behavior
+- mutual exclusivity rule between Service Point / Drop-Off and Carrier Pickup Request
+- Shipment Overview visibility for selected handoff method
+- pickup cancellation/reschedule behavior
+- provider-unavailable messaging rules
+- ZIP-code search support note if implemented
+- pickup status/history behavior and future production/live considerations
+- future recommendations not implemented now
+
+==================================================
+MANDATORY OUTPUT PROOF
+==================================================
+
+Do not give a generic completion summary.
+Do not say this task is complete unless each literal blocker is visibly fixed in the actual product UI and behavior.
+
+OUTPUT FORMAT REQUIRED
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Plan / Feature Gating Enforcement Fix
+3. Store Permission Enforcement Fix
+4. Service Point vs Pickup Mutual Exclusivity Fix
+5. Shipment Overview Visibility Fix
+6. Pickup Cancellation / Re-Schedule Fix
+7. Provider-Unavailable Messaging Fix
+8. ZIP-Code Search Improvement
+9. Pickup Status / History Clarity Fix
+10. Files Changed
+11. Documentation Updated
+12. Non-Regression Notes

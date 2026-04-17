@@ -367,7 +367,7 @@ function formatDateTime(iso: string): string {
 
 export default function ShippingCenter() {
   const { shipments, addShipment, updateShipment, invoices, repairTickets, rmas, inventoryTransfers, suppliers, customers } = useStoreLocalState();
-  const { checkPermission, checkSubPermission, isWriteBlocked, canAccess } = useAccess();
+  const { checkPermission, checkSubPermission, hasPermission, isWriteBlocked, canAccess } = useAccess();
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -387,6 +387,8 @@ export default function ShippingCenter() {
   const canSelectServicePoint = checkSubPermission('select_service_point');
   const canRequestPickup = checkSubPermission('request_carrier_pickup');
   const canCancelPickup = checkSubPermission('cancel_carrier_pickup');
+  const planAllowsServicePoints = hasPermission('service_points');
+  const planAllowsPickupRequests = hasPermission('pickup_requests');
 
   const [activeTab, setActiveTab] = useState<'shipments' | 'settings'>('shipments');
   const [search, setSearch] = useState('');
@@ -399,6 +401,7 @@ export default function ShippingCenter() {
   const [servicePointSearchResults, setServicePointSearchResults] = useState<ServicePoint[]>([]);
   const [servicePointLoading, setServicePointLoading] = useState(false);
   const [servicePointNotes, setServicePointNotes] = useState('');
+  const [servicePointZipSearch, setServicePointZipSearch] = useState('');
   const [pickupForm, setPickupForm] = useState<{ date: string; windowStart: string; windowEnd: string; contactName: string; contactPhone: string; notes: string }>({
     date: '',
     windowStart: '09:00',
@@ -915,13 +918,43 @@ export default function ShippingCenter() {
     shipstation: { servicePoints: false, pickupRequests: true },
   };
 
-  function getProviderCapabilities(shipment: Shipment): { servicePoints: boolean; pickupRequests: boolean; reason?: string } {
+  function getProviderCapabilities(shipment: Shipment): { servicePoints: boolean; pickupRequests: boolean; reason?: string; spReason?: string; puReason?: string } {
     const isManual = getShipmentMode(shipment) === 'manual';
-    if (isManual) return { servicePoints: false, pickupRequests: false, reason: 'Manual mode — not provider-orchestrated' };
-    if (!activeProviderId) return { servicePoints: false, pickupRequests: false, reason: 'No active shipping provider configured' };
+    if (isManual) {
+      const r = 'Manual mode — not provider-orchestrated. No active shipping provider configured for this shipment.';
+      return { servicePoints: false, pickupRequests: false, reason: r, spReason: `Service points not available for this shipment. ${r}`, puReason: `Carrier pickup not available for this shipment. ${r}` };
+    }
+    if (!activeProviderId) {
+      const r = 'No active shipping provider configured.';
+      return { servicePoints: false, pickupRequests: false, reason: r, spReason: `Service points not available for this shipment. ${r}`, puReason: `Carrier pickup not available for this shipment. ${r}` };
+    }
     const caps = PROVIDER_CAPABILITIES[activeProviderId.toLowerCase()];
-    if (!caps) return { servicePoints: false, pickupRequests: false, reason: `Provider "${activeProviderId}" capabilities not registered` };
-    return caps;
+    if (!caps) {
+      const r = `Provider "${activeProviderId}" capabilities not registered.`;
+      return { servicePoints: false, pickupRequests: false, reason: r, spReason: `Service points not available for this shipment. ${r}`, puReason: `Carrier pickup not available for this shipment. ${r}` };
+    }
+    // Plan-level gating: System Owner Plans & Features matrix governs whether the
+    // tenant's plan exposes service-point and/or pickup-request capabilities at all.
+    // hasPermission() reads planFeatures + matrix overrides from sessionStorage.
+    const planSP = planAllowsServicePoints;
+    const planPU = planAllowsPickupRequests;
+    const sp = caps.servicePoints && planSP;
+    const pu = caps.pickupRequests && planPU;
+    return {
+      servicePoints: sp,
+      pickupRequests: pu,
+      reason: !sp && !pu ? 'Not available for this shipment.' : undefined,
+      spReason: !sp
+        ? (!caps.servicePoints
+            ? `Service points not available for this shipment. The active provider (${activeProviderId}) does not expose a service-point selection API.`
+            : `Service points are not included in your current plan.`)
+        : undefined,
+      puReason: !pu
+        ? (!caps.pickupRequests
+            ? `Carrier pickup not available for this shipment. The active provider (${activeProviderId}) does not expose a pickup-request API.`
+            : `Carrier pickup is not included in your current plan.`)
+        : undefined,
+    };
   }
 
   // Lifecycle gates. Service-point selection is allowed before dispatch (the choice of
@@ -960,6 +993,7 @@ export default function ShippingCenter() {
   function openServicePointModal(shipmentId: string) {
     setShowServicePointModal(shipmentId);
     setServicePointNotes('');
+    setServicePointZipSearch('');
     setServicePointLoading(true);
     const ship = shipments.find(s => s.id === shipmentId);
     if (ship) {
@@ -970,8 +1004,42 @@ export default function ShippingCenter() {
     }
   }
 
+  function searchServicePointsByZip(shipmentId: string, zip: string) {
+    const ship = shipments.find(s => s.id === shipmentId);
+    if (!ship) return;
+    setServicePointLoading(true);
+    setTimeout(() => {
+      const trimmed = zip.trim();
+      const base = getMockServicePoints(ship);
+      // In production this would call shippingApi.findServicePoints({ postalCode: zip }).
+      // Here we synthesize a near-match by overriding the postal code on the preview list.
+      const results = trimmed
+        ? base.map((s, i) => ({ ...s, address: { ...s.address, postalCode: trimmed }, distanceKm: 0.5 + i * 0.7 }))
+        : base;
+      setServicePointSearchResults(results);
+      setServicePointLoading(false);
+    }, 250);
+  }
+
   async function handleSelectServicePoint(shipmentId: string, sp: ServicePoint) {
     if (isWriteBlocked) return;
+    if (!canSelectServicePoint) {
+      setProviderError(friendlyProviderError({ code: 'PERMISSION_DENIED', message: 'You do not have permission to select a service point.' }));
+      return;
+    }
+    const ship0 = shipments.find(s => s.id === shipmentId);
+    if (ship0) {
+      const caps0 = getProviderCapabilities(ship0);
+      if (!caps0.servicePoints) {
+        setProviderError(friendlyProviderError({ code: 'NOT_AVAILABLE', message: caps0.spReason || 'Service points not available.' }));
+        return;
+      }
+      const activePr = ship0.pickupRequest && PICKUP_CANCELLABLE_STATUSES.includes(ship0.pickupRequest.status);
+      if (activePr) {
+        setProviderError(friendlyProviderError({ code: 'MUTEX', message: 'Cancel the active carrier pickup request before selecting a service point — a shipment can use only one handoff method.' }));
+        return;
+      }
+    }
     const now = new Date().toISOString();
     const selected: ServicePoint = {
       ...sp,
@@ -997,6 +1065,10 @@ export default function ShippingCenter() {
 
   function handleClearServicePoint(shipmentId: string) {
     if (isWriteBlocked) return;
+    if (!canSelectServicePoint) {
+      setProviderError(friendlyProviderError({ code: 'PERMISSION_DENIED', message: 'You do not have permission to modify the service point.' }));
+      return;
+    }
     const ship = shipments.find(s => s.id === shipmentId);
     if (!ship?.servicePoint) return;
     const now = new Date().toISOString();
@@ -1014,8 +1086,21 @@ export default function ShippingCenter() {
 
   async function handleRequestPickup(shipmentId: string) {
     if (isWriteBlocked) return;
+    if (!canRequestPickup) {
+      setProviderError(friendlyProviderError({ code: 'PERMISSION_DENIED', message: 'You do not have permission to request a carrier pickup.' }));
+      return;
+    }
     const ship = shipments.find(s => s.id === shipmentId);
     if (!ship) return;
+    const caps0 = getProviderCapabilities(ship);
+    if (!caps0.pickupRequests) {
+      setProviderError(friendlyProviderError({ code: 'NOT_AVAILABLE', message: caps0.puReason || 'Carrier pickup not available.' }));
+      return;
+    }
+    if (ship.servicePoint) {
+      setProviderError(friendlyProviderError({ code: 'MUTEX', message: 'Clear the selected service point before requesting a carrier pickup — a shipment can use only one handoff method.' }));
+      return;
+    }
     if (!pickupForm.date) {
       setProviderError(friendlyProviderError({ code: 'VALIDATION', message: 'Pickup date is required.' }));
       return;
@@ -1068,6 +1153,10 @@ export default function ShippingCenter() {
 
   async function handleCancelPickup(shipmentId: string) {
     if (isWriteBlocked) return;
+    if (!canCancelPickup) {
+      setProviderError(friendlyProviderError({ code: 'PERMISSION_DENIED', message: 'You do not have permission to cancel a carrier pickup.' }));
+      return;
+    }
     const ship = shipments.find(s => s.id === shipmentId);
     if (!ship?.pickupRequest) return;
     if (!PICKUP_CANCELLABLE_STATUSES.includes(ship.pickupRequest.status)) {
@@ -2177,6 +2266,45 @@ export default function ShippingCenter() {
                       </div>
                     )}
 
+                    {/* Handoff Method (Service Point / Pickup / Direct) — surfaced in Overview for at-a-glance operator visibility */}
+                    {(() => {
+                      const oSp = selectedShip.servicePoint;
+                      const oPr = selectedShip.pickupRequest;
+                      const oPrActive = oPr && PICKUP_CANCELLABLE_STATUSES.includes(oPr.status);
+                      const method = oSp ? 'service_point' : oPrActive ? 'pickup' : 'direct';
+                      const styleByMethod = {
+                        service_point: { bg: 'bg-emerald-50', border: 'border-emerald-200', text: 'text-emerald-700', label: 'text-emerald-600', icon: 'location_on', title: 'Service Point Drop-Off' },
+                        pickup: { bg: 'bg-sky-50', border: 'border-sky-200', text: 'text-sky-700', label: 'text-sky-600', icon: 'local_shipping', title: 'Carrier Pickup Request' },
+                        direct: { bg: 'bg-slate-50', border: 'border-slate-200', text: 'text-slate-600', label: 'text-slate-500', icon: 'handshake', title: 'Direct Handoff (Default)' },
+                      } as const;
+                      const s = styleByMethod[method];
+                      return (
+                        <div className={`rounded-xl p-4 border ${s.bg} ${s.border} flex items-start justify-between gap-3`}>
+                          <div className="flex items-start gap-3">
+                            <span className={`material-symbols-outlined text-lg ${s.label} mt-0.5`}>{s.icon}</span>
+                            <div>
+                              <p className={`text-[10px] font-black uppercase tracking-widest ${s.label}`}>Handoff Method</p>
+                              <p className={`text-sm font-black ${s.text} mt-0.5`}>{s.title}</p>
+                              {method === 'service_point' && oSp && (
+                                <p className="text-[11px] text-slate-600 mt-1">{oSp.name} · {oSp.address.city}, {oSp.address.state} {oSp.address.postalCode}</p>
+                              )}
+                              {method === 'pickup' && oPr && (
+                                <p className="text-[11px] text-slate-600 mt-1">{oPr.requestedDate}{oPr.windowStart && oPr.windowEnd ? ` · ${oPr.windowStart}–${oPr.windowEnd}` : ''}{oPr.confirmationNumber ? ` · #${oPr.confirmationNumber}` : ''} · status: {oPr.status}</p>
+                              )}
+                              {method === 'direct' && (
+                                <p className="text-[11px] text-slate-500 mt-1">No service point or carrier pickup configured. Use the Logistics tab to switch handoff method.</p>
+                              )}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setDetailTab('logistics')}
+                            className="text-[10px] font-black uppercase tracking-widest text-primary hover:underline shrink-0"
+                          >Manage →</button>
+                        </div>
+                      );
+                    })()}
+
                     {(() => {
                       const shipMode = getShipmentMode(selectedShip);
                       const isManualMode = shipMode === 'manual';
@@ -2909,11 +3037,31 @@ export default function ShippingCenter() {
                   const caps = getProviderCapabilities(selectedShip);
                   const sp = selectedShip.servicePoint;
                   const pr = selectedShip.pickupRequest;
-                  const spEditable = SERVICE_POINT_EDITABLE_STATUSES.includes(selectedShip.status);
-                  const pickupRequestable = PICKUP_REQUESTABLE_STATUSES.includes(selectedShip.status);
+                  const prActive = pr && PICKUP_CANCELLABLE_STATUSES.includes(pr.status);
+                  const prTerminated = pr && ['cancelled', 'failed', 'rejected'].includes(pr.status);
+                  const spEditable = SERVICE_POINT_EDITABLE_STATUSES.includes(selectedShip.status) && !prActive;
+                  const pickupRequestable = PICKUP_REQUESTABLE_STATUSES.includes(selectedShip.status) && !sp;
                   const pickupCancellable = pr && PICKUP_CANCELLABLE_STATUSES.includes(pr.status);
                   return (
                   <div className="space-y-6">
+                    {/* Handoff method banner */}
+                    <div className="bg-gradient-to-r from-slate-50 to-white rounded-2xl border border-slate-200 p-4 flex items-center justify-between">
+                      <div>
+                        <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Handoff Method</p>
+                        <p className="text-sm font-black text-slate-800 mt-1">
+                          {sp ? 'Service Point Drop-Off' : prActive ? 'Carrier Pickup Request' : 'Direct Handoff (Default)'}
+                        </p>
+                        <p className="text-[11px] text-slate-500 mt-0.5">A shipment uses one handoff method at a time — selecting a service point clears any active pickup, and vice versa.</p>
+                      </div>
+                      <span className={`px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest ${
+                        sp ? 'bg-emerald-100 text-emerald-700' :
+                        prActive ? 'bg-sky-100 text-sky-700' :
+                        'bg-slate-100 text-slate-500'
+                      }`}>
+                        {sp ? 'Drop-Off' : prActive ? `Pickup ${pr!.status}` : 'Direct'}
+                      </span>
+                    </div>
+
                     {/* Service Point panel */}
                     <div className="bg-white rounded-2xl border border-slate-200 p-6">
                       <div className="flex items-start justify-between mb-4">
@@ -2921,15 +3069,21 @@ export default function ShippingCenter() {
                           <p className="text-[10px] font-black text-primary uppercase tracking-widest flex items-center gap-1.5"><span className="material-symbols-outlined text-sm">location_on</span>Service Point / Drop-Off</p>
                           <p className="text-xs text-slate-500 mt-1">Carrier-operated drop-off location for parcel handoff.</p>
                         </div>
-                        <span className={`px-2 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest ${sp ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{sp ? 'Selected' : 'Direct Handoff'}</span>
+                        <span className={`px-2 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest ${sp ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{sp ? 'Selected' : 'None'}</span>
                       </div>
                       {!caps.servicePoints && (
                         <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-start gap-2">
                           <span className="material-symbols-outlined text-amber-500 text-sm mt-0.5">lock</span>
                           <div className="text-xs text-amber-700">
                             <p className="font-black">Service points not available for this shipment</p>
-                            <p className="mt-0.5">{caps.reason || `The active provider does not expose a service-point selection API. Direct carrier handoff or pickup request can still be used.`}</p>
+                            <p className="mt-0.5">{caps.spReason || caps.reason}</p>
                           </div>
+                        </div>
+                      )}
+                      {caps.servicePoints && prActive && !sp && (
+                        <div className="bg-sky-50 border border-sky-200 rounded-xl p-3 flex items-start gap-2 mb-3">
+                          <span className="material-symbols-outlined text-sky-500 text-sm mt-0.5">info</span>
+                          <p className="text-xs text-sky-700">A carrier pickup is active for this shipment. Cancel the pickup first to switch to a service-point drop-off.</p>
                         </div>
                       )}
                       {caps.servicePoints && sp && (
@@ -2982,25 +3136,74 @@ export default function ShippingCenter() {
                           <span className="material-symbols-outlined text-amber-500 text-sm mt-0.5">lock</span>
                           <div className="text-xs text-amber-700">
                             <p className="font-black">Carrier pickup not available for this shipment</p>
-                            <p className="mt-0.5">{caps.reason || 'The active provider does not expose a pickup-request API. Use a service-point drop-off or direct handoff instead.'}</p>
+                            <p className="mt-0.5">{caps.puReason || caps.reason}</p>
                           </div>
                         </div>
                       )}
+                      {caps.pickupRequests && sp && !pr && (
+                        <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 flex items-start gap-2 mb-3">
+                          <span className="material-symbols-outlined text-emerald-600 text-sm mt-0.5">info</span>
+                          <p className="text-xs text-emerald-700">A service-point drop-off is selected for this shipment. Clear the service point first to switch to a carrier pickup.</p>
+                        </div>
+                      )}
                       {caps.pickupRequests && pr && (
-                        <div className="bg-sky-50/50 border border-sky-200 rounded-xl p-4 space-y-2">
+                        <div className={`rounded-xl p-4 space-y-2 border ${
+                          pr.status === 'cancelled' || pr.status === 'failed' || pr.status === 'rejected'
+                            ? 'bg-rose-50/50 border-rose-200'
+                            : pr.status === 'completed' ? 'bg-violet-50/50 border-violet-200'
+                            : 'bg-sky-50/50 border-sky-200'
+                        }`}>
                           <div className="flex items-center justify-between">
-                            <p className="text-sm font-black text-slate-800">{pr.carrier} pickup</p>
-                            {pr.confirmationNumber && <span className="text-[10px] font-mono font-black text-sky-700 bg-white px-2 py-1 rounded-lg border border-sky-200 select-all">{pr.confirmationNumber}</span>}
+                            <p className="text-sm font-black text-slate-800">{pr.carrier} pickup · <span className="capitalize">{pr.status}</span></p>
+                            {pr.confirmationNumber && <span className="text-[10px] font-mono font-black text-slate-700 bg-white px-2 py-1 rounded-lg border border-slate-200 select-all">{pr.confirmationNumber}</span>}
                           </div>
                           <p className="text-xs text-slate-600">Date: <span className="font-bold">{pr.requestedDate}</span>{pr.windowStart && pr.windowEnd && <span> · Window <span className="font-bold">{pr.windowStart}–{pr.windowEnd}</span></span>}</p>
                           <p className="text-xs text-slate-500">From: {pr.pickupAddress.line1}, {pr.pickupAddress.city}, {pr.pickupAddress.state} {pr.pickupAddress.postalCode}</p>
                           {pr.contactName && <p className="text-[11px] text-slate-500">Contact: {pr.contactName}{pr.contactPhone ? ` · ${pr.contactPhone}` : ''}</p>}
                           {pr.packageCount !== undefined && <p className="text-[11px] text-slate-500">{pr.packageCount} package(s){pr.totalWeight ? ` · ${pr.totalWeight} lb total` : ''}</p>}
                           {pr.handlingNotes && <p className="text-[11px] text-slate-500 italic">Notes: {pr.handlingNotes}</p>}
-                          <p className="text-[10px] text-slate-400">Requested by {pr.requestedBy} at {formatDateTime(pr.requestedAt)}{pr.cancelledAt ? ` · Cancelled at ${formatDateTime(pr.cancelledAt)}${pr.cancellationReason ? ` — ${pr.cancellationReason}` : ''}` : ''}</p>
+                          {/* Pickup status history mini-timeline */}
+                          <div className="mt-2 pt-2 border-t border-slate-200/60 space-y-1">
+                            <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Status History</p>
+                            <div className="flex items-center gap-2 text-[10px] text-slate-500">
+                              <span className="material-symbols-outlined text-[12px] text-sky-500">schedule</span>
+                              <span>Requested by {pr.requestedBy} at {formatDateTime(pr.requestedAt)}</span>
+                            </div>
+                            {pr.confirmedAt && (
+                              <div className="flex items-center gap-2 text-[10px] text-slate-500">
+                                <span className="material-symbols-outlined text-[12px] text-emerald-500">check_circle</span>
+                                <span>Confirmed at {formatDateTime(pr.confirmedAt)}</span>
+                              </div>
+                            )}
+                            {pr.completedAt && (
+                              <div className="flex items-center gap-2 text-[10px] text-slate-500">
+                                <span className="material-symbols-outlined text-[12px] text-violet-500">task_alt</span>
+                                <span>Completed at {formatDateTime(pr.completedAt)}</span>
+                              </div>
+                            )}
+                            {pr.cancelledAt && (
+                              <div className="flex items-center gap-2 text-[10px] text-rose-600">
+                                <span className="material-symbols-outlined text-[12px] text-rose-500">cancel</span>
+                                <span>Cancelled by {pr.cancelledBy || 'operator'} at {formatDateTime(pr.cancelledAt)}{pr.cancellationReason ? ` — ${pr.cancellationReason}` : ''}</span>
+                              </div>
+                            )}
+                            {pr.failureReason && (
+                              <div className="flex items-center gap-2 text-[10px] text-rose-600">
+                                <span className="material-symbols-outlined text-[12px] text-rose-500">error</span>
+                                <span>Failed: {pr.failureReason}</span>
+                              </div>
+                            )}
+                          </div>
+                          <p className="text-[10px] text-slate-400 italic mt-2">Live carrier pickup events (en-route / arrived / picked up) will surface here once the active provider streams pickup webhooks. For now, status reflects the request lifecycle only.</p>
                         </div>
                       )}
-                      {caps.pickupRequests && !pr && pickupRequestable && canRequestPickup && !isWriteBlocked && (
+                      {caps.pickupRequests && prTerminated && pickupRequestable && canRequestPickup && !isWriteBlocked && (
+                        <div className="bg-sky-50 border border-sky-200 rounded-xl p-3 mt-3 flex items-start gap-2">
+                          <span className="material-symbols-outlined text-sky-500 text-sm mt-0.5">restart_alt</span>
+                          <p className="text-xs text-sky-700">Previous pickup is {pr!.status}. You can re-schedule a new carrier pickup below — the cancelled record stays in the timeline for audit.</p>
+                        </div>
+                      )}
+                      {caps.pickupRequests && (!pr || prTerminated) && pickupRequestable && canRequestPickup && !isWriteBlocked && (
                         <div className="grid grid-cols-2 gap-3 mt-4">
                           <div>
                             <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Pickup Date</label>
@@ -3099,9 +3302,30 @@ export default function ShippingCenter() {
                     <span className="material-symbols-outlined text-sky-500 text-sm mt-0.5">info</span>
                     <p className="text-[11px] text-sky-700">Preview list — production deployments query the live carrier service-point API. Selection is recorded in the shipment timeline regardless.</p>
                   </div>
-                  <div>
-                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Selection notes (optional)</label>
-                    <input type="text" value={servicePointNotes} onChange={e => setServicePointNotes(e.target.value)} placeholder="e.g. Customer preferred location" className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs" />
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Search by ZIP / postal code</label>
+                      <div className="flex gap-2 mt-1">
+                        <input
+                          type="text"
+                          value={servicePointZipSearch}
+                          onChange={e => setServicePointZipSearch(e.target.value)}
+                          onKeyDown={e => { if (e.key === 'Enter') searchServicePointsByZip(ship.id, servicePointZipSearch); }}
+                          placeholder={ship.originAddress.postalCode || 'e.g. 94105'}
+                          className="flex-1 px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => searchServicePointsByZip(ship.id, servicePointZipSearch)}
+                          className="px-3 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 transition-all"
+                        >Search</button>
+                      </div>
+                      <p className="text-[10px] text-slate-400 mt-1">Default search is around the shipment origin.</p>
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Selection notes (optional)</label>
+                      <input type="text" value={servicePointNotes} onChange={e => setServicePointNotes(e.target.value)} placeholder="e.g. Customer preferred location" className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs" />
+                    </div>
                   </div>
                   {servicePointLoading && <p className="text-xs text-slate-500 text-center py-4">Loading service points...</p>}
                   {!servicePointLoading && servicePointSearchResults.map(sp => (
