@@ -922,6 +922,13 @@ export interface Shipment {
     pickupConfirmationNumber?: string;
     servicePointId?: string;
   };
+  // Phase 2: structured Service Point selection (drop-off location). When set, the
+  // operator has chosen to hand the parcel off at a carrier-operated service point
+  // rather than direct carrier handoff or carrier pickup. Provider-capability gated.
+  servicePoint?: ServicePoint;
+  // Phase 2: structured Pickup Request record. When set, the operator has scheduled
+  // a carrier pickup for this shipment. Lifecycle-aware and provider-capability gated.
+  pickupRequest?: PickupRequest;
   slaInfo?: {
     targetDeliveryAt?: string;
     slaType?: string;
@@ -929,6 +936,80 @@ export interface Shipment {
     transitBusinessDays?: number;
   };
   batchId?: string;
+}
+
+// =====================================================================================
+// Service Points & Pickup Requests (Phase 2)
+// =====================================================================================
+// These two domains add carrier handoff alternatives to the Shipping Center: a shipment
+// can be dropped off at a carrier service point, picked up by the carrier at the origin
+// address, or handed off directly. They are provider-capability gated — manual mode and
+// providers without service-point or pickup APIs surface honest "not supported" UI.
+//
+// Forward-compatibility: every record below carries a `metadata?: Record<string, unknown>`
+// extension slot so future Phase 2 additions (customs docs, insurance rules, carrier
+// analytics) and Phase 3 additions (automation rules, batch labels, packing workflows,
+// SLA optimization, carrier scorecards) can attach without a breaking schema change.
+
+export interface ServicePointHours {
+  day: 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun';
+  open?: string;
+  close?: string;
+  closed?: boolean;
+}
+
+export interface ServicePoint {
+  id: string;                              // provider-assigned service-point id
+  carrier: string;                         // 'UPS', 'FedEx', 'USPS', 'DHL', etc.
+  providerId?: string;                     // app provider id ('easypost' | 'shippo' | 'shipstation')
+  name: string;                            // 'UPS Access Point — 5th Ave Pharmacy'
+  type?: 'access_point' | 'locker' | 'office' | 'retail_partner' | 'other';
+  address: ShipmentAddress;
+  distanceKm?: number;                     // distance from origin if known
+  hours?: ServicePointHours[];
+  contactPhone?: string;
+  contactEmail?: string;
+  notes?: string;
+  selectedAt?: string;                     // ISO timestamp of operator selection
+  selectedBy?: string;                     // operator id/name
+  selectionNotes?: string;                 // operator-entered context (e.g. "customer prefers")
+  metadata?: Record<string, unknown>;      // forward-compat: customs/insurance/analytics
+}
+
+export type PickupRequestStatus =
+  | 'requested'    // sent to provider, awaiting confirmation
+  | 'scheduled'    // provider acknowledged, scheduled
+  | 'confirmed'    // confirmation number issued
+  | 'completed'    // pickup occurred (carrier scan)
+  | 'cancelled'    // operator cancelled before pickup
+  | 'failed'       // provider/carrier rejected
+  | 'rejected';    // carrier refused (e.g. weight, location)
+
+export interface PickupRequest {
+  id: string;                              // app-internal pickup request id
+  shipmentId: string;
+  providerId?: string;                     // app provider id
+  carrier: string;                         // resolved carrier
+  status: PickupRequestStatus;
+  confirmationNumber?: string;             // provider/carrier confirmation
+  requestedDate: string;                   // ISO date — pickup day
+  windowStart?: string;                    // 'HH:MM' earliest ready
+  windowEnd?: string;                      // 'HH:MM' latest available
+  pickupAddress: ShipmentAddress;          // usually shipment.originAddress
+  contactName?: string;
+  contactPhone?: string;
+  packageCount?: number;
+  totalWeight?: number;                    // pounds, summed across packages
+  handlingNotes?: string;
+  requestedAt: string;                     // operator action timestamp
+  requestedBy: string;                     // operator id/name
+  confirmedAt?: string;
+  completedAt?: string;
+  cancelledAt?: string;
+  cancelledBy?: string;
+  cancellationReason?: string;
+  failureReason?: string;                  // surface from provider on failed/rejected
+  metadata?: Record<string, unknown>;      // forward-compat: customs/insurance/analytics
 }
 
 export type ReturnStatus = 'Draft' | 'Requested' | 'Approved' | 'Ready' | 'Label Created' | 'Packed' | 'Dispatched' | 'In Transit' | 'Delivered' | 'Received' | 'Inspecting' | 'Completed' | 'Rejected' | 'Cancelled';

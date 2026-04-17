@@ -1,0 +1,385 @@
+Shipping Phase 2 — Service Points & Pickup Requests — Isolation Workstream
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is the next Shipping Phase 2 workstream.
+The objective is to add Service Points and Pickup Requests on top of the completed Shipping Center, provider integration, webhook/event automation, bulk reconciliation, and Returns Portal / Reverse Logistics foundation.
+
+This pass must implement a usable Service Points + Pickup Requests capability while also preparing the architecture for the remaining Phase 2 items:
+- customs docs
+- insurance rules
+- carrier analytics
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Firebase/Firestore data architect
+- Enterprise shipping systems architect
+- Senior shipping / fulfillment / carrier-operations expert with 20+ years of experience in parcel handoff operations, drop-off networks, pickup scheduling, retail carrier service points, reverse logistics, and shipment orchestration
+- Reliability engineer focused on state consistency, provider capability handling, and operational auditability
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Mandatory external reference review:
+Before implementing anything, open, read, and understand this exact article:
+- https://help.repairdesk.co/portal/en/kb/articles/shipstation-integration
+
+This article review is mandatory.
+You must extract useful operational ideas from it and adapt them to our app.
+Do not copy RepairDesk literally.
+Do not rebuild ShipStation UX one-to-one.
+Do not force concepts that do not fit our architecture.
+But you must explicitly identify:
+- which ideas should be implemented now
+- which should be deferred
+- which should not be adopted and why
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- RBAC/sub-permissions
+- lifecycle gating
+- platform/store hierarchy
+- System Owner Plans & Features matrix
+- Store Permissions Matrix
+- secure server-side provider call architecture
+- Shipping Center as the sole provider-management home
+- Returns Portal / Reverse Logistics
+- provider/manual shipment mode split
+- mandatory provider address validation before Get Rates in provider mode
+- Get Rates enabled only after both Origin and Destination are truly Validated
+- Ready disabled until rate selection in provider mode
+- Packed only after successful label purchase in provider mode
+- Rejected by Carrier / Returned with reasons
+- + Add Event disabled after Dispatched
+- PDF-first label flow
+- webhook/event automation hardening
+- bulk sync / reconciliation
+- existing outbound shipping core flow
+- current return-shipment / reverse-logistics behavior
+- full tracking visibility rules for authorized users
+
+==================================================
+WORKSTREAM GOAL
+==================================================
+
+Add a real Service Points and Pickup Requests capability that fits the current shipping architecture for both outbound shipping and reverse logistics where appropriate.
+
+The result should let the business:
+- select a carrier service point / drop-off point where supported
+- view and store service-point information linked to the shipment
+- request a carrier pickup where supported
+- manage pickup request lifecycle/details coherently
+- keep all of this aligned with provider mode, manual mode, shipping lifecycle, and reverse-logistics flows
+
+This workstream must also explicitly prepare the architecture for the remaining Phase 2 items:
+- customs docs
+- insurance rules
+- carrier analytics
+
+Do not fully implement those remaining items now.
+Do make this Service Points + Pickup Requests workstream architecturally compatible with them.
+
+==================================================
+PRODUCT DIRECTION — REQUIRED
+==================================================
+
+The app should now support two new operational layers inside shipping:
+
+1) Service Points
+A shipment can optionally be tied to a carrier/service point / drop-off location where provider/carrier capability supports it.
+
+2) Pickup Requests
+A shipment can optionally request carrier pickup where provider/carrier capability supports it.
+
+These are shipping capabilities, not separate disconnected mini-apps.
+They must feel native to Shipping Center and must also support reverse-logistics flows where relevant.
+
+==================================================
+MANDATORY IMPLEMENTATION OBJECTIVES
+==================================================
+
+1) SERVICE POINTS DOMAIN / MODEL
+Add a robust service-point data model that can support:
+- service point identifier
+- provider/carrier linkage
+- service point name
+- address/location details
+- hours / availability fields if available
+- contact details if available
+- shipment linkage
+- selection timestamp / operator / notes
+- forward-compatible metadata for future carrier analytics and international flows
+
+This model must be forward-compatible with:
+- customs docs
+- insurance rules
+- carrier analytics
+- future automation rules
+- future SLA optimization
+
+2) PICKUP REQUEST DOMAIN / MODEL
+Add a robust pickup-request model that can support:
+- pickup request reference / confirmation number
+- linked shipment
+- provider/carrier linkage
+- request status
+- requested pickup date/time window
+- pickup address
+- contact details
+- package count / handling notes if needed
+- audit timestamps / operator / notes
+- failure / rejection / cancellation metadata
+- forward-compatible metadata for later analytics and automation
+
+3) SERVICE POINT SELECTION EXPERIENCE
+Implement a real operator workflow for service-point selection.
+
+Minimum expectations:
+- a clear place inside shipment workflow to select/manage a service point where supported
+- visible selected service-point details on the shipment
+- coherent behavior for outbound and return shipments where relevant
+- operator understanding of when a shipment is using:
+  - direct carrier handoff
+  - service point drop-off
+  - pickup request
+
+4) PICKUP REQUEST EXPERIENCE
+Implement a real operator workflow for pickup requests.
+
+Minimum expectations:
+- a clear place inside shipment workflow to request/manage pickup where supported
+- visible pickup request details and status on the shipment
+- coherent lifecycle-aware behavior
+- operator understanding of whether pickup is:
+  - not requested
+  - requested
+  - confirmed
+  - failed/rejected/cancelled
+  - completed where applicable
+
+5) PROVIDER CAPABILITY / MODE AWARENESS
+This workstream must not pretend every shipment supports every operational option.
+
+Required:
+- if provider/carrier/mode does not support service points, the UI must be honest
+- if provider/carrier/mode does not support pickup requests, the UI must be honest
+- manual shipments remain manual
+- provider-managed shipments can use service-point / pickup workflows only where the provider flow supports them
+- do not create fake provider capability
+
+6) SHIPPING / RETURNS INTEGRATION
+Required:
+- service points and pickup requests must fit normal outbound shipping
+- they must also be coherent for reverse-logistics / return shipments where relevant
+- do not break the Returns Portal
+- do not create conflicting rules between outbound and return shipment handling
+
+7) LIFECYCLE / STATE COHERENCE
+Required:
+- service-point and pickup state must not create impossible shipment states
+- shipment status, pickup status, and service-point selection must remain understandable and auditable
+- if a shipment is already too advanced in lifecycle, inappropriate edits/actions should be blocked
+
+8) AUDITABILITY
+Required:
+- service-point selection and pickup-request actions must be auditable
+- operator must be able to see what was selected/requested, when, and by whom where practical
+- keep this lightweight but real
+
+==================================================
+SYSTEM OWNER PLANS & FEATURES + STORE PERMISSIONS REQUIREMENT
+==================================================
+
+From now on, any new module/capability added in the app must be treated coherently in governance.
+
+Required for this pass:
+- Add Service Points and Pickup Requests into the System Owner Plans & Features model in a coherent way
+- If they are surfaced as distinct user-visible capabilities, they must appear distinctly and not be hidden implicitly
+- Keep Shipping Center and Returns as separate existing features
+- Update Store Permissions Matrix / relevant permissions/sub-permissions as needed so the new capabilities are governed properly
+- Do not bypass or weaken feature gating
+
+==================================================
+PHASE 2 FORWARD-COMPATIBILITY — MUST BE INCLUDED
+==================================================
+
+This workstream must explicitly include architectural readiness for the remaining Phase 2 items:
+
+1. Customs docs
+- shipment/service-point/pickup data model must have a clean extension path for future customs information
+
+2. Insurance rules
+- shipment/service-point/pickup flows must have a clean extension path for future insurance metadata and rule handling
+
+3. Carrier analytics
+- service-point usage, pickup outcomes, failures, and timing should be stored/documented in a way useful for future carrier analytics
+
+Do not fully implement those now.
+Do make sure the current architecture clearly fits them.
+
+==================================================
+PHASE 3 COMPATIBILITY — MUST NOT BE BROKEN
+==================================================
+
+Do not block future:
+- automation rules
+- batch labels
+- packing workflows
+- SLA optimization
+- carrier scorecards
+
+Required now:
+- service-point / pickup status model should be automation-friendly
+- timing and outcome data should be useful later for SLA optimization and scorecards
+- document where Phase 3 automation hooks would attach later
+
+==================================================
+NON-NEGOTIABLE IMPLEMENTATION REQUIREMENTS
+==================================================
+
+1) REAL SHIPPING-CENTER HOME
+Required:
+- Service Points and Pickup Requests must feel native to Shipping Center
+- not buried in settings
+- not disconnected from shipment operations
+
+2) SHIPMENT-LINKED CAPABILITIES
+Required:
+- service point and pickup request must clearly link to a shipment
+- operator must be able to see/use them from shipment context
+
+3) PROVIDER/MANUAL MODE CONSISTENCY
+Required:
+- provider-managed shipments remain provider-managed
+- manual shipments remain manual
+- do not create ambiguous mixed states
+- preserve current provider/manual mode rules
+
+4) SHIPPING DISCIPLINE
+Required:
+- do not bypass current shipping rules
+- do not break address validation
+- do not break rate/label/purchase gating
+- do not create impossible lifecycle shortcuts
+
+5) PERMISSION / PREVIEW / ROLE GATING
+Required:
+- service-point selection and pickup-request actions must be permission-aware
+- preview mode must not commit writes
+- do not create a disconnected permission system
+
+==================================================
+FULFILLMENT RULES TO PRESERVE
+==================================================
+
+Do not weaken these rules:
+- Shipping Center remains the sole provider-management home
+- provider/manual mode split remains intact
+- manual shipments remain manual and do not misuse provider automation
+- address validation remains mandatory before Get Rates in provider mode
+- Get Rates requires both Origin and Destination in Validated state
+- Ready remains disabled until rate selection in provider mode
+- Packed becomes available only after successful label purchase in provider mode
+- after dispatch and provider/carrier progression, lifecycle remains provider-driven in provider mode
+- cancellation remains blocked after carrier progression
+- existing shipping core flow remains intact
+- Returns Portal / reverse logistics remains intact
+- Rejected by Carrier / Returned remain controlled outcomes
+- + Add Event remains disabled after Dispatched
+- PDF-first label flow remains intact
+- full tracking visibility remains intact
+- bulk sync/reconciliation remains a secondary recovery tool
+
+==================================================
+IMPORTANT IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into full implementation of customs docs / insurance / analytics
+- Do not touch unrelated workstreams
+- Do not break preview mode safety
+- Do not break permissions or feature gating
+- Do not break shipping core flow
+- Do not break provider configuration
+- Do not fake provider support for service points or pickups
+- Keep the design baseline consistent
+- Do not create ambiguous mixed manual/provider shipment states
+- Do not leave stale state after provider updates
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact execution order:
+
+1) Review the RepairDesk article and extract only the concepts that improve our system
+2) Design and implement the Service Points domain/model and operator workflow
+3) Design and implement the Pickup Requests domain/model and operator workflow
+4) Integrate both into shipment context in Shipping Center and reverse-logistics flows where relevant
+5) Add coherent permissions, feature-model, and plan-gating updates
+6) Ensure provider/manual mode consistency and lifecycle safety
+7) Make the model/documentation forward-compatible with remaining Phase 2 and Phase 3 roadmap items
+8) Re-test all affected flows
+9) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Service Points architecture
+- Pickup Requests architecture
+- shipment-linked service point selection behavior
+- shipment-linked pickup request behavior
+- provider/manual mode behavior for these capabilities
+- lifecycle and audit rules
+- explicit System Owner Plans & Features / Store Permissions updates
+- explicit forward-compatibility notes for remaining Phase 2 items:
+  - customs docs
+  - insurance rules
+  - carrier analytics
+- explicit forward-compatibility notes for Phase 3:
+  - automation rules
+  - batch labels
+  - packing workflows
+  - SLA optimization
+  - carrier scorecards
+- lessons adapted from the RepairDesk article
+- future recommendations not implemented now
+
+==================================================
+MANDATORY OUTPUT PROOF
+==================================================
+
+Do not give a generic completion summary.
+Do not say this task is complete unless the Service Points and Pickup Requests capability is visibly implemented and the governance/readiness updates are explicitly documented.
+
+OUTPUT FORMAT REQUIRED
+
+Reply ONLY in this structure:
+
+1. Workstream Completion Status
+2. RepairDesk Article Reviewed
+3. RepairDesk Insights Extracted
+4. How Those Insights Were Adapted To Our Shipping Center
+5. Implemented Now vs Deferred vs Not Adopted
+6. Service Points Capability Added
+7. Pickup Requests Capability Added
+8. Shipment Integration / Reverse-Logistics Integration Added
+9. Plans & Features / Permissions Updates Added
+10. Phase 2 Forward-Compatibility Included
+11. Phase 3 Forward-Compatibility Included
+12. Fulfillment-Expert Recommendations
+13. Files Changed
+14. Documentation Updated
+15. Non-Regression Notes
