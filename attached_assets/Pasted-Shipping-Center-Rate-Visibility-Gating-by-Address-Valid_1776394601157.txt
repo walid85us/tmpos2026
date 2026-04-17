@@ -1,0 +1,128 @@
+Shipping Center — Rate Visibility Gating by Address Validation — Narrow Correction Pass
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a narrow correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Only fix the shipping-rate visibility/gating behavior described below.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Enterprise shipping systems architect
+- Root-cause debugging specialist
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- RBAC/sub-permissions
+- lifecycle gating
+- platform/store hierarchy
+- Shipping Center behavior
+- Returns Portal behavior
+- provider/manual mode split
+- existing rate-selection flow
+- existing origin+destination validation logic
+- existing shipping core flow
+
+==================================================
+CURRENT BEHAVIOR TO CORRECT
+==================================================
+
+Observed issue:
+- In Shipping Center, the shipping rate can still appear before both Origin Addr and Dest Addr are marked as validated
+- This is not the desired operator experience
+
+Required behavior:
+- Shipping rate must not appear until BOTH:
+  - Origin Addr is validated
+  - Dest Addr is validated
+- Until both validations are complete/accepted, the rate display should be hidden or otherwise not shown as available
+- The operator should clearly understand that rate visibility depends on validated addresses
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIX
+==================================================
+
+1) RATE VISIBILITY GATING
+Required:
+- Hide or suppress shipping rate display until both origin and destination address validation requirements are satisfied
+- Do not show the rate prematurely in provider mode
+- Preserve existing logic for actually fetching/selecting rates, but the visible rate field/value should not appear as available before both address validations are complete
+
+2) CLEAR OPERATOR MESSAGING
+Required:
+- If the rate is hidden because address validation is incomplete, the UI should make that understandable
+- Keep it clean and concise
+- Do not create confusing partial-state behavior
+
+3) PRESERVE EXISTING SHIPPING DISCIPLINE
+Required:
+- do not break Get Rates gating
+- do not break rate selection flow
+- do not break manual mode behavior
+- do not break provider-mode address validation flow
+- do not break label purchase prerequisites
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- Before Origin and Destination are both validated, shipping rate is not shown
+- After both are validated and rate flow is valid, shipping rate appears normally
+- Existing shipping behavior remains intact
+
+==================================================
+IMPORTANT IMPLEMENTATION RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into another workstream
+- Do not change unrelated shipping logic
+- Keep the design baseline consistent
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact execution order:
+
+1) Trace the current shipping-rate display/render path
+2) Add visibility gating tied to both origin and destination validation state
+3) Add or refine concise operator messaging if needed
+4) Re-test the affected provider-mode flow
+5) Update documentation if needed
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- rate visibility depends on both origin and destination validated state
+- clarification that rate is hidden until both address validations are complete in provider mode
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Rate Visibility Gating Fix
+3. Operator Messaging Fix
+4. Files Changed
+5. Documentation Updated
+6. Non-Regression Notes

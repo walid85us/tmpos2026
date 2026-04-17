@@ -2222,14 +2222,36 @@ export default function ShippingCenter() {
                         </div>
                       )}
 
-                      {selectedShip.selectedRate && (
-                        <div className="flex items-center gap-2 text-xs">
-                          <span className="text-slate-400 font-bold">Service</span>
-                          <span className="font-black text-slate-700">{selectedShip.selectedRate.carrier} {selectedShip.selectedRate.serviceName}</span>
-                          <span className="font-black text-primary">${selectedShip.selectedRate.rate.toFixed(2)}</span>
-                          {selectedShip.selectedRate.estimatedDays && <span className="text-slate-400">({selectedShip.selectedRate.estimatedDays}d)</span>}
-                        </div>
-                      )}
+                      {(() => {
+                        // Rate visibility gating: in provider mode, the selected shipping rate
+                        // (carrier/service/price) is suppressed from view until BOTH origin and
+                        // destination addresses are validated/accepted. Manual mode is unaffected.
+                        const bothValidated = isOriginAddressAccepted(selectedShip) && isAddressAccepted(selectedShip);
+                        if (selectedShip.selectedRate && (isManualMode || bothValidated)) {
+                          return (
+                            <div className="flex items-center gap-2 text-xs">
+                              <span className="text-slate-400 font-bold">Service</span>
+                              <span className="font-black text-slate-700">{selectedShip.selectedRate.carrier} {selectedShip.selectedRate.serviceName}</span>
+                              <span className="font-black text-primary">${selectedShip.selectedRate.rate.toFixed(2)}</span>
+                              {selectedShip.selectedRate.estimatedDays && <span className="text-slate-400">({selectedShip.selectedRate.estimatedDays}d)</span>}
+                            </div>
+                          );
+                        }
+                        if (selectedShip.selectedRate && !isManualMode && !bothValidated) {
+                          const missing: string[] = [];
+                          if (!isOriginAddressAccepted(selectedShip)) missing.push('origin');
+                          if (!isAddressAccepted(selectedShip)) missing.push('destination');
+                          return (
+                            <div className="flex items-center gap-2 text-xs px-2.5 py-1.5 rounded-lg bg-amber-50 border border-amber-200">
+                              <span className="material-symbols-outlined text-amber-600" style={{ fontSize: 14 }}>lock</span>
+                              <span className="text-amber-700 font-semibold">
+                                Rate hidden — validate {missing.join(' and ')} address{missing.length > 1 ? 'es' : ''} to view shipping rate.
+                              </span>
+                            </div>
+                          );
+                        }
+                        return null;
+                      })()}
 
                       {!selectedShip.selectedRate && isManualMode && selectedShip.carrier && selectedShip.serviceLevel && (
                         <div className="flex items-center gap-2 text-xs">
@@ -2354,7 +2376,25 @@ export default function ShippingCenter() {
                     </div>
                       ); })()}
 
-                    {showRatesPanel && availableRates.length > 0 && (
+                    {showRatesPanel && availableRates.length > 0 && (() => {
+                      const ratesPanelManualMode = getShipmentMode(selectedShip) === 'manual';
+                      const ratesPanelBothValidated = isOriginAddressAccepted(selectedShip) && isAddressAccepted(selectedShip);
+                      if (!ratesPanelManualMode && !ratesPanelBothValidated) {
+                        const missing = !isOriginAddressAccepted(selectedShip) && !isAddressAccepted(selectedShip)
+                          ? 'origin and destination addresses'
+                          : !isOriginAddressAccepted(selectedShip) ? 'origin address' : 'destination address';
+                        return (
+                          <div className="bg-amber-50/60 rounded-2xl p-4 border border-amber-200 flex items-center gap-2">
+                            <span className="material-symbols-outlined text-amber-600 text-base">lock</span>
+                            <p className="text-xs text-amber-700 font-semibold">
+                              Available rates hidden — validate {missing} to view and select a shipping rate.
+                            </p>
+                          </div>
+                        );
+                      }
+                      return null;
+                    })()}
+                    {showRatesPanel && availableRates.length > 0 && (getShipmentMode(selectedShip) === 'manual' || (isOriginAddressAccepted(selectedShip) && isAddressAccepted(selectedShip))) && (
                       <div className="bg-sky-50/50 rounded-2xl p-5 border border-sky-100 space-y-3">
                         <div className="flex justify-between items-center">
                           <p className="text-[10px] font-black text-sky-600 uppercase tracking-widest flex items-center gap-1"><span className="material-symbols-outlined text-xs">local_offer</span>Available Rates</p>
