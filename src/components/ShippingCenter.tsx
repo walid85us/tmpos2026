@@ -1210,7 +1210,7 @@ export default function ShippingCenter() {
   // pre-checks, ZIP search activation — to guarantee a single source of truth.
   // Reason ordering matches operator priority: provider → plan → permission →
   // lifecycle → mutex. The first failing reason is surfaced.
-  type Eligibility = { eligible: boolean; reason?: string; category?: 'provider' | 'plan' | 'permission' | 'lifecycle' | 'mutex' };
+  type Eligibility = { eligible: boolean; reason?: string; category?: 'provider' | 'plan' | 'permission' | 'lifecycle' | 'mutex' | 'pickup_address' };
   function getServicePointEligibility(shipment: Shipment): Eligibility {
     // LIVE locator eligibility. Currently always fails at the provider category until
     // a carrier-specific locator adapter is configured under Settings → Carrier Locators.
@@ -1254,6 +1254,61 @@ export default function ShippingCenter() {
     }
     return { eligible: true };
   }
+  // ─────────────────────────────────────────────────────────────────────
+  // Pickup address — single source of truth.
+  //
+  // EasyPost (and every other pickup-capable carrier we've integrated) needs
+  // an explicit address for the *pickup location*. Earlier code passed
+  // `pickupAddress: ship.originAddress` AND `is_account_address: true` at the
+  // same time, which is contradictory: `is_account_address: true` tells
+  // EasyPost "this is the address registered on my EasyPost account, you
+  // don't need to verify it" — when the supplied address differs from the
+  // account address (which is the normal multi-store case here), EasyPost
+  // rejects with semantic-error / address-validation failures.
+  //
+  // Source-of-truth rule: pickup ALWAYS uses the shipment origin address
+  // (`shipment.originAddress`) — i.e. the same address the operator already
+  // validates for shipping. We never silently reach into a provider account
+  // address. `isAccountAddress` is forced to `false` so EasyPost validates
+  // and uses the address we sent. If a shop later wants account-address
+  // mode, that becomes an explicit per-store setting (out of scope).
+  // ─────────────────────────────────────────────────────────────────────
+  function resolvePickupAddress(shipment: Shipment): { address: ShipmentAddress; source: 'shipment_origin'; sourceLabel: string } {
+    return {
+      address: shipment.originAddress,
+      source: 'shipment_origin',
+      sourceLabel: 'Shipment origin address (the address you validated for shipping)',
+    };
+  }
+
+  // Preflight validation against the *actual* pickup address that will be
+  // sent to the provider — this runs BEFORE the EasyPost call so obviously
+  // incomplete pickup input never reaches the network. Returns the list of
+  // missing/invalid fields so the UI can show the operator exactly what to
+  // fix and where (origin address editor).
+  function validatePickupAddress(addr: ShipmentAddress | undefined | null): { ready: boolean; missing: string[]; warnings: string[] } {
+    const missing: string[] = [];
+    const warnings: string[] = [];
+    if (!addr) return { ready: false, missing: ['address'], warnings: [] };
+    if (!addr.line1 || !addr.line1.trim()) missing.push('Street address (line 1)');
+    if (!addr.city || !addr.city.trim()) missing.push('City');
+    if (!addr.state || !addr.state.trim()) missing.push('State / region');
+    if (!addr.postalCode || !addr.postalCode.trim()) missing.push('Postal / ZIP code');
+    if (!addr.country || !addr.country.trim()) missing.push('Country');
+    // Carriers require either a person (name) OR a company at the pickup
+    // location so the driver knows whom to ask for. Either is acceptable.
+    if ((!addr.name || !addr.name.trim()) && (!addr.company || !addr.company.trim())) {
+      missing.push('Contact name or company');
+    }
+    // Phone is required by EasyPost for pickup. The fallback chain in the
+    // caller is `pickupForm.contactPhone` → `addr.phone`, so we accept either
+    // here. The check happens in handleRequestPickup which also has form data.
+    if (!addr.phone || addr.phone.replace(/\D/g, '').length < 10) {
+      warnings.push('Phone (recommended; carrier driver may not be able to reach contact)');
+    }
+    return { ready: missing.length === 0, missing, warnings };
+  }
+
   function getPickupEligibility(shipment: Shipment): Eligibility {
     const caps = getProviderCapabilities(shipment);
     if (!caps.pickupRequests) {
@@ -1269,6 +1324,18 @@ export default function ShippingCenter() {
     }
     if (shipment.servicePoint) {
       return { eligible: false, reason: 'A service-point drop-off is selected. Clear it first to switch to a carrier pickup.', category: 'mutex' };
+    }
+    // Pickup-address readiness gate. Pickup uses the shipment origin
+    // address (see resolvePickupAddress). If required fields are missing,
+    // block the action with a specific reason — do not let EasyPost reject.
+    const { address: pickupAddr, sourceLabel } = resolvePickupAddress(shipment);
+    const addrCheck = validatePickupAddress(pickupAddr);
+    if (!addrCheck.ready) {
+      return {
+        eligible: false,
+        reason: `Pickup uses the ${sourceLabel}. Complete it first — missing: ${addrCheck.missing.join(', ')}.`,
+        category: 'pickup_address',
+      };
     }
     return { eligible: true };
   }
@@ -1464,9 +1531,9 @@ export default function ShippingCenter() {
       requestedDate: pickupForm.date,
       windowStart: pickupForm.windowStart || undefined,
       windowEnd: pickupForm.windowEnd || undefined,
-      pickupAddress: ship.originAddress,
+      pickupAddress: resolvePickupAddress(ship).address,
       contactName: pickupForm.contactName.trim() || undefined,
-      contactPhone: pickupForm.contactPhone.trim() || ship.originAddress.phone || undefined,
+      contactPhone: pickupForm.contactPhone.trim() || resolvePickupAddress(ship).address.phone || undefined,
       packageCount: ship.packages.length,
       totalWeight: totalWeight || undefined,
       handlingNotes: pickupForm.notes.trim() || undefined,
@@ -1490,31 +1557,75 @@ export default function ShippingCenter() {
         }
         const minDt = new Date(`${pickupForm.date}T${pickupForm.windowStart || '09:00'}:00`).toISOString();
         const maxDt = new Date(`${pickupForm.date}T${pickupForm.windowEnd || '17:00'}:00`).toISOString();
-        // Concise prerequisite snapshot — what we actually sent to the
-        // provider. Surfaced with every diagnostic outcome so the operator can
-        // see at a glance whether the cause is missing app context vs a real
-        // provider validation issue. Kept compact and non-PII (no full address).
+        // Resolve the pickup address from the single source of truth (the
+        // shipment origin) and run preflight validation against THAT address
+        // — not against any other shipment field. If the origin is not
+        // pickup-ready (missing street/city/state/zip/contact), block the
+        // request in-app rather than letting EasyPost return a generic
+        // semantic error. The operator gets a specific list of fields to fix.
+        const pickupAddrResolved = resolvePickupAddress(ship);
+        const addrCheck = validatePickupAddress(pickupAddrResolved.address);
+        const phoneAvailable = !!(pickupForm.contactPhone.trim() || pickupAddrResolved.address.phone);
+        if (!addrCheck.ready || !phoneAvailable) {
+          const missing = [...addrCheck.missing];
+          if (!phoneAvailable) missing.push('Contact phone (in pickup form or origin address)');
+          const msg = `Pickup uses the ${pickupAddrResolved.sourceLabel}. Complete it before requesting pickup. Missing: ${missing.join(', ')}.`;
+          // eslint-disable-next-line no-console
+          console.error('[Pickup] PICKUP_ADDRESS_INCOMPLETE', { source: pickupAddrResolved.source, missing });
+          setProviderError(friendlyProviderError({ code: 'PICKUP_ADDRESS_INCOMPLETE', message: msg }));
+          setPickupAttemptResult({
+            kind: 'error',
+            title: 'Pickup address is incomplete',
+            detail: msg,
+            steps: [
+              { label: 'Pre-flight: pickup address ready', status: 'fail', note: `Source: ${pickupAddrResolved.source}. Missing ${missing.length} field(s).` },
+            ],
+            code: 'PICKUP_ADDRESS_INCOMPLETE',
+            context: [
+              { label: 'Pickup address source', value: pickupAddrResolved.sourceLabel },
+              { label: 'Where to fix it', value: 'Open the shipment origin address editor (Origin section above) and complete the highlighted fields.' },
+              { label: 'Missing fields', value: missing.join(', ') },
+            ],
+          });
+          return;
+        }
+        // Concise prerequisite snapshot — what we actually send to the
+        // provider, including the explicit pickup-address source. This is now
+        // the operator's primary diagnostic (which address EasyPost is using
+        // and where to fix it) — raw provider details are kept as secondary.
         const pickupContext: { label: string; value: string }[] = [
           { label: 'Provider', value: activeProviderId || '(none)' },
           { label: 'Provider shipment ref', value: ship.providerShipmentId ? `present (${ship.providerShipmentId.slice(0, 12)}…)` : 'MISSING — label may not be purchased' },
           { label: 'Carrier', value: carrier || '(unspecified — provider will infer)' },
           { label: 'Pickup window', value: `${pickupForm.date} ${pickupForm.windowStart || '09:00'}–${pickupForm.windowEnd || '17:00'} (local) → ${minDt} → ${maxDt}` },
-          { label: 'Pickup address', value: `${ship.originAddress.city || '?'}, ${ship.originAddress.state || '?'} ${ship.originAddress.postalCode || '?'} ${ship.originAddress.country || '?'}` },
-          { label: 'is_account_address', value: 'true (using provider account address)' },
+          { label: 'Pickup address SOURCE', value: pickupAddrResolved.sourceLabel },
+          { label: 'Pickup address', value: `${pickupAddrResolved.address.line1 || '?'}${pickupAddrResolved.address.line2 ? `, ${pickupAddrResolved.address.line2}` : ''}, ${pickupAddrResolved.address.city || '?'}, ${pickupAddrResolved.address.state || '?'} ${pickupAddrResolved.address.postalCode || '?'} ${pickupAddrResolved.address.country || '?'}` },
+          { label: 'Pickup contact', value: `${pickupForm.contactName.trim() || pickupAddrResolved.address.name || pickupAddrResolved.address.company || '(none)'} · ${pickupForm.contactPhone.trim() || pickupAddrResolved.address.phone || '(no phone)'}` },
+          { label: 'is_account_address', value: 'false (sending the shipment origin address — EasyPost will validate it)' },
         ];
-        const steps: PickupAttemptResult['steps'] = [{ label: 'Create pickup with provider', status: 'pending' }];
-        setPickupAttemptResult({ kind: 'info', title: 'Booking pickup…', detail: `Calling ${activeProviderId} create-pickup endpoint.`, steps, context: pickupContext });
+        if (addrCheck.warnings.length > 0) {
+          pickupContext.push({ label: 'Address warnings', value: addrCheck.warnings.join('; ') });
+        }
+        const steps: PickupAttemptResult['steps'] = [
+          { label: 'Pre-flight: pickup address ready', status: 'ok', note: `Using ${pickupAddrResolved.source}` },
+          { label: 'Create pickup with provider', status: 'pending' },
+        ];
+        setPickupAttemptResult({ kind: 'info', title: 'Booking pickup…', detail: `Calling ${activeProviderId} create-pickup endpoint with the shipment origin address.`, steps, context: pickupContext });
         // eslint-disable-next-line no-console
-        console.log('[Pickup] createProviderPickup →', { providerId: activeProviderId, providerShipmentId: ship.providerShipmentId, minDt, maxDt, carrier });
+        console.log('[Pickup] createProviderPickup →', { providerId: activeProviderId, providerShipmentId: ship.providerShipmentId, minDt, maxDt, carrier, pickupAddressSource: pickupAddrResolved.source, isAccountAddress: false });
         const created = await shippingApi.createProviderPickup({
           providerId: activeProviderId || undefined,
-          pickupAddress: ship.originAddress,
+          pickupAddress: pickupAddrResolved.address,
           minDatetime: minDt,
           maxDatetime: maxDt,
           instructions: basePickup.handlingNotes,
           providerShipmentId: ship.providerShipmentId,
           carrier,
-          isAccountAddress: true,
+          // Honest: we are sending the shipment origin address, NOT the
+          // EasyPost account's registered pickup address. Sending true here
+          // previously was the root cause of EasyPost rejecting the request
+          // when the origin address didn't match the account address.
+          isAccountAddress: false,
         });
         // eslint-disable-next-line no-console
         console.log('[Pickup] createProviderPickup ←', created);
@@ -3853,6 +3964,8 @@ export default function ShippingCenter() {
                           ? { bg: 'bg-slate-50', border: 'border-slate-200', icon: 'text-slate-500', text: 'text-slate-600', label: 'Carrier pickup not yet available' }
                           : puElig.category === 'permission'
                           ? { bg: 'bg-rose-50', border: 'border-rose-200', icon: 'text-rose-500', text: 'text-rose-700', label: 'Carrier pickup denied' }
+                          : puElig.category === 'pickup_address'
+                          ? { bg: 'bg-rose-50', border: 'border-rose-200', icon: 'text-rose-500', text: 'text-rose-700', label: 'Pickup address is not ready' }
                           : { bg: 'bg-amber-50', border: 'border-amber-200', icon: 'text-amber-500', text: 'text-amber-700', label: puElig.category === 'plan' ? 'Carrier pickup disabled by plan' : 'Carrier pickup not available for this shipment' };
                         return (
                           <div className={`${tone.bg} border ${tone.border} rounded-xl p-3 flex items-start gap-2`}>
@@ -3860,6 +3973,54 @@ export default function ShippingCenter() {
                             <div className={`text-xs ${tone.text}`}>
                               <p className="font-black">{tone.label}</p>
                               <p className="mt-0.5">{puElig.reason}</p>
+                              {puElig.category === 'pickup_address' && (
+                                <p className="mt-1 italic">Open the Origin Address editor (above) and complete the missing fields, then return here.</p>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })()}
+                      {/* Pickup-address source-of-truth banner — visible whenever
+                          pickup is the active option, so the operator always
+                          knows which address EasyPost will use for pickup, and
+                          sees a checklist of the required fields. This is the
+                          primary diagnostic surface; raw provider errors are
+                          secondary and remain available in the attempt panel. */}
+                      {puElig.eligible && !pr && (() => {
+                        const resolved = resolvePickupAddress(selectedShip);
+                        const check = validatePickupAddress(resolved.address);
+                        const fields: { label: string; ok: boolean }[] = [
+                          { label: 'Street (line 1)', ok: !!(resolved.address.line1 || '').trim() },
+                          { label: 'City', ok: !!(resolved.address.city || '').trim() },
+                          { label: 'State / region', ok: !!(resolved.address.state || '').trim() },
+                          { label: 'Postal / ZIP', ok: !!(resolved.address.postalCode || '').trim() },
+                          { label: 'Country', ok: !!(resolved.address.country || '').trim() },
+                          { label: 'Contact name or company', ok: !!((resolved.address.name || '').trim() || (resolved.address.company || '').trim()) },
+                          { label: 'Phone', ok: !!(resolved.address.phone && resolved.address.phone.replace(/\D/g, '').length >= 10) },
+                        ];
+                        const allOk = fields.every(f => f.ok);
+                        const tone = allOk
+                          ? { bg: 'bg-sky-50', border: 'border-sky-200', text: 'text-sky-700', titleColor: 'text-sky-800' }
+                          : { bg: 'bg-amber-50', border: 'border-amber-200', text: 'text-amber-700', titleColor: 'text-amber-800' };
+                        return (
+                          <div className={`${tone.bg} border ${tone.border} rounded-xl p-3`}>
+                            <div className="flex items-start gap-2">
+                              <span className={`material-symbols-outlined text-sm mt-0.5 ${allOk ? 'text-sky-500' : 'text-amber-500'}`}>{allOk ? 'verified_user' : 'fact_check'}</span>
+                              <div className="flex-1 min-w-0">
+                                <p className={`text-[11px] font-black ${tone.titleColor}`}>Pickup address source: {resolved.sourceLabel}</p>
+                                <p className={`text-[11px] ${tone.text} mt-0.5`}>EasyPost will be sent this exact address (with <span className="font-mono">is_account_address=false</span>) and will validate it. {allOk ? 'All required fields are present.' : 'Complete the missing fields below before requesting pickup — do not wait for EasyPost to reject.'}</p>
+                                <ul className="mt-2 grid grid-cols-2 gap-x-3 gap-y-0.5">
+                                  {fields.map((f, i) => (
+                                    <li key={i} className={`text-[10px] flex items-center gap-1.5 ${f.ok ? 'text-emerald-700' : 'text-rose-700'}`}>
+                                      <span className={`material-symbols-outlined text-[12px] ${f.ok ? 'text-emerald-500' : 'text-rose-500'}`}>{f.ok ? 'check_circle' : 'cancel'}</span>
+                                      <span>{f.label}</span>
+                                    </li>
+                                  ))}
+                                </ul>
+                                {check.warnings.length > 0 && (
+                                  <p className="text-[10px] text-amber-700 mt-1 italic">Note: {check.warnings.join('; ')}</p>
+                                )}
+                              </div>
                             </div>
                           </div>
                         );

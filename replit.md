@@ -103,3 +103,23 @@ The frontend is built using React 19, TypeScript, Vite 6, and Tailwind CSS v4.
 -   **EasyPost**: Shipping API for label generation and tracking.
 -   **Shippo**: Shipping API for label generation and tracking.
 -   **ShipStation**: Shipping API for label generation and tracking.
+### Phase 2.5.3 — EasyPost Pickup Address Source-of-Truth + Preflight (Apr 2026)
+
+**Root cause fixed**: The previous pickup flow sent `pickupAddress: shipment.originAddress` while ALSO setting `is_account_address: true`. EasyPost interprets `is_account_address: true` as "this is the address registered on my EasyPost account; use that — the body must match." When the shipment origin address differed from the EasyPost account address (the normal multi-store case), EasyPost rejected the pickup with a generic semantic-error.
+
+**Pickup address source of truth**: `resolvePickupAddress(shipment)` is now the single function returning the address used for pickup. Today that is **always** `shipment.originAddress` — the same address the operator validates for shipping. We never silently reach into a provider account address. The call site explicitly passes `isAccountAddress: false` so EasyPost validates and uses the address we sent.
+
+**Preflight pickup-address validation**: `validatePickupAddress(addr)` is run BEFORE the EasyPost call and checks: `line1`, `city`, `state`, `postalCode`, `country`, contact name OR company, and contact phone (in the pickup form OR in the address). If any required field is missing, the request is blocked in-app and the operator sees a specific list of fields to fix — they never wait for EasyPost to reject obviously-incomplete input.
+
+**Pickup eligibility now includes address readiness**: `getPickupEligibility(shipment)` returns `{ category: 'pickup_address' }` with a specific reason listing missing fields when the resolved pickup address is incomplete. The Request Carrier Pickup button is disabled with a clear "Pickup address is not ready" message that points the operator at the Origin Address editor.
+
+**Operator-facing UI**: Above the pickup form, an always-visible "Pickup address source" banner shows (a) the source label ("Shipment origin address (the address you validated for shipping)"), (b) the literal `is_account_address=false` flag we send, and (c) a 7-field readiness checklist with green checks / red crosses. Phone-without-10-digits is shown as a soft warning. The existing structured `pickupAttemptResult` panel (per-step trace, provider validation errors list, stage/HTTP/code chips, request-context block, raw provider details) remains the secondary diagnostic surface for any error that still slips past preflight.
+
+**Distinction between shipment validation and pickup readiness**: Shipment address validation (origin + destination) is still required for rating/labels and lives in the existing Address Validation flow. Pickup-address readiness is a SEPARATE check against the same origin object — pickup may fail readiness even if shipping rated successfully (e.g., if phone or contact name is missing on the origin record). The two checks are intentionally independent so neither one masks the other.
+
+**Operator messages**:
+- Address incomplete (preflight): `"Pickup uses the Shipment origin address (the address you validated for shipping). Complete it before requesting pickup. Missing: <fields>."`
+- Eligibility blocked: `"Pickup uses the Shipment origin address ... Complete it first — missing: <fields>."`
+- Real EasyPost validation rejection: still surfaced verbatim per Phase 2.5.2 (field-level errors, provider code, HTTP status, stage).
+
+**Remaining limitation (honest)**: A future "use registered EasyPost account address" mode would require a per-store setting and would also require reading the account address back from EasyPost so the request body matches. Out of scope for this pass — the current flow is correct for sending the shipment origin and expects EasyPost to validate it.

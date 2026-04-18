@@ -1,0 +1,192 @@
+Shipping Phase 2 — EasyPost Pickup Address Source + Preflight Validation Root-Cause Fix
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a narrow root-cause correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Only fix the EasyPost pickup-address issue described below.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Node/Express integration engineer
+- Enterprise shipping systems architect
+- Senior carrier API / pickup-operations expert with 20+ years of experience in pickup booking, shipping-address validation, and production shipping UX
+- Root-cause debugging specialist
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- plan gating
+- store permission gating
+- provider/manual mode split
+- PACKED-only activation
+- mutual exclusivity between Service Point and Pickup
+- existing shipping core flow
+- reverse-logistics flow
+- honest provider-specific pickup capability model
+- existing EasyPost pickup create/buy/cancel wiring
+- current structured pickup diagnostics UI
+
+==================================================
+ROOT-CAUSE CONTEXT
+==================================================
+
+We already know:
+- shipment Origin and Destination addresses can be validated for normal shipping/rating
+- pickup creation still fails with EasyPost invalid-address semantics
+- the diagnostics show is_account_address = true in the pickup request context
+
+This strongly suggests the pickup flow is using a different address object than the shipment address the operator validated for shipping.
+
+So the likely problem is:
+- shipment address validation is passing for shipping
+- but EasyPost pickup is using the provider account pickup address or a different origin address object
+- that pickup address is missing required fields or is invalid for pickup booking
+- the app currently does not make that clear enough or pre-validate the actual pickup address payload before sending the EasyPost request
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — ISSUE TO FIX
+==================================================
+
+Observed issue:
+- The operator validated addresses for shipment flow already
+- Carrier Pickup Request becomes available
+- But Create Pickup fails with invalid-address semantics
+- The app must now correctly identify, validate, and explain the actual pickup address being used
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIXES
+==================================================
+
+1) TRACE AND MAKE EXPLICIT THE PICKUP ADDRESS SOURCE
+Required:
+- identify exactly which address object the EasyPost pickup request is using:
+  - provider account address
+  - shipment origin address
+  - or another mapped address object
+- make this explicit in code and in operator-visible diagnostics
+- do not leave it implicit or ambiguous
+
+2) PICKUP-ADDRESS SOURCE OF TRUTH
+Required:
+- create a single clear source of truth for the pickup address actually sent to EasyPost
+- do not let shipment validation use one address while pickup uses another hidden/stale one
+- if pickup is intended to use the provider account address, say so clearly
+- if pickup is intended to use shipment origin, use that consistently
+
+3) PREFLIGHT PICKUP-ADDRESS VALIDATION
+Required:
+- before calling EasyPost pickup create, validate the actual pickup address object that will be sent
+- at minimum validate required pickup fields:
+  - street1
+  - city
+  - state
+  - zip
+  - phone
+  - name or company
+- if any are missing/empty, block the pickup request in-app and show a clear prerequisite message
+- do not wait for EasyPost to reject obviously incomplete pickup input
+
+4) MAKE THE UI TELL THE OPERATOR WHICH ADDRESS NEEDS FIXING
+Required:
+- if the pickup flow is using the provider account address, say:
+  - "Pickup booking uses the configured provider account pickup address. Please complete/fix that address before requesting pickup."
+- if the pickup flow is using shipment origin, say:
+  - "Pickup booking uses the shipment origin address. Please complete/fix the origin pickup details before requesting pickup."
+- do not make the operator guess
+
+5) ALIGN PICKUP ELIGIBILITY WITH PICKUP ADDRESS READINESS
+Required:
+- do not enable Request Carrier Pickup unless the pickup address source is actually ready enough to attempt booking
+- if address validation/readiness is insufficient for pickup, the pickup request action should stay blocked with a clear reason
+- shipment rating/label eligibility and pickup eligibility may share some rules, but pickup must not assume shipment validation alone is sufficient if the pickup source address is different
+
+6) KEEP RAW PROVIDER DETAILS SECONDARY
+Required:
+- keep the current structured diagnostics and provider details available
+- but make the primary operator path:
+  - which address source is being used
+  - which required fields are missing or invalid
+  - what to fix next
+- do not force the operator to interpret provider internals first
+
+7) DO NOT BLAME TEST MODE UNLESS IT IS REALLY THE CAUSE
+Required:
+- if the issue is a missing/invalid pickup address field, say that plainly
+- do not hide behind generic test-mode messaging
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- the app clearly identifies the actual pickup address source used for EasyPost pickup
+- the app pre-validates that address before attempting pickup booking
+- the operator sees a clear message about which address object needs fixing and which fields are missing/invalid
+- Request Carrier Pickup is not enabled when the actual pickup address is not ready
+- existing pickup diagnostics remain available as secondary detail
+
+==================================================
+IMPORTANT RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into unrelated workstreams
+- Do not fake booking success
+- Do not fake pickup confirmation
+- Keep the design baseline consistent
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Trace the exact pickup address object used in the EasyPost create-pickup call
+2) Make that address source explicit in code and UI
+3) Add preflight validation against the actual pickup address source
+4) Block Request Carrier Pickup when that actual pickup address is not ready
+5) Improve the operator message so it clearly says what address needs fixing and what fields are missing
+6) Keep raw provider details as secondary diagnostics
+7) Re-test the current EasyPost pickup path
+8) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- EasyPost pickup address source-of-truth
+- preflight pickup-address validation rules
+- distinction between shipment validation and pickup-address readiness
+- operator-facing messaging for pickup address errors
+- any remaining limitations
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Pickup Address Source Findings
+3. Pickup Address Source-of-Truth Fix
+4. Preflight Pickup-Address Validation Fix
+5. Pickup Eligibility / Action Blocking Fix
+6. Operator Messaging Fix
+7. Files Changed
+8. Documentation Updated
+9. Non-Regression Notes
