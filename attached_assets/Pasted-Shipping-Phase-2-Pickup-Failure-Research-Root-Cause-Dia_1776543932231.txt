@@ -1,0 +1,165 @@
+Shipping Phase 2 — Pickup Failure Research / Root-Cause Diagnosis / Solution Proposal ONLY
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated analysis pass.
+DO NOT implement anything yet.
+DO NOT change code yet.
+DO NOT redesign the app yet.
+Your job in this pass is to study the issue thoroughly, inspect the existing implementation carefully, and return a diagnosis + proposed solution before touching any code.
+
+This is necessary because too much time and credit have already been wasted on repeated cosmetic or partial fixes.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior Node/Express carrier-integration engineer
+- Senior React/TypeScript engineer
+- Senior USPS / EasyPost / pickup-operations expert with 20+ years of experience in carrier pickup booking, shipping-label lifecycle rules, and operational shipping UX
+- Root-cause debugging specialist
+- Product systems thinker
+- QA gatekeeper who must refuse to implement before the real cause is understood
+
+Read first:
+- Ref.txt
+- replit.md
+
+You must inspect:
+- the current EasyPost pickup implementation
+- the current address verification flow
+- the current pickup eligibility memory flow
+- the current label-purchase / address-lock rules
+- the current edit-origin flow
+- the current logistics/pickup UI
+- the current request payload and diagnostics already shown in the UI
+
+==================================================
+CURRENT QA SOURCE OF TRUTH
+==================================================
+
+Actual runtime behavior now shows:
+
+- Delivery verified
+- Pickup ineligible for this address
+- EasyPost / USPS pickup_create still fails with:
+  HTTP 422 / UNPROCESSABLE_ENTITY / USPS code 1007 / invalid address entered
+- The UI tells the operator to:
+  edit the address (or contact info) and re-verify before retrying
+
+But there is a serious product contradiction:
+
+- the shipment label is already purchased
+- shipping addresses should not be freely editable after label purchase
+- yet the recovery path is telling the operator to edit the origin address
+
+This is not acceptable until the real operational model is understood.
+
+==================================================
+WHAT YOU MUST DETERMINE BEFORE ANY CODE CHANGE
+==================================================
+
+1) What is the TRUE root cause of the pickup failure?
+You must determine whether the problem is:
+- USPS/EasyPost pickup-specific address restrictions despite delivery verification
+- a mismatch between "delivery-valid" and "pickup-bookable"
+- missing secondary/unit/address-detail requirements
+- contact/person-at-site requirements
+- a location/carrier pickup restriction for this address type
+- a purchased-label lifecycle issue
+- or another issue in our payload/model
+
+Do not guess.
+Study the current implementation and the provider behavior carefully.
+
+2) What is the correct recovery model after label purchase?
+This is the most important architectural question.
+
+If the label is already purchased and shipment addresses are locked, then what is the correct fix path when pickup booking fails because of address-related carrier rejection?
+
+You must compare and recommend between options such as:
+
+A. Allow editing the shipment origin address even after label purchase
+- pros
+- cons
+- operational risks
+- label/address consistency risks
+
+B. Keep shipment origin locked, but introduce a separate pickup-specific editable address/contact snapshot
+- pros
+- cons
+- data consistency impact
+- provider payload implications
+
+C. Require cancel/recreate label before changing address-related pickup inputs
+- pros
+- cons
+- operational burden
+- auditability
+
+D. Another better model if one exists
+
+You must recommend the correct one for this app and explain why.
+
+3) What exactly should remain locked vs editable after label purchase?
+Be explicit.
+For example, determine separately whether these should be editable after label purchase for pickup recovery:
+- shipment origin address
+- shipment destination address
+- pickup contact name
+- pickup contact phone
+- pickup instructions
+- pickup-specific notes
+- pickup-specific address supplement / unit / suite / dock / contact location
+- any pickup-only address override
+
+Do not give a vague answer.
+Define it clearly.
+
+4) What should the operator-facing UX be?
+Before implementation, define the exact correct workflow for the operator when:
+- delivery verification passes
+- pickup booking fails
+- label is already purchased
+- address fields are locked
+
+The workflow must be operationally realistic and not contradictory.
+
+5) What should be changed in the app, and what should NOT be changed?
+You must separate:
+- root cause
+- product decision
+- implementation recommendation
+- things we should explicitly avoid
+
+==================================================
+NON-NEGOTIABLE RULES FOR THIS PASS
+==================================================
+
+- DO NOT implement yet
+- DO NOT change code yet
+- DO NOT patch the message only
+- DO NOT give a vague answer
+- DO NOT say "it depends" without making a recommendation
+- DO NOT waste time on cosmetic ideas
+- give one recommended solution path, plus alternatives with pros/cons
+
+==================================================
+REQUIRED ANALYSIS OUTPUT
+==================================================
+
+Reply ONLY in this structure:
+
+1. Confirmed Runtime Problem
+2. Root-Cause Diagnosis
+3. Why Delivery Verification Still Allows Pickup Failure
+4. Why The Current "Edit Address" Recovery Is Operationally Wrong
+5. Options Considered
+6. Recommended Product/Architecture Fix
+7. What Must Stay Locked After Label Purchase
+8. What May Still Be Editable After Label Purchase
+9. Exact Operator Workflow Recommendation
+10. What Code Changes Would Be Needed Later If Approved
+11. What We Should NOT Do
+12. Confidence Level And Remaining Unknowns
