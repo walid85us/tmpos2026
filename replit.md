@@ -268,3 +268,34 @@ The frontend is built using React 19, TypeScript, Vite 6, and Tailwind CSS v4.
 **Truthfulness invariants preserved (Phase 2.5.1+)**: no fake confirmations, no fake eligibility success, structured provider errors surfaced verbatim through the same `pickupAttemptResult` panel (which now also drives the persistent eligibility memory). Carrier-agnostic: the eligibility model is fingerprint+status only — no carrier-specific branches.
 
 **EasyPost / USPS caveat**: there is no public pre-flight pickup-eligibility endpoint. Until that exists, the app treats the first `pickup_create` as the eligibility probe and remembers its result. This is the only honest model; anything else would be a guess.
+
+### Phase 2.5.9 — Pickup-Ineligible Recovery UX (Apr 2026)
+
+**Root cause**: After Phase 2.5.8 added the separate "Pickup ineligible for this address" chip and the eligibility gate, the operator-facing guidance stack was self-contradictory. The required-fields panel correctly said READY, but the inline guidance banner above the form still said *"Complete the required pickup booking fields below to continue."* and the disabled submit button still said *"Complete required fields to continue."* — so an operator looking at a deliverable but pickup-rejected address was being told to fix fields that were already complete.
+
+**Fix — state-specific operator messaging**:
+The inline guidance banner is now branched on `puElig.category`:
+- `pickup_address` / `pickup_payload` (genuinely missing fields): sky banner, headline *"Complete the required pickup booking fields below to continue."* — unchanged.
+- `pickup_address_unverified` (fields complete, delivery verification not run / stale / failed): amber banner, headline *"Run delivery verification on the pickup address before booking."*
+- `pickup_address_ineligible` (fields complete, delivery verified, but `pickup_create` already rejected this exact fingerprint): rose banner, headline *"This address is deliverable, but the carrier has not accepted it for pickup booking."* with sub-line *"Edit the pickup street/city/state/ZIP or the contact name and phone, then re-run delivery verification before retrying. The same unchanged address will be rejected again."* plus an explicit clarifying line *"All required booking fields are present. The remaining blocker is carrier rejection of the current pickup address — not missing form data."*
+
+**Fix — state-specific submit button label**:
+The disabled submit-button label now matches the actual blocker:
+- no date → *"Choose a pickup date to continue"*
+- `pickup_address_ineligible` → *"Edit address and re-verify to continue"*
+- `pickup_address_unverified` → *"Verify delivery to continue"*
+- `pickup_address` / `pickup_payload` → *"Complete required fields to continue"* (unchanged for the legitimate case).
+The `title` tooltip still surfaces the verbatim `puElig.reason`, so the carrier message remains one hover away.
+
+**Fix — direct recovery actions inside the pickup section**:
+The pickup-ineligible banner now renders three inline action buttons so the operator never has to hunt for the right editor:
+- **Edit origin address** — opens the shipment-origin editor via `setEditingShipment(selectedShip.id)`.
+- **Edit pickup contact** — smooth-scrolls to the new `#pickup-contact-fields` anchor (Contact Name input) and focuses it.
+- **Re-verify after edit** — smooth-scrolls to the new `#delivery-verify-action` anchor (the existing Verify pickup address button).
+Editing any pickup-address or contact field changes the fingerprint, which invalidates the eligibility memory automatically (`getPickupEligibilityState` returns `'unknown'`), the verification chip flips to `stale` (Phase 2.5.7 behavior), and the operator can re-verify and retry — a guided loop, not a dead-end.
+
+**Required-fields panel non-contradiction**: the per-field readiness ticks remain authoritative for missing-fields detection. When all fields are present but eligibility is `failed`, the ineligible banner explicitly states that fields are not the problem, removing the prior contradiction.
+
+**Failure memory unchanged**: the same-address-snapshot rejection memory from Phase 2.5.8 is preserved. The recovery UX simply makes the path out of that memory obvious instead of leaving the operator stuck.
+
+**Truthfulness invariants preserved**: no fake confirmations, no carrier-specific copy, no relaxation of the eligibility gate. The submit button is still hard-disabled while `pickupSubmitReady === false` — the new label only describes the real blocker more honestly.

@@ -1,0 +1,180 @@
+Shipping Phase 2 — Pickup Ineligible State UX / Recovery Flow Final Fix
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a narrow final UX/state correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Fix the contradictory pickup-ineligible UI state so the operator gets one clear message and one clear recovery path.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Enterprise shipping systems architect
+- Senior carrier-booking UX expert with 20+ years of experience in operational shipping workflows and exception handling
+- Root-cause debugging specialist
+- QA gatekeeper who must not accept contradictory state messaging
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- plan gating
+- store permission gating
+- provider/manual mode split
+- PACKED-only activation
+- mutual exclusivity between Service Point and Pickup
+- existing shipping core flow
+- reverse-logistics flow
+- current pickup address source-of-truth work
+- delivery verification vs pickup eligibility distinction
+- current pickup eligibility failure-memory behavior
+- current structured diagnostics UI
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — ACTUAL REMAINING FAILURE
+==================================================
+
+Observed current runtime behavior:
+- The app now correctly distinguishes delivery verification from pickup eligibility
+- The address is shown as:
+  - Delivery verified
+  - Pickup ineligible for this address
+- The required-fields panel shows READY
+- But the top guidance still says:
+  "Complete the required pickup booking fields below to continue."
+- And the submit button still says:
+  "COMPLETE REQUIRED FIELDS TO CONTINUE"
+
+This is contradictory and wrong.
+
+If the address snapshot has already been rejected for pickup booking, the problem is no longer "missing required fields."
+The problem is:
+- this address/contact snapshot is pickup-ineligible
+- the operator must edit the address/contact and re-verify before retrying
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIXES
+==================================================
+
+1) DISTINGUISH MISSING-FIELDS STATE FROM PICKUP-INELIGIBLE STATE
+Required:
+- do not reuse the same guidance text for:
+  - missing required fields
+  - pickup address already rejected by provider
+- these are different states and must have different UI copy and button behavior
+
+2) PICKUP-INELIGIBLE STATE MUST HAVE ITS OWN PRIMARY MESSAGE
+Required:
+- when the current unchanged address snapshot is marked pickup-ineligible, show one clear primary message such as:
+  "This address is deliverable, but the carrier has not accepted it for pickup booking. Edit the address or contact info and re-verify before retrying."
+- do not also tell the operator to “complete required fields” if the required-fields panel is already READY
+
+3) BUTTON LABEL / DISABLED STATE MUST MATCH THE REAL BLOCKER
+Required:
+- if fields are missing, the disabled button can say:
+  "Complete required fields to continue"
+- if the address snapshot is pickup-ineligible, the disabled button must instead say something like:
+  "Edit address and re-verify to continue"
+  or
+  "Address must be updated before retrying"
+- the button tooltip/reason must match the actual blocker
+
+4) PROVIDE A DIRECT RECOVERY PATH
+Required:
+- in the pickup-ineligible state, provide a clear recovery action near the message, such as:
+  - Edit Origin Address
+  - Edit pickup contact info
+  - Re-verify after edit
+- do not make the operator hunt for the correct editor
+- the recovery path should be obvious from inside the pickup section
+
+5) KEEP FAILURE MEMORY BUT MAKE IT OPERATIONAL
+Required:
+- keep the rule that the same unchanged address snapshot cannot be retried endlessly
+- but make the recovery path clear:
+  - edit address/contact
+  - verification resets to stale/unknown
+  - re-verify
+  - retry pickup
+- this should feel like a guided workflow, not a dead-end
+
+6) REQUIRED-FIELDS PANEL SHOULD NOT IMPLY THE WRONG ROOT CAUSE
+Required:
+- if all provider-required fields are satisfied, the required-fields panel should remain READY
+- but the surrounding messaging must not imply missing fields are the problem
+- if useful, add a short line clarifying:
+  "All required booking fields are present. The remaining blocker is carrier rejection of the current pickup address."
+
+7) KEEP RAW DIAGNOSTICS SECONDARY
+Required:
+- keep the detailed provider error panel and request context
+- but the primary operator message should now be the recovery instruction, not the contradiction
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- when the address snapshot is pickup-ineligible, the UI no longer tells the operator to complete fields that are already complete
+- the submit button label and tooltip match the actual blocker
+- the operator has a clear recovery path: edit address/contact, re-verify, retry
+- required-fields readiness and pickup ineligibility are shown as distinct concepts without contradiction
+
+==================================================
+IMPORTANT RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into unrelated workstreams
+- Do not fake pickup success
+- Do not remove the pickup eligibility memory
+- Do not ship another contradictory message stack
+- Keep the design baseline consistent
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Separate missing-fields messaging from pickup-ineligible messaging
+2) Fix the button label/tooltip for pickup-ineligible state
+3) Add a direct recovery action/path from the pickup section
+4) Refine surrounding guidance so READY fields and pickup-ineligible state do not contradict each other
+5) Re-test the current pickup-ineligible flow
+6) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- distinction between missing-fields state and pickup-ineligible state
+- pickup-ineligible recovery workflow
+- button-label / operator-message rules for each state
+- clarification that READY required fields do not imply pickup eligibility
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Missing-Fields vs Pickup-Ineligible Messaging Fix
+3. Button Label / Tooltip Fix
+4. Recovery Path Fix
+5. Required-Fields Panel Clarification Fix
+6. Files Changed
+7. Documentation Updated
+8. Non-Regression Notes

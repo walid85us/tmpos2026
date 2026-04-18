@@ -4450,16 +4450,86 @@ export default function ShippingCenter() {
                       })()}
                       {/* Inline guidance shown ABOVE the form when the
                           feature is available but submit is not yet ready.
-                          The form below remains visible and fillable. */}
-                      {pickupFeatureAvailable && !pickupSubmitReady && !pr && (
-                        <div className="bg-sky-50 border border-sky-200 rounded-xl p-3 flex items-start gap-2">
-                          <span className="material-symbols-outlined text-sky-600 text-sm mt-0.5">info</span>
-                          <div className="text-xs text-sky-800">
-                            <p className="font-black">Complete the required pickup booking fields below to continue.</p>
-                            <p className="mt-0.5 text-sky-700">{puElig.reason}</p>
+                          The form below remains visible and fillable.
+                          Phase 2.5.9: messaging is now state-specific so a
+                          pickup-ineligible address is NEVER described as a
+                          "missing fields" problem (which would contradict
+                          the READY required-fields panel). The four
+                          form-readiness categories each get their own
+                          headline + recovery hint. */}
+                      {pickupFeatureAvailable && !pickupSubmitReady && !pr && (() => {
+                        const cat = puElig.category;
+                        const isIneligible = cat === 'pickup_address_ineligible';
+                        const isUnverified = cat === 'pickup_address_unverified';
+                        const isMissingFields = cat === 'pickup_address' || cat === 'pickup_payload';
+                        const tone = isIneligible
+                          ? { bg: 'bg-rose-50', border: 'border-rose-200', icon: 'block', iconColor: 'text-rose-600', title: 'text-rose-800', body: 'text-rose-700' }
+                          : isUnverified
+                          ? { bg: 'bg-amber-50', border: 'border-amber-200', icon: 'fact_check', iconColor: 'text-amber-600', title: 'text-amber-800', body: 'text-amber-700' }
+                          : { bg: 'bg-sky-50', border: 'border-sky-200', icon: 'info', iconColor: 'text-sky-600', title: 'text-sky-800', body: 'text-sky-700' };
+                        const headline = isIneligible
+                          ? 'This address is deliverable, but the carrier has not accepted it for pickup booking.'
+                          : isUnverified
+                          ? 'Run delivery verification on the pickup address before booking.'
+                          : isMissingFields
+                          ? 'Complete the required pickup booking fields below to continue.'
+                          : 'Resolve the remaining blocker below to continue.';
+                        const subline = isIneligible
+                          ? 'Edit the pickup street/city/state/ZIP or the contact name and phone, then re-run delivery verification before retrying. The same unchanged address will be rejected again.'
+                          : puElig.reason;
+                        return (
+                          <div className={`${tone.bg} border ${tone.border} rounded-xl p-3 flex items-start gap-2`}>
+                            <span className={`material-symbols-outlined ${tone.iconColor} text-sm mt-0.5`}>{tone.icon}</span>
+                            <div className={`text-xs ${tone.title} flex-1 min-w-0`}>
+                              <p className="font-black">{headline}</p>
+                              <p className={`mt-0.5 ${tone.body}`}>{subline}</p>
+                              {isIneligible && (
+                                <>
+                                  <p className={`mt-1 text-[10px] ${tone.body} italic`}>All required booking fields are present. The remaining blocker is carrier rejection of the current pickup address — not missing form data.</p>
+                                  <div className="mt-2 flex flex-wrap gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => setEditingShipment(selectedShip.id)}
+                                      className="px-2.5 py-1 rounded text-[10px] font-black uppercase tracking-widest bg-white border border-rose-300 text-rose-700 hover:bg-rose-50 inline-flex items-center gap-1"
+                                    >
+                                      <span className="material-symbols-outlined text-[12px]">edit_location</span>
+                                      Edit origin address
+                                    </button>
+                                    <a
+                                      href="#pickup-contact-fields"
+                                      onClick={(e) => {
+                                        e.preventDefault();
+                                        const el = document.getElementById('pickup-contact-fields');
+                                        if (el) {
+                                          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                          const focusable = el.querySelector('input, textarea') as HTMLElement | null;
+                                          focusable?.focus();
+                                        }
+                                      }}
+                                      className="px-2.5 py-1 rounded text-[10px] font-black uppercase tracking-widest bg-white border border-rose-300 text-rose-700 hover:bg-rose-50 inline-flex items-center gap-1"
+                                    >
+                                      <span className="material-symbols-outlined text-[12px]">contact_phone</span>
+                                      Edit pickup contact
+                                    </a>
+                                    <a
+                                      href="#delivery-verify-action"
+                                      onClick={(e) => {
+                                        e.preventDefault();
+                                        const el = document.getElementById('delivery-verify-action');
+                                        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                      }}
+                                      className="px-2.5 py-1 rounded text-[10px] font-black uppercase tracking-widest bg-white border border-rose-300 text-rose-700 hover:bg-rose-50 inline-flex items-center gap-1"
+                                    >
+                                      <span className="material-symbols-outlined text-[12px]">restart_alt</span>
+                                      Re-verify after edit
+                                    </a>
+                                  </div>
+                                </>
+                              )}
+                            </div>
                           </div>
-                        </div>
-                      )}
+                        );
+                      })()}
                       {/* Pickup-address source-of-truth banner + true carrier
                           verification panel. Shown whenever pickup is the
                           active option (no service point selected, no active
@@ -4576,6 +4646,7 @@ export default function ShippingCenter() {
                                 </div>
                                 {!isWriteBlocked && (
                                   <button
+                                    id="delivery-verify-action"
                                     type="button"
                                     onClick={() => verifyPickupAddressFor(selectedShip.id)}
                                     disabled={!canVerify}
@@ -4826,7 +4897,7 @@ export default function ShippingCenter() {
                               <input type="time" value={pickupForm.windowEnd} onChange={e => setPickupForm({ ...pickupForm, windowEnd: e.target.value })} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs" />
                             </div>
                           </div>
-                          <div>
+                          <div id="pickup-contact-fields">
                             <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Contact Name{reqMark(reqContactName)}</label>
                             <input type="text" value={pickupForm.contactName} onChange={e => setPickupForm({ ...pickupForm, contactName: e.target.value })} placeholder={selectedShip.originAddress.name} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs" />
                           </div>
@@ -4953,6 +5024,12 @@ export default function ShippingCenter() {
                             >
                               {pickupSubmitting
                                 ? 'Requesting...'
+                                : !pickupForm.date
+                                ? 'Choose a pickup date to continue'
+                                : !pickupSubmitReady && puElig.category === 'pickup_address_ineligible'
+                                ? 'Edit address and re-verify to continue'
+                                : !pickupSubmitReady && puElig.category === 'pickup_address_unverified'
+                                ? 'Verify delivery to continue'
                                 : !pickupSubmitReady
                                 ? 'Complete required fields to continue'
                                 : 'Request Carrier Pickup'}
