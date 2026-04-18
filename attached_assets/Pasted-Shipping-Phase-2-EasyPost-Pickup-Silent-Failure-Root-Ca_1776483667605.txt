@@ -1,0 +1,174 @@
+Shipping Phase 2 — EasyPost Pickup Silent Failure Root-Cause Fix
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a narrow root-cause debugging and correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Only fix the current EasyPost pickup issue where clicking "Request Carrier Pickup" shows "Requesting..." and then returns to idle with no visible result.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Node/Express integration engineer
+- Enterprise shipping systems architect
+- Senior carrier API / pickup-operations expert with 20+ years of experience in carrier booking flows, pickup scheduling, and production shipping UX
+- Root-cause debugging specialist
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- plan gating
+- store permission gating
+- provider/manual mode split
+- PACKED-only activation
+- mutual exclusivity between Service Point and Pickup
+- existing shipping core flow
+- reverse-logistics flow
+- honest provider-specific pickup capability model
+- Carrier Locator settings architecture already added
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — REMAINING FAILURE
+==================================================
+
+Observed QA result:
+- Using EasyPost as the active provider
+- Clicking "Request Carrier Pickup" changes the button to "Requesting..."
+- Then nothing visible happens
+- It goes back to "Request Carrier Pickup"
+- No confirmation, no booked state, no clear error, no visible local fallback outcome
+
+This is not acceptable.
+
+Whether the issue is:
+- test mode limitation
+- missing provider shipment reference
+- no pickup rates returned
+- buy step failure
+- provider rejection
+- UI state not updating
+- swallowed exception
+
+the operator must see a truthful result.
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIXES
+==================================================
+
+1) TRACE THE FULL EASYPOST PICKUP CHAIN
+Required:
+- inspect the actual runtime flow from button click through:
+  - create pickup request
+  - pickup rates returned or not
+  - pickup rate selection / auto-selection
+  - pickup buy request
+  - state persistence
+  - UI update
+- identify exactly where the chain is failing or being dropped
+
+2) NO MORE SILENT FAILURE
+Required:
+- if any step fails, the operator must see a clear visible result
+- do not silently reset the button with no explanation
+- surface honest provider/test-mode errors clearly
+
+3) DISTINGUISH THESE CASES CLEARLY
+Required:
+- pickup created successfully and booked successfully
+- pickup created but no pickup rates returned
+- pickup created but buy step failed
+- provider shipment reference missing
+- provider test-mode limitation
+- unsupported carrier / unsupported shipment conditions
+- unexpected server or network failure
+
+4) PERSIST SUCCESSFUL RESULT CORRECTLY
+Required:
+- if booking succeeds, the shipment must show the real provider-booked pickup state
+- show confirmation number if issued
+- show provider pickup id / cost where available
+- do not fall back to idle state after success
+
+5) PRESERVE HONEST TEST MODE BEHAVIOR
+Required:
+- if test mode limits real booking behavior, say that clearly in the UI
+- do not label a failed/simulated state as booked
+- but do not swallow the reason either
+
+6) SERVER + CLIENT ERROR HANDLING
+Required:
+- server endpoints must return clear structured errors
+- client must show them clearly in the shipment pickup section
+- do not leave debugging dependent on hidden logs only
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- Clicking Request Carrier Pickup must now end in one of two visible outcomes:
+  - a real booked/provider-backed pickup state with confirmation/details
+  - or a clear truthful error/result state explaining why booking did not happen
+- It must no longer silently reset with no explanation
+
+==================================================
+IMPORTANT RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into unrelated workstreams
+- Do not fake booking success
+- Do not fake pickup confirmation
+- Do not remove honest provider-specific behavior
+- Keep the design baseline consistent
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Trace the full EasyPost pickup create → rates → buy → persist → render flow
+2) Identify the exact failing step
+3) Fix the failing step or the state persistence/render bug
+4) Add visible structured result/error handling for all important cases
+5) Re-test the EasyPost pickup flow in current test conditions
+6) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- EasyPost pickup runtime flow
+- the exact root cause found
+- how success is persisted/rendered
+- how failure/test-mode/provider errors are surfaced to the operator
+- any remaining test-mode limitations
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. EasyPost Pickup Root-Cause Findings
+3. Silent Failure Fix
+4. Success State Persistence Fix
+5. Error / Test-Mode Messaging Fix
+6. Files Changed
+7. Documentation Updated
+8. Non-Regression Notes

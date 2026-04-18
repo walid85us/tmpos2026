@@ -183,21 +183,31 @@ app.post('/api/shipping/purchase-label', async (req, res) => {
 // ---------------------------------------------------------------------------
 app.post('/api/shipping/pickup/create', async (req, res) => {
   const { providerId, pickupAddress, minDatetime, maxDatetime, instructions, providerShipmentId, providerShipmentIds, carrier, isAccountAddress } = req.body;
+  console.log('[pickup/create] →', { providerId: providerId || '(active)', providerShipmentId, carrier, minDatetime, maxDatetime });
   const provider = resolveProvider(providerId);
   if (!provider) {
+    console.warn('[pickup/create] NO_PROVIDER');
     res.json({ success: false, error: { code: 'NO_PROVIDER', message: 'No active shipping provider. Configure a provider in Shipping Center.' } });
     return;
   }
   if (!provider.createPickup) {
+    console.warn('[pickup/create] NOT_IMPLEMENTED for', provider.providerId);
     res.json({ success: false, error: { code: 'NOT_IMPLEMENTED', message: `Provider "${provider.providerId}" does not implement pickup booking.` } });
     return;
   }
-  const result = await provider.createPickup({ pickupAddress, minDatetime, maxDatetime, instructions, providerShipmentId, providerShipmentIds, carrier, isAccountAddress });
-  res.json(result);
+  try {
+    const result = await provider.createPickup({ pickupAddress, minDatetime, maxDatetime, instructions, providerShipmentId, providerShipmentIds, carrier, isAccountAddress });
+    console.log('[pickup/create] ←', { providerId: provider.providerId, success: result.success, providerPickupId: result.providerPickupId, rates: result.rates?.length, error: result.error?.code });
+    res.json(result);
+  } catch (err) {
+    console.error('[pickup/create] EXCEPTION', err);
+    res.json({ success: false, error: { code: 'ADAPTER_EXCEPTION', message: err instanceof Error ? err.message : 'Adapter threw an unexpected error.', retryable: true } });
+  }
 });
 
 app.post('/api/shipping/pickup/buy', async (req, res) => {
   const { providerId, providerPickupId, providerRateId } = req.body;
+  console.log('[pickup/buy] →', { providerId: providerId || '(active)', providerPickupId, providerRateId });
   const provider = resolveProvider(providerId);
   if (!provider) {
     res.json({ success: false, error: { code: 'NO_PROVIDER', message: 'No active shipping provider.' } });
@@ -207,12 +217,19 @@ app.post('/api/shipping/pickup/buy', async (req, res) => {
     res.json({ success: false, error: { code: 'NOT_IMPLEMENTED', message: `Provider "${provider.providerId}" does not implement pickup buy.` } });
     return;
   }
-  const result = await provider.buyPickup({ providerPickupId, providerRateId });
-  res.json(result);
+  try {
+    const result = await provider.buyPickup({ providerPickupId, providerRateId });
+    console.log('[pickup/buy] ←', { success: result.success, confirmation: result.confirmationNumber, cost: result.cost, error: result.error?.code });
+    res.json(result);
+  } catch (err) {
+    console.error('[pickup/buy] EXCEPTION', err);
+    res.json({ success: false, error: { code: 'ADAPTER_EXCEPTION', message: err instanceof Error ? err.message : 'Adapter threw an unexpected error.', retryable: true } });
+  }
 });
 
 app.post('/api/shipping/pickup/cancel', async (req, res) => {
   const { providerId, providerPickupId } = req.body;
+  console.log('[pickup/cancel] →', { providerId: providerId || '(active)', providerPickupId });
   const provider = resolveProvider(providerId);
   if (!provider) {
     res.json({ success: false, error: { code: 'NO_PROVIDER', message: 'No active shipping provider.' } });
@@ -222,8 +239,14 @@ app.post('/api/shipping/pickup/cancel', async (req, res) => {
     res.json({ success: false, error: { code: 'NOT_IMPLEMENTED', message: `Provider "${provider.providerId}" does not implement pickup cancel.` } });
     return;
   }
-  const result = await provider.cancelPickup({ providerPickupId });
-  res.json(result);
+  try {
+    const result = await provider.cancelPickup({ providerPickupId });
+    console.log('[pickup/cancel] ←', { success: result.success, status: result.status, error: result.error?.code });
+    res.json(result);
+  } catch (err) {
+    console.error('[pickup/cancel] EXCEPTION', err);
+    res.json({ success: false, error: { code: 'ADAPTER_EXCEPTION', message: err instanceof Error ? err.message : 'Adapter threw an unexpected error.', retryable: true } });
+  }
 });
 
 app.post('/api/shipping/tracking', async (req, res) => {

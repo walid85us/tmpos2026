@@ -167,6 +167,7 @@ export interface CancelPickupResponse {
   error?: ProviderError;
 }
 export async function createProviderPickup(params: {
+  providerId?: string;
   pickupAddress: ShipmentAddress;
   minDatetime: string;
   maxDatetime: string;
@@ -175,13 +176,28 @@ export async function createProviderPickup(params: {
   carrier?: string;
   isAccountAddress?: boolean;
 }): Promise<CreatePickupResponse> {
-  return apiCall('/api/shipping/pickup/create', params);
+  // Wrap network errors as structured CreatePickupResponse so the caller never
+  // has to deal with a thrown Error in addition to {success:false}. This keeps
+  // the silent-failure surface tiny.
+  try {
+    return await apiCall('/api/shipping/pickup/create', params);
+  } catch (err) {
+    return { success: false, error: { code: 'NETWORK_ERROR', message: err instanceof Error ? err.message : 'Network error', retryable: true } };
+  }
 }
-export async function buyProviderPickup(providerPickupId: string, providerRateId: string): Promise<BuyPickupResponse> {
-  return apiCall('/api/shipping/pickup/buy', { providerPickupId, providerRateId });
+export async function buyProviderPickup(providerPickupId: string, providerRateId: string, providerId?: string): Promise<BuyPickupResponse> {
+  try {
+    return await apiCall('/api/shipping/pickup/buy', { providerId, providerPickupId, providerRateId });
+  } catch (err) {
+    return { success: false, error: { code: 'NETWORK_ERROR', message: err instanceof Error ? err.message : 'Network error', retryable: true } };
+  }
 }
-export async function cancelProviderPickup(providerPickupId: string): Promise<CancelPickupResponse> {
-  return apiCall('/api/shipping/pickup/cancel', { providerPickupId });
+export async function cancelProviderPickup(providerPickupId: string, providerId?: string): Promise<CancelPickupResponse> {
+  try {
+    return await apiCall('/api/shipping/pickup/cancel', { providerId, providerPickupId });
+  } catch (err) {
+    return { success: false, error: { code: 'NETWORK_ERROR', message: err instanceof Error ? err.message : 'Network error', retryable: true } };
+  }
 }
 
 // Service-point locator entry point. Routes to carrier-specific adapters in

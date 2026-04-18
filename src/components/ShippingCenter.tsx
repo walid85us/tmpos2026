@@ -456,6 +456,24 @@ export default function ShippingCenter() {
     notes: '',
   });
   const [pickupSubmitting, setPickupSubmitting] = useState(false);
+  // Inline structured outcome of the last pickup attempt — rendered right
+  // above the Request button so the operator always sees a truthful result
+  // (success, partial, or failure) without having to scroll back up to the
+  // page-level providerError/providerSuccess banners. Cleared when the form
+  // is reopened or a fresh attempt begins.
+  type PickupAttemptResult = {
+    kind: 'success' | 'partial' | 'error' | 'info';
+    title: string;
+    detail: string;
+    steps: { label: string; status: 'ok' | 'fail' | 'skip' | 'pending'; note?: string }[];
+    code?: string;
+    providerPickupId?: string;
+    confirmationNumber?: string;
+    cost?: number;
+    currency?: string;
+    rawError?: string;
+  };
+  const [pickupAttemptResult, setPickupAttemptResult] = useState<PickupAttemptResult | null>(null);
   const [pickupCancelReason, setPickupCancelReason] = useState('');
   // Carrier Locator per-store configuration. Persisted in sessionStorage.
   // Each adapter is independently togglable so an operator can ship via UPS
@@ -1387,19 +1405,33 @@ export default function ShippingCenter() {
   }
 
   async function handleRequestPickup(shipmentId: string) {
-    if (isWriteBlocked) return;
+    if (isWriteBlocked) {
+      setPickupAttemptResult({ kind: 'error', title: 'Write blocked', detail: 'You are in preview/read-only mode. Pickup booking is disabled.', steps: [], code: 'WRITE_BLOCKED' });
+      return;
+    }
     const ship = shipments.find(s => s.id === shipmentId);
-    if (!ship) return;
+    if (!ship) {
+      setPickupAttemptResult({ kind: 'error', title: 'Shipment not found', detail: `Could not locate shipment ${shipmentId} in local state.`, steps: [], code: 'SHIPMENT_NOT_FOUND' });
+      return;
+    }
     const elig = getPickupEligibility(ship);
     if (!elig.eligible) {
-      setProviderError(friendlyProviderError({ code: (elig.category || 'NOT_AVAILABLE').toUpperCase(), message: elig.reason || 'Carrier pickup not available.' }));
+      const msg = elig.reason || 'Carrier pickup not available.';
+      setProviderError(friendlyProviderError({ code: (elig.category || 'NOT_AVAILABLE').toUpperCase(), message: msg }));
+      setPickupAttemptResult({ kind: 'error', title: 'Pickup not eligible', detail: msg, steps: [], code: (elig.category || 'NOT_AVAILABLE').toUpperCase() });
       return;
     }
     if (!pickupForm.date) {
-      setProviderError(friendlyProviderError({ code: 'VALIDATION', message: 'Pickup date is required.' }));
+      const msg = 'Pickup date is required.';
+      setProviderError(friendlyProviderError({ code: 'VALIDATION', message: msg }));
+      setPickupAttemptResult({ kind: 'error', title: 'Missing pickup date', detail: msg, steps: [], code: 'VALIDATION' });
       return;
     }
+    clearProviderFeedback();
+    setPickupAttemptResult(null);
     setPickupSubmitting(true);
+    // eslint-disable-next-line no-console
+    console.log('[Pickup] Begin attempt', { shipmentId, providerId: activeProviderId, providerShipmentId: ship.providerShipmentId, hasLabel: !!ship.label });
     const now = new Date().toISOString();
     const totalWeight = ship.packages.reduce((sum, p) => sum + (p.weight || 0), 0);
     const carrier = ship.carrier || ship.selectedRate?.carrier || 'UPS';
@@ -1429,16 +1461,25 @@ export default function ShippingCenter() {
     // Live booking path: only when provider declares supportsLivePickupBooking
     // AND the prerequisite providerShipmentId is present (EasyPost requires it).
     // -------------------------------------------------------------------
-    if (caps?.supportsLivePickupBooking) {
-      if (caps.pickupNeedsProviderShipmentId && !ship.providerShipmentId) {
-        setPickupSubmitting(false);
-        setProviderError(friendlyProviderError({ code: 'MISSING_SHIPMENT_REF', message: `${activeProviderId} pickup requires a provider shipment id. Purchase a label for this shipment first so the pickup can be attached to it.` }));
-        return;
-      }
-      try {
+    try {
+      if (caps?.supportsLivePickupBooking) {
+        if (caps.pickupNeedsProviderShipmentId && !ship.providerShipmentId) {
+          const msg = `${activeProviderId} pickup requires a provider shipment id. Purchase a label for this shipment first so the pickup can be attached to it.`;
+          setProviderError(friendlyProviderError({ code: 'MISSING_SHIPMENT_REF', message: msg }));
+          setPickupAttemptResult({ kind: 'error', title: 'Label not purchased', detail: msg, steps: [{ label: 'Pre-flight: provider shipment id', status: 'fail', note: 'No providerShipmentId on this shipment.' }], code: 'MISSING_SHIPMENT_REF' });
+          // eslint-disable-next-line no-console
+          console.error('[Pickup] MISSING_SHIPMENT_REF — label not purchased yet');
+          return;
+        }
+        const steps: PickupAttemptResult['steps'] = [{ label: 'Create pickup with provider', status: 'pending' }];
+        setPickupAttemptResult({ kind: 'info', title: 'Booking pickup…', detail: `Calling ${activeProviderId} create-pickup endpoint.`, steps });
+
         const minDt = new Date(`${pickupForm.date}T${pickupForm.windowStart || '09:00'}:00`).toISOString();
         const maxDt = new Date(`${pickupForm.date}T${pickupForm.windowEnd || '17:00'}:00`).toISOString();
+        // eslint-disable-next-line no-console
+        console.log('[Pickup] createProviderPickup →', { providerId: activeProviderId, providerShipmentId: ship.providerShipmentId, minDt, maxDt, carrier });
         const created = await shippingApi.createProviderPickup({
+          providerId: activeProviderId || undefined,
           pickupAddress: ship.originAddress,
           minDatetime: minDt,
           maxDatetime: maxDt,
@@ -1447,21 +1488,63 @@ export default function ShippingCenter() {
           carrier,
           isAccountAddress: true,
         });
+        // eslint-disable-next-line no-console
+        console.log('[Pickup] createProviderPickup ←', created);
+
         if (!created.success || !created.providerPickupId) {
-          setPickupSubmitting(false);
+          steps[0] = { label: 'Create pickup with provider', status: 'fail', note: created.error?.message || 'Create failed' };
           setProviderError(friendlyProviderError(created.error || { code: 'PICKUP_CREATE_FAILED', message: 'Pickup create failed.' }));
+          setPickupAttemptResult({
+            kind: 'error',
+            title: 'Pickup create failed',
+            detail: created.error?.message || `${activeProviderId} did not return a pickup id.`,
+            steps,
+            code: created.error?.code || 'PICKUP_CREATE_FAILED',
+            rawError: created.error?.details,
+          });
           return;
         }
+        steps[0] = { label: 'Create pickup with provider', status: 'ok', note: `Pickup id ${created.providerPickupId}${created.rates ? ` · ${created.rates.length} rate(s)` : ''}` };
+
         // Auto-buy cheapest rate (typical pickup cost is small/zero). Operator
         // can cancel afterwards if undesired. Multi-rate selection UI is a
         // future polish — current rates are usually 0 or a single carrier fee.
         let buyResult: shippingApi.BuyPickupResponse | null = null;
-        if (caps.pickupNeedsRatePurchase && created.rates && created.rates.length > 0) {
+        if (caps.pickupNeedsRatePurchase) {
+          if (!created.rates || created.rates.length === 0) {
+            // Common in EasyPost test mode (and for some real carriers when
+            // the shipment isn't pickup-eligible). Persist the created pickup
+            // so the operator can cancel it, but surface the truth clearly.
+            steps.push({ label: 'Buy pickup rate', status: 'fail', note: 'No pickup_rates returned by provider — cannot purchase.' });
+            const partial: PickupRequest = {
+              ...basePickup,
+              providerPickupId: created.providerPickupId,
+              status: 'requested',
+              source: 'live_provider',
+              failureReason: 'Provider returned no pickup rates — pickup created but not confirmed.',
+            };
+            updateShipment(shipmentId, {
+              pickupRequest: partial,
+              pickupInfo: { ...(ship.pickupInfo || {}), pickupRequested: true, pickupScheduledAt: pickupForm.date },
+              events: [...ship.events, { id: `evt_pu_${Date.now()}`, status: 'Pickup Requested' as any, description: `Pickup created with ${activeProviderId} (id ${created.providerPickupId}) but provider returned no pickup rates — cannot purchase. ${caps.pickupTestModeLimitations ? `Test-mode note: ${caps.pickupTestModeLimitations}` : ''} No carrier confirmation issued.`, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent],
+              updatedAt: now,
+            });
+            const detail = `${activeProviderId} accepted the pickup (id ${created.providerPickupId}) but returned no purchasable rates.${caps.pickupTestModeLimitations ? ` Test-mode limitation: ${caps.pickupTestModeLimitations}` : ' This is common when the carrier or service is not enabled for scheduled pickups on the account.'} The pickup record is saved so you can cancel it; no carrier confirmation has been issued.`;
+            setProviderError(friendlyProviderError({ code: 'NO_PICKUP_RATES', message: detail }));
+            setPickupAttemptResult({ kind: 'partial', title: 'Pickup created — no rates returned', detail, steps, code: 'NO_PICKUP_RATES', providerPickupId: created.providerPickupId });
+            return;
+          }
           const cheapest = [...created.rates].sort((a, b) => a.rate - b.rate)[0];
-          buyResult = await shippingApi.buyProviderPickup(created.providerPickupId, cheapest.providerRateId);
+          steps.push({ label: 'Buy pickup rate', status: 'pending', note: `Auto-selecting cheapest: ${cheapest.carrier} ${cheapest.service} @ ${cheapest.rate} ${cheapest.currency}` });
+          setPickupAttemptResult({ kind: 'info', title: 'Buying pickup rate…', detail: `Auto-selected cheapest pickup rate.`, steps, providerPickupId: created.providerPickupId });
+          // eslint-disable-next-line no-console
+          console.log('[Pickup] buyProviderPickup →', { providerPickupId: created.providerPickupId, providerRateId: cheapest.providerRateId });
+          buyResult = await shippingApi.buyProviderPickup(created.providerPickupId, cheapest.providerRateId, activeProviderId || undefined);
+          // eslint-disable-next-line no-console
+          console.log('[Pickup] buyProviderPickup ←', buyResult);
+
           if (!buyResult.success) {
-            // Keep the created pickup recorded but mark as 'requested' (not
-            // confirmed) and surface the error. Operator can cancel.
+            steps[steps.length - 1] = { label: 'Buy pickup rate', status: 'fail', note: buyResult.error?.message || 'Buy failed' };
             const partial: PickupRequest = {
               ...basePickup,
               providerPickupId: created.providerPickupId,
@@ -1475,10 +1558,21 @@ export default function ShippingCenter() {
               events: [...ship.events, { id: `evt_pu_${Date.now()}`, status: 'Pickup Requested' as any, description: `Pickup created with ${activeProviderId} (id ${created.providerPickupId}) but rate-purchase failed: ${buyResult.error?.message}. No carrier confirmation issued.`, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent],
               updatedAt: now,
             });
-            setPickupSubmitting(false);
             setProviderError(friendlyProviderError(buyResult.error || { code: 'PICKUP_BUY_FAILED', message: 'Pickup buy failed.' }));
+            setPickupAttemptResult({
+              kind: 'partial',
+              title: 'Pickup created but buy failed',
+              detail: `Pickup ${created.providerPickupId} was created with ${activeProviderId}, but the rate-purchase step failed: ${buyResult.error?.message || 'unknown error'}. The pickup record is saved so you can cancel and retry.`,
+              steps,
+              code: buyResult.error?.code || 'PICKUP_BUY_FAILED',
+              providerPickupId: created.providerPickupId,
+              rawError: buyResult.error?.details,
+            });
             return;
           }
+          steps[steps.length - 1] = { label: 'Buy pickup rate', status: 'ok', note: `Confirmation ${buyResult.confirmationNumber || '(none)'}${typeof buyResult.cost === 'number' ? ` · ${buyResult.cost.toFixed(2)} ${buyResult.currency || 'USD'}` : ''}` };
+        } else {
+          steps.push({ label: 'Buy pickup rate', status: 'skip', note: 'Provider does not require a separate buy step.' });
         }
         const confirmed: PickupRequest = {
           ...basePickup,
@@ -1501,40 +1595,70 @@ export default function ShippingCenter() {
           events: [...ship.events, { id: `evt_pu_${Date.now()}`, status: 'Pickup Requested' as any, description: `Pickup booked LIVE with ${activeProviderId} (provider pickup id ${created.providerPickupId})${confirmed.confirmationNumber ? ` — carrier confirmation ${confirmed.confirmationNumber}` : ''}${confirmed.providerPickupCost ? ` — cost ${confirmed.providerPickupCost} ${confirmed.providerPickupCurrency}` : ''}`, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent],
           updatedAt: now,
         });
-        setPickupSubmitting(false);
+        steps.push({ label: 'Persist pickup', status: 'ok' });
         setProviderSuccess(confirmed.confirmationNumber
           ? `Carrier pickup confirmed by ${activeProviderId}. Confirmation: ${confirmed.confirmationNumber}.`
           : `Pickup created with ${activeProviderId}. Awaiting carrier confirmation.`);
-        return;
-      } catch (err) {
-        setPickupSubmitting(false);
-        setProviderError(friendlyProviderError({ code: 'NETWORK_ERROR', message: `Live pickup booking failed: ${err instanceof Error ? err.message : 'Unknown error'}` }));
+        setPickupAttemptResult({
+          kind: confirmed.confirmationNumber ? 'success' : 'partial',
+          title: confirmed.confirmationNumber ? 'Pickup booked live' : 'Pickup created — awaiting confirmation',
+          detail: confirmed.confirmationNumber
+            ? `${activeProviderId} confirmed pickup ${created.providerPickupId} for ${pickupForm.date}. Confirmation ${confirmed.confirmationNumber}.`
+            : `${activeProviderId} created pickup ${created.providerPickupId} but did not return a carrier confirmation number${caps.pickupTestModeLimitations ? ` — ${caps.pickupTestModeLimitations}` : ''}.`,
+          steps,
+          providerPickupId: created.providerPickupId,
+          confirmationNumber: confirmed.confirmationNumber,
+          cost: buyResult?.cost,
+          currency: buyResult?.currency,
+        });
         return;
       }
-    }
 
-    // -------------------------------------------------------------------
-    // Local-only path: provider does not have live pickup booking wired
-    // (Shippo, ShipStation, or any provider whose adapter returns
-    // NOT_IMPLEMENTED). We persist intent without fabricating a confirmation.
-    // -------------------------------------------------------------------
-    await new Promise(r => setTimeout(r, 100));
-    const localPickup: PickupRequest = { ...basePickup, source: 'local_only' };
-    updateShipment(shipmentId, {
-      pickupRequest: localPickup,
-      pickupInfo: {
-        ...(ship.pickupInfo || {}),
-        pickupRequested: true,
-        pickupScheduledAt: pickupForm.date,
-      },
-      events: [
-        ...ship.events,
-        { id: `evt_pu_${Date.now()}`, status: 'Pickup Requested' as any, description: `Pickup recorded LOCALLY (not booked with carrier — ${activeProviderId} adapter does not support live pickup booking) for ${pickupForm.date} ${pickupForm.windowStart || ''}–${pickupForm.windowEnd || ''}. No carrier confirmation number issued.`, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent,
-      ],
-      updatedAt: now,
-    });
-    setPickupSubmitting(false);
-    setProviderSuccess(`Pickup recorded locally — not booked with carrier. The ${activeProviderId} adapter does not currently support live pickup booking in this app.`);
+      // -------------------------------------------------------------------
+      // Local-only path: provider does not have live pickup booking wired
+      // (Shippo, ShipStation, or any provider whose adapter returns
+      // NOT_IMPLEMENTED). We persist intent without fabricating a confirmation.
+      // -------------------------------------------------------------------
+      const localPickup: PickupRequest = { ...basePickup, source: 'local_only' };
+      updateShipment(shipmentId, {
+        pickupRequest: localPickup,
+        pickupInfo: {
+          ...(ship.pickupInfo || {}),
+          pickupRequested: true,
+          pickupScheduledAt: pickupForm.date,
+        },
+        events: [
+          ...ship.events,
+          { id: `evt_pu_${Date.now()}`, status: 'Pickup Requested' as any, description: `Pickup recorded LOCALLY (not booked with carrier — ${activeProviderId} adapter does not support live pickup booking) for ${pickupForm.date} ${pickupForm.windowStart || ''}–${pickupForm.windowEnd || ''}. No carrier confirmation number issued.`, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent,
+        ],
+        updatedAt: now,
+      });
+      setProviderSuccess(`Pickup recorded locally — not booked with carrier. The ${activeProviderId} adapter does not currently support live pickup booking in this app.`);
+      setPickupAttemptResult({
+        kind: 'partial',
+        title: 'Pickup recorded locally',
+        detail: `${activeProviderId || 'The active provider'} does not support live pickup booking. The pickup intent is saved on the shipment but no carrier confirmation has been issued.`,
+        steps: [{ label: 'Live booking', status: 'skip', note: 'Provider capability not wired.' }, { label: 'Persist local pickup intent', status: 'ok' }],
+        code: 'LOCAL_ONLY',
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[Pickup] Unexpected exception', err);
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      setProviderError(friendlyProviderError({ code: 'NETWORK_ERROR', message: `Live pickup booking failed: ${msg}` }));
+      setPickupAttemptResult({
+        kind: 'error',
+        title: 'Pickup booking threw an exception',
+        detail: `An unexpected error was thrown while talking to the server: ${msg}. The pickup was not persisted. Check the browser console and server logs for details.`,
+        steps: [{ label: 'Network / server', status: 'fail', note: msg }],
+        code: 'NETWORK_ERROR',
+        rawError: err instanceof Error ? err.stack : undefined,
+      });
+    } finally {
+      setPickupSubmitting(false);
+      // eslint-disable-next-line no-console
+      console.log('[Pickup] End attempt');
+    }
   }
 
   async function handleCancelPickup(shipmentId: string) {
@@ -1557,7 +1681,7 @@ export default function ShippingCenter() {
     let liveCancelled = false;
     if (isLive && caps?.supportsPickupCancellation) {
       try {
-        const result = await shippingApi.cancelProviderPickup(ship.pickupRequest.providerPickupId!);
+        const result = await shippingApi.cancelProviderPickup(ship.pickupRequest.providerPickupId!, activeProviderId || undefined);
         if (!result.success) {
           setProviderError(friendlyProviderError(result.error || { code: 'PICKUP_CANCEL_FAILED', message: 'Pickup cancel failed.' }));
           return;
@@ -3796,6 +3920,56 @@ export default function ShippingCenter() {
                             <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Handling Notes</label>
                             <input type="text" value={pickupForm.notes} onChange={e => setPickupForm({ ...pickupForm, notes: e.target.value })} placeholder="e.g. Ring bell at side door" className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs" />
                           </div>
+                          {pickupAttemptResult && (() => {
+                            const tone = pickupAttemptResult.kind === 'success'
+                              ? { bg: 'bg-emerald-50', border: 'border-emerald-200', icon: 'check_circle', iconColor: 'text-emerald-600', titleColor: 'text-emerald-800', textColor: 'text-emerald-700' }
+                              : pickupAttemptResult.kind === 'partial'
+                              ? { bg: 'bg-amber-50', border: 'border-amber-200', icon: 'warning', iconColor: 'text-amber-600', titleColor: 'text-amber-800', textColor: 'text-amber-700' }
+                              : pickupAttemptResult.kind === 'info'
+                              ? { bg: 'bg-sky-50', border: 'border-sky-200', icon: 'sync', iconColor: 'text-sky-600', titleColor: 'text-sky-800', textColor: 'text-sky-700' }
+                              : { bg: 'bg-rose-50', border: 'border-rose-200', icon: 'error', iconColor: 'text-rose-600', titleColor: 'text-rose-800', textColor: 'text-rose-700' };
+                            return (
+                              <div className={`col-span-2 ${tone.bg} border ${tone.border} rounded-xl p-3`}>
+                                <div className="flex items-start gap-2">
+                                  <span className={`material-symbols-outlined ${tone.iconColor} text-base mt-0.5`}>{tone.icon}</span>
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <p className={`text-xs font-black ${tone.titleColor}`}>{pickupAttemptResult.title}</p>
+                                      <div className="flex items-center gap-1">
+                                        {pickupAttemptResult.code && <span className="text-[9px] font-mono font-black text-slate-500 bg-white/70 px-1.5 py-0.5 rounded">{pickupAttemptResult.code}</span>}
+                                        <button type="button" onClick={() => setPickupAttemptResult(null)} className="text-slate-400 hover:text-slate-600" aria-label="Dismiss">
+                                          <span className="material-symbols-outlined text-sm">close</span>
+                                        </button>
+                                      </div>
+                                    </div>
+                                    <p className={`text-[11px] ${tone.textColor} mt-1`}>{pickupAttemptResult.detail}</p>
+                                    {pickupAttemptResult.steps.length > 0 && (
+                                      <ul className="mt-2 space-y-0.5">
+                                        {pickupAttemptResult.steps.map((s, i) => (
+                                          <li key={i} className="flex items-start gap-1.5 text-[10px]">
+                                            <span className={`material-symbols-outlined text-[12px] mt-0.5 ${
+                                              s.status === 'ok' ? 'text-emerald-500'
+                                              : s.status === 'fail' ? 'text-rose-500'
+                                              : s.status === 'pending' ? 'text-sky-500 animate-pulse'
+                                              : 'text-slate-400'
+                                            }`}>{s.status === 'ok' ? 'check_circle' : s.status === 'fail' ? 'cancel' : s.status === 'pending' ? 'sync' : 'remove_circle'}</span>
+                                            <span className={tone.textColor}><span className="font-black">{s.label}</span>{s.note ? ` — ${s.note}` : ''}</span>
+                                          </li>
+                                        ))}
+                                      </ul>
+                                    )}
+                                    {(pickupAttemptResult.providerPickupId || pickupAttemptResult.confirmationNumber || typeof pickupAttemptResult.cost === 'number') && (
+                                      <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-mono text-slate-700">
+                                        {pickupAttemptResult.providerPickupId && <span className="bg-white/80 px-2 py-0.5 rounded border border-slate-200">pickup: {pickupAttemptResult.providerPickupId}</span>}
+                                        {pickupAttemptResult.confirmationNumber && <span className="bg-white/80 px-2 py-0.5 rounded border border-slate-200">confirm: {pickupAttemptResult.confirmationNumber}</span>}
+                                        {typeof pickupAttemptResult.cost === 'number' && <span className="bg-white/80 px-2 py-0.5 rounded border border-slate-200">cost: {pickupAttemptResult.cost.toFixed(2)} {pickupAttemptResult.currency || 'USD'}</span>}
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })()}
                           <div className="col-span-2">
                             <button onClick={() => handleRequestPickup(selectedShip.id)} disabled={pickupSubmitting || !pickupForm.date} className="w-full py-3 bg-primary text-white font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 disabled:opacity-50 disabled:cursor-not-allowed">
                               {pickupSubmitting ? 'Requesting...' : 'Request Carrier Pickup'}
