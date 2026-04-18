@@ -1,0 +1,203 @@
+Shipping Phase 2 — EasyPost Pickup True Address Verification / Multi-Carrier Fix
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a narrow root-cause correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Only fix the remaining EasyPost pickup-address problem by replacing simple field-presence checks with true pickup-address verification on the actual pickup address source before booking pickup.
+
+IMPORTANT:
+This must NOT be implemented as a USPS-only patch.
+The current visible failure happened on USPS, but the fix must apply to the EasyPost pickup flow generically for supported pickup carriers, especially:
+- USPS
+- UPS
+- FedEx
+(and remain extensible for other EasyPost-supported pickup carriers later)
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Node/Express integration engineer
+- Enterprise shipping systems architect
+- Senior carrier API / pickup-operations expert with 20+ years of experience in pickup booking, shipping-address validation, and production shipping UX
+- Root-cause debugging specialist
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- plan gating
+- store permission gating
+- provider/manual mode split
+- PACKED-only activation
+- mutual exclusivity between Service Point and Pickup
+- existing shipping core flow
+- reverse-logistics flow
+- honest provider-specific pickup capability model
+- current EasyPost pickup create/buy/cancel wiring
+- current structured pickup diagnostics UI
+
+==================================================
+ROOT-CAUSE CONTEXT
+==================================================
+
+Current behavior:
+- The app now correctly identifies the pickup address source as the shipment origin address
+- The app pre-checks for required fields
+- But EasyPost pickup still fails with invalid-address semantics on at least one carrier path
+- The visible failure was observed on USPS, but the implementation fix must not be USPS-specific
+
+This means field presence is not enough.
+The actual pickup address must pass true provider/carrier validation before pickup booking is attempted.
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — ISSUE TO FIX
+==================================================
+
+Observed issue:
+- all required pickup-address fields can appear present
+- yet EasyPost may still reject pickup create with invalid-address semantics
+- failing step = pickup_create
+
+Therefore:
+- the app must stop treating “all fields present” as “pickup-ready”
+- the app must verify the actual pickup address object with EasyPost before pickup booking
+- this verification model must support EasyPost pickup carriers generically, not just USPS
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIXES
+==================================================
+
+1) TRUE PICKUP-ADDRESS VERIFICATION
+Required:
+- use EasyPost address verification on the exact pickup address source used for pickup booking
+- do this before enabling or sending the pickup create request
+- do not rely only on local field presence checks
+
+Implementation intent:
+- verify the same address object that resolvePickupAddress(shipment) returns
+- use EasyPost verification / strict verification appropriately
+- the exact address sent to pickup booking must be the address that has passed verification or has been explicitly accepted by the operator after correction
+- this logic must be reusable across EasyPost pickup carriers, especially USPS, UPS, and FedEx
+
+2) DISTINGUISH FIELD PRESENCE FROM VERIFIED PICKUP READINESS
+Required:
+- split the concept into:
+  - fields present
+  - address verified for pickup booking
+- Request Carrier Pickup must require true pickup-address verification readiness, not only presence
+
+3) HANDLE CORRECTABLE VS NON-CORRECTABLE ADDRESSES
+Required:
+- if EasyPost returns a corrected/normalized address, present it clearly
+- allow the operator to accept/update the pickup address source when appropriate
+- if the address cannot be verified, keep pickup blocked and explain what to fix
+- if suite/apartment/unit or ZIP/street mismatch appears to be the issue, surface that clearly
+- keep the UX generic enough to work across USPS, UPS, and FedEx pickup flows while still surfacing carrier-specific details when returned
+
+4) CLEAR OPERATOR UX
+Required:
+- show the pickup address verification state clearly, such as:
+  - not verified
+  - verified
+  - corrected — review needed
+  - failed verification
+- if failed, show a concise operator summary first
+- keep raw provider details secondary
+
+5) DO NOT ATTEMPT PICKUP CREATE WHEN VERIFICATION HAS FAILED
+Required:
+- if pickup address verification fails, Request Carrier Pickup must not proceed to the EasyPost pickup create call
+- block early and clearly
+
+6) KEEP THE PICKUP ADDRESS SOURCE EXPLICIT
+Required:
+- preserve the current explicit source-of-truth messaging:
+  - shipment origin address is being used
+- but now add real verification state tied to that source
+
+7) CARRIER-AGNOSTIC EASYPOST ERROR HANDLING
+Required:
+- if EasyPost still returns pickup-address failure after verification, surface that honestly
+- do not hardcode USPS-only assumptions in the logic
+- where carrier-specific error details exist, show them
+- but keep the validation/readiness model generic for EasyPost pickup carriers
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- Request Carrier Pickup is not allowed until the actual pickup address source has passed true verification
+- the operator can see whether the address is verified, corrected, or failed
+- the app no longer sends avoidably invalid pickup addresses to EasyPost after only checking field presence
+- the fix works as a generic EasyPost pickup-address verification layer, not a USPS-only special case
+
+==================================================
+IMPORTANT RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into unrelated workstreams
+- Do not fake verification success
+- Do not fake pickup booking success
+- Do not create USPS-only logic if the same EasyPost pickup-address problem can affect UPS/FedEx
+- Keep the design baseline consistent
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Trace the exact pickup address object already used by resolvePickupAddress(shipment)
+2) Add true EasyPost address verification for that exact pickup address source
+3) Split readiness into:
+   - fields present
+   - pickup address verified
+4) Block pickup create until verified
+5) Add operator-facing verified/corrected/failed states
+6) Keep raw provider diagnostics secondary
+7) Ensure the implementation is generic for EasyPost pickup carriers, not USPS-only
+8) Re-test the EasyPost pickup path
+9) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- pickup address true verification requirement
+- difference between field presence and pickup-ready verification
+- corrected-address review flow if implemented
+- operator-facing verification states
+- note that this is implemented as a generic EasyPost pickup-address verification layer for supported pickup carriers (USPS / UPS / FedEx), not a USPS-only fix
+- future recommendations not implemented now
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. EasyPost Pickup Verification Root-Cause Findings
+3. True Pickup-Address Verification Fix
+4. Verified-vs-Present Readiness Fix
+5. Corrected/Failed Address UX Fix
+6. Carrier-Agnostic EasyPost Handling Fix
+7. Pickup Action Blocking Fix
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes

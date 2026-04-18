@@ -488,6 +488,29 @@ export default function ShippingCenter() {
   };
   const [pickupAttemptResult, setPickupAttemptResult] = useState<PickupAttemptResult | null>(null);
   const [pickupCancelReason, setPickupCancelReason] = useState('');
+  // True pickup-address verification state — separate from the shipment
+  // origin's shipping-address validation. Keyed by shipmentId. The
+  // `fingerprint` is a stable hash of the address fields the carriers care
+  // about; if the operator edits the origin, the fingerprint changes and
+  // any prior verification is treated as 'stale' (must re-verify before
+  // requesting pickup). 'corrected' results require explicit operator
+  // acceptance before pickup is allowed (operator may accept the suggested
+  // address or revise the origin manually). This works generically across
+  // any EasyPost-supported pickup carrier (USPS, UPS, FedEx, …) — EasyPost's
+  // delivery verification is carrier-agnostic.
+  type PickupVerify = {
+    fingerprint: string;
+    status: 'verified' | 'corrected' | 'failed';
+    suggestedAddress?: ShipmentAddress;
+    messages: string[];
+    providerRef?: string;
+    verifiedAt: string;
+    accepted?: boolean; // for 'corrected': operator accepted the suggestion
+    errorCode?: string;
+    errorMessage?: string;
+  };
+  const [pickupAddrVerify, setPickupAddrVerify] = useState<Record<string, PickupVerify>>({});
+  const [pickupVerifying, setPickupVerifying] = useState<Record<string, boolean>>({});
   // Carrier Locator per-store configuration. Persisted in sessionStorage.
   // Each adapter is independently togglable so an operator can ship via UPS
   // only without configuring USPS/FedEx. Status reflects scaffolding state
@@ -1210,7 +1233,7 @@ export default function ShippingCenter() {
   // pre-checks, ZIP search activation — to guarantee a single source of truth.
   // Reason ordering matches operator priority: provider → plan → permission →
   // lifecycle → mutex. The first failing reason is surfaced.
-  type Eligibility = { eligible: boolean; reason?: string; category?: 'provider' | 'plan' | 'permission' | 'lifecycle' | 'mutex' | 'pickup_address' };
+  type Eligibility = { eligible: boolean; reason?: string; category?: 'provider' | 'plan' | 'permission' | 'lifecycle' | 'mutex' | 'pickup_address' | 'pickup_address_unverified' };
   function getServicePointEligibility(shipment: Shipment): Eligibility {
     // LIVE locator eligibility. Currently always fails at the provider category until
     // a carrier-specific locator adapter is configured under Settings → Carrier Locators.
@@ -1309,6 +1332,146 @@ export default function ShippingCenter() {
     return { ready: missing.length === 0, missing, warnings };
   }
 
+  // Stable fingerprint used to detect when the resolved pickup address has
+  // changed since the last verification. Carrier validation is sensitive to
+  // line1/line2/city/state/postal/country only — name/phone changes do not
+  // invalidate a delivery verification, so we exclude them. Case- and
+  // whitespace-insensitive so trivial edits don't churn the verification.
+  function pickupAddrFingerprint(addr: ShipmentAddress | undefined | null): string {
+    if (!addr) return '';
+    const norm = (s: string | undefined) => (s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    return [norm(addr.line1), norm(addr.line2), norm(addr.city), norm(addr.state), norm(addr.postalCode), norm(addr.country)].join('|');
+  }
+
+  // Resolve the operator-facing pickup-address verification status for a
+  // shipment. This is what the eligibility gate and the pickup banner read.
+  // Status semantics are intentionally narrow:
+  //   - unverified: no verification attempt has been recorded
+  //   - verifying: a verification call is currently in flight
+  //   - stale: a prior verification exists but the address has been edited
+  //            since (fingerprint mismatch) — must re-verify
+  //   - verified: passed strict verification on the current address
+  //   - corrected_pending: provider returned a corrected/normalized address
+  //                       and the operator has not yet accepted it
+  //   - corrected_accepted: the operator accepted the corrected address
+  //                        AND that corrected address is now the origin
+  //                        (fingerprint matches the suggestion) — equivalent
+  //                        to verified for booking purposes
+  //   - failed: provider rejected the address; pickup must remain blocked
+  type PickupVerifyStatus = 'unverified' | 'verifying' | 'stale' | 'verified' | 'corrected_pending' | 'corrected_accepted' | 'failed';
+  function getPickupVerificationStatus(shipment: Shipment): { status: PickupVerifyStatus; record?: PickupVerify; currentFingerprint: string } {
+    const resolved = resolvePickupAddress(shipment);
+    const currentFingerprint = pickupAddrFingerprint(resolved.address);
+    if (pickupVerifying[shipment.id]) return { status: 'verifying', currentFingerprint };
+    const rec = pickupAddrVerify[shipment.id];
+    if (rec) {
+      if (rec.fingerprint !== currentFingerprint) return { status: 'stale', record: rec, currentFingerprint };
+      if (rec.status === 'verified') return { status: 'verified', record: rec, currentFingerprint };
+      if (rec.status === 'failed') return { status: 'failed', record: rec, currentFingerprint };
+      if (rec.status === 'corrected') return { status: rec.accepted ? 'corrected_accepted' : 'corrected_pending', record: rec, currentFingerprint };
+    }
+    // Free pass: if the shipment's origin shipping-address validation is
+    // already 'validated' (or accepted-corrected) AND its fingerprint
+    // matches the current origin, treat as verified for pickup too. The
+    // pickup address IS the shipment origin (resolvePickupAddress) and the
+    // EasyPost delivery-verification endpoint is the same, so a fresh
+    // shipping-side verification is equally valid for pickup readiness.
+    const sv = shipment.originAddressValidation;
+    if (sv && (sv.status === 'validated' || (sv.status === 'corrected' && sv.accepted))) {
+      const svFp = pickupAddrFingerprint(sv.suggestedAddress || sv.originalAddress);
+      if (svFp === currentFingerprint) {
+        return {
+          status: 'verified',
+          record: { fingerprint: currentFingerprint, status: 'verified', messages: sv.messages || [], providerRef: sv.providerRef, verifiedAt: sv.validatedAt || new Date().toISOString() },
+          currentFingerprint,
+        };
+      }
+    }
+    return { status: 'unverified', currentFingerprint };
+  }
+
+  // True pickup-address verification — calls the EasyPost create-and-verify
+  // endpoint via the existing shipping API client. Carrier-agnostic. Records
+  // the result keyed by shipment id with a fingerprint, so subsequent edits
+  // to the origin invalidate the verification.
+  async function verifyPickupAddressFor(shipmentId: string) {
+    if (isWriteBlocked) return;
+    const ship = shipments.find(s => s.id === shipmentId);
+    if (!ship) return;
+    const { address } = resolvePickupAddress(ship);
+    const presence = validatePickupAddress(address);
+    if (!presence.ready) {
+      setProviderError(friendlyProviderError({ code: 'PICKUP_ADDRESS_INCOMPLETE', message: `Cannot verify pickup address — required fields are missing: ${presence.missing.join(', ')}.` }));
+      return;
+    }
+    const fp = pickupAddrFingerprint(address);
+    setPickupVerifying(p => ({ ...p, [shipmentId]: true }));
+    try {
+      // eslint-disable-next-line no-console
+      console.log('[Pickup] verifyPickupAddress →', { shipmentId, fingerprint: fp });
+      const resp = await shippingApi.validateAddress(address);
+      if (!resp.success || !resp.result) {
+        const err = resp.error;
+        setPickupAddrVerify(p => ({
+          ...p,
+          [shipmentId]: {
+            fingerprint: fp,
+            status: 'failed',
+            messages: err?.message ? [err.message] : ['Address verification failed.'],
+            verifiedAt: new Date().toISOString(),
+            errorCode: err?.code,
+            errorMessage: err?.message,
+          },
+        }));
+        return;
+      }
+      const r = resp.result;
+      setPickupAddrVerify(p => ({
+        ...p,
+        [shipmentId]: {
+          fingerprint: fp,
+          status: r.status === 'validated' ? 'verified' : r.status === 'corrected' ? 'corrected' : 'failed',
+          suggestedAddress: r.suggestedAddress,
+          messages: r.messages || [],
+          providerRef: r.providerRef,
+          verifiedAt: r.validatedAt || new Date().toISOString(),
+          accepted: false,
+        },
+      }));
+    } catch (err) {
+      setPickupAddrVerify(p => ({
+        ...p,
+        [shipmentId]: {
+          fingerprint: fp,
+          status: 'failed',
+          messages: [err instanceof Error ? err.message : 'Unexpected error during verification.'],
+          verifiedAt: new Date().toISOString(),
+        },
+      }));
+    } finally {
+      setPickupVerifying(p => ({ ...p, [shipmentId]: false }));
+    }
+  }
+
+  // Operator accepts a corrected pickup address — applies the suggested
+  // address to the shipment origin and marks the verification as accepted.
+  // The fingerprint is recomputed against the suggestion so the verification
+  // remains valid for the now-current origin (no re-verify required).
+  function acceptCorrectedPickupAddress(shipmentId: string) {
+    if (isWriteBlocked) return;
+    const rec = pickupAddrVerify[shipmentId];
+    if (!rec || rec.status !== 'corrected' || !rec.suggestedAddress) return;
+    const ship = shipments.find(s => s.id === shipmentId);
+    if (!ship) return;
+    const newOrigin = { ...ship.originAddress, ...rec.suggestedAddress };
+    const newFp = pickupAddrFingerprint(newOrigin);
+    updateShipment(shipmentId, { originAddress: newOrigin, updatedAt: new Date().toISOString() });
+    setPickupAddrVerify(p => ({
+      ...p,
+      [shipmentId]: { ...rec, fingerprint: newFp, accepted: true },
+    }));
+  }
+
   function getPickupEligibility(shipment: Shipment): Eligibility {
     const caps = getProviderCapabilities(shipment);
     if (!caps.pickupRequests) {
@@ -1325,9 +1488,14 @@ export default function ShippingCenter() {
     if (shipment.servicePoint) {
       return { eligible: false, reason: 'A service-point drop-off is selected. Clear it first to switch to a carrier pickup.', category: 'mutex' };
     }
-    // Pickup-address readiness gate. Pickup uses the shipment origin
-    // address (see resolvePickupAddress). If required fields are missing,
-    // block the action with a specific reason — do not let EasyPost reject.
+    // Pickup-address readiness gate — TWO layers:
+    //   (a) field-presence: required fields must be non-empty (cheap, local)
+    //   (b) true verification: the address must have passed EasyPost
+    //       delivery verification (or an accepted-corrected verification)
+    //       on its current contents — fingerprint-tracked so any edit
+    //       invalidates the prior verification.
+    // Both must pass before the Request Carrier Pickup action is allowed,
+    // so we never send an avoidably-invalid pickup address to the carrier.
     const { address: pickupAddr, sourceLabel } = resolvePickupAddress(shipment);
     const addrCheck = validatePickupAddress(pickupAddr);
     if (!addrCheck.ready) {
@@ -1336,6 +1504,17 @@ export default function ShippingCenter() {
         reason: `Pickup uses the ${sourceLabel}. Complete it first — missing: ${addrCheck.missing.join(', ')}.`,
         category: 'pickup_address',
       };
+    }
+    const verify = getPickupVerificationStatus(shipment);
+    if (verify.status !== 'verified' && verify.status !== 'corrected_accepted') {
+      const reason =
+        verify.status === 'verifying' ? 'Verifying pickup address with the carrier — please wait.'
+        : verify.status === 'unverified' ? 'Pickup address has not been verified yet. Click "Verify Pickup Address" to run carrier address verification before booking.'
+        : verify.status === 'stale' ? 'Pickup address has changed since last verification. Re-verify before booking.'
+        : verify.status === 'corrected_pending' ? 'Carrier returned a corrected pickup address. Review and accept (or revise the origin) before booking.'
+        : verify.status === 'failed' ? `Carrier rejected the pickup address${verify.record?.errorMessage ? ` — ${verify.record.errorMessage}` : verify.record?.messages?.[0] ? `: ${verify.record.messages[0]}` : ''}. Fix the address and re-verify before booking.`
+        : 'Pickup address is not verified.';
+      return { eligible: false, reason, category: 'pickup_address_unverified' };
     }
     return { eligible: true };
   }
@@ -3980,13 +4159,18 @@ export default function ShippingCenter() {
                           </div>
                         );
                       })()}
-                      {/* Pickup-address source-of-truth banner — visible whenever
-                          pickup is the active option, so the operator always
-                          knows which address EasyPost will use for pickup, and
-                          sees a checklist of the required fields. This is the
-                          primary diagnostic surface; raw provider errors are
-                          secondary and remain available in the attempt panel. */}
-                      {puElig.eligible && !pr && (() => {
+                      {/* Pickup-address source-of-truth banner + true carrier
+                          verification panel. Shown whenever pickup is the
+                          active option (no service point selected, no active
+                          pickup) and the only remaining blockers (if any) are
+                          address-related. This is the operator's primary
+                          surface for understanding (a) which address pickup
+                          will use, (b) whether all required fields are
+                          present, and (c) whether the carrier has actually
+                          verified that address. EasyPost address verification
+                          is carrier-agnostic and applies to USPS, UPS, FedEx
+                          and any other supported pickup carrier. */}
+                      {!pr && !sp && (puElig.eligible || puElig.category === 'pickup_address' || puElig.category === 'pickup_address_unverified') && (() => {
                         const resolved = resolvePickupAddress(selectedShip);
                         const check = validatePickupAddress(resolved.address);
                         const fields: { label: string; ok: boolean }[] = [
@@ -3998,17 +4182,45 @@ export default function ShippingCenter() {
                           { label: 'Contact name or company', ok: !!((resolved.address.name || '').trim() || (resolved.address.company || '').trim()) },
                           { label: 'Phone', ok: !!(resolved.address.phone && resolved.address.phone.replace(/\D/g, '').length >= 10) },
                         ];
-                        const allOk = fields.every(f => f.ok);
-                        const tone = allOk
+                        const allFieldsOk = fields.every(f => f.ok);
+                        const verify = getPickupVerificationStatus(selectedShip);
+                        // Verification badge tone + label
+                        const vBadge = verify.status === 'verified' || verify.status === 'corrected_accepted'
+                          ? { bg: 'bg-emerald-100', text: 'text-emerald-700', icon: 'verified', label: verify.status === 'corrected_accepted' ? 'Verified (corrected · accepted)' : 'Verified by carrier' }
+                          : verify.status === 'verifying'
+                          ? { bg: 'bg-sky-100', text: 'text-sky-700', icon: 'sync', label: 'Verifying…' }
+                          : verify.status === 'corrected_pending'
+                          ? { bg: 'bg-amber-100', text: 'text-amber-700', icon: 'rule', label: 'Corrected — review needed' }
+                          : verify.status === 'failed'
+                          ? { bg: 'bg-rose-100', text: 'text-rose-700', icon: 'error', label: 'Failed verification' }
+                          : verify.status === 'stale'
+                          ? { bg: 'bg-amber-100', text: 'text-amber-700', icon: 'autorenew', label: 'Re-verify (address changed)' }
+                          : { bg: 'bg-slate-100', text: 'text-slate-600', icon: 'pending', label: 'Not verified' };
+                        const overallOk = allFieldsOk && (verify.status === 'verified' || verify.status === 'corrected_accepted');
+                        const tone = overallOk
                           ? { bg: 'bg-sky-50', border: 'border-sky-200', text: 'text-sky-700', titleColor: 'text-sky-800' }
+                          : verify.status === 'failed'
+                          ? { bg: 'bg-rose-50', border: 'border-rose-200', text: 'text-rose-700', titleColor: 'text-rose-800' }
                           : { bg: 'bg-amber-50', border: 'border-amber-200', text: 'text-amber-700', titleColor: 'text-amber-800' };
+                        const canVerify = allFieldsOk && !pickupVerifying[selectedShip.id] && verify.status !== 'verifying';
+                        const verifyButtonLabel = verify.status === 'verified' || verify.status === 'corrected_accepted'
+                          ? 'Re-verify'
+                          : verify.status === 'stale' ? 'Re-verify pickup address'
+                          : verify.status === 'verifying' ? 'Verifying…'
+                          : 'Verify pickup address';
                         return (
-                          <div className={`${tone.bg} border ${tone.border} rounded-xl p-3`}>
+                          <div className={`${tone.bg} border ${tone.border} rounded-xl p-3 space-y-2`}>
                             <div className="flex items-start gap-2">
-                              <span className={`material-symbols-outlined text-sm mt-0.5 ${allOk ? 'text-sky-500' : 'text-amber-500'}`}>{allOk ? 'verified_user' : 'fact_check'}</span>
+                              <span className={`material-symbols-outlined text-sm mt-0.5 ${overallOk ? 'text-sky-500' : verify.status === 'failed' ? 'text-rose-500' : 'text-amber-500'}`}>{overallOk ? 'verified_user' : 'fact_check'}</span>
                               <div className="flex-1 min-w-0">
-                                <p className={`text-[11px] font-black ${tone.titleColor}`}>Pickup address source: {resolved.sourceLabel}</p>
-                                <p className={`text-[11px] ${tone.text} mt-0.5`}>EasyPost will be sent this exact address (with <span className="font-mono">is_account_address=false</span>) and will validate it. {allOk ? 'All required fields are present.' : 'Complete the missing fields below before requesting pickup — do not wait for EasyPost to reject.'}</p>
+                                <div className="flex items-center justify-between gap-2 flex-wrap">
+                                  <p className={`text-[11px] font-black ${tone.titleColor}`}>Pickup address source: {resolved.sourceLabel}</p>
+                                  <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-black ${vBadge.bg} ${vBadge.text}`}>
+                                    <span className={`material-symbols-outlined text-[12px] ${verify.status === 'verifying' ? 'animate-spin' : ''}`}>{vBadge.icon}</span>
+                                    {vBadge.label}
+                                  </span>
+                                </div>
+                                <p className={`text-[11px] ${tone.text} mt-0.5`}>EasyPost will be sent this exact address (with <span className="font-mono">is_account_address=false</span>) and the carrier will validate it. {overallOk ? 'Address fields are present and the carrier has verified the address.' : allFieldsOk ? 'Run carrier verification before requesting pickup — field presence alone does not guarantee a valid pickup address.' : 'Complete the missing fields below, then run carrier verification.'}</p>
                                 <ul className="mt-2 grid grid-cols-2 gap-x-3 gap-y-0.5">
                                   {fields.map((f, i) => (
                                     <li key={i} className={`text-[10px] flex items-center gap-1.5 ${f.ok ? 'text-emerald-700' : 'text-rose-700'}`}>
@@ -4021,6 +4233,71 @@ export default function ShippingCenter() {
                                   <p className="text-[10px] text-amber-700 mt-1 italic">Note: {check.warnings.join('; ')}</p>
                                 )}
                               </div>
+                            </div>
+                            {/* Verification controls + state details. Carrier-agnostic; works for any EasyPost-supported pickup carrier. */}
+                            <div className="border-t border-slate-200/60 pt-2 space-y-2">
+                              <div className="flex items-center justify-between gap-2 flex-wrap">
+                                <div className="text-[10px] text-slate-600">
+                                  <span className="font-black uppercase tracking-widest text-slate-500">Carrier verification</span>
+                                  {verify.record?.verifiedAt && (
+                                    <span className="ml-2 text-slate-400">last run: {formatDateTime(verify.record.verifiedAt)}{verify.record.providerRef ? ` · ref ${verify.record.providerRef.slice(0, 10)}…` : ''}</span>
+                                  )}
+                                </div>
+                                {!isWriteBlocked && (
+                                  <button
+                                    type="button"
+                                    onClick={() => verifyPickupAddressFor(selectedShip.id)}
+                                    disabled={!canVerify}
+                                    className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition ${canVerify ? 'bg-primary text-white hover:opacity-90' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}
+                                  >{verifyButtonLabel}</button>
+                                )}
+                              </div>
+                              {verify.status === 'corrected_pending' && verify.record?.suggestedAddress && (
+                                <div className="bg-white border border-amber-200 rounded-lg p-2 space-y-2">
+                                  <p className="text-[10px] font-black text-amber-800 uppercase tracking-wider">Carrier returned a corrected address — review</p>
+                                  <div className="grid grid-cols-2 gap-2 text-[10px]">
+                                    <div>
+                                      <p className="font-black text-slate-500 uppercase tracking-wider mb-0.5">You sent</p>
+                                      <p className="text-slate-700">{resolved.address.line1}{resolved.address.line2 ? `, ${resolved.address.line2}` : ''}</p>
+                                      <p className="text-slate-700">{resolved.address.city}, {resolved.address.state} {resolved.address.postalCode}</p>
+                                    </div>
+                                    <div>
+                                      <p className="font-black text-emerald-600 uppercase tracking-wider mb-0.5">Carrier suggests</p>
+                                      <p className="text-emerald-800">{verify.record.suggestedAddress.line1}{verify.record.suggestedAddress.line2 ? `, ${verify.record.suggestedAddress.line2}` : ''}</p>
+                                      <p className="text-emerald-800">{verify.record.suggestedAddress.city}, {verify.record.suggestedAddress.state} {verify.record.suggestedAddress.postalCode}</p>
+                                    </div>
+                                  </div>
+                                  {verify.record.messages.length > 0 && (
+                                    <ul className="text-[10px] text-slate-600 list-disc list-inside">
+                                      {verify.record.messages.map((m, i) => <li key={i}>{m}</li>)}
+                                    </ul>
+                                  )}
+                                  {!isWriteBlocked && (
+                                    <div className="flex gap-2">
+                                      <button type="button" onClick={() => acceptCorrectedPickupAddress(selectedShip.id)} className="px-2 py-1 rounded text-[10px] font-black uppercase tracking-widest bg-emerald-600 text-white hover:bg-emerald-700">Accept corrected address</button>
+                                      <button type="button" onClick={() => setEditingShipment(selectedShip.id)} className="px-2 py-1 rounded text-[10px] font-black uppercase tracking-widest bg-white border border-slate-300 text-slate-700 hover:bg-slate-50">Edit origin instead</button>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                              {verify.status === 'failed' && verify.record && (
+                                <div className="bg-white border border-rose-200 rounded-lg p-2">
+                                  <p className="text-[10px] font-black text-rose-800 uppercase tracking-wider mb-1">Carrier rejected the pickup address</p>
+                                  {verify.record.errorMessage && <p className="text-[10px] text-rose-700">{verify.record.errorMessage}</p>}
+                                  {verify.record.messages.length > 0 && (
+                                    <ul className="text-[10px] text-rose-700 list-disc list-inside mt-1">
+                                      {verify.record.messages.map((m, i) => <li key={i}>{m}</li>)}
+                                    </ul>
+                                  )}
+                                  <p className="text-[10px] text-slate-500 mt-1 italic">Common causes: street/ZIP mismatch, missing apartment/suite, invalid state for ZIP. Edit the origin and re-verify.</p>
+                                </div>
+                              )}
+                              {verify.status === 'stale' && (
+                                <p className="text-[10px] text-amber-700 italic">The pickup address was edited after the last verification. Re-verify before requesting pickup.</p>
+                              )}
+                              {verify.status === 'unverified' && allFieldsOk && (
+                                <p className="text-[10px] text-slate-600 italic">Verification has not run yet. Click <span className="font-black">Verify pickup address</span> to ask the carrier to validate this address before booking pickup.</p>
+                              )}
                             </div>
                           </div>
                         );

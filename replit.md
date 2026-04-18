@@ -123,3 +123,29 @@ The frontend is built using React 19, TypeScript, Vite 6, and Tailwind CSS v4.
 - Real EasyPost validation rejection: still surfaced verbatim per Phase 2.5.2 (field-level errors, provider code, HTTP status, stage).
 
 **Remaining limitation (honest)**: A future "use registered EasyPost account address" mode would require a per-store setting and would also require reading the account address back from EasyPost so the request body matches. Out of scope for this pass — the current flow is correct for sending the shipment origin and expects EasyPost to validate it.
+
+### Phase 2.5.4 — True Pickup-Address Verification (Apr 2026)
+
+**Why field presence wasn't enough**: Phase 2.5.3 added preflight field-presence checks against the resolved pickup address. EasyPost can still reject a pickup with all fields present (street/ZIP mismatch, missing apartment, invalid state-for-ZIP, etc.). This phase adds true carrier-side address verification on the exact pickup-address source before pickup booking is allowed. The implementation is generic across EasyPost-supported pickup carriers (USPS, UPS, FedEx, …) — EasyPost's `/v2/addresses/create_and_verify` is carrier-agnostic.
+
+**Verification state model** (`PickupVerify`, keyed by shipment id):
+- `fingerprint`: a normalized hash of `line1|line2|city|state|postalCode|country`. When the operator edits the origin, the fingerprint changes and any prior verification becomes 'stale'.
+- `status`: 'verified' | 'corrected' | 'failed'.
+- `suggestedAddress`, `messages`, `providerRef`, `verifiedAt`, `accepted`, `errorCode`, `errorMessage`.
+
+**Operator-facing status** (`getPickupVerificationStatus`): `unverified | verifying | stale | verified | corrected_pending | corrected_accepted | failed`. Only `verified` and `corrected_accepted` allow the Request Carrier Pickup action. A 'corrected' result requires explicit operator acceptance (or a manual revision to the origin, which invalidates and re-prompts verification).
+
+**Free pass for shipping-side validation**: if `shipment.originAddressValidation` is already 'validated' (or accepted-corrected) AND its fingerprint matches the current origin, pickup verification is treated as already done. The pickup address IS the shipment origin, and EasyPost's verification endpoint is the same — no need to double-verify.
+
+**Eligibility integration**: `getPickupEligibility` now returns `category: 'pickup_address_unverified'` with a state-specific reason when verification has not passed. The Request Carrier Pickup form is gated on this. Defense-in-depth: `handleRequestPickup`'s existing eligibility precheck catches any unverified attempt before EasyPost is called.
+
+**UI**:
+- New verification badge on the pickup-address banner (Verified / Verifying / Corrected — review needed / Failed verification / Re-verify (address changed) / Not verified).
+- `Verify pickup address` button — disabled until field presence passes.
+- Corrected-address review block: side-by-side "You sent" vs "Carrier suggests", with `Accept corrected address` (writes the suggestion back to the origin and marks verification accepted) and `Edit origin instead` (opens the shipment edit modal).
+- Failure block: shows `errorMessage` and any per-field messages from the carrier verbatim, with a hint about common causes (street/ZIP mismatch, missing suite, invalid state-for-ZIP) — generic, not USPS-specific.
+- Stale state: explicit "address was edited after the last verification — re-verify" line.
+
+**Carrier-agnostic note**: The visible failure that triggered this phase happened on USPS, but the verification layer is implemented against EasyPost's generic delivery-verification endpoint. UPS, FedEx, and any future EasyPost-supported pickup carrier go through the same code path with no carrier-specific branches. Where carrier-specific error details come back from EasyPost they are surfaced verbatim in the failure block.
+
+**Future (not implemented)**: per-carrier verification overrides (e.g. UPS-specific street-type normalization), multi-result selection when EasyPost returns multiple suggestions, and an "always re-verify before booking" strict mode toggle.
