@@ -754,6 +754,16 @@ export interface AddressValidationResult {
   messages?: string[];
   providerRef?: string;
   accepted?: boolean;
+  // Carrier-/provider-specific deliverability diagnostics. For EasyPost this
+  // carries the verifications.delivery.details payload (DPV match code,
+  // dpv_footnotes, latitude/longitude, time_zone, etc.) so the operator can
+  // see exactly why a delivery-validated address may still not be acceptable
+  // for pickup booking.
+  details?: Record<string, unknown>;
+  // Provider error rows (DPV warnings, missing secondary info, …) returned
+  // even when delivery success is true. Surfaced verbatim so we never claim
+  // an address is fully verified while there are unresolved warnings.
+  warnings?: { code?: string; message: string; field?: string }[];
 }
 
 export interface ShippingRate {

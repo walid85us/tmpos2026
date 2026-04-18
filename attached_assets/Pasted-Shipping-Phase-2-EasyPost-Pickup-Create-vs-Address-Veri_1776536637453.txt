@@ -1,0 +1,186 @@
+Shipping Phase 2 — EasyPost Pickup Create vs Address Verification Mismatch — Final Root-Cause Resolution Pass
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a narrow final root-cause correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not waste another pass on cosmetic UI changes.
+Fix the real remaining provider-booking defect.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior Node/Express carrier-integration engineer
+- Senior React/TypeScript engineer
+- Enterprise shipping systems architect
+- Senior pickup-operations / USPS / EasyPost expert with 20+ years of experience in carrier booking flows, address normalization, and shipping production issues
+- Root-cause debugging specialist
+- QA gatekeeper who must not accept partially improved but still broken behavior
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- plan gating
+- store permission gating
+- provider/manual mode split
+- PACKED-only activation
+- mutual exclusivity between Service Point and Pickup
+- existing shipping core flow
+- reverse-logistics flow
+- current pickup address source-of-truth work
+- current pickup address verification state machine
+- current provider-specific pickup requirement model
+- current structured diagnostics UI
+- pickup form visibility fix already completed
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — ACTUAL REMAINING FAILURE
+==================================================
+
+Observed QA result:
+- Carrier Pickup form is visible
+- required fields are visible and filled
+- pickup address shows "Verified by carrier"
+- provider-required fields panel shows READY
+- yet Request Carrier Pickup still fails during pickup_create with HTTP 422
+- EasyPost/USPS still says invalid address entered / USPS code 1007
+
+This means:
+- the deadlock / hidden-field issue is fixed
+- the remaining defect is now a true mismatch between the app’s "verified" state and what EasyPost pickup_create actually accepts
+
+This must be fixed in this pass.
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIXES
+==================================================
+
+1) TRACE THE EXACT VERIFICATION FLOW VS THE EXACT PICKUP_CREATE PAYLOAD
+Required:
+- inspect the exact address object that passed verification
+- inspect the exact payload sent to EasyPost pickup_create
+- compare them field by field
+- verify whether the address used in pickup_create is byte-for-byte the normalized/verified address, or whether the app is still sending the original unnormalized address
+- identify whether line1/line2/city/state/postalCode/country/name/company/phone differ between:
+  - verified address record
+  - displayed address
+  - pickup_create payload
+
+2) DETERMINE WHETHER THE WRONG VERIFICATION MODE IS BEING USED
+Required:
+- inspect whether the current EasyPost address verification mode is appropriate for pickup booking
+- determine whether the app is using a shipping/delivery-oriented verification result that is not sufficient for pickup_create acceptance
+- if a stricter or different verification/normalization rule is required before pickup_create, implement it
+- do not guess; inspect the actual EasyPost request/response path in code
+
+3) USE THE VERIFIED/NORMALIZED ADDRESS AS THE PICKUP_CREATE SOURCE OF TRUTH
+Required:
+- if EasyPost verification returns a normalized/corrected address, ensure pickup_create uses the actual accepted verified address object, not a stale pre-verification origin snapshot
+- do not allow the UI to say "Verified by carrier" while the create call still sends a different address
+
+4) SURFACE THE REAL REMAINING ADDRESS DEFECT CLEARLY
+Required:
+- if pickup_create still fails after using the true verified address, clearly tell the operator what is still wrong
+- examples:
+  - apartment/suite/unit needed
+  - address not acceptable for pickup even if deliverable
+  - USPS-specific pickup-location restriction
+  - pickup-site contact/address issue
+- do not keep showing only the same generic "invalid address entered" message if the app can infer a more precise cause
+
+5) ADD ADDRESS VERIFICATION AUDIT DETAIL
+Required:
+- show enough comparison detail to confirm:
+  - original address entered
+  - normalized/verified address returned
+  - final address actually sent to pickup_create
+- this can be secondary diagnostic detail, but it must exist for debugging and operator confidence
+
+6) DO NOT MISLABEL THE STATE AS VERIFIED IF PICKUP_CREATE WOULD STILL BE GUARANTEED TO FAIL
+Required:
+- if the current verification mode is not actually sufficient for pickup booking, the UI must not present a misleading "Verified by carrier" state for pickup readiness
+- rename or refine the state if needed so it is truthful for pickup booking specifically
+
+7) KEEP THE FIX CARRIER-AWARE BUT NOT COSMETIC
+Required:
+- the current visible failure is on EasyPost/USPS
+- fix the root cause honestly
+- do not add fake fallback language
+- do not broaden into unrelated provider work unless needed for shared architecture
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- when the UI says the pickup address is verified and ready, pickup_create no longer fails because of the same unresolved address mismatch
+OR
+- if pickup_create still cannot proceed for a real carrier reason, the app clearly distinguishes that reason from generic address verification success
+
+The next QA must not show:
+- "Verified by carrier"
+and then immediately
+- "invalid address entered"
+for the same unchanged address payload
+
+==================================================
+IMPORTANT RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into unrelated workstreams
+- Do not fake booking success
+- Do not fake verification success
+- Do not ship another cosmetic pass
+- Fix the actual verification-vs-create mismatch
+- Keep the design baseline consistent
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Trace verified address result vs pickup_create payload field by field
+2) Identify the exact mismatch or wrong verification mode
+3) Ensure pickup_create uses the true verified/accepted address source of truth
+4) Refine the operator state/message so "verified" means pickup-ready truthfully
+5) Add secondary audit detail showing original vs verified vs sent address
+6) Re-test the EasyPost pickup flow
+7) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- the exact root cause found in this pass
+- whether pickup_create was using the original or normalized address
+- how pickup verification now maps to pickup_create readiness
+- any USPS/EasyPost-specific caveat that remains
+- how the diagnostics show original vs verified vs sent address
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Verified Address vs Pickup_Create Payload Findings
+3. Pickup_Create Source-of-Truth Fix
+4. Pickup Verification Truthfulness Fix
+5. Operator / Diagnostic Detail Fix
+6. Files Changed
+7. Documentation Updated
+8. Non-Regression Notes

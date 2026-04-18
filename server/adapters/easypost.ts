@@ -172,24 +172,67 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
 
       const data = await response.json();
       const verifications = data.address?.verifications?.delivery;
-      const isValid = verifications?.success === true;
+      const deliverySuccess = verifications?.success === true;
+      // EasyPost can return delivery success === true while STILL flagging
+      // warnings (DPV codes for missing secondary info, etc.) in
+      // verifications.delivery.errors. Those addresses are deliverable but
+      // are NOT acceptable for USPS pickup_create — the carrier rejects
+      // them with code 1007. We must not present them as fully verified.
+      const errors: { code?: string; message: string; field?: string }[] = (verifications?.errors || []).map((e: { code?: string; message?: string; field?: string }) => ({
+        code: e.code,
+        message: e.message || 'Carrier returned an unspecified address warning.',
+        field: e.field,
+      }));
+      const hasWarnings = errors.length > 0;
+      const details: Record<string, unknown> = (verifications?.details && typeof verifications.details === 'object') ? verifications.details : {};
+      // Strict pickup-readiness gate: USPS DPV match code must be 'Y' for the
+      // address to be reliably acceptable for pickup_create. D / S / N (or any
+      // other code) means a secondary unit is missing or the address could
+      // not be fully confirmed — pickup_create will reject it. We only treat
+      // 'Y' (and missing-but-success-with-no-warnings as best-effort) as
+      // pickup-ready.
+      const dpvMatch = typeof details.dpv_match_code === 'string' ? details.dpv_match_code : undefined;
+      const dpvProblematic = dpvMatch != null && dpvMatch !== 'Y';
       const suggested = data.address ? mapEasyPostToAddress(data.address) : undefined;
-      const addressChanged = suggested && (
-        suggested.line1 !== address.line1 ||
-        suggested.city !== address.city ||
-        suggested.state !== address.state ||
-        suggested.postalCode !== address.postalCode
+      const addressChanged = !!suggested && (
+        (suggested.line1 || '').trim().toUpperCase() !== (address.line1 || '').trim().toUpperCase() ||
+        (suggested.line2 || '').trim().toUpperCase() !== (address.line2 || '').trim().toUpperCase() ||
+        (suggested.city || '').trim().toUpperCase() !== (address.city || '').trim().toUpperCase() ||
+        (suggested.state || '').trim().toUpperCase() !== (address.state || '').trim().toUpperCase() ||
+        (suggested.postalCode || '').trim() !== (address.postalCode || '').trim()
       );
-
+      // Status logic — truthful for pickup readiness, not just delivery:
+      //   failed:   delivery itself failed                     -> not deliverable, definitely not pickup-ready
+      //   failed:   delivery success BUT DPV warnings present  -> deliverable but pickup_create will reject
+      //   corrected: delivery success, no warnings, but EasyPost normalized the address
+      //   validated: delivery success, no warnings, no normalization difference -> pickup-ready
+      let status: 'validated' | 'corrected' | 'failed';
+      if (!deliverySuccess) status = 'failed';
+      else if (hasWarnings || dpvProblematic) status = 'failed';
+      else if (addressChanged) status = 'corrected';
+      else status = 'validated';
+      // Compose operator-facing messages. On failed-with-warnings we surface
+      // the verbatim carrier messages plus a precise pickup-specific hint so
+      // the operator knows why a "deliverable" address still won't book.
+      const messages: string[] = errors.map(e => e.message);
+      if (deliverySuccess && (hasWarnings || dpvProblematic)) {
+        if (dpvMatch === 'D') messages.push('USPS DPV: address requires a secondary unit number (apartment / suite / unit). Add it to line 2 and re-verify.');
+        else if (dpvMatch === 'S') messages.push('USPS DPV: secondary unit number is present but could not be confirmed. Verify the apartment/suite is correct and re-verify.');
+        else if (dpvMatch === 'N') messages.push('USPS DPV: address could not be confirmed. The street number/name may be incorrect for this ZIP. Re-check and re-verify.');
+        else if (dpvMatch && dpvMatch !== 'Y') messages.push(`USPS DPV match code "${dpvMatch}" — address is deliverable but not pickup-eligible. Re-check the address and re-verify.`);
+        else messages.push('Carrier returned address warnings. Address is deliverable but pickup may be rejected. Resolve warnings before booking.');
+      }
       return {
         success: true,
         result: {
-          status: isValid ? (addressChanged ? 'corrected' : 'validated') : 'failed',
+          status,
           validatedAt: new Date().toISOString(),
           originalAddress: address,
           suggestedAddress: addressChanged ? suggested : undefined,
-          messages: verifications?.errors?.map((e: { message: string }) => e.message) || [],
+          messages,
           providerRef: data.address?.id,
+          details,
+          warnings: errors,
         },
       };
     } catch (err) {

@@ -508,6 +508,12 @@ export default function ShippingCenter() {
     accepted?: boolean; // for 'corrected': operator accepted the suggestion
     errorCode?: string;
     errorMessage?: string;
+    // Captured for the audit panel so the operator can see exactly what was
+    // sent to the verification call vs. what the carrier returned vs. what
+    // would be sent to pickup_create.
+    submittedAddress?: ShipmentAddress;
+    details?: Record<string, unknown>;
+    warnings?: { code?: string; message: string; field?: string }[];
   };
   const [pickupAddrVerify, setPickupAddrVerify] = useState<Record<string, PickupVerify>>({});
   const [pickupVerifying, setPickupVerifying] = useState<Record<string, boolean>>({});
@@ -1481,6 +1487,9 @@ export default function ShippingCenter() {
           providerRef: r.providerRef,
           verifiedAt: r.validatedAt || new Date().toISOString(),
           accepted: false,
+          submittedAddress: address,
+          details: r.details,
+          warnings: r.warnings,
         },
       }));
     } catch (err) {
@@ -1508,7 +1517,22 @@ export default function ShippingCenter() {
     if (!rec || rec.status !== 'corrected' || !rec.suggestedAddress) return;
     const ship = shipments.find(s => s.id === shipmentId);
     if (!ship) return;
-    const newOrigin = { ...ship.originAddress, ...rec.suggestedAddress };
+    // Merge the carrier-normalized address fields into the origin WITHOUT
+    // wiping name/company/phone/email — EasyPost's verification response
+    // returns those as empty strings ('') because address verification does
+    // not echo them back. A naive spread would overwrite real values with
+    // empty strings. Only normalized address fields move; contact info
+    // stays from the existing origin.
+    const sug = rec.suggestedAddress;
+    const newOrigin: ShipmentAddress = {
+      ...ship.originAddress,
+      line1: sug.line1 || ship.originAddress.line1,
+      line2: sug.line2 ?? ship.originAddress.line2,
+      city: sug.city || ship.originAddress.city,
+      state: sug.state || ship.originAddress.state,
+      postalCode: sug.postalCode || ship.originAddress.postalCode,
+      country: sug.country || ship.originAddress.country,
+    };
     const newFp = pickupAddrFingerprint(newOrigin);
     updateShipment(shipmentId, { originAddress: newOrigin, updatedAt: new Date().toISOString() });
     setPickupAddrVerify(p => ({
@@ -4483,6 +4507,53 @@ export default function ShippingCenter() {
                               )}
                               {verify.status === 'unverified' && allFieldsOk && (
                                 <p className="text-[10px] text-slate-600 italic">Verification has not run yet. Click <span className="font-black">Verify pickup address</span> to ask the carrier to validate this address before booking pickup.</p>
+                              )}
+                              {/* Audit detail — what was sent to the verification call,
+                                  what the carrier returned, and what would be sent to
+                                  pickup_create. Always visible once a verification has run
+                                  so the operator can confirm the displayed "verified" state
+                                  matches the address that will actually be booked. */}
+                              {verify.record && verify.record.submittedAddress && (
+                                <details className="bg-white border border-slate-200 rounded-lg p-2">
+                                  <summary className="cursor-pointer text-[10px] font-black text-slate-600 uppercase tracking-wider">Address audit detail</summary>
+                                  <div className="mt-2 grid grid-cols-1 md:grid-cols-3 gap-2 text-[10px]">
+                                    <div>
+                                      <p className="font-black text-slate-500 uppercase tracking-wider mb-0.5">1. Sent to verification</p>
+                                      <p className="text-slate-700">{verify.record.submittedAddress.line1}{verify.record.submittedAddress.line2 ? `, ${verify.record.submittedAddress.line2}` : ''}</p>
+                                      <p className="text-slate-700">{verify.record.submittedAddress.city}, {verify.record.submittedAddress.state} {verify.record.submittedAddress.postalCode} {verify.record.submittedAddress.country}</p>
+                                    </div>
+                                    <div>
+                                      <p className="font-black text-slate-500 uppercase tracking-wider mb-0.5">2. Carrier returned</p>
+                                      {verify.record.suggestedAddress ? (
+                                        <>
+                                          <p className="text-slate-700">{verify.record.suggestedAddress.line1}{verify.record.suggestedAddress.line2 ? `, ${verify.record.suggestedAddress.line2}` : ''}</p>
+                                          <p className="text-slate-700">{verify.record.suggestedAddress.city}, {verify.record.suggestedAddress.state} {verify.record.suggestedAddress.postalCode} {verify.record.suggestedAddress.country}</p>
+                                        </>
+                                      ) : (
+                                        <p className="text-slate-500 italic">no normalization differences</p>
+                                      )}
+                                    </div>
+                                    <div>
+                                      <p className="font-black text-slate-500 uppercase tracking-wider mb-0.5">3. Will be sent to pickup_create</p>
+                                      <p className="text-slate-700">{resolved.address.line1}{resolved.address.line2 ? `, ${resolved.address.line2}` : ''}</p>
+                                      <p className="text-slate-700">{resolved.address.city}, {resolved.address.state} {resolved.address.postalCode} {resolved.address.country}</p>
+                                    </div>
+                                  </div>
+                                  {verify.record.warnings && verify.record.warnings.length > 0 && (
+                                    <div className="mt-2">
+                                      <p className="font-black text-amber-700 uppercase tracking-wider text-[10px] mb-0.5">Carrier warnings (verbatim)</p>
+                                      <ul className="text-[10px] text-amber-800 list-disc list-inside">
+                                        {verify.record.warnings.map((w, i) => <li key={i}>{w.code ? <span className="font-mono">[{w.code}]</span> : null} {w.message}{w.field ? ` (field: ${w.field})` : ''}</li>)}
+                                      </ul>
+                                    </div>
+                                  )}
+                                  {verify.record.details && Object.keys(verify.record.details).length > 0 && (
+                                    <div className="mt-2">
+                                      <p className="font-black text-slate-500 uppercase tracking-wider text-[10px] mb-0.5">Provider verification details</p>
+                                      <pre className="text-[10px] text-slate-700 bg-slate-50 border border-slate-200 rounded p-1 overflow-x-auto whitespace-pre-wrap">{JSON.stringify(verify.record.details, null, 2)}</pre>
+                                    </div>
+                                  )}
+                                </details>
                               )}
                             </div>
                           </div>

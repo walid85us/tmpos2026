@@ -220,3 +220,23 @@ The frontend is built using React 19, TypeScript, Vite 6, and Tailwind CSS v4.
 - `pickup_address` — required address fields missing.
 - `pickup_address_unverified` — verification not yet passed.
 - `pickup_payload` — provider-required booking fields missing.
+
+### Phase 2.5.7 — EasyPost Pickup Create vs Address Verification Mismatch (Apr 2026)
+
+**Root cause found**: EasyPost's `/v2/addresses/create_and_verify` returns `verifications.delivery.success === true` even when `verifications.delivery.errors[]` contains DPV warnings (e.g. "Missing secondary information (apartment / suite / unit)") and/or when `verifications.delivery.details.dpv_match_code` is anything other than `'Y'` (D=missing secondary info, S=secondary present-but-unconfirmed, N=not confirmed). The previous adapter logic only inspected `verifications.delivery.success` and reported the address as `'validated'`, so the UI showed the green "Verified by carrier" badge while the same address was still being rejected by USPS at `/v2/pickups` with code 1007 ("invalid address entered"). The address was *deliverable* but not *pickup-eligible* — those are different acceptance bars and the app was conflating them.
+
+**Fix in `server/adapters/easypost.ts` `validateAddress`**:
+- Pull `verifications.delivery.errors[]` into a typed `warnings` array (`{code, message, field}`) and pass it through verbatim.
+- Pull `verifications.delivery.details` into a `details` blob (DPV match code, dpv_footnotes, latitude/longitude, time_zone, etc.) and pass it through.
+- New strict status logic: `delivery.success === false` → `failed`; `delivery.success === true` *but* warnings present *or* `dpv_match_code !== 'Y'` → `failed` (with verbatim carrier messages plus a precise DPV-specific operator hint, e.g. "USPS DPV: address requires a secondary unit number"); `delivery.success === true` with no warnings and a normalization difference → `corrected`; otherwise → `validated`. The "verified" state now means *pickup-ready*, not just *deliverable*.
+- Address-changed comparison now case-insensitive on line1/line2/city/state and also includes line2.
+
+**Fix in `acceptCorrectedPickupAddress` (ShippingCenter.tsx)**: the previous spread `{ ...ship.originAddress, ...rec.suggestedAddress }` overwrote `name`/`company`/`phone`/`email` with the empty strings that EasyPost's address-verification response returns for those fields. Now the merge only moves the normalized address fields (line1/line2/city/state/postalCode/country) and explicitly preserves the contact info on the existing origin. This was a hidden second source of pickup_create failures on accepted-corrected addresses.
+
+**Pickup_create source-of-truth confirmed**: `handleRequestPickup` continues to send `resolvePickupAddress(ship).address` (== `ship.originAddress`). When the operator accepts a corrected address, `ship.originAddress` is rewritten with the carrier-normalized fields *first*, so the pickup_create payload uses the byte-identical address that just passed verification — no stale pre-verification snapshot.
+
+**`AddressValidationResult` (src/types.ts)** extended with `details?: Record<string,unknown>` and `warnings?: {code?,message,field?}[]`. `PickupVerify` (ShippingCenter.tsx) extended with `submittedAddress`, `details`, `warnings` so the audit panel can show what was sent vs. returned vs. will-be-sent.
+
+**Audit panel (UI)**: a collapsible "Address audit detail" `<details>` block now appears under the verification controls once a verification has run. It shows three columns side-by-side — (1) what was sent to verification, (2) what the carrier returned (or "no normalization differences"), (3) what will be sent to pickup_create — plus the verbatim carrier warnings list (with provider codes and field hints) and a JSON dump of `verifications.delivery.details` (DPV codes, lat/lng, time zone, etc.) so the operator can confirm the displayed verified state and prove the create-call address matches.
+
+**Truthfulness invariants preserved**: no fake confirmations, no carrier-specific branches in shared code, provider errors surfaced verbatim, the "Verified by carrier" badge is now only shown when the address truly is pickup-ready (success + no warnings + DPV='Y'). USPS-specific caveat: when EasyPost returns `dpv_match_code` `D`/`S`/`N` the adapter emits a precise operator-facing hint and the address is *not* considered pickup-ready — the operator must add/correct the secondary unit and re-verify.
