@@ -190,3 +190,33 @@ The frontend is built using React 19, TypeScript, Vite 6, and Tailwind CSS v4.
 - ShipStation has no provider preflight (all flags false) because there is no provider call. The local pickup record path is unchanged.
 
 **Future (not implemented)**: Adapter-level "instructions must be non-empty" assertion as defense-in-depth; per-carrier instruction templates (USPS vs UPS phrasing); validation of phone format per carrier (E.164); real Shippo pickup adapter wiring with the modeled required-field set.
+
+### Phase 2.5.6 — Pickup Form Availability vs Submit Readiness (Apr 2026)
+
+**Root cause**: After Phase 2.5.5 the pickup-payload preflight returned `eligible: false` with `category: 'pickup_payload'` whenever any provider-required field was missing. The UI treated that as full feature unavailability (`pickupRequestable = puElig.eligible`) and rendered a "Carrier pickup not available for this shipment" banner instead of the form. The operator could not fill in the very fields the app said were required — a UX deadlock.
+
+**Fix**: Separate two concepts that were collapsed into one:
+- **Feature availability** — true gates that mean the workflow itself is not allowed: `provider`, `plan`, `permission`, `lifecycle`, `mutex`. When any of these fail, the "not available" banner is the correct response.
+- **Submit readiness** — input completeness gates: `pickup_address`, `pickup_address_unverified`, `pickup_payload`. When any of these fail, the form must stay visible and editable; only the submit button is disabled.
+
+**Implementation** (`src/components/ShippingCenter.tsx`):
+- New constants in the pickup section render: `PU_FORM_READINESS_CATS = {'pickup_address', 'pickup_address_unverified', 'pickup_payload'}`, `pickupFeatureAvailable = puElig.eligible || PU_FORM_READINESS_CATS.has(puElig.category)`, `pickupSubmitReady = puElig.eligible`.
+- `pickupRequestable` now binds to `pickupFeatureAvailable`, so the form is rendered whenever the feature is truly available.
+- The "not available" banner is gated on `!pickupFeatureAvailable` (never on form-readiness categories) and its tone map no longer includes a `pickup_address` branch.
+- A new sky-toned guidance banner is rendered above the form when `pickupFeatureAvailable && !pickupSubmitReady`: *"Complete the required pickup booking fields below to continue."* with `puElig.reason` underneath.
+- The Request Carrier Pickup button stays visible but is `disabled={!pickupSubmitReady || !pickupForm.date || pickupSubmitting}` and its label changes to *"Complete required fields to continue"* in that state. Tooltip carries `puElig.reason`.
+- The pickup-address verification banner condition was changed from `(eligible || category === 'pickup_address' || category === 'pickup_address_unverified')` to `pickupFeatureAvailable`, ensuring it also stays visible during a `pickup_payload` failure.
+
+**Per-provider model unchanged**: `PROVIDER_CAPABILITIES` and `getPickupPayloadPreflight` from Phase 2.5.5 are intact; the per-provider required-fields panel and field-level asterisks/sourceHints from Phase 2.5.5 still drive operator guidance inside the visible form. The defense-in-depth precheck inside `handleRequestPickup` (which sets `PICKUP_PAYLOAD_INCOMPLETE` if anything slips through) is unchanged.
+
+**True unavailable states** (banner shown, form hidden):
+- `provider` — manual mode or no provider configured.
+- `plan` — carrier pickup not in the active plan.
+- `permission` — operator lacks `canRequestPickup`.
+- `lifecycle` — shipment is not PACKED.
+- `mutex` — a service-point drop-off is selected.
+
+**Form-readiness states** (banner NOT shown, form visible, submit disabled, guidance inline):
+- `pickup_address` — required address fields missing.
+- `pickup_address_unverified` — verification not yet passed.
+- `pickup_payload` — provider-required booking fields missing.

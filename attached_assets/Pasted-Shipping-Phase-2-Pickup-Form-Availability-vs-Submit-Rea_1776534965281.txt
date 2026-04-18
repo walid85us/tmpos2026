@@ -1,0 +1,200 @@
+Shipping Phase 2 — Pickup Form Availability vs Submit Readiness Fix
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a narrow root-cause correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Only fix the current pickup UX deadlock where the app blocks the pickup workflow before the operator can complete the required booking fields.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Node/Express integration engineer
+- Enterprise shipping systems architect
+- Senior pickup-operations expert with 20+ years of experience in carrier booking UX and provider workflow design
+- Root-cause debugging specialist
+- QA gatekeeper who must not accept dead-end workflows
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- plan gating
+- store permission gating
+- provider/manual mode split
+- PACKED-only activation
+- mutual exclusivity between Service Point and Pickup
+- existing shipping core flow
+- reverse-logistics flow
+- current pickup address verification work
+- current provider-specific pickup capability model
+- current structured diagnostics UI
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — ACTUAL REMAINING FAILURE
+==================================================
+
+Observed QA result:
+- Carrier Pickup section now says pickup requires:
+  - pickup date
+  - pickup window
+  - pickup instructions
+- but the workflow is blocked at the section level with:
+  "Carrier pickup not available for this shipment"
+- this prevents the operator from filling the very fields the app says are required
+
+This is a logic and UX deadlock.
+
+==================================================
+ROOT CAUSE TO FIX
+==================================================
+
+The implementation is incorrectly mixing:
+1) pickup feature/capability eligibility
+with
+2) pickup form completeness / submit readiness
+
+These must be separated.
+
+Feature/capability eligibility determines whether the pickup workflow is available at all:
+- plan allows it
+- permission allows it
+- provider mode / provider configured
+- shipment is PACKED
+- no service-point mutex conflict
+- other true feature-level gates
+
+Form completeness determines whether the operator can submit the pickup booking:
+- pickup address verified
+- pickup date filled
+- earliest/latest filled
+- pickup instructions filled if required
+- contact fields filled if required
+- any provider-specific booking fields filled
+
+Missing form fields must NOT make the whole pickup feature appear unavailable.
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIXES
+==================================================
+
+1) SEPARATE FEATURE ELIGIBILITY FROM SUBMIT READINESS
+Required:
+- keep true feature/capability gating for:
+  - plan
+  - permission
+  - provider availability
+  - lifecycle
+  - mutex
+- move form-field completeness out of the “not available for this shipment” state
+- missing booking fields must not hide/block the pickup form itself
+
+2) ALWAYS SHOW THE PICKUP FORM WHEN THE FEATURE IS ELIGIBLE
+Required:
+- if Carrier Pickup is allowed for this shipment/provider/user, the operator must see the pickup form
+- required fields must remain visible and fillable:
+  - pickup date
+  - earliest
+  - latest
+  - pickup instructions
+  - contact name / phone if required
+- do not replace the form with a generic “not available” block when the only issue is incomplete inputs
+
+3) SUBMIT BUTTON DISABLED UNTIL REQUIRED FIELDS ARE COMPLETE
+Required:
+- the Request Carrier Pickup button should remain visible
+- it should be disabled until required booking fields are complete
+- the UI should clearly show what is still missing
+- this is the correct place for required-field enforcement before provider call
+
+4) CLEAR REQUIRED-FIELD UX
+Required:
+- show required fields with asterisks and/or requirement panel
+- clearly indicate which fields are missing
+- use wording like:
+  "Complete the required pickup booking fields below to continue."
+- do not use “Carrier pickup not available for this shipment” when the shipment is actually eligible
+
+5) KEEP PROVIDER-SPECIFIC PRE-FLIGHT
+Required:
+- EasyPost / Shippo / ShipStation provider requirement model should remain intact
+- but provider-required fields should feed submit-readiness, not feature-level availability, unless the provider truly does not support pickup at all
+
+6) KEEP REAL UNAVAILABLE STATES ONLY FOR TRUE FEATURE BLOCKERS
+Required:
+- use “not available for this shipment” only for true blockers such as:
+  - plan disabled
+  - permission denied
+  - no provider configured
+  - shipment not PACKED
+  - mutex conflict
+  - provider does not support pickup
+- do NOT use that state for missing form inputs
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- when Carrier Pickup is truly eligible, the form is visible
+- required booking fields are visible and fillable
+- the submit button is disabled until required fields are complete
+- the app does not deadlock the user by blocking the form because of missing form inputs
+- true unavailable states remain reserved for true feature blockers
+
+==================================================
+IMPORTANT RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into unrelated workstreams
+- Do not fake booking success
+- Do not remove the provider-specific required-field model
+- Keep the design baseline consistent
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Separate feature-level pickup eligibility from form submit-readiness
+2) Ensure the pickup form remains visible whenever the feature is truly eligible
+3) Move required-field enforcement to the submit/readiness layer
+4) Keep clear missing-field guidance in the form
+5) Re-test the EasyPost pickup workflow
+6) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- distinction between pickup feature availability and pickup submit readiness
+- rule that missing booking fields do not hide the pickup form
+- rule that the submit button is disabled until provider-required fields are complete
+- which states are true “not available” blockers vs form-completeness blockers
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Feature Availability vs Submit Readiness Fix
+3. Pickup Form Visibility Fix
+4. Submit Gating / Missing-Field Guidance Fix
+5. Files Changed
+6. Documentation Updated
+7. Non-Regression Notes

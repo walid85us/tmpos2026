@@ -4153,11 +4153,29 @@ export default function ShippingCenter() {
                   const spElig = getServicePointEligibility(selectedShip);
                   const spManualElig = getServicePointManualEntryEligibility(selectedShip);
                   const puElig = getPickupEligibility(selectedShip);
+                  // ─── Pickup gating split into two distinct concepts ───────
+                  // Feature availability: is the carrier-pickup workflow
+                  // allowed for this shipment at all (plan, permission,
+                  // provider, lifecycle, mutex). When this is false the
+                  // workflow is genuinely unavailable and we render the
+                  // "not available" banner.
+                  // Submit readiness: are all required booking inputs filled
+                  // in (verified pickup address + per-provider required
+                  // fields). When this fails the form MUST stay visible so
+                  // the operator can fill the inputs — only the submit
+                  // button is disabled. Mixing the two previously created
+                  // a deadlock where required-but-empty inputs hid the
+                  // very form needed to fill them in.
+                  const PU_FORM_READINESS_CATS = new Set(['pickup_address', 'pickup_address_unverified', 'pickup_payload']);
+                  const pickupFeatureAvailable = puElig.eligible || (puElig.category != null && PU_FORM_READINESS_CATS.has(puElig.category));
+                  const pickupSubmitReady = puElig.eligible;
                   // Selection is editable if EITHER the live locator path OR the manual
                   // entry path is eligible. While no carrier-specific locator adapter is
                   // configured, manual entry is the only path available.
                   const spEditable = spElig.eligible || spManualElig.eligible;
-                  const pickupRequestable = puElig.eligible;
+                  // `pickupRequestable` now controls form *visibility* (feature
+                  // available). Submit is gated separately by `pickupSubmitReady`.
+                  const pickupRequestable = pickupFeatureAvailable;
                   const pickupCancellable = pr && PICKUP_CANCELLABLE_STATUSES.includes(pr.status);
                   return (
                   <div className="space-y-6">
@@ -4290,15 +4308,20 @@ export default function ShippingCenter() {
                           'bg-rose-100 text-rose-700'
                         }`}>{pr ? pr.status : 'Not Requested'}</span>
                       </div>
-                      {!puElig.eligible && !pr && (() => {
+                      {/* "Not available" banner is reserved for TRUE feature
+                          blockers only (plan, permission, provider, lifecycle,
+                          mutex). Form-readiness issues (pickup_address,
+                          pickup_address_unverified, pickup_payload) are
+                          surfaced inline beside the form so the operator can
+                          actually act on them — they no longer hide the
+                          form. */}
+                      {!pickupFeatureAvailable && !pr && (() => {
                         const tone = puElig.category === 'mutex'
                           ? { bg: 'bg-emerald-50', border: 'border-emerald-200', icon: 'text-emerald-600', text: 'text-emerald-700', label: 'Carrier pickup blocked' }
                           : puElig.category === 'lifecycle'
                           ? { bg: 'bg-slate-50', border: 'border-slate-200', icon: 'text-slate-500', text: 'text-slate-600', label: 'Carrier pickup not yet available' }
                           : puElig.category === 'permission'
                           ? { bg: 'bg-rose-50', border: 'border-rose-200', icon: 'text-rose-500', text: 'text-rose-700', label: 'Carrier pickup denied' }
-                          : puElig.category === 'pickup_address'
-                          ? { bg: 'bg-rose-50', border: 'border-rose-200', icon: 'text-rose-500', text: 'text-rose-700', label: 'Pickup address is not ready' }
                           : { bg: 'bg-amber-50', border: 'border-amber-200', icon: 'text-amber-500', text: 'text-amber-700', label: puElig.category === 'plan' ? 'Carrier pickup disabled by plan' : 'Carrier pickup not available for this shipment' };
                         return (
                           <div className={`${tone.bg} border ${tone.border} rounded-xl p-3 flex items-start gap-2`}>
@@ -4306,13 +4329,22 @@ export default function ShippingCenter() {
                             <div className={`text-xs ${tone.text}`}>
                               <p className="font-black">{tone.label}</p>
                               <p className="mt-0.5">{puElig.reason}</p>
-                              {puElig.category === 'pickup_address' && (
-                                <p className="mt-1 italic">Open the Origin Address editor (above) and complete the missing fields, then return here.</p>
-                              )}
                             </div>
                           </div>
                         );
                       })()}
+                      {/* Inline guidance shown ABOVE the form when the
+                          feature is available but submit is not yet ready.
+                          The form below remains visible and fillable. */}
+                      {pickupFeatureAvailable && !pickupSubmitReady && !pr && (
+                        <div className="bg-sky-50 border border-sky-200 rounded-xl p-3 flex items-start gap-2">
+                          <span className="material-symbols-outlined text-sky-600 text-sm mt-0.5">info</span>
+                          <div className="text-xs text-sky-800">
+                            <p className="font-black">Complete the required pickup booking fields below to continue.</p>
+                            <p className="mt-0.5 text-sky-700">{puElig.reason}</p>
+                          </div>
+                        </div>
+                      )}
                       {/* Pickup-address source-of-truth banner + true carrier
                           verification panel. Shown whenever pickup is the
                           active option (no service point selected, no active
@@ -4324,7 +4356,7 @@ export default function ShippingCenter() {
                           verified that address. EasyPost address verification
                           is carrier-agnostic and applies to USPS, UPS, FedEx
                           and any other supported pickup carrier. */}
-                      {!pr && !sp && (puElig.eligible || puElig.category === 'pickup_address' || puElig.category === 'pickup_address_unverified') && (() => {
+                      {!pr && !sp && pickupFeatureAvailable && (() => {
                         const resolved = resolvePickupAddress(selectedShip);
                         const check = validatePickupAddress(resolved.address);
                         const fields: { label: string; ok: boolean }[] = [
@@ -4695,8 +4727,17 @@ export default function ShippingCenter() {
                             );
                           })()}
                           <div className="col-span-2">
-                            <button onClick={() => handleRequestPickup(selectedShip.id)} disabled={pickupSubmitting || !pickupForm.date} className="w-full py-3 bg-primary text-white font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 disabled:opacity-50 disabled:cursor-not-allowed">
-                              {pickupSubmitting ? 'Requesting...' : 'Request Carrier Pickup'}
+                            <button
+                              onClick={() => handleRequestPickup(selectedShip.id)}
+                              disabled={pickupSubmitting || !pickupForm.date || !pickupSubmitReady}
+                              title={!pickupSubmitReady && puElig.reason ? puElig.reason : undefined}
+                              className="w-full py-3 bg-primary text-white font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {pickupSubmitting
+                                ? 'Requesting...'
+                                : !pickupSubmitReady
+                                ? 'Complete required fields to continue'
+                                : 'Request Carrier Pickup'}
                             </button>
                           </div>
                         </div>
