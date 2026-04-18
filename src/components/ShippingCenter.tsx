@@ -537,6 +537,12 @@ export default function ShippingCenter() {
     providerPickupId?: string;
   };
   const [pickupEligibility, setPickupEligibility] = useState<Record<string, PickupEligibility>>({});
+  // Phase 2.6 — operator is currently editing the pickup-only override
+  // address for this shipment. Distinct from the main edit-shipment modal
+  // because origin is locked once the label is purchased; the override is
+  // not. Stored as { [shipmentId]: ShipmentAddress draft }.
+  const [pickupOverrideDraft, setPickupOverrideDraft] = useState<Record<string, ShipmentAddress>>({});
+  const [pickupOverrideDetailDraft, setPickupOverrideDetailDraft] = useState<Record<string, string>>({});
   // Carrier Locator per-store configuration. Persisted in sessionStorage.
   // Each adapter is independently togglable so an operator can ship via UPS
   // only without configuring USPS/FedEx. Status reflects scaffolding state
@@ -1367,7 +1373,29 @@ export default function ShippingCenter() {
   // and uses the address we sent. If a shop later wants account-address
   // mode, that becomes an explicit per-store setting (out of scope).
   // ─────────────────────────────────────────────────────────────────────
-  function resolvePickupAddress(shipment: Shipment): { address: ShipmentAddress; source: 'shipment_origin'; sourceLabel: string } {
+  function resolvePickupAddress(shipment: Shipment): { address: ShipmentAddress; source: 'shipment_origin' | 'pickup_override'; sourceLabel: string } {
+    // Phase 2.6 — pickup-only override takes precedence when set. The
+    // override is intentionally separate from originAddress so that label
+    // from_address (locked once the label is purchased) and the pickup
+    // dispatch address can diverge. This is the dedicated recovery path
+    // when the carrier rejects the origin for pickup booking but the
+    // label is already paid for. The override never touches the printed
+    // label.
+    if (shipment.pickupOverrideAddress) {
+      const ov = shipment.pickupOverrideAddress;
+      // pickupLocationDetail is operator-supplied dispatch context. If
+      // line2 is empty on the override, mirror the detail into line2 so
+      // the carrier sees suite/dock/door/unit alongside the street. If
+      // line2 is already set, leave it alone — operator intent wins.
+      const merged: ShipmentAddress = shipment.pickupLocationDetail && (!ov.line2 || !ov.line2.trim())
+        ? { ...ov, line2: shipment.pickupLocationDetail }
+        : ov;
+      return {
+        address: merged,
+        source: 'pickup_override',
+        sourceLabel: 'Pickup-only dispatch address (overrides label from-address for the driver)',
+      };
+    }
     return {
       address: shipment.originAddress,
       source: 'shipment_origin',
@@ -1447,6 +1475,12 @@ export default function ShippingCenter() {
     // pickup address IS the shipment origin (resolvePickupAddress) and the
     // EasyPost delivery-verification endpoint is the same, so a fresh
     // shipping-side verification is equally valid for pickup readiness.
+    // Phase 2.6 — DO NOT extend this free pass when a pickup-override
+    // address is active. The origin's validation says nothing about the
+    // override, so the override must be verified on its own.
+    if (resolved.source === 'pickup_override') {
+      return { status: 'unverified', currentFingerprint };
+    }
     const sv = shipment.originAddressValidation;
     if (sv && (sv.status === 'validated' || (sv.status === 'corrected' && sv.accepted))) {
       const svFp = pickupAddrFingerprint(sv.suggestedAddress || sv.originalAddress);
@@ -1564,21 +1598,87 @@ export default function ShippingCenter() {
     // empty strings. Only normalized address fields move; contact info
     // stays from the existing origin.
     const sug = rec.suggestedAddress;
-    const newOrigin: ShipmentAddress = {
-      ...ship.originAddress,
-      line1: sug.line1 || ship.originAddress.line1,
-      line2: sug.line2 ?? ship.originAddress.line2,
-      city: sug.city || ship.originAddress.city,
-      state: sug.state || ship.originAddress.state,
-      postalCode: sug.postalCode || ship.originAddress.postalCode,
-      country: sug.country || ship.originAddress.country,
+    // Phase 2.6 — when a pickup-override is active OR the label has
+    // already been purchased (origin is locked), accept the corrected
+    // address into the OVERRIDE slot, never into originAddress. The
+    // printed label's from_address must remain exactly what the carrier
+    // accepted at purchase time.
+    const labelLocked = !!ship.label;
+    const writeToOverride = !!ship.pickupOverrideAddress || labelLocked;
+    const baseAddr: ShipmentAddress = writeToOverride
+      ? (ship.pickupOverrideAddress || ship.originAddress)
+      : ship.originAddress;
+    const corrected: ShipmentAddress = {
+      ...baseAddr,
+      line1: sug.line1 || baseAddr.line1,
+      line2: sug.line2 ?? baseAddr.line2,
+      city: sug.city || baseAddr.city,
+      state: sug.state || baseAddr.state,
+      postalCode: sug.postalCode || baseAddr.postalCode,
+      country: sug.country || baseAddr.country,
     };
-    const newFp = pickupAddrFingerprint(newOrigin);
-    updateShipment(shipmentId, { originAddress: newOrigin, updatedAt: new Date().toISOString() });
+    const newFp = pickupAddrFingerprint(corrected);
+    if (writeToOverride) {
+      updateShipment(shipmentId, { pickupOverrideAddress: corrected, updatedAt: new Date().toISOString() });
+    } else {
+      updateShipment(shipmentId, { originAddress: corrected, updatedAt: new Date().toISOString() });
+    }
     setPickupAddrVerify(p => ({
       ...p,
       [shipmentId]: { ...rec, fingerprint: newFp, accepted: true },
     }));
+  }
+
+  // Phase 2.6 — pickup-override editor handlers. The override is a
+  // pickup-only address that takes precedence over originAddress when
+  // resolvePickupAddress is called. It is the recovery surface for the
+  // "label is paid for but the carrier rejected the from-address for
+  // pickup booking" scenario, and is also useful pre-label when the
+  // ship-from address differs from the dispatch dock.
+  function beginPickupOverride(shipmentId: string) {
+    if (isWriteBlocked) return;
+    const ship = shipments.find(s => s.id === shipmentId);
+    if (!ship) return;
+    // Seed the draft with whatever override is already saved, otherwise a
+    // copy of the origin so the operator only edits the deltas.
+    const seed: ShipmentAddress = ship.pickupOverrideAddress ? { ...ship.pickupOverrideAddress } : { ...ship.originAddress };
+    setPickupOverrideDraft(p => ({ ...p, [shipmentId]: seed }));
+    setPickupOverrideDetailDraft(p => ({ ...p, [shipmentId]: ship.pickupLocationDetail || '' }));
+  }
+  function cancelPickupOverride(shipmentId: string) {
+    setPickupOverrideDraft(p => { const next = { ...p }; delete next[shipmentId]; return next; });
+    setPickupOverrideDetailDraft(p => { const next = { ...p }; delete next[shipmentId]; return next; });
+  }
+  function savePickupOverride(shipmentId: string) {
+    if (isWriteBlocked) return;
+    const draft = pickupOverrideDraft[shipmentId];
+    if (!draft) return;
+    const detail = (pickupOverrideDetailDraft[shipmentId] || '').trim();
+    updateShipment(shipmentId, {
+      pickupOverrideAddress: draft,
+      pickupLocationDetail: detail || undefined,
+      // The override changed → invalidate any prior pickup-address
+      // verification record AND any prior pickup-eligibility memory for
+      // this shipment. Both are fingerprint-keyed against the resolved
+      // pickup address, so swapping the underlying address must wipe
+      // them so the UI does not show "verified" against the old origin.
+      updatedAt: new Date().toISOString(),
+    });
+    setPickupAddrVerify(p => { const next = { ...p }; delete next[shipmentId]; return next; });
+    setPickupEligibility(p => { const next = { ...p }; delete next[shipmentId]; return next; });
+    cancelPickupOverride(shipmentId);
+  }
+  function clearPickupOverride(shipmentId: string) {
+    if (isWriteBlocked) return;
+    updateShipment(shipmentId, {
+      pickupOverrideAddress: undefined,
+      pickupOverrideAddressValidation: undefined,
+      pickupLocationDetail: undefined,
+      updatedAt: new Date().toISOString(),
+    });
+    setPickupAddrVerify(p => { const next = { ...p }; delete next[shipmentId]; return next; });
+    setPickupEligibility(p => { const next = { ...p }; delete next[shipmentId]; return next; });
+    cancelPickupOverride(shipmentId);
   }
 
   // ─────────────────────────────────────────────────────────────────────
@@ -2033,7 +2133,11 @@ export default function ShippingCenter() {
           pickupAddress: pickupAddrResolved.address,
           minDatetime: minDt,
           maxDatetime: maxDt,
-          instructions: basePickup.handlingNotes,
+          // Phase 2.6 — when a pickup-only override is active, prepend the
+          // operator-supplied pickupLocationDetail to instructions so the
+          // driver sees suite/dock/door context even on providers that
+          // ignore line2.
+          instructions: [ship.pickupLocationDetail?.trim(), basePickup.handlingNotes].filter(Boolean).join(' — ') || undefined,
           providerShipmentId: ship.providerShipmentId,
           carrier,
           // Honest: we are sending the shipment origin address, NOT the
@@ -4475,7 +4579,9 @@ export default function ShippingCenter() {
                           ? 'Complete the required pickup booking fields below to continue.'
                           : 'Resolve the remaining blocker below to continue.';
                         const subline = isIneligible
-                          ? 'Edit the pickup street/city/state/ZIP or the contact name and phone, then re-run delivery verification before retrying. The same unchanged address will be rejected again.'
+                          ? (selectedShip.label
+                              ? 'Label is already purchased — the printed from-address is locked. Use a pickup-only dispatch override below (e.g. correct suite/dock or a different unit on the same property), then re-verify before retrying. The same unchanged address will be rejected again.'
+                              : 'Edit the pickup street/city/state/ZIP or the contact name and phone, then re-run delivery verification before retrying. The same unchanged address will be rejected again.')
                           : puElig.reason;
                         return (
                           <div className={`${tone.bg} border ${tone.border} rounded-xl p-3 flex items-start gap-2`}>
@@ -4487,14 +4593,35 @@ export default function ShippingCenter() {
                                 <>
                                   <p className={`mt-1 text-[10px] ${tone.body} italic`}>All required booking fields are present. The remaining blocker is carrier rejection of the current pickup address — not missing form data.</p>
                                   <div className="mt-2 flex flex-wrap gap-1.5">
-                                    <button
-                                      type="button"
-                                      onClick={() => setEditingShipment(selectedShip.id)}
-                                      className="px-2.5 py-1 rounded text-[10px] font-black uppercase tracking-widest bg-white border border-rose-300 text-rose-700 hover:bg-rose-50 inline-flex items-center gap-1"
-                                    >
-                                      <span className="material-symbols-outlined text-[12px]">edit_location</span>
-                                      Edit origin address
-                                    </button>
+                                    {selectedShip.label ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          beginPickupOverride(selectedShip.id);
+                                          setTimeout(() => {
+                                            const el = document.getElementById('pickup-override-editor');
+                                            if (el) {
+                                              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                              const focusable = el.querySelector('input, textarea') as HTMLElement | null;
+                                              focusable?.focus();
+                                            }
+                                          }, 50);
+                                        }}
+                                        className="px-2.5 py-1 rounded text-[10px] font-black uppercase tracking-widest bg-white border border-rose-300 text-rose-700 hover:bg-rose-50 inline-flex items-center gap-1"
+                                      >
+                                        <span className="material-symbols-outlined text-[12px]">edit_location</span>
+                                        {selectedShip.pickupOverrideAddress ? 'Edit pickup dispatch override' : 'Use pickup-only dispatch address'}
+                                      </button>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        onClick={() => setEditingShipment(selectedShip.id)}
+                                        className="px-2.5 py-1 rounded text-[10px] font-black uppercase tracking-widest bg-white border border-rose-300 text-rose-700 hover:bg-rose-50 inline-flex items-center gap-1"
+                                      >
+                                        <span className="material-symbols-outlined text-[12px]">edit_location</span>
+                                        Edit origin address
+                                      </button>
+                                    )}
                                     <a
                                       href="#pickup-contact-fields"
                                       onClick={(e) => {
@@ -4774,6 +4901,120 @@ export default function ShippingCenter() {
                                 </details>
                               )}
                             </div>
+                          </div>
+                        );
+                      })()}
+                      {/* Phase 2.6 — Pickup-only dispatch override editor.
+                          Always visible (read-only when collapsed) so the
+                          operator can see whether a pickup-only override is
+                          in effect, and edit it without touching the locked
+                          label from-address. The editor opens via either:
+                          (a) the "Use pickup-only dispatch address" button
+                          on the ineligibility recovery banner above, or
+                          (b) the "Edit override" button on this panel. */}
+                      {(() => {
+                        const ov = selectedShip.pickupOverrideAddress;
+                        const draft = pickupOverrideDraft[selectedShip.id];
+                        const isEditing = !!draft;
+                        const labelLocked = !!selectedShip.label;
+                        if (!ov && !isEditing && !labelLocked) {
+                          // Pre-label, no override set, not editing — keep the
+                          // UI quiet. The override is an advanced recovery
+                          // surface; surface it explicitly only when needed.
+                          return null;
+                        }
+                        const detailDraft = pickupOverrideDetailDraft[selectedShip.id] ?? '';
+                        const updateDraft = (patch: Partial<ShipmentAddress>) =>
+                          setPickupOverrideDraft(p => ({ ...p, [selectedShip.id]: { ...(p[selectedShip.id] || ov || selectedShip.originAddress), ...patch } }));
+                        return (
+                          <div id="pickup-override-editor" className={`rounded-xl border p-3 space-y-2 ${ov || isEditing ? 'bg-violet-50/40 border-violet-200' : 'bg-slate-50 border-slate-200'}`}>
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="min-w-0">
+                                <p className="text-[10px] font-black uppercase tracking-widest text-violet-700">Pickup-only dispatch override</p>
+                                <p className="text-[10px] text-slate-600 mt-0.5">
+                                  {ov
+                                    ? 'Override is ACTIVE — the carrier pickup driver is dispatched to this address. The printed label from-address is unchanged.'
+                                    : labelLocked
+                                      ? 'Optional. The label from-address is locked. If the carrier rejects pickup at the from-address, set a pickup-only override here (e.g. correct suite/dock or a different unit on the same property). The printed label is not affected.'
+                                      : 'Optional. Use this if the pickup dispatch dock differs from the printed ship-from address.'}
+                                </p>
+                              </div>
+                              {!isEditing && !isWriteBlocked && (
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <button type="button" onClick={() => beginPickupOverride(selectedShip.id)} className="px-2 py-1 rounded text-[10px] font-black uppercase tracking-widest bg-white border border-violet-300 text-violet-700 hover:bg-violet-50">
+                                    {ov ? 'Edit override' : 'Add override'}
+                                  </button>
+                                  {ov && (
+                                    <button type="button" onClick={() => clearPickupOverride(selectedShip.id)} className="px-2 py-1 rounded text-[10px] font-black uppercase tracking-widest bg-white border border-rose-300 text-rose-700 hover:bg-rose-50">
+                                      Clear
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                            {!isEditing && ov && (
+                              <div className="bg-white border border-violet-200 rounded-lg p-2 text-[11px] text-slate-700">
+                                <p>{ov.name}{ov.company ? ` · ${ov.company}` : ''}</p>
+                                <p>{ov.line1}{ov.line2 ? `, ${ov.line2}` : ''}</p>
+                                <p>{ov.city}, {ov.state} {ov.postalCode} {ov.country}</p>
+                                {ov.phone && <p>{ov.phone}</p>}
+                                {selectedShip.pickupLocationDetail && (
+                                  <p className="mt-1 text-[10px] text-violet-700"><span className="font-black uppercase tracking-widest">Driver detail:</span> {selectedShip.pickupLocationDetail}</p>
+                                )}
+                              </div>
+                            )}
+                            {isEditing && draft && (
+                              <div className="bg-white border border-violet-200 rounded-lg p-2 space-y-2">
+                                <div className="grid grid-cols-2 gap-2">
+                                  <div className="col-span-2">
+                                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Contact name</label>
+                                    <input type="text" value={draft.name || ''} onChange={e => updateDraft({ name: e.target.value })} className="w-full mt-1 px-2 py-1.5 border border-slate-200 rounded-lg text-xs" />
+                                  </div>
+                                  <div className="col-span-2">
+                                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Company (optional)</label>
+                                    <input type="text" value={draft.company || ''} onChange={e => updateDraft({ company: e.target.value })} className="w-full mt-1 px-2 py-1.5 border border-slate-200 rounded-lg text-xs" />
+                                  </div>
+                                  <div className="col-span-2">
+                                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Street (line 1)</label>
+                                    <input type="text" value={draft.line1 || ''} onChange={e => updateDraft({ line1: e.target.value })} className="w-full mt-1 px-2 py-1.5 border border-slate-200 rounded-lg text-xs" />
+                                  </div>
+                                  <div className="col-span-2">
+                                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Suite / unit / line 2</label>
+                                    <input type="text" value={draft.line2 || ''} onChange={e => updateDraft({ line2: e.target.value })} className="w-full mt-1 px-2 py-1.5 border border-slate-200 rounded-lg text-xs" />
+                                  </div>
+                                  <div>
+                                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">City</label>
+                                    <input type="text" value={draft.city || ''} onChange={e => updateDraft({ city: e.target.value })} className="w-full mt-1 px-2 py-1.5 border border-slate-200 rounded-lg text-xs" />
+                                  </div>
+                                  <div>
+                                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">State</label>
+                                    <input type="text" value={draft.state || ''} onChange={e => updateDraft({ state: e.target.value })} className="w-full mt-1 px-2 py-1.5 border border-slate-200 rounded-lg text-xs" />
+                                  </div>
+                                  <div>
+                                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Postal / ZIP</label>
+                                    <input type="text" value={draft.postalCode || ''} onChange={e => updateDraft({ postalCode: e.target.value })} className="w-full mt-1 px-2 py-1.5 border border-slate-200 rounded-lg text-xs" />
+                                  </div>
+                                  <div>
+                                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Country</label>
+                                    <input type="text" value={draft.country || ''} onChange={e => updateDraft({ country: e.target.value })} className="w-full mt-1 px-2 py-1.5 border border-slate-200 rounded-lg text-xs" />
+                                  </div>
+                                  <div className="col-span-2">
+                                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Phone</label>
+                                    <input type="text" value={draft.phone || ''} onChange={e => updateDraft({ phone: e.target.value })} className="w-full mt-1 px-2 py-1.5 border border-slate-200 rounded-lg text-xs" />
+                                  </div>
+                                  <div className="col-span-2">
+                                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Driver detail (suite, dock, door code, building, hours)</label>
+                                    <input type="text" value={detailDraft} onChange={e => setPickupOverrideDetailDraft(p => ({ ...p, [selectedShip.id]: e.target.value }))} placeholder='e.g. "Suite 210, dock C, ring bell"' className="w-full mt-1 px-2 py-1.5 border border-slate-200 rounded-lg text-xs" />
+                                    <p className="text-[10px] text-slate-500 mt-1">Mirrored into address line 2 (if line 2 is empty) and prepended to the carrier pickup instructions so the driver sees it.</p>
+                                  </div>
+                                </div>
+                                <p className="text-[10px] text-amber-700 italic">Saving the override invalidates any prior pickup verification and pickup-eligibility memory for this shipment. You will need to re-verify the new address before booking.</p>
+                                <div className="flex gap-2">
+                                  <button type="button" onClick={() => savePickupOverride(selectedShip.id)} className="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest bg-violet-600 text-white hover:bg-violet-700">Save override</button>
+                                  <button type="button" onClick={() => cancelPickupOverride(selectedShip.id)} className="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest bg-white border border-slate-300 text-slate-700 hover:bg-slate-50">Cancel</button>
+                                </div>
+                              </div>
+                            )}
                           </div>
                         );
                       })()}

@@ -503,6 +503,20 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
     if (!shipmentId) {
       return { success: false, error: { code: 'MISSING_SHIPMENT_REF', message: 'EasyPost pickup requires a provider shipment id (set when label was purchased).', retryable: false } };
     }
+    // Phase 2.6 — is_account_address default flipped to FALSE.
+    // Previously this defaulted to true, which told USPS "validate this
+    // pickup address against my saved shipper-of-record list". For the
+    // overwhelmingly common case (a normal store address that is NOT
+    // registered with USPS as a shipper-of-record under this EasyPost
+    // account) USPS rejects with code 1007 / Invalid address entered even
+    // when the address passes DPV deliverability. The honest default is
+    // FALSE: USPS validates the pickup address freshly. Operators with
+    // a truly registered shipper-of-record address can opt in via the
+    // per-store credential setting `uspsOriginIsShipperOfRecord` or by
+    // explicitly passing isAccountAddress=true on the request.
+    const creds = getCredentials('easypost');
+    const accountAddrDefault = creds?.uspsOriginIsShipperOfRecord === true;
+    const isAccountAddress = params.isAccountAddress ?? accountAddrDefault;
     try {
       const response = await fetch('https://api.easypost.com/v2/pickups', {
         method: 'POST',
@@ -514,7 +528,7 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
             min_datetime: params.minDatetime,
             max_datetime: params.maxDatetime,
             instructions: params.instructions || undefined,
-            is_account_address: params.isAccountAddress ?? true,
+            is_account_address: isAccountAddress,
           },
         }),
       });

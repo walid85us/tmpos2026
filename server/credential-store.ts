@@ -24,6 +24,9 @@ export function storeCredentials(
   if (credentials.apiKey) mergedCredentials.apiKey = credentials.apiKey;
   if (credentials.apiSecret) mergedCredentials.apiSecret = credentials.apiSecret;
   if (credentials.accountId) mergedCredentials.accountId = credentials.accountId;
+  if (typeof credentials.uspsOriginIsShipperOfRecord === 'boolean') {
+    mergedCredentials.uspsOriginIsShipperOfRecord = credentials.uspsOriginIsShipperOfRecord;
+  }
   providerStore.set(providerId, {
     credentials: mergedCredentials,
     environment,

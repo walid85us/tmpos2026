@@ -890,6 +890,19 @@ export interface Shipment {
   deliveredAt?: string;
   addressValidation?: AddressValidationResult;
   originAddressValidation?: AddressValidationResult;
+  // Phase 2.6 — pickup-only address/contact override. Used ONLY for the
+  // carrier pickup driver dispatch; never written to the printed label.
+  // After label purchase, originAddress is locked but the operator may
+  // still recover from a pickup-eligibility failure by supplying a
+  // dispatch-only override (e.g. correct suite/dock/door, or a different
+  // unit on the same property). resolvePickupAddress returns the override
+  // when present, otherwise originAddress.
+  pickupOverrideAddress?: ShipmentAddress;
+  pickupOverrideAddressValidation?: AddressValidationResult;
+  // Free-text dispatch detail for the pickup driver (suite, dock, door
+  // code, building name, hours). Merged into address.line2 if line2 is
+  // empty AND prepended to pickup instructions for provider visibility.
+  pickupLocationDetail?: string;
   selectedRate?: ShippingRate;
   shipmentMode?: 'provider' | 'manual';
   label?: LabelArtifact;

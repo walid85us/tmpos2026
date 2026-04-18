@@ -1,0 +1,200 @@
+Shipping Phase 2 — Pickup Override Address + is_account_address Default Fix
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+Implement the approved product/architecture fix from the analysis pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not patch messaging only.
+Implement the real recovery model.
+
+Approved direction:
+- Keep shipment origin and destination locked after label purchase
+- Do NOT allow editing shipment.originAddress once label is purchased
+- Add a pickup-specific override address/contact/location-detail model for carrier pickup recovery
+- Default EasyPost is_account_address to false unless explicitly enabled in provider settings
+- Keep all changes localized to pickup recovery and related settings/governance
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior Node/Express carrier-integration engineer
+- Senior React/TypeScript engineer
+- Enterprise shipping systems architect
+- Senior USPS / EasyPost / pickup-operations expert with 20+ years of experience in carrier pickup booking, label lifecycle rules, and operational shipping UX
+- QA gatekeeper
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- plan gating
+- store permission gating
+- provider/manual mode split
+- PACKED-only activation
+- mutual exclusivity between Service Point and Pickup
+- existing shipping core flow
+- reverse-logistics flow
+- current delivery verification / pickup eligibility distinction
+- current structured diagnostics UI
+- current build marker / runtime sync work
+
+==================================================
+APPROVED PRODUCT DECISION
+==================================================
+
+This is now the approved model:
+
+1) After label purchase, shipment.originAddress must remain locked.
+2) Recovery for pickup booking must NOT require changing the printed label address.
+3) Add a separate pickup-only dispatch address / pickup-only contact override that is used for the carrier pickup driver, without changing the label from_address.
+4) EasyPost createPickup must default is_account_address to false.
+5) Add a per-store EasyPost setting for the rare case where the origin address is truly registered with USPS as a shipper-of-record, and only then allow is_account_address=true.
+6) Add pickup location detail support (suite / dock / door code / building / hours) for pickup routing.
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIXES
+==================================================
+
+1) LOCK SHIPMENT ORIGIN AFTER LABEL PURCHASE
+Required:
+- once label exists / is purchased, shipment.originAddress must no longer be editable
+- destination must remain locked as well
+- this closes the current latent bug surfaced by the analysis
+
+2) ADD PICKUP OVERRIDE ADDRESS MODEL
+Required:
+- add optional pickupOverrideAddress on shipment
+- add optional pickupOverrideContact if needed
+- add pickupLocationDetail for suite/dock/door/building/hours
+- resolvePickupAddress must use pickupOverrideAddress when present, otherwise originAddress
+- clearly label this in UI as:
+  "Pickup dispatch address (used only for the carrier pickup driver; does not change the printed label)"
+
+3) ADD PICKUP OVERRIDE EDITOR
+Required:
+- add an in-context editor in the pickup section
+- prefill from current originAddress
+- editable after label purchase
+- separate from shipment origin editor
+- contact name/phone and pickup location detail should be editable here too
+
+4) PICKUP VERIFICATION / ELIGIBILITY MUST USE THE OVERRIDE WHEN PRESENT
+Required:
+- pickup verification
+- pickup eligibility memory
+- pickup create payload
+must all use the resolved pickup address source (override first, otherwise origin)
+
+5) FIX EASYPOST is_account_address DEFAULT
+Required:
+- default is_account_address to false in EasyPost createPickup
+- do not silently default it to true anymore
+- add a per-store/provider setting:
+  "Origin address is registered with USPS as a shipper-of-record"
+  default OFF
+- only send true when explicitly enabled
+
+6) PICKUP LOCATION DETAIL HANDLING
+Required:
+- support pickup-specific detail like suite / dock / door / building / hours
+- wire it into the pickup payload appropriately:
+  - address.street2 where appropriate
+  - pickup instructions where appropriate
+- keep this provider-aware but honest
+
+7) PICKUP RECOVERY UX
+Required:
+- when pickup fails for an address-related reason after label purchase, the recovery action must point to:
+  - Edit pickup dispatch address
+  - Edit pickup contact
+  - Edit pickup location detail
+  - Re-verify
+- do not tell the operator to edit the locked shipment origin
+
+==================================================
+WHAT MUST STAY LOCKED AFTER LABEL PURCHASE
+==================================================
+
+Keep locked:
+- shipment.originAddress
+- shipment.destinationAddress
+- selected rate / carrier / service level
+- label artifact references
+- package dimensions/weight
+- providerShipmentId
+
+==================================================
+WHAT MAY REMAIN EDITABLE AFTER LABEL PURCHASE
+==================================================
+
+Allow editing for pickup recovery:
+- pickupOverrideAddress
+- pickup contact name
+- pickup contact phone
+- pickup contact email if available
+- pickup instructions
+- pickup location detail
+- pickup date/window
+- per-store EasyPost USPS shipper-of-record setting
+
+==================================================
+IMPORTANT RULES
+==================================================
+
+- Do not redesign the app
+- Do not mutate the printed label address after label purchase
+- Do not fake pickup eligibility
+- Do not keep using the old origin-address edit recovery
+- Do not broaden into unrelated workstreams
+- Keep the design baseline consistent
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Lock shipment origin/destination after label purchase
+2) Add pickupOverrideAddress / pickupOverrideContact / pickupLocationDetail model
+3) Add the pickup override editor and recovery flow
+4) Make verification, eligibility memory, and pickup_create use the resolved pickup address source
+5) Fix EasyPost is_account_address default to false and add the explicit provider setting
+6) Re-test the pickup recovery flow
+7) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- pickup override address model
+- post-label lock rules
+- EasyPost is_account_address default change
+- USPS shipper-of-record opt-in setting
+- pickup recovery workflow after label purchase
+- what remains locked vs editable
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Post-Label Lock Fix
+3. Pickup Override Address / Contact / Location Detail Fix
+4. Resolved Pickup Address Source Integration Fix
+5. EasyPost is_account_address Default / Setting Fix
+6. Recovery UX Fix
+7. Files Changed
+8. Documentation Updated
+9. Non-Regression Notes

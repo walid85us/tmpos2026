@@ -3,6 +3,15 @@ export interface ShippingProviderCredentials {
   apiSecret?: string;
   accountId?: string;
   environment?: 'test' | 'production';
+  // Phase 2.6 — opt-in flag for the (rare) case where the origin address is
+  // truly registered with USPS as a shipper-of-record under this EasyPost
+  // account. When OFF (default), EasyPost createPickup is called with
+  // is_account_address=false and USPS validates the address freshly. When ON,
+  // the adapter forwards is_account_address=true, which tells USPS to look the
+  // address up against the operator's saved shipper-of-record list. Setting
+  // this true on a normal store address is the most common cause of the
+  // "Invalid address entered" (USPS code 1007) failures we saw in QA.
+  uspsOriginIsShipperOfRecord?: boolean;
 }
 
 export interface ShipmentAddress {
