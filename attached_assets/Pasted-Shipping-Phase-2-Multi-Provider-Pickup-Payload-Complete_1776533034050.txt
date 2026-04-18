@@ -1,0 +1,214 @@
+Shipping Phase 2 — Multi-Provider Pickup Payload Completeness / Required-Field Fix
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a narrow root-cause correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Fix the current pickup-booking provider payload issue and implement the required-field / preflight architecture as a multi-provider model for:
+- EasyPost
+- Shippo
+- ShipStation
+
+IMPORTANT:
+The visible current failure is on EasyPost, but the fix must not be implemented as an EasyPost-only one-off patch.
+The actual provider-booking logic may remain different by provider, but the required-field modeling, payload-preflight discipline, and operator UX must include Shippo and ShipStation as first-class providers.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior Node/Express carrier-integration engineer
+- Senior React/TypeScript engineer
+- Enterprise shipping systems architect
+- Senior parcel pickup / carrier API expert with 20+ years of experience in USPS, UPS, FedEx, and provider-orchestrated pickup booking
+- Root-cause debugging specialist
+- QA gatekeeper who must not accept partial/cosmetic fixes
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- plan gating
+- store permission gating
+- provider/manual mode split
+- PACKED-only activation
+- mutual exclusivity between Service Point and Pickup
+- existing shipping core flow
+- reverse-logistics flow
+- current address-source-of-truth work
+- current pickup address verification work
+- current structured diagnostics UI
+- existing provider-specific pickup capability model
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — ACTUAL REMAINING FAILURE
+==================================================
+
+The current blocker is no longer address verification.
+
+Observed QA result:
+- Pickup address now shows "Verified by carrier"
+- But pickup create still fails during pickup_create with HTTP 422
+- Current provider error says:
+  pickup.instructions: instructions field is required
+
+This means:
+- address verification is now working
+- the remaining failure is provider payload completeness / required-field mapping
+- the app is still sending an incomplete pickup-create payload to the active provider flow
+
+The visible issue is on EasyPost, but the implementation fix must establish a provider-aware required-field/preflight architecture that includes EasyPost, Shippo, and ShipStation.
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIXES
+==================================================
+
+1) TRACE THE EXACT PICKUP CREATE PAYLOAD PER PROVIDER
+Required:
+- inspect the exact payload sent for pickup create in the currently implemented EasyPost path
+- inspect the provider-specific payload model and preflight assumptions for Shippo and ShipStation even if their live booking path is not fully wired
+- identify every required pickup-booking field currently used, missing, or mapped incorrectly
+- explicitly verify whether "handling notes" is being mapped into provider pickup instructions / notes / required booking fields correctly
+
+2) FIX REQUIRED-FIELD / INSTRUCTIONS MAPPING
+Required:
+- if the active provider requires pickup instructions (or equivalent booking notes), send it correctly
+- do not rely on a generic notes field unless it is actually mapped into the provider payload
+- if the provider requires a dedicated instructions value, add/use that exact field
+- for Shippo and ShipStation, model the equivalent required-field behavior honestly even if their live booking implementation remains capability-gated in this pass
+- do not hardcode a one-provider-only hack if the same class of issue exists across providers
+
+3) PROVIDER-PAYLOAD PREFLIGHT VALIDATION
+Required:
+- before calling provider pickup create, validate the actual provider payload for required booking fields
+- include at minimum:
+  - verified pickup address readiness
+  - pickup window
+  - contact name
+  - contact phone
+  - instructions / notes if required by the active provider flow
+- if a required field is missing, block before the API call and show the operator exactly what must be filled in
+- this preflight architecture must support EasyPost, Shippo, and ShipStation, even if live provider execution differs by provider
+
+4) MULTI-PROVIDER REQUIRED-FIELD MODEL
+Required:
+- extend the provider capability / pickup requirement model so the app can represent booking requirements honestly per provider
+- examples:
+  - pickupRequiresInstructions
+  - pickupRequiresPhone
+  - pickupRequiresContactName
+  - pickupRequiresVerifiedAddress
+  - pickupRequiresProviderShipmentId
+  - pickupRequiresCarrierAccount
+  - pickupRequiresLabelIds
+  - pickupRequiresSameWarehouseLabels
+- do not keep these rules implicit and scattered
+- EasyPost, Shippo, and ShipStation must each be represented explicitly
+
+5) CLEAR OPERATOR UX
+Required:
+- if pickup instructions are required, the UI must show that clearly before the request
+- use a clear field label such as Pickup Instructions if needed
+- do not let the operator click Request Carrier Pickup and then discover a missing hidden provider field from the provider response
+- if Handling Notes is intended to satisfy the requirement, label or map it clearly and honestly
+- the UI must remain provider-aware and not imply all providers behave the same
+
+6) KEEP DIAGNOSTICS, BUT FIX THE REAL CAUSE
+Required:
+- keep the structured error display and failing-step identification
+- but make sure the next QA is testing the fixed payload/preflight, not just better error text
+- no more “visible but still broken” passes
+
+7) EASYPOST FIX NOW, SHIPPO / SHIPSTATION INCLUDED IN ARCHITECTURE NOW
+Required:
+- the EasyPost path must be actually fixed in this pass
+- Shippo and ShipStation must be included now in:
+  - required-field modeling
+  - provider capability definitions
+  - preflight validation architecture
+  - operator messaging
+- if live Shippo / ShipStation pickup is not fully executable in this pass, keep that explicit and honest
+- do not leave the app architected as if only EasyPost matters
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- when the pickup address is verified and all required pickup-booking fields are present, the EasyPost pickup flow no longer fails because of a hidden required provider field
+- if a required field is missing, the app blocks before the provider call and tells the operator exactly what is missing
+- the required-field/preflight architecture is clearly provider-aware for EasyPost, Shippo, and ShipStation
+- the next QA must not fail on another invisible pickup payload omission
+
+==================================================
+IMPORTANT RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into unrelated workstreams
+- Do not fake booking success
+- Do not fake pickup confirmation
+- Do not ship another cosmetic pass
+- Fix the actual provider payload issue
+- Keep the design baseline consistent
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Trace the exact EasyPost pickup-create payload
+2) Identify all required booking fields actually used by the current EasyPost provider flow
+3) Extend the provider requirement model to EasyPost, Shippo, and ShipStation
+4) Fix pickup instructions / required-field mapping
+5) Add provider-payload preflight validation
+6) Update the UI so required pickup-booking fields are visible and understandable
+7) Re-test the EasyPost pickup flow
+8) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- the actual root cause found in this pass
+- pickup-create provider payload requirements
+- pickup instructions / notes mapping rule
+- provider-payload preflight validation rule
+- how EasyPost, Shippo, and ShipStation differ in required booking fields / pickup prerequisites
+- what is implemented now vs only modeled/capability-gated
+- remaining limitations if any
+
+==================================================
+MANDATORY OUTPUT PROOF
+==================================================
+
+Do not give a generic completion summary.
+Do not say this task is complete unless:
+- the EasyPost provider payload issue is actually fixed
+- Shippo and ShipStation are explicitly included in the required-field / preflight architecture
+- the pickup flow is no longer failing due to hidden required fields in the active EasyPost path
+
+OUTPUT FORMAT REQUIRED
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. EasyPost Pickup Create Payload Findings
+3. Multi-Provider Required-Field Model Fix
+4. Required-Field / Instructions Mapping Fix
+5. Provider-Payload Preflight Validation Fix
+6. Operator UX Fix
+7. Shippo / ShipStation Inclusion Notes
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes

@@ -1122,6 +1122,19 @@ export default function ShippingCenter() {
     // Whether the provider needs a per-carrier account/connection on file
     // (e.g. ShipStation per-carrier connect screens).
     pickupNeedsCarrierAccount: boolean;
+    // ─── Required-field model (carrier-/provider-specific) ─────────────
+    // Each flag declares an explicit booking requirement of the provider's
+    // pickup endpoint. The preflight (`getPickupPayloadPreflight`) and the
+    // operator UI both read these flags so requirements are never implicit
+    // or scattered. EasyPost, Shippo, and ShipStation are all modeled here
+    // as first-class providers.
+    pickupRequiresVerifiedAddress: boolean;     // address must be carrier-verified
+    pickupRequiresPickupWindow: boolean;        // min_datetime/max_datetime needed
+    pickupRequiresContactName: boolean;         // person to ask for at the door
+    pickupRequiresContactPhone: boolean;        // driver-callable phone number
+    pickupRequiresInstructions: boolean;        // pickup instructions / notes
+    pickupRequiresLabelIds: boolean;            // Shippo: transactions[] of bought label ids
+    // ───────────────────────────────────────────────────────────────────
     pickupCarrierCoverage: string[];
     pickupStatusModel: 'request_lifecycle' | 'webhook_streamed';
     pickupTestModeLimitations: string;
@@ -1138,10 +1151,20 @@ export default function ShippingCenter() {
       pickupNeedsRatePurchase: true,
       pickupNeedsProviderShipmentId: true,
       pickupNeedsCarrierAccount: false,
+      pickupRequiresVerifiedAddress: true,
+      pickupRequiresPickupWindow: true,
+      pickupRequiresContactName: true,
+      pickupRequiresContactPhone: true,
+      // Confirmed at runtime — EasyPost rejects /v2/pickups without
+      // `instructions`. The field must be a non-empty string telling the
+      // driver where/how to pick up the parcel ("Front desk", "Side door
+      // ring bell", "Back loading dock 3"). We require it in the form.
+      pickupRequiresInstructions: true,
+      pickupRequiresLabelIds: false,
       pickupCarrierCoverage: ['USPS', 'UPS', 'FedEx', 'DHL'],
       pickupStatusModel: 'webhook_streamed',
       pickupTestModeLimitations: 'EasyPost test mode (api keys starting with EZTK_) does not actually dispatch a carrier; pickups can be created/bought/cancelled but no truck arrives. Use a production key for real pickups.',
-      pickupAuditNote: 'EasyPost pickups: POST /v2/pickups → returns pickup_rates → POST /v2/pickups/{id}/buy with carrier+service. A carrier confirmation number is issued after buy. Live API is wired in this app (server adapter calls real EasyPost).',
+      pickupAuditNote: 'EasyPost pickups: POST /v2/pickups (requires address, shipment id, min/max_datetime, instructions) → returns pickup_rates → POST /v2/pickups/{id}/buy with carrier+service. A carrier confirmation number is issued after buy. Live API is wired in this app (server adapter calls real EasyPost).',
     },
     shippo: {
       servicePoints: false,
@@ -1153,10 +1176,21 @@ export default function ShippingCenter() {
       pickupNeedsRatePurchase: false,
       pickupNeedsProviderShipmentId: false,
       pickupNeedsCarrierAccount: true,
+      // Shippo's /pickups endpoint requires: carrier_account, location
+      // (address + building_location_type + instructions), requested_start
+      // /end_time, transactions[] (label IDs to be picked up). All four
+      // are real provider requirements, modeled here even though the
+      // adapter is currently capability-gated to a local-only record.
+      pickupRequiresVerifiedAddress: true,
+      pickupRequiresPickupWindow: true,
+      pickupRequiresContactName: true,
+      pickupRequiresContactPhone: true,
+      pickupRequiresInstructions: true,
+      pickupRequiresLabelIds: true,
       pickupCarrierCoverage: ['USPS', 'UPS', 'DHL Express'],
       pickupStatusModel: 'request_lifecycle',
       pickupTestModeLimitations: 'Shippo test mode supports /pickups create+cancel without dispatching a carrier. Live wiring in this app is not yet done.',
-      pickupAuditNote: 'Shippo pickups: single-shot POST /pickups returns confirmation_code (no separate buy). Adapter is capability-gated in this app — local-only pickup record will be created instead. Switch to EasyPost for live booking.',
+      pickupAuditNote: 'Shippo pickups: single-shot POST /pickups (requires carrier_account, location.address, location.instructions, requested_start_time/end_time, transactions[]) returns confirmation_code (no separate buy). Adapter is capability-gated in this app — local-only pickup record will be created instead. Switch to EasyPost for live booking.',
     },
     shipstation: {
       servicePoints: false,
@@ -1170,6 +1204,17 @@ export default function ShippingCenter() {
       pickupNeedsRatePurchase: false,
       pickupNeedsProviderShipmentId: false,
       pickupNeedsCarrierAccount: true,
+      // ShipStation has NO generic pickup API — there is nothing to
+      // preflight at the provider layer. We still capture pickup window
+      // and contact info as an internal record so the operator has it
+      // when scheduling with the carrier directly. Provider-required
+      // fields are all false because there is no provider call.
+      pickupRequiresVerifiedAddress: false,
+      pickupRequiresPickupWindow: false,
+      pickupRequiresContactName: false,
+      pickupRequiresContactPhone: false,
+      pickupRequiresInstructions: false,
+      pickupRequiresLabelIds: false,
       pickupCarrierCoverage: [],
       pickupStatusModel: 'request_lifecycle',
       pickupTestModeLimitations: 'ShipStation does not expose pickup booking via API in any environment. Pickups are scheduled in ShipStation’s own UI or directly with the carrier.',
@@ -1233,7 +1278,7 @@ export default function ShippingCenter() {
   // pre-checks, ZIP search activation — to guarantee a single source of truth.
   // Reason ordering matches operator priority: provider → plan → permission →
   // lifecycle → mutex. The first failing reason is surfaced.
-  type Eligibility = { eligible: boolean; reason?: string; category?: 'provider' | 'plan' | 'permission' | 'lifecycle' | 'mutex' | 'pickup_address' | 'pickup_address_unverified' };
+  type Eligibility = { eligible: boolean; reason?: string; category?: 'provider' | 'plan' | 'permission' | 'lifecycle' | 'mutex' | 'pickup_address' | 'pickup_address_unverified' | 'pickup_payload' };
   function getServicePointEligibility(shipment: Shipment): Eligibility {
     // LIVE locator eligibility. Currently always fails at the provider category until
     // a carrier-specific locator adapter is configured under Settings → Carrier Locators.
@@ -1472,6 +1517,75 @@ export default function ShippingCenter() {
     }));
   }
 
+  // ─────────────────────────────────────────────────────────────────────
+  // Multi-provider pickup-payload preflight.
+  //
+  // Runs the provider's required-field model (declared in PROVIDER_CAPABILITIES
+  // — pickupRequiresInstructions / pickupRequiresContactName /
+  // pickupRequiresContactPhone / pickupRequiresVerifiedAddress /
+  // pickupRequiresLabelIds / pickupRequiresPickupWindow /
+  // pickupNeedsProviderShipmentId) against the actual values that the live
+  // booking call would send. If anything is missing we block BEFORE the
+  // provider call so the operator sees exactly which fields to fill in,
+  // rather than discovering hidden requirements only via a 422 from the
+  // carrier (which is what was happening with EasyPost's `instructions`).
+  //
+  // The preflight is provider-aware — EasyPost, Shippo, and ShipStation are
+  // each driven by their own capability flags. Only providers with
+  // `supportsLivePickupBooking === true` are preflighted (others go down
+  // the local-only branch where no provider payload is sent).
+  // ─────────────────────────────────────────────────────────────────────
+  type PickupPayloadPreflight = {
+    ready: boolean;
+    requiredFields: { key: string; label: string; satisfied: boolean; sourceHint: string }[];
+    missing: string[];
+    providerLive: boolean;
+  };
+  function getPickupPayloadPreflight(shipment: Shipment): PickupPayloadPreflight {
+    const caps = activeProviderId ? PROVIDER_CAPABILITIES[activeProviderId.toLowerCase()] : null;
+    if (!caps || !caps.supportsLivePickupBooking) {
+      return { ready: true, requiredFields: [], missing: [], providerLive: false };
+    }
+    const { address: pickupAddr } = resolvePickupAddress(shipment);
+    const verify = getPickupVerificationStatus(shipment);
+    const verifiedOk = verify.status === 'verified' || verify.status === 'corrected_accepted';
+    const contactName = (pickupForm.contactName.trim() || pickupAddr.name || pickupAddr.company || '').trim();
+    const contactPhone = (pickupForm.contactPhone.trim() || pickupAddr.phone || '').trim();
+    const instructions = pickupForm.notes.trim();
+    const hasWindow = !!(pickupForm.date && pickupForm.windowStart && pickupForm.windowEnd);
+    const hasShipmentRef = !!shipment.providerShipmentId;
+    const fields: { key: string; label: string; satisfied: boolean; sourceHint: string }[] = [];
+    if (caps.pickupRequiresVerifiedAddress) {
+      fields.push({ key: 'verified_address', label: 'Carrier-verified pickup address', satisfied: verifiedOk, sourceHint: 'Verify the pickup address in the banner above (Verify Pickup Address button).' });
+    }
+    if (caps.pickupNeedsProviderShipmentId) {
+      fields.push({ key: 'provider_shipment_id', label: 'Provider shipment id (label)', satisfied: hasShipmentRef, sourceHint: 'Purchase a label for this shipment first — pickups attach to a bought label.' });
+    }
+    if (caps.pickupRequiresPickupWindow) {
+      fields.push({ key: 'pickup_window', label: 'Pickup date + window (earliest/latest)', satisfied: hasWindow, sourceHint: 'Set Pickup Date, Earliest, and Latest in the form below.' });
+    }
+    if (caps.pickupRequiresContactName) {
+      fields.push({ key: 'contact_name', label: 'Contact name (person at pickup site)', satisfied: contactName.length > 0, sourceHint: 'Fill in Contact Name (or set a name on the shipment origin address).' });
+    }
+    if (caps.pickupRequiresContactPhone) {
+      fields.push({ key: 'contact_phone', label: 'Contact phone (driver-callable)', satisfied: contactPhone.length > 0, sourceHint: 'Fill in Contact Phone (or set a phone on the shipment origin address).' });
+    }
+    if (caps.pickupRequiresInstructions) {
+      // EasyPost /v2/pickups: `instructions` field is required and must be a
+      // non-empty string telling the driver where/how to pick up the parcel.
+      // Empty/whitespace-only does NOT count as satisfied.
+      fields.push({ key: 'instructions', label: 'Pickup instructions (where the driver should go)', satisfied: instructions.length > 0, sourceHint: 'Fill in Pickup Instructions below — e.g. "Front desk", "Side door, ring bell", "Loading dock 3".' });
+    }
+    if (caps.pickupRequiresLabelIds) {
+      // Shippo requires a transactions[] array of label ids. We currently
+      // map this from `providerShipmentId`/transactions on the shipment;
+      // honest signal that the data is present.
+      fields.push({ key: 'label_ids', label: 'Bought label id(s) for the pickup (transactions[])', satisfied: hasShipmentRef, sourceHint: 'Purchase the label(s) for this shipment first — Shippo attaches pickups to specific labels.' });
+    }
+    const missing = fields.filter(f => !f.satisfied).map(f => f.label);
+    return { ready: missing.length === 0, requiredFields: fields, missing, providerLive: true };
+  }
+
   function getPickupEligibility(shipment: Shipment): Eligibility {
     const caps = getProviderCapabilities(shipment);
     if (!caps.pickupRequests) {
@@ -1515,6 +1629,18 @@ export default function ShippingCenter() {
         : verify.status === 'failed' ? `Carrier rejected the pickup address${verify.record?.errorMessage ? ` — ${verify.record.errorMessage}` : verify.record?.messages?.[0] ? `: ${verify.record.messages[0]}` : ''}. Fix the address and re-verify before booking.`
         : 'Pickup address is not verified.';
       return { eligible: false, reason, category: 'pickup_address_unverified' };
+    }
+    // Provider-payload preflight — checks the actual fields the live booking
+    // call would send against the active provider's required-field model
+    // (PROVIDER_CAPABILITIES.pickupRequires*). Catches things like EasyPost's
+    // mandatory `instructions` field BEFORE the API call.
+    const preflight = getPickupPayloadPreflight(shipment);
+    if (!preflight.ready) {
+      return {
+        eligible: false,
+        reason: `${activeProviderId} pickup requires the following before booking: ${preflight.missing.join(', ')}.`,
+        category: 'pickup_payload',
+      };
     }
     return { eligible: true };
   }
@@ -1764,6 +1890,34 @@ export default function ShippingCenter() {
               { label: 'Pickup address source', value: pickupAddrResolved.sourceLabel },
               { label: 'Where to fix it', value: 'Open the shipment origin address editor (Origin section above) and complete the highlighted fields.' },
               { label: 'Missing fields', value: missing.join(', ') },
+            ],
+          });
+          return;
+        }
+        // Provider-payload preflight — runs the active provider's
+        // required-field model against the values that would be sent. This
+        // is what blocks EasyPost's hidden `instructions` requirement (and
+        // any future provider-required field) BEFORE the /v2/pickups call.
+        const payloadPreflight = getPickupPayloadPreflight(ship);
+        if (payloadPreflight.providerLive && !payloadPreflight.ready) {
+          const missingLabels = payloadPreflight.requiredFields.filter(f => !f.satisfied).map(f => `• ${f.label} — ${f.sourceHint}`);
+          const msg = `${activeProviderId} pickup is missing required field(s) for this booking. Fill them in before requesting pickup.`;
+          // eslint-disable-next-line no-console
+          console.error('[Pickup] PICKUP_PAYLOAD_INCOMPLETE', { provider: activeProviderId, missing: payloadPreflight.missing });
+          setProviderError(friendlyProviderError({ code: 'PICKUP_PAYLOAD_INCOMPLETE', message: `${msg} Missing: ${payloadPreflight.missing.join(', ')}.` }));
+          setPickupAttemptResult({
+            kind: 'error',
+            title: 'Pickup payload is incomplete',
+            detail: msg,
+            steps: [
+              { label: 'Pre-flight: pickup address ready', status: 'ok', note: `Using ${pickupAddrResolved.source}` },
+              { label: 'Pre-flight: provider required fields', status: 'fail', note: `${payloadPreflight.missing.length} required field(s) missing for ${activeProviderId}.` },
+            ],
+            code: 'PICKUP_PAYLOAD_INCOMPLETE',
+            context: [
+              { label: 'Provider', value: activeProviderId || '(none)' },
+              { label: 'Missing required fields', value: missingLabels.join('\n') },
+              { label: 'Where to fix', value: 'Fill in the highlighted fields in the pickup form (and verify the address if not yet verified).' },
             ],
           });
           return;
@@ -4373,33 +4527,79 @@ export default function ShippingCenter() {
                           <p className="text-xs text-sky-700">Previous pickup is {pr!.status}. You can re-schedule a new carrier pickup below — the cancelled record stays in the timeline for audit.</p>
                         </div>
                       )}
-                      {(!pr || prTerminated) && pickupRequestable && !isWriteBlocked && (
+                      {(!pr || prTerminated) && pickupRequestable && !isWriteBlocked && (() => {
+                        const puCaps = activeProviderId ? PROVIDER_CAPABILITIES[activeProviderId.toLowerCase()] : null;
+                        const reqInstructions = !!puCaps?.pickupRequiresInstructions;
+                        const reqContactName = !!puCaps?.pickupRequiresContactName;
+                        const reqContactPhone = !!puCaps?.pickupRequiresContactPhone;
+                        const reqWindow = !!puCaps?.pickupRequiresPickupWindow;
+                        const payloadPreflightUI = getPickupPayloadPreflight(selectedShip);
+                        const reqMark = (req: boolean) => req ? <span className="text-rose-600 ml-0.5">*</span> : null;
+                        return (
                         <div className="grid grid-cols-2 gap-3 mt-4">
+                          {puCaps?.supportsLivePickupBooking && payloadPreflightUI.requiredFields.length > 0 && (
+                            <div className={`col-span-2 rounded-xl border p-3 ${payloadPreflightUI.ready ? 'bg-emerald-50 border-emerald-200' : 'bg-amber-50 border-amber-200'}`}>
+                              <div className="flex items-center justify-between mb-2">
+                                <p className={`text-[10px] font-black uppercase tracking-widest ${payloadPreflightUI.ready ? 'text-emerald-800' : 'text-amber-800'}`}>
+                                  {activeProviderId} required pickup fields
+                                </p>
+                                <span className={`text-[9px] font-mono font-black px-1.5 py-0.5 rounded ${payloadPreflightUI.ready ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                                  {payloadPreflightUI.ready ? 'READY' : `${payloadPreflightUI.missing.length} MISSING`}
+                                </span>
+                              </div>
+                              <ul className="space-y-1">
+                                {payloadPreflightUI.requiredFields.map(f => (
+                                  <li key={f.key} className="flex items-start gap-1.5 text-[10px]">
+                                    <span className={`material-symbols-outlined text-[12px] mt-0.5 ${f.satisfied ? 'text-emerald-600' : 'text-amber-600'}`}>
+                                      {f.satisfied ? 'check_circle' : 'radio_button_unchecked'}
+                                    </span>
+                                    <span className={`${f.satisfied ? 'text-emerald-800' : 'text-amber-900'}`}>
+                                      <strong>{f.label}</strong>
+                                      {!f.satisfied && <span className="text-amber-700"> — {f.sourceHint}</span>}
+                                    </span>
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
                           <div>
-                            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Pickup Date</label>
+                            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Pickup Date{reqMark(reqWindow)}</label>
                             <input type="date" value={pickupForm.date} onChange={e => setPickupForm({ ...pickupForm, date: e.target.value })} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs" />
                           </div>
                           <div className="grid grid-cols-2 gap-2">
                             <div>
-                              <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Earliest</label>
+                              <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Earliest{reqMark(reqWindow)}</label>
                               <input type="time" value={pickupForm.windowStart} onChange={e => setPickupForm({ ...pickupForm, windowStart: e.target.value })} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs" />
                             </div>
                             <div>
-                              <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Latest</label>
+                              <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Latest{reqMark(reqWindow)}</label>
                               <input type="time" value={pickupForm.windowEnd} onChange={e => setPickupForm({ ...pickupForm, windowEnd: e.target.value })} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs" />
                             </div>
                           </div>
                           <div>
-                            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Contact Name</label>
+                            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Contact Name{reqMark(reqContactName)}</label>
                             <input type="text" value={pickupForm.contactName} onChange={e => setPickupForm({ ...pickupForm, contactName: e.target.value })} placeholder={selectedShip.originAddress.name} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs" />
                           </div>
                           <div>
-                            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Contact Phone</label>
+                            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Contact Phone{reqMark(reqContactPhone)}</label>
                             <input type="text" value={pickupForm.contactPhone} onChange={e => setPickupForm({ ...pickupForm, contactPhone: e.target.value })} placeholder={selectedShip.originAddress.phone || ''} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs" />
                           </div>
                           <div className="col-span-2">
-                            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Handling Notes</label>
-                            <input type="text" value={pickupForm.notes} onChange={e => setPickupForm({ ...pickupForm, notes: e.target.value })} placeholder="e.g. Ring bell at side door" className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs" />
+                            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">
+                              {reqInstructions ? 'Pickup Instructions' : 'Handling Notes'}{reqMark(reqInstructions)}
+                            </label>
+                            <input
+                              type="text"
+                              value={pickupForm.notes}
+                              onChange={e => setPickupForm({ ...pickupForm, notes: e.target.value })}
+                              placeholder={reqInstructions ? 'Required by ' + activeProviderId + ' — e.g. "Front desk", "Side door, ring bell", "Loading dock 3"' : 'e.g. Ring bell at side door'}
+                              className={`w-full mt-1 px-3 py-2 border rounded-xl text-xs ${reqInstructions && pickupForm.notes.trim().length === 0 ? 'border-amber-300 bg-amber-50' : 'border-slate-200'}`}
+                            />
+                            {reqInstructions && (
+                              <p className="text-[10px] text-slate-500 mt-1">
+                                Sent to the carrier as <code className="bg-slate-100 px-1 rounded">pickup.instructions</code>. Tell the driver where to go (front desk, side door, dock, etc.). Required by {activeProviderId}.
+                              </p>
+                            )}
                           </div>
                           {pickupAttemptResult && (() => {
                             const tone = pickupAttemptResult.kind === 'success'
@@ -4500,7 +4700,8 @@ export default function ShippingCenter() {
                             </button>
                           </div>
                         </div>
-                      )}
+                        );
+                      })()}
                       {pickupCancellable && canCancelPickup && !isWriteBlocked && (
                         <div className="mt-4 pt-4 border-t border-slate-100 space-y-2">
                           <input type="text" value={pickupCancelReason} onChange={e => setPickupCancelReason(e.target.value)} placeholder="Cancellation reason (optional)" className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs" />

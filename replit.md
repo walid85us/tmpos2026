@@ -149,3 +149,44 @@ The frontend is built using React 19, TypeScript, Vite 6, and Tailwind CSS v4.
 **Carrier-agnostic note**: The visible failure that triggered this phase happened on USPS, but the verification layer is implemented against EasyPost's generic delivery-verification endpoint. UPS, FedEx, and any future EasyPost-supported pickup carrier go through the same code path with no carrier-specific branches. Where carrier-specific error details come back from EasyPost they are surfaced verbatim in the failure block.
 
 **Future (not implemented)**: per-carrier verification overrides (e.g. UPS-specific street-type normalization), multi-result selection when EasyPost returns multiple suggestions, and an "always re-verify before booking" strict mode toggle.
+
+### Phase 2.5.5 — Multi-Provider Pickup Payload Completeness (Apr 2026)
+
+**Root cause found**: Pickup-address verification (Phase 2.5.4) now passes, but EasyPost `/v2/pickups` was still failing with HTTP 422 `pickup.instructions: instructions field is required`. The adapter sent `instructions: params.instructions || undefined` — an empty Handling Notes meant the field was omitted entirely, and EasyPost's API rejects pickups without it. Required-field rules were implicit and only surfaced as provider 422s instead of being modeled in the app.
+
+**Fix**: A provider-aware required-field model and pre-API preflight, applied uniformly to EasyPost (live), Shippo (modeled, capability-gated), and ShipStation (no provider pickup API).
+
+**Required-field model** — added to `ProviderCaps` in `PROVIDER_CAPABILITIES`:
+- `pickupRequiresVerifiedAddress`
+- `pickupRequiresPickupWindow`
+- `pickupRequiresContactName`
+- `pickupRequiresContactPhone`
+- `pickupRequiresInstructions`
+- `pickupRequiresLabelIds`
+- (existing) `pickupNeedsProviderShipmentId`, `pickupNeedsCarrierAccount`, `pickupNeedsRateSelection`, `pickupNeedsRatePurchase`
+
+**Per-provider declarations**:
+- **EasyPost** — verified address, pickup window, contact name, contact phone, instructions, provider shipment id ALL required. Live booking wired against `/v2/pickups` + `/buy`. `instructions` is the field that was implicitly required and is now explicit.
+- **Shippo** — same fields PLUS `pickupRequiresLabelIds: true` (Shippo's `/pickups` requires `transactions[]` of bought label ids). Modeled honestly even though the adapter is currently capability-gated to a local-only record. The capability rules ensure that when Shippo live booking is wired, the preflight already gates it correctly.
+- **ShipStation** — all `pickupRequires*` are false because there is no ShipStation pickup API to call. The app records a local-only pickup intent only.
+
+**Preflight (`getPickupPayloadPreflight`)**: For providers with `supportsLivePickupBooking === true`, walks the required-field model against the values that the live booking call would send (resolved pickup address from Phase 2.5.3, verification status from Phase 2.5.4, pickup form fields, shipment.providerShipmentId). Returns `{ ready, requiredFields[], missing[], providerLive }`. Used in two places:
+1. **Eligibility** — `getPickupEligibility` adds a new `category: 'pickup_payload'` failure with the missing-fields reason. The pickup form is still rendered (so the operator can fill in fields) but the action is gated.
+2. **Action handler** — `handleRequestPickup` re-runs the preflight as a defense-in-depth check; on failure it sets `PICKUP_PAYLOAD_INCOMPLETE` with a per-field breakdown including each field's `sourceHint` ("Fill in Pickup Instructions below — e.g. 'Front desk' …"). No EasyPost call is made.
+
+**UI**:
+- A new per-provider required-fields panel above the pickup form, showing each `pickupRequires*` field with a green check or amber radio + sourceHint, and a `READY` / `N MISSING` badge in the corner.
+- "Handling Notes" is renamed to **"Pickup Instructions"** with a red asterisk when the active provider requires it (EasyPost, Shippo). The input gets an amber outline when empty-but-required, an example placeholder ("Front desk", "Side door, ring bell", "Loading dock 3"), and a helper line stating the field is sent as `pickup.instructions` to the carrier.
+- Contact Name, Contact Phone, Pickup Date / Earliest / Latest also show the required-asterisk based on the provider's flags.
+- Operators see the requirement BEFORE clicking Request Carrier Pickup — no more "click then discover a hidden 422".
+
+**Diagnostics preserved**: The structured `pickupAttemptResult` panel from Phase 2.5.1 still renders provider errors verbatim with stage/HTTP-status/fieldErrors. The new preflight failure is rendered through the same panel with `code: 'PICKUP_PAYLOAD_INCOMPLETE'` and a stepwise trace, so the operator sees consistent diagnostics whether the failure happened in-app or at the provider.
+
+**EasyPost adapter unchanged**: `server/adapters/easypost.ts` still sends `instructions: params.instructions || undefined`. The fix is at the app layer — the preflight guarantees `instructions` is now always a non-empty string before the call, so the adapter no longer sends `undefined`. Adapter-level guard would be redundant given the preflight, but is a possible defense-in-depth follow-up.
+
+**Honest scope notes**:
+- Live wiring is unchanged: only EasyPost is `supportsLivePickupBooking: true`. Shippo and ShipStation continue to take the local-only branch.
+- Shippo's `pickupRequiresLabelIds` is modeled but the local-only branch doesn't actually need to satisfy it. When Shippo live booking is wired in a future phase, the preflight already gates it correctly without further work.
+- ShipStation has no provider preflight (all flags false) because there is no provider call. The local pickup record path is unchanged.
+
+**Future (not implemented)**: Adapter-level "instructions must be non-empty" assertion as defense-in-depth; per-carrier instruction templates (USPS vs UPS phrasing); validation of phone format per carrier (E.164); real Shippo pickup adapter wiring with the modeled required-field set.
