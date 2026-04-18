@@ -1,0 +1,91 @@
+Shipping Phase 2 — Runtime Proof / Deployment Sync Correction Pass
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is NOT another abstract logic pass.
+This is a runtime-proof and deployment-sync correction pass.
+Do not redesign the app.
+Do not broaden scope.
+
+The issue now is that your reported fix is not visibly present in the running UI.
+
+==================================================
+CURRENT QA SOURCE OF TRUTH
+==================================================
+
+Your last report claimed:
+- "Verified by carrier" was renamed to "Delivery verified"
+- a separate pickup eligibility state/chip was added
+- failed pickup eligibility for the same unchanged address would be remembered
+- the UI would no longer show the same misleading verified/ready contradiction
+
+But in the actual running app, QA still shows:
+- the badge still says "Verified by carrier"
+- there is no visible separate pickup eligibility chip/state
+- the same unchanged address can still be submitted and fail again
+
+This means the claimed fix is not actually reflected in the runtime UI.
+
+==================================================
+NON-NEGOTIABLE REQUIRED ACTIONS
+==================================================
+
+1) VERIFY RUNTIME VS CLAIMED CODE
+Required:
+- confirm whether the claimed Phase 2.5.8 changes are actually present in the currently running app
+- do not assume they are
+- inspect the real rendered UI and the live code path being served
+
+2) FIND THE DEPLOYMENT / BRANCH / BUILD MISMATCH
+Required:
+- identify exactly why the runtime still shows the old behavior
+Possible causes to investigate:
+- wrong branch
+- wrong file edited
+- stale build
+- failed restart
+- HMR not reflecting the actual code
+- code changed but not wired into the rendered path
+- report claimed a fix that was not fully implemented
+
+3) ADD A TEMPORARY RUNTIME VERSION MARKER
+Required:
+- add a small visible version/build marker in the Shipping pickup UI for this pass only, such as:
+  "Pickup UI build: Phase 2.5.8-sync"
+- this is to prove the runtime is actually serving the new code
+- keep it subtle but visible enough for QA
+- if you prefer, place it in the pickup panel footer or diagnostics area
+
+4) MAKE THE CLAIMED FIX ACTUALLY VISIBLE IN RUNTIME
+Required:
+- ensure the runtime actually shows the new concepts you claimed, including:
+  - delivery verification wording that is not misleading
+  - separate pickup eligibility state
+  - failure memory for unchanged address snapshots
+- do not just say it exists in code — it must be visible in the running app
+
+5) DO NOT CONTINUE WITH NEW LOGIC UNTIL RUNTIME MATCHES CLAIMS
+Required:
+- first make the runtime match the already-claimed behavior
+- only if you discover the logic was never actually implemented should you say so clearly and fix it now
+- no more report/QA mismatch
+
+==================================================
+MANDATORY OUTPUT PROOF
+==================================================
+
+Do not give a generic summary.
+You must prove runtime alignment.
+
+Reply ONLY in this structure:
+
+1. Runtime Mismatch Findings
+2. Root Cause of the Runtime/Report Mismatch
+3. Exact Runtime Sync Fix Applied
+4. Visible Version Marker Added
+5. What QA Should Now See in the Pickup UI
+6. Files Changed
+7. Non-Regression Notes

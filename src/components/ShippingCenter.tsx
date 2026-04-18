@@ -4531,7 +4531,13 @@ export default function ShippingCenter() {
                               <span className={`material-symbols-outlined text-sm mt-0.5 ${overallOk ? 'text-sky-500' : verify.status === 'failed' ? 'text-rose-500' : 'text-amber-500'}`}>{overallOk ? 'verified_user' : 'fact_check'}</span>
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center justify-between gap-2 flex-wrap">
-                                  <p className={`text-[11px] font-black ${tone.titleColor}`}>Pickup address source: {resolved.sourceLabel}</p>
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <p className={`text-[11px] font-black ${tone.titleColor}`}>Pickup address source: {resolved.sourceLabel}</p>
+                                    {/* Phase 2.5.8-sync runtime build marker. Proves the
+                                        running bundle includes the delivery-vs-pickup-eligibility
+                                        split. Remove once QA has confirmed the new behavior. */}
+                                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono font-black bg-violet-100 text-violet-700 border border-violet-200" title="Runtime build marker — Phase 2.5.8-sync: delivery verification and pickup eligibility are independent.">build: 2.5.8-sync</span>
+                                  </div>
                                   <div className="flex items-center gap-1 flex-wrap">
                                     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-black ${vBadge.bg} ${vBadge.text}`}>
                                       <span className={`material-symbols-outlined text-[12px] ${verify.status === 'verifying' ? 'animate-spin' : ''}`}>{vBadge.icon}</span>
