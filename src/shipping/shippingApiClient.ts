@@ -130,6 +130,60 @@ export async function purchaseLabel(
   });
 }
 
+// ---------------------------------------------------------------------------
+// Pickup booking — provider-specific. Backed by /api/shipping/pickup/* which
+// route to the active provider's adapter. EasyPost is wired live (real
+// /v2/pickups + /buy + /cancel). Shippo and ShipStation return NOT_IMPLEMENTED
+// so the UI can honestly distinguish live booking vs capability-gated.
+// ---------------------------------------------------------------------------
+export interface PickupRateDTO {
+  id: string;
+  providerRateId: string;
+  carrier: string;
+  service: string;
+  rate: number;
+  currency: string;
+}
+export interface CreatePickupResponse {
+  success: boolean;
+  providerPickupId?: string;
+  status?: string;
+  rates?: PickupRateDTO[];
+  error?: ProviderError;
+}
+export interface BuyPickupResponse {
+  success: boolean;
+  providerPickupId?: string;
+  confirmationNumber?: string;
+  status?: string;
+  cost?: number;
+  currency?: string;
+  error?: ProviderError;
+}
+export interface CancelPickupResponse {
+  success: boolean;
+  providerPickupId?: string;
+  status?: string;
+  error?: ProviderError;
+}
+export async function createProviderPickup(params: {
+  pickupAddress: ShipmentAddress;
+  minDatetime: string;
+  maxDatetime: string;
+  instructions?: string;
+  providerShipmentId?: string;
+  carrier?: string;
+  isAccountAddress?: boolean;
+}): Promise<CreatePickupResponse> {
+  return apiCall('/api/shipping/pickup/create', params);
+}
+export async function buyProviderPickup(providerPickupId: string, providerRateId: string): Promise<BuyPickupResponse> {
+  return apiCall('/api/shipping/pickup/buy', { providerPickupId, providerRateId });
+}
+export async function cancelProviderPickup(providerPickupId: string): Promise<CancelPickupResponse> {
+  return apiCall('/api/shipping/pickup/cancel', { providerPickupId });
+}
+
 // Service-point locator entry point. Routes to carrier-specific adapters in
 // src/shipping/locators/. Provider aggregators (EasyPost / Shippo / ShipStation)
 // do not expose a unified locator API, so this dispatcher bypasses them entirely

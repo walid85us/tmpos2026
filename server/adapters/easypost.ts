@@ -7,6 +7,12 @@ import type {
   PurchaseLabelResponse,
   GetTrackingRequest,
   GetTrackingResponse,
+  CreatePickupRequest,
+  CreatePickupResponse,
+  BuyPickupRequest,
+  BuyPickupResponse,
+  CancelPickupRequest,
+  CancelPickupResponse,
   ShipmentAddress,
   ShippingRate,
   LabelArtifact,
@@ -368,6 +374,114 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
           retryable: true,
         },
       };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pickup booking — REAL EasyPost /v2/pickups + /buy + /cancel calls.
+  // EasyPost requires a shipment id (since the pickup is bound to specific labels)
+  // and the request returns rate options that must be purchased via /buy before
+  // the carrier is actually dispatched. createPickup returns rates; the caller
+  // selects one (or auto-buys the cheapest) via buyPickup.
+  // ---------------------------------------------------------------------------
+  async createPickup(params: CreatePickupRequest): Promise<CreatePickupResponse> {
+    const apiKey = getApiKey();
+    if (!apiKey) return { success: false, error: NO_CREDENTIALS_ERROR };
+    const shipmentId = params.providerShipmentId || (params.providerShipmentIds && params.providerShipmentIds[0]);
+    if (!shipmentId) {
+      return { success: false, error: { code: 'MISSING_SHIPMENT_REF', message: 'EasyPost pickup requires a provider shipment id (set when label was purchased).', retryable: false } };
+    }
+    try {
+      const response = await fetch('https://api.easypost.com/v2/pickups', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pickup: {
+            address: mapAddressToEasyPost(params.pickupAddress),
+            shipment: { id: shipmentId },
+            min_datetime: params.minDatetime,
+            max_datetime: params.maxDatetime,
+            instructions: params.instructions || undefined,
+            is_account_address: params.isAccountAddress ?? true,
+          },
+        }),
+      });
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        return { success: false, error: { code: 'PICKUP_CREATE_FAILED', message: errorData?.error?.message || `Pickup create failed (HTTP ${response.status})`, retryable: response.status >= 500 } };
+      }
+      const data = await response.json();
+      const rates = (data.pickup_rates || []).map((r: Record<string, unknown>, i: number) => ({
+        id: `pkrate-${i}`,
+        providerRateId: r.id as string,
+        carrier: (r.carrier as string) || 'Unknown',
+        service: (r.service as string) || 'Standard',
+        rate: parseFloat(r.rate as string) || 0,
+        currency: (r.currency as string) || 'USD',
+      }));
+      return { success: true, providerPickupId: data.id, status: data.status, rates };
+    } catch (err) {
+      return { success: false, error: { code: 'NETWORK_ERROR', message: `Failed to connect to EasyPost: ${err instanceof Error ? err.message : 'Unknown error'}`, retryable: true } };
+    }
+  }
+
+  async buyPickup(params: BuyPickupRequest): Promise<BuyPickupResponse> {
+    const apiKey = getApiKey();
+    if (!apiKey) return { success: false, error: NO_CREDENTIALS_ERROR };
+    try {
+      // EasyPost wants carrier+service from the chosen pickup_rate. We resolve
+      // via a GET on the pickup, find the matching rate, then POST /buy.
+      const pickupResp = await fetch(`https://api.easypost.com/v2/pickups/${params.providerPickupId}`, {
+        headers: { 'Authorization': `Bearer ${apiKey}` },
+      });
+      if (!pickupResp.ok) {
+        const errorData = await pickupResp.json().catch(() => ({}));
+        return { success: false, error: { code: 'PICKUP_LOOKUP_FAILED', message: errorData?.error?.message || `Pickup lookup failed (HTTP ${pickupResp.status})`, retryable: pickupResp.status >= 500 } };
+      }
+      const pickupData = await pickupResp.json();
+      const rate = (pickupData.pickup_rates || []).find((r: Record<string, unknown>) => r.id === params.providerRateId);
+      if (!rate) {
+        return { success: false, error: { code: 'RATE_NOT_FOUND', message: 'Selected pickup rate not found on this pickup.', retryable: false } };
+      }
+      const buyResp = await fetch(`https://api.easypost.com/v2/pickups/${params.providerPickupId}/buy`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ carrier: rate.carrier, service: rate.service }),
+      });
+      if (!buyResp.ok) {
+        const errorData = await buyResp.json().catch(() => ({}));
+        return { success: false, error: { code: 'PICKUP_BUY_FAILED', message: errorData?.error?.message || `Pickup buy failed (HTTP ${buyResp.status})`, retryable: buyResp.status >= 500 } };
+      }
+      const data = await buyResp.json();
+      return {
+        success: true,
+        providerPickupId: data.id,
+        confirmationNumber: data.confirmation,
+        status: data.status,
+        cost: parseFloat(rate.rate as string) || undefined,
+        currency: (rate.currency as string) || 'USD',
+      };
+    } catch (err) {
+      return { success: false, error: { code: 'NETWORK_ERROR', message: `Failed to connect to EasyPost: ${err instanceof Error ? err.message : 'Unknown error'}`, retryable: true } };
+    }
+  }
+
+  async cancelPickup(params: CancelPickupRequest): Promise<CancelPickupResponse> {
+    const apiKey = getApiKey();
+    if (!apiKey) return { success: false, error: NO_CREDENTIALS_ERROR };
+    try {
+      const response = await fetch(`https://api.easypost.com/v2/pickups/${params.providerPickupId}/cancel`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      });
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        return { success: false, error: { code: 'PICKUP_CANCEL_FAILED', message: errorData?.error?.message || `Pickup cancel failed (HTTP ${response.status})`, retryable: response.status >= 500 } };
+      }
+      const data = await response.json();
+      return { success: true, providerPickupId: data.id, status: data.status };
+    } catch (err) {
+      return { success: false, error: { code: 'NETWORK_ERROR', message: `Failed to connect to EasyPost: ${err instanceof Error ? err.message : 'Unknown error'}`, retryable: true } };
     }
   }
 }

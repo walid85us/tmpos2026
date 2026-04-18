@@ -92,6 +92,68 @@ export interface ShippingProviderAdapter {
   getRates(params: GetRatesRequest): Promise<GetRatesResponse>;
   purchaseLabel(params: PurchaseLabelRequest): Promise<PurchaseLabelResponse>;
   getTracking(params: GetTrackingRequest): Promise<GetTrackingResponse>;
+  // Pickup methods are optional. Each provider declares its own honest
+  // capability — adapters that cannot natively schedule pickups return
+  // { success:false, error:{ code:'NOT_IMPLEMENTED' } } rather than faking it.
+  createPickup?(params: CreatePickupRequest): Promise<CreatePickupResponse>;
+  buyPickup?(params: BuyPickupRequest): Promise<BuyPickupResponse>;
+  cancelPickup?(params: CancelPickupRequest): Promise<CancelPickupResponse>;
+}
+
+export interface CreatePickupRequest {
+  pickupAddress: ShipmentAddress;
+  minDatetime: string;
+  maxDatetime: string;
+  instructions?: string;
+  // EasyPost requires the underlying shipment id (or a list) so it knows what
+  // labels are being picked up. Other providers may use different references.
+  providerShipmentId?: string;
+  providerShipmentIds?: string[];
+  carrier?: string;
+  isAccountAddress?: boolean;
+}
+
+export interface PickupRate {
+  id: string;
+  providerRateId: string;
+  carrier: string;
+  service: string;
+  rate: number;
+  currency: string;
+}
+
+export interface CreatePickupResponse {
+  success: boolean;
+  providerPickupId?: string;
+  status?: string;
+  rates?: PickupRate[];
+  error?: ProviderError;
+}
+
+export interface BuyPickupRequest {
+  providerPickupId: string;
+  providerRateId: string;
+}
+
+export interface BuyPickupResponse {
+  success: boolean;
+  providerPickupId?: string;
+  confirmationNumber?: string;
+  status?: string;
+  cost?: number;
+  currency?: string;
+  error?: ProviderError;
+}
+
+export interface CancelPickupRequest {
+  providerPickupId: string;
+}
+
+export interface CancelPickupResponse {
+  success: boolean;
+  providerPickupId?: string;
+  status?: string;
+  error?: ProviderError;
 }
 
 export interface AddressValidationResponse {

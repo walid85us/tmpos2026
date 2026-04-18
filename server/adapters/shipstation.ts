@@ -7,6 +7,12 @@ import type {
   PurchaseLabelResponse,
   GetTrackingRequest,
   GetTrackingResponse,
+  CreatePickupRequest,
+  CreatePickupResponse,
+  BuyPickupRequest,
+  BuyPickupResponse,
+  CancelPickupRequest,
+  CancelPickupResponse,
   ShipmentAddress,
   ShippingRate,
   LabelArtifact,
@@ -322,5 +328,21 @@ export class ShipStationAdapter implements ShippingProviderAdapter {
         },
       };
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pickup booking — capability-gated. ShipStation does not expose a generic
+  // pickup API: pickups are arranged either through ShipStation's own UI
+  // workflow (per-carrier connect screens) or directly with the carrier. This
+  // adapter therefore returns NOT_IMPLEMENTED rather than fabricating success.
+  // ---------------------------------------------------------------------------
+  async createPickup(_params: CreatePickupRequest): Promise<CreatePickupResponse> {
+    return { success: false, error: { code: 'NOT_IMPLEMENTED', message: 'ShipStation does not expose a programmatic pickup API. Schedule pickups directly with the carrier or via ShipStation’s own UI. Switch to EasyPost for live in-app pickup booking.', retryable: false } };
+  }
+  async buyPickup(_params: BuyPickupRequest): Promise<BuyPickupResponse> {
+    return { success: false, error: { code: 'NOT_IMPLEMENTED', message: 'ShipStation has no pickup buy step.', retryable: false } };
+  }
+  async cancelPickup(_params: CancelPickupRequest): Promise<CancelPickupResponse> {
+    return { success: false, error: { code: 'NOT_IMPLEMENTED', message: 'ShipStation pickup cancellation is not exposed via API.', retryable: false } };
   }
 }

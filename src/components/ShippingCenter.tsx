@@ -457,6 +457,79 @@ export default function ShippingCenter() {
   });
   const [pickupSubmitting, setPickupSubmitting] = useState(false);
   const [pickupCancelReason, setPickupCancelReason] = useState('');
+  // Carrier Locator per-store configuration. Persisted in sessionStorage.
+  // Each adapter is independently togglable so an operator can ship via UPS
+  // only without configuring USPS/FedEx. Status reflects scaffolding state
+  // honestly — no adapter currently performs a live API call (returns
+  // {unavailable:true} from src/shipping/locators/*), so even when an operator
+  // marks an adapter "configured" it cannot yet verify against the carrier.
+  type LocatorAdapterStatus = 'not_configured' | 'configured' | 'verified' | 'verification_failed';
+  type LocatorAdapterConfig = {
+    enabled: boolean;
+    environment: 'sandbox' | 'production';
+    credentialRef: string;
+    status: LocatorAdapterStatus;
+    lastVerifiedAt?: string;
+    lastVerifyMessage?: string;
+  };
+  const LOCATOR_DEFINITIONS = [
+    { id: 'usps' as const, name: 'USPS Locations', desc: 'Post offices, contract postal units, parcel lockers (gopost).', envHint: 'USPS_USER_ID', docs: 'https://developer.usps.com/' },
+    { id: 'ups' as const, name: 'UPS Locator', desc: 'UPS Access Points, UPS Stores, drop boxes.', envHint: 'UPS_CLIENT_ID + UPS_CLIENT_SECRET', docs: 'https://developer.ups.com/' },
+    { id: 'fedex' as const, name: 'FedEx Locations', desc: 'FedEx Office, FedEx Ship Centers, Authorized ShipCenters, Drop Boxes.', envHint: 'FEDEX_CLIENT_ID + FEDEX_CLIENT_SECRET', docs: 'https://developer.fedex.com/' },
+  ];
+  const LOCATOR_STORAGE_KEY = 'locator_adapters_config_v1';
+  const defaultLocatorConfig = (): Record<string, LocatorAdapterConfig> => ({
+    usps: { enabled: false, environment: 'sandbox', credentialRef: '', status: 'not_configured' },
+    ups: { enabled: false, environment: 'sandbox', credentialRef: '', status: 'not_configured' },
+    fedex: { enabled: false, environment: 'sandbox', credentialRef: '', status: 'not_configured' },
+  });
+  const [locatorConfig, setLocatorConfig] = useState<Record<string, LocatorAdapterConfig>>(() => {
+    try {
+      const raw = typeof window !== 'undefined' ? sessionStorage.getItem(LOCATOR_STORAGE_KEY) : null;
+      if (raw) return { ...defaultLocatorConfig(), ...JSON.parse(raw) };
+    } catch { /* swallow */ }
+    return defaultLocatorConfig();
+  });
+  function persistLocatorConfig(next: Record<string, LocatorAdapterConfig>) {
+    setLocatorConfig(next);
+    try { sessionStorage.setItem(LOCATOR_STORAGE_KEY, JSON.stringify(next)); } catch { /* swallow */ }
+  }
+  function updateLocatorAdapter(id: string, patch: Partial<LocatorAdapterConfig>) {
+    const current = locatorConfig[id] || { enabled: false, environment: 'sandbox', credentialRef: '', status: 'not_configured' as const };
+    const merged: LocatorAdapterConfig = { ...current, ...patch };
+    // Re-derive status from inputs unless an explicit status was passed in.
+    if (!('status' in patch)) {
+      merged.status = merged.enabled && merged.credentialRef.trim().length > 0 ? 'configured' : 'not_configured';
+    }
+    persistLocatorConfig({ ...locatorConfig, [id]: merged });
+  }
+  async function handleVerifyLocator(id: string) {
+    const cfg = locatorConfig[id];
+    if (!cfg || !cfg.enabled || !cfg.credentialRef.trim()) {
+      setProviderError(friendlyProviderError({ code: 'NOT_CONFIGURED', message: 'Enable the adapter and enter a credential reference before verifying.' }));
+      return;
+    }
+    // Honest stub: the underlying locator adapters in src/shipping/locators/*
+    // currently return {unavailable:true, configHint} from findServicePoints.
+    // A live verify endpoint is not yet wired, so we record the attempt and
+    // mark the adapter verification_failed with an explanatory message rather
+    // than fake a success.
+    const now = new Date().toISOString();
+    updateLocatorAdapter(id, {
+      status: 'verification_failed',
+      lastVerifiedAt: now,
+      lastVerifyMessage: `Live verification is not wired yet. The ${id.toUpperCase()} adapter scaffold (src/shipping/locators/${id}Locator.ts) returns unavailable until the carrier API call is implemented. Credentials are stored locally per session for forward-compat.`,
+    });
+    setProviderError(friendlyProviderError({ code: 'NOT_IMPLEMENTED', message: `Live ${id.toUpperCase()} locator verification is not wired in this app yet. Configuration saved for forward-compat — the adapter will use it once the API call lands.` }));
+  }
+  function locatorStatusSummary(): { configured: number; enabled: number; total: number } {
+    const adapters: LocatorAdapterConfig[] = Object.values(locatorConfig);
+    return {
+      configured: adapters.filter(a => a.status === 'configured' || a.status === 'verified').length,
+      enabled: adapters.filter(a => a.enabled).length,
+      total: adapters.length,
+    };
+  }
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingShipment, setEditingShipment] = useState<string | null>(null);
   const [showStatusConfirm, setShowStatusConfirm] = useState<{ id: string; newStatus: ShipmentStatus; label: string } | null>(null);
@@ -974,44 +1047,75 @@ export default function ShippingCenter() {
   //   - pickupStatusModel:                'request_lifecycle' | 'webhook_streamed'
   type ProviderCaps = {
     servicePoints: boolean;
+    // Capability declaration (does the provider expose pickup at all)
     pickupRequests: boolean;
+    // Live wiring: is the in-app booking flow actually wired to the real
+    // provider API right now? When false, the UI must clearly say so and fall
+    // back to a local-only pickup record (no fake confirmation number).
+    supportsLivePickupBooking: boolean;
     supportsPickupCancellation: boolean;
     pickupRequiresProviderConfirmation: boolean;
-    pickupMayRequireRateSelectionOrPurchase: boolean;
+    // EasyPost-style: create returns rates, then a separate /buy purchases.
+    pickupNeedsRateSelection: boolean;
+    pickupNeedsRatePurchase: boolean;
+    // Whether the provider needs the underlying provider shipment id (set when
+    // a label was bought) to attach the pickup to.
+    pickupNeedsProviderShipmentId: boolean;
+    // Whether the provider needs a per-carrier account/connection on file
+    // (e.g. ShipStation per-carrier connect screens).
+    pickupNeedsCarrierAccount: boolean;
     pickupCarrierCoverage: string[];
     pickupStatusModel: 'request_lifecycle' | 'webhook_streamed';
+    pickupTestModeLimitations: string;
     pickupAuditNote: string;
   };
   const PROVIDER_CAPABILITIES: Record<string, ProviderCaps> = {
     easypost: {
       servicePoints: false,
       pickupRequests: true,
+      supportsLivePickupBooking: true,
       supportsPickupCancellation: true,
       pickupRequiresProviderConfirmation: true,
-      pickupMayRequireRateSelectionOrPurchase: true,
+      pickupNeedsRateSelection: true,
+      pickupNeedsRatePurchase: true,
+      pickupNeedsProviderShipmentId: true,
+      pickupNeedsCarrierAccount: false,
       pickupCarrierCoverage: ['USPS', 'UPS', 'FedEx', 'DHL'],
       pickupStatusModel: 'webhook_streamed',
-      pickupAuditNote: 'EasyPost pickups require Pickup → Buy (rate selection + purchase). Carrier may charge a pickup fee. Live API call is not yet wired in this app — current flow records a local pickup request only.',
+      pickupTestModeLimitations: 'EasyPost test mode (api keys starting with EZTK_) does not actually dispatch a carrier; pickups can be created/bought/cancelled but no truck arrives. Use a production key for real pickups.',
+      pickupAuditNote: 'EasyPost pickups: POST /v2/pickups → returns pickup_rates → POST /v2/pickups/{id}/buy with carrier+service. A carrier confirmation number is issued after buy. Live API is wired in this app (server adapter calls real EasyPost).',
     },
     shippo: {
       servicePoints: false,
       pickupRequests: true,
+      supportsLivePickupBooking: false,
       supportsPickupCancellation: true,
       pickupRequiresProviderConfirmation: false,
-      pickupMayRequireRateSelectionOrPurchase: false,
+      pickupNeedsRateSelection: false,
+      pickupNeedsRatePurchase: false,
+      pickupNeedsProviderShipmentId: false,
+      pickupNeedsCarrierAccount: true,
       pickupCarrierCoverage: ['USPS', 'UPS', 'DHL Express'],
       pickupStatusModel: 'request_lifecycle',
-      pickupAuditNote: 'Shippo schedules pickups via /pickups; no separate rate purchase. Carrier coverage narrower than EasyPost. Live API call is not yet wired in this app.',
+      pickupTestModeLimitations: 'Shippo test mode supports /pickups create+cancel without dispatching a carrier. Live wiring in this app is not yet done.',
+      pickupAuditNote: 'Shippo pickups: single-shot POST /pickups returns confirmation_code (no separate buy). Adapter is capability-gated in this app — local-only pickup record will be created instead. Switch to EasyPost for live booking.',
     },
     shipstation: {
       servicePoints: false,
-      pickupRequests: false,
+      // Capability is true (the model supports a pickup record) but live API
+      // is not — ShipStation has no generic pickup endpoint.
+      pickupRequests: true,
+      supportsLivePickupBooking: false,
       supportsPickupCancellation: false,
       pickupRequiresProviderConfirmation: false,
-      pickupMayRequireRateSelectionOrPurchase: false,
+      pickupNeedsRateSelection: false,
+      pickupNeedsRatePurchase: false,
+      pickupNeedsProviderShipmentId: false,
+      pickupNeedsCarrierAccount: true,
       pickupCarrierCoverage: [],
       pickupStatusModel: 'request_lifecycle',
-      pickupAuditNote: 'ShipStation does not expose a generic pickup API; pickups are scheduled directly with the carrier or via ShipStation\'s own UI workflows. Disabled here.',
+      pickupTestModeLimitations: 'ShipStation does not expose pickup booking via API in any environment. Pickups are scheduled in ShipStation’s own UI or directly with the carrier.',
+      pickupAuditNote: 'ShipStation pickups: no generic API. App will record a local-only pickup intent (no confirmation number). Operator must schedule with the carrier separately. Switch to EasyPost for live in-app booking.',
     },
   };
 
@@ -1297,21 +1401,17 @@ export default function ShippingCenter() {
     }
     setPickupSubmitting(true);
     const now = new Date().toISOString();
-    // Honest local-only path: no live shippingApi.requestPickup call is wired yet.
-    // Persist the operator's intent as status='requested' (NOT 'confirmed') with no
-    // confirmation number — confirmation only happens when a real provider response
-    // arrives. UX copy/timeline must clearly state this is a local schedule, not a
-    // booked carrier pickup. This will be replaced with a real provider call when
-    // the pickup adapter lands; until then the status remains 'requested'.
-    await new Promise(r => setTimeout(r, 200));
     const totalWeight = ship.packages.reduce((sum, p) => sum + (p.weight || 0), 0);
-    const pickupRequest: PickupRequest = {
+    const carrier = ship.carrier || ship.selectedRate?.carrier || 'UPS';
+    const caps = activeProviderId ? PROVIDER_CAPABILITIES[activeProviderId.toLowerCase()] : null;
+    // Build the local pickup record up front; it will be enriched with live
+    // provider data on the EasyPost path or marked source='local_only' otherwise.
+    const basePickup: PickupRequest = {
       id: `pr_${Date.now()}`,
       shipmentId,
       providerId: activeProviderId || undefined,
-      carrier: ship.carrier || ship.selectedRate?.carrier || 'UPS',
+      carrier,
       status: 'requested',
-      // confirmationNumber intentionally omitted — only set after a real carrier confirmation
       requestedDate: pickupForm.date,
       windowStart: pickupForm.windowStart || undefined,
       windowEnd: pickupForm.windowEnd || undefined,
@@ -1323,24 +1423,118 @@ export default function ShippingCenter() {
       handlingNotes: pickupForm.notes.trim() || undefined,
       requestedAt: now,
       requestedBy: 'current_operator',
-      // confirmedAt intentionally omitted — set only when carrier confirms
     };
+
+    // -------------------------------------------------------------------
+    // Live booking path: only when provider declares supportsLivePickupBooking
+    // AND the prerequisite providerShipmentId is present (EasyPost requires it).
+    // -------------------------------------------------------------------
+    if (caps?.supportsLivePickupBooking) {
+      if (caps.pickupNeedsProviderShipmentId && !ship.providerShipmentId) {
+        setPickupSubmitting(false);
+        setProviderError(friendlyProviderError({ code: 'MISSING_SHIPMENT_REF', message: `${activeProviderId} pickup requires a provider shipment id. Purchase a label for this shipment first so the pickup can be attached to it.` }));
+        return;
+      }
+      try {
+        const minDt = new Date(`${pickupForm.date}T${pickupForm.windowStart || '09:00'}:00`).toISOString();
+        const maxDt = new Date(`${pickupForm.date}T${pickupForm.windowEnd || '17:00'}:00`).toISOString();
+        const created = await shippingApi.createProviderPickup({
+          pickupAddress: ship.originAddress,
+          minDatetime: minDt,
+          maxDatetime: maxDt,
+          instructions: basePickup.handlingNotes,
+          providerShipmentId: ship.providerShipmentId,
+          carrier,
+          isAccountAddress: true,
+        });
+        if (!created.success || !created.providerPickupId) {
+          setPickupSubmitting(false);
+          setProviderError(friendlyProviderError(created.error || { code: 'PICKUP_CREATE_FAILED', message: 'Pickup create failed.' }));
+          return;
+        }
+        // Auto-buy cheapest rate (typical pickup cost is small/zero). Operator
+        // can cancel afterwards if undesired. Multi-rate selection UI is a
+        // future polish — current rates are usually 0 or a single carrier fee.
+        let buyResult: shippingApi.BuyPickupResponse | null = null;
+        if (caps.pickupNeedsRatePurchase && created.rates && created.rates.length > 0) {
+          const cheapest = [...created.rates].sort((a, b) => a.rate - b.rate)[0];
+          buyResult = await shippingApi.buyProviderPickup(created.providerPickupId, cheapest.providerRateId);
+          if (!buyResult.success) {
+            // Keep the created pickup recorded but mark as 'requested' (not
+            // confirmed) and surface the error. Operator can cancel.
+            const partial: PickupRequest = {
+              ...basePickup,
+              providerPickupId: created.providerPickupId,
+              status: 'requested',
+              source: 'live_provider',
+              failureReason: buyResult.error?.message || 'Pickup buy failed',
+            };
+            updateShipment(shipmentId, {
+              pickupRequest: partial,
+              pickupInfo: { ...(ship.pickupInfo || {}), pickupRequested: true, pickupScheduledAt: pickupForm.date },
+              events: [...ship.events, { id: `evt_pu_${Date.now()}`, status: 'Pickup Requested' as any, description: `Pickup created with ${activeProviderId} (id ${created.providerPickupId}) but rate-purchase failed: ${buyResult.error?.message}. No carrier confirmation issued.`, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent],
+              updatedAt: now,
+            });
+            setPickupSubmitting(false);
+            setProviderError(friendlyProviderError(buyResult.error || { code: 'PICKUP_BUY_FAILED', message: 'Pickup buy failed.' }));
+            return;
+          }
+        }
+        const confirmed: PickupRequest = {
+          ...basePickup,
+          providerPickupId: created.providerPickupId,
+          confirmationNumber: buyResult?.confirmationNumber,
+          providerPickupCost: buyResult?.cost,
+          providerPickupCurrency: buyResult?.currency,
+          status: buyResult?.confirmationNumber ? 'confirmed' : 'requested',
+          confirmedAt: buyResult?.confirmationNumber ? new Date().toISOString() : undefined,
+          source: 'live_provider',
+        };
+        updateShipment(shipmentId, {
+          pickupRequest: confirmed,
+          pickupInfo: {
+            ...(ship.pickupInfo || {}),
+            pickupRequested: true,
+            pickupScheduledAt: pickupForm.date,
+            pickupConfirmationNumber: confirmed.confirmationNumber,
+          },
+          events: [...ship.events, { id: `evt_pu_${Date.now()}`, status: 'Pickup Requested' as any, description: `Pickup booked LIVE with ${activeProviderId} (provider pickup id ${created.providerPickupId})${confirmed.confirmationNumber ? ` — carrier confirmation ${confirmed.confirmationNumber}` : ''}${confirmed.providerPickupCost ? ` — cost ${confirmed.providerPickupCost} ${confirmed.providerPickupCurrency}` : ''}`, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent],
+          updatedAt: now,
+        });
+        setPickupSubmitting(false);
+        setProviderSuccess(confirmed.confirmationNumber
+          ? `Carrier pickup confirmed by ${activeProviderId}. Confirmation: ${confirmed.confirmationNumber}.`
+          : `Pickup created with ${activeProviderId}. Awaiting carrier confirmation.`);
+        return;
+      } catch (err) {
+        setPickupSubmitting(false);
+        setProviderError(friendlyProviderError({ code: 'NETWORK_ERROR', message: `Live pickup booking failed: ${err instanceof Error ? err.message : 'Unknown error'}` }));
+        return;
+      }
+    }
+
+    // -------------------------------------------------------------------
+    // Local-only path: provider does not have live pickup booking wired
+    // (Shippo, ShipStation, or any provider whose adapter returns
+    // NOT_IMPLEMENTED). We persist intent without fabricating a confirmation.
+    // -------------------------------------------------------------------
+    await new Promise(r => setTimeout(r, 100));
+    const localPickup: PickupRequest = { ...basePickup, source: 'local_only' };
     updateShipment(shipmentId, {
-      pickupRequest,
+      pickupRequest: localPickup,
       pickupInfo: {
         ...(ship.pickupInfo || {}),
         pickupRequested: true,
         pickupScheduledAt: pickupForm.date,
-        // pickupConfirmationNumber intentionally omitted — local-only request
       },
       events: [
         ...ship.events,
-        { id: `evt_pu_${Date.now()}`, status: 'Pickup Requested' as any, description: `Pickup recorded LOCALLY (not yet sent to carrier) for ${pickupForm.date} ${pickupForm.windowStart || ''}–${pickupForm.windowEnd || ''}. No carrier confirmation number issued.`, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent,
+        { id: `evt_pu_${Date.now()}`, status: 'Pickup Requested' as any, description: `Pickup recorded LOCALLY (not booked with carrier — ${activeProviderId} adapter does not support live pickup booking) for ${pickupForm.date} ${pickupForm.windowStart || ''}–${pickupForm.windowEnd || ''}. No carrier confirmation number issued.`, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent,
       ],
       updatedAt: now,
     });
     setPickupSubmitting(false);
-    setProviderSuccess('Pickup recorded locally — not yet booked with carrier. Live carrier pickup API call is not wired in this app.');
+    setProviderSuccess(`Pickup recorded locally — not booked with carrier. The ${activeProviderId} adapter does not currently support live pickup booking in this app.`);
   }
 
   async function handleCancelPickup(shipmentId: string) {
@@ -1356,6 +1550,24 @@ export default function ShippingCenter() {
       return;
     }
     const now = new Date().toISOString();
+    // Live-cancellation path: only when the pickup was booked live AND the
+    // provider exposes a cancel endpoint. Otherwise we cancel locally.
+    const caps = activeProviderId ? PROVIDER_CAPABILITIES[activeProviderId.toLowerCase()] : null;
+    const isLive = ship.pickupRequest.source === 'live_provider' && !!ship.pickupRequest.providerPickupId;
+    let liveCancelled = false;
+    if (isLive && caps?.supportsPickupCancellation) {
+      try {
+        const result = await shippingApi.cancelProviderPickup(ship.pickupRequest.providerPickupId!);
+        if (!result.success) {
+          setProviderError(friendlyProviderError(result.error || { code: 'PICKUP_CANCEL_FAILED', message: 'Pickup cancel failed.' }));
+          return;
+        }
+        liveCancelled = true;
+      } catch (err) {
+        setProviderError(friendlyProviderError({ code: 'NETWORK_ERROR', message: `Live pickup cancel failed: ${err instanceof Error ? err.message : 'Unknown error'}` }));
+        return;
+      }
+    }
     const updated: PickupRequest = {
       ...ship.pickupRequest,
       status: 'cancelled',
@@ -1368,12 +1580,12 @@ export default function ShippingCenter() {
       pickupInfo: { ...(ship.pickupInfo || {}), pickupRequested: false },
       events: [
         ...ship.events,
-        { id: `evt_pu_cancel_${Date.now()}`, status: 'Pickup Cancelled' as any, description: `Pickup ${ship.pickupRequest.confirmationNumber || ship.pickupRequest.id} cancelled${pickupCancelReason ? ` — ${pickupCancelReason}` : ''}`, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent,
+        { id: `evt_pu_cancel_${Date.now()}`, status: 'Pickup Cancelled' as any, description: `Pickup ${ship.pickupRequest.confirmationNumber || ship.pickupRequest.id} cancelled${liveCancelled ? ` LIVE with ${activeProviderId}` : ' locally'}${pickupCancelReason ? ` — ${pickupCancelReason}` : ''}`, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent,
       ],
       updatedAt: now,
     });
     setPickupCancelReason('');
-    setProviderSuccess('Carrier pickup cancelled.');
+    setProviderSuccess(liveCancelled ? `Carrier pickup cancelled live with ${activeProviderId}.` : 'Pickup cancelled locally.');
   }
 
   function getProviderPrerequisiteMessage(): string | null {
@@ -2226,41 +2438,87 @@ export default function ShippingCenter() {
         {activeTab === 'settings' ? (
           <div className="space-y-6">
             <ShippingProvidersPage embedded onProviderChange={refreshProviderState} />
-            {/* Carrier Locator Settings — direct carrier credentials for live service-point lookup. */}
-            <div className="bg-white rounded-2xl border border-slate-200 p-6">
-              <div className="flex items-start justify-between mb-4">
-                <div>
-                  <p className="text-[10px] font-black text-primary uppercase tracking-widest flex items-center gap-1.5"><span className="material-symbols-outlined text-sm">explore</span>Carrier Locators</p>
-                  <p className="text-xs text-slate-500 mt-1">Direct carrier credentials for live service-point lookup. Each adapter is independent — configure only the carriers you ship with.</p>
-                </div>
-                <span className="px-2 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest bg-amber-100 text-amber-700">Not configured</span>
-              </div>
-              <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-start gap-2 mb-4">
-                <span className="material-symbols-outlined text-amber-500 text-sm mt-0.5">warning</span>
-                <div className="text-xs text-amber-700">
-                  <p className="font-black">No locator adapter is configured</p>
-                  <p className="mt-0.5">Live service-point lookup requires direct carrier credentials. Until at least one adapter is configured, the service-point modal falls back to manual entry. Provider aggregators (EasyPost / Shippo / ShipStation) do not expose a unified service-point locator.</p>
-                </div>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                {[
-                  { id: 'usps', name: 'USPS Locations', desc: 'Post offices, contract postal units, parcel lockers (gopost).', envKey: 'USPS_USER_ID', docs: 'https://developer.usps.com/' },
-                  { id: 'ups', name: 'UPS Locator', desc: 'UPS Access Points, UPS Stores, drop boxes.', envKey: 'UPS_CLIENT_ID + UPS_CLIENT_SECRET', docs: 'https://developer.ups.com/' },
-                  { id: 'fedex', name: 'FedEx Locations', desc: 'FedEx Office, FedEx Ship Centers, Authorized ShipCenters, Drop Boxes.', envKey: 'FEDEX_CLIENT_ID + FEDEX_CLIENT_SECRET', docs: 'https://developer.fedex.com/' },
-                ].map(adapter => (
-                  <div key={adapter.id} className="border border-slate-200 rounded-2xl p-4">
-                    <div className="flex items-start justify-between mb-1">
-                      <p className="text-sm font-black text-slate-800">{adapter.name}</p>
-                      <span className="text-[9px] font-black text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded uppercase tracking-widest">Not wired</span>
+            {/* Carrier Locator Settings — per-store, per-adapter configuration.
+                Independent of the active shipping provider (EasyPost / Shippo /
+                ShipStation) because aggregators do not expose a unified
+                service-point locator. Persisted in sessionStorage. */}
+            {(() => {
+              const summary = locatorStatusSummary();
+              const overallTone = summary.configured > 0
+                ? { bg: 'bg-emerald-100', text: 'text-emerald-700', label: `${summary.configured} configured / ${summary.total}` }
+                : summary.enabled > 0
+                ? { bg: 'bg-sky-100', text: 'text-sky-700', label: `${summary.enabled} enabled — credentials needed` }
+                : { bg: 'bg-amber-100', text: 'text-amber-700', label: 'Not configured' };
+              return (
+                <div className="bg-white rounded-2xl border border-slate-200 p-6">
+                  <div className="flex items-start justify-between mb-4">
+                    <div>
+                      <p className="text-[10px] font-black text-primary uppercase tracking-widest flex items-center gap-1.5"><span className="material-symbols-outlined text-sm">explore</span>Carrier Locators</p>
+                      <p className="text-xs text-slate-500 mt-1">Direct carrier credentials for live service-point lookup. Each adapter is independent — configure only the carriers you ship with.</p>
                     </div>
-                    <p className="text-[11px] text-slate-500">{adapter.desc}</p>
-                    <p className="text-[10px] text-slate-400 mt-2 font-mono break-all">Required: {adapter.envKey}</p>
-                    <button type="button" disabled className="mt-3 w-full px-3 py-2 bg-slate-100 text-slate-400 text-[10px] font-black uppercase tracking-widest rounded-xl cursor-not-allowed">Connect (coming soon)</button>
+                    <span className={`px-2 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest ${overallTone.bg} ${overallTone.text}`}>{overallTone.label}</span>
                   </div>
-                ))}
-              </div>
-              <p className="text-[10px] text-slate-400 mt-3">Adapters are scaffolded in <span className="font-mono">src/shipping/locators/</span>. Connecting credentials and per-store enablement are part of an upcoming task.</p>
-            </div>
+                  <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-start gap-2 mb-4">
+                    <span className="material-symbols-outlined text-amber-500 text-sm mt-0.5">warning</span>
+                    <div className="text-xs text-amber-700">
+                      <p className="font-black">Adapter scaffolds — live API calls not yet wired</p>
+                      <p className="mt-0.5">Configuration entered here is persisted per browser session and will feed the underlying adapters in <span className="font-mono">src/shipping/locators/</span> once the carrier API calls land. The service-point modal continues to use manual entry until then. Provider aggregators (EasyPost / Shippo / ShipStation) do not expose a unified service-point locator.</p>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    {LOCATOR_DEFINITIONS.map(def => {
+                      const cfg = locatorConfig[def.id] || { enabled: false, environment: 'sandbox' as const, credentialRef: '', status: 'not_configured' as const };
+                      const statusTone = cfg.status === 'verified'
+                        ? { bg: 'bg-emerald-100', text: 'text-emerald-700', label: 'Verified' }
+                        : cfg.status === 'configured'
+                        ? { bg: 'bg-sky-100', text: 'text-sky-700', label: 'Configured' }
+                        : cfg.status === 'verification_failed'
+                        ? { bg: 'bg-rose-100', text: 'text-rose-700', label: 'Verify failed' }
+                        : { bg: 'bg-slate-100', text: 'text-slate-500', label: 'Not configured' };
+                      const disabled = !canManageProviderSettings || isWriteBlocked;
+                      return (
+                        <div key={def.id} className="border border-slate-200 rounded-2xl p-4 space-y-3">
+                          <div className="flex items-start justify-between gap-2">
+                            <div>
+                              <p className="text-sm font-black text-slate-800">{def.name}</p>
+                              <p className="text-[11px] text-slate-500 mt-0.5">{def.desc}</p>
+                            </div>
+                            <span className={`shrink-0 text-[9px] font-black px-1.5 py-0.5 rounded uppercase tracking-widest ${statusTone.bg} ${statusTone.text}`}>{statusTone.label}</span>
+                          </div>
+                          <label className="flex items-center gap-2 text-[11px] font-black text-slate-700">
+                            <input type="checkbox" checked={cfg.enabled} disabled={disabled} onChange={e => updateLocatorAdapter(def.id, { enabled: e.target.checked })} className="rounded border-slate-300" />
+                            Enable adapter
+                          </label>
+                          <div>
+                            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Environment</label>
+                            <select value={cfg.environment} disabled={disabled || !cfg.enabled} onChange={e => updateLocatorAdapter(def.id, { environment: e.target.value as 'sandbox' | 'production' })} className="w-full mt-1 px-2 py-1.5 border border-slate-200 rounded-lg text-xs disabled:bg-slate-50 disabled:text-slate-400">
+                              <option value="sandbox">Sandbox</option>
+                              <option value="production">Production</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Credential reference</label>
+                            <input type="text" value={cfg.credentialRef} disabled={disabled || !cfg.enabled} onChange={e => updateLocatorAdapter(def.id, { credentialRef: e.target.value })} placeholder={def.envHint} className="w-full mt-1 px-2 py-1.5 border border-slate-200 rounded-lg text-xs font-mono disabled:bg-slate-50 disabled:text-slate-400" />
+                            <p className="text-[10px] text-slate-400 mt-1">Real secrets must be set as server-side env vars (<span className="font-mono">{def.envHint}</span>). This field is a per-store reference label only.</p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button type="button" onClick={() => handleVerifyLocator(def.id)} disabled={disabled || !cfg.enabled || !cfg.credentialRef.trim()} className="flex-1 px-3 py-2 bg-primary/10 text-primary text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/20 transition-all disabled:opacity-40 disabled:cursor-not-allowed">Verify</button>
+                            <a href={def.docs} target="_blank" rel="noreferrer" className="px-3 py-2 bg-slate-100 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-slate-200 transition-all">Docs</a>
+                          </div>
+                          {cfg.lastVerifiedAt && (
+                            <div className={`text-[10px] rounded-lg p-2 ${cfg.status === 'verified' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>
+                              <p className="font-black">Last verify {formatDateTime(cfg.lastVerifiedAt)}</p>
+                              {cfg.lastVerifyMessage && <p className="mt-0.5">{cfg.lastVerifyMessage}</p>}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <p className="text-[10px] text-slate-400 mt-3">Adapters scaffolded in <span className="font-mono">src/shipping/locators/</span>. Until the carrier API calls land, Verify will record a <span className="font-bold">verification_failed</span> with an explanatory note rather than fake a successful connection.</p>
+                </div>
+              );
+            })()}
           </div>
         ) : (<>
         <div className="flex flex-wrap items-center justify-between gap-4">
@@ -3388,12 +3646,29 @@ export default function ShippingCenter() {
                           <p className="text-xs text-slate-500 mt-1">Schedule the carrier to pick up the parcel from the origin address.</p>
                           {(() => {
                             const audit = activeProviderId ? PROVIDER_CAPABILITIES[activeProviderId.toLowerCase()] : null;
-                            return audit?.pickupAuditNote ? (
-                              <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5 mt-2 inline-block">
-                                <span className="font-black uppercase tracking-widest mr-1">Provider note ({activeProviderId}):</span>
-                                {audit.pickupAuditNote}
-                              </p>
-                            ) : null;
+                            if (!audit) return null;
+                            return (
+                              <div className="mt-2 space-y-1">
+                                <div className="flex flex-wrap gap-1">
+                                  <span className={`text-[9px] font-black px-1.5 py-0.5 rounded uppercase tracking-widest ${audit.supportsLivePickupBooking ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                                    {audit.supportsLivePickupBooking ? 'Live booking wired' : 'Local-only (capability-gated)'}
+                                  </span>
+                                  {audit.pickupNeedsRatePurchase && <span className="text-[9px] font-black px-1.5 py-0.5 rounded uppercase tracking-widest bg-sky-100 text-sky-700">Rate purchase</span>}
+                                  {audit.pickupNeedsProviderShipmentId && <span className="text-[9px] font-black px-1.5 py-0.5 rounded uppercase tracking-widest bg-violet-100 text-violet-700">Needs label first</span>}
+                                  {audit.pickupNeedsCarrierAccount && <span className="text-[9px] font-black px-1.5 py-0.5 rounded uppercase tracking-widest bg-orange-100 text-orange-700">Carrier account</span>}
+                                </div>
+                                {audit.pickupCarrierCoverage.length > 0 && (
+                                  <p className="text-[10px] text-slate-500"><span className="font-black uppercase tracking-widest mr-1">Coverage:</span>{audit.pickupCarrierCoverage.join(', ')}</p>
+                                )}
+                                <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5">
+                                  <span className="font-black uppercase tracking-widest mr-1">Provider note ({activeProviderId}):</span>
+                                  {audit.pickupAuditNote}
+                                </p>
+                                {audit.pickupTestModeLimitations && (
+                                  <p className="text-[10px] text-slate-500 italic">Test-mode: {audit.pickupTestModeLimitations}</p>
+                                )}
+                              </div>
+                            );
                           })()}
                         </div>
                         <span className={`px-2 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest ${
@@ -3429,10 +3704,18 @@ export default function ShippingCenter() {
                             : pr.status === 'completed' ? 'bg-violet-50/50 border-violet-200'
                             : 'bg-sky-50/50 border-sky-200'
                         }`}>
-                          {!pr.confirmationNumber && pr.status !== 'cancelled' && pr.status !== 'failed' && pr.status !== 'rejected' && (
+                          {!pr.confirmationNumber && pr.source !== 'live_provider' && pr.status !== 'cancelled' && pr.status !== 'failed' && pr.status !== 'rejected' && (
                             <div className="bg-amber-100 border border-amber-300 rounded-lg p-2 flex items-start gap-2">
                               <span className="material-symbols-outlined text-amber-600 text-sm mt-0.5">warning</span>
-                              <p className="text-[11px] text-amber-800"><span className="font-black">Local-only request — not booked with carrier.</span> No confirmation number has been issued. The live carrier pickup API call is not wired in this app yet.</p>
+                              <p className="text-[11px] text-amber-800"><span className="font-black">Local-only request — not booked with carrier.</span> No confirmation number has been issued. The active provider does not have live pickup booking wired in this app.</p>
+                            </div>
+                          )}
+                          {pr.source === 'live_provider' && (
+                            <div className="bg-emerald-100 border border-emerald-300 rounded-lg p-2 flex items-start gap-2">
+                              <span className="material-symbols-outlined text-emerald-600 text-sm mt-0.5">verified</span>
+                              <div className="text-[11px] text-emerald-800">
+                                <p><span className="font-black">Booked live with {pr.providerId}.</span>{pr.providerPickupId ? <> Provider pickup id: <span className="font-mono">{pr.providerPickupId}</span>.</> : null}{typeof pr.providerPickupCost === 'number' ? <> Cost: <span className="font-mono">{pr.providerPickupCost.toFixed(2)} {pr.providerPickupCurrency || 'USD'}</span>.</> : null}</p>
+                              </div>
                             </div>
                           )}
                           <div className="flex items-center justify-between">

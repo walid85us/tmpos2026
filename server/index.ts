@@ -176,6 +176,56 @@ app.post('/api/shipping/purchase-label', async (req, res) => {
   res.json(result);
 });
 
+// ---------------------------------------------------------------------------
+// Pickup endpoints. Each routes to the active provider's adapter; when the
+// adapter has not implemented pickup booking it returns NOT_IMPLEMENTED so the
+// frontend can honestly distinguish live vs capability-gated providers.
+// ---------------------------------------------------------------------------
+app.post('/api/shipping/pickup/create', async (req, res) => {
+  const { providerId, pickupAddress, minDatetime, maxDatetime, instructions, providerShipmentId, providerShipmentIds, carrier, isAccountAddress } = req.body;
+  const provider = resolveProvider(providerId);
+  if (!provider) {
+    res.json({ success: false, error: { code: 'NO_PROVIDER', message: 'No active shipping provider. Configure a provider in Shipping Center.' } });
+    return;
+  }
+  if (!provider.createPickup) {
+    res.json({ success: false, error: { code: 'NOT_IMPLEMENTED', message: `Provider "${provider.providerId}" does not implement pickup booking.` } });
+    return;
+  }
+  const result = await provider.createPickup({ pickupAddress, minDatetime, maxDatetime, instructions, providerShipmentId, providerShipmentIds, carrier, isAccountAddress });
+  res.json(result);
+});
+
+app.post('/api/shipping/pickup/buy', async (req, res) => {
+  const { providerId, providerPickupId, providerRateId } = req.body;
+  const provider = resolveProvider(providerId);
+  if (!provider) {
+    res.json({ success: false, error: { code: 'NO_PROVIDER', message: 'No active shipping provider.' } });
+    return;
+  }
+  if (!provider.buyPickup) {
+    res.json({ success: false, error: { code: 'NOT_IMPLEMENTED', message: `Provider "${provider.providerId}" does not implement pickup buy.` } });
+    return;
+  }
+  const result = await provider.buyPickup({ providerPickupId, providerRateId });
+  res.json(result);
+});
+
+app.post('/api/shipping/pickup/cancel', async (req, res) => {
+  const { providerId, providerPickupId } = req.body;
+  const provider = resolveProvider(providerId);
+  if (!provider) {
+    res.json({ success: false, error: { code: 'NO_PROVIDER', message: 'No active shipping provider.' } });
+    return;
+  }
+  if (!provider.cancelPickup) {
+    res.json({ success: false, error: { code: 'NOT_IMPLEMENTED', message: `Provider "${provider.providerId}" does not implement pickup cancel.` } });
+    return;
+  }
+  const result = await provider.cancelPickup({ providerPickupId });
+  res.json(result);
+});
+
 app.post('/api/shipping/tracking', async (req, res) => {
   const { providerId, trackingNumber, carrier, providerShipmentId } = req.body;
   const provider = resolveProvider(providerId);

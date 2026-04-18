@@ -7,6 +7,12 @@ import type {
   PurchaseLabelResponse,
   GetTrackingRequest,
   GetTrackingResponse,
+  CreatePickupRequest,
+  CreatePickupResponse,
+  BuyPickupRequest,
+  BuyPickupResponse,
+  CancelPickupRequest,
+  CancelPickupResponse,
   ShipmentAddress,
   ShippingRate,
   LabelArtifact,
@@ -353,5 +359,21 @@ export class ShippoAdapter implements ShippingProviderAdapter {
         },
       };
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pickup booking — capability-gated. Shippo exposes /pickups (different shape
+  // from EasyPost: no separate /buy step, single-shot create returns a
+  // confirmation_code). Live wiring is not yet implemented in this app, so we
+  // fail honestly with NOT_IMPLEMENTED rather than fabricate a confirmation.
+  // ---------------------------------------------------------------------------
+  async createPickup(_params: CreatePickupRequest): Promise<CreatePickupResponse> {
+    return { success: false, error: { code: 'NOT_IMPLEMENTED', message: 'Shippo pickup booking is capability-gated. Shippo /pickups is supported by Shippo but the adapter call is not yet wired in this app. Use a local pickup record or switch to EasyPost for live booking.', retryable: false } };
+  }
+  async buyPickup(_params: BuyPickupRequest): Promise<BuyPickupResponse> {
+    return { success: false, error: { code: 'NOT_IMPLEMENTED', message: 'Shippo pickups do not use a separate buy step (single-shot create). buyPickup is not applicable for this provider.', retryable: false } };
+  }
+  async cancelPickup(_params: CancelPickupRequest): Promise<CancelPickupResponse> {
+    return { success: false, error: { code: 'NOT_IMPLEMENTED', message: 'Shippo pickup cancellation adapter is not yet wired in this app.', retryable: false } };
   }
 }

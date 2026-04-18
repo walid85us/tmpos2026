@@ -1,0 +1,349 @@
+Shipping Phase 2 — Carrier Locator Config + Multi-Provider Live Pickup Booking — Controlled Implementation Pass
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a controlled follow-up pass for Shipping Phase 2 Service Points & Pickup Requests.
+Do not redesign the app.
+Do not broaden scope.
+Implement only the agreed next layer:
+
+1) real carrier locator configuration UI/architecture under Shipping Settings
+2) real provider-specific pickup booking flow
+3) honest multi-provider pickup capability handling for EasyPost, Shippo, and ShipStation
+
+Do not implement fake live locator search.
+Do not fake pickup booking.
+Do not imply all providers behave the same.
+Do not leave ambiguous “coming soon” behavior without clear truth.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Firebase/Firestore data architect
+- Enterprise shipping systems architect
+- Senior parcel-network / carrier-integration / pickup-operations expert with 20+ years of experience in carrier pickups, service-point networks, shipping API design, and production shipping UX
+- Reliability engineer focused on state consistency, capability modeling, and auditability
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- RBAC/sub-permissions
+- lifecycle gating
+- System Owner Plans & Features matrix
+- Store Permissions Matrix
+- Shipping Center as the sole provider-management home
+- Returns Portal / Reverse Logistics
+- provider/manual shipment mode split
+- mandatory provider address validation before Get Rates in provider mode
+- Get Rates requires both Origin and Destination in Validated state
+- Ready disabled until rate selection in provider mode
+- Packed only after successful label purchase in provider mode
+- existing Service Points and Pickup Requests work
+- live gating/source-of-truth fixes already completed and passed QA
+- fake ZIP search already removed
+- manual service-point fallback already added
+- existing outbound shipping core flow
+- existing reverse-logistics flow
+
+==================================================
+AGREED DIRECTION — DO NOT DEVIATE
+==================================================
+
+We agreed on the following:
+
+1) Carrier Locator Adapters in Shipping Settings must move beyond placeholder scaffolding
+- store owners should have a real configuration surface
+- per-carrier adapter settings should be configurable and testable where applicable
+- the UI must clearly distinguish:
+  - not configured
+  - configured but adapter not yet implemented
+  - testable
+  - verified
+  - production-ready
+  - unsupported
+
+2) Pickup must become honestly provider-specific
+- EasyPost, Shippo, and ShipStation do NOT have identical pickup workflows
+- the app must model those differences explicitly
+- do not force a fake unified pickup flow
+
+3) EasyPost live pickup booking should be implemented now where supported
+- current “local-only request” is not enough if real booking is available
+- the app must honestly handle EasyPost’s real pickup lifecycle
+
+4) Shippo and ShipStation must be made ready in the app architecture now
+- add their real capability/configuration model
+- wire their pickup settings and provider-specific flow shape
+- implement live booking where feasible in the current architecture
+- if one provider is not fully wired in this pass, say so clearly and keep the UI honest
+
+==================================================
+MANDATORY IMPLEMENTATION OBJECTIVES
+==================================================
+
+PART A — CARRIER LOCATOR CONFIGURATION UI / ARCHITECTURE
+
+1) REAL CARRIER LOCATOR SETTINGS SURFACE
+Inside Shipping Center → Settings, add/upgrade a real subsection:
+
+Carrier Locator Adapters
+
+Required cards:
+- USPS Locator
+- UPS Locator
+- FedEx Locations
+
+Each card must support real configuration architecture:
+- enabled toggle
+- environment selector where relevant (sandbox/test vs production)
+- credential/config fields
+- save/update action
+- test/verify connection action where feasible
+- status display:
+  - not configured
+  - configured
+  - verified
+  - adapter not yet implemented
+  - unsupported in current environment
+- last verified timestamp if tested
+- concise note explaining whether live service-point lookup is actually implemented yet for that carrier
+
+Important:
+- do not mislead the store owner into thinking live lookup works if it does not
+- replace placeholder-only behavior with a truthful configuration architecture
+
+==================================================
+PART B — MULTI-PROVIDER PICKUP CAPABILITY MODEL
+
+Add or refine a provider pickup capability model that can clearly support differences like:
+- supportsPickupRequests
+- supportsLivePickupBooking
+- pickupNeedsRateSelection
+- pickupNeedsRatePurchase
+- pickupNeedsLabelIds
+- pickupNeedsCarrierAccount
+- pickupNeedsSameWarehouseLabels
+- pickupNeedsTransactions
+- pickupSupportsCancellation
+- pickupConfirmationBehavior
+- pickupTestModeLimitations
+- pickupCarrierCoverage
+
+This model must explicitly support:
+- EasyPost
+- Shippo
+- ShipStation
+
+The UI must adapt honestly by provider.
+Do not present all providers as functionally identical.
+
+==================================================
+PART C — LIVE EASYPOST PICKUP BOOKING
+
+1) AUDIT THE CURRENT EASYPOST PICKUP FLOW
+Inspect the current implementation and determine exactly what the app currently does.
+Then replace the local-only placeholder flow with real EasyPost pickup booking where supported.
+
+2) IMPLEMENT REAL EASYPOST PICKUP BOOKING
+Required:
+- if active provider is EasyPost and pickup is supported, the app must use the real EasyPost pickup flow
+- the app must not stop at a local-only request if real booking is available
+- the app must honestly handle the actual steps returned by EasyPost, including:
+  - pickup object creation
+  - pickup rates returned
+  - pickup rate selection or safe auto-selection when only one reasonable rate exists
+  - pickup rate purchase where required
+  - real confirmation number when issued
+- do not guess or hardcode success
+
+3) HONEST EASYPOST UI STATES
+The shipment pickup section must clearly distinguish states such as:
+- local draft / not sent
+- provider request created
+- pickup rates returned
+- rate selected
+- booked / confirmed
+- failed / rejected
+- cancelled
+
+If multiple pickup rates exist, the operator must have a clear way to select one.
+If one rate exists and auto-selection is safe, document it and do it honestly.
+If no rates are returned, say so clearly.
+
+==================================================
+PART D — SHIPPO PICKUP READINESS / IMPLEMENTATION
+
+Shippo pickup is not the same as EasyPost.
+
+Required:
+- inspect current Shippo pickup feasibility in this app architecture
+- wire Shippo-specific config and capability handling
+- model Shippo’s pickup flow honestly around:
+  - carrier account
+  - pickup location/address
+  - eligible transactions
+  - requested start/end time
+  - confirmation code / status response
+- if live Shippo pickup booking can be implemented safely in this pass, implement it
+- if not, leave it capability-gated and clearly state what remains
+- do not fake EasyPost-style pickup-rate purchase if Shippo does not use that pattern
+
+==================================================
+PART E — SHIPSTATION PICKUP READINESS / IMPLEMENTATION
+
+ShipStation pickup is also different.
+
+Required:
+- inspect current ShipStation pickup feasibility in this app architecture
+- wire ShipStation-specific config and capability handling
+- model ShipStation’s pickup flow honestly around:
+  - label IDs
+  - same-carrier and same-warehouse requirements
+  - contact details
+  - pickup window
+  - pickup ID / confirmation number / cancellation behavior
+- if live ShipStation pickup booking can be implemented safely in this pass, implement it
+- if not, leave it capability-gated and clearly state what remains
+- do not fake EasyPost or Shippo semantics in ShipStation mode
+
+==================================================
+PART F — PROVIDER-SPECIFIC SETTINGS / UX
+
+Under Shipping Settings, provide a provider-specific pickup configuration and status surface that can show:
+- EasyPost pickup ready / partially wired / not supported
+- Shippo pickup ready / partially wired / supported carriers
+- ShipStation pickup ready / partially wired / supported workflow constraints
+- environment awareness
+- test mode vs production notes
+- required prerequisites
+
+The operator/store owner must be able to understand:
+- what is configurable
+- what is implemented
+- what is testable
+- what is production-only
+- what is not yet supported
+
+==================================================
+PART G — NON-NEGOTIABLE SAFETY / GOVERNANCE
+
+All of this must still respect:
+- plan gating
+- store permission gating
+- provider/manual mode split
+- PACKED-only activation
+- mutual exclusivity between Service Point / Drop-Off and Carrier Pickup
+- no-provider disable behavior
+- existing shipping and reverse-logistics flows
+
+Do not break any of the above.
+
+==================================================
+NON-NEGOTIABLE IMPLEMENTATION REQUIREMENTS
+==================================================
+
+1. Carrier locator settings are real and useful
+Required:
+- store owners can actually configure locator adapter settings
+- the UI truthfully reflects implementation state per carrier
+Acceptance:
+- QA can open Shipping Settings and see meaningful carrier locator configuration, not placeholder-only cards
+
+2. EasyPost pickup is truly provider-booked when supported
+Required:
+- if EasyPost is active and live booking is supported, the app performs the real provider flow
+- the UI shows real provider-booked status/confirmation, not only a local placeholder
+Acceptance:
+- QA can distinguish local-only from true EasyPost provider booking
+
+3. Shippo and ShipStation are first-class provider pickup models
+Required:
+- the app must be ready for both and not assume EasyPost-only architecture
+- implement live booking if feasible in this pass; otherwise capability-gate honestly
+Acceptance:
+- QA can understand Shippo/ShipStation pickup support state and see that the app does not imply identical behavior
+
+4. Existing shipping / returns behavior stays intact
+Required:
+- do not regress core shipping or reverse-logistics behavior
+Acceptance:
+- existing flows still pass spot checks
+
+==================================================
+IMPORTANT RULES
+==================================================
+
+- Do not redesign the app
+- Do not implement fake live locator search
+- Do not touch unrelated workstreams
+- Do not break outbound shipping
+- Do not break reverse logistics
+- Keep the design baseline consistent
+- Keep operator workflow honest and auditable
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact execution order:
+
+1) Upgrade Carrier Locator Adapters settings from placeholder scaffolding to real configuration architecture
+2) Audit the current EasyPost pickup implementation
+3) Implement real EasyPost pickup booking where supported
+4) Add provider-specific capability modeling for Shippo and ShipStation
+5) Implement live Shippo / ShipStation pickup only if feasible and honest in this pass; otherwise capability-gate clearly
+6) Re-test all affected service-point, pickup, shipping, and reverse-logistics flows
+7) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Carrier Locator Adapters settings architecture
+- per-carrier configuration states
+- which locator adapters are configurable vs actually implemented
+- EasyPost pickup flow findings
+- EasyPost pickup booking lifecycle implemented in this pass
+- Shippo pickup flow findings
+- ShipStation pickup flow findings
+- provider-specific pickup capability model
+- test mode vs production mode notes
+- future recommendations not implemented now
+
+==================================================
+MANDATORY OUTPUT PROOF
+==================================================
+
+Do not give a generic completion summary.
+Do not say this task is complete unless:
+- Carrier Locator settings are meaningfully configurable and honest
+- EasyPost pickup is no longer merely local-only where real booking is supported
+- Shippo and ShipStation are represented as first-class provider-specific pickup models
+- the app clearly distinguishes what is implemented now vs capability-gated for later
+
+OUTPUT FORMAT REQUIRED
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Carrier Locator Settings Architecture Fix
+3. EasyPost Pickup Flow Audit Findings
+4. Live EasyPost Pickup Booking Fix
+5. Shippo Pickup Capability / Implementation Findings
+6. ShipStation Pickup Capability / Implementation Findings
+7. Provider-Specific Pickup Capability Model Fix
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes

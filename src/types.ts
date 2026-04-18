@@ -993,6 +993,10 @@ export interface PickupRequest {
   carrier: string;                         // resolved carrier
   status: PickupRequestStatus;
   confirmationNumber?: string;             // provider/carrier confirmation
+  providerPickupId?: string;               // provider-side pickup id (e.g. EasyPost pickup id) — required for cancel
+  providerPickupCost?: number;             // pickup fee charged by carrier (when applicable)
+  providerPickupCurrency?: string;
+  source?: 'live_provider' | 'local_only'; // honesty marker — local_only means no real carrier API call was made
   requestedDate: string;                   // ISO date — pickup day
   windowStart?: string;                    // 'HH:MM' earliest ready
   windowEnd?: string;                      // 'HH:MM' latest available
