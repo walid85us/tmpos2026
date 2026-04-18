@@ -1,0 +1,184 @@
+Shipping Phase 2 — EasyPost Pickup Final Diagnostics + Error-Detail Pass
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a narrow final diagnostics-and-error-detail pass.
+Do not redesign the app.
+Do not broaden scope.
+Only fix the remaining EasyPost pickup diagnostics gap so the app reveals the real cause of pickup failure and becomes operationally understandable.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Node/Express integration engineer
+- Enterprise shipping systems architect
+- Senior carrier API / pickup-operations expert with 20+ years of experience in provider booking flows, carrier validation, and production shipping UX
+- Root-cause debugging specialist
+- QA-minded side auditor
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- plan gating
+- store permission gating
+- provider/manual mode split
+- PACKED-only activation
+- mutual exclusivity between Service Point and Pickup
+- existing shipping core flow
+- reverse-logistics flow
+- honest provider-specific pickup capability model
+- Carrier Locator settings architecture already added
+- existing EasyPost pickup create/buy/cancel flow wiring already added
+- current visible pickup error state already improved from silent failure
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — REMAINING FAILURE
+==================================================
+
+Observed QA result:
+- EasyPost pickup no longer fails silently
+- But the visible error is still too generic:
+  "Pickup create failed, The request was well-formed but was unable to be followed due to semantic errors."
+- This is not enough to diagnose or operate the feature
+- We need the app to reveal the actual EasyPost failure cause
+
+This must now become a true diagnostics pass.
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIXES
+==================================================
+
+1) SURFACE THE REAL EASYPOST ERROR DETAILS
+Required:
+- when EasyPost pickup create/buy fails, surface the actual structured provider error details to the operator in a clean readable way
+- at minimum include:
+  - provider error code
+  - top-level provider message
+  - field-level validation details when present
+  - which stage failed:
+    - pickup create
+    - pickup buy
+    - pickup cancel
+- do not stop at the generic semantic-error wrapper
+
+2) PRESERVE STRUCTURED SERVER ERRORS
+Required:
+- server must preserve and return structured EasyPost error payload details instead of collapsing them into one generic sentence
+- if EasyPost returns nested errors, keep those available to the client
+- do not swallow useful provider diagnostics
+
+3) CLIENT-SIDE DIAGNOSTIC DISPLAY
+Required:
+- shipment pickup UI must display the failure in an operator-friendly but specific way
+- if there are multiple field-level issues, render them as a short structured list
+- clearly indicate what the user must correct next if the provider error makes that obvious
+
+4) IDENTIFY THE FAILING STEP
+Required:
+- the UI must clearly show whether the failure occurred during:
+  - Create Pickup
+  - Buy Pickup Rate
+  - Cancel Pickup
+- do not leave the operator guessing which step failed
+
+5) SHOW THE KEY REQUEST PREREQUISITES USED
+Required:
+- for diagnostics, expose enough context to understand why EasyPost may reject the request, such as:
+  - provider shipment reference existence
+  - pickup window used
+  - pickup address source
+  - whether account-address mode is being used
+  - whether pickup rates were returned
+- keep this concise, not overly technical, but sufficient to debug
+
+6) HONEST TEST-MODE MESSAGING
+Required:
+- if test mode contributes to the failure, say that specifically
+- do not blame test mode unless the provider response or flow actually supports that conclusion
+- distinguish:
+  - true provider validation error
+  - test-mode limitation
+  - missing app-side prerequisite
+  - provider buy-step failure
+
+7) KEEP SUCCESS PATH READY
+Required:
+- if the underlying issue is fixed later, the app must still cleanly show:
+  - created
+  - rate returned
+  - booked
+  - confirmation number
+  - cost
+- do not regress the successful path while improving diagnostics
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- Request Carrier Pickup must now end in one of two understandable outcomes:
+  1. a real provider-booked pickup state with confirmation/details
+  2. a clearly explained failure with real EasyPost error details and the failing stage identified
+- The app must no longer rely on a vague generic semantic-error message
+
+==================================================
+IMPORTANT RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into unrelated workstreams
+- Do not fake booking success
+- Do not fake pickup confirmation
+- Do not remove honest provider-specific behavior
+- Keep the design baseline consistent
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Trace the exact EasyPost error payload returned during pickup create/buy/cancel failures
+2) Preserve the structured error details through server responses
+3) Surface those details clearly in the client pickup UI
+4) Label the exact failing step
+5) Add concise prerequisite context where helpful
+6) Re-test the EasyPost pickup flow in the current environment
+7) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- EasyPost pickup diagnostics/error-handling behavior
+- which step failed labeling
+- what structured provider details are surfaced
+- how test-mode limitations vs provider validation vs app prerequisite issues are distinguished
+- any remaining limitations
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. EasyPost Error Payload Findings
+3. Structured Server Error Preservation Fix
+4. Client Diagnostic Display Fix
+5. Failing-Step Identification Fix
+6. Test-Mode / Provider / App-Prerequisite Distinction Fix
+7. Files Changed
+8. Documentation Updated
+9. Non-Regression Notes

@@ -70,11 +70,25 @@ export interface GetTrackingResponse {
   error?: ProviderError;
 }
 
+export interface ProviderFieldError {
+  field?: string;
+  message: string;
+  code?: string;
+  suggestion?: string;
+}
+
 export interface ProviderError {
   code: string;
   message: string;
   details?: string;
   retryable?: boolean;
+  // Structured diagnostics preserved from the upstream provider so the UI can
+  // surface the *actual* failure cause rather than a generic wrapper sentence.
+  httpStatus?: number;
+  stage?: string;
+  providerCode?: string;
+  providerMessage?: string;
+  fieldErrors?: ProviderFieldError[];
 }
 
 export type ProviderCredentialStatus = 'missing' | 'present' | 'valid' | 'invalid';

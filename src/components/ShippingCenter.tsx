@@ -472,6 +472,19 @@ export default function ShippingCenter() {
     cost?: number;
     currency?: string;
     rawError?: string;
+    // Structured upstream-provider diagnostics so the operator can see the
+    // *actual* failure cause (e.g. EasyPost field-level validation) rather
+    // than the generic semantic-error wrapper.
+    stage?: string;
+    httpStatus?: number;
+    providerCode?: string;
+    providerMessage?: string;
+    fieldErrors?: { field?: string; message: string; code?: string; suggestion?: string }[];
+    // Concise prerequisite snapshot — what we sent to the provider, so the
+    // operator can see at a glance whether the cause is missing app context
+    // (no shipment ref, bad window, manual address) vs a true provider issue.
+    context?: { label: string; value: string }[];
+    detailsCollapsed?: string; // multi-line raw detail bundle for "Show details"
   };
   const [pickupAttemptResult, setPickupAttemptResult] = useState<PickupAttemptResult | null>(null);
   const [pickupCancelReason, setPickupCancelReason] = useState('');
@@ -993,6 +1006,10 @@ export default function ShippingCenter() {
   }
 
   function friendlyProviderError(raw: ProviderError): ProviderError {
+    // If the upstream provider already returned structured field-level errors,
+    // those are *more specific* than any generic message we'd substitute below.
+    // Pass them through unchanged so the operator sees the real cause.
+    if (raw.fieldErrors && raw.fieldErrors.length > 0) return raw;
     const msg = raw.message.toLowerCase();
     if (raw.code === 'PROVIDER_NOT_CONFIGURED' || msg.includes('no credentials') || msg.includes('not configured')) {
       return { ...raw, message: 'Shipping provider is not configured. Go to Provider Settings to enter your credentials.' };
@@ -1471,11 +1488,22 @@ export default function ShippingCenter() {
           console.error('[Pickup] MISSING_SHIPMENT_REF — label not purchased yet');
           return;
         }
-        const steps: PickupAttemptResult['steps'] = [{ label: 'Create pickup with provider', status: 'pending' }];
-        setPickupAttemptResult({ kind: 'info', title: 'Booking pickup…', detail: `Calling ${activeProviderId} create-pickup endpoint.`, steps });
-
         const minDt = new Date(`${pickupForm.date}T${pickupForm.windowStart || '09:00'}:00`).toISOString();
         const maxDt = new Date(`${pickupForm.date}T${pickupForm.windowEnd || '17:00'}:00`).toISOString();
+        // Concise prerequisite snapshot — what we actually sent to the
+        // provider. Surfaced with every diagnostic outcome so the operator can
+        // see at a glance whether the cause is missing app context vs a real
+        // provider validation issue. Kept compact and non-PII (no full address).
+        const pickupContext: { label: string; value: string }[] = [
+          { label: 'Provider', value: activeProviderId || '(none)' },
+          { label: 'Provider shipment ref', value: ship.providerShipmentId ? `present (${ship.providerShipmentId.slice(0, 12)}…)` : 'MISSING — label may not be purchased' },
+          { label: 'Carrier', value: carrier || '(unspecified — provider will infer)' },
+          { label: 'Pickup window', value: `${pickupForm.date} ${pickupForm.windowStart || '09:00'}–${pickupForm.windowEnd || '17:00'} (local) → ${minDt} → ${maxDt}` },
+          { label: 'Pickup address', value: `${ship.originAddress.city || '?'}, ${ship.originAddress.state || '?'} ${ship.originAddress.postalCode || '?'} ${ship.originAddress.country || '?'}` },
+          { label: 'is_account_address', value: 'true (using provider account address)' },
+        ];
+        const steps: PickupAttemptResult['steps'] = [{ label: 'Create pickup with provider', status: 'pending' }];
+        setPickupAttemptResult({ kind: 'info', title: 'Booking pickup…', detail: `Calling ${activeProviderId} create-pickup endpoint.`, steps, context: pickupContext });
         // eslint-disable-next-line no-console
         console.log('[Pickup] createProviderPickup →', { providerId: activeProviderId, providerShipmentId: ship.providerShipmentId, minDt, maxDt, carrier });
         const created = await shippingApi.createProviderPickup({
@@ -1496,10 +1524,17 @@ export default function ShippingCenter() {
           setProviderError(friendlyProviderError(created.error || { code: 'PICKUP_CREATE_FAILED', message: 'Pickup create failed.' }));
           setPickupAttemptResult({
             kind: 'error',
-            title: 'Pickup create failed',
+            title: `Pickup create failed${created.error?.httpStatus ? ` (HTTP ${created.error.httpStatus})` : ''}`,
             detail: created.error?.message || `${activeProviderId} did not return a pickup id.`,
             steps,
-            code: created.error?.code || 'PICKUP_CREATE_FAILED',
+            code: created.error?.providerCode || created.error?.code || 'PICKUP_CREATE_FAILED',
+            stage: created.error?.stage || 'pickup_create',
+            httpStatus: created.error?.httpStatus,
+            providerCode: created.error?.providerCode,
+            providerMessage: created.error?.providerMessage,
+            fieldErrors: created.error?.fieldErrors,
+            context: pickupContext,
+            detailsCollapsed: created.error?.details,
             rawError: created.error?.details,
           });
           return;
@@ -1531,7 +1566,7 @@ export default function ShippingCenter() {
             });
             const detail = `${activeProviderId} accepted the pickup (id ${created.providerPickupId}) but returned no purchasable rates.${caps.pickupTestModeLimitations ? ` Test-mode limitation: ${caps.pickupTestModeLimitations}` : ' This is common when the carrier or service is not enabled for scheduled pickups on the account.'} The pickup record is saved so you can cancel it; no carrier confirmation has been issued.`;
             setProviderError(friendlyProviderError({ code: 'NO_PICKUP_RATES', message: detail }));
-            setPickupAttemptResult({ kind: 'partial', title: 'Pickup created — no rates returned', detail, steps, code: 'NO_PICKUP_RATES', providerPickupId: created.providerPickupId });
+            setPickupAttemptResult({ kind: 'partial', title: 'Pickup created — no rates returned', detail, steps, code: 'NO_PICKUP_RATES', stage: 'pickup_buy', providerPickupId: created.providerPickupId, context: pickupContext });
             return;
           }
           const cheapest = [...created.rates].sort((a, b) => a.rate - b.rate)[0];
@@ -1561,11 +1596,18 @@ export default function ShippingCenter() {
             setProviderError(friendlyProviderError(buyResult.error || { code: 'PICKUP_BUY_FAILED', message: 'Pickup buy failed.' }));
             setPickupAttemptResult({
               kind: 'partial',
-              title: 'Pickup created but buy failed',
+              title: `Pickup created but buy failed${buyResult.error?.httpStatus ? ` (HTTP ${buyResult.error.httpStatus})` : ''}`,
               detail: `Pickup ${created.providerPickupId} was created with ${activeProviderId}, but the rate-purchase step failed: ${buyResult.error?.message || 'unknown error'}. The pickup record is saved so you can cancel and retry.`,
               steps,
-              code: buyResult.error?.code || 'PICKUP_BUY_FAILED',
+              code: buyResult.error?.providerCode || buyResult.error?.code || 'PICKUP_BUY_FAILED',
+              stage: buyResult.error?.stage || 'pickup_buy',
+              httpStatus: buyResult.error?.httpStatus,
+              providerCode: buyResult.error?.providerCode,
+              providerMessage: buyResult.error?.providerMessage,
+              fieldErrors: buyResult.error?.fieldErrors,
               providerPickupId: created.providerPickupId,
+              context: pickupContext,
+              detailsCollapsed: buyResult.error?.details,
               rawError: buyResult.error?.details,
             });
             return;
@@ -1610,6 +1652,7 @@ export default function ShippingCenter() {
           confirmationNumber: confirmed.confirmationNumber,
           cost: buyResult?.cost,
           currency: buyResult?.currency,
+          context: pickupContext,
         });
         return;
       }
@@ -3958,12 +4001,55 @@ export default function ShippingCenter() {
                                         ))}
                                       </ul>
                                     )}
+                                    {pickupAttemptResult.fieldErrors && pickupAttemptResult.fieldErrors.length > 0 && (
+                                      <div className="mt-2 bg-white/80 border border-rose-200 rounded p-2">
+                                        <p className="text-[10px] font-black text-rose-700 uppercase tracking-wider mb-1">Provider validation errors ({pickupAttemptResult.fieldErrors.length})</p>
+                                        <ul className="space-y-0.5">
+                                          {pickupAttemptResult.fieldErrors.map((fe, i) => (
+                                            <li key={i} className="text-[10px] text-rose-800 flex items-start gap-1.5">
+                                              <span className="text-rose-400">›</span>
+                                              <span>
+                                                {fe.field && <span className="font-mono font-black">{fe.field}: </span>}
+                                                <span>{fe.message}</span>
+                                                {fe.suggestion && <span className="text-rose-600 italic"> — {fe.suggestion}</span>}
+                                              </span>
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                    )}
+                                    {(pickupAttemptResult.stage || pickupAttemptResult.providerCode || pickupAttemptResult.httpStatus) && (
+                                      <div className="mt-2 flex flex-wrap gap-1.5 text-[9px] font-mono text-slate-600">
+                                        {pickupAttemptResult.stage && <span className="bg-white/70 px-1.5 py-0.5 rounded border border-slate-200">stage: <span className="font-black">{pickupAttemptResult.stage}</span></span>}
+                                        {pickupAttemptResult.providerCode && <span className="bg-white/70 px-1.5 py-0.5 rounded border border-slate-200">provider: <span className="font-black">{pickupAttemptResult.providerCode}</span></span>}
+                                        {pickupAttemptResult.httpStatus && <span className="bg-white/70 px-1.5 py-0.5 rounded border border-slate-200">HTTP <span className="font-black">{pickupAttemptResult.httpStatus}</span></span>}
+                                      </div>
+                                    )}
                                     {(pickupAttemptResult.providerPickupId || pickupAttemptResult.confirmationNumber || typeof pickupAttemptResult.cost === 'number') && (
                                       <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-mono text-slate-700">
                                         {pickupAttemptResult.providerPickupId && <span className="bg-white/80 px-2 py-0.5 rounded border border-slate-200">pickup: {pickupAttemptResult.providerPickupId}</span>}
                                         {pickupAttemptResult.confirmationNumber && <span className="bg-white/80 px-2 py-0.5 rounded border border-slate-200">confirm: {pickupAttemptResult.confirmationNumber}</span>}
                                         {typeof pickupAttemptResult.cost === 'number' && <span className="bg-white/80 px-2 py-0.5 rounded border border-slate-200">cost: {pickupAttemptResult.cost.toFixed(2)} {pickupAttemptResult.currency || 'USD'}</span>}
                                       </div>
+                                    )}
+                                    {pickupAttemptResult.context && pickupAttemptResult.context.length > 0 && (pickupAttemptResult.kind === 'error' || pickupAttemptResult.kind === 'partial') && (
+                                      <details className="mt-2">
+                                        <summary className="text-[10px] font-black text-slate-600 uppercase tracking-wider cursor-pointer hover:text-slate-800">Request context (what we sent)</summary>
+                                        <ul className="mt-1 space-y-0.5 bg-white/60 border border-slate-200 rounded p-2">
+                                          {pickupAttemptResult.context.map((c, i) => (
+                                            <li key={i} className="text-[10px] text-slate-700 flex gap-2">
+                                              <span className="font-black w-32 shrink-0 text-slate-500">{c.label}:</span>
+                                              <span className="font-mono break-all">{c.value}</span>
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      </details>
+                                    )}
+                                    {pickupAttemptResult.detailsCollapsed && (
+                                      <details className="mt-2">
+                                        <summary className="text-[10px] font-black text-slate-600 uppercase tracking-wider cursor-pointer hover:text-slate-800">Raw provider details</summary>
+                                        <pre className="mt-1 text-[10px] font-mono text-slate-700 bg-white/80 border border-slate-200 rounded p-2 whitespace-pre-wrap break-all">{pickupAttemptResult.detailsCollapsed}</pre>
+                                      </details>
                                     )}
                                   </div>
                                 </div>

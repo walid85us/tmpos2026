@@ -78,11 +78,30 @@ export interface AddressValidationResult {
   providerRef?: string;
 }
 
+export interface ProviderFieldError {
+  field?: string;
+  message: string;
+  code?: string;
+  suggestion?: string;
+}
+
 export interface ProviderError {
   code: string;
   message: string;
   details?: string;
   retryable?: boolean;
+  // Structured diagnostics preserved from the upstream provider so the UI can
+  // surface the *actual* failure cause rather than a generic wrapper sentence.
+  // For EasyPost these come from `error.code`, `error.message`, and the nested
+  // `error.errors[{field, message}]` array. `httpStatus` is the raw HTTP status
+  // we got back. `stage` identifies which provider call failed (e.g.
+  // 'pickup_create' / 'pickup_buy' / 'pickup_cancel'). `providerCode` is the
+  // upstream-defined error code (often more specific than `code`).
+  httpStatus?: number;
+  stage?: string;
+  providerCode?: string;
+  providerMessage?: string;
+  fieldErrors?: ProviderFieldError[];
 }
 
 export interface ShippingProviderAdapter {

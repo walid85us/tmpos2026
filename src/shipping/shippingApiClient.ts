@@ -1,10 +1,21 @@
 import type { ShipmentAddress, ShipmentPackage, ShippingRate, AddressValidationResult, LabelArtifact, ProviderTrackingEvent } from '../types';
 
+interface ProviderFieldError {
+  field?: string;
+  message: string;
+  code?: string;
+  suggestion?: string;
+}
 interface ProviderError {
   code: string;
   message: string;
   details?: string;
   retryable?: boolean;
+  httpStatus?: number;
+  stage?: string;
+  providerCode?: string;
+  providerMessage?: string;
+  fieldErrors?: ProviderFieldError[];
 }
 
 interface AddressValidationResponse {

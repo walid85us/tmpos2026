@@ -18,8 +18,77 @@ import type {
   LabelArtifact,
   ProviderTrackingEvent,
   ProviderError,
+  ProviderFieldError,
 } from '../types';
 import { getCredentials } from '../credential-store';
+
+// EasyPost API error responses look like:
+//   { error: { code: "PICKUP.INVALID", message: "...", errors: [{ field, message }] } }
+// The top-level `message` is often a generic wrapper ("The request was
+// well-formed but was unable to be followed due to semantic errors.") while
+// the *actual* validation failures live in the nested `errors[]` array. We
+// extract both so the operator sees the real cause instead of the wrapper.
+function extractEasyPostError(
+  errorData: unknown,
+  httpStatus: number,
+  stage: string,
+  fallbackCode: string,
+): ProviderError {
+  const root = (errorData as { error?: Record<string, unknown> } | undefined)?.error;
+  const providerCode = (root?.code as string | undefined) || undefined;
+  const providerMessage = (root?.message as string | undefined) || undefined;
+  const nested = Array.isArray(root?.errors) ? (root!.errors as unknown[]) : [];
+  const fieldErrors: ProviderFieldError[] = [];
+  for (const e of nested) {
+    const obj = e as Record<string, unknown>;
+    const field = (obj.field as string | undefined) || undefined;
+    const message = (obj.message as string | undefined) || (obj.error as string | undefined) || '';
+    const code = (obj.code as string | undefined) || undefined;
+    const suggestion = (obj.suggestion as string | undefined) || undefined;
+    if (!message && !field) continue;
+    fieldErrors.push({ field, message: message || `Invalid ${field || 'value'}`, code, suggestion });
+  }
+
+  // Build the operator-facing summary line. Prefer the most specific signal:
+  // 1. The first field-level error if present (most actionable)
+  // 2. The provider's top-level message
+  // 3. A generic HTTP fallback
+  let summary: string;
+  if (fieldErrors.length > 0) {
+    const first = fieldErrors[0];
+    summary = first.field ? `${first.field}: ${first.message}` : first.message;
+    if (fieldErrors.length > 1) summary += ` (+${fieldErrors.length - 1} more)`;
+  } else if (providerMessage) {
+    summary = providerMessage;
+  } else {
+    summary = `${stage} failed (HTTP ${httpStatus})`;
+  }
+
+  // Compact human-readable details bundle (newline-separated) so the UI can
+  // show a "Show details" toggle without having to render JSON.
+  const detailLines: string[] = [];
+  if (providerCode) detailLines.push(`EasyPost code: ${providerCode}`);
+  if (providerMessage && providerMessage !== summary) detailLines.push(`EasyPost message: ${providerMessage}`);
+  for (const fe of fieldErrors) {
+    detailLines.push(`• ${fe.field ? fe.field + ': ' : ''}${fe.message}`);
+  }
+  detailLines.push(`HTTP ${httpStatus} · stage=${stage}`);
+
+  console.warn(`[EasyPost ${stage}] HTTP ${httpStatus} providerCode=${providerCode || '(none)'} providerMessage=${JSON.stringify(providerMessage)} fieldErrors=${fieldErrors.length}`);
+  if (fieldErrors.length > 0) console.warn(`[EasyPost ${stage}] field errors:`, fieldErrors);
+
+  return {
+    code: providerCode || fallbackCode,
+    message: summary,
+    details: detailLines.join('\n'),
+    retryable: httpStatus >= 500,
+    httpStatus,
+    stage,
+    providerCode,
+    providerMessage,
+    fieldErrors: fieldErrors.length > 0 ? fieldErrors : undefined,
+  };
+}
 
 const NO_CREDENTIALS_ERROR: ProviderError = {
   code: 'PROVIDER_NOT_CONFIGURED',
@@ -408,7 +477,7 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
       });
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        return { success: false, error: { code: 'PICKUP_CREATE_FAILED', message: errorData?.error?.message || `Pickup create failed (HTTP ${response.status})`, retryable: response.status >= 500 } };
+        return { success: false, error: extractEasyPostError(errorData, response.status, 'pickup_create', 'PICKUP_CREATE_FAILED') };
       }
       const data = await response.json();
       const rates = (data.pickup_rates || []).map((r: Record<string, unknown>, i: number) => ({
@@ -436,7 +505,7 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
       });
       if (!pickupResp.ok) {
         const errorData = await pickupResp.json().catch(() => ({}));
-        return { success: false, error: { code: 'PICKUP_LOOKUP_FAILED', message: errorData?.error?.message || `Pickup lookup failed (HTTP ${pickupResp.status})`, retryable: pickupResp.status >= 500 } };
+        return { success: false, error: extractEasyPostError(errorData, pickupResp.status, 'pickup_lookup', 'PICKUP_LOOKUP_FAILED') };
       }
       const pickupData = await pickupResp.json();
       const rate = (pickupData.pickup_rates || []).find((r: Record<string, unknown>) => r.id === params.providerRateId);
@@ -450,7 +519,7 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
       });
       if (!buyResp.ok) {
         const errorData = await buyResp.json().catch(() => ({}));
-        return { success: false, error: { code: 'PICKUP_BUY_FAILED', message: errorData?.error?.message || `Pickup buy failed (HTTP ${buyResp.status})`, retryable: buyResp.status >= 500 } };
+        return { success: false, error: extractEasyPostError(errorData, buyResp.status, 'pickup_buy', 'PICKUP_BUY_FAILED') };
       }
       const data = await buyResp.json();
       return {
@@ -476,7 +545,7 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
       });
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        return { success: false, error: { code: 'PICKUP_CANCEL_FAILED', message: errorData?.error?.message || `Pickup cancel failed (HTTP ${response.status})`, retryable: response.status >= 500 } };
+        return { success: false, error: extractEasyPostError(errorData, response.status, 'pickup_cancel', 'PICKUP_CANCEL_FAILED') };
       }
       const data = await response.json();
       return { success: true, providerPickupId: data.id, status: data.status };
