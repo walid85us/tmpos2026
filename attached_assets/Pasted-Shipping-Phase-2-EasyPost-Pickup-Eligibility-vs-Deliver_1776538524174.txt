@@ -1,0 +1,182 @@
+Shipping Phase 2 — EasyPost Pickup Eligibility vs Delivery Verification Final Fix
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+This is a narrow final root-cause correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Fix the remaining contradiction where the app labels the address as "Verified by carrier" and then the same unchanged address still fails pickup_create.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior Node/Express carrier-integration engineer
+- Senior React/TypeScript engineer
+- Enterprise shipping systems architect
+- Senior USPS / EasyPost / pickup-operations expert with 20+ years of experience in pickup booking, carrier eligibility, and production shipping UX
+- Root-cause debugging specialist
+- QA gatekeeper who must not accept another cosmetic pass
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- plan gating
+- store permission gating
+- provider/manual mode split
+- PACKED-only activation
+- mutual exclusivity between Service Point and Pickup
+- existing shipping core flow
+- reverse-logistics flow
+- current pickup address source-of-truth work
+- current provider-specific pickup requirement model
+- current structured diagnostics UI
+- current pickup form visibility fix
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — ACTUAL REMAINING FAILURE
+==================================================
+
+Observed QA result:
+- Pickup address is shown as "Verified by carrier"
+- Address audit detail shows the same address is sent to pickup_create
+- All required provider fields are present
+- Yet pickup_create still fails with HTTP 422 invalid address entered / USPS code 1007
+
+This means the current "Verified by carrier" state is still not truthful for pickup booking readiness.
+
+==================================================
+ROOT CAUSE TO FIX
+==================================================
+
+The app is still treating EasyPost delivery verification as equivalent to pickup eligibility.
+
+That is the wrong model.
+
+A deliverable address may still be rejected for pickup_create by the carrier/provider.
+So the app must stop claiming "Verified by carrier" in a way that implies pickup-bookable readiness unless that has actually been proven.
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIXES
+==================================================
+
+1) SEPARATE DELIVERY VERIFICATION FROM PICKUP ELIGIBILITY
+Required:
+- do not label the address as pickup-ready simply because delivery verification succeeded
+- introduce a distinct pickup-readiness / pickup-eligibility state model
+At minimum:
+- delivery_verified
+- pickup_eligibility_unknown
+- pickup_eligibility_confirmed
+- pickup_eligibility_failed
+
+2) STOP MISLEADING "VERIFIED BY CARRIER" STATE
+Required:
+- if the current verification is only delivery verification, say that clearly
+- do not show a badge/state that implies the address is ready for pickup booking unless that is actually true
+- rename/refine the state accordingly
+
+3) ADD PICKUP ELIGIBILITY PRECHECK / PROBE MODEL
+Required:
+- implement an honest provider-booking eligibility step for pickup
+- if EasyPost/USPS has no separate official pickup-eligibility endpoint, then the app must treat pickup_create itself as the first true pickup-eligibility proof point
+- structure the UI around that reality instead of overstating delivery verification
+
+4) BETTER PICKUP STATE MODEL AFTER ATTEMPT
+Required:
+- after pickup_create attempt, store/display a clearer result:
+  - pickup eligible and booked
+  - pickup ineligible for this address
+  - pickup failed for another provider reason
+- if the provider says invalid address at pickup_create time, convert that into a persistent pickup-eligibility failure state for that address snapshot
+- do not keep showing the same address as pickup-ready verified after it already failed pickup_create unchanged
+
+5) OPERATOR-FACING EXPLANATION
+Required:
+- primary summary must say something like:
+  "This address is deliverable, but the carrier has not accepted it for pickup booking."
+  or
+  "Carrier pickup could not be booked for this address. Delivery verification passed, but pickup eligibility failed."
+- make this distinction explicit
+- do not force the operator to infer it from raw diagnostics
+
+6) ADDRESS SNAPSHOT / FAILURE MEMORY
+Required:
+- if a specific unchanged address snapshot already failed pickup_create, remember that state
+- do not let the UI keep presenting it as ready until the address changes or a successful re-check occurs
+- changing the address should invalidate the prior failure state and require re-evaluation
+
+7) KEEP RAW DIAGNOSTICS SECONDARY
+Required:
+- keep the current provider diagnostics and audit details
+- but the primary operator message must now explain the delivery-vs-pickup distinction clearly
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- the app no longer shows a misleading pickup-ready "Verified by carrier" state for an address that still fails pickup_create unchanged
+- delivery verification and pickup eligibility are represented as different concepts
+- after an invalid-address pickup_create failure, the UI preserves an honest pickup-ineligible state until the address changes or a new successful provider result is obtained
+
+==================================================
+IMPORTANT RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into unrelated workstreams
+- Do not fake pickup eligibility success
+- Do not fake pickup confirmation
+- Do not ship another cosmetic pass
+- Fix the actual delivery-verification vs pickup-eligibility contradiction
+- Keep the design baseline consistent
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Separate delivery verification state from pickup eligibility state
+2) Replace the misleading pickup-ready verification badge/state
+3) Add pickup eligibility result handling based on real provider-booking outcome
+4) Persist pickup-ineligible state for unchanged failed address snapshots
+5) Improve the operator explanation to make the distinction explicit
+6) Re-test the EasyPost pickup flow
+7) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- delivery verification vs pickup eligibility distinction
+- new pickup eligibility state model
+- rule that pickup_create failure can mark an unchanged address snapshot as pickup-ineligible
+- operator-facing explanation for delivery-verified but pickup-ineligible addresses
+- any remaining USPS/EasyPost caveats
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Delivery Verification vs Pickup Eligibility Findings
+3. Pickup Eligibility State Model Fix
+4. Misleading Verification State Fix
+5. Address Snapshot Failure Memory Fix
+6. Operator Explanation Fix
+7. Files Changed
+8. Documentation Updated
+9. Non-Regression Notes

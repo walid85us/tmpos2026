@@ -240,3 +240,31 @@ The frontend is built using React 19, TypeScript, Vite 6, and Tailwind CSS v4.
 **Audit panel (UI)**: a collapsible "Address audit detail" `<details>` block now appears under the verification controls once a verification has run. It shows three columns side-by-side — (1) what was sent to verification, (2) what the carrier returned (or "no normalization differences"), (3) what will be sent to pickup_create — plus the verbatim carrier warnings list (with provider codes and field hints) and a JSON dump of `verifications.delivery.details` (DPV codes, lat/lng, time zone, etc.) so the operator can confirm the displayed verified state and prove the create-call address matches.
 
 **Truthfulness invariants preserved**: no fake confirmations, no carrier-specific branches in shared code, provider errors surfaced verbatim, the "Verified by carrier" badge is now only shown when the address truly is pickup-ready (success + no warnings + DPV='Y'). USPS-specific caveat: when EasyPost returns `dpv_match_code` `D`/`S`/`N` the adapter emits a precise operator-facing hint and the address is *not* considered pickup-ready — the operator must add/correct the secondary unit and re-verify.
+
+### Phase 2.5.8 — Delivery Verification vs Pickup Eligibility (Apr 2026)
+
+**Root cause**: Even after Phase 2.5.7's strict DPV-aware delivery verification, the app was still presenting a "Verified by carrier" badge as if it implied pickup-booking readiness. EasyPost's `/v2/addresses/create_and_verify` only proves the address is *deliverable* — the carrier can deliver mail to it. It is not a pickup-eligibility endpoint. USPS / EasyPost expose **no separate pickup-eligibility endpoint**; the only true proof point is the result of `pickup_create` itself. Treating delivery verification as pickup eligibility means a perfectly deliverable address can keep showing as "ready" while `pickup_create` fails with USPS code 1007 over and over.
+
+**Conceptual fix — two independent state models**:
+1. **Delivery verification** (existing `PickupVerify`): proves the address is deliverable. Statuses: `verified` / `corrected_pending` / `corrected_accepted` / `failed` / `stale` / `verifying` / `unverified`. Comes from `/v2/addresses/create_and_verify`.
+2. **Pickup eligibility** (new `PickupEligibility`, Phase 2.5.8): proves the carrier will actually accept the address for a scheduled pickup. Statuses: `unknown` / `confirmed` / `failed`. Derived only from real `pickup_create` outcomes, keyed by the resolved-pickup-address fingerprint.
+
+**State model**:
+- `pickupEligibility[shipmentId] = { fingerprint, status, message?, providerCode?, httpStatus?, attemptedAt, providerPickupId? }`.
+- `getPickupEligibilityState(shipment)` returns `unknown` when no record exists OR when the current address fingerprint differs from the recorded one (i.e. the address has been edited since the last attempt — failure memory is invalidated). Otherwise returns the recorded status/record.
+- On `pickup_create` failure, status is set to `'failed'` with the verbatim provider code, HTTP status, and message.
+- On `pickup_create` success, status is set to `'confirmed'` with the provider pickup id.
+
+**Eligibility gate** (`getPickupEligibility`): new category `'pickup_address_ineligible'`. If `pickupEligibility` for the current fingerprint is `'failed'`, the eligibility check returns ineligible with a reason that quotes the carrier message and instructs the operator to edit the address and re-verify. The category is included in `PU_FORM_READINESS_CATS` so the form stays visible (the operator needs the form to edit fields) but **submit is disabled** until the address changes or a fresh successful create occurs. The `mark` for failure is fingerprint-scoped: editing any pickup-address field invalidates the memory automatically.
+
+**Misleading-state UI fix**:
+- The verification badge no longer says "Verified by carrier". It now reads **"Delivery verified"** (or "Delivery verified (corrected)" for accepted-corrected) with a `mark_email_read` icon. All other delivery-verification badge labels were renamed similarly: "Verifying delivery…", "Delivery corrected — review", "Delivery verification failed", "Re-verify delivery (address changed)", "Delivery not verified".
+- A second, **separate "Pickup eligibility" chip** sits next to the delivery chip: emerald "Pickup eligibility: confirmed" / rose "Pickup ineligible for this address" / slate "Pickup eligibility: not yet attempted".
+- The header explanation paragraph now reads (paraphrased): "Two separate checks: delivery verification proves mail can reach this address; pickup eligibility proves the carrier will actually accept it for a scheduled pickup. EasyPost / USPS expose no separate pickup-eligibility endpoint, so the only true proof is the result of `pickup_create` itself."
+- When `eligibility === 'failed'`, an explicit operator block renders: **"This address is deliverable, but the carrier has not accepted it for pickup booking."** (or "Pickup booking has already been rejected for this exact address." when delivery isn't verified) plus the verbatim carrier message, provider code, HTTP status, and the timestamp of the last attempt.
+
+**Address-snapshot failure memory**: a `pickup_create` failure persists *for that exact address fingerprint*. The operator cannot re-submit the same payload — the submit button shows `Pickup ineligible for this address` and the eligibility reason in its tooltip. Editing any pickup-address field changes the fingerprint and the memory is automatically invalidated (status returns to `'unknown'`), allowing a new attempt.
+
+**Truthfulness invariants preserved (Phase 2.5.1+)**: no fake confirmations, no fake eligibility success, structured provider errors surfaced verbatim through the same `pickupAttemptResult` panel (which now also drives the persistent eligibility memory). Carrier-agnostic: the eligibility model is fingerprint+status only — no carrier-specific branches.
+
+**EasyPost / USPS caveat**: there is no public pre-flight pickup-eligibility endpoint. Until that exists, the app treats the first `pickup_create` as the eligibility probe and remembers its result. This is the only honest model; anything else would be a guess.

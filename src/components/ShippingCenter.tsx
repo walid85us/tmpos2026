@@ -517,6 +517,26 @@ export default function ShippingCenter() {
   };
   const [pickupAddrVerify, setPickupAddrVerify] = useState<Record<string, PickupVerify>>({});
   const [pickupVerifying, setPickupVerifying] = useState<Record<string, boolean>>({});
+  // Pickup-eligibility state (Phase 2.5.8). Distinct from address verification:
+  //   - delivery verification (PickupVerify) only proves the address is
+  //     DELIVERABLE — i.e. the carrier could deliver mail there.
+  //   - pickup eligibility proves the carrier will actually ACCEPT the
+  //     address for a pickup_create call. EasyPost / USPS have no separate
+  //     official pickup-eligibility endpoint, so the only true proof point
+  //     is the result of pickup_create itself. We persist that result here,
+  //     keyed by the resolved-pickup-address fingerprint, so an address
+  //     snapshot that already failed pickup_create cannot keep showing as
+  //     "ready" until the operator changes the address.
+  type PickupEligibility = {
+    fingerprint: string;
+    status: 'confirmed' | 'failed';
+    message?: string;
+    providerCode?: string;
+    httpStatus?: number;
+    attemptedAt: string;
+    providerPickupId?: string;
+  };
+  const [pickupEligibility, setPickupEligibility] = useState<Record<string, PickupEligibility>>({});
   // Carrier Locator per-store configuration. Persisted in sessionStorage.
   // Each adapter is independently togglable so an operator can ship via UPS
   // only without configuring USPS/FedEx. Status reflects scaffolding state
@@ -1284,7 +1304,7 @@ export default function ShippingCenter() {
   // pre-checks, ZIP search activation — to guarantee a single source of truth.
   // Reason ordering matches operator priority: provider → plan → permission →
   // lifecycle → mutex. The first failing reason is surfaced.
-  type Eligibility = { eligible: boolean; reason?: string; category?: 'provider' | 'plan' | 'permission' | 'lifecycle' | 'mutex' | 'pickup_address' | 'pickup_address_unverified' | 'pickup_payload' };
+  type Eligibility = { eligible: boolean; reason?: string; category?: 'provider' | 'plan' | 'permission' | 'lifecycle' | 'mutex' | 'pickup_address' | 'pickup_address_unverified' | 'pickup_payload' | 'pickup_address_ineligible' };
   function getServicePointEligibility(shipment: Shipment): Eligibility {
     // LIVE locator eligibility. Currently always fails at the provider category until
     // a carrier-specific locator adapter is configured under Settings → Carrier Locators.
@@ -1439,6 +1459,26 @@ export default function ShippingCenter() {
       }
     }
     return { status: 'unverified', currentFingerprint };
+  }
+
+  // Phase 2.5.8 — pickup-eligibility lookup. Distinct from delivery
+  // verification. Returns:
+  //   - 'unknown'   : never attempted on this address snapshot, or the
+  //                   address has changed since the last attempt
+  //                   (fingerprint mismatch invalidates prior memory)
+  //   - 'confirmed' : pickup_create succeeded for this exact snapshot
+  //   - 'failed'    : pickup_create failed for this exact snapshot — the
+  //                   carrier rejected the address for pickup booking,
+  //                   regardless of whether delivery verification passed.
+  //                   The UI must NOT present a "ready" state until the
+  //                   address changes or a fresh successful create occurs.
+  type PickupEligibilityStatus = 'unknown' | 'confirmed' | 'failed';
+  function getPickupEligibilityState(shipment: Shipment): { status: PickupEligibilityStatus; record?: PickupEligibility } {
+    const rec = pickupEligibility[shipment.id];
+    if (!rec) return { status: 'unknown' };
+    const fp = pickupAddrFingerprint(resolvePickupAddress(shipment).address);
+    if (rec.fingerprint !== fp) return { status: 'unknown' };
+    return { status: rec.status, record: rec };
   }
 
   // True pickup-address verification — calls the EasyPost create-and-verify
@@ -1664,6 +1704,24 @@ export default function ShippingCenter() {
         eligible: false,
         reason: `${activeProviderId} pickup requires the following before booking: ${preflight.missing.join(', ')}.`,
         category: 'pickup_payload',
+      };
+    }
+    // Pickup-eligibility memory (Phase 2.5.8). If the very same address
+    // snapshot already failed pickup_create, do not let the operator
+    // re-submit it — the carrier already said no for this exact address
+    // and delivery verification is not a counter-proof. Editing the
+    // address invalidates this memory (fingerprint mismatch in
+    // getPickupEligibilityState) so the operator can retry on a fresh
+    // address snapshot. A successful create promotes status to
+    // 'confirmed' and pickup_create won't be re-offered for that
+    // shipment because pickupRequest is set (handled by `pr` above).
+    const elig = getPickupEligibilityState(shipment);
+    if (elig.status === 'failed') {
+      const why = elig.record?.message ? ` Carrier said: ${elig.record.message}` : '';
+      return {
+        eligible: false,
+        reason: `${activeProviderId || 'The carrier'} already rejected this exact pickup address for booking.${why} Edit the address (or contact info) and re-verify before retrying.`,
+        category: 'pickup_address_ineligible',
       };
     }
     return { eligible: true };
@@ -1990,6 +2048,26 @@ export default function ShippingCenter() {
         if (!created.success || !created.providerPickupId) {
           steps[0] = { label: 'Create pickup with provider', status: 'fail', note: created.error?.message || 'Create failed' };
           setProviderError(friendlyProviderError(created.error || { code: 'PICKUP_CREATE_FAILED', message: 'Pickup create failed.' }));
+          // Phase 2.5.8 — pickup-eligibility memory. The carrier just
+          // rejected this exact address snapshot for pickup booking.
+          // Persist that fact keyed by the address fingerprint so the
+          // operator cannot keep retrying the same payload (which would
+          // be guaranteed to fail again). Editing the pickup address
+          // invalidates this record.
+          {
+            const failFp = pickupAddrFingerprint(pickupAddrResolved.address);
+            setPickupEligibility(p => ({
+              ...p,
+              [shipmentId]: {
+                fingerprint: failFp,
+                status: 'failed',
+                message: created.error?.providerMessage || created.error?.message,
+                providerCode: created.error?.providerCode || created.error?.code,
+                httpStatus: created.error?.httpStatus,
+                attemptedAt: new Date().toISOString(),
+              },
+            }));
+          }
           setPickupAttemptResult({
             kind: 'error',
             title: `Pickup create failed${created.error?.httpStatus ? ` (HTTP ${created.error.httpStatus})` : ''}`,
@@ -2106,6 +2184,19 @@ export default function ShippingCenter() {
           updatedAt: now,
         });
         steps.push({ label: 'Persist pickup', status: 'ok' });
+        // Phase 2.5.8 — pickup-eligibility memory: confirmed for this address.
+        {
+          const okFp = pickupAddrFingerprint(pickupAddrResolved.address);
+          setPickupEligibility(p => ({
+            ...p,
+            [shipmentId]: {
+              fingerprint: okFp,
+              status: 'confirmed',
+              attemptedAt: new Date().toISOString(),
+              providerPickupId: created.providerPickupId,
+            },
+          }));
+        }
         setProviderSuccess(confirmed.confirmationNumber
           ? `Carrier pickup confirmed by ${activeProviderId}. Confirmation: ${confirmed.confirmationNumber}.`
           : `Pickup created with ${activeProviderId}. Awaiting carrier confirmation.`);
@@ -4190,7 +4281,7 @@ export default function ShippingCenter() {
                   // button is disabled. Mixing the two previously created
                   // a deadlock where required-but-empty inputs hid the
                   // very form needed to fill them in.
-                  const PU_FORM_READINESS_CATS = new Set(['pickup_address', 'pickup_address_unverified', 'pickup_payload']);
+                  const PU_FORM_READINESS_CATS = new Set(['pickup_address', 'pickup_address_unverified', 'pickup_payload', 'pickup_address_ineligible']);
                   const pickupFeatureAvailable = puElig.eligible || (puElig.category != null && PU_FORM_READINESS_CATS.has(puElig.category));
                   const pickupSubmitReady = puElig.eligible;
                   // Selection is editable if EITHER the live locator path OR the manual
@@ -4394,19 +4485,35 @@ export default function ShippingCenter() {
                         ];
                         const allFieldsOk = fields.every(f => f.ok);
                         const verify = getPickupVerificationStatus(selectedShip);
-                        // Verification badge tone + label
+                        const elig = getPickupEligibilityState(selectedShip);
+                        // Phase 2.5.8 — Delivery verification badge. Wording is
+                        // strictly "Delivery verified" (not "Verified by
+                        // carrier") because EasyPost's create_and_verify only
+                        // proves the address is deliverable; pickup booking is
+                        // a separate, stricter acceptance bar (see eligibility
+                        // chip below).
                         const vBadge = verify.status === 'verified' || verify.status === 'corrected_accepted'
-                          ? { bg: 'bg-emerald-100', text: 'text-emerald-700', icon: 'verified', label: verify.status === 'corrected_accepted' ? 'Verified (corrected · accepted)' : 'Verified by carrier' }
+                          ? { bg: 'bg-emerald-100', text: 'text-emerald-700', icon: 'mark_email_read', label: verify.status === 'corrected_accepted' ? 'Delivery verified (corrected)' : 'Delivery verified' }
                           : verify.status === 'verifying'
-                          ? { bg: 'bg-sky-100', text: 'text-sky-700', icon: 'sync', label: 'Verifying…' }
+                          ? { bg: 'bg-sky-100', text: 'text-sky-700', icon: 'sync', label: 'Verifying delivery…' }
                           : verify.status === 'corrected_pending'
-                          ? { bg: 'bg-amber-100', text: 'text-amber-700', icon: 'rule', label: 'Corrected — review needed' }
+                          ? { bg: 'bg-amber-100', text: 'text-amber-700', icon: 'rule', label: 'Delivery corrected — review' }
                           : verify.status === 'failed'
-                          ? { bg: 'bg-rose-100', text: 'text-rose-700', icon: 'error', label: 'Failed verification' }
+                          ? { bg: 'bg-rose-100', text: 'text-rose-700', icon: 'error', label: 'Delivery verification failed' }
                           : verify.status === 'stale'
-                          ? { bg: 'bg-amber-100', text: 'text-amber-700', icon: 'autorenew', label: 'Re-verify (address changed)' }
-                          : { bg: 'bg-slate-100', text: 'text-slate-600', icon: 'pending', label: 'Not verified' };
-                        const overallOk = allFieldsOk && (verify.status === 'verified' || verify.status === 'corrected_accepted');
+                          ? { bg: 'bg-amber-100', text: 'text-amber-700', icon: 'autorenew', label: 'Re-verify delivery (address changed)' }
+                          : { bg: 'bg-slate-100', text: 'text-slate-600', icon: 'pending', label: 'Delivery not verified' };
+                        // Phase 2.5.8 — Pickup-eligibility chip. Distinct from
+                        // delivery verification. Status is derived from real
+                        // pickup_create outcomes recorded against the address
+                        // fingerprint — it does NOT inherit from delivery
+                        // verification success.
+                        const eBadge = elig.status === 'confirmed'
+                          ? { bg: 'bg-emerald-100', text: 'text-emerald-700', icon: 'local_shipping', label: 'Pickup eligibility: confirmed' }
+                          : elig.status === 'failed'
+                          ? { bg: 'bg-rose-100', text: 'text-rose-700', icon: 'block', label: 'Pickup ineligible for this address' }
+                          : { bg: 'bg-slate-100', text: 'text-slate-600', icon: 'help', label: 'Pickup eligibility: not yet attempted' };
+                        const overallOk = allFieldsOk && (verify.status === 'verified' || verify.status === 'corrected_accepted') && elig.status !== 'failed';
                         const tone = overallOk
                           ? { bg: 'bg-sky-50', border: 'border-sky-200', text: 'text-sky-700', titleColor: 'text-sky-800' }
                           : verify.status === 'failed'
@@ -4425,12 +4532,20 @@ export default function ShippingCenter() {
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center justify-between gap-2 flex-wrap">
                                   <p className={`text-[11px] font-black ${tone.titleColor}`}>Pickup address source: {resolved.sourceLabel}</p>
-                                  <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-black ${vBadge.bg} ${vBadge.text}`}>
-                                    <span className={`material-symbols-outlined text-[12px] ${verify.status === 'verifying' ? 'animate-spin' : ''}`}>{vBadge.icon}</span>
-                                    {vBadge.label}
-                                  </span>
+                                  <div className="flex items-center gap-1 flex-wrap">
+                                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-black ${vBadge.bg} ${vBadge.text}`}>
+                                      <span className={`material-symbols-outlined text-[12px] ${verify.status === 'verifying' ? 'animate-spin' : ''}`}>{vBadge.icon}</span>
+                                      {vBadge.label}
+                                    </span>
+                                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-black ${eBadge.bg} ${eBadge.text}`}>
+                                      <span className="material-symbols-outlined text-[12px]">{eBadge.icon}</span>
+                                      {eBadge.label}
+                                    </span>
+                                  </div>
                                 </div>
-                                <p className={`text-[11px] ${tone.text} mt-0.5`}>EasyPost will be sent this exact address (with <span className="font-mono">is_account_address=false</span>) and the carrier will validate it. {overallOk ? 'Address fields are present and the carrier has verified the address.' : allFieldsOk ? 'Run carrier verification before requesting pickup — field presence alone does not guarantee a valid pickup address.' : 'Complete the missing fields below, then run carrier verification.'}</p>
+                                <p className={`text-[11px] ${tone.text} mt-0.5`}>
+                                  Two separate checks: <span className="font-black">delivery verification</span> proves mail can reach this address; <span className="font-black">pickup eligibility</span> proves the carrier will actually accept it for a scheduled pickup. EasyPost / USPS expose no separate pickup-eligibility endpoint, so the only true proof is the result of <span className="font-mono">pickup_create</span> itself. {overallOk ? 'Delivery is verified and the carrier has not yet rejected this address for pickup — submit to attempt the booking.' : verify.status !== 'verified' && verify.status !== 'corrected_accepted' ? 'Run delivery verification first, then submit to test pickup eligibility.' : elig.status === 'failed' ? 'Delivery is verified but pickup_create has already been rejected for this exact address. Edit the address and re-verify before retrying.' : 'Address fields are missing — complete them, run delivery verification, then submit to test pickup eligibility.'}
+                                </p>
                                 <ul className="mt-2 grid grid-cols-2 gap-x-3 gap-y-0.5">
                                   {fields.map((f, i) => (
                                     <li key={i} className={`text-[10px] flex items-center gap-1.5 ${f.ok ? 'text-emerald-700' : 'text-rose-700'}`}>
@@ -4507,6 +4622,32 @@ export default function ShippingCenter() {
                               )}
                               {verify.status === 'unverified' && allFieldsOk && (
                                 <p className="text-[10px] text-slate-600 italic">Verification has not run yet. Click <span className="font-black">Verify pickup address</span> to ask the carrier to validate this address before booking pickup.</p>
+                              )}
+                              {/* Phase 2.5.8 — pickup ineligibility explanation. Shown when
+                                  delivery verification passed (or any other state) but
+                                  pickup_create has already failed for this exact address.
+                                  Makes the delivery-vs-pickup distinction explicit instead
+                                  of forcing the operator to infer it from raw diagnostics. */}
+                              {elig.status === 'failed' && elig.record && (
+                                <div className="bg-white border border-rose-200 rounded-lg p-2">
+                                  <p className="text-[10px] font-black text-rose-800 uppercase tracking-wider mb-1">Pickup ineligible for this address</p>
+                                  <p className="text-[11px] text-rose-700">
+                                    {verify.status === 'verified' || verify.status === 'corrected_accepted'
+                                      ? 'This address is deliverable, but the carrier has not accepted it for pickup booking.'
+                                      : 'Pickup booking has already been rejected for this exact address.'}
+                                    {' '}Edit the address (or contact info) and re-verify before retrying — submitting again with the same payload will fail again.
+                                  </p>
+                                  {(elig.record.providerCode || elig.record.httpStatus) && (
+                                    <p className="text-[10px] text-rose-600 mt-1 font-mono">
+                                      {elig.record.providerCode && <span className="mr-2">code: <span className="font-black">{elig.record.providerCode}</span></span>}
+                                      {elig.record.httpStatus && <span className="mr-2">HTTP <span className="font-black">{elig.record.httpStatus}</span></span>}
+                                      <span className="text-rose-500">last attempt: {formatDateTime(elig.record.attemptedAt)}</span>
+                                    </p>
+                                  )}
+                                  {elig.record.message && (
+                                    <p className="text-[10px] text-rose-700 mt-1 italic">Carrier said: {elig.record.message}</p>
+                                  )}
+                                </div>
                               )}
                               {/* Audit detail — what was sent to the verification call,
                                   what the carrier returned, and what would be sent to
