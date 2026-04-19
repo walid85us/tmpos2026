@@ -366,3 +366,29 @@ The state is **derived**, not stored, so it stays consistent with `addressValida
 **Pickup forecast clears with stale rates**: the forecast badge is computed inline from each `availableRates` entry, so when the rate-clearing effect empties `availableRates`, every forecast badge attached to those rates disappears with them. There is no separately persisted forecast state to leave dangling.
 
 **Truthfulness invariants preserved**: no rate row claims final pickup eligibility; the forecast tooltip and the help text under the rate panel both call out that pickup_create is the source of truth. `'corrected'` does not unlock Get Rates. `'stale_after_edit'` does not unlock Get Rates. A previously-selected rate is cleared (not silently retained) when its address basis becomes stale. Existing pickup phone preflight, partial-failure honesty, and carrier-agnostic pickup flow are untouched.
+
+### Phase 2.7.1 — UPS Service-Family Pickup Refinement (Apr 2026)
+
+**Why this exists**: QA found that USPS and FedEx pickups worked, but at least one selected UPS service failed at `pickup_create` with `"UPS DAP pickup rates are not supported"`. The root cause was that Phase 2.7's UPS forecast treated every UPS-family rate as a single `final_check` bucket. EasyPost actually exposes multiple UPS rate sources (the `UPS` carrier account, the `UPSDAP` carrier account, plus USPS-handoff service families like SurePost / Ground Saver / Mail Innovations) whose pickup eligibility is NOT uniform.
+
+**UPS service-family classification logic** (`classifyUpsServicePickup` in `ShippingCenter.tsx`): the classifier examines `rate.carrier`, `rate.serviceCode`, and `rate.serviceName` (uppercased and dash/underscore-stripped for robust matching) and returns one of:
+- `not_capable` — `carrier === 'UPSDAP'` (UPS Daily/Direct Account Program rates — pickup_create has historically returned the literal "UPS DAP pickup rates are not supported" error). Operator must use drop-off or pick a non-DAP UPS service.
+- `not_capable` — UPS SurePost / Ground Saver (`UPSSUREPOST`, `UPSGROUNDSAVER`, `SUREPOST`, `GROUNDSAVER`, or service name contains "SUREPOST" / "GROUND SAVER"). Final mile is USPS, so pickup at the shipper for the UPS leg is not bookable through EasyPost's pickup flow.
+- `not_capable` — UPS Mail Innovations (carrier contains `UPSMAILINNOVATIONS`, or service code/name contains `MAIL INNOVATIONS`). USPS-handoff product, not pickup-bookable.
+- `final_check` — known standard UPS services with bookable pickup but cutoff/lead-time constraints: Ground, NextDayAir / NextDayAirSaver / NextDayAirEarlyAM, SecondDayAir / 2ndDayAir / SecondDayAirAM / 2ndDayAirAM, 3DaySelect / ThreeDaySelect, Worldwide Express / Express Plus / Express Saver / Expedited / Standard.
+- `unknown` — UPS-family rate the classifier hasn't explicitly modeled. Honest "unknown" rather than guessing — the operator will only know after pickup_create.
+
+**Evidence basis**: matching is conservative — carrier + serviceCode + serviceName are all consulted so a slight drift in any one field cannot silently misclassify. There is no "if it contains UPS, it's pickup-capable" fallback. The classification reasons are encoded in the `detail` string returned with each result and surfaced in the rate row tooltip.
+
+**Forecast wiring**: `getPickupForecastForRate` now delegates the UPS branch entirely to `classifyUpsServicePickup`. USPS, FedEx, DHL, and unknown-carrier branches are unchanged. Non-EasyPost providers continue to return `unknown` for UPS rates as before.
+
+**Earlier pickup gating**: `handleRequestPickup` runs the UPS classifier on the shipment's `selectedRate` immediately after the carrier-agnostic eligibility check and before the live booking call. When the result is `not_capable`, the call is blocked with a precise operator message:
+> This UPS service level does not support scheduled pickup through the current provider flow. Choose a different service or use drop-off. (<service-specific reason>)
+
+The error code is `UPS_SERVICE_NOT_PICKUP_CAPABLE`, distinct from the carrier-agnostic categories so logs and friendly-error mapping can recognize it. The gate is intentionally additive (does not weaken `getPickupEligibility`), only fires for `selectedRate.carrier` containing "UPS", and skips when no `selectedRate` exists (manual mode / pre-rate flows are unaffected).
+
+**Why USPS and FedEx were left unchanged**: QA passed for both. USPS remains `'likely'` (free pickup, lenient cutoffs over EasyPost). FedEx remains `'final_check'` with the existing Express vs Ground cutoff explanation. There was no evidence that those branches needed service-level subdivision and broadening scope risked regressing what already works.
+
+**Truthfulness invariants preserved**: `partial_failed` / `requested` / `confirmed` semantics are unchanged. The new gate refuses an avoidable round-trip — it does not invent a confirmation that wasn't issued. Forecast badges remain estimates; the rate-panel help text continues to state pickup_create is the source of truth for final eligibility.
+
+**Remaining UPS unknowns**: UPS regional/contract-only services not enumerated above will continue to forecast as `unknown` until evidence is collected from real EasyPost responses in this account. Adding a new service to the `final_check` set is a one-line change in `knownFinalCheckCodes` once observed.

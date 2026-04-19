@@ -1635,6 +1635,136 @@ export default function ShippingCenter() {
   //                        carrier, or no active provider). The operator
   //                        will only know after attempting pickup booking.
   type PickupForecastState = 'likely' | 'final_check' | 'setup_required' | 'not_capable' | 'unknown';
+
+  // Phase 2.7.1 — UPS service-family pickup classification.
+  //
+  // Background: UPS is not a single pickup-capable bucket through EasyPost.
+  // QA confirmed at least one selected UPS service returned
+  // "UPS DAP pickup rates are not supported" at pickup_create time. The
+  // root cause is that EasyPost exposes multiple UPS rate sources whose
+  // pickup eligibility is not uniform:
+  //
+  //   - UPSDAP carrier account (Daily/Direct Account Program rates) —
+  //     EasyPost has historically returned the literal error
+  //     "UPS DAP pickup rates are not supported" when pickup_create is
+  //     attempted against rates carrying carrier="UPSDAP". Treat as
+  //     not_capable (drop-off only).
+  //
+  //   - UPS Mail Innovations and UPS SurePost / Ground Saver —
+  //     final-mile delivery is handed off to USPS. Pickup at the shipper
+  //     for these services is constrained / typically unsupported through
+  //     EasyPost's pickup flow. Treat as not_capable.
+  //
+  //   - Standard UPS services (Ground, NextDayAir family, 2nd/3rd Day,
+  //     Worldwide Express / Saver / Expedited / Standard) — pickup is
+  //     supported but always subject to per-zone cutoffs / lead-times,
+  //     so we keep them at final_check (truthful: cannot promise).
+  //
+  //   - Anything outside those sets — unknown rather than guessing.
+  //
+  // Evidence basis: rate.carrier (the EasyPost carrier string, e.g.
+  // "UPSDAP" vs "UPS"), rate.serviceCode (machine code), and
+  // rate.serviceName (display string). We match conservatively on all
+  // three so a slight drift in any one field does not silently
+  // misclassify a service. We do not fabricate a classification just
+  // because the carrier string contains "UPS".
+  type UpsPickupClass = 'final_check' | 'not_capable' | 'unknown';
+  function classifyUpsServicePickup(rate: ShippingRate): { state: UpsPickupClass; label: string; detail: string } {
+    const carrier = (rate.carrier || '').toUpperCase().replace(/\s+/g, '');
+    const code = (rate.serviceCode || '').toUpperCase().replace(/[\s_-]+/g, '');
+    const name = (rate.serviceName || '').toUpperCase();
+
+    // Hard not_capable: UPSDAP carrier account. EasyPost surfaces these
+    // as carrier="UPSDAP" and the live pickup_create call returns
+    // "UPS DAP pickup rates are not supported".
+    if (carrier === 'UPSDAP') {
+      return {
+        state: 'not_capable',
+        label: 'Not pickup-capable (UPS DAP)',
+        detail: 'This rate is from the UPS DAP (Daily/Direct Account Program) account. Scheduled pickup is not supported for DAP rates through the current provider flow. Use drop-off, or choose a non-DAP UPS service to enable pickup.',
+      };
+    }
+
+    // UPS SurePost / Ground Saver — final mile is USPS, pickup at the
+    // shipper for the UPS leg is not bookable through EasyPost's pickup
+    // flow in practice.
+    const isSurePostOrGroundSaver =
+      code === 'UPSSUREPOST' ||
+      code === 'SUREPOST' ||
+      code === 'UPSGROUNDSAVER' ||
+      code === 'GROUNDSAVER' ||
+      name.includes('SUREPOST') ||
+      name.includes('GROUND SAVER');
+    if (isSurePostOrGroundSaver) {
+      return {
+        state: 'not_capable',
+        label: 'Not pickup-capable (USPS final mile)',
+        detail: 'UPS SurePost / Ground Saver hand the final mile to USPS. Scheduled UPS pickup is not bookable for these services through the current provider flow. Use drop-off, or choose a standard UPS service.',
+      };
+    }
+
+    // UPS Mail Innovations family — also USPS-handoff oriented, no
+    // bookable UPS pickup through the provider flow.
+    const isMailInnovations =
+      carrier.includes('UPSMAILINNOVATIONS') ||
+      code.includes('MAILINNOVATIONS') ||
+      name.includes('MAIL INNOVATIONS');
+    if (isMailInnovations) {
+      return {
+        state: 'not_capable',
+        label: 'Not pickup-capable (UPS Mail Innovations)',
+        detail: 'UPS Mail Innovations is a USPS-handoff product. Scheduled UPS pickup is not supported through the current provider flow. Use drop-off or choose a standard UPS service.',
+      };
+    }
+
+    // Known pickup-capable UPS services — Ground, NextDayAir variants,
+    // SecondDayAir variants, 3DaySelect, and Worldwide international
+    // services. All still final_check because cutoffs / lead-times
+    // determine whether the chosen pickup window will actually book.
+    const knownFinalCheckCodes = new Set([
+      'GROUND',
+      'UPSGROUND',
+      'NEXTDAYAIR',
+      'NEXTDAYAIRSAVER',
+      'NEXTDAYAIREARLYAM',
+      'NEXTDAYAIREARLY',
+      'SECONDDAYAIR',
+      '2NDDAYAIR',
+      'SECONDDAYAIRAM',
+      '2NDDAYAIRAM',
+      'THREEDAYSELECT',
+      '3DAYSELECT',
+      'STANDARD',
+      'UPSSTANDARD',
+      'EXPRESS',
+      'UPSEXPRESS',
+      'EXPRESSPLUS',
+      'UPSEXPRESSPLUS',
+      'EXPRESSSAVER',
+      'UPSEXPRESSSAVER',
+      'WORLDWIDEEXPRESS',
+      'WORLDWIDEEXPRESSPLUS',
+      'WORLDWIDEEXPEDITED',
+      'WORLDWIDESAVER',
+      'EXPEDITED',
+    ]);
+    if (knownFinalCheckCodes.has(code)) {
+      return {
+        state: 'final_check',
+        label: 'Pickup-capable — final check after label purchase',
+        detail: 'UPS pickups depend on per-zone cutoff times and lead-time requirements. Rates are available at pickup-create time only when those constraints are satisfied for the chosen pickup window.',
+      };
+    }
+
+    // Conservative fallback: a UPS-family rate we haven't explicitly
+    // modeled. Honest "unknown" rather than a green light.
+    return {
+      state: 'unknown',
+      label: 'Unknown until pickup check',
+      detail: `UPS service "${rate.serviceName || rate.serviceCode || 'unknown'}" is outside the set of UPS services this forecast explicitly classifies. Pickup eligibility will be determined when the carrier pickup request is created.`,
+    };
+  }
+
   function getPickupForecastForRate(rate: ShippingRate): { state: PickupForecastState; label: string; detail: string } {
     if (!activeProviderId) {
       return { state: 'setup_required', label: 'Account/setup required', detail: 'No active shipping provider is configured. Pickup is not possible until a provider is connected under Settings.' };
@@ -1653,8 +1783,13 @@ export default function ShippingCenter() {
       if (carrierUpper.includes('USPS')) {
         return { state: 'likely', label: 'Likely pickup-capable', detail: 'USPS pickups over EasyPost are typically available with no per-pickup fee. Final eligibility is confirmed when the carrier pickup request is created.' };
       }
+      // Phase 2.7.1 — UPS family is no longer a single bucket. Delegate
+      // to the service-family classifier so UPS DAP, SurePost / Ground
+      // Saver, and Mail Innovations are surfaced as not_capable BEFORE
+      // pickup_create, while standard UPS services remain final_check.
       if (carrierUpper.includes('UPS')) {
-        return { state: 'final_check', label: 'Pickup-capable — final check after label purchase', detail: 'UPS pickups depend on per-zone cutoff times and lead-time requirements. Rates are available at pickup-create time only when those constraints are satisfied for the chosen pickup window.' };
+        const ups = classifyUpsServicePickup(rate);
+        return ups;
       }
       if (carrierUpper.includes('FEDEX')) {
         return { state: 'final_check', label: 'Pickup-capable — final check after label purchase', detail: 'FedEx pickups depend on service-specific cutoff/ready/close times. Express vs Ground may have different windows. Pickup_create will return rates only when the chosen window satisfies the carrier constraints.' };
@@ -2161,6 +2296,25 @@ export default function ShippingCenter() {
       setProviderError(friendlyProviderError({ code: (elig.category || 'NOT_AVAILABLE').toUpperCase(), message: msg }));
       setPickupAttemptResult({ kind: 'error', title: 'Pickup not eligible', detail: msg, steps: [], code: (elig.category || 'NOT_AVAILABLE').toUpperCase() });
       return;
+    }
+    // Phase 2.7.1 — UPS service-level early gate. If the selected rate
+    // is a UPS service the classifier marks not_capable (UPS DAP, SurePost
+    // / Ground Saver, Mail Innovations), do NOT round-trip pickup_create
+    // — we already know the carrier will refuse. Surface a precise,
+    // service-aware operator message so they can switch service or use
+    // drop-off. This gate is intentionally additive to getPickupEligibility
+    // (which is carrier-agnostic) and only fires for UPS rate objects, so
+    // it cannot affect USPS or FedEx flows. Skips when no selectedRate
+    // (manual mode / pre-rate) — no service evidence to gate on.
+    const sel = ship.selectedRate;
+    if (sel && (sel.carrier || '').toUpperCase().includes('UPS')) {
+      const ups = classifyUpsServicePickup(sel);
+      if (ups.state === 'not_capable') {
+        const msg = `This UPS service level does not support scheduled pickup through the current provider flow. Choose a different service or use drop-off. (${ups.detail})`;
+        setProviderError(friendlyProviderError({ code: 'UPS_SERVICE_NOT_PICKUP_CAPABLE', message: msg }));
+        setPickupAttemptResult({ kind: 'error', title: 'UPS service not pickup-capable', detail: msg, steps: [], code: 'UPS_SERVICE_NOT_PICKUP_CAPABLE' });
+        return;
+      }
     }
     if (!pickupForm.date) {
       const msg = 'Pickup date is required.';
