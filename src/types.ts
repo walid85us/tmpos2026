@@ -1026,6 +1026,11 @@ export interface PickupRequest {
   providerPickupId?: string;               // provider-side pickup id (e.g. EasyPost pickup id) — required for cancel
   providerPickupCost?: number;             // pickup fee charged by carrier (when applicable)
   providerPickupCurrency?: string;
+  // Phase 2.9 — exact carrier/service the operator selected at the
+  // pickup_rates step (may differ from the shipment's selectedRate
+  // service when the carrier returns multiple pickup-eligible options).
+  providerPickupService?: string;
+  providerPickupRateId?: string;           // provider-side rate id that was bought
   source?: 'live_provider' | 'local_only'; // honesty marker — local_only means no real carrier API call was made
   requestedDate: string;                   // ISO date — pickup day
   windowStart?: string;                    // 'HH:MM' earliest ready

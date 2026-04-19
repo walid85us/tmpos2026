@@ -432,3 +432,51 @@ The error code is `UPS_SERVICE_NOT_PICKUP_CAPABLE`, distinct from the carrier-ag
 - No FedEx service-family classifier (current FedEx forecast is still a single `final_check` bucket; QA has not surfaced FedEx false positives).
 
 **Truthfulness invariants preserved**: forecast badges remain estimates. Fee chips remain class-level estimates with no dollar figures. `'corrected'` and `'stale_after_edit'` still do NOT unlock Get Rates. UPS DAP / SurePost / Mail Innovations remain hard-`not_capable`. `partial_failed` semantics, phone preflight, two-stage address readiness, override recovery, and label-lock behavior are all untouched.
+
+### Phase 2.9 — Exact Pickup Fees and Rate Selection at Booking Time (Apr 2026)
+
+**Why this exists**: Phase 2.8 added class-level pickup fee guidance on each rate row (forecast + fee class) but at booking time we still auto-bought the cheapest pickup_rate without showing it to the operator. That meant the operator never saw the actual provider-returned dollar amount before money/commitment changed hands, and an empty `pickup_rates` array got mis-styled as `partial_failed` even though no booking was attempted. Phase 2.9 fixes both.
+
+**Two-step booking flow** (`handleRequestPickup` → operator → `handleConfirmPickupBuy`):
+- **Step 1 — `handleRequestPickup(shipmentId)`**: runs all existing preflight (eligibility, UPS service-family gate, address readiness, payload preflight, phone format), then calls `pickup.create`. For providers that require a separate buy step (`caps.pickupNeedsRatePurchase` — currently EasyPost), it now PAUSES instead of auto-buying. Provider-returned `pickup_rates` are captured into a new `pickupRatesPanel` state. Providers without `pickupNeedsRatePurchase` (Shippo single-shot) keep their existing single-shot path unchanged.
+- **Step 2 — `handleConfirmPickupBuy(shipmentId)`**: takes the operator's chosen `providerRateId` from `pickupRatesPanel.selectedRateId`, calls `pickup.buy` against EXACTLY that rate (no implicit cheapest selection), and persists the confirmed `PickupRequest` with the EXACT bought rate / currency / service / confirmation number. On buy failure, the existing Phase 2.6.1 `partial_failed` semantics are retained — provider pickup id is held on the shipment so the operator can cancel the orphan and retry.
+- **Discard — `handleDiscardPickupOptions()`**: cancels the open rate panel. If the provider supports cancellation, also cancels the orphan provider pickup record created at Step 1 (so the operator doesn't leave a dangling pickup on the carrier side). Soft-warns if cancel cleanup fails — the panel always closes.
+
+**`pickupRatesPanel` state model**:
+```ts
+{
+  shipmentId, providerPickupId, providerId,
+  rates: [{ id, providerRateId, carrier, service, rate, currency }],
+  selectedRateId?,            // providerRateId — auto-set when rates.length === 1
+  fetchedAt,
+  kind: 'rates' | 'no_rates',
+  formSnapshot: { date, windowStart, windowEnd },
+}
+```
+`formSnapshot` is captured at Step 1 so the panel can render a stale-warning if the operator edits the date/window between Step 1 and Step 2 — the confirm button is disabled in that case to prevent buying for a window that no longer matches what's on screen.
+
+**Rate-row UI** (rendered in the pickup form between `pickupAttemptResult` and the request button):
+- **1 rate, rate === 0** — "Free pickup" emerald badge; confirm button labelled `Confirm free pickup — {carrier} {service}`. Single rate is auto-selected.
+- **1 rate, rate > 0** — rate row shows `{rate.toFixed(2)} {currency}`; confirm button labelled `Confirm pickup — {rate} {currency}`. Single rate is auto-selected.
+- **Multiple rates** — radio list of all rates with carrier/service/rate/providerRateId; confirm button stays disabled until a rate is selected, and shows the selected rate's exact figure (`Confirm pickup — {rate} {currency}` or `Confirm free pickup — …`).
+- **Empty rates (`kind: 'no_rates'`)** — honest pre-booking message: "No pickup rates available for {date} {window} through this provider/account. Adjust the window or use drop-off — no booking was attempted." A Discard action cancels the orphan provider pickup. NO `partial_failed` `PickupRequest` is persisted on the shipment, NO event is logged as `Pickup Booking Failed`, and `pickupRequested` is NOT set on `pickupInfo`. The shipment is exactly as it was before Step 1, minus the orphan provider record (which Discard cleans up).
+- **Stale window** — amber inline warning + confirm disabled; operator must Discard and re-fetch.
+
+**Persistence on success** (`PickupRequest`):
+- `confirmationNumber` — exact carrier confirmation from `pickup.buy`.
+- `providerPickupCost` — exact fee from `pickup.buy.cost` (falls back to the operator-selected `rate.rate` if the provider doesn't echo it back; in EasyPost they are always the same).
+- `providerPickupCurrency` — currency from `pickup.buy.currency` (or `rate.currency`).
+- `providerPickupService` (NEW Phase 2.9 field) — the carrier service the operator selected (may differ from the shipment's `selectedRate.service` when the carrier returned multiple pickup-eligible options).
+- `providerPickupRateId` (NEW Phase 2.9 field) — the provider-side rate id that was actually bought; useful for audit and dispute.
+- `carrier` — set from the bought rate's carrier (overrides the inferred carrier when the operator picked a different option).
+- `status` — `confirmed` if a confirmation number was issued, else `requested`.
+
+**Truthfulness invariants preserved**:
+- `partial_failed` is now reserved for the case where `pickup.create` succeeded AND `pickup.buy` failed (i.e. a real booking attempt that did not complete). Empty `pickup_rates` is no longer mis-classified as `partial_failed` — that path now writes nothing to the shipment.
+- The Phase 2.8 forecast and fee-class chips on the Get Rates row remain advisory and class-level; Phase 2.9 does NOT back-propagate exact pickup fees into Get Rates and does NOT show dollar amounts on those badges. Exact fees only appear at booking time, sourced from the live `pickup_rates` response.
+- Phase 2.7 address readiness and Phase 2.7.1 UPS service-family gate fire BEFORE Step 1 — UPS DAP / SurePost / Ground Saver / Mail Innovations are still hard-blocked before any provider round-trip.
+- Shippo / ShipStation / non-rate-purchase paths are unchanged — no `pickupRatesPanel`, no two-step UI; existing single-shot persistence intact.
+
+**Phase 2.8 vs Phase 2.9 ownership**:
+- **Phase 2.8 owns**: rate-row pickup forecast chip + fee-class chip on the Get Rates list. Class-level estimates only. No dollar amounts. Updated help text.
+- **Phase 2.9 adds**: at booking time, the actual `pickup_rates` selection panel with exact fees, exact-rate `pickup.buy`, exact-fee persistence (`providerPickupCost` / `providerPickupService` / `providerPickupRateId`), and the honest no-rates pre-booking state distinct from `partial_failed`.

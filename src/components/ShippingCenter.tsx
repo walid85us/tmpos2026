@@ -487,6 +487,23 @@ export default function ShippingCenter() {
     detailsCollapsed?: string; // multi-line raw detail bundle for "Show details"
   };
   const [pickupAttemptResult, setPickupAttemptResult] = useState<PickupAttemptResult | null>(null);
+  // Phase 2.9 — pickup-rates selection panel. After pickup.create returns,
+  // this holds the provider-returned rates so the operator can pick the
+  // exact one (with the exact fee) before pickup.buy is called. Empty
+  // `rates` with kind='no_rates' means the provider explicitly returned
+  // zero rates — that is rendered as an honest pre-booking no-rates
+  // state and is NOT persisted as a partial_failed PickupRequest.
+  type PickupRatesPanel = {
+    shipmentId: string;
+    providerPickupId: string;
+    providerId?: string;
+    rates: { id: string; providerRateId: string; carrier: string; service: string; rate: number; currency: string }[];
+    selectedRateId?: string; // providerRateId of the chosen rate
+    fetchedAt: string;
+    kind: 'rates' | 'no_rates';
+    formSnapshot: { date: string; windowStart: string; windowEnd: string };
+  };
+  const [pickupRatesPanel, setPickupRatesPanel] = useState<PickupRatesPanel | null>(null);
   const [pickupCancelReason, setPickupCancelReason] = useState('');
   // True pickup-address verification state — separate from the shipment
   // origin's shipping-address validation. Keyed by shipmentId. The
@@ -2629,87 +2646,61 @@ export default function ShippingCenter() {
         }
         steps[0] = { label: 'Create pickup with provider', status: 'ok', note: `Pickup id ${created.providerPickupId}${created.rates ? ` · ${created.rates.length} rate(s)` : ''}` };
 
-        // Auto-buy cheapest rate (typical pickup cost is small/zero). Operator
-        // can cancel afterwards if undesired. Multi-rate selection UI is a
-        // future polish — current rates are usually 0 or a single carrier fee.
+        // Phase 2.9 — for providers that require a separate pickup.buy step
+        // (EasyPost), pause here and surface the provider-returned pickup_rates
+        // to the operator. Step 2 (handleConfirmPickupBuy) calls pickup.buy
+        // against the operator's chosen rate. Empty pickup_rates is treated
+        // as an honest pre-booking no-rates state — NOT partial_failed — and
+        // does not write a PickupRequest to the shipment.
         let buyResult: shippingApi.BuyPickupResponse | null = null;
         if (caps.pickupNeedsRatePurchase) {
           if (!created.rates || created.rates.length === 0) {
-            // Common in EasyPost test mode (and for some real carriers when
-            // the shipment isn't pickup-eligible). Persist the created pickup
-            // so the operator can cancel it, but surface the truth clearly.
-            steps.push({ label: 'Buy pickup rate', status: 'fail', note: 'No pickup_rates returned by provider — cannot purchase.' });
-            // Phase 2.6.1 — partial failure: provider create succeeded but
-            // no purchasable rates were returned. Booking is NOT complete.
-            // Status is 'partial_failed' (not 'requested'), pickupRequested
-            // is NOT set on pickupInfo (so chips/tracker don't show
-            // requested/scheduled), and the event description is honest.
-            const partial: PickupRequest = {
-              ...basePickup,
+            // Phase 2.9 — honest pre-booking no-rates state. The provider
+            // created an orphan pickup object but offered no purchasable
+            // rates for this date/window, so NO booking was attempted and
+            // NO PickupRequest is persisted on the shipment (would be
+            // misleading). The orphan provider pickup id is held in the
+            // panel so the operator can discard (cancel) it cleanly.
+            steps.push({ label: 'Buy pickup rate', status: 'skip', note: 'No pickup_rates returned by provider — booking not attempted.' });
+            setPickupRatesPanel({
+              shipmentId,
               providerPickupId: created.providerPickupId,
-              status: 'partial_failed',
-              source: 'live_provider',
-              failureReason: 'Provider returned no pickup rates — pickup created but not booked. No carrier confirmation issued.',
-            };
-            updateShipment(shipmentId, {
-              pickupRequest: partial,
-              // Intentionally do NOT set pickupRequested: true here. The
-              // carrier did not accept the booking, so this is not a
-              // requested pickup from the operator's or carrier's POV.
-              events: [...ship.events, { id: `evt_pu_${Date.now()}`, status: 'Pickup Booking Failed' as any, description: `Pickup object created with ${activeProviderId} (id ${created.providerPickupId}) but provider returned no purchasable rates — booking NOT confirmed. ${caps.pickupTestModeLimitations ? `Test-mode note: ${caps.pickupTestModeLimitations}` : ''} No carrier confirmation issued. The orphaned provider pickup record can be cancelled from this panel.`, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent],
-              updatedAt: now,
+              providerId: activeProviderId || undefined,
+              rates: [],
+              fetchedAt: now,
+              kind: 'no_rates',
+              formSnapshot: { date: pickupForm.date, windowStart: pickupForm.windowStart, windowEnd: pickupForm.windowEnd },
             });
-            const detail = `${activeProviderId} accepted the pickup (id ${created.providerPickupId}) but returned no purchasable rates.${caps.pickupTestModeLimitations ? ` Test-mode limitation: ${caps.pickupTestModeLimitations}` : ' This is common when the carrier or service is not enabled for scheduled pickups on the account.'} The pickup record is saved so you can cancel it; no carrier confirmation has been issued.`;
-            setProviderError(friendlyProviderError({ code: 'NO_PICKUP_RATES', message: detail }));
-            setPickupAttemptResult({ kind: 'partial', title: 'Pickup created — no rates returned', detail, steps, code: 'NO_PICKUP_RATES', stage: 'pickup_buy', providerPickupId: created.providerPickupId, context: pickupContext });
+            const detail = `${activeProviderId} returned no pickup rates for ${pickupForm.date} ${pickupForm.windowStart || '09:00'}–${pickupForm.windowEnd || '17:00'} through this provider/account.${caps.pickupTestModeLimitations ? ` Test-mode limitation: ${caps.pickupTestModeLimitations}` : ' Adjust the window or use drop-off.'} No booking was attempted — no carrier confirmation has been issued.`;
+            setPickupAttemptResult({ kind: 'partial', title: 'No pickup rates available', detail, steps, code: 'NO_PICKUP_RATES_AVAILABLE', stage: 'pickup_create', providerPickupId: created.providerPickupId, context: pickupContext });
             return;
           }
-          const cheapest = [...created.rates].sort((a, b) => a.rate - b.rate)[0];
-          steps.push({ label: 'Buy pickup rate', status: 'pending', note: `Auto-selecting cheapest: ${cheapest.carrier} ${cheapest.service} @ ${cheapest.rate} ${cheapest.currency}` });
-          setPickupAttemptResult({ kind: 'info', title: 'Buying pickup rate…', detail: `Auto-selected cheapest pickup rate.`, steps, providerPickupId: created.providerPickupId });
-          // eslint-disable-next-line no-console
-          console.log('[Pickup] buyProviderPickup →', { providerPickupId: created.providerPickupId, providerRateId: cheapest.providerRateId });
-          buyResult = await shippingApi.buyProviderPickup(created.providerPickupId, cheapest.providerRateId, activeProviderId || undefined);
-          // eslint-disable-next-line no-console
-          console.log('[Pickup] buyProviderPickup ←', buyResult);
-
-          if (!buyResult.success) {
-            steps[steps.length - 1] = { label: 'Buy pickup rate', status: 'fail', note: buyResult.error?.message || 'Buy failed' };
-            // Phase 2.6.1 — partial failure (buy step). Same semantics
-            // as the no-rates branch: status is 'partial_failed',
-            // pickupRequested is NOT set, event is 'Pickup Booking Failed'.
-            const partial: PickupRequest = {
-              ...basePickup,
-              providerPickupId: created.providerPickupId,
-              status: 'partial_failed',
-              source: 'live_provider',
-              failureReason: buyResult.error?.message || 'Pickup buy failed — booking NOT confirmed.',
-            };
-            updateShipment(shipmentId, {
-              pickupRequest: partial,
-              events: [...ship.events, { id: `evt_pu_${Date.now()}`, status: 'Pickup Booking Failed' as any, description: `Pickup object created with ${activeProviderId} (id ${created.providerPickupId}) but rate-purchase failed: ${buyResult.error?.message}. Booking NOT confirmed — no carrier confirmation issued. The orphaned provider pickup record can be cancelled from this panel.`, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent],
-              updatedAt: now,
-            });
-            setProviderError(friendlyProviderError(buyResult.error || { code: 'PICKUP_BUY_FAILED', message: 'Pickup buy failed.' }));
-            setPickupAttemptResult({
-              kind: 'partial',
-              title: `Pickup created but buy failed${buyResult.error?.httpStatus ? ` (HTTP ${buyResult.error.httpStatus})` : ''}`,
-              detail: `Pickup ${created.providerPickupId} was created with ${activeProviderId}, but the rate-purchase step failed: ${buyResult.error?.message || 'unknown error'}. The pickup record is saved so you can cancel and retry.`,
-              steps,
-              code: buyResult.error?.providerCode || buyResult.error?.code || 'PICKUP_BUY_FAILED',
-              stage: buyResult.error?.stage || 'pickup_buy',
-              httpStatus: buyResult.error?.httpStatus,
-              providerCode: buyResult.error?.providerCode,
-              providerMessage: buyResult.error?.providerMessage,
-              fieldErrors: buyResult.error?.fieldErrors,
-              providerPickupId: created.providerPickupId,
-              context: pickupContext,
-              detailsCollapsed: buyResult.error?.details,
-              rawError: buyResult.error?.details,
-            });
-            return;
-          }
-          steps[steps.length - 1] = { label: 'Buy pickup rate', status: 'ok', note: `Confirmation ${buyResult.confirmationNumber || '(none)'}${typeof buyResult.cost === 'number' ? ` · ${buyResult.cost.toFixed(2)} ${buyResult.currency || 'USD'}` : ''}` };
+          // One or more rates returned — open the selection panel and let
+          // the operator confirm (Step 2). Auto-select the only rate when
+          // there is just one to streamline the common case, but still
+          // require an explicit confirm click so the operator sees the
+          // exact fee before money/commitment changes hands.
+          const initialSelected = created.rates.length === 1 ? created.rates[0].providerRateId : undefined;
+          steps.push({ label: 'Buy pickup rate', status: 'pending', note: `Awaiting operator selection — ${created.rates.length} rate(s) returned.` });
+          setPickupRatesPanel({
+            shipmentId,
+            providerPickupId: created.providerPickupId,
+            providerId: activeProviderId || undefined,
+            rates: created.rates,
+            selectedRateId: initialSelected,
+            fetchedAt: now,
+            kind: 'rates',
+            formSnapshot: { date: pickupForm.date, windowStart: pickupForm.windowStart, windowEnd: pickupForm.windowEnd },
+          });
+          setPickupAttemptResult({
+            kind: 'info',
+            title: created.rates.length === 1 ? 'Pickup rate ready — confirm to book' : `${created.rates.length} pickup rates returned — choose one to book`,
+            detail: `${activeProviderId} created pickup ${created.providerPickupId} and returned ${created.rates.length} rate(s). Pickup is NOT booked yet — review the exact fee and confirm to call pickup.buy.`,
+            steps,
+            providerPickupId: created.providerPickupId,
+            context: pickupContext,
+          });
+          return;
         } else {
           steps.push({ label: 'Buy pickup rate', status: 'skip', note: 'Provider does not require a separate buy step.' });
         }
@@ -2817,6 +2808,215 @@ export default function ShippingCenter() {
       setPickupSubmitting(false);
       // eslint-disable-next-line no-console
       console.log('[Pickup] End attempt');
+    }
+  }
+
+  // Phase 2.9 — Step 2 of the two-step booking flow. Called when the operator
+  // confirms a chosen rate from the pickupRatesPanel. Calls pickup.buy with
+  // the EXACT operator-selected providerRateId (no implicit "first/cheapest"
+  // selection any more), persists the confirmed PickupRequest with the exact
+  // bought rate / currency / service / confirmation number, and clears the
+  // panel. Buy failures retain the truthful partial_failed semantics from
+  // Phase 2.6.1 — provider pickup id is held on the shipment so the operator
+  // can cancel the orphan and retry.
+  async function handleConfirmPickupBuy(shipmentId: string) {
+    if (isWriteBlocked) return;
+    const panel = pickupRatesPanel;
+    if (!panel || panel.shipmentId !== shipmentId || panel.kind !== 'rates') return;
+    const ship = shipments.find(s => s.id === shipmentId);
+    if (!ship) return;
+    const rate = panel.rates.find(r => r.providerRateId === panel.selectedRateId);
+    if (!rate) {
+      setProviderError(friendlyProviderError({ code: 'VALIDATION', message: 'Choose a pickup rate to confirm.' }));
+      return;
+    }
+    const providerId = panel.providerId;
+    const totalWeight = ship.packages.reduce((sum, p) => sum + (p.weight || 0), 0);
+    const carrier = rate.carrier || ship.carrier || ship.selectedRate?.carrier || 'UPS';
+    const now = new Date().toISOString();
+    const basePickup: PickupRequest = {
+      id: `pr_${Date.now()}`,
+      shipmentId,
+      providerId,
+      carrier,
+      status: 'requested',
+      requestedDate: panel.formSnapshot.date,
+      windowStart: panel.formSnapshot.windowStart || undefined,
+      windowEnd: panel.formSnapshot.windowEnd || undefined,
+      pickupAddress: resolvePickupAddress(ship).address,
+      contactName: pickupForm.contactName.trim() || undefined,
+      contactPhone: pickupForm.contactPhone.trim() || resolvePickupAddress(ship).address.phone || undefined,
+      packageCount: ship.packages.length,
+      totalWeight: totalWeight || undefined,
+      handlingNotes: pickupForm.notes.trim() || undefined,
+      requestedAt: now,
+      requestedBy: 'current_operator',
+    };
+    setPickupSubmitting(true);
+    try {
+      const steps: PickupAttemptResult['steps'] = [
+        { label: 'Create pickup with provider', status: 'ok', note: `Pickup id ${panel.providerPickupId} · ${panel.rates.length} rate(s)` },
+        { label: 'Buy pickup rate', status: 'pending', note: `Selected: ${rate.carrier} ${rate.service} @ ${rate.rate.toFixed(2)} ${rate.currency}` },
+      ];
+      setPickupAttemptResult({
+        kind: 'info',
+        title: 'Buying pickup rate…',
+        detail: `Calling ${providerId || 'provider'} pickup.buy for the selected rate.`,
+        steps,
+        providerPickupId: panel.providerPickupId,
+      });
+      // eslint-disable-next-line no-console
+      console.log('[Pickup] buyProviderPickup →', { providerPickupId: panel.providerPickupId, providerRateId: rate.providerRateId, carrier: rate.carrier, service: rate.service });
+      const buyResult = await shippingApi.buyProviderPickup(panel.providerPickupId, rate.providerRateId, providerId);
+      // eslint-disable-next-line no-console
+      console.log('[Pickup] buyProviderPickup ←', buyResult);
+
+      if (!buyResult.success) {
+        steps[1] = { label: 'Buy pickup rate', status: 'fail', note: buyResult.error?.message || 'Buy failed' };
+        // Phase 2.6.1 partial-failure semantics retained: a provider pickup
+        // object exists but no carrier confirmation was issued. Persist the
+        // orphan so the operator can cancel + retry.
+        const partial: PickupRequest = {
+          ...basePickup,
+          providerPickupId: panel.providerPickupId,
+          providerPickupService: rate.service,
+          providerPickupRateId: rate.providerRateId,
+          status: 'partial_failed',
+          source: 'live_provider',
+          failureReason: buyResult.error?.message || 'Pickup buy failed — booking NOT confirmed.',
+        };
+        updateShipment(shipmentId, {
+          pickupRequest: partial,
+          events: [...ship.events, { id: `evt_pu_${Date.now()}`, status: 'Pickup Booking Failed' as any, description: `Pickup object created with ${providerId} (id ${panel.providerPickupId}) but rate-purchase failed for ${rate.carrier} ${rate.service} @ ${rate.rate.toFixed(2)} ${rate.currency}: ${buyResult.error?.message}. Booking NOT confirmed — no carrier confirmation issued. The orphaned provider pickup record can be cancelled from this panel.`, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent],
+          updatedAt: now,
+        });
+        setProviderError(friendlyProviderError(buyResult.error || { code: 'PICKUP_BUY_FAILED', message: 'Pickup buy failed.' }));
+        setPickupAttemptResult({
+          kind: 'partial',
+          title: `Pickup created but buy failed${buyResult.error?.httpStatus ? ` (HTTP ${buyResult.error.httpStatus})` : ''}`,
+          detail: `Pickup ${panel.providerPickupId} was created with ${providerId}, but the rate-purchase step failed for ${rate.carrier} ${rate.service}: ${buyResult.error?.message || 'unknown error'}. The pickup record is saved so you can cancel and retry.`,
+          steps,
+          code: buyResult.error?.providerCode || buyResult.error?.code || 'PICKUP_BUY_FAILED',
+          stage: buyResult.error?.stage || 'pickup_buy',
+          httpStatus: buyResult.error?.httpStatus,
+          providerCode: buyResult.error?.providerCode,
+          providerMessage: buyResult.error?.providerMessage,
+          fieldErrors: buyResult.error?.fieldErrors,
+          providerPickupId: panel.providerPickupId,
+          detailsCollapsed: buyResult.error?.details,
+          rawError: buyResult.error?.details,
+        });
+        setPickupRatesPanel(null);
+        return;
+      }
+      // Success — persist exact bought rate, currency, service, and
+      // confirmation number on the PickupRequest. The cost on the request
+      // record is the EXACT figure returned by pickup.buy (or, if the
+      // provider didn't echo it back, the figure the operator selected
+      // from pickup_rates — they are typically the same value).
+      const boughtCost = typeof buyResult.cost === 'number' ? buyResult.cost : rate.rate;
+      const boughtCurrency = buyResult.currency || rate.currency;
+      steps[1] = { label: 'Buy pickup rate', status: 'ok', note: `Confirmation ${buyResult.confirmationNumber || '(none)'} · ${boughtCost.toFixed(2)} ${boughtCurrency}` };
+      const confirmed: PickupRequest = {
+        ...basePickup,
+        providerPickupId: panel.providerPickupId,
+        confirmationNumber: buyResult.confirmationNumber,
+        providerPickupCost: boughtCost,
+        providerPickupCurrency: boughtCurrency,
+        providerPickupService: rate.service,
+        providerPickupRateId: rate.providerRateId,
+        carrier: rate.carrier || carrier,
+        status: buyResult.confirmationNumber ? 'confirmed' : 'requested',
+        confirmedAt: buyResult.confirmationNumber ? now : undefined,
+        source: 'live_provider',
+      };
+      updateShipment(shipmentId, {
+        pickupRequest: confirmed,
+        pickupInfo: {
+          ...(ship.pickupInfo || {}),
+          pickupRequested: true,
+          pickupScheduledAt: panel.formSnapshot.date,
+          pickupConfirmationNumber: confirmed.confirmationNumber,
+        },
+        events: [...ship.events, { id: `evt_pu_${Date.now()}`, status: 'Pickup Requested' as any, description: `Pickup booked LIVE with ${providerId} (provider pickup id ${panel.providerPickupId}, ${rate.carrier} ${rate.service})${confirmed.confirmationNumber ? ` — carrier confirmation ${confirmed.confirmationNumber}` : ''} — exact pickup fee ${boughtCost.toFixed(2)} ${boughtCurrency}`, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent],
+        updatedAt: now,
+      });
+      steps.push({ label: 'Persist pickup', status: 'ok' });
+      {
+        const okPayloadFp = pickupPayloadFingerprint(ship, pickupForm);
+        const okAddrFp = pickupAddrFingerprint(resolvePickupAddress(ship).address);
+        setPickupEligibility(p => ({
+          ...p,
+          [shipmentId]: {
+            fingerprint: okPayloadFp,
+            addrFingerprint: okAddrFp,
+            status: 'confirmed',
+            attemptedAt: now,
+            providerPickupId: panel.providerPickupId,
+          },
+        }));
+      }
+      setProviderSuccess(confirmed.confirmationNumber
+        ? `Carrier pickup confirmed by ${providerId}. Confirmation: ${confirmed.confirmationNumber}. Fee: ${boughtCost.toFixed(2)} ${boughtCurrency}.`
+        : `Pickup created with ${providerId}. Awaiting carrier confirmation.`);
+      setPickupAttemptResult({
+        kind: confirmed.confirmationNumber ? 'success' : 'partial',
+        title: confirmed.confirmationNumber ? 'Pickup booked live' : 'Pickup created — awaiting confirmation',
+        detail: confirmed.confirmationNumber
+          ? `${providerId} confirmed pickup ${panel.providerPickupId} (${rate.carrier} ${rate.service}) for ${panel.formSnapshot.date}. Confirmation ${confirmed.confirmationNumber}. Exact fee ${boughtCost.toFixed(2)} ${boughtCurrency}.`
+          : `${providerId} created pickup ${panel.providerPickupId} but did not return a carrier confirmation number.`,
+        steps,
+        providerPickupId: panel.providerPickupId,
+        confirmationNumber: confirmed.confirmationNumber,
+        cost: boughtCost,
+        currency: boughtCurrency,
+      });
+      setPickupRatesPanel(null);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[Pickup] Unexpected exception (buy)', err);
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      setProviderError(friendlyProviderError({ code: 'NETWORK_ERROR', message: `Live pickup buy failed: ${msg}` }));
+      setPickupAttemptResult({
+        kind: 'error',
+        title: 'Pickup buy threw an exception',
+        detail: `An unexpected error was thrown while talking to the server: ${msg}. The pickup was not booked.`,
+        steps: [{ label: 'Network / server', status: 'fail', note: msg }],
+        code: 'NETWORK_ERROR',
+        rawError: err instanceof Error ? err.stack : undefined,
+      });
+    } finally {
+      setPickupSubmitting(false);
+    }
+  }
+
+  // Phase 2.9 — discard the open rate-selection panel. If the provider
+  // supports cancellation, also cancel the orphan provider pickup record
+  // (created by pickup.create at Step 1 but never bought) so the operator
+  // doesn't leave a dangling pickup on the carrier side.
+  async function handleDiscardPickupOptions() {
+    if (isWriteBlocked) return;
+    const panel = pickupRatesPanel;
+    if (!panel) return;
+    const caps = panel.providerId ? PROVIDER_CAPABILITIES[panel.providerId.toLowerCase()] : null;
+    setPickupRatesPanel(null);
+    if (caps?.supportsPickupCancellation && panel.providerPickupId) {
+      try {
+        // eslint-disable-next-line no-console
+        console.log('[Pickup] discard → cancelProviderPickup', { providerPickupId: panel.providerPickupId });
+        const result = await shippingApi.cancelProviderPickup(panel.providerPickupId, panel.providerId);
+        if (!result.success) {
+          // Don't block the UI — the panel is gone either way; surface a
+          // soft warning so the operator can cancel manually if needed.
+          setProviderError(friendlyProviderError(result.error || { code: 'PICKUP_CANCEL_FAILED', message: `Could not cancel orphan provider pickup ${panel.providerPickupId}. You may need to cancel it from the provider dashboard.` }));
+          return;
+        }
+        setProviderSuccess(`Discarded pickup options. Orphan provider pickup ${panel.providerPickupId} cancelled.`);
+      } catch (err) {
+        setProviderError(friendlyProviderError({ code: 'NETWORK_ERROR', message: `Discard cleanup failed: ${err instanceof Error ? err.message : 'Unknown error'}` }));
+      }
+    } else {
+      setProviderSuccess('Discarded pickup options.');
     }
   }
 
@@ -5885,15 +6085,110 @@ export default function ShippingCenter() {
                               </div>
                             );
                           })()}
+                          {/* Phase 2.9 — pickup-rates selection panel. Rendered
+                              after pickup.create returns rates (or empty rates).
+                              The operator picks the exact rate; pickup.buy is
+                              called against THAT rate. Empty rates render as an
+                              honest pre-booking no-rates state — NOT partial_failed. */}
+                          {pickupRatesPanel && pickupRatesPanel.shipmentId === selectedShip.id && (() => {
+                            const panel = pickupRatesPanel;
+                            const stale = panel.formSnapshot.date !== pickupForm.date
+                              || (panel.formSnapshot.windowStart || '') !== (pickupForm.windowStart || '')
+                              || (panel.formSnapshot.windowEnd || '') !== (pickupForm.windowEnd || '');
+                            const selected = panel.kind === 'rates'
+                              ? panel.rates.find(r => r.providerRateId === panel.selectedRateId)
+                              : undefined;
+                            return (
+                              <div className="col-span-2 rounded-2xl border-2 border-primary/30 bg-primary/5 p-4 space-y-3">
+                                <div className="flex items-start justify-between gap-2">
+                                  <div>
+                                    <p className="text-[10px] font-black text-primary uppercase tracking-widest">Pickup options from {panel.providerId || 'provider'}</p>
+                                    <p className="text-[11px] text-slate-700 mt-0.5">
+                                      {panel.kind === 'no_rates'
+                                        ? `No pickup rates available for ${panel.formSnapshot.date} ${panel.formSnapshot.windowStart || '09:00'}–${panel.formSnapshot.windowEnd || '17:00'} through this provider/account. Adjust the window or use drop-off — no booking was attempted.`
+                                        : `Provider returned ${panel.rates.length} rate${panel.rates.length === 1 ? '' : 's'}. Pickup is NOT booked yet — review the exact fee and confirm.`}
+                                    </p>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDiscardPickupOptions()}
+                                    disabled={pickupSubmitting}
+                                    className="text-[10px] font-black text-slate-500 hover:text-rose-600 uppercase tracking-widest disabled:opacity-50"
+                                  >
+                                    Discard
+                                  </button>
+                                </div>
+                                {stale && (
+                                  <div className="rounded-xl bg-amber-50 border border-amber-200 px-3 py-2 text-[10px] text-amber-800">
+                                    Pickup form date/window has changed since these rates were fetched ({panel.formSnapshot.date} {panel.formSnapshot.windowStart || '09:00'}–{panel.formSnapshot.windowEnd || '17:00'}). Discard and re-fetch to get rates for the current window.
+                                  </div>
+                                )}
+                                {panel.kind === 'rates' && (
+                                  <ul className="space-y-2">
+                                    {panel.rates.map(r => {
+                                      const isSel = panel.selectedRateId === r.providerRateId;
+                                      const isFree = r.rate === 0;
+                                      return (
+                                        <li key={r.providerRateId}>
+                                          <label className={`flex items-center gap-3 rounded-xl border px-3 py-2.5 cursor-pointer transition-all ${isSel ? 'border-primary bg-white shadow-sm' : 'border-slate-200 bg-white/70 hover:border-slate-300'}`}>
+                                            <input
+                                              type="radio"
+                                              name={`pickup-rate-${selectedShip.id}`}
+                                              checked={isSel}
+                                              onChange={() => setPickupRatesPanel(p => p ? { ...p, selectedRateId: r.providerRateId } : p)}
+                                              disabled={pickupSubmitting}
+                                              className="accent-primary"
+                                            />
+                                            <div className="flex-1 min-w-0">
+                                              <p className="text-xs font-black text-slate-800 truncate">{r.carrier} · {r.service}</p>
+                                              <p className="text-[10px] text-slate-500 font-mono truncate">{r.providerRateId}</p>
+                                            </div>
+                                            <div className="text-right shrink-0">
+                                              {isFree
+                                                ? <span className="text-[11px] font-black text-emerald-700 uppercase tracking-wider">Free pickup</span>
+                                                : <span className="text-sm font-black text-slate-800">{r.rate.toFixed(2)} <span className="text-[10px] text-slate-500">{r.currency}</span></span>}
+                                            </div>
+                                          </label>
+                                        </li>
+                                      );
+                                    })}
+                                  </ul>
+                                )}
+                                {panel.kind === 'rates' ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleConfirmPickupBuy(selectedShip.id)}
+                                    disabled={pickupSubmitting || !selected || stale}
+                                    className="w-full py-3 bg-primary text-white font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                                  >
+                                    {pickupSubmitting
+                                      ? 'Confirming pickup…'
+                                      : stale
+                                      ? 'Discard and re-fetch — window changed'
+                                      : !selected
+                                      ? 'Choose a pickup rate to confirm'
+                                      : selected.rate === 0
+                                      ? `Confirm free pickup — ${selected.carrier} ${selected.service}`
+                                      : `Confirm pickup — ${selected.rate.toFixed(2)} ${selected.currency}`}
+                                  </button>
+                                ) : (
+                                  <p className="text-[10px] text-slate-500 italic">No purchasable rates were returned, so no booking is possible right now. Discard the orphan pickup record and try a different date/window — or use carrier drop-off.</p>
+                                )}
+                                <p className="text-[10px] text-slate-400 italic">Exact fee comes from the provider's <code className="font-mono">pickup_rates</code> response. Confirming calls <code className="font-mono">pickup.buy</code> for the chosen rate only.</p>
+                              </div>
+                            );
+                          })()}
                           <div className="col-span-2">
-                            <button
-                              onClick={() => handleRequestPickup(selectedShip.id)}
-                              disabled={pickupSubmitting || !pickupForm.date || !pickupSubmitReady}
-                              title={!pickupSubmitReady && puElig.reason ? puElig.reason : undefined}
-                              className="w-full py-3 bg-primary text-white font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 disabled:opacity-50 disabled:cursor-not-allowed"
-                            >
-                              {pickupSubmitting
-                                ? 'Requesting...'
+                            {(() => {
+                              const panelOpen = !!pickupRatesPanel && pickupRatesPanel.shipmentId === selectedShip.id;
+                              const caps = activeProviderId ? PROVIDER_CAPABILITIES[activeProviderId.toLowerCase()] : null;
+                              // Phase 2.9 — when the panel is open, the
+                              // primary action lives inside the panel; this
+                              // button drops back to "Refresh options" only,
+                              // and the form-stale case keeps it functional.
+                              const ratePurchase = !!caps?.pickupNeedsRatePurchase;
+                              const buttonLabel = pickupSubmitting
+                                ? (panelOpen ? 'Working…' : 'Requesting…')
                                 : !pickupForm.date
                                 ? 'Choose a pickup date to continue'
                                 : !pickupSubmitReady && puElig.category === 'pickup_address_ineligible'
@@ -5902,8 +6197,22 @@ export default function ShippingCenter() {
                                 ? 'Verify delivery to continue'
                                 : !pickupSubmitReady
                                 ? 'Complete required fields to continue'
-                                : 'Request Carrier Pickup'}
-                            </button>
+                                : panelOpen
+                                ? 'Refresh pickup options'
+                                : ratePurchase
+                                ? 'Get pickup options'
+                                : 'Request Carrier Pickup';
+                              return (
+                                <button
+                                  onClick={() => handleRequestPickup(selectedShip.id)}
+                                  disabled={pickupSubmitting || !pickupForm.date || !pickupSubmitReady}
+                                  title={!pickupSubmitReady && puElig.reason ? puElig.reason : undefined}
+                                  className={`w-full py-3 font-black text-[10px] uppercase tracking-widest rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed ${panelOpen ? 'bg-white border-2 border-slate-300 text-slate-700 hover:border-slate-400' : 'bg-primary text-white hover:bg-primary/90 shadow-lg shadow-primary/20'}`}
+                                >
+                                  {buttonLabel}
+                                </button>
+                              );
+                            })()}
                           </div>
                         </div>
                         );

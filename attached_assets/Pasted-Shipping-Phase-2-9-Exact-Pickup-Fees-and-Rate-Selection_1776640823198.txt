@@ -1,0 +1,186 @@
+Shipping Phase 2.9 — Exact Pickup Fees and Rate Selection at Booking Time
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+Implement ONLY Phase 2.9 from the approved pickup fee transparency plan.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen Phase 2.8.
+Do not change working USPS/FedEx behavior unless absolutely necessary for Phase 2.9.
+Do not weaken any of the current truthfulness rules around pickup status.
+
+Goal:
+Move from class-level pickup fee guidance to exact provider-returned pickup fee selection at booking time.
+
+Approved direction:
+- Keep Phase 2.8 rate-row forecast + fee-class guidance exactly as it is.
+- At pickup booking time, use the actual pickup.create response as the source of truth.
+- Surface the returned pickup_rates array to the operator.
+- Let the operator select the exact pickup option when multiple rates are returned.
+- Call pickup.buy against the selected pickup rate, not the first one implicitly.
+- Persist and display the exact bought pickup rate and confirmation number.
+- If pickup.create returns no pickup_rates, treat that as an honest pre-booking no-rates state, not as partial_failed.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior Node/Express carrier-integration engineer
+- Senior React/TypeScript engineer
+- Enterprise shipping systems architect
+- Senior multi-carrier pickup-operations expert with 20+ years of experience in USPS / UPS / FedEx / DHL pickup booking flows, pricing, and provider orchestration
+- Product systems thinker
+- QA gatekeeper who must preserve pricing truthfulness and prevent false booking states
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+- the approved pickup fee transparency plan
+- the approved Phase 2.8 implementation outcome
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- plan gating
+- store permission gating
+- provider/manual mode split
+- PACKED-only activation
+- mutual exclusivity between Service Point and Pickup
+- existing shipping core flow
+- reverse-logistics flow
+- pickup override recovery model
+- locked shipment origin/destination after label purchase
+- current truthful booking / partial-failure / confirmed-state logic
+- current pickup forecast and fee-class badges from Phase 2.8
+- current UPS service-family gating behavior
+
+==================================================
+PHASE 2.9 REQUIRED OUTCOME
+==================================================
+
+At pickup booking time, the operator must see the real provider-returned pickup options and exact fee(s) before confirming the booking.
+
+==================================================
+NON-NEGOTIABLE REQUIRED FEATURES
+==================================================
+
+1) SURFACE pickup.create pickup_rates TO THE UI
+Required:
+- wire the actual pickup.create response's pickup_rates array through to the pickup-booking UI
+- do not discard it
+- do not continue auto-buying the first returned rate silently
+
+2) EXACT PICKUP-RATE SELECTION UX
+Required:
+- when the operator opens the pickup form on a packed shipment with a label, the app should run pickup.create using the date/window/contact already in scope
+- then render the returned pickup_rates as a selection UI
+
+Required behaviors:
+- one rate and rate === 0:
+  - show a clear “Free pickup” indicator
+  - single confirm button
+- one rate and rate > 0:
+  - show the exact fee prominently
+  - confirm button includes the exact fee
+- multiple rates:
+  - show a radio/select list with carrier, service, exact rate, currency
+  - confirm button stays disabled until one is selected
+- if provider returns additional useful message detail or surcharges, render them clearly without clutter
+
+3) pickup.buy MUST USE THE CHOSEN RATE
+Required:
+- call pickup.buy against the operator’s chosen pickup rate
+- do not default implicitly to the first rate anymore
+
+4) PERSIST EXACT BOUGHT PICKUP RATE + CONFIRMATION
+Required:
+- persist the exact bought pickup rate, currency, chosen carrier/service, and confirmation number on the pickup record
+- render them on the shipment row / pickup summary after successful purchase
+- confirmation UI must match the actual bought rate
+
+5) EMPTY pickup_rates IS NOT partial_failed
+Required:
+- if pickup.create succeeds but returns an empty pickup_rates array:
+  - treat this as an honest pre-booking “no rates available for this date/window/provider combination”
+  - show a clear message such as:
+    “No pickup rates available for this date/window through the current provider. Adjust the window or use drop-off.”
+  - provide a retry/change-window path
+- do NOT style this as partial_failed
+- do NOT create a fake booked/requested state
+- do NOT create an orphan that needs cancellation if booking never actually occurred
+
+6) KEEP TRUE partial_failed FOR REAL CREATE/BUY FAILURES
+Required:
+- if pickup.create throws or pickup.buy fails after a provider pickup object exists, keep the truthful partial_failed behavior already implemented
+- do not weaken honesty
+
+7) KEEP PHASE 2.8 FORECAST/FEE BADGES ADVISORY ONLY
+Required:
+- the Phase 2.8 forecast and fee-class badges stay advisory
+- do not back-propagate exact pickup fees into Get Rates
+- do not show estimated dollar amounts on rate rows
+
+8) UPS / USPS / FEDEX TRUTHFULNESS
+Required:
+- do not regress working USPS behavior
+- do not regress working FedEx behavior
+- keep UPS service-family gating intact
+- if UPS DAP or another known unsupported service is blocked earlier, keep that block and do not attempt to force it through Phase 2.9
+
+==================================================
+WHAT NOT TO DO
+==================================================
+
+- Do not show estimated dollar amounts on Get Rates badges
+- Do not call pickup.create on every rate row at Get Rates time
+- Do not change Phase 2.8 forecast/fee-class logic except as strictly necessary for consistency
+- Do not weaken partial_failed semantics
+- Do not create false booked/requested states
+- Do not redesign the shipping UI broadly
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Inspect the current pickup.create response shape in the EasyPost adapter and confirm how pickup_rates is returned today
+2) Wire pickup_rates to the pickup form UI
+3) Implement single-rate / multi-rate / free-rate / empty-rate states
+4) Make pickup.buy use the chosen rate explicitly
+5) Persist exact bought rate + confirmation number
+6) Add honest empty-rates UX that is distinct from partial_failed
+7) Re-test USPS/FedEx non-regression and UPS gating non-regression
+8) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- exact pickup fee flow at booking time
+- pickup_rates selection behavior
+- free vs paid vs multi-rate vs empty-rate states
+- distinction between no-rates and partial_failed
+- what gets persisted after successful pickup booking
+- what Phase 2.8 still owns vs what Phase 2.9 now adds
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Phase 2.9 Implementation Status
+2. pickup.create Response / pickup_rates Findings
+3. Pickup Rate Selection UI
+4. pickup.buy Selected-Rate Fix
+5. Exact Fee + Confirmation Persistence Fix
+6. Empty-Rates vs partial_failed Truthfulness Fix
+7. Files Changed
+8. Documentation Updated
+9. Non-Regression Notes
