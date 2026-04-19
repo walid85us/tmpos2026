@@ -528,7 +528,14 @@ export default function ShippingCenter() {
   //     snapshot that already failed pickup_create cannot keep showing as
   //     "ready" until the operator changes the address.
   type PickupEligibility = {
+    // Phase 2.6.1 — `fingerprint` is now the FULL payload fingerprint
+    // (address + contact name + normalized phone + instructions + window),
+    // not just the address. Any provider-relevant edit invalidates the
+    // memory and re-opens the retry path. `addrFingerprint` is kept
+    // separately for diagnostics / display so we can tell whether the
+    // operator changed only contact info vs. the address itself.
     fingerprint: string;
+    addrFingerprint?: string;
     status: 'confirmed' | 'failed';
     message?: string;
     providerCode?: string;
@@ -1304,7 +1311,10 @@ export default function ShippingCenter() {
   // unaffected because the entire Logistics tab is gated by provider capability.
   const SERVICE_POINT_EDITABLE_STATUSES: ShipmentStatus[] = ['Packed'];
   const PICKUP_REQUESTABLE_STATUSES: ShipmentStatus[] = ['Packed'];
-  const PICKUP_CANCELLABLE_STATUSES: PickupRequestStatus[] = ['requested', 'scheduled', 'confirmed'];
+  // Phase 2.6.1 — `partial_failed` is included so the operator can cancel
+  // an orphaned provider pickup record (created but not booked). Without
+  // cancel access these dangle on the EasyPost account forever.
+  const PICKUP_CANCELLABLE_STATUSES: PickupRequestStatus[] = ['requested', 'scheduled', 'confirmed', 'partial_failed'];
 
   // Unified eligibility evaluators. Used everywhere — UI gating, action-handler
   // pre-checks, ZIP search activation — to guarantee a single source of truth.
@@ -1442,6 +1452,41 @@ export default function ShippingCenter() {
     return [norm(addr.line1), norm(addr.line2), norm(addr.city), norm(addr.state), norm(addr.postalCode), norm(addr.country)].join('|');
   }
 
+  // Phase 2.6.1 — provider-critical pickup PAYLOAD fingerprint. Used for
+  // pickup-eligibility memory invalidation. Includes every field the
+  // provider booking call actually sends, so changing any of them clears
+  // the prior failed-attempt memory and reopens the retry path. The
+  // address-only `pickupAddrFingerprint` above is intentionally NARROWER:
+  // it scopes the address-verification record because verification really
+  // is about the address only — but eligibility (the carrier-rejected-this-
+  // exact-payload memory) must respond to contact/window/instructions
+  // edits too, otherwise the operator sees "ineligible" indefinitely after
+  // fixing a contact-phone mutation that caused the original rejection.
+  function pickupContactDigits(s: string | undefined | null): string {
+    return (s || '').replace(/\D/g, '');
+  }
+  function pickupPayloadFingerprint(shipment: Shipment, form: { contactName: string; contactPhone: string; notes: string; date: string; windowStart: string; windowEnd: string }): string {
+    const addr = resolvePickupAddress(shipment).address;
+    const norm = (s: string | undefined) => (s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    const contactName = norm(form.contactName.trim() || addr.name || addr.company);
+    // Phone normalized to digits-only (10-digit US after stripping leading
+    // 1) so cosmetic edits like adding/removing dashes/parens do NOT
+    // invalidate the memory, but a real digit change does.
+    const phoneRaw = form.contactPhone.trim() || addr.phone || '';
+    const phoneDigits = pickupContactDigits(phoneRaw);
+    const phoneCanonical = phoneDigits.length === 11 && phoneDigits.startsWith('1') ? phoneDigits.slice(1) : phoneDigits;
+    const instructions = norm([shipment.pickupLocationDetail?.trim(), form.notes.trim()].filter(Boolean).join(' — '));
+    return [
+      pickupAddrFingerprint(addr),
+      contactName,
+      phoneCanonical,
+      instructions,
+      norm(form.date),
+      norm(form.windowStart),
+      norm(form.windowEnd),
+    ].join('||');
+  }
+
   // Resolve the operator-facing pickup-address verification status for a
   // shipment. This is what the eligibility gate and the pickup banner read.
   // Status semantics are intentionally narrow:
@@ -1510,8 +1555,16 @@ export default function ShippingCenter() {
   function getPickupEligibilityState(shipment: Shipment): { status: PickupEligibilityStatus; record?: PickupEligibility } {
     const rec = pickupEligibility[shipment.id];
     if (!rec) return { status: 'unknown' };
-    const fp = pickupAddrFingerprint(resolvePickupAddress(shipment).address);
-    if (rec.fingerprint !== fp) return { status: 'unknown' };
+    // Phase 2.6.1 — compare the FULL payload fingerprint. If the
+    // pickupForm currently in scope reflects a DIFFERENT shipment (the
+    // operator hasn't opened this row's pickup form yet), the computed
+    // fingerprint won't match and we return 'unknown' — which is the safe
+    // default (allows fresh attempt, never blocks). The previous
+    // address-only check was sticky across contact/window edits, so a
+    // failure caused by a bad phone stayed "ineligible" forever even
+    // after the operator fixed the phone.
+    const payloadFp = pickupPayloadFingerprint(shipment, pickupForm);
+    if (rec.fingerprint !== payloadFp) return { status: 'unknown' };
     return { status: rec.status, record: rec };
   }
 
@@ -2052,10 +2105,25 @@ export default function ShippingCenter() {
         // semantic error. The operator gets a specific list of fields to fix.
         const pickupAddrResolved = resolvePickupAddress(ship);
         const addrCheck = validatePickupAddress(pickupAddrResolved.address);
-        const phoneAvailable = !!(pickupForm.contactPhone.trim() || pickupAddrResolved.address.phone);
-        if (!addrCheck.ready || !phoneAvailable) {
+        const phoneRawForCheck = (pickupForm.contactPhone.trim() || pickupAddrResolved.address.phone || '').trim();
+        const phoneAvailable = !!phoneRawForCheck;
+        // Phase 2.6.1 — phone-format preflight. Carriers (USPS in
+        // particular) require a 10-digit US phone. Accept 10 digits, or
+        // 11 digits starting with 1 (which we'll normalize on the server),
+        // or an E.164 +1XXXXXXXXXX. Anything else is rejected up front
+        // with a specific error so the operator doesn't waste a provider
+        // round-trip and doesn't see the contact-phone-mutation bug
+        // re-enter the form via a corrected suggestion.
+        const phoneDigitsForCheck = phoneRawForCheck.replace(/\D/g, '');
+        const phoneFormatOk = phoneDigitsForCheck.length === 10
+          || (phoneDigitsForCheck.length === 11 && phoneDigitsForCheck.startsWith('1'));
+        if (!addrCheck.ready || !phoneAvailable || !phoneFormatOk) {
           const missing = [...addrCheck.missing];
-          if (!phoneAvailable) missing.push('Contact phone (in pickup form or origin address)');
+          if (!phoneAvailable) {
+            missing.push('Contact phone (in pickup form or origin address)');
+          } else if (!phoneFormatOk) {
+            missing.push(`Contact phone must be a 10-digit US number (got "${phoneRawForCheck}", ${phoneDigitsForCheck.length} digit${phoneDigitsForCheck.length === 1 ? '' : 's'})`);
+          }
           const msg = `Pickup uses the ${pickupAddrResolved.sourceLabel}. Complete it before requesting pickup. Missing: ${missing.join(', ')}.`;
           // eslint-disable-next-line no-console
           console.error('[Pickup] PICKUP_ADDRESS_INCOMPLETE', { source: pickupAddrResolved.source, missing });
@@ -2159,11 +2227,16 @@ export default function ShippingCenter() {
           // be guaranteed to fail again). Editing the pickup address
           // invalidates this record.
           {
-            const failFp = pickupAddrFingerprint(pickupAddrResolved.address);
+            // Phase 2.6.1 — record the FULL payload fingerprint so editing
+            // the contact phone (the most common cause of a phone-format
+            // rejection) clears this memory.
+            const failPayloadFp = pickupPayloadFingerprint(ship, pickupForm);
+            const failAddrFp = pickupAddrFingerprint(pickupAddrResolved.address);
             setPickupEligibility(p => ({
               ...p,
               [shipmentId]: {
-                fingerprint: failFp,
+                fingerprint: failPayloadFp,
+                addrFingerprint: failAddrFp,
                 status: 'failed',
                 message: created.error?.providerMessage || created.error?.message,
                 providerCode: created.error?.providerCode || created.error?.code,
@@ -2201,17 +2274,24 @@ export default function ShippingCenter() {
             // the shipment isn't pickup-eligible). Persist the created pickup
             // so the operator can cancel it, but surface the truth clearly.
             steps.push({ label: 'Buy pickup rate', status: 'fail', note: 'No pickup_rates returned by provider — cannot purchase.' });
+            // Phase 2.6.1 — partial failure: provider create succeeded but
+            // no purchasable rates were returned. Booking is NOT complete.
+            // Status is 'partial_failed' (not 'requested'), pickupRequested
+            // is NOT set on pickupInfo (so chips/tracker don't show
+            // requested/scheduled), and the event description is honest.
             const partial: PickupRequest = {
               ...basePickup,
               providerPickupId: created.providerPickupId,
-              status: 'requested',
+              status: 'partial_failed',
               source: 'live_provider',
-              failureReason: 'Provider returned no pickup rates — pickup created but not confirmed.',
+              failureReason: 'Provider returned no pickup rates — pickup created but not booked. No carrier confirmation issued.',
             };
             updateShipment(shipmentId, {
               pickupRequest: partial,
-              pickupInfo: { ...(ship.pickupInfo || {}), pickupRequested: true, pickupScheduledAt: pickupForm.date },
-              events: [...ship.events, { id: `evt_pu_${Date.now()}`, status: 'Pickup Requested' as any, description: `Pickup created with ${activeProviderId} (id ${created.providerPickupId}) but provider returned no pickup rates — cannot purchase. ${caps.pickupTestModeLimitations ? `Test-mode note: ${caps.pickupTestModeLimitations}` : ''} No carrier confirmation issued.`, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent],
+              // Intentionally do NOT set pickupRequested: true here. The
+              // carrier did not accept the booking, so this is not a
+              // requested pickup from the operator's or carrier's POV.
+              events: [...ship.events, { id: `evt_pu_${Date.now()}`, status: 'Pickup Booking Failed' as any, description: `Pickup object created with ${activeProviderId} (id ${created.providerPickupId}) but provider returned no purchasable rates — booking NOT confirmed. ${caps.pickupTestModeLimitations ? `Test-mode note: ${caps.pickupTestModeLimitations}` : ''} No carrier confirmation issued. The orphaned provider pickup record can be cancelled from this panel.`, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent],
               updatedAt: now,
             });
             const detail = `${activeProviderId} accepted the pickup (id ${created.providerPickupId}) but returned no purchasable rates.${caps.pickupTestModeLimitations ? ` Test-mode limitation: ${caps.pickupTestModeLimitations}` : ' This is common when the carrier or service is not enabled for scheduled pickups on the account.'} The pickup record is saved so you can cancel it; no carrier confirmation has been issued.`;
@@ -2230,17 +2310,19 @@ export default function ShippingCenter() {
 
           if (!buyResult.success) {
             steps[steps.length - 1] = { label: 'Buy pickup rate', status: 'fail', note: buyResult.error?.message || 'Buy failed' };
+            // Phase 2.6.1 — partial failure (buy step). Same semantics
+            // as the no-rates branch: status is 'partial_failed',
+            // pickupRequested is NOT set, event is 'Pickup Booking Failed'.
             const partial: PickupRequest = {
               ...basePickup,
               providerPickupId: created.providerPickupId,
-              status: 'requested',
+              status: 'partial_failed',
               source: 'live_provider',
-              failureReason: buyResult.error?.message || 'Pickup buy failed',
+              failureReason: buyResult.error?.message || 'Pickup buy failed — booking NOT confirmed.',
             };
             updateShipment(shipmentId, {
               pickupRequest: partial,
-              pickupInfo: { ...(ship.pickupInfo || {}), pickupRequested: true, pickupScheduledAt: pickupForm.date },
-              events: [...ship.events, { id: `evt_pu_${Date.now()}`, status: 'Pickup Requested' as any, description: `Pickup created with ${activeProviderId} (id ${created.providerPickupId}) but rate-purchase failed: ${buyResult.error?.message}. No carrier confirmation issued.`, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent],
+              events: [...ship.events, { id: `evt_pu_${Date.now()}`, status: 'Pickup Booking Failed' as any, description: `Pickup object created with ${activeProviderId} (id ${created.providerPickupId}) but rate-purchase failed: ${buyResult.error?.message}. Booking NOT confirmed — no carrier confirmation issued. The orphaned provider pickup record can be cancelled from this panel.`, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent],
               updatedAt: now,
             });
             setProviderError(friendlyProviderError(buyResult.error || { code: 'PICKUP_BUY_FAILED', message: 'Pickup buy failed.' }));
@@ -2290,11 +2372,17 @@ export default function ShippingCenter() {
         steps.push({ label: 'Persist pickup', status: 'ok' });
         // Phase 2.5.8 — pickup-eligibility memory: confirmed for this address.
         {
-          const okFp = pickupAddrFingerprint(pickupAddrResolved.address);
+          // Phase 2.6.1 — store the FULL payload fingerprint on success too
+          // so the "confirmed" memory only applies to the exact payload that
+          // actually got booked. Any subsequent edit to contact/window/
+          // instructions correctly re-opens the eligibility decision.
+          const okPayloadFp = pickupPayloadFingerprint(ship, pickupForm);
+          const okAddrFp = pickupAddrFingerprint(pickupAddrResolved.address);
           setPickupEligibility(p => ({
             ...p,
             [shipmentId]: {
-              fingerprint: okFp,
+              fingerprint: okPayloadFp,
+              addrFingerprint: okAddrFp,
               status: 'confirmed',
               attemptedAt: new Date().toISOString(),
               providerPickupId: created.providerPickupId,
@@ -2487,15 +2575,33 @@ export default function ShippingCenter() {
       // satisfy isAddressAccepted/isOriginAddressAccepted. The operator must explicitly
       // re-run Validate Addresses on the corrected address and receive a `validated`
       // status before Get Rates / Purchase Label become enabled.
+      // Phase 2.6.1 — when applying a "corrected" suggestion, ONLY adopt
+      // the address-shape fields (line1/line2/city/state/postal/country)
+      // and preserve the operator-entered contact fields (name, company,
+      // phone, email). The previous spread-the-whole-suggestion behavior
+      // was overwriting the operator-typed phone with the server's
+      // round-tripped (and previously prepended-"1") value, mutating a
+      // valid 10-digit US number into an 11-digit one and showing it back
+      // in the form. Contact fields are NOT verified by the address
+      // verification call, so they have no business being rewritten by it.
+      const mergeCorrected = (existing: ShipmentAddress, suggested: ShipmentAddress): ShipmentAddress => ({
+        ...existing,
+        line1: suggested.line1 || existing.line1,
+        line2: suggested.line2 ?? existing.line2,
+        city: suggested.city || existing.city,
+        state: suggested.state || existing.state,
+        postalCode: suggested.postalCode || existing.postalCode,
+        country: suggested.country || existing.country,
+      });
       if (side === 'origin') {
         updates.originAddressValidation = validationResult;
         if (validationResult.status === 'corrected' && validationResult.suggestedAddress) {
-          updates.originAddress = validationResult.suggestedAddress;
+          updates.originAddress = mergeCorrected(shipment.originAddress, validationResult.suggestedAddress);
         }
       } else {
         updates.addressValidation = validationResult;
         if (validationResult.status === 'corrected' && validationResult.suggestedAddress) {
-          updates.destinationAddress = validationResult.suggestedAddress;
+          updates.destinationAddress = mergeCorrected(shipment.destinationAddress, validationResult.suggestedAddress);
         }
       }
       return { ok: true, status: validationResult.status, updates };
@@ -4524,8 +4630,9 @@ export default function ShippingCenter() {
                           pr.status === 'confirmed' || pr.status === 'scheduled' ? 'bg-emerald-100 text-emerald-700' :
                           pr.status === 'requested' ? 'bg-sky-100 text-sky-700' :
                           pr.status === 'completed' ? 'bg-violet-100 text-violet-700' :
+                          pr.status === 'partial_failed' ? 'bg-amber-100 text-amber-800' :
                           'bg-rose-100 text-rose-700'
-                        }`}>{pr ? pr.status : 'Not Requested'}</span>
+                        }`}>{pr ? (pr.status === 'partial_failed' ? 'Booking Failed' : pr.status) : 'Not Requested'}</span>
                       </div>
                       {/* "Not available" banner is reserved for TRUE feature
                           blockers only (plan, permission, provider, lifecycle,
@@ -5022,16 +5129,35 @@ export default function ShippingCenter() {
                         <div className={`rounded-xl p-4 space-y-2 border ${
                           pr.status === 'cancelled' || pr.status === 'failed' || pr.status === 'rejected'
                             ? 'bg-rose-50/50 border-rose-200'
+                            : pr.status === 'partial_failed' ? 'bg-amber-50/60 border-amber-200'
                             : pr.status === 'completed' ? 'bg-violet-50/50 border-violet-200'
                             : 'bg-sky-50/50 border-sky-200'
                         }`}>
-                          {!pr.confirmationNumber && pr.source !== 'live_provider' && pr.status !== 'cancelled' && pr.status !== 'failed' && pr.status !== 'rejected' && (
+                          {!pr.confirmationNumber && pr.source !== 'live_provider' && pr.status !== 'cancelled' && pr.status !== 'failed' && pr.status !== 'rejected' && pr.status !== 'partial_failed' && (
                             <div className="bg-amber-100 border border-amber-300 rounded-lg p-2 flex items-start gap-2">
                               <span className="material-symbols-outlined text-amber-600 text-sm mt-0.5">warning</span>
                               <p className="text-[11px] text-amber-800"><span className="font-black">Local-only request — not booked with carrier.</span> No confirmation number has been issued. The active provider does not have live pickup booking wired in this app.</p>
                             </div>
                           )}
-                          {pr.source === 'live_provider' && (
+                          {/* Phase 2.6.1 — partial-failed honesty banner.
+                              Distinct from the success banner below: the
+                              provider pickup record exists (id present) but
+                              the carrier did NOT confirm the booking. The
+                              previous code rendered the green "Booked live"
+                              banner here — that was the source of the
+                              "Booked live + Booking failed" contradiction
+                              QA reported. */}
+                          {pr.status === 'partial_failed' && (
+                            <div className="bg-amber-100 border border-amber-300 rounded-lg p-2 flex items-start gap-2">
+                              <span className="material-symbols-outlined text-amber-600 text-sm mt-0.5">error</span>
+                              <div className="text-[11px] text-amber-900">
+                                <p><span className="font-black">Pickup object created with {pr.providerId} but booking NOT confirmed.</span>{pr.providerPickupId ? <> Provider pickup id: <span className="font-mono">{pr.providerPickupId}</span>.</> : null} No carrier confirmation number has been issued.</p>
+                                {pr.failureReason && <p className="mt-1">Reason: {pr.failureReason}</p>}
+                                <p className="mt-1 italic">The orphaned provider record is preserved so you can cancel it from this panel. Fix the underlying issue and re-attempt — booking has not occurred.</p>
+                              </div>
+                            </div>
+                          )}
+                          {pr.source === 'live_provider' && pr.status !== 'partial_failed' && (
                             <div className="bg-emerald-100 border border-emerald-300 rounded-lg p-2 flex items-start gap-2">
                               <span className="material-symbols-outlined text-emerald-600 text-sm mt-0.5">verified</span>
                               <div className="text-[11px] text-emerald-800">
@@ -5040,7 +5166,7 @@ export default function ShippingCenter() {
                             </div>
                           )}
                           <div className="flex items-center justify-between">
-                            <p className="text-sm font-black text-slate-800">{pr.carrier} pickup · <span className="capitalize">{pr.status}</span></p>
+                            <p className="text-sm font-black text-slate-800">{pr.carrier} pickup · <span className="capitalize">{pr.status === 'partial_failed' ? 'Booking Failed' : pr.status}</span></p>
                             {pr.confirmationNumber && <span className="text-[10px] font-mono font-black text-slate-700 bg-white px-2 py-1 rounded-lg border border-slate-200 select-all">{pr.confirmationNumber}</span>}
                           </div>
                           <p className="text-xs text-slate-600">Date: <span className="font-bold">{pr.requestedDate}</span>{pr.windowStart && pr.windowEnd && <span> · Window <span className="font-bold">{pr.windowStart}–{pr.windowEnd}</span></span>}</p>

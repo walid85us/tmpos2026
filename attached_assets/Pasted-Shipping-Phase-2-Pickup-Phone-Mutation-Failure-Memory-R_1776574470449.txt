@@ -1,0 +1,217 @@
+Shipping Phase 2 — Pickup Phone Mutation / Failure-Memory Reset / Partial-Booking State Fix
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+Do not redesign the app.
+Do not broaden scope.
+Fix the current pickup-booking state bugs revealed by QA.
+
+This issue must now be treated as:
+1) phone normalization / mutation bug
+2) provider-required contact schema enforcement
+3) incorrect failure-memory reset logic
+4) incorrect partial-booking / requested-state UI
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior Node/Express carrier-integration engineer
+- Senior React/TypeScript engineer
+- Enterprise shipping systems architect
+- Senior USPS / EasyPost / pickup-operations expert with 20+ years of experience in carrier booking flows, payload validation, and operational shipping UX
+- Root-cause debugging specialist
+- QA gatekeeper who must not accept misleading booked/requested states
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- plan gating
+- store permission gating
+- provider/manual mode split
+- PACKED-only activation
+- mutual exclusivity between Service Point and Pickup
+- existing shipping core flow
+- reverse-logistics flow
+- pickup override recovery model
+- locked shipment origin/destination after label purchase
+- current EasyPost is_account_address=false default
+- current structured diagnostics UI
+
+==================================================
+CURRENT QA SOURCE OF TRUTH — ACTUAL REMAINING FAILURE
+==================================================
+
+The current screenshots show multiple real problems:
+
+1) Phone mutation bug after validation
+Observed QA result:
+- operator enters pickup contact phone as a plain 10-digit US number, e.g. 3143280000
+- after clicking Validate Address, the app mutates it to 11 digits, e.g. 13143280000
+- this likely contributes to provider schema rejection
+This is a bug. The app must not silently rewrite the operator-entered phone into a provider-invalid format.
+
+2) Provider rejection is now about provider-critical booking payload/schema
+The failed booking payload/history indicates the provider is rejecting a pickup contact schema / booking payload condition.
+
+3) The app is not resetting pickup failure memory correctly after operator edits
+The visible form can contain changed pickup inputs, but the UI still behaves as if the old failed payload remains the active blocker.
+
+4) The UI is falsely implying success/booking
+The pickup panel can say things like:
+- Booked live with easypost
+- USPS pickup · Requested
+while status history also says:
+- booking / rate-purchase failed
+- no carrier confirmation issued
+
+That is not acceptable.
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIXES
+==================================================
+
+1) FIX PHONE NORMALIZATION / MUTATION BUG
+Required:
+- trace where the pickup contact phone is being transformed from 10 digits to 11 digits
+- identify whether this happens during:
+  - address validation
+  - pickup form state sync
+  - contact autofill
+  - payload construction
+  - provider response merge
+- stop silently mutating a valid operator-entered phone into a provider-invalid format
+- preserve the operator-entered value unless there is an explicit, correct normalization rule
+- if normalization is necessary, it must produce the provider-required format, not break it
+
+2) PROVIDER CONTACT PHONE / CONTACT SCHEMA PREFLIGHT
+Required:
+- preflight-validate the active provider/carrier contact schema before provider call
+- for the current EasyPost/USPS path, if the provider expects exactly a 10-digit phone format, enforce that before submit
+- do not let the operator submit a phone format the provider will definitely reject
+- if safe and explicit, normalize a leading-US-country-code format to the provider-required format
+- otherwise block clearly and explain the exact expected format
+
+3) PROVIDER-CRITICAL INPUT FINGERPRINT / FAILURE-MEMORY RESET
+Required:
+- do not key pickup failure memory only on address
+- include all provider-critical booking inputs in the retry fingerprint / retry invalidation model, at minimum:
+  - resolved pickup dispatch address / override
+  - pickup contact name
+  - pickup contact phone
+  - pickup instructions
+  - pickup date
+  - pickup window
+  - any provider-specific booking fields
+- when any of these change, the prior failed-attempt memory must invalidate and the retry path must re-open
+- do not keep blocking based on an old payload after the operator changed a required booking field
+
+4) PARTIAL BOOKING VS TRUE BOOKING STATE
+Required:
+- distinguish these states clearly:
+  - local draft only
+  - provider pickup object created
+  - provider booking / buy step failed
+  - provider booking confirmed
+  - cancelled
+- if create succeeded but rate-purchase / booking confirmation failed, do NOT show:
+  - Booked live
+  - Requested
+  - confirmed/requested final state
+- instead show a partial/failed state such as:
+  - Pickup object created, carrier booking failed
+  - No carrier confirmation issued
+- tracking/event history must match the real state
+
+5) TRACKING & EVENTS STATE HONESTY
+Required:
+- the Tracking & Events tab must not log the pickup as successfully requested if the booking failed
+- it must show a truthful partial-failure event/state
+- the operator must be able to understand whether the carrier actually accepted the pickup
+
+6) CLEAR RETRY PATH AFTER CONTACT/PAYLOAD FIX
+Required:
+- once the operator fixes the offending pickup payload input (for example contact phone format), the ineligible state must clear automatically
+- the app must allow re-verify/retry using the new payload
+- do not force the operator into a stale failed state caused by the previous payload
+
+7) KEEP PICKUP OVERRIDE MODEL INTACT
+Required:
+- do not regress the label-lock / pickup-only override solution
+- this pass is not about undoing that
+- it is about phone mutation, failed-state semantics, payload reset logic, and truthful booking state
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- entering a valid 10-digit pickup phone no longer gets silently mutated into an invalid 11-digit value
+- changing provider-critical booking inputs clears the stale failed state
+- provider-side phone/schema errors are blocked before provider call where possible
+- the UI does not claim booked/requested when booking actually failed
+- tracking/events reflect partial failure honestly
+- the operator can correct the payload and retry meaningfully
+
+==================================================
+IMPORTANT RULES
+==================================================
+
+- Do not redesign the app
+- Do not broaden into unrelated workstreams
+- Do not fake carrier confirmation
+- Do not show booked/requested success if booking failed
+- Do not keep stale failure memory after payload changes
+- Keep the design baseline consistent
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Trace exactly where the pickup phone is mutated after validation
+2) Fix the phone normalization / mutation bug
+3) Expand the pickup retry fingerprint to include all provider-critical booking inputs
+4) Add provider-schema preflight for contact/phone formatting
+5) Fix partial-booking vs booked/requested state semantics
+6) Fix Tracking & Events to reflect partial failure honestly
+7) Re-test the corrected retry flow
+8) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- pickup phone normalization / mutation rules
+- provider-critical pickup fingerprint model
+- what changes invalidate prior pickup failure memory
+- phone/contact schema preflight rules
+- distinction between pickup object created vs booking confirmed
+- tracking/event truthfulness rules for failed booking attempts
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Correction Pass Status
+2. Phone Mutation Root-Cause Findings
+3. Phone Normalization / Mutation Fix
+4. Provider-Critical Failure-Memory Reset Fix
+5. Contact / Phone Schema Preflight Fix
+6. Partial-Booking vs Booked-State Fix
+7. Tracking & Events Truthfulness Fix
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes

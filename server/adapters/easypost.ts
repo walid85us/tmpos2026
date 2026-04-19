@@ -101,12 +101,26 @@ function getApiKey(): string | null {
   return creds?.apiKey || null;
 }
 
+// Phase 2.6.1 — phone normalization is digits-only and STRIPS a leading
+// US country code, never prepends one. Previously this function prepended
+// a "1" to a 10-digit US number, mutating the operator-entered phone into
+// an 11-digit value. EasyPost echoed the mutated value back in the
+// address-verify response and the client merged it into the form, leaving
+// the operator with an invalid-looking phone that some downstream USPS
+// schema validations rejected. The honest behavior is to canonicalize to
+// the 10-digit national format for US numbers and pass through anything
+// else the operator typed.
 function normalizePhone(phone?: string): string | undefined {
   if (!phone) return undefined;
   const digits = phone.replace(/\D/g, '');
   if (digits.length < 10) return undefined;
-  if (digits.length === 11 && digits.startsWith('1')) return digits;
-  if (digits.length === 10) return '1' + digits;
+  // 11-digit US E.164-without-plus → strip the country code and return the
+  // 10-digit national number.
+  if (digits.length === 11 && digits.startsWith('1')) return digits.slice(1);
+  // 10-digit US national number → return as-is. Do NOT prepend "1".
+  if (digits.length === 10) return digits;
+  // Longer (likely international) → pass through untouched. We do not
+  // assume a country code.
   return digits;
 }
 
@@ -125,18 +139,23 @@ function mapAddressToEasyPost(addr: ShipmentAddress) {
   };
 }
 
+// Phase 2.6.1 — only address-shape fields are echoed back from the
+// verification response. Contact fields (name, company, phone, email) are
+// intentionally OMITTED here because the verify endpoint round-trips
+// whatever we sent (including the server-normalized phone) and the client
+// would otherwise overwrite the operator-entered values when accepting a
+// "corrected" address. Contact fields stay under operator control on the
+// client side; address normalization is the only legitimate output of
+// this function.
 function mapEasyPostToAddress(ep: Record<string, string>): ShipmentAddress {
   return {
-    name: ep.name || '',
-    company: ep.company || undefined,
+    name: '',
     line1: ep.street1 || '',
     line2: ep.street2 || undefined,
     city: ep.city || '',
     state: ep.state || '',
     postalCode: ep.zip || '',
     country: ep.country || 'US',
-    phone: ep.phone || undefined,
-    email: ep.email || undefined,
   };
 }
 

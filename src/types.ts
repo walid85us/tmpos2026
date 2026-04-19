@@ -1001,13 +1001,20 @@ export interface ServicePoint {
 }
 
 export type PickupRequestStatus =
-  | 'requested'    // sent to provider, awaiting confirmation
-  | 'scheduled'    // provider acknowledged, scheduled
-  | 'confirmed'    // confirmation number issued
-  | 'completed'    // pickup occurred (carrier scan)
-  | 'cancelled'    // operator cancelled before pickup
-  | 'failed'       // provider/carrier rejected
-  | 'rejected';    // carrier refused (e.g. weight, location)
+  | 'requested'      // sent to provider, awaiting confirmation
+  | 'scheduled'      // provider acknowledged, scheduled
+  | 'confirmed'      // confirmation number issued
+  | 'completed'      // pickup occurred (carrier scan)
+  | 'cancelled'      // operator cancelled before pickup
+  | 'failed'         // provider/carrier rejected at create time
+  // Phase 2.6.1 — provider create succeeded and we have a providerPickupId,
+  // but the rate-purchase / booking confirmation step failed (or returned
+  // no rates). The pickup is NOT booked with the carrier — no
+  // confirmation number was issued. Distinct from 'requested' so the UI
+  // never shows a misleading booked/scheduled state for this case. The
+  // provider pickup record is preserved so the operator can cancel it.
+  | 'partial_failed'
+  | 'rejected';      // carrier refused (e.g. weight, location)
 
 export interface PickupRequest {
   id: string;                              // app-internal pickup request id
