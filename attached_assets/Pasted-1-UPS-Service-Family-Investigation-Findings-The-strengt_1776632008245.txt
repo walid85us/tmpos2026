@@ -1,0 +1,40 @@
+1. UPS Service-Family Investigation Findings
+The strengthened spec was re-issued after Phase 2.7.1 was already merged. Re-checking the existing implementation against the broader "UPS-family, not single-service" requirement:
+The classifier (classifyUpsServicePickup in src/components/ShippingCenter.tsx) already groups UPS into three not_capable buckets covering four+ service families plus the entire DAP rate source, an allowlist of ~22 standard pickup-capable service codes, and an honest unknown fallback for anything else. It evaluates rate.carrier, rate.serviceCode, AND rate.serviceName (uppercased, dash/underscore-stripped), so it is not pinned to one string.
+One small gap in the standard allowlist was found re-reading the EasyPost UPS service code list: UPSSaver / Saver (UPS international Saver) was missing. Added in this pass. No other changes were warranted — the existing structure already satisfies the broader-than-DAP requirement.
+2. Revised UPS Pickup Forecast Model
+getPickupForecastForRate's UPS branch delegates to classifyUpsServicePickup, which returns:
+•	not_capable (UPS DAP) — carrier === 'UPSDAP'. EasyPost has historically returned "UPS DAP pickup rates are not supported" for these.
+•	not_capable (USPS final mile — SurePost / Ground Saver) — codes UPSSUREPOST, SUREPOST, UPSGROUNDSAVER, GROUNDSAVER, or service name containing SUREPOST / GROUND SAVER.
+•	not_capable (UPS Mail Innovations) — carrier contains UPSMAILINNOVATIONS, or code/name contains MAIL INNOVATIONS (covers ExpeditedMailInnovations, FirstClassMailInnovations, PriorityMailInnovations).
+•	final_check (standard pickup-capable UPS services) — Ground, NextDayAir, NextDayAirSaver, NextDayAirEarlyAM, SecondDayAir / 2ndDayAir, SecondDayAirAM / 2ndDayAirAM, 3DaySelect / ThreeDaySelect, Express, ExpressPlus, ExpressSaver, Saver / UPSSaver (added this pass), Standard / UPSStandard, WorldwideExpress, WorldwideExpressPlus, WorldwideExpedited, WorldwideSaver, Expedited.
+•	unknown — any other UPS-family rate. Honest "unknown" rather than a green light.
+USPS, FedEx, DHL, and unknown-carrier branches in getPickupForecastForRate are unchanged.
+3. Earlier UPS Gating / Operator Message Fix
+Already in place from the previous pass: handleRequestPickup runs classifyUpsServicePickup(ship.selectedRate) immediately after the carrier-agnostic eligibility check and before the live booking call. When the result is not_capable, pickup is blocked with error code UPS_SERVICE_NOT_PICKUP_CAPABLE and the message:
+This UPS service level does not support scheduled pickup through the current provider flow. Choose a different service or use drop-off. (<service-specific reason>)
+The gate fires only when selectedRate.carrier contains "UPS" and only when selectedRate is set, so manual mode and pre-rate flows are unaffected, and USPS/FedEx flows cannot be reached by it. The Saver code addition automatically extends to gating as well — no separate change needed because the gate consumes the classifier result directly.
+4. USPS/FedEx Non-Regression Notes
+•	getPickupForecastForRate USPS branch: unchanged ('likely').
+•	getPickupForecastForRate FedEx branch: unchanged ('final_check' with the existing Express vs Ground cutoff explanation).
+•	The UPS gate is wrapped in (sel.carrier || '').toUpperCase().includes('UPS'), so USPS / FedEx selected rates skip it entirely.
+•	getPickupEligibility, getPickupPayloadPreflight, pickupPayloadFingerprint, partial_failed honesty handling, phone preflight, two-stage address readiness, and the override editor are all untouched.
+•	TypeScript clean for the changed file (only one pre-existing unrelated LabelArtifact.format error remains).
+5. Files Changed
+•	src/components/ShippingCenter.tsx — added 'SAVER' and 'UPSSAVER' to the knownFinalCheckCodes allowlist in classifyUpsServicePickup. The classifier, UPS forecast wiring, and handleRequestPickup gate themselves were already in place from the previous pass.
+•	replit.md — annotated the existing Phase 2.7.1 section with a re-confirmation note (spec re-issued, breadth requirement re-verified, Saver added).
+6. Documentation Updated
+The Phase 2.7.1 section in replit.md already documents:
+•	Why the refinement exists (QA finding + DAP root cause).
+•	The exact classifier rules and which patterns trigger each state.
+•	The evidence basis (carrier + serviceCode + serviceName, conservative matching).
+•	The forecast wiring (UPS branch delegation only — USPS / FedEx / DHL untouched).
+•	The early-gating message and UPS_SERVICE_NOT_PICKUP_CAPABLE error code.
+•	Why USPS and FedEx were intentionally left unchanged.
+•	Where remaining UPS unknowns surface as 'unknown' until observed.
+The new annotation records that the spec was re-issued with stronger UPS-family-breadth language, that the existing implementation satisfies it, and that Saver / UPSSaver were added to the allowlist.
+7. Remaining Unknowns
+•	UPS regional / contract-only services not in the allowlist (niche import/export tariffs, regional UPS Freight services if surfaced as parcel rates) continue to forecast as 'unknown' until evidence arrives. Promoting one to final_check is a single-line change in knownFinalCheckCodes.
+•	UPS DAP success cases out-of-band — some UPS account configurations allow scheduling DAP pickups directly with UPS (not through EasyPost's pickup_create). The gate is correct for this app's provider flow; it does not claim to model UPS DAP universally.
+•	EasyPost API drift risk — if EasyPost ever stops returning carrier === 'UPSDAP' and merges DAP into the standard UPS carrier string, the carrier-key DAP detection alone would miss. The serviceCode/serviceName fallbacks reduce risk, but a future regression test (mock EasyPost rate fixtures asserting classifier outputs) would be the durable defense — not implemented here to keep this pass strict-isolated.
+

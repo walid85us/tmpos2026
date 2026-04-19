@@ -1,0 +1,111 @@
+Shipping Phase 2 — Pickup Fees / Carrier-vs-Provider Support Research + Plan ONLY
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated research and planning pass.
+DO NOT implement anything yet.
+DO NOT change code yet.
+Return a diagnosis and proposed plan only.
+
+Reason:
+We now need a better design for:
+1) pickup fee transparency
+2) carrier-world support vs current provider-flow support
+3) service-family-aware pickup forecasting, especially for UPS
+4) how and when the app should show exact pickup charges
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior Node/Express carrier-integration engineer
+- Senior React/TypeScript engineer
+- Enterprise shipping systems architect
+- Senior multi-carrier pickup-operations expert with 20+ years of experience in USPS / UPS / FedEx / DHL pickup workflows, pricing, and provider orchestration
+- Product systems thinker
+- QA gatekeeper who must not allow misleading fee/eligibility UX
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Study carefully before proposing anything:
+- EasyPost Pickup API behavior, especially create -> pickup_rates -> buy
+- EasyPost pickup best practices about price, service level, carrier, and date/window dependence
+- USPS official pickup options and fee model
+- UPS official On-Call Pickup options and fee model
+- FedEx official pickup options and fee model
+- current app behavior for pickup forecast and pickup booking
+- current UPS service-family refinement behavior already in the app
+
+==================================================
+WHAT YOU MUST ANSWER
+==================================================
+
+1) What is the correct product distinction between:
+- carrier supports pickup
+- current provider flow supports pickup
+- this selected service/rate is likely pickup-capable
+- final pickup eligibility is confirmed only after the real pickup request
+
+2) What is the correct pricing model in the app?
+You must evaluate and recommend between:
+- showing only generic fee guidance at Get Rates
+- showing estimated fees at Get Rates
+- showing exact provider-returned pickup fees only after pickup create
+- a hybrid model
+
+3) What should the app say for unsupported current-provider-flow services?
+Especially for UPS:
+- how should the app distinguish "UPS supports pickup generally" from "this UPS service is not pickup-bookable in the current EasyPost flow"?
+
+4) What should the pickup forecast states become?
+Propose final operator-facing forecast states that are:
+- honest
+- useful
+- service-aware
+- fee-aware where appropriate
+but do not overstate certainty
+
+5) Where should actual pickup fee confirmation happen?
+Define the exact UX point where the operator should see:
+- free pickup
+- exact pickup fee
+- multiple returned pickup rates
+- surcharges if returned by provider
+- unsupported/no-rates outcomes
+
+6) What should be implemented next, and in what order?
+Provide a phased implementation plan:
+- minimum safe improvement
+- next refinement
+- optional later enhancements
+
+==================================================
+NON-NEGOTIABLE RULES
+==================================================
+
+- DO NOT implement yet
+- DO NOT change code yet
+- DO NOT give a vague answer
+- DO NOT conflate carrier support with provider-flow support
+- DO NOT guess pickup fees when the provider can return exact pickup rates
+- make one recommendation, plus alternatives with pros/cons
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Research Summary
+2. Carrier Support vs Provider-Flow Support Model
+3. Recommended Pickup Fee Transparency Model
+4. Recommended Pickup Forecast State Model
+5. Recommended UPS Positioning In The App
+6. Exact UX Point For Showing Final Pickup Fees
+7. Proposed Phased Implementation Plan
+8. What We Should NOT Do
+9. Confidence Level And Remaining Unknowns
