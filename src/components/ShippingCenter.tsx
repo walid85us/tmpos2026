@@ -1742,6 +1742,8 @@ export default function ShippingCenter() {
       'UPSEXPRESSPLUS',
       'EXPRESSSAVER',
       'UPSEXPRESSSAVER',
+      'SAVER',
+      'UPSSAVER',
       'WORLDWIDEEXPRESS',
       'WORLDWIDEEXPRESSPLUS',
       'WORLDWIDEEXPEDITED',

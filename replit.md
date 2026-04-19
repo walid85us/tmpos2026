@@ -369,6 +369,8 @@ The state is **derived**, not stored, so it stays consistent with `addressValida
 
 ### Phase 2.7.1 — UPS Service-Family Pickup Refinement (Apr 2026)
 
+_(Re-confirmed Apr 2026: spec re-issued emphasizing UPS-family breadth, not just DAP. Implementation already covers three not_capable buckets — UPSDAP, SurePost/Ground Saver, Mail Innovations — plus an allowlist of standard service codes. Added UPS Saver / UPSSAVER to the standard allowlist for completeness.)
+
 **Why this exists**: QA found that USPS and FedEx pickups worked, but at least one selected UPS service failed at `pickup_create` with `"UPS DAP pickup rates are not supported"`. The root cause was that Phase 2.7's UPS forecast treated every UPS-family rate as a single `final_check` bucket. EasyPost actually exposes multiple UPS rate sources (the `UPS` carrier account, the `UPSDAP` carrier account, plus USPS-handoff service families like SurePost / Ground Saver / Mail Innovations) whose pickup eligibility is NOT uniform.
 
 **UPS service-family classification logic** (`classifyUpsServicePickup` in `ShippingCenter.tsx`): the classifier examines `rate.carrier`, `rate.serviceCode`, and `rate.serviceName` (uppercased and dash/underscore-stripped for robust matching) and returns one of:

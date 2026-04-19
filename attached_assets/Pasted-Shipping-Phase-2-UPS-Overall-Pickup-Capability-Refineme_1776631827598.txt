@@ -1,0 +1,179 @@
+Shipping Phase 2 — UPS Overall Pickup Capability Refinement (Service-Family Aware)
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated refinement pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not touch working USPS or FedEx pickup behavior unless absolutely necessary.
+
+Goal:
+Refine pickup forecast and pickup gating for UPS as an overall carrier family, using service-level awareness instead of treating UPS as one generic pickup-capable bucket.
+
+Current QA result:
+- USPS pickup passed
+- FedEx pickup passed
+- UPS failed on at least one selected service with:
+  "UPS DAP pickup rates are not supported"
+
+This means:
+- the current pickup architecture is not broadly broken
+- but the current UPS forecast/gating is too coarse
+- the app needs a more accurate UPS service-family pickup model
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior Node/Express carrier-integration engineer
+- Senior React/TypeScript engineer
+- Enterprise shipping systems architect
+- Senior UPS / EasyPost / multi-carrier pickup expert with 20+ years of experience in service-level carrier constraints, on-call pickup workflows, and shipping UX
+- Root-cause debugging specialist
+- QA gatekeeper who must not allow overly broad or misleading pickup forecast states
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- USPS working behavior
+- FedEx working behavior
+- current truthful partial-failure / confirmed-state logic
+- current two-stage address readiness model
+- current pickup forecast model
+- current pickup override recovery model
+- current label-lock behavior
+- current phone/schema fixes
+- current tracking/event truthfulness
+
+==================================================
+CURRENT QA SOURCE OF TRUTH
+==================================================
+
+Observed QA result:
+- USPS = PASS
+- FedEx = PASS
+- UPS = FAIL for at least one selected service
+- Current provider error:
+  "UPS DAP pickup rates are not supported"
+
+This indicates that the app must not treat all UPS services as one generic pickup bucket.
+The operator should get a more accurate UPS-specific service-family pickup forecast and earlier gating where evidence is strong.
+
+IMPORTANT:
+This is NOT a DAP-only patch.
+Study UPS overall in the context of the services that this app actually surfaces through EasyPost.
+The outcome must improve UPS as a carrier family, not just hardcode one single service string.
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIXES
+==================================================
+
+1) RESEARCH UPS SERVICE-FAMILY PICKUP SUPPORT
+Required:
+- inspect the UPS services currently returned in this app through EasyPost
+- inspect the current carrier strings / service codes / rate row values / selected-rate values used by this app
+- determine which UPS services should be treated as:
+  - likely pickup-capable
+  - final check after label purchase
+  - not pickup-capable through the current provider flow
+  - unknown
+- do not base the logic only on one UPSDAP example
+- study the overall UPS services that the app actually surfaces in real rate results
+
+2) USE THE BEST AVAILABLE PROGRAMMATIC BASIS
+Required:
+- use current provider/carrier data already available in the app where possible
+- use EasyPost carrier metadata / service-level capabilities if already reachable in the current implementation
+- use actual observed provider responses already surfaced by the app
+- use current rate/service strings the app already receives from EasyPost
+- do not invent random hardcoded tags with no evidence behind them
+
+3) UPS-SPECIFIC FORECAST REFINEMENT
+Required:
+- refine the Pickup Forecast logic so UPS services are not all lumped together
+- examples of acceptable outcomes:
+  - some UPS services remain "Pickup-capable — final check after label purchase"
+  - some UPS services become "Not pickup-capable"
+  - some remain "Unknown until pickup check"
+- the operator must see a more accurate service-level signal before trying pickup
+
+4) EARLIER GATING FOR CLEARLY UNSUPPORTED UPS SERVICES
+Required:
+- if a UPS service is clearly unsupported for pickup through the current provider flow, block pickup earlier
+- do not wait until pickup_create if the service-level evidence is already strong
+- show a precise operator message such as:
+  "This UPS service level does not support scheduled pickup through the current provider flow. Choose a different UPS service or use drop-off."
+
+5) UPS FAMILY CLASSIFICATION, NOT SINGLE-SERVICE PATCHING
+Required:
+- group UPS services into meaningful capability buckets where appropriate
+- do not hardcode only UPSDAP
+- do not mark all UPS services unsupported because one failed
+- do not overgeneralize from one service to the entire carrier
+- make the result maintainable as new UPS service strings appear later
+
+6) DO NOT DEGRADE USPS OR FEDEX
+Required:
+- keep USPS working behavior intact
+- keep FedEx working behavior intact
+- do not broaden this into speculative cross-carrier hardcoding
+
+7) TRACKING / TRUTHFULNESS MUST REMAIN INTACT
+Required:
+- partial_failed / confirmed / requested states must remain truthful
+- this refinement should improve forecasting and gating, not weaken honesty
+- if a UPS service still reaches pickup_create and fails for a legitimate carrier reason, the app must still surface that honestly
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- USPS remains healthy
+- FedEx remains healthy
+- UPS forecast/gating becomes more accurate at the service-family level
+- clearly unsupported UPS services are surfaced earlier and more honestly
+- the app no longer treats UPS as one undifferentiated pickup bucket
+- the result is broader than a single UPSDAP special case
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Research the UPS services actually returned in this app
+2) Build a UPS service-family pickup classification
+3) Refine pickup forecast for UPS rate rows
+4) Add earlier pickup gating/message for clearly unsupported UPS services
+5) Re-test USPS/FedEx non-regression
+6) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- UPS service-family pickup classification logic
+- which UPS services are forecast as likely / final_check / not_capable / unknown
+- what evidence drives those classifications
+- why USPS/FedEx behavior was left unchanged
+- any remaining UPS unknowns
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. UPS Service-Family Investigation Findings
+2. Revised UPS Pickup Forecast Model
+3. Earlier UPS Gating / Operator Message Fix
+4. USPS/FedEx Non-Regression Notes
+5. Files Changed
+6. Documentation Updated
+7. Remaining Unknowns
