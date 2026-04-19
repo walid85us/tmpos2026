@@ -328,3 +328,41 @@ Editing any pickup-address or contact field changes the fingerprint, which inval
 **Phone preflight in `handleRequestPickup`**: the existing presence check is extended with a format check — the resolved phone must yield exactly 10 digits, or 11 digits starting with "1" (server-stripped). Anything else fails preflight with a specific error stating the actual length received, so the operator never wastes a provider round-trip on a malformed phone and never sees a partial-fail caused by a bad number.
 
 **Truthfulness invariants preserved**: `'requested'` continues to mean a real provider booking is in flight; `'partial_failed'` is a new, clearly distinct state that never claims a confirmation that was not issued. Operator-entered contact fields are now treated as authoritative — the address verifier may not rewrite them, neither on the wire nor in the client merge.
+
+### Phase 2.7 — Pickup Forecast at Get Rates + Two-Stage Address Readiness (Apr 2026)
+
+**Pickup Forecast vs final pickup eligibility**: at Get Rates time, every returned rate row now displays a carrier-aware pickup forecast badge. This is an estimate to help the operator compare options — it is NEVER presented as final eligibility. The real `pickup_create` / `buy` flow remains the authoritative source of truth, and the help text below the rate panel is explicit about that boundary.
+
+**Forecast states and meanings** (`getPickupForecastForRate` in `ShippingCenter.tsx`):
+- `'likely'` — high confidence (USPS over EasyPost). Emerald badge.
+- `'final_check'` — pickup-capable but constrained by carrier-side cutoffs / lead-times / account configuration; the actual pickup_create call determines whether the chosen window will return rates (UPS / FedEx / DHL over EasyPost). Sky badge.
+- `'setup_required'` — the active provider is not configured (no provider, missing capability registration). Amber badge.
+- `'not_capable'` — the active provider's capability map says `pickupRequests: false`. Operator must use Service Point / drop-off. Rose badge.
+- `'unknown'` — non-EasyPost provider, manual mode, or carrier outside the modeled set. Slate badge.
+
+**Carrier-aware evaluation logic**: the evaluator uses `activeProviderId`, `PROVIDER_CAPABILITIES[provider].pickupRequests`, and the rate's carrier string. EasyPost gets carrier-specific branches for USPS/UPS/FedEx/DHL; other providers fall through to `'unknown'` rather than fabricating confidence. Each forecast carries a `detail` string surfaced via tooltip explaining WHY the badge is what it is.
+
+**Two-stage address state model** (`AddressReadinessState` + `getAddressReadinessForSide`):
+- `'unchecked'` — no validation record, or last attempt failed.
+- `'corrected'` — provider returned a suggested address; the shipment field has been swapped to the suggestion but it has NOT yet been re-verified.
+- `'validated'` — provider returned validated AND the current shipment address still matches the snapshot that was validated (no edits since).
+- `'stale_after_edit'` — was previously validated, but the operator has since edited a rating-relevant address field; must be re-checked and re-validated.
+- `'failed'` — provider explicitly rejected the address.
+
+The state is **derived**, not stored, so it stays consistent with `addressValidation` and the current shipment fields. Comparison uses an `addrShapeFingerprint` covering `line1`/`line2`/`city`/`state`/`postalCode`/`country` only — name/phone changes do not invalidate verification.
+
+**Difference between corrected and validated**: `'corrected'` means the verifier returned a suggested address that has been loaded into the shipment field but the operator has NOT yet confirmed it is deliverable. `'validated'` means the verifier returned a clean pass on the address that is currently in the shipment field. Only `'validated'` unlocks Get Rates. `'corrected'` is intentionally not enough — the suggestion could itself need further correction, and accepting it without re-verification is the false-confidence failure mode this phase is built to prevent.
+
+**Check Address / Validate Address / Get Rates rules**:
+- The address-action button auto-selects between two stages based on the current readiness:
+  - **Check Address (1/2)** — shown when any side is `'unchecked'`, `'stale_after_edit'`, or `'failed'`. Indigo outline. Calls the verifier; result moves the side(s) to `'corrected'`, `'validated'`, or `'failed'`.
+  - **Validate Address (2/2)** — shown when at least one side is `'corrected'` and no side still needs Check. Emerald outline. Re-runs the verifier on the corrected address; a clean response moves the side to `'validated'`.
+- When BOTH sides are `'validated'` (and not stale), neither button is rendered — the address section's existing validated badges and timestamp tell the operator the work is done.
+- **Get Rates** is enabled only when both `isOriginAddressAccepted(shipment)` and `isAddressAccepted(shipment)` return true; both helpers now require `getAddressReadinessForSide(...) === 'validated'` (i.e. status is `'validated'` AND the current address still matches the validated snapshot).
+- The combined `handleValidateAddresses` handler is shared by both stages — the Check vs Validate distinction is purely UX clarity, not a separate API path. Each click sends the current address to the provider's verifier and accepts whatever status comes back.
+
+**Rate invalidation after address edit**: a `useEffect` keyed on the selected shipment's per-side readiness state clears `availableRates`, hides the rates panel, and clears the persisted `selectedRate` whenever readiness drops below `validated/validated`. This fires only when an address edit actually moves either side out of `'validated'` (NOT on every keystroke). Skips post-purchase shipments (origin/destination locked anyway) and manual mode (no provider rates apply). Defense-in-depth on top of the existing `getLabelPrerequisites`/`getRatePrerequisites` gating, which already required `'validated'` before label purchase.
+
+**Pickup forecast clears with stale rates**: the forecast badge is computed inline from each `availableRates` entry, so when the rate-clearing effect empties `availableRates`, every forecast badge attached to those rates disappears with them. There is no separately persisted forecast state to leave dangling.
+
+**Truthfulness invariants preserved**: no rate row claims final pickup eligibility; the forecast tooltip and the help text under the rate panel both call out that pickup_create is the source of truth. `'corrected'` does not unlock Get Rates. `'stale_after_edit'` does not unlock Get Rates. A previously-selected rate is cleared (not silently retained) when its address basis becomes stale. Existing pickup phone preflight, partial-failure honesty, and carrier-agnostic pickup flow are untouched.

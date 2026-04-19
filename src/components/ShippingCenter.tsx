@@ -1105,18 +1105,76 @@ export default function ShippingCenter() {
     return shipment.packages.length > 0 && shipment.packages.some(p => p.weight || p.contentsSummary || p.declaredValue);
   }
 
-  // Strict validated-only readiness. Per operational policy, a `corrected` result
-  // (provider returned a suggested/normalized address) is an INTERMEDIATE state and
-  // must NOT unlock Get Rates. The suggested address is swapped into the shipment
-  // fields by `validateSingleSide`, but the operator must explicitly re-run Validate
-  // Addresses on the corrected address and receive a `validated` result before rate
-  // fetching, label purchase, or rate display becomes available.
+  // Phase 2.7 — explicit two-stage address-readiness state machine.
+  // Operator-facing states for an address side:
+  //   'unchecked'         — never verified (or last attempt failed)
+  //   'corrected'         — provider returned a suggested address; the
+  //                         shipment field has been swapped to that
+  //                         suggestion but it has NOT yet been re-verified
+  //   'validated'         — provider returned validated AND the current
+  //                         shipment address still matches the snapshot
+  //                         that was validated (no edits since)
+  //   'stale_after_edit'  — was previously validated, but the operator has
+  //                         since edited a rating-relevant address field;
+  //                         must be re-checked and re-validated
+  //   'failed'            — provider explicitly rejected the address
+  //
+  // Get Rates is gated on BOTH sides being in 'validated' state. 'corrected'
+  // and 'stale_after_edit' are NOT acceptance states — the operator must
+  // proceed through Check → Validate again.
+  type AddressReadinessState = 'unchecked' | 'corrected' | 'validated' | 'stale_after_edit' | 'failed';
+
+  // Address-shape fingerprint (line1/line2/city/state/postal/country). Used to
+  // detect when the current shipment address differs from the one that was
+  // validated. Carrier validation only verifies address shape — name/phone
+  // changes do NOT invalidate verification, so they're excluded.
+  function addrShapeFingerprint(addr: ShipmentAddress | undefined | null): string {
+    if (!addr) return '';
+    const norm = (s: string | undefined) => (s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    return [norm(addr.line1), norm(addr.line2), norm(addr.city), norm(addr.state), norm(addr.postalCode), norm(addr.country)].join('|');
+  }
+
+  function getAddressReadinessForSide(
+    shipment: Shipment,
+    side: 'origin' | 'destination'
+  ): AddressReadinessState {
+    const validation = side === 'origin' ? shipment.originAddressValidation : shipment.addressValidation;
+    const currentAddr = side === 'origin' ? shipment.originAddress : shipment.destinationAddress;
+    if (!validation) return 'unchecked';
+    if (validation.status === 'failed') return 'unchecked';
+    // Compare current address to the snapshot that was actually evaluated.
+    // For 'validated' results, the snapshot is `originalAddress` (since the
+    // address WAS the one that passed). For 'corrected' results, the snapshot
+    // we expect to validate next is the `suggestedAddress` that we swapped
+    // into the shipment field.
+    const snapshot = validation.status === 'corrected'
+      ? (validation.suggestedAddress || validation.originalAddress)
+      : (validation.originalAddress);
+    const currentFp = addrShapeFingerprint(currentAddr);
+    const snapshotFp = addrShapeFingerprint(snapshot);
+    if (validation.status === 'validated') {
+      return currentFp === snapshotFp ? 'validated' : 'stale_after_edit';
+    }
+    if (validation.status === 'corrected') {
+      // If the operator edited away from the suggestion, we treat that as
+      // unchecked rather than corrected — the suggestion is no longer the
+      // address in the form, so re-checking from scratch is honest.
+      return currentFp === snapshotFp ? 'corrected' : 'unchecked';
+    }
+    return 'unchecked';
+  }
+
+  // Strict validated-and-fresh readiness. Per operational policy, a `corrected`
+  // result is an INTERMEDIATE state and must NOT unlock Get Rates. Likewise a
+  // previously-validated address that has since been edited is `stale_after_edit`
+  // and must NOT remain accepted — both conditions force the operator back
+  // through Check → Validate before rates can be fetched.
   function isAddressAccepted(shipment: Shipment): boolean {
-    return shipment.addressValidation?.status === 'validated';
+    return getAddressReadinessForSide(shipment, 'destination') === 'validated';
   }
 
   function isOriginAddressAccepted(shipment: Shipment): boolean {
-    return shipment.originAddressValidation?.status === 'validated';
+    return getAddressReadinessForSide(shipment, 'origin') === 'validated';
   }
 
   // =====================================================================================
@@ -1552,6 +1610,65 @@ export default function ShippingCenter() {
   //                   The UI must NOT present a "ready" state until the
   //                   address changes or a fresh successful create occurs.
   type PickupEligibilityStatus = 'unknown' | 'confirmed' | 'failed';
+  // Phase 2.7 — Pickup Forecast at Get Rates time. CARRIER-AWARE, NON-FINAL.
+  // This is an estimate the operator sees on each returned rate row to help
+  // them compare options. It is NOT a booking and does NOT promise success.
+  // The real pickup create/buy flow remains the authoritative source of
+  // truth — same as today.
+  //
+  // States:
+  //   'likely'           — High confidence the carrier supports a pickup at
+  //                        this service level when an EasyPost provider is
+  //                        active. (USPS over EasyPost.)
+  //   'final_check'      — Pickup-capable, but carrier-side cutoffs / lead
+  //                        times / account configuration determine whether
+  //                        the actual pickup_create call will return rates.
+  //                        The operator should expect to confirm this after
+  //                        label purchase. (UPS / FedEx / DHL over EasyPost.)
+  //   'setup_required'   — Provider/account configuration is needed before
+  //                        pickup will succeed (e.g. provider not connected,
+  //                        capability flag off, missing credentials).
+  //   'not_capable'      — The active provider explicitly cannot book a
+  //                        pickup (capability flag is false). Operator must
+  //                        use drop-off / Service Point.
+  //   'unknown'          — Forecast cannot be computed (manual mode, unknown
+  //                        carrier, or no active provider). The operator
+  //                        will only know after attempting pickup booking.
+  type PickupForecastState = 'likely' | 'final_check' | 'setup_required' | 'not_capable' | 'unknown';
+  function getPickupForecastForRate(rate: ShippingRate): { state: PickupForecastState; label: string; detail: string } {
+    if (!activeProviderId) {
+      return { state: 'setup_required', label: 'Account/setup required', detail: 'No active shipping provider is configured. Pickup is not possible until a provider is connected under Settings.' };
+    }
+    const caps = PROVIDER_CAPABILITIES[activeProviderId.toLowerCase()];
+    if (!caps) {
+      return { state: 'unknown', label: 'Unknown until pickup check', detail: 'Provider capability is not registered for this active provider — forecast unavailable.' };
+    }
+    if (!caps.pickupRequests) {
+      return { state: 'not_capable', label: 'Not pickup-capable', detail: `${activeProviderId} does not currently support live pickup booking in this app. Use Service Point / drop-off, or switch to a provider that does.` };
+    }
+    const carrierUpper = (rate.carrier || '').toUpperCase();
+    // EasyPost path — by far the dominant case in this app.
+    const isEasyPost = activeProviderId.toLowerCase() === 'easypost';
+    if (isEasyPost) {
+      if (carrierUpper.includes('USPS')) {
+        return { state: 'likely', label: 'Likely pickup-capable', detail: 'USPS pickups over EasyPost are typically available with no per-pickup fee. Final eligibility is confirmed when the carrier pickup request is created.' };
+      }
+      if (carrierUpper.includes('UPS')) {
+        return { state: 'final_check', label: 'Pickup-capable — final check after label purchase', detail: 'UPS pickups depend on per-zone cutoff times and lead-time requirements. Rates are available at pickup-create time only when those constraints are satisfied for the chosen pickup window.' };
+      }
+      if (carrierUpper.includes('FEDEX')) {
+        return { state: 'final_check', label: 'Pickup-capable — final check after label purchase', detail: 'FedEx pickups depend on service-specific cutoff/ready/close times. Express vs Ground may have different windows. Pickup_create will return rates only when the chosen window satisfies the carrier constraints.' };
+      }
+      if (carrierUpper.includes('DHL')) {
+        return { state: 'final_check', label: 'Pickup-capable — final check after label purchase', detail: 'DHL pickups depend on account configuration and service-area cutoffs. Final eligibility is confirmed when the pickup is created.' };
+      }
+      return { state: 'unknown', label: 'Unknown until pickup check', detail: `Carrier "${rate.carrier}" is outside the USPS/UPS/FedEx/DHL set this forecast covers. Pickup eligibility will be determined when the carrier pickup request is created.` };
+    }
+    // Non-EasyPost providers: capability says pickup is supported, but we
+    // don't model carrier-specific cutoffs for them here. Honest "unknown".
+    return { state: 'unknown', label: 'Unknown until pickup check', detail: `Pickup eligibility for ${rate.carrier} via ${activeProviderId} is determined at the time of the pickup request.` };
+  }
+
   function getPickupEligibilityState(shipment: Shipment): { status: PickupEligibilityStatus; record?: PickupEligibility } {
     const rec = pickupEligibility[shipment.id];
     if (!rec) return { status: 'unknown' };
@@ -2642,7 +2759,9 @@ export default function ShippingCenter() {
     const summarize = (label: string, r: { ok: boolean; status?: AddressValidationResult['status']; message?: string }) => {
       if (!r.ok) return `${label}: failed${r.message ? ` (${r.message})` : ''}`;
       if (r.status === 'validated') return `${label}: validated`;
-      if (r.status === 'corrected') return `${label}: corrected — re-validate the suggested address to enable rates`;
+      // Phase 2.7 — explicit two-stage language. The next operator action
+      // on a 'corrected' side is the Validate Address (step 2) button.
+      if (r.status === 'corrected') return `${label}: corrected — click Validate Address (step 2) to confirm the suggested address and unlock Get Rates`;
       return `${label}: ${r.status ?? 'completed'}`;
     };
 
@@ -3332,6 +3451,38 @@ export default function ShippingCenter() {
   }
 
   const selectedShip = selectedShipment ? shipments.find(s => s.id === selectedShipment) : null;
+
+  // Phase 2.7 — clear stale rates and selected rate when an address change
+  // invalidates validation. Driven by the shipment's address-validation
+  // fingerprint, NOT raw address fields, so this only fires when the
+  // operator's edit actually moves either side out of 'validated'. Skips
+  // post-purchase shipments (label is locked anyway) and manual mode (no
+  // provider rates apply). Avoids scheduling work when there's nothing to
+  // clear.
+  const selectedShipOriginReadiness = selectedShip ? getAddressReadinessForSide(selectedShip, 'origin') : 'unchecked';
+  const selectedShipDestReadiness = selectedShip ? getAddressReadinessForSide(selectedShip, 'destination') : 'unchecked';
+  useEffect(() => {
+    if (!selectedShip) return;
+    if (selectedShip.label) return;
+    if (getShipmentMode(selectedShip) === 'manual') return;
+    const bothValidated = selectedShipOriginReadiness === 'validated' && selectedShipDestReadiness === 'validated';
+    if (bothValidated) return;
+    // Clear in-memory rate panel state so the operator does not see a
+    // stale list attached to an address that is no longer validated.
+    if (availableRates.length > 0 || showRatesPanel) {
+      setAvailableRates([]);
+      setShowRatesPanel(false);
+    }
+    // Clear the persisted selectedRate so downstream code paths cannot
+    // treat it as a confirmed choice. Get Rates / Purchase Label gating
+    // already requires both sides to be 'validated', so this is
+    // defense-in-depth — but the spec requires the rate to be invalidated,
+    // and silently keeping it stored would be misleading.
+    if (selectedShip.selectedRate) {
+      updateShipment(selectedShip.id, { selectedRate: undefined, updatedAt: new Date().toISOString() });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedShip?.id, selectedShipOriginReadiness, selectedShipDestReadiness]);
 
   function hasCarrierAcceptance(shipment: Shipment): boolean {
     const provEvents = shipment.providerTrackingEvents || [];
@@ -4059,24 +4210,69 @@ export default function ShippingCenter() {
 
                       <div className="flex gap-2 flex-wrap pt-1">
                         {!isManualMode && canValidateAddress && !isWriteBlocked && isEditable(selectedShip.status) && !selectedShip.label && (() => {
-                          const validateDisabled = providerLoading !== null || !activeProviderId;
-                          const validateTitle = !activeProviderId
-                            ? 'No active shipping provider configured. Configure a provider in Shipping Center → Settings before validating addresses.'
-                            : 'Validates both origin (shipper) and destination (recipient) addresses with the active shipping provider in a single action. Required for Get Rates.';
+                          // Phase 2.7 — explicit two-stage Check Address →
+                          // Validate Address flow. Both buttons call the
+                          // same underlying handler (`handleValidateAddresses`),
+                          // because each call sends the address to the
+                          // provider's verifier and accepts whatever status
+                          // comes back ('validated' or 'corrected'). The
+                          // distinction between Check and Validate is purely
+                          // a UX clarity step:
+                          //   • Check Address  — first pass on a fresh /
+                          //                      stale / failed address.
+                          //                      Result lands in 'corrected'
+                          //                      or 'validated' or 'failed'.
+                          //   • Validate Address — second pass that confirms
+                          //                       a 'corrected' suggestion
+                          //                       is actually a deliverable
+                          //                       address. Only enabled when
+                          //                       a side is currently
+                          //                       'corrected'. Required to
+                          //                       reach the 'validated'
+                          //                       state that unlocks Get
+                          //                       Rates.
+                          // When BOTH sides are already 'validated' (and not
+                          // stale), neither button is rendered — the address
+                          // section already shows the validated badges.
+                          const originState = getAddressReadinessForSide(selectedShip, 'origin');
+                          const destState = getAddressReadinessForSide(selectedShip, 'destination');
+                          const allValidated = originState === 'validated' && destState === 'validated';
+                          if (allValidated) return null;
+                          const anyCorrected = originState === 'corrected' || destState === 'corrected';
+                          // Validate button is enabled when there's a
+                          // 'corrected' side waiting to be confirmed AND
+                          // no other side is in 'unchecked' / 'stale_after_edit'
+                          // / 'failed' (those need Check first). If a side
+                          // needs Check, we show Check; once Check produces
+                          // a 'corrected' result, Validate replaces it.
+                          const needsCheck = originState !== 'corrected' && originState !== 'validated'
+                            ? true
+                            : destState !== 'corrected' && destState !== 'validated';
+                          const stage: 'check' | 'validate' = needsCheck ? 'check' : (anyCorrected ? 'validate' : 'check');
+                          const buttonDisabled = providerLoading !== null || !activeProviderId;
+                          const tooltip = !activeProviderId
+                            ? 'No active shipping provider configured. Configure a provider in Shipping Center → Settings before checking addresses.'
+                            : stage === 'check'
+                              ? 'Step 1 of 2: Check Address. Sends both origin and destination to the provider verifier. The result will either be VALIDATED (ready) or CORRECTED (a suggested address is loaded — you must then run Validate Address to confirm).'
+                              : 'Step 2 of 2: Validate Address. Re-runs the verifier on the corrected address loaded from the previous Check step. A successful response moves the address to VALIDATED, which unlocks Get Rates.';
+                          const labelIdle = stage === 'check' ? 'Check Address' : 'Validate Address';
+                          const labelLoading = stage === 'check' ? 'Checking...' : 'Validating...';
+                          const icon = providerLoading === 'validate' ? 'hourglass_top' : !activeProviderId ? 'lock' : (stage === 'check' ? 'fact_check' : 'verified');
                           return (
-                          <div className="relative group">
-                            <button onClick={() => handleValidateAddresses(selectedShip.id)} disabled={validateDisabled}
-                              title={validateTitle}
-                              className="px-3 py-2 bg-white text-indigo-600 border border-indigo-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50 transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1">
-                              <span className="material-symbols-outlined text-sm">{providerLoading === 'validate' ? 'hourglass_top' : !activeProviderId ? 'lock' : 'verified'}</span>
-                              {providerLoading === 'validate' ? 'Validating Addresses...' : 'Validate Addresses'}
-                            </button>
-                            {!activeProviderId && (
-                              <div className="absolute bottom-full left-0 mb-1 hidden group-hover:block z-10">
-                                <div className="bg-slate-800 text-white text-[10px] rounded-lg px-3 py-2 whitespace-nowrap shadow-lg">No active shipping provider configured.</div>
-                              </div>
-                            )}
-                          </div>
+                            <div className="relative group">
+                              <button onClick={() => handleValidateAddresses(selectedShip.id)} disabled={buttonDisabled}
+                                title={tooltip}
+                                className={`px-3 py-2 bg-white border rounded-xl text-[10px] font-black uppercase tracking-widest transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 ${stage === 'validate' ? 'text-emerald-700 border-emerald-300 hover:bg-emerald-50' : 'text-indigo-600 border-indigo-200 hover:bg-indigo-50'}`}>
+                                <span className="material-symbols-outlined text-sm">{icon}</span>
+                                {providerLoading === 'validate' ? labelLoading : labelIdle}
+                                <span className="ml-1 px-1.5 py-0.5 rounded text-[8px] font-black uppercase tracking-wider bg-slate-100 text-slate-500">{stage === 'check' ? '1/2' : '2/2'}</span>
+                              </button>
+                              {!activeProviderId && (
+                                <div className="absolute bottom-full left-0 mb-1 hidden group-hover:block z-10">
+                                  <div className="bg-slate-800 text-white text-[10px] rounded-lg px-3 py-2 whitespace-nowrap shadow-lg">No active shipping provider configured.</div>
+                                </div>
+                              )}
+                            </div>
                           );
                         })()}
 
@@ -4183,27 +4379,61 @@ export default function ShippingCenter() {
                           <button onClick={() => setShowRatesPanel(false)} className="text-slate-400 hover:text-slate-600"><span className="material-symbols-outlined text-sm">close</span></button>
                         </div>
                         <div className="space-y-2">
-                          {availableRates.map(rate => (
-                            <div key={rate.id} className="flex items-center justify-between bg-white rounded-xl p-3 border border-sky-100 hover:border-primary/30 transition-all">
-                              <div>
-                                <p className="text-xs font-black text-slate-700">{rate.carrier} — {rate.serviceName}</p>
-                                <p className="text-[10px] text-slate-400">
-                                  {rate.estimatedDays ? `${rate.estimatedDays} day${rate.estimatedDays !== 1 ? 's' : ''}` : 'Delivery estimate N/A'}
-                                  {rate.isGuaranteed && ' · Guaranteed'}
-                                </p>
+                          {availableRates.map(rate => {
+                            // Phase 2.7 — pickup forecast badge per rate row.
+                            // This is intentionally rendered inline so the
+                            // operator can compare cost against pickup
+                            // readiness in one glance. Forecast is NEVER
+                            // presented as a final pickup eligibility — see
+                            // help text below.
+                            const forecast = getPickupForecastForRate(rate);
+                            const tone = forecast.state === 'likely'
+                              ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                              : forecast.state === 'final_check'
+                                ? 'bg-sky-50 text-sky-700 border-sky-200'
+                                : forecast.state === 'setup_required'
+                                  ? 'bg-amber-50 text-amber-800 border-amber-200'
+                                  : forecast.state === 'not_capable'
+                                    ? 'bg-rose-50 text-rose-700 border-rose-200'
+                                    : 'bg-slate-50 text-slate-600 border-slate-200';
+                            const icon = forecast.state === 'likely' ? 'check_circle'
+                              : forecast.state === 'final_check' ? 'pending'
+                              : forecast.state === 'setup_required' ? 'settings'
+                              : forecast.state === 'not_capable' ? 'block'
+                              : 'help';
+                            return (
+                              <div key={rate.id} className="flex items-center justify-between bg-white rounded-xl p-3 border border-sky-100 hover:border-primary/30 transition-all">
+                                <div className="min-w-0 flex-1">
+                                  <p className="text-xs font-black text-slate-700">{rate.carrier} — {rate.serviceName}</p>
+                                  <p className="text-[10px] text-slate-400">
+                                    {rate.estimatedDays ? `${rate.estimatedDays} day${rate.estimatedDays !== 1 ? 's' : ''}` : 'Delivery estimate N/A'}
+                                    {rate.isGuaranteed && ' · Guaranteed'}
+                                  </p>
+                                  <div className="mt-1.5">
+                                    <span title={forecast.detail}
+                                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-[9px] font-bold uppercase tracking-wider ${tone}`}>
+                                      <span className="material-symbols-outlined" style={{ fontSize: 11 }}>{icon}</span>
+                                      Pickup: {forecast.label}
+                                    </span>
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-3 ml-3">
+                                  <span className="text-sm font-black text-primary">${rate.rate.toFixed(2)}</span>
+                                  {!isWriteBlocked && (
+                                    <button onClick={() => handleSelectRate(selectedShip.id, rate)}
+                                      className="px-3 py-1.5 bg-primary text-white rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-primary/90 transition-all">
+                                      Select
+                                    </button>
+                                  )}
+                                </div>
                               </div>
-                              <div className="flex items-center gap-3">
-                                <span className="text-sm font-black text-primary">${rate.rate.toFixed(2)}</span>
-                                {!isWriteBlocked && (
-                                  <button onClick={() => handleSelectRate(selectedShip.id, rate)}
-                                    className="px-3 py-1.5 bg-primary text-white rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-primary/90 transition-all">
-                                    Select
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
+                        <p className="text-[10px] text-slate-500 leading-relaxed border-t border-sky-100 pt-2">
+                          <span className="material-symbols-outlined align-middle mr-1" style={{ fontSize: 11 }}>info</span>
+                          <span className="font-bold">Pickup forecast</span> is an estimate based on carrier, service, and provider setup. <span className="font-bold">Final pickup eligibility is confirmed when the carrier pickup request is created.</span> A "final check" badge does not imply failure — it means cutoffs/lead-times for that carrier determine whether the chosen pickup window will return a bookable rate.
+                        </p>
                       </div>
                     )}
 

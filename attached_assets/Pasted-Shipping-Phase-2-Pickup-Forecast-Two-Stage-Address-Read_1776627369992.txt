@@ -1,0 +1,268 @@
+Shipping Phase 2 — Pickup Forecast + Two-Stage Address Readiness Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+Do not redesign the app.
+Do not broaden scope.
+Implement two things together in one controlled pass:
+
+1) Pickup Forecast at Get Rates (carrier-aware, honest, non-final)
+2) Two-stage shipping-address readiness workflow correction:
+   - Check Address
+   - Validate Address
+
+These must work together cleanly.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Node/Express carrier-integration engineer
+- Enterprise shipping systems architect
+- Senior multi-carrier pickup-operations expert with 20+ years of experience across USPS / UPS / FedEx / DHL and provider-orchestrated pickup workflows
+- Product systems thinker
+- QA gatekeeper who must not allow misleading eligibility claims or broken address-state transitions
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- plan gating
+- store permission gating
+- provider/manual mode split
+- PACKED-only activation
+- mutual exclusivity between Service Point and Pickup
+- existing shipping core flow
+- reverse-logistics flow
+- pickup override recovery model
+- locked shipment origin/destination after label purchase
+- current truthful booking / partial-failure / confirmed-state logic
+- current carrier-specific pickup behavior
+
+==================================================
+PART A — PICKUP FORECAST AT GET RATES
+==================================================
+
+PRODUCT GOAL
+
+At Get Rates time, the operator should be able to see which returned carrier/service options are:
+- likely pickup-capable
+- pickup-capable but require a later live pickup check
+- account/setup dependent
+- not suitable for pickup
+- unknown until pickup check
+
+IMPORTANT:
+Do NOT present this as final pickup eligibility.
+This is a Pickup Forecast / Pickup Readiness indicator at rating time.
+The real pickup booking flow remains the final source of truth.
+
+NON-NEGOTIABLE REQUIRED FEATURES
+
+1) ADD PICKUP FORECAST TO RATE RESULTS
+Required:
+- when rates are displayed, each rate row/card must show a pickup forecast indicator
+- it must be tied to the actual returned carrier/service level
+- it must help the operator compare rates without clutter
+
+Suggested states:
+- Likely pickup-capable
+- Pickup-capable — final check after label purchase
+- Account/setup required
+- Not pickup-capable
+- Unknown until pickup check
+
+2) CARRIER-AWARE FORECAST ENGINE
+Required:
+- build a carrier-aware pickup forecast model using:
+  - active provider
+  - returned carrier
+  - returned service level
+  - provider capability model
+  - known carrier/provider setup constraints
+  - current provider settings
+- do not use random cosmetic tags
+
+At minimum, account for:
+- USPS
+- UPS
+- FedEx
+- DHL if currently surfaced in this flow
+
+3) DO NOT OVERSTATE CERTAINTY
+Required:
+- do not label a rate as final “pickup eligible” at Get Rates time unless there is a real basis for certainty
+- use forecast/probability/readiness wording instead
+- later pickup flow remains the final truth
+
+4) CLEAR HELP TEXT
+Required:
+- add a concise explanation:
+  "Pickup forecast is an estimate based on carrier, service, and provider setup. Final pickup eligibility is confirmed when the carrier pickup request is created."
+
+==================================================
+PART B — TWO-STAGE ADDRESS READINESS WORKFLOW
+==================================================
+
+PRODUCT GOAL
+
+The address workflow in Shipping must become an explicit two-stage process:
+
+Stage 1: Check Address
+- this marks the address as corrected / reviewed
+- this is not yet fully ready for rating
+
+Stage 2: Validate Address
+- this marks the address as validated
+- only validated addresses may unlock Get Rates
+
+This must apply cleanly to the shipping address workflow and must not reintroduce prior regressions.
+
+NON-NEGOTIABLE REQUIRED FEATURES
+
+1) ADDRESS STATE MACHINE
+Required:
+- implement an explicit address-state model for the relevant shipping addresses
+- at minimum support:
+  - unchecked
+  - corrected
+  - validated
+  - stale_after_edit
+
+Apply this to the shipping address workflow in a way that is clear in the UI.
+
+2) TWO-STAGE ACTION FLOW
+Required:
+- Check Address must run first
+- once the address is corrected/reviewed, Validate Address becomes the next step
+- once the address is validated:
+  - Validate Address must be disabled
+  - Get Rates must be enabled
+- if the address changes later:
+  - validation state must be invalidated
+  - Get Rates must be disabled again
+  - Check/Validate flow must be required again
+
+3) GET RATES GATING
+Required:
+- Get Rates must only be enabled when the required shipping addresses are in validated state
+- do not enable Get Rates merely because an address was corrected
+- corrected is not enough; validated is required
+
+4) RATE INVALIDATION AFTER ADDRESS CHANGE
+Required:
+- if the operator changes any rating-relevant address after validation and/or after rate selection:
+  - previously selected rate must be invalidated
+  - Get Rates must be disabled until the address goes through Check Address + Validate Address again
+  - downstream steps that depend on the selected rate must not remain falsely valid
+
+5) VALIDATE ADDRESS BUTTON BEHAVIOR AFTER RATE SELECTION
+Required:
+- once a valid rate is selected and the address remains unchanged:
+  - Validate Address stays disabled
+- if the address changes after a rate is selected:
+  - Validate Address becomes relevant again through the required Check → Validate sequence
+  - selected rate becomes stale and must not remain trusted
+
+6) CLEAR UI WORDING
+Required:
+- the operator must clearly understand the difference between:
+  - Check Address
+  - Validate Address
+  - Get Rates
+- corrected and validated must not be visually or semantically conflated
+
+7) DO NOT BREAK EXISTING SHIPPING FLOW
+Required:
+- preserve current flow integrity for:
+  - rate selection
+  - label purchase
+  - pickup
+  - tracking
+  - reverse logistics
+
+==================================================
+PART C — HOW BOTH PARTS MUST WORK TOGETHER
+==================================================
+
+1) Pickup Forecast appears only after valid rate results exist
+Required:
+- no pickup forecast should appear before Get Rates returns actual results
+
+2) If address changes and rates are invalidated
+Required:
+- pickup forecast must also clear/reset with the stale rates
+- do not let old pickup forecast remain attached to stale rates
+
+3) Later pickup flow remains final source of truth
+Required:
+- the forecast can guide the operator
+- the real pickup create/buy flow remains authoritative
+
+==================================================
+WHAT NOT TO DO
+==================================================
+
+- Do not claim final pickup eligibility at Get Rates time
+- Do not re-enable Get Rates on merely corrected addresses
+- Do not leave Validate Address enabled after a truly validated unchanged address
+- Do not leave Get Rates enabled after address edits
+- Do not keep stale selected rates after address change
+- Do not redesign the overall shipping UI broadly
+- Do not add cosmetic-only badges with no logic behind them
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Research the current carrier/provider/service-level pickup suitability relevant to this app
+2) Design and implement the carrier-aware Pickup Forecast evaluator
+3) Add Pickup Forecast to returned rate rows/cards
+4) Implement the two-stage address-state model
+5) Wire Check Address → Validate Address → Get Rates gating correctly
+6) Add rate invalidation/reset when address changes
+7) Ensure Pickup Forecast resets with stale rates
+8) Re-test shipping, rate selection, and pickup flows
+9) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Pickup Forecast concept vs final pickup eligibility
+- forecast states and meanings
+- carrier-aware evaluation logic
+- two-stage address state model
+- difference between corrected vs validated
+- exact rules for enabling/disabling Check Address, Validate Address, and Get Rates
+- rules for rate invalidation after address edits
+- rule that pickup forecast clears with stale rates
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Research Summary
+2. Pickup Forecast State Model
+3. Carrier/Service Evaluation Logic
+4. Two-Stage Address State Model
+5. Check Address / Validate Address / Get Rates Rules
+6. Rate Invalidation / Reset Rules
+7. Rate-UI Changes
+8. How Forecast Connects To Final Pickup Flow
+9. Files Changed
+10. Documentation Updated
+11. Non-Regression Notes
