@@ -394,3 +394,41 @@ The error code is `UPS_SERVICE_NOT_PICKUP_CAPABLE`, distinct from the carrier-ag
 **Truthfulness invariants preserved**: `partial_failed` / `requested` / `confirmed` semantics are unchanged. The new gate refuses an avoidable round-trip — it does not invent a confirmation that wasn't issued. Forecast badges remain estimates; the rate-panel help text continues to state pickup_create is the source of truth for final eligibility.
 
 **Remaining UPS unknowns**: UPS regional/contract-only services not enumerated above will continue to forecast as `unknown` until evidence is collected from real EasyPost responses in this account. Adding a new service to the `final_check` set is a one-line change in `knownFinalCheckCodes` once observed.
+
+### Phase 2.8 — Pickup Fee Transparency (Minimum Safe Improvement) (Apr 2026)
+
+**Why this exists**: rate rows surfaced a pickup forecast badge but no fee signal at all. An operator picking between UPS Ground (per-pickup fee), USPS Priority (typically free), and FedEx Express (typically included with account) had no way to factor pickup cost into the decision until pickup_create — too late. Phase 2.8 adds a class-level fee signal alongside the existing forecast WITHOUT estimating dollar amounts (those come from pickup.create's `pickup_rates` array in a future Phase 2.9). Forecast and fee are kept as ORTHOGONAL fields; collapsing them would create a combinatorial mess.
+
+**`PickupFeeClass` model** (`getPickupFeeClassForRate(rate, forecastState)` in `ShippingCenter.tsx`):
+- `'pickup_may_be_free'` — shipper-typical free pickup at the chosen service level (USPS Priority / Express / International / Returns over EasyPost). Word it as "may be" — the actual fee is confirmed at pickup_create. Emerald chip with a savings icon.
+- `'pickup_fee_likely'` — carrier charges a per-pickup fee for this service in the dominant case (UPS On-Call standard services, FedEx Ground without scheduled pickup). Amber chip with a payments icon.
+- `'fee_depends_on_account'` — varies by account/contract (DHL, FedEx Express, UPS Worldwide / Standard contract rates). Sky chip with a wallet icon.
+- `'not_applicable'` — service is not pickup-capable at all (forecast === `'not_capable'`); fee is moot. Slate chip.
+- `'unknown'` — manual mode, unknown carrier, no active provider, or a service the model does not classify. Slate chip.
+
+**Carrier mappings (EasyPost path)**:
+- USPS → `pickup_may_be_free` ("USPS Package Pickup is typically free at the shipper for qualifying services… Same-day pickup may carry a fee. Exact fee is confirmed when the pickup request is created.")
+- UPS Worldwide / UPSStandard → `fee_depends_on_account` (international / contract rates often include pickup; some bill per pickup).
+- UPS standard (Ground, NextDayAir family, etc.) → `pickup_fee_likely` ("UPS On-Call Pickup typically carries a per-pickup fee that varies by service tier and residential vs commercial address.")
+- FedEx Express family (Express, Overnight, First, Priority Overnight, Standard) → `fee_depends_on_account` (Express on-demand pickup typically included with an Express account).
+- FedEx Ground / Home Delivery / SmartPost → `pickup_fee_likely` (Ground on-demand pickup typically billed per pickup without a scheduled contract).
+- Other FedEx services → `fee_depends_on_account`.
+- DHL → `fee_depends_on_account`.
+- All other carriers → `unknown`.
+- Non-EasyPost providers → `unknown` (no fee tables modeled).
+
+**Conservative wording**: every fee chip uses hedged language — "may be free", "fee likely", "depends on account" — never "free" or a dollar figure. Tooltips end with "Exact fee is confirmed when the pickup request is created." The previous USPS forecast `detail` ("typically available with no per-pickup fee") was softened to remove the "no fee" promise; the fee promise lives only in the `pickupFeeClass` chip and remains hedged.
+
+**Rate-row UI**: each rate row in the Available Rates panel now renders TWO compact chips on a flex-wrap row: the existing forecast chip (Pickup: …) plus the new fee chip (Pickup may be free / Pickup fee likely / Fee depends on account / Fee N/A / Fee unknown). Each carries its own tooltip (`detail` string). No dollar amount is displayed on the badge in Phase 2.8. The rate-panel help text below the list now explicitly states forecast AND fee are estimates and that pickup_create remains the source of truth for both eligibility AND the exact fee.
+
+**UPS gate-message refinement**: the early-gating message in `handleRequestPickup` for `not_capable` UPS services was rewritten from "This UPS service level does not support scheduled pickup through the current provider flow." to "This UPS service is not pickup-bookable through the current provider flow. Other UPS services on this rate list may be pickup-capable — choose a different UPS service or use drop-off." This avoids implying UPS as a whole lacks pickup support and tells the operator their out: switch UPS service, not switch carrier.
+
+**Out of scope for Phase 2.8 (intentionally deferred)**:
+- No `pickup.create` invocation at Get Rates time to preview real fees (multiplies API calls / orphan pickups).
+- No dollar amounts on the rate-row badge.
+- No pickup-rate selection UI in the booking modal.
+- No change to `pickup.buy` rate selection behavior.
+- No new persisted fields on the pickup record.
+- No FedEx service-family classifier (current FedEx forecast is still a single `final_check` bucket; QA has not surfaced FedEx false positives).
+
+**Truthfulness invariants preserved**: forecast badges remain estimates. Fee chips remain class-level estimates with no dollar figures. `'corrected'` and `'stale_after_edit'` still do NOT unlock Get Rates. UPS DAP / SurePost / Mail Innovations remain hard-`not_capable`. `partial_failed` semantics, phone preflight, two-stage address readiness, override recovery, and label-lock behavior are all untouched.

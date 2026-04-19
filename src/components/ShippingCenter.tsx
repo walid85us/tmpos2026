@@ -1783,7 +1783,12 @@ export default function ShippingCenter() {
     const isEasyPost = activeProviderId.toLowerCase() === 'easypost';
     if (isEasyPost) {
       if (carrierUpper.includes('USPS')) {
-        return { state: 'likely', label: 'Likely pickup-capable', detail: 'USPS pickups over EasyPost are typically available with no per-pickup fee. Final eligibility is confirmed when the carrier pickup request is created.' };
+        // Phase 2.8 — softened wording: USPS Package Pickup is FREE for
+        // Priority Mail / Express / International / Returns when the
+        // shipper qualifies, but not universally and not for same-day
+        // pickup. We do not promise "no fee" here — the fee class is
+        // surfaced separately by getPickupFeeClassForRate.
+        return { state: 'likely', label: 'Likely pickup-capable', detail: 'USPS pickups over EasyPost are typically available. Final eligibility (and exact fee, if any) is confirmed when the carrier pickup request is created.' };
       }
       // Phase 2.7.1 — UPS family is no longer a single bucket. Delegate
       // to the service-family classifier so UPS DAP, SurePost / Ground
@@ -1804,6 +1809,93 @@ export default function ShippingCenter() {
     // Non-EasyPost providers: capability says pickup is supported, but we
     // don't model carrier-specific cutoffs for them here. Honest "unknown".
     return { state: 'unknown', label: 'Unknown until pickup check', detail: `Pickup eligibility for ${rate.carrier} via ${activeProviderId} is determined at the time of the pickup request.` };
+  }
+
+  // Phase 2.8 — Pickup fee class (orthogonal to forecast).
+  //
+  // Rationale: forecast answers "is this service pickup-bookable?". Fee
+  // class answers "if it IS booked, will there typically be a per-pickup
+  // fee?". Collapsing the two into a combined state creates a
+  // combinatorial mess; keeping them as two narrow fields lets each
+  // rate row show both at a glance with honest, conservative wording.
+  //
+  // INTENTIONALLY: NO DOLLAR AMOUNTS HERE. Phase 2.8 only exposes the
+  // fee CLASS — the exact fee comes from pickup.create's pickup_rates
+  // and is rendered in the booking flow (Phase 2.9, not yet
+  // implemented).
+  //
+  // States:
+  //   'pickup_may_be_free'   — shipper-typical free pickup at the
+  //                            chosen service level (USPS Priority /
+  //                            Express / International / Returns over
+  //                            EasyPost). Word it as "may be" — the
+  //                            actual fee is confirmed at pickup_create.
+  //   'pickup_fee_likely'    — carrier charges a per-pickup fee for
+  //                            this service in the dominant case
+  //                            (UPS On-Call, FedEx Ground without a
+  //                            scheduled pickup).
+  //   'fee_depends_on_account' — varies by account/contract
+  //                              configuration (DHL, FedEx Express,
+  //                              UPS contract rates).
+  //   'not_applicable'       — service is not pickup-capable at all
+  //                            (forecast === 'not_capable'); fee is
+  //                            moot.
+  //   'unknown'              — manual mode, unknown carrier, no active
+  //                            provider, or a service the model does
+  //                            not classify.
+  type PickupFeeClass = 'pickup_may_be_free' | 'pickup_fee_likely' | 'fee_depends_on_account' | 'not_applicable' | 'unknown';
+  function getPickupFeeClassForRate(rate: ShippingRate, forecastState: PickupForecastState): { state: PickupFeeClass; label: string; detail: string } {
+    // Forecast already says it cannot be picked up — fee is moot.
+    if (forecastState === 'not_capable') {
+      return { state: 'not_applicable', label: 'Fee N/A', detail: 'This service is not pickup-bookable through the current provider flow, so a pickup fee does not apply.' };
+    }
+    if (forecastState === 'setup_required' || !activeProviderId) {
+      return { state: 'unknown', label: 'Fee unknown', detail: 'Provider setup is incomplete. The pickup fee class will be determinable once a provider is configured.' };
+    }
+    const isEasyPost = activeProviderId.toLowerCase() === 'easypost';
+    if (!isEasyPost) {
+      // Non-EasyPost providers — we don't model their fee tables here.
+      return { state: 'unknown', label: 'Fee unknown', detail: `Pickup fee class for ${rate.carrier} via ${activeProviderId} is determined at the time of the pickup request.` };
+    }
+    const carrierUpper = (rate.carrier || '').toUpperCase();
+    if (carrierUpper.includes('USPS')) {
+      // USPS Package Pickup is free for Priority Mail / Express /
+      // International / Returns from the shipper's address. Same-day
+      // pickup is fee-bearing. We say "may be free" rather than
+      // "free" — the exact fee is confirmed at pickup_create.
+      return { state: 'pickup_may_be_free', label: 'Pickup may be free', detail: 'USPS Package Pickup is typically free at the shipper for qualifying services (Priority Mail, Express, International, Returns) when scheduled in advance. Same-day pickup may carry a fee. Exact fee is confirmed when the pickup request is created.' };
+    }
+    if (carrierUpper.includes('UPS')) {
+      // UPS On-Call Pickup is fee-bearing in the dominant US case.
+      // Some UPS contract / Worldwide rates include pickup — we mark
+      // those as fee_depends_on_account where we can detect them.
+      const code = (rate.serviceCode || '').toUpperCase().replace(/[\s_-]+/g, '');
+      const isWorldwide = code.startsWith('WORLDWIDE') || code === 'STANDARD' || code === 'UPSSTANDARD';
+      if (isWorldwide) {
+        return { state: 'fee_depends_on_account', label: 'Fee depends on account', detail: 'UPS Worldwide / international service pickup fees vary by account contract. Some contracts include pickup; others bill per pickup. Exact fee is confirmed when the pickup request is created.' };
+      }
+      return { state: 'pickup_fee_likely', label: 'Pickup fee likely', detail: 'UPS On-Call Pickup typically carries a per-pickup fee that varies by service tier and residential vs commercial address. Exact fee is confirmed when the pickup request is created.' };
+    }
+    if (carrierUpper.includes('FEDEX')) {
+      const code = (rate.serviceCode || '').toUpperCase().replace(/[\s_-]+/g, '');
+      const name = (rate.serviceName || '').toUpperCase();
+      // FedEx Express on-demand pickup is included with an Express
+      // shipping account; FedEx Ground on-demand pickup is fee-bearing
+      // without a scheduled pickup contract.
+      const isExpress = code.includes('EXPRESS') || code.includes('OVERNIGHT') || code.includes('FIRST') || code.includes('PRIORITY') || code.includes('STANDARD') || name.includes('EXPRESS') || name.includes('OVERNIGHT') || name.includes('FIRST') || name.includes('PRIORITY OVERNIGHT');
+      const isGround = code.includes('GROUND') || code.includes('HOMEDELIVERY') || code.includes('SMARTPOST') || name.includes('GROUND') || name.includes('HOME DELIVERY') || name.includes('SMARTPOST');
+      if (isExpress && !isGround) {
+        return { state: 'fee_depends_on_account', label: 'Fee depends on account', detail: 'FedEx Express on-demand pickup is typically included with a FedEx Express shipping account. Fee, if any, is confirmed when the pickup request is created.' };
+      }
+      if (isGround) {
+        return { state: 'pickup_fee_likely', label: 'Pickup fee likely', detail: 'FedEx Ground on-demand pickup typically carries a per-pickup fee unless a scheduled pickup contract is in place. Exact fee is confirmed when the pickup request is created.' };
+      }
+      return { state: 'fee_depends_on_account', label: 'Fee depends on account', detail: 'FedEx pickup fees depend on service tier and account configuration. Exact fee is confirmed when the pickup request is created.' };
+    }
+    if (carrierUpper.includes('DHL')) {
+      return { state: 'fee_depends_on_account', label: 'Fee depends on account', detail: 'DHL Express pickup is typically included with an account in most lanes; some service areas carry surcharges. Exact fee is confirmed when the pickup request is created.' };
+    }
+    return { state: 'unknown', label: 'Fee unknown', detail: `Pickup fee class for "${rate.carrier}" is not modeled. Exact fee is determined when the pickup request is created.` };
   }
 
   function getPickupEligibilityState(shipment: Shipment): { status: PickupEligibilityStatus; record?: PickupEligibility } {
@@ -2312,7 +2404,7 @@ export default function ShippingCenter() {
     if (sel && (sel.carrier || '').toUpperCase().includes('UPS')) {
       const ups = classifyUpsServicePickup(sel);
       if (ups.state === 'not_capable') {
-        const msg = `This UPS service level does not support scheduled pickup through the current provider flow. Choose a different service or use drop-off. (${ups.detail})`;
+        const msg = `This UPS service is not pickup-bookable through the current provider flow. Other UPS services on this rate list may be pickup-capable — choose a different UPS service or use drop-off. (${ups.detail})`;
         setProviderError(friendlyProviderError({ code: 'UPS_SERVICE_NOT_PICKUP_CAPABLE', message: msg }));
         setPickupAttemptResult({ kind: 'error', title: 'UPS service not pickup-capable', detail: msg, steps: [], code: 'UPS_SERVICE_NOT_PICKUP_CAPABLE' });
         return;
@@ -4557,6 +4649,26 @@ export default function ShippingCenter() {
                               : forecast.state === 'setup_required' ? 'settings'
                               : forecast.state === 'not_capable' ? 'block'
                               : 'help';
+                            // Phase 2.8 — orthogonal pickup fee class chip
+                            // rendered next to the forecast badge. NO
+                            // dollar amounts here (Phase 2.8 scope) —
+                            // exact fees come from pickup.create at
+                            // booking time (Phase 2.9, not yet wired).
+                            const fee = getPickupFeeClassForRate(rate, forecast.state);
+                            const feeTone = fee.state === 'pickup_may_be_free'
+                              ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                              : fee.state === 'pickup_fee_likely'
+                                ? 'bg-amber-50 text-amber-800 border-amber-200'
+                                : fee.state === 'fee_depends_on_account'
+                                  ? 'bg-sky-50 text-sky-700 border-sky-200'
+                                  : fee.state === 'not_applicable'
+                                    ? 'bg-slate-50 text-slate-500 border-slate-200'
+                                    : 'bg-slate-50 text-slate-600 border-slate-200';
+                            const feeIcon = fee.state === 'pickup_may_be_free' ? 'savings'
+                              : fee.state === 'pickup_fee_likely' ? 'payments'
+                              : fee.state === 'fee_depends_on_account' ? 'account_balance_wallet'
+                              : fee.state === 'not_applicable' ? 'remove'
+                              : 'help';
                             return (
                               <div key={rate.id} className="flex items-center justify-between bg-white rounded-xl p-3 border border-sky-100 hover:border-primary/30 transition-all">
                                 <div className="min-w-0 flex-1">
@@ -4565,11 +4677,16 @@ export default function ShippingCenter() {
                                     {rate.estimatedDays ? `${rate.estimatedDays} day${rate.estimatedDays !== 1 ? 's' : ''}` : 'Delivery estimate N/A'}
                                     {rate.isGuaranteed && ' · Guaranteed'}
                                   </p>
-                                  <div className="mt-1.5">
+                                  <div className="mt-1.5 flex flex-wrap items-center gap-1">
                                     <span title={forecast.detail}
                                       className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-[9px] font-bold uppercase tracking-wider ${tone}`}>
                                       <span className="material-symbols-outlined" style={{ fontSize: 11 }}>{icon}</span>
                                       Pickup: {forecast.label}
+                                    </span>
+                                    <span title={fee.detail}
+                                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-[9px] font-bold uppercase tracking-wider ${feeTone}`}>
+                                      <span className="material-symbols-outlined" style={{ fontSize: 11 }}>{feeIcon}</span>
+                                      {fee.label}
                                     </span>
                                   </div>
                                 </div>
@@ -4588,7 +4705,7 @@ export default function ShippingCenter() {
                         </div>
                         <p className="text-[10px] text-slate-500 leading-relaxed border-t border-sky-100 pt-2">
                           <span className="material-symbols-outlined align-middle mr-1" style={{ fontSize: 11 }}>info</span>
-                          <span className="font-bold">Pickup forecast</span> is an estimate based on carrier, service, and provider setup. <span className="font-bold">Final pickup eligibility is confirmed when the carrier pickup request is created.</span> A "final check" badge does not imply failure — it means cutoffs/lead-times for that carrier determine whether the chosen pickup window will return a bookable rate.
+                          <span className="font-bold">Pickup forecast</span> and <span className="font-bold">fee class</span> are estimates based on carrier, service, and provider setup. <span className="font-bold">Final pickup eligibility AND the exact pickup fee (if any) are confirmed when the carrier pickup request is created.</span> A "final check" forecast does not imply failure — it means cutoffs/lead-times for that carrier determine whether the chosen pickup window will return a bookable rate. "Pickup may be free", "Pickup fee likely", and "Fee depends on account" are class-level signals only — no dollar amount is implied at this stage.
                         </p>
                       </div>
                     )}

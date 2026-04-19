@@ -1,0 +1,72 @@
+Shipping Phase 2.8 — Pickup Fee Transparency (Minimum Safe Improvement Only)
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+Implement ONLY Phase 2.8 from the approved research plan.
+Do not implement Phase 2.9 yet.
+Do not redesign the app.
+Do not broaden scope.
+
+Goal:
+Improve pickup fee transparency and pickup-rate decision quality with the minimum safe change set.
+
+Approved direction:
+- Keep the current Pickup Forecast model
+- Add an orthogonal pickupFeeClass beside forecast
+- Do NOT show estimated dollar amounts at Get Rates
+- Do NOT change pickup booking flow yet
+- Do NOT add pickup-rate selection yet
+- Do NOT weaken current truthful pickup booking / partial-failure / confirmed-state logic
+
+Read first:
+- Ref.txt
+- replit.md
+- the approved fee-transparency / support-model plan
+
+Implement exactly:
+
+1) Add pickupFeeClass to rate-row evaluation
+Supported states:
+- pickup_fee_likely
+- pickup_may_be_free
+- fee_depends_on_account
+- not_applicable
+- unknown
+
+2) Render fee-class indicator next to the existing pickup forecast badge on returned rate rows
+- Keep the UI compact
+- Each fee-class must have concise tooltip/help text
+- Do not add any dollar estimates at this stage
+
+3) Use conservative wording
+- Prefer “Pickup fee likely”, “Pickup may be free”, “Fee depends on account”, “Not applicable”, “Unknown”
+- Avoid overconfident wording unless supported by strong rules already available in the app
+
+4) UPS wording refinement
+- Keep the current service-family-aware UPS model
+- Where the app blocks unsupported UPS services, make sure the operator-facing wording remains:
+  “This UPS service is not pickup-bookable through the current provider flow”
+- Do not imply UPS as a whole lacks pickup support
+
+5) Remove any lingering copy that implies pickup is always free unless that is truly known
+- Especially in generic help text
+
+6) Do not implement Phase 2.9 yet
+Specifically do NOT:
+- surface pickup_rates selection UI yet
+- show exact pickup fee confirmation UI yet
+- change pickup.buy selection behavior yet
+- persist picked pickup rate in new UX surfaces yet
+
+Output format required:
+
+1. Phase 2.8 Implementation Status
+2. pickupFeeClass Model
+3. Rate-Row UI Changes
+4. UPS Wording / Positioning Notes
+5. Files Changed
+6. Documentation Updated
+7. Non-Regression Notes
