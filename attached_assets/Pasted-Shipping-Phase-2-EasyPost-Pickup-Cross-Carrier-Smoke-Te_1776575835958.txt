@@ -1,0 +1,125 @@
+Shipping Phase 2 — EasyPost Pickup Cross-Carrier Smoke-Test / Gap Report
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated validation pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not make speculative changes yet.
+
+USPS pickup now appears to be working correctly.
+The next step is to validate the current EasyPost pickup flow across the other intended EasyPost pickup carriers:
+- UPS
+- FedEx
+
+This pass is for:
+1) cross-carrier smoke-test readiness review
+2) carrier-specific requirement/gap identification
+3) only minimal corrections if an obvious small bug is found
+4) otherwise return a precise gap report instead of broad implementation
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior Node/Express carrier-integration engineer
+- Senior React/TypeScript engineer
+- Enterprise shipping systems architect
+- Senior multi-carrier pickup-operations expert with 20+ years of experience in USPS / UPS / FedEx pickup booking flows and operational exception handling
+- QA gatekeeper
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview mode safety
+- plan gating
+- store permission gating
+- provider/manual mode split
+- PACKED-only activation
+- mutual exclusivity between Service Point and Pickup
+- existing shipping core flow
+- reverse-logistics flow
+- pickup override recovery model
+- locked shipment origin/destination after label purchase
+- current EasyPost is_account_address=false default
+- current structured diagnostics UI
+- current truthful booking / partial-failure / confirmed-state logic
+
+==================================================
+CURRENT STATUS
+==================================================
+
+USPS / EasyPost pickup now appears healthy:
+- booked live
+- confirmed
+- phone mutation fixed
+- stale-failure memory fixed
+- booked/requested state truthful
+
+Now validate the same current EasyPost pickup architecture for:
+- UPS
+- FedEx
+
+==================================================
+GOAL OF THIS PASS
+==================================================
+
+You must determine:
+
+1) Whether the existing EasyPost pickup flow is already operationally suitable for UPS and FedEx
+2) Whether UPS or FedEx require additional carrier-specific constraints or UI guidance
+3) Whether there are small obvious bugs to fix now
+4) Or whether the remaining differences should be documented as carrier-specific expected behavior rather than treated as bugs
+
+==================================================
+NON-NEGOTIABLE REQUIRED OUTPUT
+==================================================
+
+1) CROSS-CARRIER READINESS REVIEW
+Review the current pickup flow for:
+- address source
+- contact requirements
+- phone format assumptions
+- instructions/location detail handling
+- provider shipment requirement
+- date/window handling
+- confirmation handling
+- cancellation handling
+- webhook/event expectations
+
+2) IDENTIFY CARRIER-SPECIFIC DIFFERENCES
+For each of USPS / UPS / FedEx, state clearly:
+- what should work with the current flow
+- what may differ by carrier
+- what QA should specifically watch for
+- what would count as a real bug vs expected provider/carrier variation
+
+3) MINIMAL FIXES ONLY IF TRULY NEEDED
+If you find one small, obvious, contained correction that is necessary before QA, implement only that.
+Do not start a broad new carrier implementation pass unless absolutely necessary.
+
+4) NO COSMETIC OR SPECULATIVE CHANGES
+Do not change working USPS behavior.
+Do not redesign the UI.
+Do not add broad new features.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Cross-Carrier Review Status
+2. USPS Readiness Notes
+3. UPS Readiness Notes
+4. FedEx Readiness Notes
+5. Carrier-Specific QA Watchouts
+6. Small Fixes Applied Now (if any)
+7. Documentation Updated
+8. Recommendation: Ready For Manual Smoke Test Or Needs One More Narrow Fix
