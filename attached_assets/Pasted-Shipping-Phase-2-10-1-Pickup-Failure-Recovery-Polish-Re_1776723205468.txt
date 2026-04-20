@@ -1,0 +1,149 @@
+Shipping Phase 2.10.1 — Pickup Failure Recovery Polish + Remaining Input Audit
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated optional polish pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen Phase 2.10.
+This is not a blocker-fix pass; it is a focused operator-experience polish pass.
+
+Goal:
+Refine the post-Phase-2.10 experience for:
+1) failed / unconfirmed pickup recovery UX
+2) future-date / provider-refusal guidance
+3) remaining app-wide state / ZIP / phone normalization gaps
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Node/Express carrier-integration engineer
+- Enterprise shipping systems architect
+- Senior USPS / UPS / FedEx / EasyPost operations expert with 20+ years of experience in pickup scheduling, failure recovery UX, and shipment lifecycle controls
+- QA gatekeeper who must improve operator recovery without changing underlying truthfulness
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- USPS working behavior
+- truthful FedEx success/failure behavior from Phase 2.9.3 and 2.10
+- UPS unsupported-service early blocking
+- current pickup forecast + fee-class model
+- current exact pickup-rate selection flow
+- current no-rates vs partial_failed truthfulness
+- current label-lock and pickup-override behavior
+- current two-stage address readiness model
+- current shipment-cancel dependency rule from Phase 2.10
+- current cancellation confirmation/result flow
+
+==================================================
+CURRENT QA SOURCE OF TRUTH
+==================================================
+
+Phase 2.10 now passes.
+
+However, the remaining polish need is:
+- when pickup is not confirmed / booking failed, the UI should not leave Cancel Pickup as the main recovery path
+- operator should be guided to edit date/window or other blocking details and retry
+- FedEx "Pickup Date too far in future" should have clearer recovery guidance
+- remaining untouched state / ZIP / phone fields across the app should be audited and normalized if any gaps remain
+
+==================================================
+NON-NEGOTIABLE REQUIRED IMPROVEMENTS
+==================================================
+
+1) FAILED / UNCONFIRMED PICKUP RECOVERY UX
+Required:
+- for pickup objects that exist but are not confirmed, make the primary recovery path:
+  - Edit pickup date/window
+  - Edit pickup details
+  - Retry booking
+- keep Cancel Pickup available when an orphan provider pickup exists, but make it a secondary recovery action
+- do not present the failed/unconfirmed state as if the pickup is booked
+
+2) FUTURE-DATE / PROVIDER-REFUSAL GUIDANCE
+Required:
+- when provider returns a specific date/window-style reason such as:
+  - PICKUPDATE.TOO.FAR
+  - no pickup rates for the selected date/window
+- show a clear operator hint such as:
+  - "Try an earlier pickup date"
+  - "Try a different pickup window"
+  - "Carrier/account/date combination may not support that future date"
+- keep the provider reason visible, but add a clear operator action path
+
+3) FAILED / UNCONFIRMED PICKUP ACTION HIERARCHY
+Required:
+- for failed/unconfirmed pickup states:
+  - primary CTA = edit date/window/details and retry
+  - secondary CTA = cancel orphan pickup
+- do not make cancellation the only obvious next action when the better next step is correction + retry
+
+4) REMAINING APP-WIDE INPUT AUDIT
+Required:
+- audit remaining state / ZIP / phone inputs across the app
+- identify any remaining structured address/contact inputs not yet normalized
+- apply the same normalization rules where gaps still exist
+- if some inputs are intentionally excluded, document why
+
+5) DO NOT CHANGE UNDERLYING TRUTHFULNESS
+Required:
+- do not weaken the truthful distinction between:
+  - no-rates
+  - booking failed
+  - confirmed pickup
+- do not weaken USPS/FedEx/UPS truthfulness already achieved
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- failed/unconfirmed pickup states guide the operator toward fixing and retrying, not just cancelling
+- future-date/provider-refusal cases have clearer operator guidance
+- any remaining normalization gaps are closed or explicitly documented
+- USPS/FedEx/UPS truthfulness remains intact
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Refine failed/unconfirmed pickup action hierarchy
+2) Add date/window/provider-refusal recovery hints
+3) Audit remaining app-wide state / ZIP / phone inputs
+4) Fill any normalization gaps
+5) Re-test USPS/FedEx/UPS non-regression
+6) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- failed/unconfirmed pickup recovery UX rules
+- date/window/provider-refusal guidance rules
+- remaining input-normalization audit findings
+- any newly normalized modules/fields
+- confirmation that USPS/FedEx/UPS truthfulness was preserved
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Failed / Unconfirmed Pickup Recovery UX Fix
+3. Future-Date / Provider-Refusal Guidance Fix
+4. Remaining Input Audit / Normalization Fix
+5. Files Changed
+6. Documentation Updated
+7. Non-Regression Notes

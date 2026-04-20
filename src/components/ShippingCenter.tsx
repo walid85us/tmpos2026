@@ -6009,10 +6009,48 @@ export default function ShippingCenter() {
                           {pr.status === 'partial_failed' && (
                             <div className="bg-amber-100 border border-amber-300 rounded-lg p-2 flex items-start gap-2">
                               <span className="material-symbols-outlined text-amber-600 text-sm mt-0.5">error</span>
-                              <div className="text-[11px] text-amber-900">
+                              <div className="text-[11px] text-amber-900 flex-1 min-w-0">
                                 <p><span className="font-black">Pickup object created with {pr.providerId} but booking NOT confirmed.</span>{pr.providerPickupId ? <> Provider pickup id: <span className="font-mono">{pr.providerPickupId}</span>.</> : null} No carrier confirmation number has been issued.</p>
                                 {pr.failureReason && <p className="mt-1">Reason: {pr.failureReason}</p>}
-                                <p className="mt-1 italic">The orphaned provider record is preserved so you can cancel it from this panel. Fix the underlying issue and re-attempt — booking has not occurred.</p>
+                                <p className="mt-1 italic">Recommended next step: edit pickup date/window above and retry. Cancellation is a fallback if you do not plan to retry.</p>
+                                {/* Phase 2.10.1 — promote fix-and-retry as the primary
+                                    recovery action; demote cancel-orphan to secondary. */}
+                                <div className="mt-2 flex flex-wrap items-center gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const el = document.getElementById('pickup-date-input') as HTMLInputElement | null;
+                                      if (el) {
+                                        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                        setTimeout(() => { try { el.focus(); el.showPicker?.(); } catch { /* showPicker may throw outside user gesture */ } }, 250);
+                                      }
+                                    }}
+                                    className="px-3 py-1.5 bg-primary text-white font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-primary/90 transition-colors flex items-center gap-1"
+                                  >
+                                    <span className="material-symbols-outlined text-sm">edit_calendar</span>
+                                    Edit Date / Window
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={pickupSubmitting}
+                                    onClick={() => handleRequestPickup(selectedShip.id)}
+                                    className="px-3 py-1.5 bg-emerald-600 text-white font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-emerald-700 transition-colors flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                                  >
+                                    <span className="material-symbols-outlined text-sm">refresh</span>
+                                    Retry Booking
+                                  </button>
+                                  {pr.providerPickupId && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleCancelPickup(selectedShip.id)}
+                                      className="px-3 py-1.5 bg-white border border-rose-200 text-rose-700 font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-rose-50 transition-colors flex items-center gap-1"
+                                      title="Only needed if you do not plan to retry — cancels the orphan provider pickup record at the carrier."
+                                    >
+                                      <span className="material-symbols-outlined text-sm">close_small</span>
+                                      Cancel Orphan
+                                    </button>
+                                  )}
+                                </div>
                               </div>
                             </div>
                           )}
@@ -6111,7 +6149,7 @@ export default function ShippingCenter() {
                           )}
                           <div>
                             <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Pickup Date{reqMark(reqWindow)}</label>
-                            <input type="date" value={pickupForm.date} onChange={e => setPickupForm({ ...pickupForm, date: e.target.value })} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs" />
+                            <input id="pickup-date-input" type="date" value={pickupForm.date} onChange={e => setPickupForm({ ...pickupForm, date: e.target.value })} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs" />
                           </div>
                           <div className="grid grid-cols-2 gap-2">
                             <div>
@@ -6236,6 +6274,77 @@ export default function ShippingCenter() {
                                         <pre className="mt-1 text-[10px] font-mono text-slate-700 bg-white/80 border border-slate-200 rounded p-2 whitespace-pre-wrap break-all">{pickupAttemptResult.detailsCollapsed}</pre>
                                       </details>
                                     )}
+                                    {/* Phase 2.10.1 — failed/unconfirmed pickup recovery polish.
+                                        For 'error' or 'partial' results, lead the operator
+                                        toward fix-and-retry rather than cancellation. Show
+                                        date/window-specific guidance when the provider reason
+                                        names a future-date / window / no-rates problem. Cancel
+                                        is demoted to a secondary action and only when an
+                                        orphan provider pickup id actually exists. */}
+                                    {(pickupAttemptResult.kind === 'error' || pickupAttemptResult.kind === 'partial') && (() => {
+                                      const haystack = `${pickupAttemptResult.code || ''} ${pickupAttemptResult.providerCode || ''} ${pickupAttemptResult.detail || ''}`.toLowerCase();
+                                      const isDateWindowIssue =
+                                        haystack.includes('pickupdate') ||
+                                        haystack.includes('too.far') ||
+                                        haystack.includes('too far') ||
+                                        haystack.includes('no_pickup_rates') ||
+                                        haystack.includes('no pickup rates') ||
+                                        haystack.includes('future') ||
+                                        haystack.includes('window');
+                                      const hasOrphan = !!pickupAttemptResult.providerPickupId;
+                                      return (
+                                        <div className="mt-3 pt-3 border-t border-slate-200/60 space-y-2">
+                                          {isDateWindowIssue && (
+                                            <div className="bg-sky-50 border border-sky-200 rounded-lg p-2 flex items-start gap-2">
+                                              <span className="material-symbols-outlined text-sky-600 text-sm mt-0.5">lightbulb</span>
+                                              <div className="text-[11px] text-sky-900">
+                                                <p className="font-black">Try adjusting date or window.</p>
+                                                <p className="mt-0.5">Some carrier/account/service combinations only support same-day or next-day pickups. Try an earlier pickup date, a different window (e.g. earlier latest time), or confirm the carrier supports pickups for this origin on the chosen date.</p>
+                                              </div>
+                                            </div>
+                                          )}
+                                          <div className="flex flex-wrap items-center gap-2">
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                const el = document.getElementById('pickup-date-input') as HTMLInputElement | null;
+                                                if (el) {
+                                                  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                                  setTimeout(() => { try { el.focus(); el.showPicker?.(); } catch { /* showPicker may throw outside user gesture */ } }, 250);
+                                                }
+                                              }}
+                                              className="px-3 py-1.5 bg-primary text-white font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-primary/90 transition-colors flex items-center gap-1"
+                                            >
+                                              <span className="material-symbols-outlined text-sm">edit_calendar</span>
+                                              Edit Pickup Date / Window
+                                            </button>
+                                            <button
+                                              type="button"
+                                              disabled={pickupSubmitting}
+                                              onClick={() => { setPickupAttemptResult(null); handleRequestPickup(selectedShip.id); }}
+                                              className="px-3 py-1.5 bg-emerald-600 text-white font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-emerald-700 transition-colors flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                                            >
+                                              <span className="material-symbols-outlined text-sm">refresh</span>
+                                              Retry Booking
+                                            </button>
+                                            {hasOrphan && (
+                                              <button
+                                                type="button"
+                                                onClick={() => handleCancelPickup(selectedShip.id)}
+                                                className="px-3 py-1.5 bg-white border border-rose-200 text-rose-600 font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-rose-50 transition-colors flex items-center gap-1"
+                                                title="Only needed if you do not plan to retry — cancels the orphan provider pickup record at the carrier."
+                                              >
+                                                <span className="material-symbols-outlined text-sm">close_small</span>
+                                                Cancel Orphan Pickup
+                                              </button>
+                                            )}
+                                          </div>
+                                          {hasOrphan && (
+                                            <p className="text-[10px] text-slate-500 italic">Cancellation is the secondary action — use it only if you do not intend to retry. The orphan pickup will not be charged unless it is confirmed.</p>
+                                          )}
+                                        </div>
+                                      );
+                                    })()}
                                   </div>
                                 </div>
                               </div>
