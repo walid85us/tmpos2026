@@ -5,6 +5,7 @@ import { useStoreLocalState, type LoyaltyTier } from '../context/StoreLocalState
 import { useAccess } from '../context/AccessContext';
 import type { Customer, Invoice, RepairTicket, CartItem } from '../types';
 import type { CompletedOrder } from '../context/StoreLocalState';
+import { normalizePhone } from '../utils/inputNormalizers';
 
 type CustomerView = 'list' | 'profile';
 type HistoryTab = 'orders' | 'invoices' | 'repairs';
@@ -945,7 +946,11 @@ export default function Customers() {
                     <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Phone</label>
                     <input
                       value={newCustomerForm.phone}
-                      onChange={(e) => handleFormChange('phone', e.target.value)}
+                      onChange={(e) => handleFormChange('phone', normalizePhone(e.target.value))}
+                      type="tel"
+                      inputMode="tel"
+                      maxLength={15}
+                      placeholder="Digits only"
                       className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20"
                     />
                   </div>
@@ -1033,7 +1038,11 @@ export default function Customers() {
                     <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">Phone</label>
                     <input
                       value={editForm.phone}
-                      onChange={(e) => setEditForm(prev => ({ ...prev, phone: e.target.value }))}
+                      onChange={(e) => setEditForm(prev => ({ ...prev, phone: normalizePhone(e.target.value) }))}
+                      type="tel"
+                      inputMode="tel"
+                      maxLength={15}
+                      placeholder="Digits only"
                       className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-primary/20"
                     />
                   </div>

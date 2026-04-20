@@ -1,0 +1,174 @@
+Shipping Phase 2.10 — Pickup Cancellation Integrity + Input Hardening + Shipment-Cancel Dependency
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen Phase 2.9.3.
+
+Goal:
+Address the next operational issues found in QA after Phase 2.9.3:
+1) pickup cancellation UX and cancellation integrity
+2) truthful handling of future-window/provider-refusal cases (especially FedEx)
+3) input hardening for state / ZIP / phone fields
+4) shipment-cancel dependency on confirmed pickup
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Node/Express carrier-integration engineer
+- Enterprise shipping systems architect
+- Senior USPS / UPS / FedEx / EasyPost operations expert with 20+ years of experience in pickup scheduling, cancellation flows, and shipment lifecycle controls
+- Root-cause debugging specialist
+- QA gatekeeper who must preserve operational truthfulness
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- USPS working behavior
+- truthful FedEx failure/success behavior from Phase 2.9.3
+- UPS unsupported-service early blocking
+- current pickup forecast + fee-class model
+- current exact pickup-rate selection flow
+- current no-rates vs partial_failed truthfulness
+- current label-lock and pickup-override behavior
+- current two-stage address readiness model
+
+==================================================
+CURRENT QA SOURCE OF TRUTH
+==================================================
+
+Observed QA follow-up issues:
+
+1) FedEx future-window behavior
+- next-day pickup can succeed
+- a pickup for 2 days ahead can fail
+- this should not be treated as a blanket “test mode only” rule without evidence
+- the app must surface this honestly as a provider/account/window outcome, not a vague failure
+
+2) Pickup cancellation UX/integrity
+- clicking Cancel Pickup currently gives no confirmation modal
+- in some cases it appears nothing happens
+- operator needs explicit confirm/cancel interaction and truthful final status
+
+3) Input hardening across the app
+- state fields should be 2-letter state code only
+- ZIP code fields should accept numeric input only
+- phone number fields should accept numeric input only
+- this should be applied consistently wherever those inputs appear in the app
+
+4) Shipment cancel dependency on confirmed pickup
+- currently a shipment can be cancelled while a pickup remains confirmed
+- this is operationally wrong
+- shipment cancellation must either:
+  A) be blocked until pickup is cancelled first
+  OR
+  B) explicitly cascade and cancel the pickup first, with user confirmation
+- the app must choose one consistent, truthful rule
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIXES
+==================================================
+
+1) PICKUP CANCELLATION CONFIRMATION + OUTCOME
+Required:
+- when operator clicks Cancel Pickup, show a confirmation modal
+- modal must explain what will happen
+- on success, show a clear success state/message
+- on failure, show a clear failure state/message
+- do not leave the operator with “nothing happened”
+
+2) FUTURE-WINDOW / NO-RATES / PROVIDER-REFUSAL TRUTHFULNESS
+Required:
+- distinguish clearly between:
+  - no pickup rates for this date/window/account/provider combination
+  - provider created pickup object but booking failed
+  - provider rejected/could not confirm the booking
+- do not imply a blanket carrier rule if the result is actually date/window/account-specific
+- FedEx two-day failure should be surfaced as a truthful provider/window outcome
+
+3) STATE CODE INPUT HARDENING
+Required:
+- all U.S. state inputs across the app must use 2-letter state code format only
+- normalize to uppercase
+- reject longer free-text state names in structured address inputs
+- apply consistently wherever shipment/customer/store/etc. addresses are entered
+
+4) ZIP + PHONE INPUT HARDENING
+Required:
+- ZIP code fields: numeric characters only
+- phone number fields: numeric characters only
+- if formatting/masking is used, underlying stored value must stay valid and normalized
+- apply consistently across the app
+
+5) SHIPMENT CANCEL DEPENDENCY ON CONFIRMED PICKUP
+Required:
+- choose and implement one correct operational rule:
+  OPTION A: Disable shipment cancellation while pickup is confirmed/scheduled until pickup cancellation succeeds
+  OR
+  OPTION B: Shipment cancel flow becomes a confirm dialog that explicitly says pickup will also be cancelled first, and shipment cancellation only completes if pickup cancellation succeeds
+- recommend and implement the better option for operational integrity
+- do not allow shipment to show cancelled while pickup remains confirmed
+
+6) KEEP EXISTING TRUTHFULNESS
+Required:
+- preserve USPS success
+- preserve FedEx truthful success/failure
+- preserve UPS unsupported-service gating
+- preserve no-rates vs partial_failed distinction
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- Cancel Pickup has a real confirmation and real result handling
+- state / ZIP / phone inputs are hardened consistently
+- shipment cannot be cancelled while a pickup remains confirmed without a truthful dependency flow
+- future-window failures are surfaced honestly as provider/window outcomes, not vague behavior
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Fix pickup cancellation confirmation and result handling
+2) Implement shipment-cancel dependency on confirmed pickup
+3) Harden state / ZIP / phone inputs across the app
+4) Refine future-window / no-rates / provider-refusal messaging
+5) Re-test USPS/FedEx/UPS non-regression
+6) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- pickup cancellation confirmation/result rules
+- chosen shipment-cancel dependency model
+- state / ZIP / phone normalization/input rules
+- future-window/no-rates/provider-refusal distinctions
+- confirmation that USPS/FedEx/UPS truthfulness was preserved
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Pickup Cancellation Confirmation / Result Fix
+3. Shipment-Cancel Dependency Fix
+4. State / ZIP / Phone Input Hardening Fix
+5. Future-Window / Provider-Refusal Truthfulness Fix
+6. Files Changed
+7. Documentation Updated
+8. Non-Regression Notes

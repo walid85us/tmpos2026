@@ -5,6 +5,7 @@ import { useStoreLocalState } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
 import { PurchaseOrder, RMA, SupplierRefundEntry } from '../types';
 import type { ShipmentPrefill } from './ShippingCenter';
+import { normalizePhone } from '../utils/inputNormalizers';
 
 type SupplyTab = 'po' | 'grn' | 'rma' | 'suppliers';
 
@@ -371,7 +372,7 @@ export default function SupplyChain() {
               <div className="space-y-3 mb-4">
                 <input defaultValue={sup.contactName || ''} onBlur={(e) => { if (canManageSuppliers) updateSupplier(sup.id, { contactName: e.target.value || undefined }); }} placeholder="Contact Name" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" />
                 <input defaultValue={sup.email || ''} onBlur={(e) => { if (canManageSuppliers) updateSupplier(sup.id, { email: e.target.value || undefined }); }} placeholder="Email" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" />
-                <input defaultValue={sup.phone || ''} onBlur={(e) => { if (canManageSuppliers) updateSupplier(sup.id, { phone: e.target.value || undefined }); }} placeholder="Phone" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" />
+                <input defaultValue={sup.phone || ''} type="tel" inputMode="tel" maxLength={15} onChange={(e) => { e.target.value = normalizePhone(e.target.value); }} onBlur={(e) => { const v = normalizePhone(e.target.value); if (canManageSuppliers) updateSupplier(sup.id, { phone: v || undefined }); }} placeholder="Phone (digits only)" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" />
                 <input defaultValue={sup.website || ''} onBlur={(e) => { if (canManageSuppliers) updateSupplier(sup.id, { website: e.target.value || undefined }); }} placeholder="Website" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-sm" />
                 <div className="flex gap-2">
                   <button onClick={() => { if (canManageSuppliers) updateSupplier(sup.id, { status: sup.status === 'Active' ? 'Inactive' : 'Active' }); }} className="px-3 py-2 bg-slate-100 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-slate-200">{sup.status === 'Active' ? 'Deactivate' : 'Activate'}</button>

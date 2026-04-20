@@ -11,6 +11,7 @@ import PageShell from './PageShell';
 import { TrackingNumber } from './shared/TrackingNumber';
 import ShippingProvidersPage from './ShippingProvidersPage';
 import { featureMatrix as staticFeatureMatrix } from '../owner/mockData';
+import { normalizeStateCode, normalizeZip, normalizePhone } from '../utils/inputNormalizers';
 
 async function convertImageToPdfBlobUrl(imageUrl: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -505,6 +506,38 @@ export default function ShippingCenter() {
   };
   const [pickupRatesPanel, setPickupRatesPanel] = useState<PickupRatesPanel | null>(null);
   const [pickupCancelReason, setPickupCancelReason] = useState('');
+  // Phase 2.10 — pickup cancellation confirmation modal. The previous
+  // direct-call pattern (clicking Cancel Pickup → fire-and-forget) gave
+  // operators no warning before a live carrier-cancel call and no clear
+  // outcome state when the call hung or the network dropped between
+  // clicking and the toast appearing. We now stage the cancel through a
+  // modal that:
+  //   1. Names the carrier + confirmation number that will be cancelled.
+  //   2. Distinguishes live carrier cancellation vs local-only cancellation.
+  //   3. Has its own in-flight + result fields so the operator sees
+  //      "cancelling…" → "cancelled" or "failed" without ambiguity.
+  // The modal is also the single place we call handleCancelPickup from now,
+  // so the two pickup-cancel entry points (panel button + status panel
+  // button) cannot diverge in confirmation behavior.
+  const [pickupCancelModal, setPickupCancelModal] = useState<{
+    shipmentId: string;
+    carrier: string;
+    confirmationNumber?: string;
+    isLive: boolean;
+    inFlight: boolean;
+    result?: { ok: boolean; message: string };
+  } | null>(null);
+  // Phase 2.10 — shipment-cancel dependency on confirmed pickup. When a
+  // shipment has an active pickup booking, the operator must cancel the
+  // pickup FIRST so the carrier doesn't show up at the door for a void
+  // shipment. We surface this as an explicit blocking modal rather than a
+  // silent button-disable so the operator knows what to do next.
+  const [shipmentCancelBlocked, setShipmentCancelBlocked] = useState<{
+    shipmentId: string;
+    carrier: string;
+    confirmationNumber?: string;
+    pickupStatus: PickupRequestStatus;
+  } | null>(null);
   // True pickup-address verification state — separate from the shipment
   // origin's shipping-address validation. Keyed by shipmentId. The
   // `fingerprint` is a stable hash of the address fields the carriers care
@@ -924,6 +957,25 @@ export default function ShippingCenter() {
     }
 
     if (newStatus === 'Cancelled' && shipment && hasCarrierAcceptance(shipment)) {
+      setShowStatusConfirm(null);
+      return;
+    }
+
+    // Phase 2.10 — shipment-cancel dependency on confirmed pickup (Option A:
+    // block first, require explicit pickup-cancel as a separate operator
+    // action). Allowing a shipment to flip to Cancelled while a carrier
+    // pickup is still on the books would cause the truck to arrive at a
+    // void shipment, which is exactly the operational error this guard
+    // exists to prevent. The operator gets a dedicated modal naming the
+    // carrier + confirmation # and pointing at the Cancel Pickup action,
+    // not a silent disabled button.
+    if (newStatus === 'Cancelled' && shipment?.pickupRequest && PICKUP_CANCELLABLE_STATUSES.includes(shipment.pickupRequest.status)) {
+      setShipmentCancelBlocked({
+        shipmentId: id,
+        carrier: shipment.pickupRequest.carrier,
+        confirmationNumber: shipment.pickupRequest.confirmationNumber,
+        pickupStatus: shipment.pickupRequest.status,
+      });
       setShowStatusConfirm(null);
       return;
     }
@@ -2688,7 +2740,22 @@ export default function ShippingCenter() {
               kind: 'no_rates',
               formSnapshot: { date: pickupForm.date, windowStart: pickupForm.windowStart, windowEnd: pickupForm.windowEnd },
             });
-            const detail = `${activeProviderId} returned no pickup rates for ${pickupForm.date} ${pickupForm.windowStart || '09:00'}–${pickupForm.windowEnd || '17:00'} through this provider/account.${caps.pickupTestModeLimitations ? ` Test-mode limitation: ${caps.pickupTestModeLimitations}` : ' Adjust the window or use drop-off.'} No booking was attempted — no carrier confirmation has been issued.`;
+            // Phase 2.10 — refined no-rates messaging. The previous text
+            // implied a blanket "test mode" rule whenever caps had a test
+            // limitation string, which was misleading: QA confirmed FedEx
+            // accepts a next-day pickup but refuses a 2-day-out pickup
+            // through the same account/provider, which is a date/window/
+            // account-specific outcome — NOT a blanket carrier prohibition.
+            // We now name the three orthogonal axes (date, window, account)
+            // explicitly and only mention the test-mode caveat as an
+            // additional possible factor, never as the sole explanation.
+            const detail =
+              `${activeProviderId} returned no pickup rates for the requested combination of date (${pickupForm.date}), ` +
+              `window (${pickupForm.windowStart || '09:00'}–${pickupForm.windowEnd || '17:00'}), carrier service, ` +
+              `pickup address, and provider account. This is a per-request outcome — the same carrier may accept a ` +
+              `different date or a different window for this same address. Try shifting the date by a day, widening ` +
+              `the time window, or switching to drop-off.${caps.pickupTestModeLimitations ? ` Additional possible factor: ${caps.pickupTestModeLimitations}` : ''} ` +
+              `No booking was attempted — no carrier confirmation has been issued.`;
             setPickupAttemptResult({ kind: 'partial', title: 'No pickup rates available', detail, steps, code: 'NO_PICKUP_RATES_AVAILABLE', stage: 'pickup_create', providerPickupId: created.providerPickupId, context: pickupContext });
             return;
           }
@@ -3037,7 +3104,16 @@ export default function ShippingCenter() {
     }
   }
 
-  async function handleCancelPickup(shipmentId: string) {
+  // Phase 2.10 — pickup cancellation now goes through a confirmation modal.
+  // `handleCancelPickup` is the entry point: it validates permission/state
+  // and opens the modal. The actual cancel call runs from
+  // `executePickupCancel`, which the modal's Confirm button invokes. This
+  // gives the operator an explicit "this will tell <carrier> to cancel
+  // pickup <confirmation #>" warning, an in-flight indicator, and a clear
+  // success/failure outcome inside the modal — replacing the previous
+  // fire-and-forget UX where the operator could not tell whether the
+  // cancel actually happened on the carrier side.
+  function handleCancelPickup(shipmentId: string) {
     if (isWriteBlocked) return;
     if (!canCancelPickup) {
       setProviderError(friendlyProviderError({ code: 'PERMISSION_DENIED', message: 'You do not have permission to cancel a carrier pickup.' }));
@@ -3049,9 +3125,29 @@ export default function ShippingCenter() {
       setProviderError(friendlyProviderError({ code: 'INVALID_STATE', message: `Pickup is "${ship.pickupRequest.status}" and cannot be cancelled.` }));
       return;
     }
+    const caps = activeProviderId ? PROVIDER_CAPABILITIES[activeProviderId.toLowerCase()] : null;
+    const isLive = ship.pickupRequest.source === 'live_provider'
+      && !!ship.pickupRequest.providerPickupId
+      && !!caps?.supportsPickupCancellation;
+    setPickupCancelModal({
+      shipmentId,
+      carrier: ship.pickupRequest.carrier,
+      confirmationNumber: ship.pickupRequest.confirmationNumber,
+      isLive,
+      inFlight: false,
+    });
+  }
+
+  async function executePickupCancel() {
+    const modal = pickupCancelModal;
+    if (!modal || modal.inFlight) return;
+    const ship = shipments.find(s => s.id === modal.shipmentId);
+    if (!ship?.pickupRequest) {
+      setPickupCancelModal({ ...modal, result: { ok: false, message: 'Shipment or pickup record no longer exists.' } });
+      return;
+    }
+    setPickupCancelModal({ ...modal, inFlight: true, result: undefined });
     const now = new Date().toISOString();
-    // Live-cancellation path: only when the pickup was booked live AND the
-    // provider exposes a cancel endpoint. Otherwise we cancel locally.
     const caps = activeProviderId ? PROVIDER_CAPABILITIES[activeProviderId.toLowerCase()] : null;
     const isLive = ship.pickupRequest.source === 'live_provider' && !!ship.pickupRequest.providerPickupId;
     let liveCancelled = false;
@@ -3059,12 +3155,16 @@ export default function ShippingCenter() {
       try {
         const result = await shippingApi.cancelProviderPickup(ship.pickupRequest.providerPickupId!, activeProviderId || undefined);
         if (!result.success) {
-          setProviderError(friendlyProviderError(result.error || { code: 'PICKUP_CANCEL_FAILED', message: 'Pickup cancel failed.' }));
+          const friendly = friendlyProviderError(result.error || { code: 'PICKUP_CANCEL_FAILED', message: 'Pickup cancel failed.' });
+          setProviderError(friendly);
+          setPickupCancelModal({ ...modal, inFlight: false, result: { ok: false, message: friendly.message } });
           return;
         }
         liveCancelled = true;
       } catch (err) {
-        setProviderError(friendlyProviderError({ code: 'NETWORK_ERROR', message: `Live pickup cancel failed: ${err instanceof Error ? err.message : 'Unknown error'}` }));
+        const message = `Live pickup cancel failed: ${err instanceof Error ? err.message : 'Unknown error'}`;
+        setProviderError(friendlyProviderError({ code: 'NETWORK_ERROR', message }));
+        setPickupCancelModal({ ...modal, inFlight: false, result: { ok: false, message } });
         return;
       }
     }
@@ -3075,7 +3175,7 @@ export default function ShippingCenter() {
       cancelledBy: 'current_operator',
       cancellationReason: pickupCancelReason.trim() || undefined,
     };
-    updateShipment(shipmentId, {
+    updateShipment(modal.shipmentId, {
       pickupRequest: updated,
       pickupInfo: { ...(ship.pickupInfo || {}), pickupRequested: false },
       events: [
@@ -3084,8 +3184,12 @@ export default function ShippingCenter() {
       ],
       updatedAt: now,
     });
+    const successMsg = liveCancelled
+      ? `Carrier pickup cancelled live with ${activeProviderId}.`
+      : 'Pickup cancelled locally (no live carrier call was needed for this provider/source).';
     setPickupCancelReason('');
-    setProviderSuccess(liveCancelled ? `Carrier pickup cancelled live with ${activeProviderId}.` : 'Pickup cancelled locally.');
+    setProviderSuccess(successMsg);
+    setPickupCancelModal({ ...modal, inFlight: false, result: { ok: true, message: successMsg } });
   }
 
   function getProviderPrerequisiteMessage(): string | null {
@@ -6394,15 +6498,15 @@ export default function ShippingCenter() {
                       </div>
                       <div>
                         <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">State *</label>
-                        <input type="text" value={manualSpForm.state} onChange={e => setManualSpForm(f => ({ ...f, state: e.target.value }))} disabled={!manualEnabled} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs disabled:opacity-50 disabled:bg-slate-50" />
+                        <input type="text" inputMode="text" maxLength={2} value={manualSpForm.state} onChange={e => setManualSpForm(f => ({ ...f, state: normalizeStateCode(e.target.value) }))} disabled={!manualEnabled} placeholder="ST" className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs uppercase disabled:opacity-50 disabled:bg-slate-50" />
                       </div>
                       <div>
                         <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Postal code *</label>
-                        <input type="text" value={manualSpForm.postalCode} onChange={e => setManualSpForm(f => ({ ...f, postalCode: e.target.value }))} disabled={!manualEnabled} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs disabled:opacity-50 disabled:bg-slate-50" />
+                        <input type="text" inputMode="numeric" maxLength={5} value={manualSpForm.postalCode} onChange={e => setManualSpForm(f => ({ ...f, postalCode: normalizeZip(e.target.value) }))} disabled={!manualEnabled} placeholder="ZIP" className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs disabled:opacity-50 disabled:bg-slate-50" />
                       </div>
                       <div>
                         <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Phone (optional)</label>
-                        <input type="text" value={manualSpForm.phone} onChange={e => setManualSpForm(f => ({ ...f, phone: e.target.value }))} disabled={!manualEnabled} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs disabled:opacity-50 disabled:bg-slate-50" />
+                        <input type="tel" inputMode="tel" maxLength={15} value={manualSpForm.phone} onChange={e => setManualSpForm(f => ({ ...f, phone: normalizePhone(e.target.value) }))} disabled={!manualEnabled} placeholder="Digits only" className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs disabled:opacity-50 disabled:bg-slate-50" />
                       </div>
                       <div className="col-span-2">
                         <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Selection notes (optional)</label>
@@ -6441,6 +6545,87 @@ export default function ShippingCenter() {
               <div className="flex gap-3">
                 <button onClick={() => setShowStatusConfirm(null)} className="flex-1 py-3 bg-white text-slate-500 rounded-xl font-black text-[10px] uppercase tracking-widest border border-slate-200">Cancel</button>
                 <button onClick={() => handleStatusTransition(showStatusConfirm.id, showStatusConfirm.newStatus)} className="flex-1 py-3 bg-primary text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-primary/20">Confirm</button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Phase 2.10 — Pickup cancellation confirmation modal */}
+        {pickupCancelModal && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-md p-8">
+              <div className="text-center">
+                <span className={`material-symbols-outlined text-4xl mb-3 ${pickupCancelModal.result?.ok ? 'text-emerald-500' : pickupCancelModal.result && !pickupCancelModal.result.ok ? 'text-rose-500' : 'text-rose-400'}`}>
+                  {pickupCancelModal.result?.ok ? 'check_circle' : pickupCancelModal.result && !pickupCancelModal.result.ok ? 'error' : 'cancel'}
+                </span>
+                <p className="text-sm font-black text-slate-800 mb-1">Cancel carrier pickup</p>
+                <p className="text-xs text-slate-500 mb-4">
+                  {pickupCancelModal.carrier}
+                  {pickupCancelModal.confirmationNumber ? <> · confirmation <span className="font-mono font-bold">{pickupCancelModal.confirmationNumber}</span></> : null}
+                </p>
+              </div>
+              {!pickupCancelModal.result && (
+                <div className={`rounded-xl p-3 mb-4 text-[11px] leading-relaxed ${pickupCancelModal.isLive ? 'bg-amber-50 text-amber-800 border border-amber-200' : 'bg-slate-50 text-slate-600 border border-slate-200'}`}>
+                  {pickupCancelModal.isLive ? (
+                    <>This will call <span className="font-black">{activeProviderId}</span> to cancel the pickup with the carrier. The carrier will not arrive. This action cannot be undone — a new pickup must be requested if you change your mind.</>
+                  ) : (
+                    <>This pickup will be cancelled locally only — no live carrier-cancel call will be made (the pickup was not booked live, or this provider does not expose a cancel endpoint). The shipment timeline will record the local cancellation.</>
+                  )}
+                </div>
+              )}
+              {pickupCancelModal.result && (
+                <div className={`rounded-xl p-3 mb-4 text-[11px] leading-relaxed border ${pickupCancelModal.result.ok ? 'bg-emerald-50 text-emerald-800 border-emerald-200' : 'bg-rose-50 text-rose-800 border-rose-200'}`}>
+                  {pickupCancelModal.result.message}
+                </div>
+              )}
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setPickupCancelModal(null)}
+                  disabled={pickupCancelModal.inFlight}
+                  className="flex-1 py-3 bg-white text-slate-500 rounded-xl font-black text-[10px] uppercase tracking-widest border border-slate-200 disabled:opacity-50"
+                >
+                  {pickupCancelModal.result ? 'Close' : 'Keep pickup'}
+                </button>
+                {!pickupCancelModal.result && (
+                  <button
+                    onClick={executePickupCancel}
+                    disabled={pickupCancelModal.inFlight}
+                    className="flex-1 py-3 bg-rose-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-rose-600/20 disabled:opacity-60 disabled:cursor-wait"
+                  >
+                    {pickupCancelModal.inFlight ? 'Cancelling…' : 'Cancel pickup'}
+                  </button>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Phase 2.10 — Shipment-cancel blocked by active pickup */}
+        {shipmentCancelBlocked && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-teal-950/40 backdrop-blur-sm">
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-md p-8 text-center">
+              <span className="material-symbols-outlined text-4xl text-amber-500 mb-3">block</span>
+              <p className="text-sm font-black text-slate-800 mb-2">Cancel pickup first</p>
+              <p className="text-xs text-slate-600 mb-4 leading-relaxed">
+                This shipment has an active <span className="font-black">{shipmentCancelBlocked.carrier}</span> pickup
+                {shipmentCancelBlocked.confirmationNumber ? <> (confirmation <span className="font-mono font-bold">{shipmentCancelBlocked.confirmationNumber}</span>)</> : null}
+                {' '}with status <span className="font-black">{shipmentCancelBlocked.pickupStatus}</span>. The shipment cannot be cancelled while the carrier is still scheduled to arrive — that would leave the truck dispatched against a void shipment.
+              </p>
+              <p className="text-[11px] text-slate-500 mb-5">Cancel the pickup with the carrier first, then return here to cancel the shipment.</p>
+              <div className="flex gap-3">
+                <button onClick={() => setShipmentCancelBlocked(null)} className="flex-1 py-3 bg-white text-slate-500 rounded-xl font-black text-[10px] uppercase tracking-widest border border-slate-200">Close</button>
+                <button
+                  onClick={() => {
+                    const id = shipmentCancelBlocked.shipmentId;
+                    setShipmentCancelBlocked(null);
+                    handleCancelPickup(id);
+                  }}
+                  disabled={!canCancelPickup}
+                  className="flex-1 py-3 bg-rose-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-rose-600/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                  title={!canCancelPickup ? 'You do not have permission to cancel a carrier pickup.' : undefined}
+                >
+                  Cancel pickup now
+                </button>
               </div>
             </motion.div>
           </div>
@@ -6592,10 +6777,10 @@ export default function ShippingCenter() {
                     <input value={newOrigin.line1} onChange={e => setNewOrigin(p => ({ ...p, line1: e.target.value }))} disabled={addressLocked} className="col-span-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Address line 1" />
                     <input value={newOrigin.city} onChange={e => setNewOrigin(p => ({ ...p, city: e.target.value }))} disabled={addressLocked} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="City" />
                     <div className="grid grid-cols-2 gap-2">
-                      <input value={newOrigin.state} onChange={e => setNewOrigin(p => ({ ...p, state: e.target.value }))} disabled={addressLocked} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="State" />
-                      <input value={newOrigin.postalCode} onChange={e => setNewOrigin(p => ({ ...p, postalCode: e.target.value }))} disabled={addressLocked} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="ZIP" />
+                      <input value={newOrigin.state} maxLength={2} inputMode="text" onChange={e => setNewOrigin(p => ({ ...p, state: normalizeStateCode(e.target.value) }))} disabled={addressLocked} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs uppercase focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="ST" />
+                      <input value={newOrigin.postalCode} maxLength={5} inputMode="numeric" onChange={e => setNewOrigin(p => ({ ...p, postalCode: normalizeZip(e.target.value) }))} disabled={addressLocked} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="ZIP" />
                     </div>
-                    <input value={newOrigin.phone || ''} onChange={e => setNewOrigin(p => ({ ...p, phone: e.target.value || undefined }))} disabled={addressLocked} className="col-span-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Phone" />
+                    <input value={newOrigin.phone || ''} type="tel" inputMode="tel" maxLength={15} onChange={e => { const v = normalizePhone(e.target.value); setNewOrigin(p => ({ ...p, phone: v || undefined })); }} disabled={addressLocked} className="col-span-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Phone (digits only)" />
                   </div>
                 </div>
                 <div className="space-y-3">
@@ -6605,10 +6790,10 @@ export default function ShippingCenter() {
                     <input value={newDest.line1} onChange={e => setNewDest(p => ({ ...p, line1: e.target.value }))} disabled={addressLocked} className="col-span-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Address line 1" />
                     <input value={newDest.city} onChange={e => setNewDest(p => ({ ...p, city: e.target.value }))} disabled={addressLocked} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="City" />
                     <div className="grid grid-cols-2 gap-2">
-                      <input value={newDest.state} onChange={e => setNewDest(p => ({ ...p, state: e.target.value }))} disabled={addressLocked} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="State" />
-                      <input value={newDest.postalCode} onChange={e => setNewDest(p => ({ ...p, postalCode: e.target.value }))} disabled={addressLocked} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="ZIP" />
+                      <input value={newDest.state} maxLength={2} inputMode="text" onChange={e => setNewDest(p => ({ ...p, state: normalizeStateCode(e.target.value) }))} disabled={addressLocked} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs uppercase focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="ST" />
+                      <input value={newDest.postalCode} maxLength={5} inputMode="numeric" onChange={e => setNewDest(p => ({ ...p, postalCode: normalizeZip(e.target.value) }))} disabled={addressLocked} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="ZIP" />
                     </div>
-                    <input value={newDest.phone || ''} onChange={e => setNewDest(p => ({ ...p, phone: e.target.value || undefined }))} disabled={addressLocked} className="col-span-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Phone (required for UPS/FedEx)" />
+                    <input value={newDest.phone || ''} type="tel" inputMode="tel" maxLength={15} onChange={e => { const v = normalizePhone(e.target.value); setNewDest(p => ({ ...p, phone: v || undefined })); }} disabled={addressLocked} className="col-span-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Phone (digits only — required for UPS/FedEx)" />
                   </div>
                 </div>
                 <div>
@@ -6750,10 +6935,10 @@ export default function ShippingCenter() {
                     <input value={newOrigin.line1} onChange={e => setNewOrigin({ ...newOrigin, line1: e.target.value })} placeholder="Address Line 1 *" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
                     <div className="grid grid-cols-2 gap-2">
                       <input value={newOrigin.city} onChange={e => setNewOrigin({ ...newOrigin, city: e.target.value })} placeholder="City *" className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
-                      <input value={newOrigin.state} onChange={e => setNewOrigin({ ...newOrigin, state: e.target.value })} placeholder="State *" className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                      <input value={newOrigin.state} maxLength={2} inputMode="text" onChange={e => setNewOrigin({ ...newOrigin, state: normalizeStateCode(e.target.value) })} placeholder="ST *" className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm uppercase focus:outline-none focus:ring-2 focus:ring-primary/20" />
                     </div>
-                    <input value={newOrigin.postalCode} onChange={e => setNewOrigin({ ...newOrigin, postalCode: e.target.value })} placeholder="Postal Code *" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
-                    <input value={newOrigin.phone || ''} onChange={e => setNewOrigin({ ...newOrigin, phone: e.target.value || undefined })} placeholder="Phone" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                    <input value={newOrigin.postalCode} maxLength={5} inputMode="numeric" onChange={e => setNewOrigin({ ...newOrigin, postalCode: normalizeZip(e.target.value) })} placeholder="ZIP *" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                    <input value={newOrigin.phone || ''} type="tel" inputMode="tel" maxLength={15} onChange={e => { const v = normalizePhone(e.target.value); setNewOrigin({ ...newOrigin, phone: v || undefined }); }} placeholder="Phone (digits only)" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
                   </div>
                   <div className="space-y-3">
                     <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Destination Address</p>
@@ -6761,24 +6946,23 @@ export default function ShippingCenter() {
                     <input value={newDest.line1} onChange={e => setNewDest({ ...newDest, line1: e.target.value })} placeholder="Address Line 1 *" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
                     <div className="grid grid-cols-2 gap-2">
                       <input value={newDest.city} onChange={e => setNewDest({ ...newDest, city: e.target.value })} placeholder="City *" className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
-                      <input value={newDest.state} onChange={e => setNewDest({ ...newDest, state: e.target.value })} placeholder="State *" className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                      <input value={newDest.state} maxLength={2} inputMode="text" onChange={e => setNewDest({ ...newDest, state: normalizeStateCode(e.target.value) })} placeholder="ST *" className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm uppercase focus:outline-none focus:ring-2 focus:ring-primary/20" />
                     </div>
                     <div className="relative">
-                      <input value={newDest.postalCode} onChange={e => {
-                        const val = e.target.value;
+                      <input value={newDest.postalCode} maxLength={5} inputMode="numeric" onChange={e => {
+                        const val = normalizeZip(e.target.value);
                         setNewDest(prev => {
                           const updated = { ...prev, postalCode: val };
-                          const zip = val.trim();
-                          if (zip.length === 5) {
-                            const lookup = lookupZipCode(zip);
+                          if (val.length === 5) {
+                            const lookup = lookupZipCode(val);
                             if (lookup) {
                               updated.city = lookup.city;
-                              updated.state = lookup.state;
+                              updated.state = normalizeStateCode(lookup.state);
                             }
                           }
                           return updated;
                         });
-                      }} placeholder="Postal Code *" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                      }} placeholder="ZIP *" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
                       {newDest.postalCode.trim().length === 5 && lookupZipCode(newDest.postalCode.trim()) && (
                         <span className="absolute right-3 top-1/2 -translate-y-1/2 text-emerald-500">
                           <span className="material-symbols-outlined text-sm">check_circle</span>
@@ -6791,7 +6975,7 @@ export default function ShippingCenter() {
                         Zip not in local database. Enter city/state manually.
                       </p>
                     )}
-                    <input value={newDest.phone || ''} onChange={e => setNewDest({ ...newDest, phone: e.target.value || undefined })} placeholder="Phone (required for UPS/FedEx)" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                    <input value={newDest.phone || ''} type="tel" inputMode="tel" maxLength={15} onChange={e => { const v = normalizePhone(e.target.value); setNewDest({ ...newDest, phone: v || undefined }); }} placeholder="Phone (digits only — required for UPS/FedEx)" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20" />
                   </div>
                 </div>
 

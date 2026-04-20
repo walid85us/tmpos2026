@@ -4,6 +4,7 @@ import { useStoreLocalState } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
 import PageShell from './PageShell';
 import { TrackingNumber } from './shared/TrackingNumber';
+import { normalizeStateCode, normalizeZip, normalizePhone } from '../utils/inputNormalizers';
 import type {
   Return,
   ReturnStatus,
@@ -1492,12 +1493,12 @@ function CreateReturnShipmentModal({ ret, customers, onClose, onSave, createdBy 
               <div className="grid grid-cols-3 gap-2">
                 <input value={origin.city} onChange={e => setOrigin(p => ({ ...p, city: e.target.value }))} placeholder="City *"
                   className="px-3 py-2 rounded-lg border border-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/30" />
-                <input value={origin.state} onChange={e => setOrigin(p => ({ ...p, state: e.target.value }))} placeholder="State *"
-                  className="px-3 py-2 rounded-lg border border-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/30" />
-                <input value={origin.postalCode} onChange={e => setOrigin(p => ({ ...p, postalCode: e.target.value }))} placeholder="ZIP *"
+                <input value={origin.state} maxLength={2} inputMode="text" onChange={e => setOrigin(p => ({ ...p, state: normalizeStateCode(e.target.value) }))} placeholder="ST *"
+                  className="px-3 py-2 rounded-lg border border-slate-200 text-xs uppercase focus:outline-none focus:ring-2 focus:ring-indigo-500/30" />
+                <input value={origin.postalCode} maxLength={5} inputMode="numeric" onChange={e => setOrigin(p => ({ ...p, postalCode: normalizeZip(e.target.value) }))} placeholder="ZIP *"
                   className="px-3 py-2 rounded-lg border border-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/30" />
               </div>
-              <input value={origin.phone || ''} onChange={e => setOrigin(p => ({ ...p, phone: e.target.value }))} placeholder="Phone"
+              <input value={origin.phone || ''} type="tel" inputMode="tel" maxLength={15} onChange={e => setOrigin(p => ({ ...p, phone: normalizePhone(e.target.value) }))} placeholder="Phone (digits only)"
                 className="w-full px-4 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/30" />
             </div>
 
@@ -1510,12 +1511,12 @@ function CreateReturnShipmentModal({ ret, customers, onClose, onSave, createdBy 
               <div className="grid grid-cols-3 gap-2">
                 <input value={destination.city} onChange={e => setDestination(p => ({ ...p, city: e.target.value }))} placeholder="City *"
                   className="px-3 py-2 rounded-lg border border-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/30" />
-                <input value={destination.state} onChange={e => setDestination(p => ({ ...p, state: e.target.value }))} placeholder="State *"
-                  className="px-3 py-2 rounded-lg border border-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/30" />
-                <input value={destination.postalCode} onChange={e => setDestination(p => ({ ...p, postalCode: e.target.value }))} placeholder="ZIP *"
+                <input value={destination.state} maxLength={2} inputMode="text" onChange={e => setDestination(p => ({ ...p, state: normalizeStateCode(e.target.value) }))} placeholder="ST *"
+                  className="px-3 py-2 rounded-lg border border-slate-200 text-xs uppercase focus:outline-none focus:ring-2 focus:ring-indigo-500/30" />
+                <input value={destination.postalCode} maxLength={5} inputMode="numeric" onChange={e => setDestination(p => ({ ...p, postalCode: normalizeZip(e.target.value) }))} placeholder="ZIP *"
                   className="px-3 py-2 rounded-lg border border-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/30" />
               </div>
-              <input value={destination.phone || ''} onChange={e => setDestination(p => ({ ...p, phone: e.target.value }))} placeholder="Phone"
+              <input value={destination.phone || ''} type="tel" inputMode="tel" maxLength={15} onChange={e => setDestination(p => ({ ...p, phone: normalizePhone(e.target.value) }))} placeholder="Phone (digits only)"
                 className="w-full px-4 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/30" />
             </div>
           </div>
