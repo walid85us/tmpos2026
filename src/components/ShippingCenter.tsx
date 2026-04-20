@@ -457,6 +457,10 @@ export default function ShippingCenter() {
     notes: '',
   });
   const [pickupSubmitting, setPickupSubmitting] = useState(false);
+  // Phase 2.10.2 — transient highlight on the pickup date input so the
+  // "Edit Date / Window" recovery action is visibly affirmative instead
+  // of a silent scroll. Cleared automatically after ~2.5s.
+  const [flashDateInput, setFlashDateInput] = useState(false);
   // Inline structured outcome of the last pickup attempt — rendered right
   // above the Request button so the operator always sees a truthful result
   // (success, partial, or failure) without having to scroll back up to the
@@ -6022,7 +6026,12 @@ export default function ShippingCenter() {
                                       const el = document.getElementById('pickup-date-input') as HTMLInputElement | null;
                                       if (el) {
                                         el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                                        setTimeout(() => { try { el.focus(); el.showPicker?.(); } catch { /* showPicker may throw outside user gesture */ } }, 250);
+                                        setFlashDateInput(true);
+                                        setTimeout(() => { setFlashDateInput(false); }, 2500);
+                                        setTimeout(() => {
+                                          try { el.focus(); } catch { /* noop */ }
+                                          try { el.showPicker?.(); } catch { /* showPicker may throw outside user gesture */ }
+                                        }, 350);
                                       }
                                     }}
                                     className="px-3 py-1.5 bg-primary text-white font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-primary/90 transition-colors flex items-center gap-1"
@@ -6033,7 +6042,15 @@ export default function ShippingCenter() {
                                   <button
                                     type="button"
                                     disabled={pickupSubmitting}
-                                    onClick={() => handleRequestPickup(selectedShip.id)}
+                                    onClick={() => {
+                                      setPickupAttemptResult({
+                                        kind: 'info',
+                                        title: 'Retrying pickup booking…',
+                                        detail: `Re-sending pickup request to ${activeProviderId} with the current date/window. Watch for a new result above the Request Pickup button.`,
+                                        steps: [{ label: 'Re-attempt pickup booking', status: 'pending' }],
+                                      });
+                                      handleRequestPickup(selectedShip.id);
+                                    }}
                                     className="px-3 py-1.5 bg-emerald-600 text-white font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-emerald-700 transition-colors flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
                                   >
                                     <span className="material-symbols-outlined text-sm">refresh</span>
@@ -6149,7 +6166,17 @@ export default function ShippingCenter() {
                           )}
                           <div>
                             <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Pickup Date{reqMark(reqWindow)}</label>
-                            <input id="pickup-date-input" type="date" value={pickupForm.date} onChange={e => setPickupForm({ ...pickupForm, date: e.target.value })} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs" />
+                            <input
+                              id="pickup-date-input"
+                              type="date"
+                              value={pickupForm.date}
+                              onChange={e => setPickupForm({ ...pickupForm, date: e.target.value })}
+                              className={`w-full mt-1 px-3 py-2 border rounded-xl text-xs transition-all ${
+                                flashDateInput
+                                  ? 'border-primary ring-4 ring-primary/30 bg-primary/5 shadow-lg shadow-primary/20 animate-pulse'
+                                  : 'border-slate-200'
+                              }`}
+                            />
                           </div>
                           <div className="grid grid-cols-2 gap-2">
                             <div>
@@ -6298,8 +6325,8 @@ export default function ShippingCenter() {
                                             <div className="bg-sky-50 border border-sky-200 rounded-lg p-2 flex items-start gap-2">
                                               <span className="material-symbols-outlined text-sky-600 text-sm mt-0.5">lightbulb</span>
                                               <div className="text-[11px] text-sky-900">
-                                                <p className="font-black">Try adjusting date or window.</p>
-                                                <p className="mt-0.5">Some carrier/account/service combinations only support same-day or next-day pickups. Try an earlier pickup date, a different window (e.g. earlier latest time), or confirm the carrier supports pickups for this origin on the chosen date.</p>
+                                                <p className="font-black">Try the next business day.</p>
+                                                <p className="mt-0.5">Some FedEx pickup types (and some UPS / USPS account configurations) only accept current or next-business-day pickups. Open the date picker, pick the next business day, and click Retry Booking. The provider's verbatim reason above remains the source of truth.</p>
                                               </div>
                                             </div>
                                           )}
@@ -6310,7 +6337,12 @@ export default function ShippingCenter() {
                                                 const el = document.getElementById('pickup-date-input') as HTMLInputElement | null;
                                                 if (el) {
                                                   el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                                                  setTimeout(() => { try { el.focus(); el.showPicker?.(); } catch { /* showPicker may throw outside user gesture */ } }, 250);
+                                                  setFlashDateInput(true);
+                                                  setTimeout(() => { setFlashDateInput(false); }, 2500);
+                                                  setTimeout(() => {
+                                                    try { el.focus(); } catch { /* noop */ }
+                                                    try { el.showPicker?.(); } catch { /* showPicker may throw outside user gesture */ }
+                                                  }, 350);
                                                 }
                                               }}
                                               className="px-3 py-1.5 bg-primary text-white font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-primary/90 transition-colors flex items-center gap-1"
@@ -6321,7 +6353,15 @@ export default function ShippingCenter() {
                                             <button
                                               type="button"
                                               disabled={pickupSubmitting}
-                                              onClick={() => { setPickupAttemptResult(null); handleRequestPickup(selectedShip.id); }}
+                                              onClick={() => {
+                                                setPickupAttemptResult({
+                                                  kind: 'info',
+                                                  title: 'Retrying pickup booking…',
+                                                  detail: `Re-sending pickup request to ${activeProviderId} with the current date/window. Watch for a new result here.`,
+                                                  steps: [{ label: 'Re-attempt pickup booking', status: 'pending' }],
+                                                });
+                                                handleRequestPickup(selectedShip.id);
+                                              }}
                                               className="px-3 py-1.5 bg-emerald-600 text-white font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-emerald-700 transition-colors flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
                                             >
                                               <span className="material-symbols-outlined text-sm">refresh</span>
@@ -6340,7 +6380,7 @@ export default function ShippingCenter() {
                                             )}
                                           </div>
                                           {hasOrphan && (
-                                            <p className="text-[10px] text-slate-500 italic">Cancellation is the secondary action — use it only if you do not intend to retry. The orphan pickup will not be charged unless it is confirmed.</p>
+                                            <p className="text-[10px] text-slate-500 italic">Cancellation is the secondary action — use it only if you do not intend to retry. The orphan pickup will not be charged unless it is confirmed. The duplicate "Cancel Pickup" button at the bottom of this panel is hidden in this state to avoid ambiguity.</p>
                                           )}
                                         </div>
                                       );
@@ -6482,10 +6522,21 @@ export default function ShippingCenter() {
                         </div>
                         );
                       })()}
+                      {/* Phase 2.10.2 — single cancellation action model.
+                          For `partial_failed` (orphan) state, the cancel CTA
+                          lives inside the partial_failed banner above as
+                          "Cancel Orphan", so this generic bottom button is
+                          intentionally hidden to avoid the duplicate
+                          Cancel Orphan / Cancel Pickup pair QA flagged. The
+                          cancellation REASON field still lives here so the
+                          operator can fill it before clicking Cancel Orphan
+                          above; it's labeled accordingly. */}
                       {pickupCancellable && canCancelPickup && !isWriteBlocked && (
                         <div className="mt-4 pt-4 border-t border-slate-100 space-y-2">
-                          <input type="text" value={pickupCancelReason} onChange={e => setPickupCancelReason(e.target.value)} placeholder="Cancellation reason (optional)" className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs" />
-                          <button onClick={() => handleCancelPickup(selectedShip.id)} className="px-4 py-2.5 bg-rose-50 text-rose-600 font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-rose-100 transition-all">Cancel Pickup</button>
+                          <input type="text" value={pickupCancelReason} onChange={e => setPickupCancelReason(e.target.value)} placeholder={pr?.status === 'partial_failed' ? 'Cancellation reason for "Cancel Orphan" above (optional)' : 'Cancellation reason (optional)'} className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs" />
+                          {pr?.status !== 'partial_failed' && (
+                            <button onClick={() => handleCancelPickup(selectedShip.id)} className="px-4 py-2.5 bg-rose-50 text-rose-600 font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-rose-100 transition-all">Cancel Pickup</button>
+                          )}
                         </div>
                       )}
                     </div>
