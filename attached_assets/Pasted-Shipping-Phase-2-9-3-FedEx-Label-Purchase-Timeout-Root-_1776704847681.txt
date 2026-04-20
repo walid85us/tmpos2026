@@ -1,0 +1,151 @@
+Shipping Phase 2.9.3 — FedEx Label Purchase Timeout Root-Cause + Fix
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated regression-fix pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen unrelated shipping workstreams.
+
+Goal:
+Fix the remaining FedEx blocker now that timeout truthfulness is working.
+The current runtime shows the failure stage as LABEL_PURCHASE_FAILED.
+That means the next target is the FedEx label-purchase flow itself, not the pickup-selection UI.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior Node/Express carrier-integration engineer
+- Senior React/TypeScript engineer
+- Enterprise shipping systems architect
+- Senior FedEx / EasyPost expert with 20+ years of experience in shipment purchase flows, timeout handling, and provider-response diagnostics
+- Root-cause debugging specialist
+- QA gatekeeper who must restore a truthful and operational FedEx label-purchase path
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- USPS working behavior
+- UPS unsupported-service early blocking
+- current Phase 2.8 pickup forecast + fee-class guidance
+- current Phase 2.9 pickup-rate selection flow
+- current truthful no-rates vs partial_failed logic
+- current label-lock / pickup-override behavior
+- current phone/schema fixes
+- current two-stage address readiness behavior
+
+==================================================
+CURRENT QA SOURCE OF TRUTH
+==================================================
+
+Observed QA result:
+- FedEx timeout truthfulness is now visible
+- runtime shows the stage as LABEL_PURCHASE_FAILED
+- USPS remains healthy
+- UPS unsupported services remain blocked honestly
+
+Therefore:
+- the remaining blocker is a FedEx label-purchase timeout
+- not a pickup-rate-selection truthfulness bug anymore
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIXES
+==================================================
+
+1) TRACE THE EXACT FEDEX LABEL-PURCHASE TIMEOUT
+Required:
+- trace the FedEx label-purchase path end-to-end
+- determine whether the timeout occurs in:
+  - client request layer
+  - dev proxy
+  - server route
+  - EasyPost shipment buy / label purchase call
+  - post-purchase normalization / response handling
+- do not guess
+
+2) COMPARE PRE-FAILURE AND CURRENT FEDEX FLOW
+Required:
+- inspect what changed in the app around the FedEx purchase path across recent shipping phases
+- confirm whether the timeout is:
+  - truly upstream/provider-side
+  - configuration/account/service-specific
+  - or an app-level regression in timeout handling / request sequencing / response parsing
+
+3) MAKE FEDEX LABEL-PURCHASE FAILURES STAGE-SPECIFIC AND ACTIONABLE
+Required:
+- if the timeout remains real, surface it truthfully and specifically as a FedEx label-purchase timeout
+- preserve code + stage + message + runtime marker quality
+- do not fall back to vague generic messaging
+
+4) FIX THE TIMEOUT IF IT IS AN APP-SIDE ISSUE
+Required:
+- if there is an app-side timeout threshold, request sequencing bug, stale promise handling, duplicate request, malformed payload, or response parsing issue, fix it
+- do not broaden the fix beyond what is needed
+
+5) IF IT IS A REAL UPSTREAM TIMEOUT, IMPROVE OPERATOR RECOVERY
+Required:
+- if the timeout is genuinely upstream and not app-caused, the app must:
+  - say that clearly
+  - preserve a clean retry path
+  - avoid false purchased/confirmed states
+  - keep shipment state truthful
+
+6) DO NOT REGRESS ANYTHING ELSE
+Required:
+- USPS must remain healthy
+- UPS unsupported services must remain blocked honestly
+- Phase 2.9 pickup-rate selection flow must stay intact
+- no-rates vs partial_failed truthfulness must stay intact
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- FedEx label-purchase timeout root cause is identified
+- if app-side, it is fixed
+- if upstream, the app handles it truthfully and operationally cleanly
+- USPS remains healthy
+- UPS unsupported-service behavior remains healthy
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Trace the exact FedEx label-purchase timeout point
+2) Compare current behavior with the intended purchase flow
+3) Fix any app-side timeout / sequencing / parsing issue
+4) If upstream timeout remains, improve operator recovery and truthfulness
+5) Re-test USPS and UPS non-regression
+6) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- FedEx label-purchase timeout root cause
+- what was fixed or confirmed as upstream
+- how the app now surfaces and handles FedEx label-purchase timeout
+- confirmation that USPS/UPS behavior was preserved
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. FedEx Label-Purchase Root-Cause Findings
+2. App-Side Fixes Applied (if any)
+3. Upstream-Timeout Handling Improvements (if any)
+4. USPS / UPS Non-Regression Notes
+5. Files Changed
+6. Documentation Updated
+7. Remaining Limits / Unknowns

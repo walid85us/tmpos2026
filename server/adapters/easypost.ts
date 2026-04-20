@@ -336,10 +336,24 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
     if (!apiKey) return { success: false, error: NO_CREDENTIALS_ERROR };
 
     const parcel = params.packages[0];
+    // Phase 2.9.3 — same AbortController-bounded fetch pattern Phase 2.9.1
+    // applied to pickup_create / pickup_buy, now extended to the label-
+    // purchase path. FedEx /v2/shipments/:id/buy is the slowest carrier on
+    // EasyPost (rate-shop + service eligibility + label render); 90s is the
+    // generous-but-bounded ceiling. We track the active stage so an abort
+    // surfaces as either SHIPMENT_CREATE_TIMEOUT (rate-shop hung) or
+    // LABEL_PURCHASE_TIMEOUT (FedEx /buy hung) — never a generic
+    // LABEL_PURCHASE_FAILED that leaves QA guessing whether it was the
+    // create or the buy that died.
+    const ac = new AbortController();
+    const startedAt = Date.now();
+    const timeoutMs = 90_000;
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    let stage: 'shipment_create' | 'shipment_buy' = 'shipment_create';
     try {
       const fromAddr = mapAddressToEasyPost(params.originAddress);
       const toAddr = mapAddressToEasyPost(params.destinationAddress);
-      console.log(`[EasyPost] purchaseLabel from_address.phone=${JSON.stringify(fromAddr.phone)} to_address.phone=${JSON.stringify(toAddr.phone)}`);
+      console.log(`[EasyPost] purchaseLabel from_address.phone=${JSON.stringify(fromAddr.phone)} to_address.phone=${JSON.stringify(toAddr.phone)} carrier=${params.carrier} service=${params.service}`);
       const createResponse = await fetch('https://api.easypost.com/v2/shipments', {
         method: 'POST',
         headers: {
@@ -358,16 +372,22 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
             },
           },
         }),
+        signal: ac.signal,
       });
 
       if (!createResponse.ok) {
         const errorData = await createResponse.json().catch(() => ({}));
+        const elapsedMs = Date.now() - startedAt;
+        console.warn(`[EasyPost shipment_create] HTTP ${createResponse.status} after ${elapsedMs}ms carrier=${params.carrier}`);
         return {
           success: false,
           error: {
             code: 'SHIPMENT_CREATE_FAILED',
             message: errorData?.error?.message || `Shipment creation failed (HTTP ${createResponse.status})`,
+            details: `stage=shipment_create elapsedMs=${elapsedMs} httpStatus=${createResponse.status} carrier=${params.carrier} service=${params.service}`,
             retryable: createResponse.status >= 500,
+            httpStatus: createResponse.status,
+            stage: 'shipment_create',
           },
         };
       }
@@ -383,11 +403,15 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
           error: {
             code: 'RATE_NOT_FOUND',
             message: `Selected rate (${params.carrier} ${params.service}) not available for this shipment.`,
+            details: `stage=shipment_create rates=${(shipmentData.rates || []).length} carrier=${params.carrier} service=${params.service}`,
             retryable: false,
+            stage: 'shipment_create',
           },
         };
       }
 
+      stage = 'shipment_buy';
+      const buyStartedAt = Date.now();
       const buyResponse = await fetch(`https://api.easypost.com/v2/shipments/${shipmentData.id}/buy`, {
         method: 'POST',
         headers: {
@@ -395,21 +419,31 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ rate: { id: targetRate.id }, label_format: 'PDF' }),
+        signal: ac.signal,
       });
 
       if (!buyResponse.ok) {
         const errorData = await buyResponse.json().catch(() => ({}));
+        const elapsedMs = Date.now() - startedAt;
+        const buyElapsedMs = Date.now() - buyStartedAt;
+        console.warn(`[EasyPost shipment_buy] HTTP ${buyResponse.status} after ${buyElapsedMs}ms (total ${elapsedMs}ms) carrier=${params.carrier} shipment=${shipmentData.id}`);
         return {
           success: false,
           error: {
             code: 'LABEL_PURCHASE_FAILED',
             message: errorData?.error?.message || `Label purchase failed (HTTP ${buyResponse.status})`,
+            details: `stage=shipment_buy elapsedMs=${buyElapsedMs} totalMs=${elapsedMs} httpStatus=${buyResponse.status} carrier=${params.carrier} service=${params.service} shipment=${shipmentData.id} rate=${targetRate.id}`,
             retryable: buyResponse.status >= 500,
+            httpStatus: buyResponse.status,
+            stage: 'shipment_buy',
+            providerCode: errorData?.error?.code,
+            providerMessage: errorData?.error?.message,
           },
         };
       }
 
       const buyData = await buyResponse.json();
+      console.log(`[EasyPost shipment_buy] OK in ${Date.now() - buyStartedAt}ms shipment=${buyData.id} tracking=${buyData.tracking_code}`);
       const pdfUrl = buyData.postage_label?.label_pdf_url;
       const fallbackUrl = buyData.postage_label?.label_url || '';
       const labelUrl = pdfUrl || fallbackUrl;
@@ -433,14 +467,37 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
 
       return { success: true, label, providerShipmentId: buyData.id };
     } catch (err) {
+      const elapsedMs = Date.now() - startedAt;
+      const aborted = (err instanceof Error && err.name === 'AbortError') || ac.signal.aborted;
+      if (aborted) {
+        const code = stage === 'shipment_buy' ? 'LABEL_PURCHASE_TIMEOUT' : 'SHIPMENT_CREATE_TIMEOUT';
+        const stageHuman = stage === 'shipment_buy' ? 'Label purchase' : 'Shipment create / rate-shop';
+        console.warn(`[EasyPost ${stage}] TIMEOUT after ${elapsedMs}ms (limit ${timeoutMs}ms) carrier=${params.carrier} service=${params.service}`);
+        return {
+          success: false,
+          error: {
+            code,
+            message: `${stageHuman} timed out at provider after ${Math.round(elapsedMs / 1000)}s. The carrier (commonly FedEx) did not respond in time. Please retry.`,
+            details: `stage=${stage} elapsedMs=${elapsedMs} limitMs=${timeoutMs} carrier=${params.carrier} service=${params.service}`,
+            retryable: true,
+            httpStatus: 0,
+            stage,
+          },
+        };
+      }
+      console.error(`[EasyPost ${stage}] NETWORK_ERROR after ${elapsedMs}ms carrier=${params.carrier}:`, err);
       return {
         success: false,
         error: {
           code: 'NETWORK_ERROR',
           message: `Failed to connect to EasyPost: ${err instanceof Error ? err.message : 'Unknown error'}`,
+          details: `stage=${stage} elapsedMs=${elapsedMs} carrier=${params.carrier} service=${params.service}`,
           retryable: true,
+          stage,
         },
       };
+    } finally {
+      clearTimeout(timer);
     }
   }
 

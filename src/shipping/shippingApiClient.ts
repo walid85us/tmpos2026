@@ -149,9 +149,22 @@ export async function purchaseLabel(
   service: string,
   shipmentRef?: string
 ): Promise<PurchaseLabelResponse> {
-  return apiCall('/api/shipping/purchase-label', {
-    originAddress, destinationAddress, packages, selectedRateId, carrier, service, shipmentRef,
-  });
+  // Phase 2.9.3 — same catch-tagging pattern as the pickup wrappers. Any
+  // timeout that fires above the EasyPost adapter (vite proxy, fetch
+  // TimeoutError) lands here without a stage; we infer the most likely
+  // stage (shipment_buy, since rate-shop /shipments creation is fast and
+  // the FedEx /buy is the slow leg) and upgrade the code so the friendly
+  // mapper preserves the message verbatim and the banner shows the
+  // stage chip + timeout-ui marker.
+  try {
+    return await apiCall('/api/shipping/purchase-label', {
+      originAddress, destinationAddress, packages, selectedRateId, carrier, service, shipmentRef,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Network error';
+    const looksLikeTimeout = /timeout|timed out|aborted/i.test(message);
+    return { success: false, error: { code: looksLikeTimeout ? 'LABEL_PURCHASE_TIMEOUT' : 'NETWORK_ERROR', message: looksLikeTimeout ? `Label purchase network/proxy timeout: ${message}` : message, retryable: true, stage: 'shipment_buy' } };
+  }
 }
 
 // ---------------------------------------------------------------------------

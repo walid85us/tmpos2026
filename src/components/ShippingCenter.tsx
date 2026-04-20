@@ -1115,7 +1115,14 @@ export default function ShippingCenter() {
     // returned). Adapter-side codes are PICKUP_CREATE_TIMEOUT /
     // PICKUP_LOOKUP_TIMEOUT / PICKUP_BUY_TIMEOUT and the message already
     // names the stage and elapsed seconds.
-    if (raw.code === 'PICKUP_CREATE_TIMEOUT' || raw.code === 'PICKUP_LOOKUP_TIMEOUT' || raw.code === 'PICKUP_BUY_TIMEOUT') {
+    // Phase 2.9.3 — extended to include label-stage timeouts.
+    if (
+      raw.code === 'PICKUP_CREATE_TIMEOUT' ||
+      raw.code === 'PICKUP_LOOKUP_TIMEOUT' ||
+      raw.code === 'PICKUP_BUY_TIMEOUT' ||
+      raw.code === 'SHIPMENT_CREATE_TIMEOUT' ||
+      raw.code === 'LABEL_PURCHASE_TIMEOUT'
+    ) {
       return { ...raw, retryable: true };
     }
     if (msg.includes('timeout') || msg.includes('timed out')) {
@@ -4415,8 +4422,15 @@ export default function ShippingCenter() {
                               {providerError.httpStatus !== undefined && providerError.httpStatus !== 0 && (
                                 <span className="inline-block px-1.5 py-0.5 rounded bg-slate-200 text-slate-700 text-[9px] font-bold uppercase tracking-wider">HTTP {providerError.httpStatus}</span>
                               )}
-                              {(providerError.code === 'PICKUP_CREATE_TIMEOUT' || providerError.code === 'PICKUP_LOOKUP_TIMEOUT' || providerError.code === 'PICKUP_BUY_TIMEOUT' || (providerError.stage && /pickup_/.test(providerError.stage))) && (
-                                <span className="inline-block px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 text-[9px] font-bold uppercase tracking-wider" title="Phase 2.9.2 runtime proof marker">timeout-ui: 2.9.2</span>
+                              {(
+                                providerError.code === 'PICKUP_CREATE_TIMEOUT' ||
+                                providerError.code === 'PICKUP_LOOKUP_TIMEOUT' ||
+                                providerError.code === 'PICKUP_BUY_TIMEOUT' ||
+                                providerError.code === 'SHIPMENT_CREATE_TIMEOUT' ||
+                                providerError.code === 'LABEL_PURCHASE_TIMEOUT' ||
+                                (providerError.stage && /pickup_|shipment_/.test(providerError.stage))
+                              ) && (
+                                <span className="inline-block px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 text-[9px] font-bold uppercase tracking-wider" title="Phase 2.9.3 runtime proof marker — covers pickup_* and shipment_* stage timeouts">timeout-ui: 2.9.3</span>
                               )}
                             </div>
                             <p className="text-xs text-red-600 font-medium break-words">{providerError.message}</p>
