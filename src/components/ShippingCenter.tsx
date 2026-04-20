@@ -1109,8 +1109,18 @@ export default function ShippingCenter() {
     if (msg.includes('500') || msg.includes('502') || msg.includes('503') || msg.includes('server error') || msg.includes('internal error')) {
       return { ...raw, message: 'The shipping provider is experiencing issues. Please try again shortly.', retryable: true };
     }
+    // Phase 2.9.1 — preserve stage-tagged pickup timeouts verbatim so QA can
+    // tell create-stage timeouts (provider hung on pickup.create) apart from
+    // buy-stage timeouts (provider hung on pickup.buy after rates were
+    // returned). Adapter-side codes are PICKUP_CREATE_TIMEOUT /
+    // PICKUP_LOOKUP_TIMEOUT / PICKUP_BUY_TIMEOUT and the message already
+    // names the stage and elapsed seconds.
+    if (raw.code === 'PICKUP_CREATE_TIMEOUT' || raw.code === 'PICKUP_LOOKUP_TIMEOUT' || raw.code === 'PICKUP_BUY_TIMEOUT') {
+      return { ...raw, retryable: true };
+    }
     if (msg.includes('timeout') || msg.includes('timed out')) {
-      return { ...raw, message: 'Request to the shipping provider timed out. Please try again.', retryable: true };
+      const stageNote = raw.stage ? ` (stage: ${raw.stage})` : '';
+      return { ...raw, message: `Request to the shipping provider timed out${stageNote}. Please try again.`, retryable: true };
     }
     if (raw.code === 'VALIDATION_FAILED' || msg.includes('invalid address') || msg.includes('validation')) {
       return { ...raw, message: `Address validation issue: ${raw.message}` };

@@ -522,6 +522,18 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
     if (!shipmentId) {
       return { success: false, error: { code: 'MISSING_SHIPMENT_REF', message: 'EasyPost pickup requires a provider shipment id (set when label was purchased).', retryable: false } };
     }
+    // Phase 2.9.1 — explicit per-call fetch timeout. Without this, a slow
+    // upstream (commonly FedEx pickup.create through EasyPost in test mode,
+    // which can hang for 60+ seconds) would surface as an opaque hang or as
+    // a generic socket error from the dev proxy. With the AbortController
+    // we get a deterministic, stage-tagged PICKUP_CREATE_TIMEOUT that the
+    // operator can retry. 60s is generous (typical EasyPost pickup.create
+    // returns in 1–8s; FedEx can take 20–40s); 60s safely covers the slow
+    // path while keeping failure recovery snappy.
+    const ac = new AbortController();
+    const startedAt = Date.now();
+    const timeoutMs = 60_000;
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
     // Phase 2.6 — is_account_address default flipped to FALSE.
     // Previously this defaulted to true, which told USPS "validate this
     // pickup address against my saved shipper-of-record list". For the
@@ -550,9 +562,12 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
             is_account_address: isAccountAddress,
           },
         }),
+        signal: ac.signal,
       });
+      const elapsedMs = Date.now() - startedAt;
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
+        console.warn(`[EasyPost pickup_create] HTTP ${response.status} after ${elapsedMs}ms shipment=${shipmentId}`);
         return { success: false, error: extractEasyPostError(errorData, response.status, 'pickup_create', 'PICKUP_CREATE_FAILED') };
       }
       const data = await response.json();
@@ -564,20 +579,50 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
         rate: parseFloat(r.rate as string) || 0,
         currency: (r.currency as string) || 'USD',
       }));
+      console.log(`[EasyPost pickup_create] OK in ${elapsedMs}ms shipment=${shipmentId} pickup=${data.id} rates=${rates.length}`);
       return { success: true, providerPickupId: data.id, status: data.status, rates };
     } catch (err) {
-      return { success: false, error: { code: 'NETWORK_ERROR', message: `Failed to connect to EasyPost: ${err instanceof Error ? err.message : 'Unknown error'}`, retryable: true } };
+      const elapsedMs = Date.now() - startedAt;
+      const aborted = (err instanceof Error && err.name === 'AbortError') || ac.signal.aborted;
+      if (aborted) {
+        console.warn(`[EasyPost pickup_create] TIMEOUT after ${elapsedMs}ms (limit ${timeoutMs}ms) shipment=${shipmentId}`);
+        return {
+          success: false,
+          error: {
+            code: 'PICKUP_CREATE_TIMEOUT',
+            message: `Pickup create timed out at provider after ${Math.round(elapsedMs / 1000)}s. The carrier (commonly FedEx) did not respond in time. Please retry.`,
+            details: `stage=pickup_create elapsedMs=${elapsedMs} limitMs=${timeoutMs} shipment=${shipmentId}`,
+            retryable: true,
+            httpStatus: 0,
+            stage: 'pickup_create',
+          },
+        };
+      }
+      console.error(`[EasyPost pickup_create] NETWORK_ERROR after ${elapsedMs}ms shipment=${shipmentId}:`, err);
+      return { success: false, error: { code: 'NETWORK_ERROR', message: `Failed to connect to EasyPost: ${err instanceof Error ? err.message : 'Unknown error'}`, retryable: true, stage: 'pickup_create' } };
+    } finally {
+      clearTimeout(timer);
     }
   }
 
   async buyPickup(params: BuyPickupRequest): Promise<BuyPickupResponse> {
     const apiKey = getApiKey();
     if (!apiKey) return { success: false, error: NO_CREDENTIALS_ERROR };
+    // Phase 2.9.1 — same explicit per-call timeout as createPickup. Buy is
+    // typically faster than create, but FedEx /buy can also stall; surfacing
+    // a stage-tagged PICKUP_BUY_TIMEOUT lets the operator distinguish it
+    // from a create-stage hang and retry confidently.
+    const ac = new AbortController();
+    const startedAt = Date.now();
+    const timeoutMs = 60_000;
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    let stage: 'pickup_lookup' | 'pickup_buy' = 'pickup_lookup';
     try {
       // EasyPost wants carrier+service from the chosen pickup_rate. We resolve
       // via a GET on the pickup, find the matching rate, then POST /buy.
       const pickupResp = await fetch(`https://api.easypost.com/v2/pickups/${params.providerPickupId}`, {
         headers: { 'Authorization': `Bearer ${apiKey}` },
+        signal: ac.signal,
       });
       if (!pickupResp.ok) {
         const errorData = await pickupResp.json().catch(() => ({}));
@@ -586,18 +631,23 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
       const pickupData = await pickupResp.json();
       const rate = (pickupData.pickup_rates || []).find((r: Record<string, unknown>) => r.id === params.providerRateId);
       if (!rate) {
-        return { success: false, error: { code: 'RATE_NOT_FOUND', message: 'Selected pickup rate not found on this pickup.', retryable: false } };
+        return { success: false, error: { code: 'RATE_NOT_FOUND', message: 'Selected pickup rate not found on this pickup.', retryable: false, stage: 'pickup_lookup' } };
       }
+      stage = 'pickup_buy';
       const buyResp = await fetch(`https://api.easypost.com/v2/pickups/${params.providerPickupId}/buy`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ carrier: rate.carrier, service: rate.service }),
+        signal: ac.signal,
       });
+      const elapsedMs = Date.now() - startedAt;
       if (!buyResp.ok) {
         const errorData = await buyResp.json().catch(() => ({}));
+        console.warn(`[EasyPost pickup_buy] HTTP ${buyResp.status} after ${elapsedMs}ms pickup=${params.providerPickupId} rate=${params.providerRateId}`);
         return { success: false, error: extractEasyPostError(errorData, buyResp.status, 'pickup_buy', 'PICKUP_BUY_FAILED') };
       }
       const data = await buyResp.json();
+      console.log(`[EasyPost pickup_buy] OK in ${elapsedMs}ms pickup=${data.id} confirmation=${data.confirmation}`);
       return {
         success: true,
         providerPickupId: data.id,
@@ -607,7 +657,27 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
         currency: (rate.currency as string) || 'USD',
       };
     } catch (err) {
-      return { success: false, error: { code: 'NETWORK_ERROR', message: `Failed to connect to EasyPost: ${err instanceof Error ? err.message : 'Unknown error'}`, retryable: true } };
+      const elapsedMs = Date.now() - startedAt;
+      const aborted = (err instanceof Error && err.name === 'AbortError') || ac.signal.aborted;
+      if (aborted) {
+        const code = stage === 'pickup_buy' ? 'PICKUP_BUY_TIMEOUT' : 'PICKUP_LOOKUP_TIMEOUT';
+        console.warn(`[EasyPost ${stage}] TIMEOUT after ${elapsedMs}ms (limit ${timeoutMs}ms) pickup=${params.providerPickupId}`);
+        return {
+          success: false,
+          error: {
+            code,
+            message: `Pickup ${stage === 'pickup_buy' ? 'buy' : 'lookup'} timed out at provider after ${Math.round(elapsedMs / 1000)}s. The carrier did not respond in time. Please retry.`,
+            details: `stage=${stage} elapsedMs=${elapsedMs} limitMs=${timeoutMs} pickup=${params.providerPickupId}`,
+            retryable: true,
+            httpStatus: 0,
+            stage,
+          },
+        };
+      }
+      console.error(`[EasyPost ${stage}] NETWORK_ERROR after ${elapsedMs}ms pickup=${params.providerPickupId}:`, err);
+      return { success: false, error: { code: 'NETWORK_ERROR', message: `Failed to connect to EasyPost: ${err instanceof Error ? err.message : 'Unknown error'}`, retryable: true, stage } };
+    } finally {
+      clearTimeout(timer);
     }
   }
 

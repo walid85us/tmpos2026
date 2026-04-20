@@ -1,0 +1,158 @@
+Shipping Phase 2.9.1 — FedEx Pickup Timeout Regression / Paid-Rate Path Recovery
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated regression-fix pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen unrelated workstreams.
+
+Goal:
+Fix the FedEx regression introduced or exposed by Phase 2.9 so the paid pickup-rate path can be tested and validated.
+
+Current QA result:
+- USPS free pickup flow works
+- Empty/no-rates truthfulness works
+- UPS unsupported services remain blocked honestly
+- FedEx now fails with:
+  "Request to the shipping provider timed out. Please try again. This error may be temporary. You can retry."
+- FedEx used to work before Phase 2.9
+- Therefore the new Phase 2.9 two-step flow is not yet acceptable
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior Node/Express carrier-integration engineer
+- Senior React/TypeScript engineer
+- Enterprise shipping systems architect
+- Senior FedEx / EasyPost / pickup-operations expert with 20+ years of experience in pickup booking flows, timeouts, and provider-response handling
+- Root-cause debugging specialist
+- QA gatekeeper who must restore FedEx before calling Phase 2.9 complete
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- USPS working behavior
+- honest no-rates handling
+- UPS unsupported-service early blocking
+- current pickup forecast + fee-class model
+- current truthful partial_failed / confirmed-state logic
+- current label-lock and pickup-override behavior
+- current phone/schema fixes
+- current two-stage address readiness behavior
+
+==================================================
+CURRENT QA SOURCE OF TRUTH
+==================================================
+
+Observed QA result:
+- USPS = PASS
+- FedEx now times out in the pickup flow
+- FedEx used to work before Phase 2.9
+- This blocks validation of:
+  - single paid pickup rate flow
+  - exact fee persistence
+  - confirmation persistence on a paid service
+
+Therefore:
+- Phase 2.9 is not acceptable until FedEx is restored
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIXES
+==================================================
+
+1) TRACE THE FEDEX REGRESSION EXACTLY
+Required:
+- compare the pre-2.9 working FedEx path with the new Phase 2.9 path
+- determine exactly where the timeout occurs:
+  - client-side timeout
+  - server-side timeout
+  - adapter fetch timeout
+  - pickup.create call
+  - pickup.buy call
+  - state/panel handling
+  - duplicate request / retry race
+- do not guess
+
+2) RESTORE FEDEX PAID-RATE PATH
+Required:
+- fix the regression so FedEx can again complete the pickup.create step and surface pickup_rates correctly
+- if the provider returns one paid rate, show it cleanly
+- if provider returns one free rate, show it cleanly
+- if provider returns multiple rates, support selection
+- if provider returns no rates, show honest no-rates state
+- if provider genuinely times out, surface that truthfully — but only after confirming it is a real provider timeout, not an app bug
+
+3) DO NOT REGRESS USPS OR UPS
+Required:
+- USPS must remain healthy
+- UPS unsupported-service early gate must remain intact
+- do not break the already-correct no-rates handling
+
+4) ADD TARGETED DIAGNOSTIC DETAIL
+Required:
+- add or improve structured diagnostics so QA can tell whether the failure is:
+  - create timeout
+  - buy timeout
+  - provider returned no rates
+  - provider returned rates but selection/buy failed
+- do not add noisy debug clutter, but make the failure stage explicit
+
+5) MAKE PAID-RATE PATH TESTABLE
+Required:
+- the operator must be able to reach a working paid-rate path on FedEx again if the provider supports it
+- if multiple rates are not naturally returned in this environment, do not fake them
+- but the one-rate paid path must be restored if provider supports it
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- FedEx no longer times out due to an app regression in the Phase 2.9 flow
+- paid-rate pickup path becomes testable again
+- USPS remains healthy
+- UPS unsupported services remain blocked honestly
+- the app can distinguish create timeout vs buy timeout vs no-rates cleanly
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Compare pre-2.9 and post-2.9 FedEx flow
+2) Identify the exact timeout point
+3) Fix the regression
+4) Improve stage-specific diagnostics
+5) Re-test USPS and UPS non-regression
+6) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- FedEx timeout regression root cause
+- what was fixed in the Phase 2.9 path
+- how create timeout vs buy timeout vs no-rates are distinguished
+- confirmation that USPS/UPS behavior was preserved
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Regression Root-Cause Findings
+2. FedEx Timeout Fix
+3. Stage-Specific Diagnostic Improvements
+4. USPS / UPS Non-Regression Notes
+5. Files Changed
+6. Documentation Updated
+7. Remaining Limits / Unknowns
