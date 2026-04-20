@@ -1,0 +1,148 @@
+Shipping Phase 2.9.2 — FedEx Timeout Error Propagation / Runtime Truthfulness Fix
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated regression-fix pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen unrelated workstreams.
+
+Goal:
+Fix the fact that Phase 2.9.1 claimed to add stage-specific timeout errors, but the runtime still shows the same old generic timeout banner.
+
+Current QA result:
+- FedEx still shows only:
+  "Request to the shipping provider timed out. Please try again. This error may be temporary. You can retry."
+- The operator still does NOT see whether the timeout happened during:
+  - pickup_create
+  - pickup_lookup
+  - pickup_buy
+- Therefore the Phase 2.9.1 fix is not actually reaching the runtime UI in the required way
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior Node/Express carrier-integration engineer
+- Senior React/TypeScript engineer
+- Enterprise shipping systems architect
+- Senior FedEx / EasyPost / pickup-operations expert with 20+ years of experience in provider-response handling and timeout diagnostics
+- Root-cause debugging specialist
+- QA gatekeeper who must restore end-to-end truthfulness
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- USPS working behavior
+- UPS unsupported-service early blocking
+- honest no-rates handling
+- Phase 2.9 exact-rate selection flow
+- current forecast + fee-class model
+- current label-lock / pickup-override behavior
+- current partial_failed / confirmed-state logic
+
+==================================================
+CURRENT QA SOURCE OF TRUTH
+==================================================
+
+Phase 2.9.1 claimed:
+- stage-specific timeout codes
+- stage-specific timeout messaging
+- clearer create / lookup / buy timeout distinction
+
+But actual runtime QA still shows only the same generic timeout banner.
+
+This means the timeout signal is still not propagating end-to-end.
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIXES
+==================================================
+
+1) TRACE THE EXACT ERROR OBJECT END-TO-END
+Required:
+- trace the actual FedEx timeout error from:
+  - EasyPost adapter
+  - server route
+  - client API layer
+  - UI mapper
+  - final rendered banner/panel
+- show exactly where the stage/code/message is being lost or collapsed
+
+2) PRESERVE STAGE + CODE + MESSAGE THROUGH THE FULL CHAIN
+Required:
+- if adapter emits:
+  - PICKUP_CREATE_TIMEOUT
+  - PICKUP_LOOKUP_TIMEOUT
+  - PICKUP_BUY_TIMEOUT
+then those must survive to the rendered UI
+- do not collapse them into the old generic timeout message
+- the operator must be able to see the failure stage clearly
+
+3) MAKE RUNTIME TRUTHFUL
+Required:
+- the final UI must explicitly indicate whether the timeout happened during:
+  - Create pickup
+  - Lookup pickup
+  - Buy pickup
+- if you keep a friendly summary, that is fine, but the stage must still be visible
+
+4) ADD MINIMAL VISIBLE RUNTIME PROOF
+Required:
+- add a small temporary visible marker in the FedEx timeout error panel or pickup diagnostics area for this pass only, such as:
+  "timeout-ui: 2.9.2"
+- this is to prove QA is seeing the new runtime path, not stale behavior
+
+5) DO NOT CHANGE THE UNDERLYING FEDEX FLOW UNLESS NECESSARY
+Required:
+- this pass is about error propagation and runtime truthfulness
+- do not rewrite pickup flow broadly unless you discover that the stage-tagged errors are impossible without doing so
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- a FedEx timeout no longer renders as only the old generic message
+- the operator can see whether the timeout happened during create, lookup, or buy
+- the runtime visibly proves the 2.9.2 path is active
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Trace the actual timeout error end-to-end
+2) Identify where stage/code/message is lost
+3) Fix the propagation
+4) Add the temporary runtime proof marker
+5) Re-test FedEx timeout rendering
+6) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- exact point where timeout metadata was being lost
+- how stage/code/message now propagate end-to-end
+- what the runtime proof marker is for
+- confirmation that USPS/UPS behavior was preserved
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Error Propagation Root-Cause Findings
+2. End-to-End Timeout Metadata Fix
+3. Runtime Proof Marker Added
+4. USPS / UPS Non-Regression Notes
+5. Files Changed
+6. Documentation Updated
+7. Remaining Limits / Unknowns

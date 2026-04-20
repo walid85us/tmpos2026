@@ -4396,9 +4396,37 @@ export default function ShippingCenter() {
                       {providerError && (
                         <div className="px-3 py-2 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2">
                           <span className="material-symbols-outlined text-red-500 text-sm mt-0.5">error</span>
-                          <div>
-                            <p className="text-xs text-red-600 font-medium">{providerError.message}</p>
+                          <div className="flex-1 min-w-0">
+                            {/* Phase 2.9.2 — render stage + code chips so QA
+                                can see end-to-end whether the failure is a
+                                pickup_create / pickup_lookup / pickup_buy
+                                stage hit, instead of just a generic banner.
+                                The "timeout-ui: 2.9.2" marker is a temporary
+                                runtime proof flag (per Phase 2.9.2 spec) so
+                                QA can confirm they are on the new code path
+                                and not stale cached JS. */}
+                            <div className="flex flex-wrap items-center gap-1 mb-1">
+                              {providerError.code && (
+                                <span className="inline-block px-1.5 py-0.5 rounded bg-red-100 text-red-700 text-[9px] font-bold uppercase tracking-wider">{providerError.code}</span>
+                              )}
+                              {providerError.stage && (
+                                <span className="inline-block px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 text-[9px] font-bold uppercase tracking-wider">stage: {providerError.stage}</span>
+                              )}
+                              {providerError.httpStatus !== undefined && providerError.httpStatus !== 0 && (
+                                <span className="inline-block px-1.5 py-0.5 rounded bg-slate-200 text-slate-700 text-[9px] font-bold uppercase tracking-wider">HTTP {providerError.httpStatus}</span>
+                              )}
+                              {(providerError.code === 'PICKUP_CREATE_TIMEOUT' || providerError.code === 'PICKUP_LOOKUP_TIMEOUT' || providerError.code === 'PICKUP_BUY_TIMEOUT' || (providerError.stage && /pickup_/.test(providerError.stage))) && (
+                                <span className="inline-block px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 text-[9px] font-bold uppercase tracking-wider" title="Phase 2.9.2 runtime proof marker">timeout-ui: 2.9.2</span>
+                              )}
+                            </div>
+                            <p className="text-xs text-red-600 font-medium break-words">{providerError.message}</p>
                             {providerError.retryable && <p className="text-[10px] text-red-400 mt-0.5">This error may be temporary. You can retry.</p>}
+                            {providerError.details && (
+                              <details className="mt-1">
+                                <summary className="text-[10px] text-red-500 cursor-pointer hover:text-red-700 select-none">Show diagnostic details</summary>
+                                <pre className="mt-1 text-[10px] text-red-700 bg-red-100/60 rounded px-1.5 py-1 whitespace-pre-wrap break-words">{providerError.details}</pre>
+                              </details>
+                            )}
                           </div>
                         </div>
                       )}

@@ -72,8 +72,21 @@ async function apiCall<T>(path: string, body?: unknown): Promise<T> {
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData?.error || errorData?.message || `Request failed (HTTP ${response.status})`);
+    // Phase 2.9.2 — when the server returns a non-2xx (e.g. HTTP 504 from a
+    // proxy timeout), the body may be either a structured envelope
+    // ({success:false, error:{...}}) OR a string/empty. Previously this
+    // path coerced an object error to "[object Object]" via new Error(),
+    // erasing the stage/code. Now: if the body is already a structured
+    // {success:false} envelope we return it directly so stage/code/message
+    // survive intact; otherwise we throw a string with the best signal.
+    const errorData = await response.json().catch(() => null) as Record<string, unknown> | null;
+    if (errorData && errorData.success === false && typeof errorData.error === 'object' && errorData.error !== null) {
+      return errorData as T;
+    }
+    const fallback = typeof errorData?.error === 'string' ? errorData.error
+      : typeof errorData?.message === 'string' ? errorData.message
+      : `Request failed (HTTP ${response.status})`;
+    throw new Error(fallback);
   }
   return response.json();
 }
@@ -190,24 +203,34 @@ export async function createProviderPickup(params: {
   // Wrap network errors as structured CreatePickupResponse so the caller never
   // has to deal with a thrown Error in addition to {success:false}. This keeps
   // the silent-failure surface tiny.
+  // Phase 2.9.2 — tag the catch path with stage='pickup_create' so any
+  // timeout that fires above the adapter (vite proxy, fetch-layer
+  // TimeoutError, dropped socket) still arrives at the UI with a stage
+  // attached. Without this the friendly-error mapper falls back to the
+  // generic timeout banner with no stage hint.
   try {
     return await apiCall('/api/shipping/pickup/create', params);
   } catch (err) {
-    return { success: false, error: { code: 'NETWORK_ERROR', message: err instanceof Error ? err.message : 'Network error', retryable: true } };
+    const message = err instanceof Error ? err.message : 'Network error';
+    const looksLikeTimeout = /timeout|timed out|aborted/i.test(message);
+    return { success: false, error: { code: looksLikeTimeout ? 'PICKUP_CREATE_TIMEOUT' : 'NETWORK_ERROR', message: looksLikeTimeout ? `Pickup create network/proxy timeout: ${message}` : message, retryable: true, stage: 'pickup_create' } };
   }
 }
 export async function buyProviderPickup(providerPickupId: string, providerRateId: string, providerId?: string): Promise<BuyPickupResponse> {
   try {
     return await apiCall('/api/shipping/pickup/buy', { providerId, providerPickupId, providerRateId });
   } catch (err) {
-    return { success: false, error: { code: 'NETWORK_ERROR', message: err instanceof Error ? err.message : 'Network error', retryable: true } };
+    const message = err instanceof Error ? err.message : 'Network error';
+    const looksLikeTimeout = /timeout|timed out|aborted/i.test(message);
+    return { success: false, error: { code: looksLikeTimeout ? 'PICKUP_BUY_TIMEOUT' : 'NETWORK_ERROR', message: looksLikeTimeout ? `Pickup buy network/proxy timeout: ${message}` : message, retryable: true, stage: 'pickup_buy' } };
   }
 }
 export async function cancelProviderPickup(providerPickupId: string, providerId?: string): Promise<CancelPickupResponse> {
   try {
     return await apiCall('/api/shipping/pickup/cancel', { providerId, providerPickupId });
   } catch (err) {
-    return { success: false, error: { code: 'NETWORK_ERROR', message: err instanceof Error ? err.message : 'Network error', retryable: true } };
+    const message = err instanceof Error ? err.message : 'Network error';
+    return { success: false, error: { code: 'NETWORK_ERROR', message, retryable: true, stage: 'pickup_cancel' } };
   }
 }
 
