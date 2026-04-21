@@ -480,6 +480,11 @@ export default function ShippingCenter() {
   // pending` chip while pickupSubmitting is true.
   const [retryAttemptCount, setRetryAttemptCount] = useState(0);
   const [lastRetryAt, setLastRetryAt] = useState<string | null>(null);
+  // Phase 2.10.5 — last seeded shipment id for partial_failed prefill, so the
+  // useEffect below seeds pickupForm + lastPickupAttemptSnapshot exactly once
+  // per (shipmentId, partial_failed) transition. Without this, every render
+  // would clobber any in-flight edits the operator made.
+  const [seededPartialFailedFor, setSeededPartialFailedFor] = useState<string | null>(null);
   // Inline structured outcome of the last pickup attempt — rendered right
   // above the Request button so the operator always sees a truthful result
   // (success, partial, or failure) without having to scroll back up to the
@@ -905,6 +910,34 @@ export default function ShippingCenter() {
 
     setIsResolving(false);
   }
+
+  // Phase 2.10.5 — when the operator opens a shipment whose pickup is in
+  // partial_failed (orphan) state, prefill the pickup form's date/window
+  // from the failed PickupRequest so (a) the operator can see what was
+  // attempted, and (b) the no-change comparison on Retry has a real
+  // baseline to compare against. Runs once per (shipmentId × partial_failed)
+  // transition; never clobbers in-flight edits.
+  useEffect(() => {
+    const ship = shipments.find(s => s.id === selectedShipment);
+    const partialFailedPr = ship?.pickupRequest?.status === 'partial_failed' ? ship.pickupRequest : null;
+    if (partialFailedPr && seededPartialFailedFor !== ship!.id) {
+      setPickupForm(prev => ({
+        ...prev,
+        date: partialFailedPr.requestedDate || prev.date,
+        windowStart: partialFailedPr.windowStart || prev.windowStart,
+        windowEnd: partialFailedPr.windowEnd || prev.windowEnd,
+      }));
+      setLastPickupAttemptSnapshot({
+        date: partialFailedPr.requestedDate || '',
+        windowStart: partialFailedPr.windowStart || '',
+        windowEnd: partialFailedPr.windowEnd || '',
+      });
+      setSeededPartialFailedFor(ship!.id);
+      console.log(`[recovery 2.10.5] Seeded pickupForm + lastPickupAttemptSnapshot from partial_failed pr for shipment ${ship!.id}: date=${partialFailedPr.requestedDate}, window=${partialFailedPr.windowStart}-${partialFailedPr.windowEnd}`);
+    } else if (!partialFailedPr && seededPartialFailedFor) {
+      setSeededPartialFailedFor(null);
+    }
+  }, [selectedShipment, shipments, seededPartialFailedFor]);
 
   useEffect(() => {
     const state = location.state as { openCreate?: boolean; prefill?: ShipmentPrefill; openShipmentId?: string } | null;
@@ -6145,7 +6178,7 @@ export default function ShippingCenter() {
                                   {/* Phase 2.10.4 runtime proof markers on the partial_failed recovery row */}
                                   <span className="ml-auto flex flex-wrap gap-1 items-center text-[9px] font-mono font-black">
                                     <span className="text-slate-500 bg-white border border-slate-200 px-1.5 py-0.5 rounded">recovery-ui: 2.10.4</span>
-                                    <span className="text-rose-700 bg-white border border-rose-200 px-1.5 py-0.5 rounded">cancel-model: orphan-only</span>
+                                    <span className="text-rose-700 bg-white border border-rose-200 px-1.5 py-0.5 rounded">cancel-bind: orphan-only</span>
                                     {editingPickupSchedule && <span className="text-primary bg-white border border-primary/40 px-1.5 py-0.5 rounded">edit-mode: active</span>}
                                     {pickupSubmitting && <span className="text-sky-700 bg-white border border-sky-300 px-1.5 py-0.5 rounded animate-pulse">retry-mode: pending</span>}
                                     {retryAttemptCount > 0 && <span className="text-slate-600 bg-white border border-slate-200 px-1.5 py-0.5 rounded">retries: {retryAttemptCount}{lastRetryAt ? ` · last ${lastRetryAt.slice(11, 19)}Z` : ''}</span>}
@@ -6212,7 +6245,14 @@ export default function ShippingCenter() {
                           <p className="text-xs text-sky-700">Previous pickup is {pr!.status}. You can re-schedule a new carrier pickup below — the cancelled record stays in the timeline for audit.</p>
                         </div>
                       )}
-                      {(!pr || prTerminated) && pickupRequestable && !isWriteBlocked && (() => {
+                      {/* Phase 2.10.5 — pickup schedule form is now also rendered
+                          in `partial_failed` state, so the Edit Date / Window
+                          recovery action binds to a REAL editable date/window
+                          input in the DOM. Previously the form was hidden when
+                          `pr` existed (unless terminated), so all 2.10.4
+                          handlers set state + logged but the operator saw no
+                          editable controls. */}
+                      {(!pr || prTerminated || pr?.status === 'partial_failed') && pickupRequestable && !isWriteBlocked && (() => {
                         const puCaps = activeProviderId ? PROVIDER_CAPABILITIES[activeProviderId.toLowerCase()] : null;
                         const reqInstructions = !!puCaps?.pickupRequiresInstructions;
                         const reqContactName = !!puCaps?.pickupRequiresContactName;
@@ -6278,7 +6318,15 @@ export default function ShippingCenter() {
                             )}
                             <div className="space-y-2">
                               <div>
-                                <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Pickup Date{reqMark(reqWindow)}</label>
+                                <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-2 flex-wrap">
+                                  <span>Pickup Date{reqMark(reqWindow)}</span>
+                                  {/* Phase 2.10.5 — proof that the Edit Date / Window action
+                                      successfully bound to a real, enabled date input
+                                      visible to the operator (not a hidden/non-existent
+                                      element as in 2.10.4). */}
+                                  {editingPickupSchedule && <span className="text-[9px] font-mono font-black text-emerald-700 bg-emerald-50 border border-emerald-300 px-1.5 py-0.5 rounded normal-case tracking-normal">edit-bind: 2.10.5</span>}
+                                  {pr?.status === 'partial_failed' && <span className="text-[9px] font-mono font-black text-amber-700 bg-amber-50 border border-amber-300 px-1.5 py-0.5 rounded normal-case tracking-normal">form-shown-on-partial-failed</span>}
+                                </label>
                                 <input
                                   id="pickup-date-input"
                                   type="date"
@@ -6345,8 +6393,11 @@ export default function ShippingCenter() {
                                   <div className="flex-1 min-w-0">
                                     <div className="flex items-center justify-between gap-2">
                                       <p className={`text-xs font-black ${tone.titleColor}`}>{pickupAttemptResult.title}</p>
-                                      <div className="flex items-center gap-1">
+                                      <div className="flex items-center gap-1 flex-wrap">
                                         {pickupAttemptResult.code && <span className="text-[9px] font-mono font-black text-slate-500 bg-white/70 px-1.5 py-0.5 rounded">{pickupAttemptResult.code}</span>}
+                                        {/* Phase 2.10.5 — explicit retry-branch proof markers */}
+                                        {pickupAttemptResult.code === 'RETRY_NO_CHANGE' && <span className="text-[9px] font-mono font-black text-amber-700 bg-amber-50 border border-amber-300 px-1.5 py-0.5 rounded">retry-bind: no-change</span>}
+                                        {pickupAttemptResult.code === 'RETRY_SUBMITTED' && <span className="text-[9px] font-mono font-black text-sky-700 bg-sky-50 border border-sky-300 px-1.5 py-0.5 rounded">retry-bind: submitted</span>}
                                         <button type="button" onClick={() => setPickupAttemptResult(null)} className="text-slate-400 hover:text-slate-600" aria-label="Dismiss">
                                           <span className="material-symbols-outlined text-sm">close</span>
                                         </button>

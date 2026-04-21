@@ -1,0 +1,162 @@
+Shipping Phase 2.10.5 — Recovery Controls Must Bind To Real Inputs And Actions
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated bug-fix pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen unrelated workstreams.
+Fix only the runtime-functional control binding issues in failed/unconfirmed pickup recovery.
+
+Goal:
+Phase 2.10.4 proved the runtime marker is live, but QA shows the recovery controls are still not bound to real, usable actions.
+
+Current QA result:
+- recovery-ui proof marker is visible
+- therefore the new runtime path is live
+- but:
+  - Edit Date / Window still does not expose a usable editable date/window area
+  - Retry Booking still does not clearly perform either no-change feedback or a real retry submission
+  - failed/orphan cancellation is still confusing in practice
+
+This means the problem is now specifically about control binding and rendered-state wiring.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Node/Express carrier-integration engineer
+- Enterprise shipping systems architect
+- Root-cause debugging specialist
+- QA gatekeeper who must ensure controls bind to real runtime behavior
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- USPS working behavior
+- truthful FedEx success/failure behavior
+- UPS unsupported-service early blocking
+- current pickup forecast + fee-class model
+- current exact pickup-rate selection flow
+- current no-rates vs partial_failed truthfulness
+- current label-lock and pickup-override behavior
+- current two-stage address readiness model
+- current shipment-cancel dependency rule
+- current provider-truthfulness messaging
+
+==================================================
+CURRENT QA SOURCE OF TRUTH
+==================================================
+
+Confirmed:
+- The 2.10.4 runtime proof marker is visible.
+- Therefore QA is seeing the live runtime.
+
+Still broken:
+1) Edit Date / Window shows marker/state but does not expose a truly usable editable schedule area.
+2) Retry Booking does not clearly show either:
+   - no-change detected
+   - or retry submitted
+3) Failed/orphan cancellation still does not behave as one clean action path in practice.
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIXES
+==================================================
+
+1) BIND EDIT ACTION TO REAL, VISIBLE, ENABLED CONTROLS
+Required:
+- clicking Edit Date / Window must reveal and/or focus the actual date/window controls that are truly editable at that moment
+- if the controls are conditionally hidden, collapsed, disabled, or off-screen, fix that
+- do not rely only on scroll/highlight state
+- ensure the operator can immediately modify date/window after clicking the action
+
+2) ADD EXPLICIT RUNTIME STATE LABELS FOR RETRY OUTCOME
+Required:
+- when Retry Booking is clicked, the UI must visibly enter exactly one of these states:
+  - RETRY_NO_CHANGE
+  - RETRY_SUBMITTED
+- these labels or equivalent human-readable states must be visibly rendered for QA during this pass
+- if no change was made, the UI must explicitly say so
+- if retry was submitted, the UI must explicitly show that a new request was sent
+
+3) VERIFY LAST-ATTEMPT SNAPSHOT IS REALLY COMPARING THE ACTIVE CONTROLS
+Required:
+- ensure the retry no-change comparison is using the actual editable date/window fields the operator sees
+- if the comparison is using stale or different state, fix it
+- QA must not experience “nothing happened” after a schedule change
+
+4) MAKE FAILED/ORPHAN CANCELLATION PATH UNAMBIGUOUS
+Required:
+- in failed/orphan state there must be exactly one visible cancellation action model
+- if the bottom cancel block or any alternate cancel route still appears in practice, remove/fix it
+- the displayed action must correspond to the actual allowed operation for that pickup state
+
+5) ADD TEMPORARY ACTION-SPECIFIC PROOF MARKERS
+Required:
+- keep the runtime proof approach, but make it more specific for this pass:
+  - edit-bind: 2.10.5 when edit action successfully binds to the real schedule editor
+  - retry-bind: no-change or retry-bind: submitted when retry path resolves which branch it took
+  - cancel-bind: orphan-only when the orphan cancellation model is the only one rendered
+- these are temporary QA proof markers and can be removed later
+
+6) DO NOT REOPEN OTHER ISSUES
+Required:
+- do not broaden into UPS DAP policy
+- do not broaden into FedEx future-date policy
+- do not change truthful provider messaging already achieved
+- do not change booking flow semantics outside this recovery-control bug
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- Edit Date / Window binds to a truly usable editable schedule area
+- Retry Booking visibly resolves to no-change or submitted
+- failed/orphan cancellation has one unambiguous visible path
+- temporary proof markers show those bindings are active in runtime
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Inspect the actual rendered schedule controls and their enabled/hidden state
+2) Fix Edit Date / Window binding to those controls
+3) Fix retry no-change vs submitted runtime branch visibility
+4) Fix orphan cancellation rendering so only one valid path remains
+5) Add temporary action-specific proof markers
+6) Re-test USPS/FedEx/UPS non-regression
+7) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- exact runtime binding fix for Edit Date / Window
+- exact runtime binding fix for Retry Booking
+- exact single cancellation model for failed/orphan state
+- temporary 2.10.5 proof markers and what each proves
+- confirmation that USPS/FedEx/UPS truthfulness was preserved
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Runtime Binding Root-Cause Findings
+2. Edit Control Binding Fix
+3. Retry Control Binding Fix
+4. Failed/Orphan Cancellation Binding Fix
+5. Temporary Proof Markers Added
+6. Files Changed
+7. Documentation Updated
+8. Non-Regression Notes
