@@ -472,6 +472,14 @@ export default function ShippingCenter() {
   // snapshot — if nothing changed, we say so explicitly instead of
   // silently re-firing the same payload.
   const [lastPickupAttemptSnapshot, setLastPickupAttemptSnapshot] = useState<{ date: string; windowStart: string; windowEnd: string } | null>(null);
+  // Phase 2.10.4 — runtime proof that Retry Booking actually fired a new
+  // submission (not just toggled UI). Increments only when a real retry
+  // is submitted (i.e. the schedule changed since lastPickupAttemptSnapshot
+  // OR the operator pressed Force Retry Anyway). Surfaced inline in the
+  // in-flight info banner as "Attempt #N at HH:MM:SS" + a `retry-mode:
+  // pending` chip while pickupSubmitting is true.
+  const [retryAttemptCount, setRetryAttemptCount] = useState(0);
+  const [lastRetryAt, setLastRetryAt] = useState<string | null>(null);
   // Inline structured outcome of the last pickup attempt — rendered right
   // above the Request button so the operator always sees a truthful result
   // (success, partial, or failure) without having to scroll back up to the
@@ -6042,6 +6050,7 @@ export default function ShippingCenter() {
                                   <button
                                     type="button"
                                     onClick={() => {
+                                      console.log('[recovery 2.10.4] Edit handler fired (partial_failed banner) — entering edit mode');
                                       setEditingPickupSchedule(true);
                                       const card = document.getElementById('pickup-schedule-edit-card');
                                       const el = document.getElementById('pickup-date-input') as HTMLInputElement | null;
@@ -6065,21 +6074,22 @@ export default function ShippingCenter() {
                                     type="button"
                                     disabled={pickupSubmitting}
                                     onClick={() => {
-                                      // Phase 2.10.3 — detect no-change re-submission and tell the operator.
-                                      if (
+                                      const noChange = !!(
                                         lastPickupAttemptSnapshot &&
                                         lastPickupAttemptSnapshot.date === pickupForm.date &&
                                         lastPickupAttemptSnapshot.windowStart === pickupForm.windowStart &&
                                         lastPickupAttemptSnapshot.windowEnd === pickupForm.windowEnd
-                                      ) {
+                                      );
+                                      if (noChange) {
+                                        console.log('[recovery 2.10.4] Retry handler (partial_failed banner) — RETRY_NO_CHANGE skipped');
                                         setEditingPickupSchedule(true);
                                         setPickupAttemptResult({
                                           kind: 'info',
-                                          title: 'No changes since last attempt',
-                                          detail: `The date (${pickupForm.date}) and window (${pickupForm.windowStart || '09:00'}–${pickupForm.windowEnd || '17:00'}) are identical to the previous attempt that just failed. Change the date or window in the highlighted editor above, then click Retry Booking again. The same payload will produce the same result at the carrier.`,
+                                          title: 'No changes since last attempt — retry skipped',
+                                          detail: `The date (${pickupForm.date}) and window (${pickupForm.windowStart || '09:00'}–${pickupForm.windowEnd || '17:00'}) are identical to the previous attempt that just failed. Change the date or window in the highlighted EDIT MODE editor above, then click Retry Booking again. The same payload will produce the same result at the carrier.`,
                                           steps: [
                                             { label: 'Detect schedule change', status: 'fail', note: 'no change vs last attempt' },
-                                            { label: 'Retry skipped', status: 'skip' },
+                                            { label: 'Retry skipped — RETRY_NO_CHANGE', status: 'skip' },
                                           ],
                                           code: 'RETRY_NO_CHANGE',
                                         });
@@ -6089,19 +6099,25 @@ export default function ShippingCenter() {
                                         setTimeout(() => { setFlashDateInput(false); }, 2500);
                                         return;
                                       }
+                                      const nextAttempt = retryAttemptCount + 1;
+                                      const ts = new Date().toISOString();
+                                      setRetryAttemptCount(nextAttempt);
+                                      setLastRetryAt(ts);
+                                      console.log(`[recovery 2.10.4] Retry handler (partial_failed banner) — RETRY_SUBMITTED attempt #${nextAttempt} at ${ts}`);
                                       setPickupAttemptResult({
                                         kind: 'info',
-                                        title: 'Retrying pickup booking…',
-                                        detail: `Re-sending pickup request to ${activeProviderId} with date ${pickupForm.date}${pickupForm.windowStart ? `, window ${pickupForm.windowStart}–${pickupForm.windowEnd || '17:00'}` : ''}. Watch for a new result above the Request Pickup button.`,
-                                        steps: [{ label: 'Re-attempt pickup booking', status: 'pending' }],
+                                        title: `Retrying pickup booking… (attempt #${nextAttempt})`,
+                                        detail: `Submitted at ${ts.slice(11, 19)} UTC. Re-sending pickup request to ${activeProviderId} with date ${pickupForm.date}${pickupForm.windowStart ? `, window ${pickupForm.windowStart}–${pickupForm.windowEnd || '17:00'}` : ''}. Watch for a new result above the Request Pickup button.`,
+                                        steps: [{ label: `Re-attempt pickup booking (attempt #${nextAttempt})`, status: 'pending' }],
+                                        code: 'RETRY_SUBMITTED',
                                       });
                                       setEditingPickupSchedule(false);
                                       handleRequestPickup(selectedShip.id);
                                     }}
                                     className="px-3 py-1.5 bg-emerald-600 text-white font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-emerald-700 transition-colors flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
                                   >
-                                    <span className="material-symbols-outlined text-sm">refresh</span>
-                                    Retry Booking
+                                    <span className="material-symbols-outlined text-sm">{pickupSubmitting ? 'sync' : 'refresh'}</span>
+                                    {pickupSubmitting ? 'Retrying…' : 'Retry Booking'}
                                   </button>
                                   {pr.providerPickupId && (
                                     <>
@@ -6117,7 +6133,7 @@ export default function ShippingCenter() {
                                       />
                                       <button
                                         type="button"
-                                        onClick={() => handleCancelPickup(selectedShip.id)}
+                                        onClick={() => { console.log('[recovery 2.10.4] Cancel Orphan handler (partial_failed banner) fired — single-cancel-path active'); handleCancelPickup(selectedShip.id); }}
                                         className="px-3 py-1.5 bg-white border border-rose-200 text-rose-700 font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-rose-50 transition-colors flex items-center gap-1"
                                         title="Only needed if you do not plan to retry — cancels the orphan provider pickup record at the carrier."
                                       >
@@ -6126,6 +6142,14 @@ export default function ShippingCenter() {
                                       </button>
                                     </>
                                   )}
+                                  {/* Phase 2.10.4 runtime proof markers on the partial_failed recovery row */}
+                                  <span className="ml-auto flex flex-wrap gap-1 items-center text-[9px] font-mono font-black">
+                                    <span className="text-slate-500 bg-white border border-slate-200 px-1.5 py-0.5 rounded">recovery-ui: 2.10.4</span>
+                                    <span className="text-rose-700 bg-white border border-rose-200 px-1.5 py-0.5 rounded">cancel-model: orphan-only</span>
+                                    {editingPickupSchedule && <span className="text-primary bg-white border border-primary/40 px-1.5 py-0.5 rounded">edit-mode: active</span>}
+                                    {pickupSubmitting && <span className="text-sky-700 bg-white border border-sky-300 px-1.5 py-0.5 rounded animate-pulse">retry-mode: pending</span>}
+                                    {retryAttemptCount > 0 && <span className="text-slate-600 bg-white border border-slate-200 px-1.5 py-0.5 rounded">retries: {retryAttemptCount}{lastRetryAt ? ` · last ${lastRetryAt.slice(11, 19)}Z` : ''}</span>}
+                                  </span>
                                 </div>
                               </div>
                             </div>
@@ -6233,13 +6257,16 @@ export default function ShippingCenter() {
                           >
                             {editingPickupSchedule && (
                               <div className="flex items-center justify-between mb-3 pb-2 border-b border-primary/30">
-                                <div className="flex items-center gap-2">
+                                <div className="flex items-center gap-2 flex-wrap">
                                   <span className="material-symbols-outlined text-primary text-base animate-pulse">edit_calendar</span>
-                                  <p className="text-[10px] font-black text-primary uppercase tracking-widest">Editing pickup date / window</p>
+                                  <p className="text-[10px] font-black text-primary uppercase tracking-widest">Edit mode active — pickup date / window</p>
+                                  {/* Phase 2.10.4 runtime proof markers */}
+                                  <span className="text-[9px] font-mono font-black text-primary bg-white border border-primary/40 px-1.5 py-0.5 rounded">edit-mode: active</span>
+                                  <span className="text-[9px] font-mono font-black text-slate-500 bg-white border border-slate-200 px-1.5 py-0.5 rounded">recovery-ui: 2.10.4</span>
                                 </div>
                                 <button
                                   type="button"
-                                  onClick={() => setEditingPickupSchedule(false)}
+                                  onClick={() => { console.log('[recovery 2.10.4] Done editing — exiting edit mode'); setEditingPickupSchedule(false); }}
                                   className="text-[10px] font-black text-slate-600 uppercase tracking-widest bg-white border border-slate-300 rounded-lg px-2 py-1 hover:bg-slate-50"
                                 >
                                   Done editing
@@ -6247,7 +6274,7 @@ export default function ShippingCenter() {
                               </div>
                             )}
                             {editingPickupSchedule && (
-                              <p className="text-[11px] text-slate-600 mb-3">Change the date or window below, then click <span className="font-black">Retry Booking</span> in the failure panel — or press Done editing to leave this mode.</p>
+                              <p className="text-[11px] text-slate-700 mb-3 bg-white/70 border border-primary/20 rounded-lg px-2 py-1.5"><span className="font-black text-primary">EDIT MODE.</span> Change the date or window below, then click <span className="font-black">Retry Booking</span> in the failure panel — or press <span className="font-black">Done editing</span> to leave this mode.</p>
                             )}
                             <div className="space-y-2">
                               <div>
@@ -6424,6 +6451,7 @@ export default function ShippingCenter() {
                                             <button
                                               type="button"
                                               onClick={() => {
+                                                console.log('[recovery 2.10.4] Edit handler fired (result-panel) — entering edit mode');
                                                 setEditingPickupSchedule(true);
                                                 const card = document.getElementById('pickup-schedule-edit-card');
                                                 const el = document.getElementById('pickup-date-input') as HTMLInputElement | null;
@@ -6447,21 +6475,23 @@ export default function ShippingCenter() {
                                               type="button"
                                               disabled={pickupSubmitting}
                                               onClick={() => {
-                                                // Phase 2.10.3 — detect no-change re-submission and tell the operator.
-                                                if (
+                                                // Phase 2.10.3/4 — detect no-change re-submission and tell the operator.
+                                                const noChange = !!(
                                                   lastPickupAttemptSnapshot &&
                                                   lastPickupAttemptSnapshot.date === pickupForm.date &&
                                                   lastPickupAttemptSnapshot.windowStart === pickupForm.windowStart &&
                                                   lastPickupAttemptSnapshot.windowEnd === pickupForm.windowEnd
-                                                ) {
+                                                );
+                                                if (noChange) {
+                                                  console.log('[recovery 2.10.4] Retry handler (result-panel) — RETRY_NO_CHANGE skipped');
                                                   setEditingPickupSchedule(true);
                                                   setPickupAttemptResult({
                                                     kind: 'info',
-                                                    title: 'No changes since last attempt',
-                                                    detail: `The date (${pickupForm.date}) and window (${pickupForm.windowStart || '09:00'}–${pickupForm.windowEnd || '17:00'}) are identical to the previous attempt that just failed. Change the date or window in the highlighted editor above, then click Retry Booking again. The same payload will produce the same result at the carrier.`,
+                                                    title: 'No changes since last attempt — retry skipped',
+                                                    detail: `The date (${pickupForm.date}) and window (${pickupForm.windowStart || '09:00'}–${pickupForm.windowEnd || '17:00'}) are identical to the previous attempt that just failed. Change the date or window in the highlighted EDIT MODE editor above, then click Retry Booking again. The same payload will produce the same result at the carrier.`,
                                                     steps: [
                                                       { label: 'Detect schedule change', status: 'fail', note: 'no change vs last attempt' },
-                                                      { label: 'Retry skipped', status: 'skip' },
+                                                      { label: 'Retry skipped — RETRY_NO_CHANGE', status: 'skip' },
                                                     ],
                                                     code: 'RETRY_NO_CHANGE',
                                                   });
@@ -6471,24 +6501,30 @@ export default function ShippingCenter() {
                                                   setTimeout(() => { setFlashDateInput(false); }, 2500);
                                                   return;
                                                 }
+                                                const nextAttempt = retryAttemptCount + 1;
+                                                const ts = new Date().toISOString();
+                                                setRetryAttemptCount(nextAttempt);
+                                                setLastRetryAt(ts);
+                                                console.log(`[recovery 2.10.4] Retry handler (result-panel) — RETRY_SUBMITTED attempt #${nextAttempt} at ${ts}`);
                                                 setPickupAttemptResult({
                                                   kind: 'info',
-                                                  title: 'Retrying pickup booking…',
-                                                  detail: `Re-sending pickup request to ${activeProviderId} with date ${pickupForm.date}${pickupForm.windowStart ? `, window ${pickupForm.windowStart}–${pickupForm.windowEnd || '17:00'}` : ''}. Watch for a new result here.`,
-                                                  steps: [{ label: 'Re-attempt pickup booking', status: 'pending' }],
+                                                  title: `Retrying pickup booking… (attempt #${nextAttempt})`,
+                                                  detail: `Submitted at ${ts.slice(11, 19)} UTC. Re-sending pickup request to ${activeProviderId} with date ${pickupForm.date}${pickupForm.windowStart ? `, window ${pickupForm.windowStart}–${pickupForm.windowEnd || '17:00'}` : ''}. Watch for a new result here.`,
+                                                  steps: [{ label: `Re-attempt pickup booking (attempt #${nextAttempt})`, status: 'pending' }],
+                                                  code: 'RETRY_SUBMITTED',
                                                 });
                                                 setEditingPickupSchedule(false);
                                                 handleRequestPickup(selectedShip.id);
                                               }}
                                               className="px-3 py-1.5 bg-emerald-600 text-white font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-emerald-700 transition-colors flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
                                             >
-                                              <span className="material-symbols-outlined text-sm">refresh</span>
-                                              Retry Booking
+                                              <span className="material-symbols-outlined text-sm">{pickupSubmitting ? 'sync' : 'refresh'}</span>
+                                              {pickupSubmitting ? 'Retrying…' : 'Retry Booking'}
                                             </button>
                                             {hasOrphan && (
                                               <button
                                                 type="button"
-                                                onClick={() => handleCancelPickup(selectedShip.id)}
+                                                onClick={() => { console.log('[recovery 2.10.4] Cancel Orphan handler (result-panel) fired'); handleCancelPickup(selectedShip.id); }}
                                                 className="px-3 py-1.5 bg-white border border-rose-200 text-rose-600 font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-rose-50 transition-colors flex items-center gap-1"
                                                 title="Only needed if you do not plan to retry — cancels the orphan provider pickup record at the carrier."
                                               >
@@ -6496,6 +6532,13 @@ export default function ShippingCenter() {
                                                 Cancel Orphan Pickup
                                               </button>
                                             )}
+                                            {/* Phase 2.10.4 runtime proof markers on the recovery row */}
+                                            <span className="ml-auto flex flex-wrap gap-1 items-center text-[9px] font-mono font-black">
+                                              <span className="text-slate-500 bg-white border border-slate-200 px-1.5 py-0.5 rounded">recovery-ui: 2.10.4</span>
+                                              {editingPickupSchedule && <span className="text-primary bg-white border border-primary/40 px-1.5 py-0.5 rounded">edit-mode: active</span>}
+                                              {pickupSubmitting && <span className="text-sky-700 bg-white border border-sky-300 px-1.5 py-0.5 rounded animate-pulse">retry-mode: pending</span>}
+                                              {retryAttemptCount > 0 && <span className="text-slate-600 bg-white border border-slate-200 px-1.5 py-0.5 rounded">retries: {retryAttemptCount}</span>}
+                                            </span>
                                           </div>
                                           {hasOrphan && (
                                             <p className="text-[10px] text-slate-500 italic">Cancellation is the secondary action — use it only if you do not intend to retry. The orphan pickup will not be charged unless it is confirmed. The duplicate "Cancel Pickup" button at the bottom of this panel is hidden in this state to avoid ambiguity.</p>

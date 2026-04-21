@@ -1,0 +1,173 @@
+Shipping Phase 2.10.4 — Recovery Actions Runtime Proof + Functional Wiring Fix
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated bug-fix pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen unrelated shipping workstreams.
+Fix only the runtime/functionality gap in failed/unconfirmed pickup recovery actions.
+
+Goal:
+Phase 2.10.3 claimed the recovery actions were functional, but QA proves they still do not work in runtime.
+
+Current QA result:
+- Edit Date / Window still does not do anything useful
+- Retry Booking still does not visibly perform a real retry
+- Retry no-change case still does not clearly explain itself
+- Failed/orphan cancellation is still confusing in practice
+
+This is now a runtime-functional proof problem.
+Do not respond with another cosmetic description of intended behavior.
+Prove the handlers work in the live UI.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Node/Express carrier-integration engineer
+- Enterprise shipping systems architect
+- Root-cause debugging specialist
+- QA gatekeeper who must ensure runtime behavior matches the claimed fix
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- USPS working behavior
+- truthful FedEx success/failure behavior
+- UPS unsupported-service early blocking
+- current pickup forecast + fee-class model
+- current exact pickup-rate selection flow
+- current no-rates vs partial_failed truthfulness
+- current label-lock and pickup-override behavior
+- current two-stage address readiness model
+- current shipment-cancel dependency rule
+
+==================================================
+CURRENT QA SOURCE OF TRUTH
+==================================================
+
+Phase 2.10.3 claimed:
+- Edit Date / Window enters a real edit state
+- Retry Booking visibly handles no-change and changed cases
+- orphan/failed cancellation has one clear action path
+
+Actual QA says:
+- Edit Date / Window still does nothing useful
+- Retry Booking still does not visibly retry
+- no-change handling still does not clearly appear
+- cancellation remains confusing
+
+Therefore:
+- the claimed behavior is not actually functioning in runtime
+- this pass must prove and fix the runtime behavior, not just describe it
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIXES
+==================================================
+
+1) ADD TEMPORARY RUNTIME PROOF MARKERS
+Required:
+- add small visible runtime proof markers for this pass only:
+  - recovery-ui: 2.10.4 on the failed/unconfirmed pickup recovery panel
+  - edit-mode: active when the Edit Date / Window action truly enters edit mode
+  - retry-mode: pending when Retry Booking is actually running
+- these must be visible enough for QA to confirm the new runtime path is live
+
+2) EDIT DATE / WINDOW MUST PROVE IT ENTERED EDIT MODE
+Required:
+- clicking Edit Date / Window must set a visible edit-mode state in the UI
+- the operator must see:
+  - a clear highlighted edit card/section
+  - a visible marker that edit mode is active
+  - focus/open behavior on the date control
+- if browser picker cannot open, the UI must still obviously enter edit mode
+
+3) RETRY BOOKING MUST PROVE WHAT HAPPENED
+Required:
+- clicking Retry Booking must show one of two explicit runtime outcomes:
+  A) RETRY_NO_CHANGE
+     - clearly visible message that no schedule fields changed
+     - clearly visible prompt to edit first
+  B) RETRY_SUBMITTED
+     - clearly visible pending state
+     - timestamp or attempt counter proving a new retry was sent
+     - then a new result
+- do not allow Retry Booking to feel like a no-op
+
+4) FAILED/ORPHAN CANCELLATION MUST HAVE ONE REAL PATH
+Required:
+- in partial_failed/orphan state:
+  - hide the generic bottom Cancel Pickup block unconditionally
+  - show only one cancellation path
+  - label it clearly
+- if any second cancel action is still rendered in that state, remove/fix it
+
+5) ADD MINIMAL HANDLER-LEVEL DIAGNOSTIC SIGNAL
+Required:
+- without cluttering the UI, add enough visible diagnostic signal for QA to tell:
+  - edit handler fired
+  - retry handler fired
+  - retry was skipped due to no-change vs actually submitted
+  - orphan cancel state is the active model
+
+6) DO NOT REOPEN OTHER ISSUES
+Required:
+- do not broaden into UPS DAP policy
+- do not broaden into FedEx date-policy work
+- do not change truthful provider messaging already achieved
+- keep this pass only about runtime-functional proof and handler wiring
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- Edit Date / Window clearly enters edit mode
+- Retry Booking clearly shows either no-change or real retry-submitted behavior
+- failed/orphan state has one clear cancellation path
+- runtime proof markers confirm QA is seeing the new code path
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Add runtime proof markers
+2) Fix Edit Date / Window so edit mode is visibly undeniable
+3) Fix Retry Booking so no-change vs submitted is visibly undeniable
+4) Fix orphan cancellation so only one path exists
+5) Re-test USPS/FedEx/UPS non-regression
+6) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- runtime proof markers added in 2.10.4
+- exact runtime behavior for edit mode
+- exact runtime behavior for retry no-change vs retry submitted
+- the single cancellation model for orphan state
+- confirmation that USPS/FedEx/UPS truthfulness was preserved
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Runtime Functional Root-Cause Findings
+2. Edit Mode Runtime Fix
+3. Retry Runtime Fix
+4. Orphan Cancellation Runtime Fix
+5. Runtime Proof Markers Added
+6. Files Changed
+7. Documentation Updated
+8. Non-Regression Notes

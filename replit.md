@@ -474,6 +474,36 @@ The error code is `UPS_SERVICE_NOT_PICKUP_CAPABLE`, distinct from the carrier-ag
 - In `partial_failed` orphan state, only **Cancel Orphan** appears (inside the banner) — the bottom Cancel Pickup is hidden, eliminating the duplicate-CTA confusion. The reason input remains, with copy that points the operator at Cancel Orphan.
 - FedEx returns `PICKUPDATE.TOO.FAR` for a 2-day-out booking → the verbatim provider reason still appears at the top, plus the new "Try the next business day" hint, plus the three (now operationally convincing) recovery CTAs.
 
+### Phase 2.10.4 — Failed-Pickup Recovery Runtime Proof + Attempt Counter (Apr 2026)
+**Why this exists**: Phase 2.10.3 wired the handler logic correctly, but QA reported the recovery actions still felt cosmetic in runtime — there was no on-screen proof that a click had actually executed the new code path. The fix in 2.10.4 adds visible runtime proof markers, a real retry-attempt counter with timestamps, and console diagnostic signals so QA can verify the live UI is running the new code.
+
+**What was added**:
+- `src/components/ShippingCenter.tsx` — new state `retryAttemptCount: number` (+ `lastRetryAt: string | null`). Incremented only when a retry is actually submitted (not when `RETRY_NO_CHANGE` skips). Surfaced inline in the in-flight info banner as **"Retrying pickup booking… (attempt #N)"** with **"Submitted at HH:MM:SS UTC"** in the detail text and a `Re-attempt pickup booking (attempt #N)` step label. Operators see the counter advance with each real submission, proving the handler ran.
+- `src/components/ShippingCenter.tsx` — runtime proof marker chips in three locations:
+  - Edit-mode card header: `edit-mode: active` (primary chip) + `recovery-ui: 2.10.4` (slate chip), both rendered only while `editingPickupSchedule === true`.
+  - Failure recovery row in the `pickupAttemptResult` panel: persistent `recovery-ui: 2.10.4` chip + conditional `edit-mode: active` (when in edit mode) + conditional `retry-mode: pending` (animate-pulse, while `pickupSubmitting`) + conditional `retries: N` (after first retry).
+  - Partial_failed banner recovery row: same chip set plus a persistent `cancel-model: orphan-only` rose chip proving the single-cancellation-path model is the active code path. The retries chip also shows the last retry timestamp (`retries: N · last HH:MM:SSZ`).
+- `src/components/ShippingCenter.tsx` — Retry button now visibly switches its label to **"Retrying…"** with a `sync` icon while `pickupSubmitting` is true (was a static "Retry Booking" with refresh icon). Operator sees the button's own state change immediately on click.
+- `src/components/ShippingCenter.tsx` — console diagnostic logs on every recovery handler firing:
+  - `[recovery 2.10.4] Edit handler fired (result-panel)` / `(partial_failed banner) — entering edit mode`
+  - `[recovery 2.10.4] Done editing — exiting edit mode`
+  - `[recovery 2.10.4] Retry handler (...) — RETRY_NO_CHANGE skipped`
+  - `[recovery 2.10.4] Retry handler (...) — RETRY_SUBMITTED attempt #N at <iso>`
+  - `[recovery 2.10.4] Cancel Orphan handler (result-panel) fired`
+  - `[recovery 2.10.4] Cancel Orphan handler (partial_failed banner) fired — single-cancel-path active`
+  These let QA prove from devtools that the click actually executed the new path even when the visual delta is subtle.
+- `src/components/ShippingCenter.tsx` — RETRY_NO_CHANGE result title strengthened to **"No changes since last attempt — retry skipped"** and the step label to **"Retry skipped — RETRY_NO_CHANGE"** so the skip is unmistakable. The result code remains `RETRY_NO_CHANGE`.
+- `src/components/ShippingCenter.tsx` — RETRY_SUBMITTED result now carries an explicit `code: 'RETRY_SUBMITTED'` so the chip reads `RETRY_SUBMITTED` next to the title in the result panel header — a clear runtime distinction from `RETRY_NO_CHANGE`.
+
+**Operator runtime proof flow now**:
+1. Encounter a failed pickup → see `recovery-ui: 2.10.4` chip on the recovery row. **Proof the new code path is live.**
+2. Click **Edit Date / Window** → console logs `[recovery 2.10.4] Edit handler fired …`. The edit card opens with `edit-mode: active` + `recovery-ui: 2.10.4` chips in its header AND on the recovery row simultaneously. Date input flashes/focuses, native picker opens. **Proof edit mode entered.**
+3. Click **Retry Booking** without changing schedule → console logs `RETRY_NO_CHANGE skipped`, button keeps "Retry Booking" label (no submission), result panel becomes blue "No changes since last attempt — retry skipped" with code chip `RETRY_NO_CHANGE` and steps `Detect schedule change: fail` + `Retry skipped — RETRY_NO_CHANGE: skip`. Edit card auto-opens. **Proof no-op was deliberate, not a bug.**
+4. Change date/window then click **Retry Booking** → console logs `RETRY_SUBMITTED attempt #N at <iso>`, button immediately becomes **"Retrying…"** with sync icon, result panel becomes blue "Retrying pickup booking… (attempt #N)" with `Submitted at HH:MM:SS UTC` in detail and code chip `RETRY_SUBMITTED`. The `retry-mode: pending` chip pulses on the recovery row alongside `retries: N`. When the provider responds, the panel transitions to the new result and the `retries: N · last HH:MM:SSZ` chip persists. **Proof the retry actually fired and a new attempt was sent.**
+5. In `partial_failed` orphan state, the `cancel-model: orphan-only` rose chip proves the single-cancellation-path model is active. Only the inline `[reason input] [Cancel Orphan Pickup]` pair exists. Console logs `Cancel Orphan handler … single-cancel-path active`. **Proof the duplicate-cancel UI cannot exist in this state.**
+
+**Non-regression confirmation**: USPS confirmed pickups still show the green Booked-live banner and the bottom Cancel Pickup block; the new chips only appear on failure / partial_failed recovery rows. FedEx truthful provider messaging (verbatim reason + `stage: …` chip + `provider: …` chip + `HTTP …` chip + `timeout-ui: 2.9.3` marker) is preserved at the top of the result/banner above all 2.10.4 markers. UPS unsupported-service early gate (`UPS_SERVICE_NOT_PICKUP_CAPABLE`) still fires before any provider call. Phase 2.10 Option-A shipment-cancel-blocked invariant is untouched. The `recovery-ui: 2.10.4` / `edit-mode` / `retry-mode` / `cancel-model` / `retries` chips are intentionally small monospace chips that QA can remove in a follow-up pass once they've confirmed the runtime path.
+
 ### Phase 2.10.3 — Failed-Pickup Recovery Actions Truly Functional (Apr 2026)
 **Why this exists**: Phase 2.10.2 added flash + immediate info-banner feedback, but QA still reported the recovery actions felt cosmetic in practice: clicking Edit Date / Window only scrolled and pulsed (no clear "I'm in an edit state" affordance), clicking Retry Booking with the same date/window silently re-fired the same payload (operators had no way to tell that the carrier was about to reject the identical request), and the duplicate-cancellation ambiguity in `partial_failed` state still surfaced because the bottom reason input + bottom Cancel Pickup button (when re-enabled in any future state-matrix change) sat far away from the in-banner Cancel Orphan.
 
