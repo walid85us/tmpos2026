@@ -6177,6 +6177,12 @@ export default function ShippingCenter() {
                                   )}
                                   {/* Phase 2.10.4 runtime proof markers on the partial_failed recovery row */}
                                   <span className="ml-auto flex flex-wrap gap-1 items-center text-[9px] font-mono font-black">
+                                    {/* Phase 2.10.6 — unity proof: this is the ONE canonical
+                                        recovery surface. The lower pickupAttemptResult
+                                        error/partial panel is suppressed in this state, and
+                                        the schedule editor immediately below carries a
+                                        matching "↳ Part of recovery surface above" header. */}
+                                    <span className="text-emerald-700 bg-white border border-emerald-300 px-1.5 py-0.5 rounded">unified-recovery: 2.10.6</span>
                                     <span className="text-slate-500 bg-white border border-slate-200 px-1.5 py-0.5 rounded">recovery-ui: 2.10.4</span>
                                     <span className="text-rose-700 bg-white border border-rose-200 px-1.5 py-0.5 rounded">cancel-bind: orphan-only</span>
                                     {editingPickupSchedule && <span className="text-primary bg-white border border-primary/40 px-1.5 py-0.5 rounded">edit-mode: active</span>}
@@ -6184,6 +6190,38 @@ export default function ShippingCenter() {
                                     {retryAttemptCount > 0 && <span className="text-slate-600 bg-white border border-slate-200 px-1.5 py-0.5 rounded">retries: {retryAttemptCount}{lastRetryAt ? ` · last ${lastRetryAt.slice(11, 19)}Z` : ''}</span>}
                                   </span>
                                 </div>
+                                {/* Phase 2.10.6 — inline attempt-result notice rendered
+                                    INSIDE the canonical surface. Replaces the duplicate
+                                    lower pickupAttemptResult panel (suppressed below in
+                                    partial_failed state). Truthful provider details
+                                    (stage / providerCode / httpStatus) and retry-branch
+                                    proof markers (RETRY_NO_CHANGE / RETRY_SUBMITTED) are
+                                    surfaced here so they appear exactly once. */}
+                                {pickupAttemptResult && (
+                                  <div className={`mt-2 border rounded-lg p-2 text-[11px] ${
+                                    pickupAttemptResult.kind === 'success' ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                                    : pickupAttemptResult.kind === 'partial' || pickupAttemptResult.kind === 'error' ? 'bg-rose-50 border-rose-300 text-rose-900'
+                                    : 'bg-sky-50 border-sky-300 text-sky-900'
+                                  }`}>
+                                    <div className="flex items-start justify-between gap-2">
+                                      <p className="font-black flex-1 min-w-0">{pickupAttemptResult.title}</p>
+                                      <div className="flex items-center gap-1 flex-wrap shrink-0">
+                                        {pickupAttemptResult.code && <span className="text-[9px] font-mono font-black text-slate-600 bg-white/80 px-1.5 py-0.5 rounded border border-slate-200">{pickupAttemptResult.code}</span>}
+                                        {pickupAttemptResult.code === 'RETRY_NO_CHANGE' && <span className="text-[9px] font-mono font-black text-amber-700 bg-amber-50 border border-amber-300 px-1.5 py-0.5 rounded">retry-bind: no-change</span>}
+                                        {pickupAttemptResult.code === 'RETRY_SUBMITTED' && <span className="text-[9px] font-mono font-black text-sky-700 bg-sky-50 border border-sky-300 px-1.5 py-0.5 rounded">retry-bind: submitted</span>}
+                                        <button type="button" onClick={() => setPickupAttemptResult(null)} className="text-slate-400 hover:text-slate-600" aria-label="Dismiss"><span className="material-symbols-outlined text-sm">close</span></button>
+                                      </div>
+                                    </div>
+                                    {pickupAttemptResult.detail && <p className="mt-1 opacity-90">{pickupAttemptResult.detail}</p>}
+                                    {(pickupAttemptResult.stage || pickupAttemptResult.providerCode || pickupAttemptResult.httpStatus) && (
+                                      <div className="mt-1.5 flex flex-wrap gap-1.5 text-[9px] font-mono text-slate-600">
+                                        {pickupAttemptResult.stage && <span className="bg-white/80 px-1.5 py-0.5 rounded border border-slate-200">stage: <span className="font-black">{pickupAttemptResult.stage}</span></span>}
+                                        {pickupAttemptResult.providerCode && <span className="bg-white/80 px-1.5 py-0.5 rounded border border-slate-200">provider: <span className="font-black">{pickupAttemptResult.providerCode}</span></span>}
+                                        {pickupAttemptResult.httpStatus && <span className="bg-white/80 px-1.5 py-0.5 rounded border border-slate-200">HTTP <span className="font-black">{pickupAttemptResult.httpStatus}</span></span>}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
                               </div>
                             </div>
                           )}
@@ -6287,12 +6325,26 @@ export default function ShippingCenter() {
                               </ul>
                             </div>
                           )}
+                          {/* Phase 2.10.6 — when the canonical recovery surface is active
+                              (partial_failed), prepend a small "↳ Part of recovery surface
+                              above" anchor so the operator visually understands the
+                              schedule editor BELONGS to the failure card above, not to a
+                              separate (now-removed) panel. */}
+                          {pr?.status === 'partial_failed' && (
+                            <div className="col-span-2 -mt-2 mb-1 flex items-center gap-1.5 text-[10px] font-black text-amber-800 uppercase tracking-widest">
+                              <span className="material-symbols-outlined text-amber-600 text-sm">subdirectory_arrow_right</span>
+                              <span>Part of recovery surface above — edit the schedule, then click Retry Booking in the panel above.</span>
+                              <span className="ml-auto text-[9px] font-mono text-emerald-700 bg-emerald-50 border border-emerald-300 px-1.5 py-0.5 rounded normal-case tracking-normal">unified-recovery: 2.10.6</span>
+                            </div>
+                          )}
                           <div
                             id="pickup-schedule-edit-card"
                             className={`col-span-2 transition-all ${
                               editingPickupSchedule
                                 ? 'rounded-2xl border-2 border-primary bg-primary/5 p-4 shadow-lg shadow-primary/10 ring-4 ring-primary/20'
-                                : ''
+                                : pr?.status === 'partial_failed'
+                                  ? 'rounded-2xl border-2 border-amber-300 bg-amber-50/40 p-4'
+                                  : ''
                             }`}
                           >
                             {editingPickupSchedule && (
@@ -6378,7 +6430,14 @@ export default function ShippingCenter() {
                               </p>
                             )}
                           </div>
-                          {pickupAttemptResult && (() => {
+                          {/* Phase 2.10.6 — when in partial_failed (orphan) state, the
+                              canonical recovery surface above already owns the truthful
+                              attempt details, retry notices, and recovery actions.
+                              Suppress this lower panel entirely to eliminate the
+                              duplicate failed-state surface QA reported. Other states
+                              (no pr, success, terminated) continue to render this
+                              panel as before. */}
+                          {pickupAttemptResult && pr?.status !== 'partial_failed' && (() => {
                             const tone = pickupAttemptResult.kind === 'success'
                               ? { bg: 'bg-emerald-50', border: 'border-emerald-200', icon: 'check_circle', iconColor: 'text-emerald-600', titleColor: 'text-emerald-800', textColor: 'text-emerald-700' }
                               : pickupAttemptResult.kind === 'partial'

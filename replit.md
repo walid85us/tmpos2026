@@ -474,6 +474,41 @@ The error code is `UPS_SERVICE_NOT_PICKUP_CAPABLE`, distinct from the carrier-ag
 - In `partial_failed` orphan state, only **Cancel Orphan** appears (inside the banner) — the bottom Cancel Pickup is hidden, eliminating the duplicate-CTA confusion. The reason input remains, with copy that points the operator at Cancel Orphan.
 - FedEx returns `PICKUPDATE.TOO.FAR` for a 2-day-out booking → the verbatim provider reason still appears at the top, plus the new "Try the next business day" hint, plus the three (now operationally convincing) recovery CTAs.
 
+### Phase 2.10.6 — Unify Duplicate Failed-Pickup Surfaces (Apr 2026)
+**Why this exists / runtime root cause**: After Phase 2.10.5 made the controls bind to a real form, QA still couldn't reliably edit / retry / cancel because the **same failed pickup state was rendered twice on screen**:
+1. The persisted `partial_failed` banner (upper, amber) — owned the truthful provider failure summary, the Edit / Retry / Cancel-Orphan recovery actions, and the proof-marker chips.
+2. The transient `pickupAttemptResult` panel (lower) — also showed a failure header, also showed `stage:` / `provider:` / `HTTP …` chips, also showed retry-branch info, and was visually a second "failure card" for the very same orphan PickupRequest.
+3. Between them sat the schedule-edit card — making it look like the editor belonged to neither (or both) failure surfaces.
+
+The result was three competing visual blocks for one logical state, with each surface reading like its own self-contained recovery flow. Operators didn't know which Edit/Retry/Cancel they were supposed to use, and the editor felt orphaned because nothing visually claimed it.
+
+**Canonical surface model chosen**: the upper `partial_failed` banner is the **one** canonical failed-pickup recovery surface. It owns:
+- the truthful failure header (provider, provider pickup id, failure reason)
+- the truthful `stage:` / `provider:` / `HTTP …` provider details
+- the retry-branch notices (RETRY_NO_CHANGE / RETRY_SUBMITTED) with their proof markers
+- the recovery actions (Edit Date / Window, Retry Booking, Cancel Orphan Pickup)
+- all runtime proof-marker chips
+The schedule-edit card immediately below is visually re-anchored as a continuation of that single surface.
+
+**What was fixed**:
+- `src/components/ShippingCenter.tsx` — lower `pickupAttemptResult` panel render gate widened from `pickupAttemptResult && (…)` to `pickupAttemptResult && pr?.status !== 'partial_failed' && (…)`. This **eliminates** the duplicate failed-state surface entirely in orphan/recovery state. Other states (no `pr`, success, terminated, info-only) continue to render this panel exactly as before.
+- `src/components/ShippingCenter.tsx` — new inline attempt-result notice rendered **inside** the canonical `partial_failed` banner. When `pickupAttemptResult` is present in this state, its title, detail, and truthful provider chips (`stage:`, `provider:`, `HTTP …`) plus `RETRY_NO_CHANGE` / `RETRY_SUBMITTED` proof markers (`retry-bind: no-change` / `retry-bind: submitted`) appear here — exactly once, on the canonical surface. Code chips and dismiss button preserved. Truthful details are surfaced without duplication.
+- `src/components/ShippingCenter.tsx` — schedule-edit card visually anchored to the canonical surface in `partial_failed` state via:
+  - a `↳ Part of recovery surface above — edit the schedule, then click Retry Booking in the panel above.` header rendered above the editor (amber, uppercase, with a `subdirectory_arrow_right` icon).
+  - matching amber border / amber background tint on the editor card itself when `pr.status === 'partial_failed'` and the operator is not in primary edit-mode (in edit-mode the primary-bordered Edit Mode styling still wins).
+  - the `unified-recovery: 2.10.6` chip echoed on the editor's anchor row, so the visual continuity from banner to editor is provable at a glance.
+- `src/components/ShippingCenter.tsx` — new **`unified-recovery: 2.10.6`** emerald proof marker on the canonical surface's marker row. Per spec, this chip exists ONLY on the one canonical recovery surface. QA can confirm a single canonical recovery panel by counting one `unified-recovery: 2.10.6` chip per failed pickup — and zero second failure cards anywhere else on the screen.
+
+**Operator runtime proof flow now**:
+1. Open a shipment whose pickup is in `partial_failed`. The amber canonical recovery surface appears once. It carries: the truthful "Pickup object created with X but booking NOT confirmed" header, the failure reason, the inline attempt-result notice (with provider details + retry markers), the Edit Date / Window + Retry Booking + Cancel Orphan Pickup buttons, and the marker chip row including `unified-recovery: 2.10.6`, `recovery-ui: 2.10.4`, `cancel-bind: orphan-only`.
+2. Directly below, the schedule editor card carries the matching `↳ Part of recovery surface above` anchor + a second `unified-recovery: 2.10.6` chip + amber border continuity, making it visually clear the editor BELONGS to the surface above.
+3. **No second failure panel renders below the editor** in this state — the duplicate surface is suppressed.
+4. Click Edit Date / Window → editor enters primary EDIT MODE (existing 2.10.3/2.10.4 styling) with `edit-bind: 2.10.5` chip; the `↳ Part of recovery surface above` anchor remains visible above to keep the visual ownership clear.
+5. Click Retry Booking with no changes → `RETRY_NO_CHANGE` notice appears as the inline attempt-result inside the canonical surface (not as a second panel below).
+6. Click Retry Booking after editing → `RETRY_SUBMITTED` + `retry-bind: submitted` appears in the canonical surface; on resolution the surface refreshes with the new outcome — still one surface.
+
+**Non-regression confirmation**: USPS confirmed-pickup path (`requested` / `scheduled` / `confirmed`) still hides the schedule form, still renders the lower `pickupAttemptResult` panel for success / info notices because the suppression only triggers in `partial_failed`. FedEx truthful provider messaging (verbatim reason + `stage: …` + `provider: …` + `HTTP …` + `timeout-ui: 2.9.3`) preserved — the same details now appear inline in the canonical surface in orphan state, and unchanged in the lower panel for non-orphan states. UPS unsupported-service early gate untouched. Phase 2.10 Option-A shipment-cancel-blocked invariant untouched. All Phase 2.10.4 / 2.10.5 markers (`recovery-ui: 2.10.4`, `cancel-bind: orphan-only`, `edit-mode: active`, `retry-mode: pending`, `retries: N · last HH:MM:SSZ`, `edit-bind: 2.10.5`, `form-shown-on-partial-failed`, `retry-bind: no-change`, `retry-bind: submitted`) preserved alongside the new `unified-recovery: 2.10.6` chip. Pickup forecast, fee-class model, exact rate-selection flow, no-rates vs partial_failed truthfulness, label-lock + pickup-override, two-stage address readiness all untouched.
+
 ### Phase 2.10.5 — Failed-Pickup Recovery Control Binding (Apr 2026)
 **Why this exists / runtime root cause**: Phase 2.10.4 proved the new code path was live (chip visible) but QA still couldn't actually edit or retry. Root-cause investigation found the real bug: the **pickup schedule form (containing `pickup-schedule-edit-card` and `#pickup-date-input`) was hidden** in `partial_failed` state. The render gate at line 6225 was `{(!pr || prTerminated) && pickupRequestable && !isWriteBlocked && ...}`, where `prTerminated = ['cancelled','failed','rejected'].includes(pr.status)` — `partial_failed` is **not** in that set. So in exactly the state where Edit Date / Window and Retry Booking are needed, the controls those handlers tried to scroll/focus/read **did not exist in the DOM**. The handlers fired (console logs proved it), `editingPickupSchedule` toggled true (chip proved it), but `getElementById('pickup-date-input')` returned null and `pickupForm.date` was the empty string from initial state — so the operator saw nothing change, and the no-change comparison was meaningless because there was nothing to compare against.
 
