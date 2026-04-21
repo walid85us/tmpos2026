@@ -485,6 +485,22 @@ export default function ShippingCenter() {
   // per (shipmentId, partial_failed) transition. Without this, every render
   // would clobber any in-flight edits the operator made.
   const [seededPartialFailedFor, setSeededPartialFailedFor] = useState<string | null>(null);
+  // Phase 2.10.7 — orphan provider-pickup cancel verdict, keyed by
+  // `${shipmentId}:${providerPickupId}`. EasyPost frequently returns
+  // "Invalid request, the pickup's current status does not allow this
+  // operation." for orphan pickup objects whose provider-side state is
+  // already terminal/non-cancellable (e.g. the carrier rejected
+  // pickup.buy and the provider auto-finalized the pickup record into a
+  // status that does not accept cancellation). Pre-2.10.7 the UI kept
+  // offering Cancel Orphan Pickup, the call kept failing, and the
+  // operator had no working action. From 2.10.7: we (a) try carrier
+  // cancel optimistically, (b) on this specific provider error remember
+  // the verdict so the next render swaps Cancel Orphan Pickup → Dismiss
+  // Orphan Locally with an operator-readable explanation. Verdict values:
+  //   'unknown'             — never attempted; show carrier cancel optimistically
+  //   'carrier-cancellable' — carrier accepted cancel; orphan is cleared
+  //   'not-cancellable'     — carrier rejected cancel for state reasons; only local dismiss is valid
+  const [orphanCancelVerdict, setOrphanCancelVerdict] = useState<Record<string, 'unknown' | 'carrier-cancellable' | 'not-cancellable'>>({});
   // Inline structured outcome of the last pickup attempt — rendered right
   // above the Request button so the operator always sees a truthful result
   // (success, partial, or failure) without having to scroll back up to the
@@ -3220,11 +3236,40 @@ export default function ShippingCenter() {
         const result = await shippingApi.cancelProviderPickup(ship.pickupRequest.providerPickupId!, activeProviderId || undefined);
         if (!result.success) {
           const friendly = friendlyProviderError(result.error || { code: 'PICKUP_CANCEL_FAILED', message: 'Pickup cancel failed.' });
+          // Phase 2.10.7 — detect provider-state rejection so the UI can
+          // swap Cancel Orphan Pickup → Dismiss Orphan Locally. We match
+          // both the provider's literal phrase and a broader fallback so
+          // adapter-side rewording doesn't silently regress this.
+          const rawMsg = (result.error?.message || friendly.message || '').toLowerCase();
+          const providerStateReject =
+            rawMsg.includes('does not allow this operation') ||
+            rawMsg.includes('current status does not allow') ||
+            rawMsg.includes('cannot be cancelled') ||
+            rawMsg.includes('cannot be canceled');
+          if (providerStateReject && ship.pickupRequest.providerPickupId) {
+            const verdictKey = `${ship.id}:${ship.pickupRequest.providerPickupId}`;
+            setOrphanCancelVerdict(prev => ({ ...prev, [verdictKey]: 'not-cancellable' }));
+            console.log(`[recovery 2.10.7] Carrier rejected orphan cancel for ${verdictKey} — provider says state does not allow cancellation. Verdict pinned to 'not-cancellable'; UI will swap to Dismiss Orphan Locally.`);
+          }
           setProviderError(friendly);
-          setPickupCancelModal({ ...modal, inFlight: false, result: { ok: false, message: friendly.message } });
+          setPickupCancelModal({
+            ...modal,
+            inFlight: false,
+            result: {
+              ok: false,
+              message: providerStateReject
+                ? `${friendly.message} — The provider pickup record is in a state that no longer accepts carrier cancellation. Close this dialog and use "Dismiss Orphan Locally" on the recovery panel instead.`
+                : friendly.message,
+            },
+          });
           return;
         }
         liveCancelled = true;
+        if (ship.pickupRequest.providerPickupId) {
+          const verdictKey = `${ship.id}:${ship.pickupRequest.providerPickupId}`;
+          setOrphanCancelVerdict(prev => ({ ...prev, [verdictKey]: 'carrier-cancellable' }));
+          console.log(`[recovery 2.10.7] Carrier ACCEPTED orphan cancel for ${verdictKey}. Verdict 'carrier-cancellable'.`);
+        }
       } catch (err) {
         const message = `Live pickup cancel failed: ${err instanceof Error ? err.message : 'Unknown error'}`;
         setProviderError(friendlyProviderError({ code: 'NETWORK_ERROR', message }));
@@ -3254,6 +3299,42 @@ export default function ShippingCenter() {
     setPickupCancelReason('');
     setProviderSuccess(successMsg);
     setPickupCancelModal({ ...modal, inFlight: false, result: { ok: true, message: successMsg } });
+  }
+
+  // Phase 2.10.7 — local-only dismiss for an orphan provider pickup record
+  // whose carrier-side state no longer accepts cancellation. Marks the
+  // PickupRequest cancelled with a clear local-dismiss reason so the
+  // shipment timeline reflects the truth: we did NOT call the carrier
+  // (because the carrier already rejected it once with
+  // "current status does not allow this operation"), we cleaned up
+  // locally, and the operator can request a fresh pickup. The orphan
+  // provider pickup id is recorded in the event for audit.
+  function dismissOrphanLocally(shipmentId: string) {
+    if (isWriteBlocked) return;
+    const ship = shipments.find(s => s.id === shipmentId);
+    if (!ship?.pickupRequest) return;
+    const now = new Date().toISOString();
+    const reason = pickupCancelReason.trim()
+      || 'Dismissed locally — provider reported pickup state no longer accepts carrier cancellation.';
+    const eventDescription = `Orphan provider pickup ${ship.pickupRequest.providerPickupId || ship.pickupRequest.id} dismissed LOCALLY (no carrier call). Reason: ${reason}`;
+    console.log(`[recovery 2.10.7] dismissOrphanLocally for ${shipmentId} (pid=${ship.pickupRequest.providerPickupId}) — ${reason}`);
+    updateShipment(shipmentId, {
+      pickupRequest: {
+        ...ship.pickupRequest,
+        status: 'cancelled',
+        cancelledAt: now,
+        cancelledBy: 'current_operator',
+        cancellationReason: reason,
+      },
+      pickupInfo: { ...(ship.pickupInfo || {}), pickupRequested: false },
+      events: [
+        ...ship.events,
+        { id: `evt_pu_dismiss_${Date.now()}`, status: 'Pickup Cancelled' as any, description: eventDescription, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent,
+      ],
+      updatedAt: now,
+    });
+    setPickupCancelReason('');
+    setProviderSuccess('Orphan pickup dismissed locally. The carrier was NOT called because its current state does not accept cancellation. You can now request a fresh pickup.');
   }
 
   function getProviderPrerequisiteMessage(): string | null {
@@ -6152,29 +6233,56 @@ export default function ShippingCenter() {
                                     <span className="material-symbols-outlined text-sm">{pickupSubmitting ? 'sync' : 'refresh'}</span>
                                     {pickupSubmitting ? 'Retrying…' : 'Retry Booking'}
                                   </button>
-                                  {pr.providerPickupId && (
-                                    <>
-                                      {/* Phase 2.10.3 — single coherent cancellation model for orphan
-                                          state: reason input lives RIGHT NEXT to the Cancel Orphan
-                                          button, not in a duplicate bottom block. */}
-                                      <input
-                                        type="text"
-                                        value={pickupCancelReason}
-                                        onChange={e => setPickupCancelReason(e.target.value)}
-                                        placeholder="Cancellation reason (optional)"
-                                        className="flex-1 min-w-[180px] px-2 py-1.5 border border-rose-200 rounded-lg text-[11px] bg-white"
-                                      />
-                                      <button
-                                        type="button"
-                                        onClick={() => { console.log('[recovery 2.10.4] Cancel Orphan handler (partial_failed banner) fired — single-cancel-path active'); handleCancelPickup(selectedShip.id); }}
-                                        className="px-3 py-1.5 bg-white border border-rose-200 text-rose-700 font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-rose-50 transition-colors flex items-center gap-1"
-                                        title="Only needed if you do not plan to retry — cancels the orphan provider pickup record at the carrier."
-                                      >
-                                        <span className="material-symbols-outlined text-sm">close_small</span>
-                                        Cancel Orphan Pickup
-                                      </button>
-                                    </>
-                                  )}
+                                  {pr.providerPickupId && (() => {
+                                    // Phase 2.10.7 — swap Cancel Orphan Pickup → Dismiss Orphan
+                                    // Locally once the provider has rejected carrier cancel
+                                    // for state reasons. Verdict is per (shipment, providerPickupId)
+                                    // and is set only after a real provider response, never speculatively.
+                                    const verdictKey = `${selectedShip.id}:${pr.providerPickupId}`;
+                                    const verdict = orphanCancelVerdict[verdictKey] || 'unknown';
+                                    const showLocalDismiss = verdict === 'not-cancellable';
+                                    return (
+                                      <>
+                                        {/* Phase 2.10.3 — single coherent cancellation model for orphan
+                                            state: reason input lives RIGHT NEXT to the cancel/dismiss
+                                            button, not in a duplicate bottom block. */}
+                                        <input
+                                          type="text"
+                                          value={pickupCancelReason}
+                                          onChange={e => setPickupCancelReason(e.target.value)}
+                                          placeholder={showLocalDismiss ? 'Local-dismiss reason (optional)' : 'Cancellation reason (optional)'}
+                                          className="flex-1 min-w-[180px] px-2 py-1.5 border border-rose-200 rounded-lg text-[11px] bg-white"
+                                        />
+                                        {showLocalDismiss ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => { console.log(`[recovery 2.10.7] Dismiss Orphan Locally handler fired for ${selectedShip.id} — verdict=not-cancellable`); dismissOrphanLocally(selectedShip.id); }}
+                                            className="px-3 py-1.5 bg-white border border-amber-300 text-amber-800 font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-amber-50 transition-colors flex items-center gap-1"
+                                            title="The carrier's current pickup state does not accept cancellation. This dismisses the orphan record locally so you can request a fresh pickup. The provider was NOT called."
+                                          >
+                                            <span className="material-symbols-outlined text-sm">delete_sweep</span>
+                                            Dismiss Orphan Locally
+                                          </button>
+                                        ) : (
+                                          <button
+                                            type="button"
+                                            onClick={() => { console.log(`[recovery 2.10.7] Cancel Orphan Pickup handler fired for ${selectedShip.id} — verdict=${verdict} (will attempt carrier cancel; on state-reject the verdict pins to 'not-cancellable' and the UI swaps to Dismiss Orphan Locally)`); handleCancelPickup(selectedShip.id); }}
+                                            className="px-3 py-1.5 bg-white border border-rose-200 text-rose-700 font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-rose-50 transition-colors flex items-center gap-1"
+                                            title="Tells the carrier to cancel the orphan provider pickup record. If the carrier reports its state no longer accepts cancellation, the next render will switch to Dismiss Orphan Locally."
+                                          >
+                                            <span className="material-symbols-outlined text-sm">close_small</span>
+                                            Cancel Orphan Pickup
+                                          </button>
+                                        )}
+                                        {/* Phase 2.10.7 — operator explanation for non-cancellable verdict */}
+                                        {showLocalDismiss && (
+                                          <p className="basis-full text-[11px] text-amber-900 bg-amber-100/60 border border-amber-300 rounded-lg px-2 py-1.5 mt-1">
+                                            <span className="font-black">Carrier-cancellation unavailable.</span> The provider rejected the cancel request because the orphan pickup record is in a state that no longer allows cancellation. The local-dismiss option above clears the record on this side without calling the provider; you can then request a fresh pickup as usual.
+                                          </p>
+                                        )}
+                                      </>
+                                    );
+                                  })()}
                                   {/* Phase 2.10.4 runtime proof markers on the partial_failed recovery row */}
                                   <span className="ml-auto flex flex-wrap gap-1 items-center text-[9px] font-mono font-black">
                                     {/* Phase 2.10.6 — unity proof: this is the ONE canonical
@@ -6185,6 +6293,19 @@ export default function ShippingCenter() {
                                     <span className="text-emerald-700 bg-white border border-emerald-300 px-1.5 py-0.5 rounded">unified-recovery: 2.10.6</span>
                                     <span className="text-slate-500 bg-white border border-slate-200 px-1.5 py-0.5 rounded">recovery-ui: 2.10.4</span>
                                     <span className="text-rose-700 bg-white border border-rose-200 px-1.5 py-0.5 rounded">cancel-bind: orphan-only</span>
+                                    {/* Phase 2.10.7 — orphan-cancel verdict marker. Reflects whether
+                                        the provider has accepted, rejected, or not-yet-been-asked-for
+                                        a carrier cancel. QA can confirm the new path is live by the
+                                        `orphan-cancel: 2.10.7` chip; the suffix shows the verdict. */}
+                                    {(() => {
+                                      const verdictKey = `${selectedShip.id}:${pr.providerPickupId || 'no-pid'}`;
+                                      const verdict = pr.providerPickupId ? (orphanCancelVerdict[verdictKey] || 'unknown') : 'no-pid';
+                                      const verdictColor =
+                                        verdict === 'not-cancellable' ? 'text-amber-700 border-amber-300'
+                                        : verdict === 'carrier-cancellable' ? 'text-emerald-700 border-emerald-300'
+                                        : 'text-slate-600 border-slate-200';
+                                      return <span className={`bg-white border px-1.5 py-0.5 rounded ${verdictColor}`}>orphan-cancel: 2.10.7 · {verdict}</span>;
+                                    })()}
                                     {editingPickupSchedule && <span className="text-primary bg-white border border-primary/40 px-1.5 py-0.5 rounded">edit-mode: active</span>}
                                     {pickupSubmitting && <span className="text-sky-700 bg-white border border-sky-300 px-1.5 py-0.5 rounded animate-pulse">retry-mode: pending</span>}
                                     {retryAttemptCount > 0 && <span className="text-slate-600 bg-white border border-slate-200 px-1.5 py-0.5 rounded">retries: {retryAttemptCount}{lastRetryAt ? ` · last ${lastRetryAt.slice(11, 19)}Z` : ''}</span>}

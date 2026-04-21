@@ -1,0 +1,161 @@
+Shipping Phase 2.10.7 — Orphan Pickup Cancellation Must Match Actual Provider State
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated bug-fix pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen unrelated shipping workstreams.
+Fix only the remaining orphan-cancellation validity problem in failed/unconfirmed pickup recovery.
+
+Goal:
+Phase 2.10.6 unified the failed recovery surface successfully, but QA proves the remaining cancellation action is still not operationally correct.
+
+Current QA result:
+- only one failed recovery surface is shown
+- schedule editor is clearly attached to that surface
+- proof marker is visible
+- USPS / FedEx / UPS truthfulness remains intact
+- but the single cancellation action still fails with:
+  "Invalid request, the pickup's current status does not allow this operation."
+
+Therefore:
+- the remaining problem is not duplicate UI
+- it is that the offered orphan-cancel action does not match the actual provider-side state/allowed operation
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Node/Express carrier-integration engineer
+- Enterprise shipping systems architect
+- Senior USPS / UPS / FedEx / EasyPost operations expert with 20+ years of experience in pickup lifecycle states and cancellation rules
+- Root-cause debugging specialist
+- QA gatekeeper who must ensure the orphan action matches real provider state
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- USPS working behavior
+- truthful FedEx success/failure behavior
+- UPS unsupported-service early blocking
+- current unified failed recovery surface from 2.10.6
+- current pickup forecast + fee-class model
+- current exact pickup-rate selection flow
+- current no-rates vs partial_failed truthfulness
+- current label-lock and pickup-override behavior
+- current two-stage address readiness model
+- current shipment-cancel dependency rule
+- current provider-truthfulness messaging
+
+==================================================
+CURRENT QA SOURCE OF TRUTH
+==================================================
+
+Observed runtime issue:
+- the unified failed recovery surface is correct
+- but clicking the single cancel action still returns:
+  "Invalid request, the pickup's current status does not allow this operation."
+
+This means the UI is still offering a cancellation path that does not match the actual provider-side state.
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIXES
+==================================================
+
+1) TRACE THE ACTUAL PROVIDER PICKUP STATE AT CANCEL TIME
+Required:
+- inspect exactly what providerPickupId/state/status is present when the operator clicks Cancel Orphan Pickup
+- determine whether the provider object is truly cancellable or not
+- do not guess
+
+2) ONLY OFFER CARRIER CANCELLATION WHEN IT IS VALID
+Required:
+- if the provider pickup is truly cancellable, keep Cancel Orphan Pickup and make it work
+- if the provider pickup is not cancellable anymore, do not offer carrier cancellation as if it should work
+
+3) ADD THE CORRECT FALLBACK WHEN PROVIDER CANCEL IS NOT ALLOWED
+Required:
+- if provider cancellation is not valid for that pickup state, replace the action with the correct operational fallback, such as:
+  - Dismiss orphan record locally
+  - Mark as non-cancellable at carrier
+  - Retry/edit only
+- the UI must explain why carrier cancellation is unavailable
+- do not show a misleading cancel action that predictably fails
+
+4) KEEP ONE COHERENT ACTION MODEL
+Required:
+- maintain one single action model on the unified failed recovery surface
+- do not reintroduce duplicate cancel actions
+- cancellation, if offered, must correspond to a real allowed operation
+
+5) SURFACE PROVIDER-STATE EXPLANATION CLEARLY
+Required:
+- if the provider says the pickup status does not allow cancellation, show that clearly in operator language
+- distinguish:
+  - carrier-cancellable orphan
+  - non-cancellable provider object
+  - local cleanup only
+- do not leave the operator guessing
+
+6) ADD A TEMPORARY PROOF MARKER FOR THIS PASS
+Required:
+- add a small visible marker such as:
+  orphan-cancel: 2.10.7
+- show it on the unified failed recovery surface
+- if carrier cancel is valid, indicate that
+- if only local dismiss is valid, indicate that
+- QA must be able to confirm the new path is live
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- the orphan action offered in the UI matches the real provider-side state
+- if carrier cancellation is valid, it works
+- if carrier cancellation is not valid, the UI no longer offers a misleading cancel action
+- the unified failed recovery surface remains intact
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Trace provider pickup state and cancel eligibility
+2) Fix the action model so only valid cancellation/dismiss options are shown
+3) Add clear operator explanation for non-cancellable provider states
+4) Add the temporary 2.10.7 proof marker
+5) Re-test USPS/FedEx/UPS non-regression
+6) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- the actual provider-side orphan cancel eligibility rules found
+- the chosen action model for cancellable vs non-cancellable orphan states
+- the operator-facing explanation for non-cancellable provider pickups
+- the temporary orphan-cancel: 2.10.7 proof marker
+- confirmation that USPS/FedEx/UPS truthfulness was preserved
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Orphan-Cancel Root-Cause Findings
+2. Valid Cancel vs Local-Dismiss Action Model Fix
+3. Operator Explanation Fix
+4. Temporary Proof Marker Added
+5. Files Changed
+6. Documentation Updated
+7. Non-Regression Notes
