@@ -1,0 +1,148 @@
+Shipping Phase 2.10.3 — Failed Pickup Recovery Actions Must Be Truly Functional
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated bug-fix pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen Phase 2.10 generally.
+Fix only the failed/unconfirmed pickup recovery actions so they are truly functional and unambiguous.
+
+Goal:
+The current failed/unconfirmed pickup recovery UI is still not acceptable because:
+- Edit Date / Window does not visibly take the operator into a usable edit flow
+- Retry Booking does not give clear evidence that a real retry occurred
+- Cancellation in failed/orphan state is still confusing in practice
+- The FedEx future-date/provider reason is already truthful enough and should not be reopened in this pass
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Node/Express carrier-integration engineer
+- Enterprise shipping systems architect
+- Senior USPS / UPS / FedEx / EasyPost operations expert with 20+ years of experience in pickup scheduling and recovery UX
+- Root-cause debugging specialist
+- QA gatekeeper who must ensure recovery actions are operational, not cosmetic
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- USPS working behavior
+- truthful FedEx success/failure behavior
+- UPS unsupported-service early blocking
+- current pickup forecast + fee-class model
+- current exact pickup-rate selection flow
+- current no-rates vs partial_failed truthfulness
+- current label-lock and pickup-override behavior
+- current two-stage address readiness model
+- current shipment-cancel dependency rule from Phase 2.10
+
+==================================================
+CURRENT QA SOURCE OF TRUTH
+==================================================
+
+Observed issues:
+
+1) Edit Date / Window still does not do anything useful enough for the operator.
+2) Retry Booking still does not provide clear visible retry behavior.
+3) In failed/orphan pickup state, cancellation is still confusing in practice.
+4) FedEx date-too-far guidance is already truthful enough and is NOT the blocker for this pass.
+5) UPS DAP/provider-flow limitation is also NOT the blocker for this pass.
+
+This pass is ONLY about making the recovery actions truly functional.
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIXES
+==================================================
+
+1) EDIT DATE / WINDOW MUST ENTER A REAL EDIT STATE
+Required:
+- clicking Edit Date / Window must visibly and unmistakably move the operator into a usable pickup-date/window edit state
+- it is not enough to only scroll or pulse
+- the date field must become obviously active/editable
+- if needed, also expand or visually isolate the pickup date/window area
+- the operator must be able to tell immediately what to change
+
+2) RETRY BOOKING MUST BE VISIBLY REAL
+Required:
+- clicking Retry Booking must:
+  - clear the old failed state
+  - show an obvious retry-in-progress state
+  - and then show a new result
+- if the retry is blocked because the date/window was not changed, say so explicitly
+- do not leave the operator unsure whether anything happened
+
+3) FAILED/ORPHAN CANCELLATION MUST HAVE ONE CLEAR MODEL
+Required:
+- in failed/orphan pickup state, there must be one clear cancellation action path
+- do not leave the operator with two actions that appear to mean similar things
+- if the bottom generic Cancel Pickup button still exists in that state, fix that
+- use one coherent label and one coherent action path for orphan cleanup
+
+4) IMPROVE ACTION FEEDBACK
+Required:
+- every recovery action must give visible feedback:
+  - edit action enters edit state
+  - retry action shows progress/result
+  - cancel action opens confirm/result
+- no dead-feeling buttons
+
+5) DO NOT REOPEN UNRELATED ISSUES
+Required:
+- do not broaden into UPS DAP policy work
+- do not broaden into FedEx future-date policy work
+- do not change truthful provider messaging already achieved
+- keep this pass narrowly focused on recovery-action functionality
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- Edit Date / Window clearly works
+- Retry Booking clearly works
+- failed/orphan cancellation path is no longer confusing
+- USPS/FedEx/UPS truthfulness remains intact
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Fix Edit Date / Window so it enters a real edit state
+2) Fix Retry Booking so it visibly retries
+3) Resolve failed/orphan cancellation ambiguity
+4) Re-test USPS/FedEx/UPS non-regression
+5) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- exact failed/unconfirmed recovery-action behavior
+- how Edit Date / Window now enters an actual edit state
+- how Retry Booking now proves a real retry occurred
+- the chosen single cancellation model for failed/orphan state
+- confirmation that USPS/FedEx/UPS truthfulness was preserved
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Edit Date / Window Functional Fix
+3. Retry Booking Functional Fix
+4. Failed/Orphan Cancellation Action Fix
+5. Files Changed
+6. Documentation Updated
+7. Non-Regression Notes

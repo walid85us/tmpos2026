@@ -461,6 +461,17 @@ export default function ShippingCenter() {
   // "Edit Date / Window" recovery action is visibly affirmative instead
   // of a silent scroll. Cleared automatically after ~2.5s.
   const [flashDateInput, setFlashDateInput] = useState(false);
+  // Phase 2.10.3 — explicit "edit pickup schedule" mode. When ON, the
+  // date + window grid is wrapped in a primary-bordered, highlighted card
+  // with an "EDITING" header so the operator unambiguously knows they're
+  // in an edit state — not just a passive scroll/flash.
+  const [editingPickupSchedule, setEditingPickupSchedule] = useState(false);
+  // Phase 2.10.3 — snapshot of the last attempted pickup schedule
+  // (date / windowStart / windowEnd). Captured at the moment a pickup
+  // request is sent. On Retry, we compare the current form to this
+  // snapshot — if nothing changed, we say so explicitly instead of
+  // silently re-firing the same payload.
+  const [lastPickupAttemptSnapshot, setLastPickupAttemptSnapshot] = useState<{ date: string; windowStart: string; windowEnd: string } | null>(null);
   // Inline structured outcome of the last pickup attempt — rendered right
   // above the Request button so the operator always sees a truthful result
   // (success, partial, or failure) without having to scroll back up to the
@@ -2469,6 +2480,14 @@ export default function ShippingCenter() {
       setPickupAttemptResult({ kind: 'error', title: 'Write blocked', detail: 'You are in preview/read-only mode. Pickup booking is disabled.', steps: [], code: 'WRITE_BLOCKED' });
       return;
     }
+    // Phase 2.10.3 — record the schedule the operator is about to send so
+    // a later Retry click can detect a no-change re-submission and tell
+    // the operator instead of silently re-firing the same payload.
+    setLastPickupAttemptSnapshot({
+      date: pickupForm.date,
+      windowStart: pickupForm.windowStart,
+      windowEnd: pickupForm.windowEnd,
+    });
     const ship = shipments.find(s => s.id === shipmentId);
     if (!ship) {
       setPickupAttemptResult({ kind: 'error', title: 'Shipment not found', detail: `Could not locate shipment ${shipmentId} in local state.`, steps: [], code: 'SHIPMENT_NOT_FOUND' });
@@ -6023,16 +6042,19 @@ export default function ShippingCenter() {
                                   <button
                                     type="button"
                                     onClick={() => {
+                                      setEditingPickupSchedule(true);
+                                      const card = document.getElementById('pickup-schedule-edit-card');
                                       const el = document.getElementById('pickup-date-input') as HTMLInputElement | null;
-                                      if (el) {
-                                        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                                        setFlashDateInput(true);
-                                        setTimeout(() => { setFlashDateInput(false); }, 2500);
-                                        setTimeout(() => {
+                                      if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                      else if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                      setFlashDateInput(true);
+                                      setTimeout(() => { setFlashDateInput(false); }, 2500);
+                                      setTimeout(() => {
+                                        if (el) {
                                           try { el.focus(); } catch { /* noop */ }
                                           try { el.showPicker?.(); } catch { /* showPicker may throw outside user gesture */ }
-                                        }, 350);
-                                      }
+                                        }
+                                      }, 400);
                                     }}
                                     className="px-3 py-1.5 bg-primary text-white font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-primary/90 transition-colors flex items-center gap-1"
                                   >
@@ -6043,12 +6065,37 @@ export default function ShippingCenter() {
                                     type="button"
                                     disabled={pickupSubmitting}
                                     onClick={() => {
+                                      // Phase 2.10.3 — detect no-change re-submission and tell the operator.
+                                      if (
+                                        lastPickupAttemptSnapshot &&
+                                        lastPickupAttemptSnapshot.date === pickupForm.date &&
+                                        lastPickupAttemptSnapshot.windowStart === pickupForm.windowStart &&
+                                        lastPickupAttemptSnapshot.windowEnd === pickupForm.windowEnd
+                                      ) {
+                                        setEditingPickupSchedule(true);
+                                        setPickupAttemptResult({
+                                          kind: 'info',
+                                          title: 'No changes since last attempt',
+                                          detail: `The date (${pickupForm.date}) and window (${pickupForm.windowStart || '09:00'}–${pickupForm.windowEnd || '17:00'}) are identical to the previous attempt that just failed. Change the date or window in the highlighted editor above, then click Retry Booking again. The same payload will produce the same result at the carrier.`,
+                                          steps: [
+                                            { label: 'Detect schedule change', status: 'fail', note: 'no change vs last attempt' },
+                                            { label: 'Retry skipped', status: 'skip' },
+                                          ],
+                                          code: 'RETRY_NO_CHANGE',
+                                        });
+                                        const card = document.getElementById('pickup-schedule-edit-card');
+                                        if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                        setFlashDateInput(true);
+                                        setTimeout(() => { setFlashDateInput(false); }, 2500);
+                                        return;
+                                      }
                                       setPickupAttemptResult({
                                         kind: 'info',
                                         title: 'Retrying pickup booking…',
-                                        detail: `Re-sending pickup request to ${activeProviderId} with the current date/window. Watch for a new result above the Request Pickup button.`,
+                                        detail: `Re-sending pickup request to ${activeProviderId} with date ${pickupForm.date}${pickupForm.windowStart ? `, window ${pickupForm.windowStart}–${pickupForm.windowEnd || '17:00'}` : ''}. Watch for a new result above the Request Pickup button.`,
                                         steps: [{ label: 'Re-attempt pickup booking', status: 'pending' }],
                                       });
+                                      setEditingPickupSchedule(false);
                                       handleRequestPickup(selectedShip.id);
                                     }}
                                     className="px-3 py-1.5 bg-emerald-600 text-white font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-emerald-700 transition-colors flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -6057,15 +6104,27 @@ export default function ShippingCenter() {
                                     Retry Booking
                                   </button>
                                   {pr.providerPickupId && (
-                                    <button
-                                      type="button"
-                                      onClick={() => handleCancelPickup(selectedShip.id)}
-                                      className="px-3 py-1.5 bg-white border border-rose-200 text-rose-700 font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-rose-50 transition-colors flex items-center gap-1"
-                                      title="Only needed if you do not plan to retry — cancels the orphan provider pickup record at the carrier."
-                                    >
-                                      <span className="material-symbols-outlined text-sm">close_small</span>
-                                      Cancel Orphan
-                                    </button>
+                                    <>
+                                      {/* Phase 2.10.3 — single coherent cancellation model for orphan
+                                          state: reason input lives RIGHT NEXT to the Cancel Orphan
+                                          button, not in a duplicate bottom block. */}
+                                      <input
+                                        type="text"
+                                        value={pickupCancelReason}
+                                        onChange={e => setPickupCancelReason(e.target.value)}
+                                        placeholder="Cancellation reason (optional)"
+                                        className="flex-1 min-w-[180px] px-2 py-1.5 border border-rose-200 rounded-lg text-[11px] bg-white"
+                                      />
+                                      <button
+                                        type="button"
+                                        onClick={() => handleCancelPickup(selectedShip.id)}
+                                        className="px-3 py-1.5 bg-white border border-rose-200 text-rose-700 font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-rose-50 transition-colors flex items-center gap-1"
+                                        title="Only needed if you do not plan to retry — cancels the orphan provider pickup record at the carrier."
+                                      >
+                                        <span className="material-symbols-outlined text-sm">close_small</span>
+                                        Cancel Orphan Pickup
+                                      </button>
+                                    </>
                                   )}
                                 </div>
                               </div>
@@ -6164,28 +6223,59 @@ export default function ShippingCenter() {
                               </ul>
                             </div>
                           )}
-                          <div>
-                            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Pickup Date{reqMark(reqWindow)}</label>
-                            <input
-                              id="pickup-date-input"
-                              type="date"
-                              value={pickupForm.date}
-                              onChange={e => setPickupForm({ ...pickupForm, date: e.target.value })}
-                              className={`w-full mt-1 px-3 py-2 border rounded-xl text-xs transition-all ${
-                                flashDateInput
-                                  ? 'border-primary ring-4 ring-primary/30 bg-primary/5 shadow-lg shadow-primary/20 animate-pulse'
-                                  : 'border-slate-200'
-                              }`}
-                            />
-                          </div>
-                          <div className="grid grid-cols-2 gap-2">
-                            <div>
-                              <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Earliest{reqMark(reqWindow)}</label>
-                              <input type="time" value={pickupForm.windowStart} onChange={e => setPickupForm({ ...pickupForm, windowStart: e.target.value })} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs" />
-                            </div>
-                            <div>
-                              <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Latest{reqMark(reqWindow)}</label>
-                              <input type="time" value={pickupForm.windowEnd} onChange={e => setPickupForm({ ...pickupForm, windowEnd: e.target.value })} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-xl text-xs" />
+                          <div
+                            id="pickup-schedule-edit-card"
+                            className={`col-span-2 transition-all ${
+                              editingPickupSchedule
+                                ? 'rounded-2xl border-2 border-primary bg-primary/5 p-4 shadow-lg shadow-primary/10 ring-4 ring-primary/20'
+                                : ''
+                            }`}
+                          >
+                            {editingPickupSchedule && (
+                              <div className="flex items-center justify-between mb-3 pb-2 border-b border-primary/30">
+                                <div className="flex items-center gap-2">
+                                  <span className="material-symbols-outlined text-primary text-base animate-pulse">edit_calendar</span>
+                                  <p className="text-[10px] font-black text-primary uppercase tracking-widest">Editing pickup date / window</p>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingPickupSchedule(false)}
+                                  className="text-[10px] font-black text-slate-600 uppercase tracking-widest bg-white border border-slate-300 rounded-lg px-2 py-1 hover:bg-slate-50"
+                                >
+                                  Done editing
+                                </button>
+                              </div>
+                            )}
+                            {editingPickupSchedule && (
+                              <p className="text-[11px] text-slate-600 mb-3">Change the date or window below, then click <span className="font-black">Retry Booking</span> in the failure panel — or press Done editing to leave this mode.</p>
+                            )}
+                            <div className="space-y-2">
+                              <div>
+                                <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Pickup Date{reqMark(reqWindow)}</label>
+                                <input
+                                  id="pickup-date-input"
+                                  type="date"
+                                  value={pickupForm.date}
+                                  onChange={e => setPickupForm({ ...pickupForm, date: e.target.value })}
+                                  className={`w-full mt-1 px-3 py-2 border rounded-xl text-xs transition-all ${
+                                    flashDateInput
+                                      ? 'border-primary ring-4 ring-primary/30 bg-primary/5 shadow-lg shadow-primary/20 animate-pulse'
+                                      : editingPickupSchedule
+                                      ? 'border-primary/50 bg-white'
+                                      : 'border-slate-200'
+                                  }`}
+                                />
+                              </div>
+                              <div className="grid grid-cols-2 gap-2">
+                                <div>
+                                  <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Earliest{reqMark(reqWindow)}</label>
+                                  <input type="time" value={pickupForm.windowStart} onChange={e => setPickupForm({ ...pickupForm, windowStart: e.target.value })} className={`w-full mt-1 px-3 py-2 border rounded-xl text-xs ${editingPickupSchedule ? 'border-primary/50 bg-white' : 'border-slate-200'}`} />
+                                </div>
+                                <div>
+                                  <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Latest{reqMark(reqWindow)}</label>
+                                  <input type="time" value={pickupForm.windowEnd} onChange={e => setPickupForm({ ...pickupForm, windowEnd: e.target.value })} className={`w-full mt-1 px-3 py-2 border rounded-xl text-xs ${editingPickupSchedule ? 'border-primary/50 bg-white' : 'border-slate-200'}`} />
+                                </div>
+                              </div>
                             </div>
                           </div>
                           <div id="pickup-contact-fields">
@@ -6334,16 +6424,19 @@ export default function ShippingCenter() {
                                             <button
                                               type="button"
                                               onClick={() => {
+                                                setEditingPickupSchedule(true);
+                                                const card = document.getElementById('pickup-schedule-edit-card');
                                                 const el = document.getElementById('pickup-date-input') as HTMLInputElement | null;
-                                                if (el) {
-                                                  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                                                  setFlashDateInput(true);
-                                                  setTimeout(() => { setFlashDateInput(false); }, 2500);
-                                                  setTimeout(() => {
+                                                if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                                else if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                                setFlashDateInput(true);
+                                                setTimeout(() => { setFlashDateInput(false); }, 2500);
+                                                setTimeout(() => {
+                                                  if (el) {
                                                     try { el.focus(); } catch { /* noop */ }
                                                     try { el.showPicker?.(); } catch { /* showPicker may throw outside user gesture */ }
-                                                  }, 350);
-                                                }
+                                                  }
+                                                }, 400);
                                               }}
                                               className="px-3 py-1.5 bg-primary text-white font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-primary/90 transition-colors flex items-center gap-1"
                                             >
@@ -6354,12 +6447,37 @@ export default function ShippingCenter() {
                                               type="button"
                                               disabled={pickupSubmitting}
                                               onClick={() => {
+                                                // Phase 2.10.3 — detect no-change re-submission and tell the operator.
+                                                if (
+                                                  lastPickupAttemptSnapshot &&
+                                                  lastPickupAttemptSnapshot.date === pickupForm.date &&
+                                                  lastPickupAttemptSnapshot.windowStart === pickupForm.windowStart &&
+                                                  lastPickupAttemptSnapshot.windowEnd === pickupForm.windowEnd
+                                                ) {
+                                                  setEditingPickupSchedule(true);
+                                                  setPickupAttemptResult({
+                                                    kind: 'info',
+                                                    title: 'No changes since last attempt',
+                                                    detail: `The date (${pickupForm.date}) and window (${pickupForm.windowStart || '09:00'}–${pickupForm.windowEnd || '17:00'}) are identical to the previous attempt that just failed. Change the date or window in the highlighted editor above, then click Retry Booking again. The same payload will produce the same result at the carrier.`,
+                                                    steps: [
+                                                      { label: 'Detect schedule change', status: 'fail', note: 'no change vs last attempt' },
+                                                      { label: 'Retry skipped', status: 'skip' },
+                                                    ],
+                                                    code: 'RETRY_NO_CHANGE',
+                                                  });
+                                                  const card = document.getElementById('pickup-schedule-edit-card');
+                                                  if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                                  setFlashDateInput(true);
+                                                  setTimeout(() => { setFlashDateInput(false); }, 2500);
+                                                  return;
+                                                }
                                                 setPickupAttemptResult({
                                                   kind: 'info',
                                                   title: 'Retrying pickup booking…',
-                                                  detail: `Re-sending pickup request to ${activeProviderId} with the current date/window. Watch for a new result here.`,
+                                                  detail: `Re-sending pickup request to ${activeProviderId} with date ${pickupForm.date}${pickupForm.windowStart ? `, window ${pickupForm.windowStart}–${pickupForm.windowEnd || '17:00'}` : ''}. Watch for a new result here.`,
                                                   steps: [{ label: 'Re-attempt pickup booking', status: 'pending' }],
                                                 });
+                                                setEditingPickupSchedule(false);
                                                 handleRequestPickup(selectedShip.id);
                                               }}
                                               className="px-3 py-1.5 bg-emerald-600 text-white font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-emerald-700 transition-colors flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -6525,18 +6643,18 @@ export default function ShippingCenter() {
                       {/* Phase 2.10.2 — single cancellation action model.
                           For `partial_failed` (orphan) state, the cancel CTA
                           lives inside the partial_failed banner above as
-                          "Cancel Orphan", so this generic bottom button is
-                          intentionally hidden to avoid the duplicate
-                          Cancel Orphan / Cancel Pickup pair QA flagged. The
-                          cancellation REASON field still lives here so the
-                          operator can fill it before clicking Cancel Orphan
-                          above; it's labeled accordingly. */}
-                      {pickupCancellable && canCancelPickup && !isWriteBlocked && (
+                          "Cancel Orphan Pickup" alongside its own reason
+                          input — see Phase 2.10.3 single-cancellation
+                          model below. */}
+                      {/* Phase 2.10.3 — single coherent cancellation model:
+                          when status is partial_failed (orphan pickup record at
+                          carrier), the entire bottom cancel block is hidden.
+                          Cancel-orphan + reason input both live inline next to
+                          each other inside the partial_failed banner above. */}
+                      {pickupCancellable && canCancelPickup && !isWriteBlocked && pr?.status !== 'partial_failed' && (
                         <div className="mt-4 pt-4 border-t border-slate-100 space-y-2">
-                          <input type="text" value={pickupCancelReason} onChange={e => setPickupCancelReason(e.target.value)} placeholder={pr?.status === 'partial_failed' ? 'Cancellation reason for "Cancel Orphan" above (optional)' : 'Cancellation reason (optional)'} className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs" />
-                          {pr?.status !== 'partial_failed' && (
-                            <button onClick={() => handleCancelPickup(selectedShip.id)} className="px-4 py-2.5 bg-rose-50 text-rose-600 font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-rose-100 transition-all">Cancel Pickup</button>
-                          )}
+                          <input type="text" value={pickupCancelReason} onChange={e => setPickupCancelReason(e.target.value)} placeholder="Cancellation reason (optional)" className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs" />
+                          <button onClick={() => handleCancelPickup(selectedShip.id)} className="px-4 py-2.5 bg-rose-50 text-rose-600 font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-rose-100 transition-all">Cancel Pickup</button>
                         </div>
                       )}
                     </div>
