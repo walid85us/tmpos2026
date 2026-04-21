@@ -501,6 +501,27 @@ export default function ShippingCenter() {
   //   'carrier-cancellable' — carrier accepted cancel; orphan is cleared
   //   'not-cancellable'     — carrier rejected cancel for state reasons; only local dismiss is valid
   const [orphanCancelVerdict, setOrphanCancelVerdict] = useState<Record<string, 'unknown' | 'carrier-cancellable' | 'not-cancellable'>>({});
+  // Phase 2.10.8 — terminal local-resolution registry for orphan provider
+  // pickups whose carrier-side state does not allow cancellation. Once an
+  // operator confirms Dismiss Orphan Locally for a (shipmentId,
+  // providerPickupId) pair, that key is added here PERMANENTLY for the
+  // session. From that moment on:
+  //   - the active failed-recovery surface for that orphan does not
+  //     reappear (pr flips to `cancelled` AND we suppress any lingering
+  //     pickupAttemptResult that still references that provider id)
+  //   - carrier cancel is never re-offered for that same orphan
+  //   - the cancelled-pr banner shows a distinct "Locally resolved
+  //     (carrier non-cancellable)" audit badge with the
+  //     `orphan-resolve: 2.10.8` proof marker, so the timeline still has
+  //     a truthful audit trail without re-presenting an active recovery
+  //     loop.
+  // The key matches the verdict key shape: `${shipmentId}:${providerPickupId}`.
+  const [resolvedOrphans, setResolvedOrphans] = useState<Set<string>>(new Set());
+  // Phase 2.10.8 — fixed prefix written into PickupRequest.cancellationReason
+  // by `dismissOrphanLocally`. Lets the cancelled-banner detect a local
+  // resolution and render the resolved-audit badge, distinct from a real
+  // carrier cancellation.
+  const LOCAL_DISMISS_REASON_PREFIX = '[locally-resolved · carrier non-cancellable]';
   // Inline structured outcome of the last pickup attempt — rendered right
   // above the Request button so the operator always sees a truthful result
   // (success, partial, or failure) without having to scroll back up to the
@@ -3314,17 +3335,24 @@ export default function ShippingCenter() {
     const ship = shipments.find(s => s.id === shipmentId);
     if (!ship?.pickupRequest) return;
     const now = new Date().toISOString();
-    const reason = pickupCancelReason.trim()
-      || 'Dismissed locally — provider reported pickup state no longer accepts carrier cancellation.';
-    const eventDescription = `Orphan provider pickup ${ship.pickupRequest.providerPickupId || ship.pickupRequest.id} dismissed LOCALLY (no carrier call). Reason: ${reason}`;
-    console.log(`[recovery 2.10.7] dismissOrphanLocally for ${shipmentId} (pid=${ship.pickupRequest.providerPickupId}) — ${reason}`);
+    const operatorReason = pickupCancelReason.trim();
+    // Phase 2.10.8 — embed the LOCAL_DISMISS_REASON_PREFIX so the
+    // cancelled banner can reliably detect a local-resolution and show
+    // the resolved-audit badge instead of a generic carrier-cancel
+    // history line.
+    const fullReason = operatorReason
+      ? `${LOCAL_DISMISS_REASON_PREFIX} — ${operatorReason}`
+      : `${LOCAL_DISMISS_REASON_PREFIX} — Dismissed locally; provider reported pickup state no longer accepts carrier cancellation. The provider was NOT called.`;
+    const orphanPid = ship.pickupRequest.providerPickupId || ship.pickupRequest.id;
+    const eventDescription = `Orphan provider pickup ${orphanPid} dismissed LOCALLY (no carrier call). Local-resolution reason: ${fullReason}`;
+    console.log(`[recovery 2.10.8] dismissOrphanLocally TERMINAL for ${shipmentId} (pid=${ship.pickupRequest.providerPickupId}) — registering resolvedOrphans key, clearing pickupAttemptResult + edit/retry state. Reason: ${fullReason}`);
     updateShipment(shipmentId, {
       pickupRequest: {
         ...ship.pickupRequest,
         status: 'cancelled',
         cancelledAt: now,
         cancelledBy: 'current_operator',
-        cancellationReason: reason,
+        cancellationReason: fullReason,
       },
       pickupInfo: { ...(ship.pickupInfo || {}), pickupRequested: false },
       events: [
@@ -3333,8 +3361,22 @@ export default function ShippingCenter() {
       ],
       updatedAt: now,
     });
+    // Phase 2.10.8 — terminal local-resolution. The active failed
+    // recovery surface for this orphan must NEVER reappear after this
+    // point, even if a stale pickupAttemptResult still references the
+    // same providerPickupId.
+    if (ship.pickupRequest.providerPickupId) {
+      const key = `${shipmentId}:${ship.pickupRequest.providerPickupId}`;
+      setResolvedOrphans(prev => { const next = new Set(prev); next.add(key); return next; });
+    }
+    setPickupAttemptResult(null);
+    setEditingPickupSchedule(false);
+    setRetryAttemptCount(0);
+    setLastRetryAt(null);
+    setLastPickupAttemptSnapshot(null);
+    setSeededPartialFailedFor(null);
     setPickupCancelReason('');
-    setProviderSuccess('Orphan pickup dismissed locally. The carrier was NOT called because its current state does not accept cancellation. You can now request a fresh pickup.');
+    setProviderSuccess('Orphan pickup dismissed locally — recovery loop closed. The carrier was NOT called (its state does not accept cancellation). The orphan record is preserved as audit history; you can now request a fresh pickup.');
   }
 
   function getProviderPrerequisiteMessage(): string | null {
@@ -6151,7 +6193,7 @@ export default function ShippingCenter() {
                               banner here — that was the source of the
                               "Booked live + Booking failed" contradiction
                               QA reported. */}
-                          {pr.status === 'partial_failed' && (
+                          {pr.status === 'partial_failed' && !(pr.providerPickupId && resolvedOrphans.has(`${selectedShip.id}:${pr.providerPickupId}`)) && (
                             <div className="bg-amber-100 border border-amber-300 rounded-lg p-2 flex items-start gap-2">
                               <span className="material-symbols-outlined text-amber-600 text-sm mt-0.5">error</span>
                               <div className="text-[11px] text-amber-900 flex-1 min-w-0">
@@ -6358,6 +6400,29 @@ export default function ShippingCenter() {
                             <p className="text-sm font-black text-slate-800">{pr.carrier} pickup · <span className="capitalize">{pr.status === 'partial_failed' ? 'Booking Failed' : pr.status}</span></p>
                             {pr.confirmationNumber && <span className="text-[10px] font-mono font-black text-slate-700 bg-white px-2 py-1 rounded-lg border border-slate-200 select-all">{pr.confirmationNumber}</span>}
                           </div>
+                          {/* Phase 2.10.8 — when this cancelled pickup was closed via
+                              Dismiss Orphan Locally (carrier was NOT called because its
+                              state did not allow cancellation), surface a distinct
+                              audit badge so the operator can tell a local-resolution
+                              apart from a real carrier cancellation. The
+                              `orphan-resolve: 2.10.8` chip is the proof marker that the
+                              terminal-local-resolution path was taken. */}
+                          {pr.status === 'cancelled' && typeof pr.cancellationReason === 'string' && pr.cancellationReason.startsWith(LOCAL_DISMISS_REASON_PREFIX) && (
+                            <div className="mt-1 bg-rose-50 border border-rose-200 rounded-lg p-2 flex items-start gap-2">
+                              <span className="material-symbols-outlined text-rose-500 text-sm mt-0.5">verified</span>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span className="text-[11px] font-black text-rose-800">Locally Resolved (carrier non-cancellable)</span>
+                                  <span className="text-[9px] font-mono font-black text-rose-700 bg-white border border-rose-300 px-1.5 py-0.5 rounded">orphan-resolve: 2.10.8</span>
+                                  {pr.providerPickupId && resolvedOrphans.has(`${selectedShip.id}:${pr.providerPickupId}`) && (
+                                    <span className="text-[9px] font-mono font-black text-slate-600 bg-white border border-slate-200 px-1.5 py-0.5 rounded">resolved-orphan: pinned</span>
+                                  )}
+                                </div>
+                                <p className="text-[11px] text-rose-900/90 mt-1">The provider was <span className="font-black">NOT</span> called. The orphan provider pickup record is preserved here as audit history; the active recovery surface has been retired so it will not loop. You can request a fresh pickup below.</p>
+                                <p className="text-[10px] text-rose-700/80 mt-1 italic break-words">{pr.cancellationReason}</p>
+                              </div>
+                            </div>
+                          )}
                           <p className="text-xs text-slate-600">Date: <span className="font-bold">{pr.requestedDate}</span>{pr.windowStart && pr.windowEnd && <span> · Window <span className="font-bold">{pr.windowStart}–{pr.windowEnd}</span></span>}</p>
                           <p className="text-xs text-slate-500">From: {pr.pickupAddress.line1}, {pr.pickupAddress.city}, {pr.pickupAddress.state} {pr.pickupAddress.postalCode}</p>
                           {pr.contactName && <p className="text-[11px] text-slate-500">Contact: {pr.contactName}{pr.contactPhone ? ` · ${pr.contactPhone}` : ''}</p>}
@@ -6558,7 +6623,16 @@ export default function ShippingCenter() {
                               duplicate failed-state surface QA reported. Other states
                               (no pr, success, terminated) continue to render this
                               panel as before. */}
-                          {pickupAttemptResult && pr?.status !== 'partial_failed' && (() => {
+                          {/* Phase 2.10.8 — also suppress when this attempt result references
+                              an orphan that has been terminally locally-resolved. Without this
+                              guard, the lower panel re-rendered after Dismiss Orphan Locally
+                              flipped pr→cancelled (because the partial_failed suppression
+                              stopped applying), recreating an active recovery block with
+                              Edit/Retry/Cancel for the same orphan and looping the operator. */}
+                          {pickupAttemptResult
+                            && pr?.status !== 'partial_failed'
+                            && !(pickupAttemptResult.providerPickupId && resolvedOrphans.has(`${selectedShip.id}:${pickupAttemptResult.providerPickupId}`))
+                            && (() => {
                             const tone = pickupAttemptResult.kind === 'success'
                               ? { bg: 'bg-emerald-50', border: 'border-emerald-200', icon: 'check_circle', iconColor: 'text-emerald-600', titleColor: 'text-emerald-800', textColor: 'text-emerald-700' }
                               : pickupAttemptResult.kind === 'partial'

@@ -1,0 +1,172 @@
+Shipping Phase 2.10.8 — Break the Orphan Cancel/Dismiss Loop With a Terminal Local-Resolution State
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated bug-fix pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen unrelated shipping workstreams.
+Fix only the orphan cancel/dismiss loop in failed/unconfirmed pickup recovery.
+
+Goal:
+The current orphan-pickup recovery is still broken because the operator can enter a loop:
+- click Cancel Orphan Pickup
+- confirm in modal
+- provider returns that cancellation is not allowed for the current pickup state
+- app offers Dismiss Orphan Locally
+- after dismiss, another buy-failed/orphan recovery block appears again
+- cancel/dismiss becomes a loop or dead end
+
+This is not acceptable.
+This pass must introduce a true terminal local-resolution state for non-cancellable orphan pickups.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Node/Express carrier-integration engineer
+- Enterprise shipping systems architect
+- Senior USPS / UPS / FedEx / EasyPost operations expert with 20+ years of experience in pickup lifecycle states and cancellation rules
+- Root-cause debugging specialist
+- QA gatekeeper who must eliminate the orphan loop completely
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- USPS working behavior
+- truthful FedEx success/failure behavior
+- UPS unsupported-service early blocking
+- current unified failed recovery surface
+- current pickup forecast + fee-class model
+- current exact pickup-rate selection flow
+- current no-rates vs partial_failed truthfulness
+- current label-lock and pickup-override behavior
+- current two-stage address readiness model
+- current shipment-cancel dependency rule
+- current provider-truthfulness messaging
+
+==================================================
+CURRENT QA SOURCE OF TRUTH
+==================================================
+
+Observed runtime issue:
+1) Operator clicks Cancel Orphan Pickup
+2) Confirmation modal appears
+3) Provider responds:
+   "Invalid request, the pickup's current status does not allow this operation."
+4) App instructs operator to use Dismiss Orphan Locally
+5) After local dismiss, another buy-failed/orphan recovery area appears again
+6) Clicking cancel again loops or does nothing
+
+This proves:
+- the UI still has no terminal local-resolution state for non-cancellable orphan pickups
+- the same failed provider pickup can re-enter recovery after local dismiss
+- the operator is trapped in a loop
+
+==================================================
+NON-NEGOTIABLE REQUIRED FIXES
+==================================================
+
+1) DEFINE A TRUE TERMINAL LOCAL-RESOLUTION STATE
+Required:
+- add a terminal local-only state for a failed orphan pickup that cannot be cancelled at the carrier
+- examples of acceptable internal meaning:
+  - orphan_dismissed_locally
+  - provider_non_cancellable_locally_resolved
+- once this state is set for a given failed providerPickupId, the active recovery panel for that orphan must not reappear again
+
+2) DISMISS ORPHAN LOCALLY MUST BE ONE-WAY
+Required:
+- when provider cancellation is rejected because the pickup state is not cancellable:
+  - offer Dismiss Orphan Locally
+- when operator confirms local dismiss:
+  - resolve the orphan locally
+  - hide the active failed recovery UI for that orphan
+  - do not show Edit / Retry / Cancel again for that same orphan
+  - do not recreate another buy-failed/orphan block for the same providerPickupId
+
+3) DO NOT OFFER CARRIER CANCEL AFTER PROVIDER SAYS IT IS NOT ALLOWED
+Required:
+- if provider explicitly says current pickup state does not allow cancellation, the app must stop presenting carrier cancel for that same orphan
+- do not loop the operator back into a cancel action that will predictably fail again
+
+4) KEEP AUDITABILITY WITHOUT KEEPING THE LOOP
+Required:
+- after local dismiss, keep an audit/history record if needed
+- but present it as resolved history, not an active recovery problem
+- acceptable examples:
+  - a collapsed audit note
+  - a timeline event
+  - a resolved badge
+- not an active error block with Edit / Retry / Cancel again
+
+5) ADD CLEAR OPERATOR EXPLANATION
+Required:
+- explain in plain language:
+  - carrier cancellation is no longer allowed for this provider pickup state
+  - the app can dismiss the orphan locally so work can continue
+  - local dismiss does not mean the carrier confirmed cancellation; it means the app has closed the unresolved recovery loop locally
+- keep this truthful and concise
+
+6) ADD A TEMPORARY PROOF MARKER FOR THIS PASS
+Required:
+- add a small visible marker such as:
+  orphan-resolve: 2.10.8
+- show it when the new terminal local-resolution path is active
+- QA must be able to verify that the new path is live
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- if provider cancellation is invalid, the app offers local dismiss instead of looping
+- local dismiss is terminal for that orphan in the active UI
+- the same failed orphan recovery block does not reappear again for that providerPickupId
+- any remaining record is audit/history only, not an active recovery loop
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Trace why the same providerPickupId can re-enter active orphan recovery after local dismiss
+2) Add a terminal local-resolution state for non-cancellable orphan pickups
+3) Make Dismiss Orphan Locally one-way and final in the active UI
+4) Prevent carrier-cancel from being re-offered for that same non-cancellable orphan
+5) Add the temporary 2.10.8 proof marker
+6) Re-test USPS/FedEx/UPS non-regression
+7) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- root cause of the orphan cancel/dismiss loop
+- the terminal local-resolution model for non-cancellable orphan pickups
+- what remains visible after local dismiss (history/audit only)
+- the operator-facing explanation for non-cancellable provider pickups
+- the temporary orphan-resolve: 2.10.8 proof marker
+- confirmation that USPS/FedEx/UPS truthfulness was preserved
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Orphan Loop Root-Cause Findings
+2. Terminal Local-Resolution State Fix
+3. Dismiss-Orphan One-Way Flow Fix
+4. Operator Explanation Fix
+5. Temporary Proof Marker Added
+6. Files Changed
+7. Documentation Updated
+8. Non-Regression Notes
