@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import type { Shipment, ShipmentSourceType, PickupRequestStatus } from '../../types';
 
 /**
- * Phase 2 — Carrier Analytics Foundation
+ * Phase 2 — Carrier Analytics Foundation (post-correction pass)
  *
  * This is a deterministic, read-only analytics surface inside Shipping
  * Center. All metrics are derived from already-stored shipment / pickup /
@@ -32,12 +32,33 @@ import type { Shipment, ShipmentSourceType, PickupRequestStatus } from '../../ty
  *                      first event with status === 'Delivered'
  *                       .timestamp; otherwise undefined.
  *   isReturn         = shipment.returnInfo?.isReturn === true.
- *   isProviderMode   = shipment.shipmentMode === 'provider'.
+ *   mode             = deriveMode(shipment)  ← see below; this matches
+ *                       getShipmentMode() in ShippingCenter so analytics
+ *                       and operational behavior agree on what "provider"
+ *                       and "manual" mean. Stale `shipmentMode` UI-only
+ *                       fields are NOT used as the source of truth.
  *   carrierLabel     = shipment.carrier || 'Unknown'.
  *   serviceLabel     = shipment.serviceLevel || 'Unknown'.
  *   providerLabel    = shipment.providerShipmentId
  *                       ? (derived first segment, see resolveProviderLabel)
  *                       : 'manual'.
+ *
+ * Mode derivation (Phase 2 correction — Part A):
+ *   deriveMode(s) = 'provider' if s.selectedRate exists,
+ *                   'manual'   if s.carrier && s.serviceLevel,
+ *                   'provider' otherwise (matches getShipmentMode() in
+ *                   ShippingCenter; this is the SINGLE source of truth used
+ *                   by both operational behavior and analytics so the Mode
+ *                   filter cannot drift from the rest of the app).
+ *
+ * Status bucket derivation (Phase 2 correction — Part B):
+ *   The shipment lifecycle treats Dispatched and In Transit as DISTINCT
+ *   states. Analytics MUST NOT silently absorb Dispatched into In Transit:
+ *     dispatchedCount  = count where shipment.status === 'Dispatched'
+ *     inTransitCount   = count where shipment.status === 'In Transit'
+ *     deliveredCount   = count where derived deliveredAt exists
+ *     exceptionCount   = count where shipment.status === 'Exception'
+ *     cancelledCount   = count where shipment.status === 'Cancelled'
  *
  * Filter window:
  *   We filter shipments by createdAt within the active date range. This
@@ -46,8 +67,8 @@ import type { Shipment, ShipmentSourceType, PickupRequestStatus } from '../../ty
  *
  * Counts (always truthful — explicit definitions):
  *   shipmentCount             = filtered.length
- *   providerShipmentCount     = count where shipmentMode === 'provider'
- *   manualShipmentCount       = count where shipmentMode === 'manual'
+ *   providerShipmentCount     = count where deriveMode(s) === 'provider'
+ *   manualShipmentCount       = count where deriveMode(s) === 'manual'
  *   labelPurchasedCount       = count where any event.status === 'Label Created'
  *                                (proxy for "label exists" — labels can also
  *                                exist without an event row in early
@@ -67,10 +88,23 @@ import type { Shipment, ShipmentSourceType, PickupRequestStatus } from '../../ty
  *   pickupFailedCount         = count where pr.status in
  *                                ['failed','rejected','partial_failed']
  *   deliveredCount            = count where derived deliveredAt exists
- *   inTransitCount            = count where shipment.status in
- *                                ['Dispatched','In Transit']
+ *   dispatchedCount           = count where shipment.status === 'Dispatched'
+ *                                (Phase 2 correction — Part B: Dispatched is
+ *                                its own bucket; we DO NOT roll it into
+ *                                In Transit)
+ *   inTransitCount            = count where shipment.status === 'In Transit'
  *   exceptionCount            = count where shipment.status === 'Exception'
  *   cancelledShipmentCount    = count where shipment.status === 'Cancelled'
+ *
+ * Provider-connected analytics (Phase 2 correction — Part D):
+ *   When an active shipping provider is configured (activeProviderId !== null)
+ *   we render an additional read-only block summarizing provider-backed
+ *   shipments inside the cohort. These metrics are derived from the SAME
+ *   already-recorded shipment / pickup / event data — we do not poll a live
+ *   carrier dashboard, do not invent SLA grades, and do not extrapolate
+ *   coverage parity across providers. If provider-backed coverage is partial
+ *   we surface that as an explicit caveat. The block hides entirely when
+ *   no provider is configured for the store.
  *
  * Cost metrics (only when `canViewCosts === true`):
  *   shipmentsWithCost         = count where typeof shippingCost === 'number'
@@ -107,11 +141,20 @@ import type { Shipment, ShipmentSourceType, PickupRequestStatus } from '../../ty
  *   - lane / route analytics
  *   - automation-rule recommendations
  *   - exception-reporting workflows
- *   - customs-docs analytics
- *   - insurance-rules analytics
- *   These are deferred. The foundation deliberately exposes deterministic
- *   counts + coverage so future scorecards can build on top without
- *   rewriting the metric layer.
+ *
+ * Customs Docs and Insurance Rules are NOT implemented in this pass either,
+ * but per the Phase 2 correction guidance they are no longer "indefinitely
+ * deferred" — they are the next queued shipping improvements after this
+ * correction pass. When implemented they MUST be added coherently to:
+ *   - System Owner Plans & Features (as plan-gated features), and
+ *   - Store Owner Permissions Matrix (as sub-permissions),
+ * matching the gating discipline used here for Carrier Analytics, Pickup
+ * Requests, Service Points / Carrier Locators, and Shipping Provider
+ * Configuration.
+ *
+ * The broader Addon governance / archived-addon / tenant Features tab
+ * paid-override redesign is intentionally OUT OF SCOPE for this correction
+ * pass. It is a separate commercial-platform workstream.
  */
 
 type DateRangePreset = '7d' | '30d' | '90d' | 'all' | 'custom';
@@ -125,6 +168,40 @@ interface CarrierAnalyticsProps {
   planAllowsCarrierAnalytics: boolean;
   /** When false the surface renders a permission-gated state. */
   hasViewPermission: boolean;
+  /**
+   * Phase 2 correction — Part C. Pickup analytics block visibility is gated
+   * by BOTH the Pickup Requests plan feature and the View Pickup Analytics
+   * sub-permission. When either is false, the block renders a coherent
+   * locked / not-included state instead of disappearing silently.
+   */
+  planAllowsPickupRequests: boolean;
+  canViewPickupAnalytics: boolean;
+  /**
+   * Phase 2 correction — Part D. When non-null, an aggregator provider is
+   * configured for the store. We use this to render an additional truthful
+   * provider-connected analytics block summarizing provider-backed shipments
+   * inside the cohort. We never invent live carrier dashboards; the block is
+   * derived from the same already-recorded fields used by the rest of the
+   * surface.
+   */
+  activeProviderId: string | null;
+}
+
+/**
+ * Phase 2 correction — Part A. Single source of truth for shipment mode,
+ * matching getShipmentMode() in ShippingCenter so the Mode filter cannot
+ * drift from operational behavior.
+ *
+ * Provider mode is established by the operator selecting a live carrier
+ * rate (selectedRate). Manual mode is established when carrier and
+ * serviceLevel are both populated without a live rate selection. The
+ * stored shipmentMode field is intentionally NOT consulted here — it is a
+ * display hint and can be stale across legacy records.
+ */
+function deriveMode(s: Shipment): 'provider' | 'manual' {
+  if ((s as any).selectedRate) return 'provider';
+  if (s.carrier && s.serviceLevel) return 'manual';
+  return 'provider';
 }
 
 function ymd(d: Date): string {
@@ -168,7 +245,7 @@ function deriveDeliveredAt(s: Shipment): number | null {
 }
 
 function resolveProviderLabel(s: Shipment): string {
-  if (s.shipmentMode !== 'provider') return 'manual';
+  if (deriveMode(s) !== 'provider') return 'manual';
   const id = s.providerShipmentId || '';
   // EasyPost ids start with `shp_`, Shippo with `shippo_`, ShipStation numeric, etc.
   if (id.startsWith('shp_')) return 'easypost';
@@ -237,7 +314,7 @@ function coverageTone(num: number, den: number): 'good' | 'partial' | 'poor' {
   return 'poor';
 }
 
-export function CarrierAnalytics({ shipments, canViewCosts, planAllowsCarrierAnalytics, hasViewPermission }: CarrierAnalyticsProps) {
+export function CarrierAnalytics({ shipments, canViewCosts, planAllowsCarrierAnalytics, hasViewPermission, planAllowsPickupRequests, canViewPickupAnalytics, activeProviderId }: CarrierAnalyticsProps) {
   // ------ Filter state ------
   const [datePreset, setDatePreset] = useState<DateRangePreset>('30d');
   const [customFrom, setCustomFrom] = useState('');
@@ -280,7 +357,10 @@ export function CarrierAnalytics({ shipments, canViewCosts, planAllowsCarrierAna
       const created = parseTs(s.createdAt);
       if (fromMs != null && (created == null || created < fromMs)) return false;
       if (toMs != null && (created == null || created > toMs)) return false;
-      if (modeFilter !== 'all' && s.shipmentMode !== modeFilter) return false;
+      // Phase 2 correction — Part A. Mode filter uses derived mode, not the
+      // stale UI-only `shipmentMode` field, so analytics agrees with
+      // ShippingCenter's getShipmentMode().
+      if (modeFilter !== 'all' && deriveMode(s) !== modeFilter) return false;
       if (providerFilter !== 'all' && resolveProviderLabel(s) !== providerFilter) return false;
       const carrierLabel = (s.carrier || '').trim() || 'Unknown';
       if (carrierFilter !== 'all' && carrierLabel !== carrierFilter) return false;
@@ -305,6 +385,9 @@ export function CarrierAnalytics({ shipments, canViewCosts, planAllowsCarrierAna
       pickupCancelledCount: 0,
       pickupFailedCount: 0,
       deliveredCount: 0,
+      // Phase 2 correction — Part B. Dispatched and In Transit are
+      // SEPARATE buckets. We never collapse Dispatched into In Transit.
+      dispatchedCount: 0,
       inTransitCount: 0,
       exceptionCount: 0,
       cancelledShipmentCount: 0,
@@ -319,17 +402,34 @@ export function CarrierAnalytics({ shipments, canViewCosts, planAllowsCarrierAna
       carrierDist: new Map<string, number>(),
       serviceDist: new Map<string, number>(),
       pickupBreakdown: new Map<PickupRequestStatus, number>(),
+      // Phase 2 correction — Part D. Provider-backed sub-counts derived from
+      // the cohort. We define "provider-backed" deterministically as
+      // deriveMode(s) === 'provider'. These are surfaced only when an active
+      // provider is configured; they never claim coverage we don't have.
+      providerBackedDelivered: 0,
+      providerBackedDispatched: 0,
+      providerBackedInTransit: 0,
+      providerBackedPickupConfirmed: 0,
+      providerBackedLabelsPurchased: 0,
     };
     for (const s of filtered) {
-      if (s.shipmentMode === 'provider') out.providerShipmentCount++;
-      else if (s.shipmentMode === 'manual') out.manualShipmentCount++;
+      const sMode = deriveMode(s);
+      if (sMode === 'provider') out.providerShipmentCount++;
+      else out.manualShipmentCount++;
       const labelTs = deriveLabelCreatedAt(s);
-      if (labelTs != null) out.labelPurchasedCount++;
+      if (labelTs != null) {
+        out.labelPurchasedCount++;
+        if (sMode === 'provider') out.providerBackedLabelsPurchased++;
+      }
       const pr = s.pickupRequest;
       if (pr) {
         out.pickupRequestedCount++;
         const isLive = pr.source === 'live_provider';
-        if ((pr.status === 'confirmed' || pr.status === 'completed') && isLive) out.pickupConfirmedCount++;
+        const isConfirmedLive = (pr.status === 'confirmed' || pr.status === 'completed') && isLive;
+        if (isConfirmedLive) {
+          out.pickupConfirmedCount++;
+          if (sMode === 'provider') out.providerBackedPickupConfirmed++;
+        }
         if (!isLive) out.pickupLocalOnlyCount++;
         if (pr.status === 'cancelled') out.pickupCancelledCount++;
         if (pr.status === 'failed' || pr.status === 'rejected' || pr.status === 'partial_failed') out.pickupFailedCount++;
@@ -337,9 +437,21 @@ export function CarrierAnalytics({ shipments, canViewCosts, planAllowsCarrierAna
       }
       const deliveredTs = deriveDeliveredAt(s);
       const dispatchedTs = deriveDispatchedAt(s);
-      if (deliveredTs != null) { out.deliveredCount++; out.shipmentsWithDelivered++; }
+      if (deliveredTs != null) {
+        out.deliveredCount++; out.shipmentsWithDelivered++;
+        if (sMode === 'provider') out.providerBackedDelivered++;
+      }
       if (dispatchedTs != null) out.shipmentsWithDispatch++;
-      if (s.status === 'Dispatched' || s.status === 'In Transit') out.inTransitCount++;
+      // Phase 2 correction — Part B. Dispatched != In Transit. Each status
+      // increments only its own bucket.
+      if (s.status === 'Dispatched') {
+        out.dispatchedCount++;
+        if (sMode === 'provider') out.providerBackedDispatched++;
+      }
+      if (s.status === 'In Transit') {
+        out.inTransitCount++;
+        if (sMode === 'provider') out.providerBackedInTransit++;
+      }
       if (s.status === 'Exception') out.exceptionCount++;
       if (s.status === 'Cancelled') out.cancelledShipmentCount++;
       if (typeof s.shippingCost === 'number') {
@@ -394,7 +506,7 @@ export function CarrierAnalytics({ shipments, canViewCosts, planAllowsCarrierAna
           <div>
             <p className="text-[10px] font-black text-primary uppercase tracking-widest flex items-center gap-1.5"><span className="material-symbols-outlined text-sm">analytics</span>Carrier Analytics</p>
             <h2 className="text-lg font-black text-slate-800 mt-0.5">Operational shipping intelligence</h2>
-            <p className="text-xs text-slate-500 mt-1 max-w-2xl">All metrics are derived deterministically from your real shipment, pickup, and event records. Where the data is incomplete, the metric is shown as an honest unknown / insufficient-data state — never extrapolated. Carrier scorecards, lane analytics, customs-docs analytics, and insurance-rule analytics are <span className="font-bold">deferred for future improvement</span> and are not included in this foundation pass.</p>
+            <p className="text-xs text-slate-500 mt-1 max-w-2xl">All metrics are derived deterministically from your real shipment, pickup, and event records. Where the data is incomplete, the metric is shown as an honest unknown / insufficient-data state — never extrapolated. Carrier scorecards, lane analytics, automation rules, and exception-reporting workflows are not included in this foundation pass. <span className="font-bold">Customs Docs and Insurance Rules</span> are also not in this pass — they are <span className="font-bold">queued as the next shipping improvements</span> and will be added with their own plan-feature and permission gates when implemented.</p>
           </div>
           <div className="flex items-center gap-1 flex-wrap">
             <span className="text-[9px] font-mono font-black text-slate-600 bg-slate-100 border border-slate-200 px-1.5 py-0.5 rounded">analytics: foundation</span>
@@ -488,14 +600,21 @@ export function CarrierAnalytics({ shipments, canViewCosts, planAllowsCarrierAna
         </div>
       ) : (
         <>
-          {/* Core counts */}
+          {/* Core counts. Phase 2 correction — Part B. Dispatched and In
+              Transit render as DISTINCT cards. We also include the explicit
+              status-to-bucket mapping in a tiny caption so the operator can
+              see, in-place, that the lifecycle distinction is preserved. */}
           <div className="bg-white rounded-2xl border border-slate-200 p-4">
-            <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-3">Shipment volume</p>
+            <div className="flex items-start justify-between gap-2 mb-3 flex-wrap">
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Shipment volume &amp; status buckets</p>
+              <span className="text-[9px] font-mono font-black text-slate-600 bg-slate-50 border border-slate-200 px-1.5 py-0.5 rounded">Dispatched ≠ In Transit</span>
+            </div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               <MetricCard tone="primary" label="Shipments" value={String(m.shipmentCount)} sub={`${m.providerShipmentCount} provider · ${m.manualShipmentCount} manual`} />
               <MetricCard label="Labels purchased" value={String(m.labelPurchasedCount)} sub={`${fmtPct(m.labelPurchasedCount, m.shipmentCount)} of cohort`} help="Counts shipments with a 'Label Created' event row." />
               <MetricCard tone="emerald" label="Delivered" value={String(m.deliveredCount)} sub={`${fmtPct(m.deliveredCount, m.shipmentCount)} of cohort`} />
-              <MetricCard tone="sky" label="In transit" value={String(m.inTransitCount)} sub="Dispatched + In Transit" />
+              <MetricCard tone="sky" label="Dispatched" value={String(m.dispatchedCount)} sub="status === 'Dispatched' (handed to carrier, not yet moving)" help="Dispatched is its own lifecycle state — it is NOT counted as In Transit." />
+              <MetricCard tone="sky" label="In transit" value={String(m.inTransitCount)} sub="status === 'In Transit' (carrier reports movement)" help="Strictly the In Transit bucket. Dispatched-but-not-yet-moving shipments are counted under Dispatched only." />
               <MetricCard tone="amber" label="Exceptions" value={String(m.exceptionCount)} sub={`${fmtPct(m.exceptionCount, m.shipmentCount)} of cohort`} />
               <MetricCard tone="rose" label="Cancelled" value={String(m.cancelledShipmentCount)} sub={`${fmtPct(m.cancelledShipmentCount, m.shipmentCount)} of cohort`} />
               {canViewCosts ? (
@@ -512,27 +631,98 @@ export function CarrierAnalytics({ shipments, canViewCosts, planAllowsCarrierAna
             </div>
           </div>
 
-          {/* Pickup analytics */}
-          <div className="bg-white rounded-2xl border border-slate-200 p-4">
-            <div className="flex items-start justify-between gap-2 mb-3 flex-wrap">
-              <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Pickup analytics</p>
-              <span className="text-[9px] font-mono font-black text-slate-600 bg-slate-50 border border-slate-200 px-1.5 py-0.5 rounded">live-provider vs local-only kept distinct</span>
-            </div>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-              <MetricCard tone="primary" label="Pickup requested" value={String(m.pickupRequestedCount)} sub={`${fmtPct(m.pickupRequestedCount, m.shipmentCount)} of cohort`} />
-              <MetricCard tone="emerald" label="Provider-confirmed" value={String(m.pickupConfirmedCount)} sub="status confirmed/completed AND source=live_provider" />
-              <MetricCard tone="amber" label="Local-only" value={String(m.pickupLocalOnlyCount)} sub="No live provider confirmation" help="These pickups are operational records only — the carrier has not confirmed them." />
-              <MetricCard tone="slate" label="Cancelled" value={String(m.pickupCancelledCount)} sub="includes locally-resolved orphans" />
-              <MetricCard tone="rose" label="Failed / rejected / partial" value={String(m.pickupFailedCount)} sub="failed + rejected + partial_failed" />
-            </div>
-            {m.pickupBreakdown.size > 0 && (
-              <div className="mt-3 flex flex-wrap gap-1.5">
-                {Array.from(m.pickupBreakdown.entries()).sort((a, b) => b[1] - a[1]).map(([status, count]) => (
-                  <span key={status} className="text-[10px] font-mono font-black text-slate-600 bg-slate-50 border border-slate-200 px-1.5 py-0.5 rounded">{status}: <span className="tabular-nums">{count}</span></span>
-                ))}
+          {/* Pickup analytics. Phase 2 correction — Part C. Visibility is
+              gated by BOTH the Pickup Requests plan feature AND the
+              View Pickup Analytics sub-permission. When either is missing
+              we render a coherent locked / not-included state instead of
+              silently dropping the block, so operators can SEE that the
+              capability exists but is gated. We deliberately do NOT
+              expose the underlying pickup counts in either locked state. */}
+          {!planAllowsPickupRequests ? (
+            <div className="bg-white rounded-2xl border border-amber-200 p-4">
+              <div className="flex items-start gap-3">
+                <span className="material-symbols-outlined text-amber-500 text-2xl">workspace_premium</span>
+                <div>
+                  <p className="text-sm font-black text-slate-700">Pickup Analytics is not included in your current plan</p>
+                  <p className="text-xs text-slate-500 mt-1 max-w-2xl">Pickup analytics surfaces require the <span className="font-mono">Pickup Requests</span> plan feature. Contact your account owner to upgrade. Pickup metrics are intentionally hidden — we do not show counts that could imply a capability the plan does not include.</p>
+                </div>
               </div>
-            )}
-          </div>
+            </div>
+          ) : !canViewPickupAnalytics ? (
+            <div className="bg-white rounded-2xl border border-slate-200 p-4">
+              <div className="flex items-start gap-3">
+                <span className="material-symbols-outlined text-slate-300 text-2xl">lock</span>
+                <div>
+                  <p className="text-sm font-black text-slate-700">Pickup Analytics is not enabled for your role</p>
+                  <p className="text-xs text-slate-500 mt-1 max-w-2xl">Ask a store administrator to grant the <span className="font-mono">View Pickup Analytics</span> sub-permission under Shipping. This is independent of operational pickup permissions, so visibility can be granted without granting the ability to schedule or cancel pickups.</p>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="bg-white rounded-2xl border border-slate-200 p-4">
+              <div className="flex items-start justify-between gap-2 mb-3 flex-wrap">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Pickup analytics</p>
+                <span className="text-[9px] font-mono font-black text-slate-600 bg-slate-50 border border-slate-200 px-1.5 py-0.5 rounded">live-provider vs local-only kept distinct</span>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                <MetricCard tone="primary" label="Pickup requested" value={String(m.pickupRequestedCount)} sub={`${fmtPct(m.pickupRequestedCount, m.shipmentCount)} of cohort`} />
+                <MetricCard tone="emerald" label="Provider-confirmed" value={String(m.pickupConfirmedCount)} sub="status confirmed/completed AND source=live_provider" />
+                <MetricCard tone="amber" label="Local-only" value={String(m.pickupLocalOnlyCount)} sub="No live provider confirmation" help="These pickups are operational records only — the carrier has not confirmed them." />
+                <MetricCard tone="slate" label="Cancelled" value={String(m.pickupCancelledCount)} sub="includes locally-resolved orphans" />
+                <MetricCard tone="rose" label="Failed / rejected / partial" value={String(m.pickupFailedCount)} sub="failed + rejected + partial_failed" />
+              </div>
+              {m.pickupBreakdown.size > 0 && (
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {Array.from(m.pickupBreakdown.entries()).sort((a, b) => b[1] - a[1]).map(([status, count]) => (
+                    <span key={status} className="text-[10px] font-mono font-black text-slate-600 bg-slate-50 border border-slate-200 px-1.5 py-0.5 rounded">{status}: <span className="tabular-nums">{count}</span></span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Provider-connected analytics. Phase 2 correction — Part D.
+              Rendered ONLY when an active aggregator provider is configured
+              (activeProviderId !== null). All values are derived from the
+              SAME already-recorded fields used elsewhere on this surface —
+              we never poll a live carrier dashboard, never fabricate SLA
+              grades, and never claim parity across providers. When provider
+              coverage of the cohort is partial, we surface the coverage
+              ratio next to the counts so the operator reads them with the
+              correct caveat. */}
+          {activeProviderId && (
+            <div className="bg-white rounded-2xl border border-sky-200 p-4">
+              <div className="flex items-start justify-between gap-2 mb-3 flex-wrap">
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-sky-700">Provider-connected analytics</p>
+                  <p className="text-xs text-slate-500 mt-0.5">Derived from cohort shipments where mode is provider. Active provider: <span className="font-mono font-black">{activeProviderId}</span>. <span className="italic">No live carrier-dashboard polling — counts come from your already-recorded shipment, pickup, and event data.</span></p>
+                </div>
+                <span className="text-[9px] font-mono font-black text-sky-700 bg-sky-50 border border-sky-200 px-1.5 py-0.5 rounded">provider-backed coverage: {m.providerShipmentCount}/{m.shipmentCount} ({fmtPct(m.providerShipmentCount, m.shipmentCount)})</span>
+              </div>
+              {m.providerShipmentCount === 0 ? (
+                <div className="text-xs text-slate-500 italic bg-slate-50 border border-slate-200 rounded-xl p-3">
+                  No provider-backed shipments in this cohort. The active provider is configured, but no shipments in the current filter window were created in provider mode. We do not extrapolate provider performance from manual-mode shipments.
+                </div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                    <MetricCard tone="sky" label="Provider shipments" value={String(m.providerShipmentCount)} sub={`${fmtPct(m.providerShipmentCount, m.shipmentCount)} of cohort`} />
+                    <MetricCard tone="primary" label="Provider labels" value={String(m.providerBackedLabelsPurchased)} sub={`${fmtPct(m.providerBackedLabelsPurchased, m.providerShipmentCount)} of provider shipments`} />
+                    <MetricCard tone="emerald" label="Provider delivered" value={String(m.providerBackedDelivered)} sub={`${fmtPct(m.providerBackedDelivered, m.providerShipmentCount)} of provider shipments`} />
+                    <MetricCard tone="sky" label="Provider dispatched" value={String(m.providerBackedDispatched)} sub="status === 'Dispatched' AND mode = provider" />
+                    <MetricCard tone="sky" label="Provider in transit" value={String(m.providerBackedInTransit)} sub="status === 'In Transit' AND mode = provider" />
+                  </div>
+                  <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <MetricCard tone="emerald" label="Provider-confirmed pickups" value={String(m.providerBackedPickupConfirmed)} sub="confirmed/completed AND source=live_provider AND mode=provider" help="A subset of the cohort-wide Provider-confirmed count, filtered to provider-mode shipments only." />
+                    <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-[11px] text-amber-800">
+                      <p className="font-black uppercase tracking-widest text-[9px]">Coverage caveat</p>
+                      <p className="mt-1 leading-snug">Provider-backed analytics reflect only shipments created in provider mode against your active provider during this filter window. They do NOT include manual-mode shipments, do NOT poll the carrier dashboard, and do NOT imply parity across providers you have not configured.</p>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
 
           {/* Lifecycle timing */}
           <div className="bg-white rounded-2xl border border-slate-200 p-4">

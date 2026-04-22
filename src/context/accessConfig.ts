@@ -100,7 +100,9 @@ export const SUB_PERMISSIONS: SubPermissionDef[] = [
   { id: 'select_service_point', label: 'Select Service Point', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'edit', description: 'Select or change a carrier service-point / drop-off location for a shipment' },
   { id: 'request_carrier_pickup', label: 'Request Carrier Pickup', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'edit', description: 'Schedule a carrier pickup for a shipment where supported' },
   { id: 'cancel_carrier_pickup', label: 'Cancel Carrier Pickup', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Cancel a previously requested carrier pickup' },
-  { id: 'view_carrier_analytics', label: 'View Carrier Analytics', parentDomain: 'shipping', minModuleLevel: 'view', defaultLevel: 'manage', description: 'View Shipping Center carrier analytics — shipment counts, pickup outcomes, carrier/service distribution, and lifecycle timing derived from real shipment, pickup, and event data. Default-grants only at manage-level on Shipping (admin/manager); other roles must be explicitly opted in. Cost-related metrics also require View Shipping Costs.' },
+  { id: 'view_carrier_analytics', label: 'View Carrier Analytics', parentDomain: 'shipping', minModuleLevel: 'view', defaultLevel: 'manage', description: 'View Shipping Center carrier analytics — shipment counts, status buckets (Dispatched separate from In Transit), carrier/service distribution, and lifecycle timing derived from real shipment, pickup, and event data. Default-grants only at manage-level on Shipping (admin/manager); other roles must be explicitly opted in. Cost-related metrics also require View Shipping Costs. Pickup analytics blocks additionally require the View Pickup Analytics sub-permission and the Pickup Requests plan feature.' },
+  { id: 'view_pickup_analytics', label: 'View Pickup Analytics', parentDomain: 'shipping', minModuleLevel: 'view', defaultLevel: 'manage', description: 'View pickup-analytics surfaces inside Carrier Analytics — counts of requested / provider-confirmed / local-only / cancelled / failed pickups. Independently gated from operational pickup permissions so analytics visibility can be granted (or withheld) without giving the operator the ability to schedule or cancel pickups. Also requires the Pickup Requests plan feature.' },
+  { id: 'manage_carrier_locator_settings', label: 'Manage Carrier Locator Settings', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Configure per-store carrier-locator adapters (USPS / FedEx / UPS / DHL / GLS) used for live service-point lookup. Independent of Manage Shipping Settings (which controls aggregator-level provider configuration like EasyPost / Shippo / ShipStation). Requires the Service Points plan feature.' },
   { id: 'create_return', label: 'Create Return', parentDomain: 'returns', minModuleLevel: 'create', defaultLevel: 'create', description: 'Initiate a new return request' },
   { id: 'approve_return', label: 'Approve Return', parentDomain: 'returns', minModuleLevel: 'manage', defaultLevel: 'approve', description: 'Approve or reject return requests' },
   { id: 'receive_return', label: 'Receive Return', parentDomain: 'returns', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Mark returns as received and perform intake' },
@@ -195,7 +197,9 @@ export const tenantRoles: EmployeeRole[] = [
       cancel_shipment: true,
       view_shipping_costs: true,
       view_carrier_analytics: true,
+      view_pickup_analytics: true,
       manage_shipping_settings: true,
+      manage_carrier_locator_settings: true,
       validate_shipping_address: true,
       fetch_shipping_rates: true,
       purchase_shipping_label: true,
@@ -272,7 +276,9 @@ export const tenantRoles: EmployeeRole[] = [
       cancel_shipment: false,
       view_shipping_costs: false,
       view_carrier_analytics: false,
+      view_pickup_analytics: false,
       manage_shipping_settings: false,
+      manage_carrier_locator_settings: false,
       validate_shipping_address: false,
       fetch_shipping_rates: false,
       purchase_shipping_label: false,
@@ -349,7 +355,9 @@ export const tenantRoles: EmployeeRole[] = [
       cancel_shipment: false,
       view_shipping_costs: false,
       view_carrier_analytics: false,
+      view_pickup_analytics: false,
       manage_shipping_settings: false,
+      manage_carrier_locator_settings: false,
       validate_shipping_address: false,
       fetch_shipping_rates: false,
       purchase_shipping_label: false,
@@ -371,8 +379,8 @@ export const roles = [...platformRoles, ...tenantRoles];
 
 export const planFeatures: Record<Plan, string[]> = {
   starter: ['dashboard', 'sales', 'customers', 'invoices', 'support'],
-  growth: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'employees', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests'],
-  advanced: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'employees', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests'],
+  growth: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'employees', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests', 'shipping_providers'],
+  advanced: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'employees', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests', 'shipping_providers'],
 };
 
 export const permissions = PERMISSION_DOMAINS;

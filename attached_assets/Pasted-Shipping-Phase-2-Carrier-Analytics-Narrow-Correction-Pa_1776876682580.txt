@@ -1,0 +1,234 @@
+Shipping Phase 2 — Carrier Analytics Narrow Correction Pass
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen closed pickup/cancellation/debug threads except where directly required by the analytics correction notes below.
+Do not implement Customs Docs or Insurance Rules in this pass.
+Do not mix in broader Addon governance / tenant Features-tab override redesign in this pass.
+Implement only the focused correction work needed to close Carrier Analytics foundation.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Node/Express carrier-integration engineer
+- Enterprise shipping systems architect
+- Senior shipping analytics / operations intelligence expert
+- QA gatekeeper
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview-mode safety
+- live System Owner plan gating behavior
+- store permission gating
+- provider/manual mode split
+- PACKED-only activation already completed for shipping operational flows
+- mutual exclusivity and lifecycle rules already completed
+- existing shipping core flow
+- reverse-logistics flow
+- pickup forecast / fee transparency / exact pickup-rate selection
+- two-stage address readiness
+- truthful USPS/FedEx/UPS provider-state handling
+- shipment-cancel dependency on confirmed pickup
+- orphan/local-dismiss resolution logic
+- label-lock and pickup-override behavior
+
+==================================================
+CORRECTION GOAL
+==================================================
+
+Close the remaining Carrier Analytics issues from manual QA without expanding scope:
+
+1) Fix Mode filter truthfully
+2) Fix Transit / Delivery metric derivation so Dispatched is not counted as In Transit
+3) Make Pickup Analytics appear/disappear based on the pickup feature’s live plan availability and store-role permissions
+4) Improve provider-connected analytics truthfully when an active provider is configured
+5) Add owner/permission control surfaces for Carrier Locators and Shipping Provider capability visibility
+6) Keep Customs Docs and Insurance Rules out of this pass, but treat them as queued next improvements after this correction pass
+7) Do not mix in Addon governance redesign here
+
+==================================================
+PART A — MODE FILTER CORRECTION
+==================================================
+
+Required:
+- fix the Carrier Analytics Mode filter so filtering to provider shows provider-mode shipments correctly
+- filtering to manual shows manual shipments correctly
+- filtering must derive from the same source-of-truth mode logic already used by Shipping Center operational behavior
+- do not use a shallow UI-only filter against stale or display-only fields
+- document exactly which shipment fields / selected-rate / provider-state fields determine:
+  - provider mode
+  - manual mode
+
+Acceptance detail:
+- “Provider” filter must not return blank when provider-backed shipments exist
+- “Manual” filter must not accidentally include provider-backed shipments
+- “All” must equal the truthful union of both sets
+
+==================================================
+PART B — TRANSIT / DELIVERY DERIVATION CORRECTION
+==================================================
+
+Required:
+- Dispatched must remain its own state and must not be counted under In Transit
+- analytics must respect the project’s shipment lifecycle truth:
+  - Dispatched != In Transit
+  - In Transit should only be counted when the shipment is actually in the in-transit state according to current lifecycle / provider-event logic
+- re-check all summary buckets and charts/cards that currently group statuses
+
+Acceptance detail:
+- any transit metric, status distribution, or open-shipment bucket must not silently absorb Dispatched into In Transit
+- document the exact status-to-bucket mapping
+
+==================================================
+PART C — PICKUP ANALYTICS GATING CORRECTION
+==================================================
+
+Required:
+- Pickup Analytics must not show as a generic always-on analytics block
+- it must follow the same live plan gating and permission logic philosophy as the pickup feature itself
+- if pickup_requests is disabled for the tenant plan, Pickup Analytics should either:
+  - disappear, or
+  - show a truthful locked/not-included-for-plan state
+- if the operator lacks the relevant shipping analytics/pickup visibility permission, the surface must hide or lock coherently
+- do not show pickup analytics for plans/users that should not see pickup capability
+
+Important:
+- preserve truthful distinction inside analytics between:
+  - local-only pickup intents
+  - live-provider pickup requests
+  - confirmed
+  - cancelled
+  - failed
+- do not overstate provider-confirmed pickups when they were only local-only records
+
+==================================================
+PART D — PROVIDER-CONNECTED ANALYTICS IMPROVEMENT
+==================================================
+
+Required:
+- where an active shipping provider is configured, improve Carrier Analytics so it uses the currently available recorded provider-backed shipment data more directly
+- do this truthfully from already-recorded shipment/provider/tracking/pickup records
+- do not invent live provider dashboards if the system does not truly fetch them
+- if provider-backed coverage is partial, surface that clearly
+- examples of allowed truthful improvements:
+  - better provider distribution
+  - better carrier/service usage metrics
+  - provider-backed shipment counts
+  - provider-backed pickup counts
+  - provider-backed delivered / in-transit counts where current data supports it
+- examples not allowed:
+  - fake full-provider scorecards
+  - fake real-time carrier performance feed
+  - fake coverage parity across all providers
+
+==================================================
+PART E — OWNER FEATURE CONTROL + ROLE PERMISSION ALIGNMENT
+==================================================
+
+Required:
+- add Carrier Locators to System Owner Plans & Features treatment
+- add Shipping Provider capability/control to System Owner Plans & Features treatment if not already controllable at the correct granularity
+- ensure both can be enabled/disabled by plan with coherent UI behavior:
+  - appear when included
+  - disappear or show truthful “not available for this plan” state when excluded
+- add corresponding store-owner Permissions Matrix treatment so these capabilities can be granted/withheld for employees appropriately
+- do not create the old problem where the UI shows a capability that the plan or role does not actually allow
+
+Important:
+- do not break current provider configuration logic
+- do not break current carrier locator scaffolding
+- do not conflate:
+  - shipping center access
+  - shipping provider configuration access
+  - carrier locator access
+  - pickup analytics visibility
+  - carrier analytics visibility
+
+==================================================
+PART F — CUSTOMS / INSURANCE STATUS
+==================================================
+
+Required:
+- do not implement Customs Docs or Insurance Rules in this pass
+- update the record/documentation so they are no longer treated as indefinitely deferred
+- mark them as queued next shipping improvements after Carrier Analytics correction closes
+- note that when implemented later, they must be added coherently to:
+  - System Owner Plans & Features
+  - Store Owner Permissions Matrix
+if surfaced as permissioned/gated capabilities
+
+==================================================
+PART G — DO NOT MIX IN ADDON GOVERNANCE REDESIGN
+==================================================
+
+Required:
+- do not implement the broader Addon / archived-addon / tenant Features tab / paid-override pricing redesign in this pass
+- leave that for a separate commercial-platform workstream after shipping correction closes
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- Provider vs Manual Mode filter works truthfully
+- Dispatched is not counted as In Transit
+- Pickup Analytics visibility is coherently tied to plan/permission treatment
+- provider-connected analytics are improved truthfully without fake coverage
+- Carrier Locators and Shipping Provider capability are controlled coherently via System Owner / Permissions treatment
+- Customs Docs and Insurance Rules remain unimplemented in this pass but are recorded as next shipping improvements
+- existing shipping, pickup, return, and cancellation flows remain intact
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Fix mode derivation and filtering
+2) Fix status bucket derivation so Dispatched != In Transit
+3) Fix Pickup Analytics gating and visibility
+4) Improve provider-connected analytics truthfully from current recorded data
+5) Wire Carrier Locators + Shipping Provider owner-feature and permission treatment
+6) Re-test shipping non-regression
+7) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- corrected carrier analytics mode derivation rules
+- corrected status-to-bucket mapping
+- pickup analytics visibility/gating rules
+- provider-connected analytics coverage limits
+- Carrier Locators and Shipping Provider plan/permission treatment
+- note that Customs Docs and Insurance Rules are queued next shipping improvements, not implemented in this pass
+- note that broader Addon governance redesign is intentionally out of scope for this correction pass
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Mode Filter Derivation Fix
+3. Transit / Delivery Bucket Fix
+4. Pickup Analytics Gating Fix
+5. Provider-Connected Analytics Improvement
+6. Carrier Locators / Shipping Provider Gating + Permission Updates
+7. Files Changed
+8. Documentation Updated
+9. Non-Regression Notes

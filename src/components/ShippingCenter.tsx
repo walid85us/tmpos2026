@@ -429,6 +429,11 @@ export default function ShippingCenter() {
   }
   const planAllowsServicePoints = isPlanFeatureLive('service_points');
   const planAllowsPickupRequests = isPlanFeatureLive('pickup_requests');
+  // Phase 2 correction — Shipping Provider configuration is now an explicit
+  // plan feature. Settings tab provider configuration is hidden when the
+  // plan excludes it, so the UI cannot show capabilities the plan does not
+  // actually allow.
+  const planAllowsShippingProviders = isPlanFeatureLive('shipping_providers');
   // Phase 2 — Carrier Analytics foundation. Plan-level gate (Growth/Advanced)
   // and store-permission gate (`view_carrier_analytics`) are evaluated
   // independently and BOTH must pass for the tab to render. The Carrier
@@ -436,6 +441,17 @@ export default function ShippingCenter() {
   // direct deep-link cannot bypass either gate.
   const planAllowsCarrierAnalytics = isPlanFeatureLive('carrier_analytics');
   const canViewCarrierAnalytics = checkSubPermission('view_carrier_analytics');
+  // Phase 2 correction — Pickup analytics is gated independently from the
+  // operational pickup permissions so an operator can be granted (or denied)
+  // visibility of pickup metrics without being granted the ability to schedule
+  // or cancel pickups. The pickup-analytics block inside Carrier Analytics
+  // requires BOTH planAllowsPickupRequests AND canViewPickupAnalytics; if
+  // either is false the block renders a coherent locked state.
+  const canViewPickupAnalytics = checkSubPermission('view_pickup_analytics');
+  // Phase 2 correction — Carrier Locators get their own sub-permission so the
+  // locator settings card in the Settings tab can be granted independently
+  // from aggregator (EasyPost / Shippo / ShipStation) provider configuration.
+  const canManageCarrierLocators = checkSubPermission('manage_carrier_locator_settings');
 
   const [activeTab, setActiveTab] = useState<'shipments' | 'analytics' | 'settings'>('shipments');
   const [search, setSearch] = useState('');
@@ -4305,15 +4321,45 @@ export default function ShippingCenter() {
             canViewCosts={canViewCosts}
             planAllowsCarrierAnalytics={planAllowsCarrierAnalytics}
             hasViewPermission={canViewCarrierAnalytics}
+            planAllowsPickupRequests={planAllowsPickupRequests}
+            canViewPickupAnalytics={canViewPickupAnalytics}
+            activeProviderId={activeProviderId}
           />
         ) : activeTab === 'settings' ? (
           <div className="space-y-6">
-            <ShippingProvidersPage embedded onProviderChange={refreshProviderState} />
+            {/* Phase 2 correction — Shipping Provider configuration is now
+                explicitly plan-gated. When the plan excludes it, render a
+                truthful "not included" state instead of silently showing
+                provider settings the operator cannot actually use. */}
+            {planAllowsShippingProviders ? (
+              <ShippingProvidersPage embedded onProviderChange={refreshProviderState} />
+            ) : (
+              <div className="bg-white rounded-2xl border border-amber-200 p-6 text-center">
+                <span className="material-symbols-outlined text-amber-500 text-3xl">workspace_premium</span>
+                <p className="text-sm font-black text-slate-700 mt-2">Shipping Provider configuration is not included in your current plan</p>
+                <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">EasyPost / Shippo / ShipStation aggregator configuration requires a plan with the <span className="font-mono">Shipping Provider Configuration</span> feature. Manual-mode shipments remain available.</p>
+              </div>
+            )}
             {/* Carrier Locator Settings — per-store, per-adapter configuration.
                 Independent of the active shipping provider (EasyPost / Shippo /
                 ShipStation) because aggregators do not expose a unified
-                service-point locator. Persisted in sessionStorage. */}
-            {(() => {
+                service-point locator. Persisted in sessionStorage.
+                Phase 2 correction — also explicitly plan-gated by Service
+                Points and permission-gated by manage_carrier_locator_settings
+                so the card hides cleanly when either is missing. */}
+            {!planAllowsServicePoints ? (
+              <div className="bg-white rounded-2xl border border-amber-200 p-6 text-center">
+                <span className="material-symbols-outlined text-amber-500 text-3xl">workspace_premium</span>
+                <p className="text-sm font-black text-slate-700 mt-2">Carrier Locators are not included in your current plan</p>
+                <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">Per-carrier service-point lookup adapters require a plan with the <span className="font-mono">Service Points</span> feature.</p>
+              </div>
+            ) : !canManageCarrierLocators ? (
+              <div className="bg-white rounded-2xl border border-slate-200 p-6 text-center">
+                <span className="material-symbols-outlined text-slate-300 text-3xl">lock</span>
+                <p className="text-sm font-black text-slate-700 mt-2">Carrier Locator Settings is not enabled for your role</p>
+                <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">Ask a store administrator to grant the <span className="font-mono">Manage Carrier Locator Settings</span> sub-permission under Shipping.</p>
+              </div>
+            ) : (() => {
               const summary = locatorStatusSummary();
               const overallTone = summary.configured > 0
                 ? { bg: 'bg-emerald-100', text: 'text-emerald-700', label: `${summary.configured} configured / ${summary.total}` }
