@@ -768,14 +768,41 @@ export default function ShippingCenter() {
   const [addEventModal, setAddEventModal] = useState<string | null>(null);
   const [eventDescription, setEventDescription] = useState('');
   const [eventLocation, setEventLocation] = useState('');
-  const [activeProviderId, setActiveProviderId] = useState<string | null>(null);
+  // PHASE 2 — Shipping Provider hard-disable.
+  // The raw state tracks what the credential store reports (we don't destroy
+  // the stored configuration when the plan changes). The PUBLIC `activeProviderId`
+  // is derived: when the plan does NOT allow Shipping Provider Configuration,
+  // it resolves to null, which makes every gating check, eligibility evaluator,
+  // and "no provider configured" early-return throughout this component
+  // automatically reflect the plan-disabled state. This is the single
+  // gating-derivation site so no consumer can accidentally bypass plan
+  // enforcement by using a stale value.
+  const [activeProviderIdRaw, setActiveProviderIdRaw] = useState<string | null>(null);
   const [providerEnvironment, setProviderEnvironment] = useState<'test' | 'production' | null>(null);
+  // PHASE 2 — Plan-aware derived active provider id (declared after the raw
+  // state so it sees the latest value). When the plan disables Shipping
+  // Provider Configuration this resolves to null EVEN IF a provider is still
+  // configured in the credential store. Every gating check, every
+  // eligibility evaluator, and every "no active provider" early-return in
+  // this component reads `activeProviderId` (not the raw state), so the
+  // entire surface and every provider-call handler hard-disable together
+  // with no per-handler bypass possible.
+  const activeProviderId: string | null = planAllowsShippingProviders ? activeProviderIdRaw : null;
+  // Truthful state-model derivation. Used by banners and prerequisite
+  // messages so the operator sees the exact reason the provider is
+  // unavailable (plan-disabled vs. nothing configured vs. permission-denied).
+  type ProviderAvailability = 'plan_disabled' | 'permission_denied' | 'no_provider' | 'configured';
+  const providerAvailability: ProviderAvailability = !planAllowsShippingProviders
+    ? 'plan_disabled'
+    : (!canManageProviderSettings && !activeProviderIdRaw
+        ? 'permission_denied'
+        : (activeProviderIdRaw ? 'configured' : 'no_provider'));
   const [reasonModal, setReasonModal] = useState<{ id: string; newStatus: 'Rejected' | 'Returned' | 'Packed' } | null>(null);
   const [selectedReason, setSelectedReason] = useState('');
   const [reasonNotes, setReasonNotes] = useState('');
   useEffect(() => {
     shippingApi.getActiveProvider().then(r => {
-      setActiveProviderId(r.activeProviderId);
+      setActiveProviderIdRaw(r.activeProviderId);
       setProviderEnvironment(r.environment || null);
     });
     loadProviderStatuses();
@@ -2578,6 +2605,7 @@ export default function ShippingCenter() {
   }
 
   async function handleRequestPickup(shipmentId: string) {
+    if (guardShippingProviderPlan('Requesting a carrier pickup')) return;
     if (isWriteBlocked) {
       setPickupAttemptResult({ kind: 'error', title: 'Write blocked', detail: 'You are in preview/read-only mode. Pickup booking is disabled.', steps: [], code: 'WRITE_BLOCKED' });
       return;
@@ -3029,6 +3057,7 @@ export default function ShippingCenter() {
   // Phase 2.6.1 — provider pickup id is held on the shipment so the operator
   // can cancel the orphan and retry.
   async function handleConfirmPickupBuy(shipmentId: string) {
+    if (guardShippingProviderPlan('Confirming a carrier pickup booking')) return;
     if (isWriteBlocked) return;
     const panel = pickupRatesPanel;
     if (!panel || panel.shipmentId !== shipmentId || panel.kind !== 'rates') return;
@@ -3404,9 +3433,38 @@ export default function ShippingCenter() {
   }
 
   function getProviderPrerequisiteMessage(): string | null {
+    // Truthful state model — distinguish plan-disabled from no-provider so
+    // operators are not told to "configure a shipping provider" for a
+    // capability the plan does not actually include.
+    if (providerAvailability === 'plan_disabled') {
+      return 'Shipping Provider Configuration is not included in your current plan';
+    }
+    if (providerAvailability === 'permission_denied') {
+      return 'Your role does not have permission to configure or use a shipping provider';
+    }
     if (activeProviderId) return null;
     const hasAnyConfigured = providerStatuses.length > 0;
     return hasAnyConfigured ? 'Set an active shipping provider' : 'Configure a shipping provider';
+  }
+
+  // PHASE 2 — Shipping Provider hard-disable guard.
+  // Defense-in-depth check used at the top of every provider-call handler.
+  // Even though `activeProviderId` is already plan-aware (resolves to null
+  // when the plan disables Shipping Providers, which would trip the
+  // existing `if (!activeProviderId)` early-returns), this guard surfaces a
+  // truthful "not included in your current plan" message instead of the
+  // generic "no provider configured" message — the two states are
+  // operationally different and must not be conflated. Returns true when
+  // the action MUST be aborted; the caller should `return` immediately.
+  function guardShippingProviderPlan(actionLabel: string): boolean {
+    if (planAllowsShippingProviders) return false;
+    setProviderError({
+      code: 'plan_disabled',
+      message: 'Shipping Provider Configuration is not included in your current plan',
+      details: `${actionLabel} requires Shipping Provider Configuration, which is not included in your current plan. Existing provider credentials are preserved but cannot be used until the plan is upgraded. Contact your account owner.`,
+      retryable: false,
+    });
+    return true;
   }
 
   function getRatePrerequisites(shipment: Shipment): string[] {
@@ -3518,6 +3576,7 @@ export default function ShippingCenter() {
   // Validates origin and destination sequentially, merges both result updates into a single
   // updateShipment call, and surfaces one consolidated feedback message.
   async function handleValidateAddresses(shipmentId: string) {
+    if (guardShippingProviderPlan('Validating addresses with the carrier')) return;
     if (isWriteBlocked) return;
     const shipment = shipments.find(s => s.id === shipmentId);
     if (!shipment) return;
@@ -3558,6 +3617,7 @@ export default function ShippingCenter() {
   // Legacy single-side validator retained for internal/programmatic use. The operator-facing
   // UX uses the combined handleValidateAddresses action above.
   async function handleValidateAddress(shipmentId: string, side: 'origin' | 'destination' = 'destination') {
+    if (guardShippingProviderPlan('Validating an address with the carrier')) return;
     if (isWriteBlocked) return;
     const shipment = shipments.find(s => s.id === shipmentId);
     if (!shipment) return;
@@ -3579,6 +3639,7 @@ export default function ShippingCenter() {
   void handleValidateAddress;
 
   async function handleFetchRates(shipmentId: string) {
+    if (guardShippingProviderPlan('Fetching live shipping rates')) return;
     if (isWriteBlocked) return;
     const shipment = shipments.find(s => s.id === shipmentId);
     if (!shipment) return;
@@ -3628,6 +3689,7 @@ export default function ShippingCenter() {
   }
 
   async function handlePurchaseLabel(shipmentId: string) {
+    if (guardShippingProviderPlan('Purchasing a shipping label')) return;
     if (isWriteBlocked) return;
     const shipment = shipments.find(s => s.id === shipmentId);
     if (!shipment) return;
@@ -3699,13 +3761,14 @@ export default function ShippingCenter() {
 
   function refreshProviderState() {
     shippingApi.getActiveProvider().then(r => {
-      setActiveProviderId(r.activeProviderId);
+      setActiveProviderIdRaw(r.activeProviderId);
       setProviderEnvironment(r.environment || null);
     });
     loadProviderStatuses();
   }
 
   async function handleTestConnection(providerId: string) {
+    if (guardShippingProviderPlan('Testing a provider connection')) return;
     clearProviderFeedback();
     setProviderLoading('test-connection');
     try {
@@ -3749,6 +3812,7 @@ export default function ShippingCenter() {
   }
 
   async function handleReplayEvent(webhookEventId: string) {
+    if (guardShippingProviderPlan('Replaying a webhook event')) return;
     if (isWriteBlocked) return;
     clearProviderFeedback();
     setProviderLoading('replay');
@@ -3805,6 +3869,7 @@ export default function ShippingCenter() {
   }
 
   async function handleSimulateTrackingEvent(shipmentId: string) {
+    if (guardShippingProviderPlan('Simulating a tracking event')) return;
     if (isWriteBlocked) return;
     const shipment = shipments.find(s => s.id === shipmentId);
     if (!shipment || !shipment.trackingNumber) return;
@@ -3918,6 +3983,7 @@ export default function ShippingCenter() {
   }
 
   async function handleBulkSync() {
+    if (guardShippingProviderPlan('Bulk syncing tracking from the provider')) return;
     if (isWriteBlocked) return;
     const eligible = getBulkSyncEligibleShipments();
     if (eligible.length === 0) return;
@@ -4028,6 +4094,7 @@ export default function ShippingCenter() {
   }
 
   async function handleSyncTracking(shipmentId: string) {
+    if (guardShippingProviderPlan('Syncing tracking from the provider')) return;
     if (isWriteBlocked) return;
     const shipment = shipments.find(s => s.id === shipmentId);
     if (!shipment || !shipment.trackingNumber) return;

@@ -1,0 +1,236 @@
+Shipping Phase 2 — Plan-to-Permission Propagation + Provider Hard-Disable Correction Pass
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated correction pass.
+Do not redesign the app.
+Do not broaden scope beyond the gating-integrity issue exposed by the latest QA.
+Do not reopen closed pickup/cancellation/debug threads except where directly required by the plan-gating correction below.
+Do not implement Customs Docs or Insurance Rules in this pass.
+Do not mix in broader Addon governance redesign in this pass.
+
+Implement the correction needed to close the remaining Shipping Phase 2 gating issues by fixing the general rule:
+
+If a feature is disabled for the tenant plan, the Store Permissions Matrix must not continue to show related permissions for that feature, and the feature’s runtime functionality must not continue operating as if enabled.
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Node/Express carrier-integration engineer
+- Enterprise shipping systems architect
+- Senior RBAC / entitlement systems architect
+- QA gatekeeper
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview-mode safety
+- live System Owner plan gating behavior
+- store permission gating
+- provider/manual mode split
+- PACKED-only activation already completed for shipping operational flows
+- mutual exclusivity and lifecycle rules already completed
+- existing shipping core flow
+- reverse-logistics flow
+- pickup forecast / fee transparency / exact pickup-rate selection
+- two-stage address readiness
+- truthful USPS/FedEx/UPS provider-state handling
+- shipment-cancel dependency on confirmed pickup
+- orphan/local-dismiss resolution logic
+- label-lock and pickup-override behavior
+
+==================================================
+CORRECTION GOAL
+==================================================
+
+Close the remaining Shipping Phase 2 issues by implementing a generalized and truthful entitlement propagation model:
+
+1) If a feature is disabled at the plan level, related permissions must not remain exposed in the Store Permissions Matrix
+2) If a runtime capability is disabled at the plan level, the capability must be operationally unavailable immediately
+3) Shipping Provider disablement must hard-stop provider-backed functionality
+4) Carrier Analytics / Pickup Analytics / Carrier Locators / Shipping Provider must all follow the same coherent rule
+5) Existing shipping and reverse-logistics flows must remain intact when the capabilities are enabled
+
+==================================================
+PART A — GENERAL PLAN → PERMISSION PROPAGATION RULE
+==================================================
+
+Required:
+- implement this as a general rule, not a one-off shipping-only patch
+- define a feature-to-permission dependency model so that when a plan-level feature is disabled, the Store Permissions Matrix does not continue to show permissions that belong only to that disabled feature
+- the matrix should not leak child permissions for unavailable capabilities
+
+Required behavior:
+- if a feature is disabled for the active tenant plan, any related permission rows/sub-permissions in the Store Permissions Matrix should:
+  - disappear entirely, or
+  - be shown in a clearly locked/unavailable-for-plan state
+- choose one consistent pattern and apply it coherently
+- do not allow a role to appear configurable for a feature the plan does not include
+
+Important:
+- this must be generalizable for future features, not hardcoded only for:
+  - carrier analytics
+  - pickup analytics
+  - carrier locators
+  - shipping provider
+
+Document:
+- how features map to permission domains/sub-permissions
+- how unavailable plan features suppress or lock related permissions
+
+==================================================
+PART B — SHIPPING-SPECIFIC FEATURE / PERMISSION ALIGNMENT
+==================================================
+
+Apply the generalized rule to the shipping-related capabilities currently under QA:
+
+1) Carrier Analytics
+2) Pickup Analytics
+3) Carrier Locators
+4) Shipping Provider capability
+
+Required:
+- if disabled for plan, related permissions must not remain exposed as ordinary usable permissions in the Store Permissions Matrix
+- if enabled for plan, permissions should appear normally and remain role-assignable
+- plan and role logic must remain distinct:
+  - plan decides whether feature exists
+  - role decides who can use it
+- role permissions must never resurrect a feature that the plan disabled
+
+==================================================
+PART C — SHIPPING PROVIDER HARD-DISABLE
+==================================================
+
+This is mandatory.
+
+Required:
+- if Shipping Provider capability is disabled for the plan, provider-backed shipping functionality must stop working immediately and truthfully
+- the app must not continue allowing:
+  - Get Rates
+  - rate selection
+  - Purchase Label
+  - provider-backed validation
+  - provider-backed pickup operations
+  - provider-backed tracking sync
+  - any other provider-dependent action
+when the plan no longer includes Shipping Provider capability
+
+Critical rule:
+- disabling Shipping Provider at the plan level must override any existing stored provider configuration
+- if EasyPost or another provider had already been configured, the system must treat provider capability as unavailable at runtime
+
+Implementation intent:
+- do not necessarily destroy stored credentials/configuration data
+- but operationally the provider must be treated as disconnected/inactive while the feature is disabled for the plan
+- when the feature is disabled, the runtime should behave as though no usable provider capability is available
+
+Required UX:
+- show truthful not-included / unavailable-for-plan messaging
+- do not silently keep provider-backed actions alive because configuration already exists
+- do not let stale active-provider state bypass entitlement checks
+
+Required enforcement layers:
+- UI gating
+- action-handler gating
+- operational prerequisite evaluators
+- any server/client provider invocation path that currently assumes configured provider = allowed provider
+
+==================================================
+PART D — PICKUP ANALYTICS / CARRIER LOCATORS FOLLOW SAME RULE
+==================================================
+
+Required:
+- Pickup Analytics must follow plan availability + role access coherently
+- Carrier Locators must follow plan availability + role access coherently
+- if disabled at plan level, they must not remain normally assignable/visible in Store Permissions Matrix
+- any associated UI/runtime path must show truthful unavailable behavior
+
+==================================================
+PART E — TRUTHFUL STATE MODEL
+==================================================
+
+Required:
+- distinguish clearly between:
+  - configured
+  - operationally available
+  - unavailable because plan-disabled
+  - unavailable because permission-denied
+  - unavailable because no provider configured
+- do not conflate these reasons
+
+Examples:
+- configured but plan-disabled ≠ available
+- enabled by plan but permission-denied ≠ configured failure
+- enabled by plan and permission-granted but no provider configured ≠ plan problem
+
+==================================================
+PART F — DO NOT IMPLEMENT THESE IN THIS PASS
+==================================================
+
+Required:
+- do not implement Customs Docs in this pass
+- do not implement Insurance Rules in this pass
+- do not implement broader Addon governance redesign in this pass
+
+Documentation only:
+- note that Customs Docs and Insurance Rules are queued next after this correction pass closes
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- disabling a feature at the plan level prevents related permissions from remaining normally exposed in the Store Permissions Matrix
+- role permissions cannot resurrect a plan-disabled feature
+- disabling Shipping Provider for the plan hard-disables provider-backed operations even if a provider was previously configured
+- Pickup Analytics / Carrier Locators / Carrier Analytics / Shipping Provider all behave coherently under the same entitlement rule
+- existing shipping and reverse-logistics flows remain intact when the relevant features are enabled
+- Customs Docs and Insurance Rules remain unimplemented in this pass but recorded as next shipping improvements
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Design and implement the general plan-to-permission propagation rule
+2) Apply it to the shipping-related capabilities under QA
+3) Implement Shipping Provider hard-disable across UI + runtime + handler layers
+4) Re-check truthful unavailable-state messaging
+5) Re-test shipping non-regression
+6) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- the general plan-to-permission propagation rule
+- how plan-disabled features affect the Store Permissions Matrix
+- the distinction between plan-disabled vs permission-denied vs unconfigured
+- Shipping Provider hard-disable behavior
+- shipping feature mappings covered in this pass
+- note that Customs Docs and Insurance Rules are queued next after this correction closes
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. General Plan-to-Permission Propagation Rule
+3. Shipping Feature Permission Alignment
+4. Shipping Provider Hard-Disable Behavior
+5. Truthful Unavailable-State Handling
+6. Files Changed
+7. Documentation Updated
+8. Non-Regression Notes

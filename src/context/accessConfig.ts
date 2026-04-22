@@ -114,6 +114,105 @@ export const SUB_PERMISSIONS: SubPermissionDef[] = [
 
 export const ADMIN_ACTION_LEVEL_MAP = SUB_PERMISSIONS;
 
+// =============================================================================
+// FEATURE → PERMISSION DEPENDENCY MAP (Phase 2 plan-to-permission propagation)
+// =============================================================================
+//
+// General rule: If a tenant's plan disables a feature, every sub-permission
+// listed under that feature here is treated as PLAN-LOCKED in the Store
+// Permissions Matrix and cannot be granted to any role. The runtime evaluator
+// (`checkSubPermission`) ALSO short-circuits to denied for plan-locked
+// sub-permissions, so a stale role grant cannot resurrect a plan-disabled
+// capability — plan decides whether the feature exists, role decides who can
+// use it, and role can never override plan.
+//
+// This map is the SINGLE source of truth for that propagation. Adding a new
+// feature with related sub-permissions only requires adding the row here and
+// the matrix UI / runtime guards pick it up automatically — there is no need
+// to touch Employees.tsx or per-feature gating sites.
+//
+// Note: a sub-permission's parent module (e.g. `shipping`) is also implicitly
+// a plan dependency, handled separately by `isSubPermissionPlanAvailable()`.
+// This map is for FEATURE-level dependencies WITHIN an enabled module.
+export const FEATURE_PERMISSION_DEPENDENCIES: Record<string, string[]> = {
+  // Shipping Provider Configuration controls aggregator-backed actions. When
+  // the plan excludes it, no role can configure providers, fetch live rates,
+  // purchase labels, validate addresses against carriers, or sync tracking —
+  // all of these require an active aggregator connection.
+  shipping_providers: [
+    'manage_shipping_settings',
+    'fetch_shipping_rates',
+    'purchase_shipping_label',
+    'validate_shipping_address',
+    'sync_shipping_tracking',
+  ],
+  // Pickup Requests controls operational pickup flows AND pickup analytics
+  // visibility. Without the plan feature there is nothing to schedule, cancel,
+  // or analyze — so all related sub-permissions are plan-locked.
+  pickup_requests: [
+    'request_carrier_pickup',
+    'cancel_carrier_pickup',
+    'view_pickup_analytics',
+  ],
+  // Service Points (Carrier Locators) controls per-store locator adapter
+  // configuration AND the operator's ability to pick a service point for a
+  // shipment. Both depend on the plan including locator capability.
+  service_points: [
+    'select_service_point',
+    'manage_carrier_locator_settings',
+  ],
+  // Carrier Analytics controls the analytics surface; the view-permission is
+  // meaningless without the analytics feature being available at the plan
+  // level.
+  carrier_analytics: [
+    'view_carrier_analytics',
+  ],
+};
+
+// Reverse lookup: which plan features must be live for this sub-permission to
+// be assignable to a role.
+export function getFeatureGatesForSubPermission(subPermId: string): string[] {
+  return Object.entries(FEATURE_PERMISSION_DEPENDENCIES)
+    .filter(([, perms]) => perms.includes(subPermId))
+    .map(([feature]) => feature);
+}
+
+// Plan-feature live check that reads the System Owner's runtime override from
+// sessionStorage (`features_data`) when present, falls back to the static
+// `planFeatures` map otherwise. Mirrors the behavior of
+// ShippingCenter.isPlanFeatureLive but in a context-free helper so any
+// component (Employees matrix, ShippingCenter, AccessContext) can call it
+// consistently.
+export function isPlanFeatureLiveFor(plan: Plan | string | undefined | null, featureId: string): boolean {
+  if (!plan) return false;
+  const planKey = (plan as string) === 'starter' ? 'essential' : (plan as string);
+  let matrix: Array<{ id: string; planAvailability?: Record<string, boolean> }> = [];
+  try {
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      const raw = window.sessionStorage.getItem('features_data');
+      if (raw) matrix = JSON.parse(raw);
+    }
+  } catch { /* ignore parse errors — fall back to static planFeatures */ }
+  if (Array.isArray(matrix) && matrix.length > 0) {
+    const entry = matrix.find(f => f.id === featureId);
+    if (entry && entry.planAvailability) return !!entry.planAvailability[planKey];
+  }
+  return (planFeatures[plan as Plan] || []).includes(featureId);
+}
+
+// Returns true if the sub-permission is plan-eligible for the given tenant
+// plan: BOTH (a) the sub-permission's parent domain must be in the plan AND
+// (b) every feature gate from FEATURE_PERMISSION_DEPENDENCIES must be live.
+// Returns false when EITHER condition fails — i.e. the sub-permission is
+// plan-locked and must not be assignable in the matrix.
+export function isSubPermissionPlanAvailable(sub: SubPermissionDef, plan: Plan | string | undefined | null): boolean {
+  if (!plan) return false;
+  const planFeats = planFeatures[plan as Plan] || [];
+  if (!planFeats.includes(sub.parentDomain)) return false;
+  const gates = getFeatureGatesForSubPermission(sub.id);
+  return gates.every(f => isPlanFeatureLiveFor(plan, f));
+}
+
 export function getSubPermissionsForDomain(domainId: string): SubPermissionDef[] {
   return SUB_PERMISSIONS.filter(sp => sp.parentDomain === domainId);
 }
@@ -379,8 +478,8 @@ export const roles = [...platformRoles, ...tenantRoles];
 
 export const planFeatures: Record<Plan, string[]> = {
   starter: ['dashboard', 'sales', 'customers', 'invoices', 'support'],
-  growth: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'employees', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests', 'shipping_providers'],
-  advanced: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'employees', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests', 'shipping_providers'],
+  growth: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'employees', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests', 'shipping_providers', 'carrier_analytics'],
+  advanced: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'employees', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests', 'shipping_providers', 'carrier_analytics'],
 };
 
 export const permissions = PERMISSION_DOMAINS;

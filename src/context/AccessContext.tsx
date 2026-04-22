@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback, Rea
 import { onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
 import { auth, db } from '../firebase';
-import { Role, Plan, AccountStatus, platformRoles as initialPlatformRoles, tenantRoles as initialTenantRoles, planFeatures, adminPermissions, PERMISSION_HIERARCHY, meetsPermissionLevel, PERMISSION_DOMAINS, SUB_PERMISSIONS } from './accessConfig';
+import { Role, Plan, AccountStatus, platformRoles as initialPlatformRoles, tenantRoles as initialTenantRoles, planFeatures, adminPermissions, PERMISSION_HIERARCHY, meetsPermissionLevel, PERMISSION_DOMAINS, SUB_PERMISSIONS, isSubPermissionPlanAvailable } from './accessConfig';
 import { EmployeeRole, PermissionLevel } from '../types';
 
 interface Session {
@@ -208,10 +208,21 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
 
   const checkSubPermission = useCallback((actionId: string): boolean => {
     if (!session) return false;
-    if (effectiveRole === 'system_owner' || effectiveRole === 'store_owner') return true;
 
     const actionDef = SUB_PERMISSIONS.find(sp => sp.id === actionId);
     if (!actionDef) return false;
+
+    // PHASE 2 PLAN-TO-PERMISSION PROPAGATION (general rule):
+    // The plan-availability check runs BEFORE every other shortcut — including
+    // the system_owner / store_owner blanket allow — so a plan-disabled
+    // capability cannot be exercised by ANY role, even Store Owner. Plan
+    // decides whether the feature exists; role decides who can use it within
+    // an enabled feature; role can never resurrect a plan-disabled feature.
+    // System Owner (platform role) is also subject to this for tenant-scoped
+    // sub-permissions because they operate within the tenant's plan envelope.
+    if (tenant && !isSubPermissionPlanAvailable(actionDef, tenant.plan)) return false;
+
+    if (effectiveRole === 'system_owner' || effectiveRole === 'store_owner') return true;
 
     const parentLevel = getPermissionLevel(actionDef.parentDomain);
     if (!meetsPermissionLevel(parentLevel, actionDef.minModuleLevel)) return false;
@@ -224,7 +235,7 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     }
 
     return meetsPermissionLevel(parentLevel, actionDef.defaultLevel);
-  }, [session, effectiveRole, tenantRolesState, getPermissionLevel]);
+  }, [session, effectiveRole, tenantRolesState, tenant, getPermissionLevel]);
 
   const updateTenantRoleSubPermission = (roleId: string, actionId: string, granted: boolean) => {
     setTenantRolesState(prev => prev.map(r => {
