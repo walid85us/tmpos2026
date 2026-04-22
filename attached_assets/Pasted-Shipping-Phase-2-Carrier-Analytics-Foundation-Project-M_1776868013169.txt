@@ -1,0 +1,233 @@
+Shipping Phase 2 — Carrier Analytics Foundation
+
+Project:
+Multi-Tenant Repair / POS SaaS
+
+Scope:
+This is a strict isolated implementation pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen closed pickup/cancellation/debug threads.
+Do not implement Customs Docs or Insurance Rules in this pass.
+Keep Customs Docs and Insurance Rules deferred in the record for future improvement only.
+Implement the remaining active planned Phase 2 workstream:
+1) Carrier Analytics foundation
+
+Role:
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Node/Express carrier-integration engineer
+- Enterprise shipping systems architect
+- Senior shipping analytics / operations intelligence expert
+- QA gatekeeper
+- Systems thinker
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve without breaking:
+- current design baseline exactly
+- auth behavior
+- preview-mode safety
+- plan gating
+- store permission gating
+- provider/manual mode split
+- PACKED-only activation
+- mutual exclusivity and lifecycle rules already completed
+- existing shipping core flow
+- reverse-logistics flow
+- pickup forecast / fee transparency / exact pickup-rate selection
+- two-stage address readiness
+- truthful USPS/FedEx/UPS provider-state handling
+- shipment-cancel dependency on confirmed pickup
+- orphan/local-dismiss resolution logic
+- label-lock and pickup-override behavior
+
+==================================================
+WORKSTREAM GOAL
+==================================================
+
+Add a solid Shipping Center foundation for:
+1) Carrier Analytics
+
+This should be foundation-level, production-minded, auditable, and extensible.
+Do NOT fake analytics that the system cannot truthfully derive.
+Build the data model usage, operator-facing analytics surfaces, filters, metric definitions, and data-quality handling correctly.
+
+==================================================
+PART A — CARRIER ANALYTICS FOUNDATION
+==================================================
+
+Required concepts:
+- analytics must be based on real shipment/provider/tracking/pickup data already in the system
+- metrics must be truthful about source quality and coverage
+- manual shipments and provider-mode shipments must not be conflated silently
+- incomplete or insufficient data must be shown honestly, not guessed
+
+Required features:
+
+1) Carrier Analytics surface inside Shipping Center
+Required:
+- add a Carrier Analytics surface inside Shipping Center
+- keep it consistent with the current design baseline
+- it may be a tab, section, or analytics panel, but it must feel native to current Shipping Center IA
+- do not create a disconnected mini-app
+
+2) Analytics filters
+At minimum support:
+- date range
+- store / location context if available in current architecture
+- provider
+- carrier
+- shipment type/context where available
+- outbound vs return shipment context where available
+- manual vs provider-mode distinction
+
+3) Truthful core metrics
+At minimum support metrics that can be derived honestly from current data, such as:
+- shipment count
+- label purchased count
+- provider-mode shipment count
+- manual shipment count
+- pickup requested count
+- pickup confirmed count
+- pickup cancelled count
+- delivered count
+- cancelled shipment count
+- shipping spend totals where actual stored cost exists
+- average shipping cost where actual stored cost exists
+- carrier/provider distribution
+- service-level distribution where available
+
+4) Transit / delivery analytics
+Required:
+- only calculate transit or delivery-speed metrics when enough timestamp/state data exists
+- if insufficient data exists, show a truthful unknown / insufficient-data state
+- do not invent SLA performance
+- if feasible from current shipment lifecycle data, support metrics such as:
+  - average time from label created to delivered
+  - average time from dispatched to delivered
+  - delivered vs in-transit vs exception/open counts
+- if exact provider event coverage is partial, reflect that honestly
+
+5) Pickup analytics
+Required:
+- include pickup analytics using the completed Phase 2 pickup records
+- show requested / confirmed / cancelled / failed / local-only where applicable
+- preserve truthful provider-state handling
+- do not overstate provider-confirmed pickups when they were only local-only intents
+
+6) Data-quality / coverage states
+Required:
+- clearly distinguish:
+  - actual metric
+  - unavailable metric
+  - insufficient-data metric
+  - partial provider coverage
+- show concise operator-facing explanations where a metric is not fully reliable
+- do not silently mix local-only operational records with live-provider-confirmed records unless clearly labeled
+
+7) Auditability / metric definitions
+Required:
+- metric definitions must be deterministic
+- analytics must be traceable to current shipment records/statuses/events/cost fields
+- avoid magic calculations
+- use stable definitions so future scorecards can build on them
+
+==================================================
+PART B — DATA MODEL / DERIVATION RULES
+==================================================
+
+Required:
+- define the exact derivation rules for each surfaced metric
+- specify which existing shipment fields, tracking fields, pickup records, and event history are used
+- where current data is not strong enough, surface the limitation instead of manufacturing a calculation
+- keep the foundation extensible for future:
+  - carrier scorecards
+  - SLA analytics
+  - automation rules
+  - exception reporting
+  - lane / route analytics
+
+==================================================
+PART C — PLAN / PERMISSION / SETTINGS INTEGRITY
+==================================================
+
+Required:
+- update relevant Shipping Center permissions/sub-permissions if analytics needs explicit access control
+- update System Owner / plan-level treatment if Carrier Analytics is surfaced as a distinct shipping capability or sub-feature
+- do not repeat earlier gating mistakes where UI showed unavailable capabilities incorrectly
+- plan gating and store permissions must both behave coherently
+
+==================================================
+PART D — DO NOT FAKE WHAT IS NOT BUILT
+==================================================
+
+Required:
+- do not pretend the platform has carrier scorecards if they are not truly implemented
+- do not pretend all carriers/providers have equal event coverage
+- do not pretend transit-time analytics are precise if the data is partial
+- show truthful states such as:
+  - based on recorded shipment data
+  - partial provider coverage
+  - insufficient timestamp coverage
+  - future scorecard foundation only
+when appropriate
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+- carrier analytics foundation exists inside Shipping Center
+- metrics shown are based on truthful derivation from real current data
+- pickup analytics reflect the completed pickup architecture honestly
+- data-quality / partial-coverage states are visible where needed
+- plan/permission integrity remains coherent
+- existing shipping, pickup, return, and cancellation flows remain intact
+- Customs Docs and Insurance Rules are not implemented in this pass and remain deferred for future improvement
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Design analytics scope and metric derivation rules from current data model
+2) Implement analytics surface and filters
+3) Add truthful core shipment / provider / pickup metrics
+4) Add data-quality / partial-coverage states
+5) Wire permissions / gating / plan integrity
+6) Re-test shipping non-regression
+7) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- carrier analytics scope
+- surfaced metrics and their exact derivation rules
+- pickup analytics treatment
+- data-quality / coverage-state logic
+- plan/permission/gating treatment
+- what is foundation-only vs future carrier scorecards / advanced analytics
+- note explicitly that Customs Docs and Insurance Rules are deferred for future improvement and not implemented in this pass
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Analytics Scope + Metric Definitions
+3. Analytics Surface + Filters
+4. Pickup Analytics + Coverage Logic
+5. Data-Quality / Partial-Coverage Handling
+6. Plan / Permission / Gating Updates
+7. Files Changed
+8. Documentation Updated
+9. Non-Regression Notes

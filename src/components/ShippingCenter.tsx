@@ -10,6 +10,7 @@ import type { ReturnPrefill } from './ReturnsPortal';
 import PageShell from './PageShell';
 import { TrackingNumber } from './shared/TrackingNumber';
 import ShippingProvidersPage from './ShippingProvidersPage';
+import { CarrierAnalytics } from './shipping/CarrierAnalytics';
 import { featureMatrix as staticFeatureMatrix } from '../owner/mockData';
 import { normalizeStateCode, normalizeZip, normalizePhone } from '../utils/inputNormalizers';
 
@@ -428,8 +429,15 @@ export default function ShippingCenter() {
   }
   const planAllowsServicePoints = isPlanFeatureLive('service_points');
   const planAllowsPickupRequests = isPlanFeatureLive('pickup_requests');
+  // Phase 2 — Carrier Analytics foundation. Plan-level gate (Growth/Advanced)
+  // and store-permission gate (`view_carrier_analytics`) are evaluated
+  // independently and BOTH must pass for the tab to render. The Carrier
+  // Analytics surface itself also rechecks both inside its own render so a
+  // direct deep-link cannot bypass either gate.
+  const planAllowsCarrierAnalytics = isPlanFeatureLive('carrier_analytics');
+  const canViewCarrierAnalytics = checkSubPermission('view_carrier_analytics');
 
-  const [activeTab, setActiveTab] = useState<'shipments' | 'settings'>('shipments');
+  const [activeTab, setActiveTab] = useState<'shipments' | 'analytics' | 'settings'>('shipments');
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<ShipmentStatus | 'all'>('all');
   const [sourceFilter, setSourceFilter] = useState<ShipmentSourceType | 'all'>('all');
@@ -4269,6 +4277,19 @@ export default function ShippingCenter() {
           >
             <span className="flex items-center gap-1"><span className="material-symbols-outlined text-sm">inventory_2</span>Shipments</span>
           </button>
+          {/* Phase 2 Carrier Analytics — tab is rendered only when BOTH the
+              plan allows the capability AND the operator has the
+              `view_carrier_analytics` sub-permission. The CarrierAnalytics
+              surface revalidates both gates internally so a stale activeTab
+              cannot show analytics after a downgrade or permission change. */}
+          {planAllowsCarrierAnalytics && canViewCarrierAnalytics && (
+            <button
+              onClick={() => setActiveTab('analytics')}
+              className={`px-4 py-2.5 text-[10px] font-black uppercase tracking-widest border-b-2 transition-all ${activeTab === 'analytics' ? 'text-primary border-primary' : 'text-slate-400 hover:text-slate-600 border-transparent hover:border-slate-300'}`}
+            >
+              <span className="flex items-center gap-1"><span className="material-symbols-outlined text-sm">analytics</span>Analytics</span>
+            </button>
+          )}
           {canManageProviderSettings && (
             <button
               onClick={() => setActiveTab('settings')}
@@ -4278,7 +4299,14 @@ export default function ShippingCenter() {
             </button>
           )}
         </div>
-        {activeTab === 'settings' ? (
+        {activeTab === 'analytics' ? (
+          <CarrierAnalytics
+            shipments={shipments}
+            canViewCosts={canViewCosts}
+            planAllowsCarrierAnalytics={planAllowsCarrierAnalytics}
+            hasViewPermission={canViewCarrierAnalytics}
+          />
+        ) : activeTab === 'settings' ? (
           <div className="space-y-6">
             <ShippingProvidersPage embedded onProviderChange={refreshProviderState} />
             {/* Carrier Locator Settings — per-store, per-adapter configuration.
