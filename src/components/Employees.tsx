@@ -896,44 +896,31 @@ export default function Employees() {
                         })}
                       </tr>
                       {expandedMatrixDomains.has(domain.id) && domainSubs.map(sub => {
-                        // Phase 2 plan-to-permission propagation. The Store
-                        // Permissions Matrix consults the generalized
-                        // `isSubPermissionPlanAvailable` rule from
-                        // accessConfig — if the tenant's plan disables the
-                        // feature(s) this sub-permission depends on, the row
-                        // renders as a coherent Plan-Locked state across ALL
-                        // roles (including Store Owner) so it cannot be
-                        // assigned. We do NOT silently hide the row, because
-                        // the sub-permission still exists conceptually — the
-                        // matrix tells the operator exactly WHY it is not
-                        // currently configurable, and which feature would
-                        // need to be enabled at the plan level.
+                        // Phase 2 Final Entitlement Integrity correction —
+                        // generalized "linked feature permissions disappear"
+                        // rule. When the tenant's plan disables a feature the
+                        // sub-permission is specifically linked to (parent
+                        // module not in plan, OR any FEATURE_PERMISSION_DEPENDENCIES
+                        // gate not in plan), the row is OMITTED from the matrix
+                        // entirely — not rendered as Plan-Locked, not rendered
+                        // as disabled chrome. This is enforced as a single
+                        // architectural rule via `isSubPermissionPlanAvailable`
+                        // so future feature/plan additions inherit the same
+                        // disappearance semantics with no UI changes needed.
+                        // Truthful state model: plan decides if a capability
+                        // exists at all; the matrix only shows capabilities
+                        // that actually exist for this tenant's plan.
                         const planAvailable = tenant ? isSubPermissionPlanAvailable(sub, tenant.plan) : true;
-                        const featureGates = getFeatureGatesForSubPermission(sub.id);
-                        const planFeats = tenant ? (planFeatures[tenant.plan] || []) : [];
-                        const moduleInPlan = tenant ? planFeats.includes(sub.parentDomain) : true;
-                        const lockedReason = !moduleInPlan
-                          ? `Module "${domain.label}" is not included in the ${tenant?.plan || ''} plan.`
-                          : (featureGates.length > 0
-                              ? `Requires plan feature${featureGates.length > 1 ? 's' : ''}: ${featureGates.join(', ')}.`
-                              : '');
+                        if (!planAvailable) return null;
                         return (
-                        <tr key={sub.id} className={`border-b border-slate-50/50 transition-colors ${planAvailable ? 'bg-white hover:bg-slate-50/30' : 'bg-amber-50/40'}`}>
+                        <tr key={sub.id} className="border-b border-slate-50/50 transition-colors bg-white hover:bg-slate-50/30">
                           <td className="pl-10 pr-4 py-2.5">
-                            <span className={`text-xs font-bold flex items-center gap-1.5 ${planAvailable ? 'text-slate-500' : 'text-amber-700'}`}>
+                            <span className="text-xs font-bold flex items-center gap-1.5 text-slate-500">
                               <span className="text-slate-300">└</span>
                               {sub.label}
-                              {!planAvailable && (
-                                <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-amber-100 text-amber-700 border border-amber-200 rounded text-[8px] font-black uppercase tracking-widest">
-                                  <span className="material-symbols-outlined text-[10px]">workspace_premium</span>
-                                  Plan-Locked
-                                </span>
-                              )}
                             </span>
                             <span className="block text-[9px] text-slate-400 font-medium mt-0.5 ml-4">
-                              {planAvailable
-                                ? `Default at ${LEVEL_LABELS[sub.defaultLevel]}+ · Requires ${domain.label} access`
-                                : lockedReason}
+                              {`Default at ${LEVEL_LABELS[sub.defaultLevel]}+ · Requires ${domain.label} access`}
                             </span>
                           </td>
                           {tenantRolesState.map(role => {
@@ -943,12 +930,7 @@ export default function Employees() {
 
                             return (
                               <td key={role.id} className="px-4 py-2.5 text-center">
-                                {!planAvailable ? (
-                                  <span className="inline-flex items-center gap-1 px-2 py-1 bg-amber-50 text-amber-600 border border-amber-200 rounded-lg text-[9px] font-black uppercase tracking-widest" title={lockedReason}>
-                                    <span className="material-symbols-outlined text-[10px]">lock</span>
-                                    Plan-Locked
-                                  </span>
-                                ) : isStoreOwnerRole ? (
+                                {isStoreOwnerRole ? (
                                   <span className="inline-flex items-center gap-1 px-2 py-1 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-lg text-[9px] font-black uppercase tracking-widest">
                                     <span className="material-symbols-outlined text-[10px]">check_circle</span>
                                     Allowed

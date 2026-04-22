@@ -1,0 +1,309 @@
+Shipping Phase 2 — Final Entitlement Integrity Correction Pass
+Hide Disabled Feature Permissions + Shipping Provider Full Deactivation
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated final correction pass for the remaining entitlement and shipping-provider issues.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen previously closed shipping threads except where directly required by this correction.
+Do not implement Customs Docs or Insurance Rules in this pass.
+Do not mix in broader Addon governance redesign in this pass.
+
+Your job is to close the remaining QA failures cleanly and permanently.
+
+==================================================
+MANDATORY CONTEXT
+==================================================
+
+The current implementation partially works, but it still fails the required business behavior in these ways:
+
+1) In the Store Permissions Matrix, plan-disabled feature-related permissions are still being shown as "Plan locked".
+   This is NOT the desired behavior.
+   New required behavior:
+   - if a feature is disabled at the plan level, and a permission/sub-permission belongs specifically to that feature, it should DISAPPEAR from the Store Permissions Matrix entirely
+   - do not show it as "Plan locked"
+   - do not leave it visible as a non-usable row
+   - if the feature does not exist for the plan, its linked permission surface should not remain visible
+
+2) Shipping Provider still needs stronger separation and control.
+   Required:
+   - there must be an explicit Store Permissions Matrix permission for Shipping Provider configuration / management
+   - plan-disabled Shipping Provider must not just block usage; it must fully deactivate provider capability
+   - if Shipping Provider was previously active/configured and then the feature is disabled for the plan, the provider must be deactivated and the configuration removed/cleared
+   - provider-backed functionality must stop working immediately and truthfully
+
+This pass must solve those issues completely.
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Node/Express carrier-integration engineer
+- Senior RBAC / entitlement systems architect
+- Senior multi-tenant commercial-controls architect
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Important behavior:
+Do not implement a shallow patch.
+Think through the best architecture for this correction pass.
+If there is a stronger, cleaner, more extensible implementation than the current approach, use it.
+If you improve the implementation approach, explain it clearly in the required output structure.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- Ref.txt
+- replit.md
+
+Use them as the continuity and source-of-truth documents.
+
+==================================================
+PRESERVE WITHOUT BREAKING
+==================================================
+
+Preserve exactly unless this correction explicitly requires touching it:
+- current design baseline exactly
+- auth behavior
+- preview-mode safety
+- live System Owner plan gating behavior
+- store permission gating
+- provider/manual mode split
+- shipping lifecycle integrity
+- existing shipping core flow
+- reverse-logistics flow
+- pickup forecast / fee transparency / exact pickup-rate selection
+- two-stage address readiness
+- truthful USPS/FedEx/UPS provider-state handling
+- shipment-cancel dependency on confirmed pickup
+- orphan/local-dismiss resolution logic
+- label-lock and pickup-override behavior
+- enabled-state non-regression when features are turned back on
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Implement the final correction so that:
+
+A) If a feature is disabled for the active plan, any permission/sub-permission that belongs specifically to that feature DISAPPEARS from the Store Permissions Matrix
+
+B) Shipping Provider gets an explicit permission model and a true hard deactivation model:
+- plan disable => feature unavailable
+- active/configured provider => deactivated
+- configuration => removed/cleared
+- provider-backed flows => stop immediately
+
+C) Shipping-related capabilities under this scope behave coherently:
+- Pickup Analytics
+- Carrier Locators
+- Carrier Analytics
+- Shipping Provider capability
+- Shipping Provider configuration access
+
+==================================================
+PART A — GENERAL RULE: PLAN-DISABLED FEATURE PERMISSIONS MUST DISAPPEAR
+==================================================
+
+Required:
+Implement this as a general rule, not a one-off hack.
+
+New required rule:
+- when a feature is disabled for the current tenant plan
+- and a permission/sub-permission is specifically linked to that feature
+- that permission row must NOT render in the Store Permissions Matrix
+- do NOT render it in a "Plan locked" state
+- do NOT keep it visible as disabled chrome
+- remove it from the matrix view entirely
+
+This rule must be architecture-driven and reusable for future features.
+
+Required design expectation:
+- define a clean feature-to-permission dependency mapping
+- use that mapping to decide which rows/sub-permissions render in the Store Permissions Matrix
+- rendering should be based on plan-available capabilities first
+- only after that should role-level assignability be evaluated
+
+Business rule:
+- plan determines whether the capability exists at all
+- role determines who can use/configure it
+- role must never be able to expose or revive a plan-disabled feature
+
+Important:
+Use disappearance for linked feature permissions.
+Do NOT keep using the current "Plan locked" pattern for this specific behavior.
+
+==================================================
+PART B — APPLY THE RULE TO CURRENT SHIPPING FEATURES
+==================================================
+
+Apply the generalized disappearance rule to the shipping-related capabilities under QA where the permission is specifically linked to the feature, including:
+
+1) Pickup Analytics
+2) Carrier Locators
+3) Carrier Analytics
+4) Shipping Provider capability
+5) Shipping Provider configuration / management
+
+Required behavior:
+- if the feature is disabled at plan level, its linked permissions/sub-permissions disappear from Store Permissions Matrix
+- if the feature is enabled at plan level, its linked permissions appear normally and remain role-assignable
+- do not leave stale linked permission rows behind
+
+==================================================
+PART C — ADD EXPLICIT SHIPPING PROVIDER CONFIGURATION PERMISSION
+==================================================
+
+Required:
+Introduce an explicit permission/sub-permission for Shipping Provider configuration / management.
+
+Expectation:
+Separate, at minimum, these concerns:
+- access to Shipping Center generally
+- ability to use provider-backed shipping operations
+- ability to configure/manage Shipping Provider settings
+
+Do not keep Shipping Provider configuration hidden behind unrelated generic shipping access if that is how it currently behaves.
+
+Required:
+- add the correct permission model
+- wire it into Store Permissions Matrix
+- wire it into the relevant Shipping Center settings/config surfaces
+- ensure it respects the plan-first rendering rule above
+
+==================================================
+PART D — SHIPPING PROVIDER FULL DEACTIVATION + CONFIG REMOVAL
+==================================================
+
+This is mandatory and literal.
+
+Required behavior when Shipping Provider feature is disabled at the plan level:
+
+1) provider-backed functionality must become unavailable immediately
+This includes, where applicable:
+- Get Rates
+- rate selection
+- Purchase Label
+- provider-backed validation
+- provider-backed pickup operations
+- provider-backed tracking sync
+- any provider-dependent shipping action
+
+2) if a provider had already been active/configured, it must be deactivated
+
+3) configuration must be removed/cleared
+This is not just visual blocking.
+The system should not continue to carry an active usable provider configuration after plan disable.
+
+Important implementation note:
+- do this safely and coherently
+- if credentials/settings are persisted in the current architecture, clear the operational configuration/state so the app no longer treats the provider as configured or active
+- do not leave stale session/local state, cached active-provider state, or previously selected provider values that continue to power shipping flows
+- the runtime should behave as though no provider is configured after the plan disables Shipping Provider
+
+Required truthful behavior:
+- if disabled for plan, explain it as a plan entitlement reason
+- do not present it as a configuration issue
+- do not silently fall through into provider mode because config existed earlier
+
+==================================================
+PART E — TRUTHFUL STATE MODEL
+==================================================
+
+Keep these states clearly distinct:
+- feature enabled and configured
+- feature enabled but unconfigured
+- feature disabled for plan
+- feature enabled for plan but permission denied
+- feature deactivated because plan removed entitlement
+- provider config removed because entitlement disabled
+
+Do not conflate these.
+
+==================================================
+PART F — NON-REGRESSION REQUIREMENT
+==================================================
+
+Required:
+- when these features are enabled again, normal behavior should resume coherently
+- do not break ordinary shipping and reverse-logistics flows under enabled plans
+- do not break non-provider manual flows when Shipping Provider is disabled
+- do not break unrelated shipping permissions
+
+==================================================
+PART G — OUT OF SCOPE
+==================================================
+
+Do NOT implement in this pass:
+- Customs Docs
+- Insurance Rules
+- broader Addon governance redesign
+
+Documentation only:
+- keep Customs Docs and Insurance Rules recorded as the next shipping improvements after this correction pass closes
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Linked feature permissions disappear from Store Permissions Matrix when the feature is plan-disabled
+2) "Plan locked" is no longer used for these linked feature-permission rows
+3) Shipping Provider configuration has its own explicit permission model
+4) Disabling Shipping Provider at plan level fully deactivates provider-backed operations
+5) If provider was already configured, that configuration is removed/cleared and no stale active-provider behavior remains
+6) Carrier Analytics / Pickup Analytics / Carrier Locators / Shipping Provider all behave coherently under the corrected rule
+7) Enabled-state non-regression remains intact
+8) Customs Docs and Insurance Rules remain unimplemented in this pass
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Design the general feature-to-permission disappearance rule
+2) Apply it to shipping-linked permissions under this scope
+3) Add explicit Shipping Provider configuration permission
+4) Implement Shipping Provider deactivation + configuration clearing on plan disable
+5) Re-check all provider-backed shipping action paths for stale state leakage
+6) Re-test enabled-state non-regression
+7) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- the final general rule for linked feature-permission rendering in Store Permissions Matrix
+- note that linked permissions disappear entirely when their parent feature is plan-disabled
+- Shipping Provider configuration permission model
+- Shipping Provider full deactivation behavior
+- Shipping Provider configuration clearing/removal behavior on plan disable
+- distinction between plan-disabled vs permission-denied vs unconfigured
+- note that Customs Docs and Insurance Rules are next shipping improvements after this correction closes
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. General Feature-to-Permission Disappearance Rule
+3. Shipping Provider Configuration Permission Model
+4. Shipping Provider Full Deactivation + Config Clearing
+5. Shipping Feature Alignment Updates
+6. Files Changed
+7. Documentation Updated
+8. Non-Regression Notes

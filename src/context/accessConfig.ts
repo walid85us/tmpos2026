@@ -91,7 +91,8 @@ export const SUB_PERMISSIONS: SubPermissionDef[] = [
   { id: 'update_tracking_events', label: 'Update Tracking', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'edit', description: 'Add tracking events and updates' },
   { id: 'cancel_shipment', label: 'Cancel Shipment', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Cancel shipment records' },
   { id: 'view_shipping_costs', label: 'View Shipping Costs', parentDomain: 'shipping', minModuleLevel: 'view', defaultLevel: 'edit', description: 'View shipment cost and financial details' },
-  { id: 'manage_shipping_settings', label: 'Manage Shipping Settings', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Configure carrier providers and shipping settings' },
+  { id: 'manage_shipping_settings', label: 'Manage Shipping Settings', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Configure general shipping settings (origin defaults, package presets, manual carrier list, label preferences). Does NOT include aggregator provider configuration — that requires the separate Configure Shipping Provider sub-permission.' },
+  { id: 'configure_shipping_provider', label: 'Configure Shipping Provider', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Connect, configure, switch environments for, and remove aggregator shipping providers (EasyPost / Shippo / ShipStation). Independent of Manage Shipping Settings (general shipping config) and of provider-backed action permissions (Fetch Rates / Purchase Label / Validate Address / Sync Tracking). Requires the Shipping Provider Configuration plan feature.' },
   { id: 'validate_shipping_address', label: 'Validate Address', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'edit', description: 'Validate shipping addresses via provider' },
   { id: 'fetch_shipping_rates', label: 'Fetch Rates', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'edit', description: 'Retrieve shipping rates from provider' },
   { id: 'purchase_shipping_label', label: 'Purchase Label', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Purchase shipping labels via provider' },
@@ -140,7 +141,7 @@ export const FEATURE_PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // purchase labels, validate addresses against carriers, or sync tracking —
   // all of these require an active aggregator connection.
   shipping_providers: [
-    'manage_shipping_settings',
+    'configure_shipping_provider',
     'fetch_shipping_rates',
     'purchase_shipping_label',
     'validate_shipping_address',
@@ -298,6 +299,7 @@ export const tenantRoles: EmployeeRole[] = [
       view_carrier_analytics: true,
       view_pickup_analytics: true,
       manage_shipping_settings: true,
+      configure_shipping_provider: true,
       manage_carrier_locator_settings: true,
       validate_shipping_address: true,
       fetch_shipping_rates: true,
@@ -377,6 +379,7 @@ export const tenantRoles: EmployeeRole[] = [
       view_carrier_analytics: false,
       view_pickup_analytics: false,
       manage_shipping_settings: false,
+      configure_shipping_provider: false,
       manage_carrier_locator_settings: false,
       validate_shipping_address: false,
       fetch_shipping_rates: false,
@@ -456,6 +459,7 @@ export const tenantRoles: EmployeeRole[] = [
       view_carrier_analytics: false,
       view_pickup_analytics: false,
       manage_shipping_settings: false,
+      configure_shipping_provider: false,
       manage_carrier_locator_settings: false,
       validate_shipping_address: false,
       fetch_shipping_rates: false,

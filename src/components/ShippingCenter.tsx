@@ -402,7 +402,15 @@ export default function ShippingCenter() {
   const canPurchaseLabel = checkSubPermission('purchase_shipping_label');
   const canPrintLabel = checkSubPermission('print_shipping_label');
   const canSyncTracking = checkSubPermission('sync_shipping_tracking');
-  const canManageProviderSettings = checkSubPermission('manage_shipping_settings');
+  // Phase 2 Final Entitlement Integrity correction — `configure_shipping_provider`
+  // is the explicit, dedicated sub-permission for connecting/configuring/removing
+  // aggregator shipping providers (EasyPost / Shippo / ShipStation). It is
+  // separate from `manage_shipping_settings` (general non-provider shipping
+  // settings) and from per-action provider permissions like `fetch_shipping_rates`
+  // / `purchase_shipping_label`. It is plan-gated by `shipping_providers` via
+  // FEATURE_PERMISSION_DEPENDENCIES, so when the plan disables Shipping Provider
+  // Configuration the runtime check returns false for every role.
+  const canManageProviderSettings = checkSubPermission('configure_shipping_provider');
   const canSelectServicePoint = checkSubPermission('select_service_point');
   const canRequestPickup = checkSubPermission('request_carrier_pickup');
   const canCancelPickup = checkSubPermission('cancel_carrier_pickup');
@@ -800,13 +808,58 @@ export default function ShippingCenter() {
   const [reasonModal, setReasonModal] = useState<{ id: string; newStatus: 'Rejected' | 'Returned' | 'Packed' } | null>(null);
   const [selectedReason, setSelectedReason] = useState('');
   const [reasonNotes, setReasonNotes] = useState('');
+  // Phase 2 Final Entitlement Integrity correction — single plan-aware
+  // load/deactivate effect. Both branches use a cancellation token so an
+  // in-flight load cannot land AFTER the plan flips and resurrect stale
+  // provider state.
+  //   - When the plan ALLOWS providers: load active provider + statuses.
+  //   - When the plan DISABLES providers: hard-deactivate — call server to
+  //     clear the active-provider pointer AND remove every persisted
+  //     credential, then wipe all local operational state. After this
+  //     completes the runtime behaves as though no provider was ever
+  //     configured. Re-enabling the plan re-runs the load branch, but the
+  //     server now has no active provider and no credentials, so the
+  //     operator must explicitly reconnect — nothing silently resurrects.
   useEffect(() => {
-    shippingApi.getActiveProvider().then(r => {
-      setActiveProviderIdRaw(r.activeProviderId);
-      setProviderEnvironment(r.environment || null);
-    });
-    loadProviderStatuses();
-  }, []);
+    let cancelled = false;
+    (async () => {
+      if (planAllowsShippingProviders) {
+        try {
+          const r = await shippingApi.getActiveProvider();
+          if (cancelled) return;
+          setActiveProviderIdRaw(r.activeProviderId);
+          setProviderEnvironment(r.environment || null);
+        } catch { /* surface via providerError elsewhere */ }
+        if (!cancelled) loadProviderStatuses();
+        return;
+      }
+      // Plan-disabled branch — hard deactivation.
+      let serverPurgeFailed = false;
+      try {
+        await shippingApi.setActiveProvider(null);
+      } catch { serverPurgeFailed = true; }
+      try {
+        const statusResp = await shippingApi.getProvidersStatus();
+        const ids: string[] = (statusResp?.providers || []).map((p: any) => p.providerId).filter(Boolean);
+        for (const id of ids) {
+          try { await shippingApi.removeProviderCredentials(id); }
+          catch { serverPurgeFailed = true; }
+        }
+      } catch { serverPurgeFailed = true; }
+      if (cancelled) return;
+      // Local clear is unconditional — runtime state of record is here.
+      setActiveProviderIdRaw(null);
+      setProviderEnvironment(null);
+      setProviderStatuses([]);
+      setShowProviderSettings(false);
+      setAvailableRates([]);
+      setShowRatesPanel(false);
+      if (serverPurgeFailed) {
+        setProviderWarning('Shipping Provider Configuration is not included in your current plan. The provider has been deactivated locally; some server-side credentials may not have been cleared and will be removed on the next successful sync.');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [planAllowsShippingProviders]);
 
   const [newCarrier, setNewCarrier] = useState('');
   const [newService, setNewService] = useState('');
