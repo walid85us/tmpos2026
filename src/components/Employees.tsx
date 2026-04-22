@@ -835,7 +835,14 @@ export default function Employees() {
               <tbody>
                 {PERMISSION_DOMAINS.map(domain => {
                   const sortedLevels = PERMISSION_HIERARCHY.filter(l => domain.levels.includes(l));
-                  const domainSubs = getSubPermissionsForDomain(domain.id);
+                  // Phase 2 Final Sub-Permission Count Correction — counts must
+                  // reflect the ACTUAL rendered/available sub-permission list
+                  // after plan filtering, not the static master definition.
+                  // When linked sub-permissions disappear because their parent
+                  // feature is plan-disabled, the count must decrease
+                  // accordingly (and recover when the plan re-enables it).
+                  const allDomainSubs = getSubPermissionsForDomain(domain.id);
+                  const domainSubs = tenant ? allDomainSubs.filter(sub => isSubPermissionPlanAvailable(sub, tenant.plan)) : allDomainSubs;
                   const hasSubs = domainSubs.length > 0;
 
                   return (
@@ -1346,7 +1353,12 @@ export default function Employees() {
                     {PERMISSION_DOMAINS.map(domain => {
                       const sortedLevels = PERMISSION_HIERARCHY.filter(l => domain.levels.includes(l));
                       const currentLevel = newRole.permissions[domain.id] || 'none';
-                      const domainSubs = getSubPermissionsForDomain(domain.id);
+                      // Same dynamic count rule applies to the create-role
+                      // modal — only show sub-permissions the tenant's plan
+                      // actually exposes, so admins cannot grant sub-perms
+                      // for a feature the plan disables.
+                      const allDomainSubs = getSubPermissionsForDomain(domain.id);
+                      const domainSubs = tenant ? allDomainSubs.filter(sub => isSubPermissionPlanAvailable(sub, tenant.plan)) : allDomainSubs;
                       return (
                         <React.Fragment key={domain.id}>
                           <div className={`flex items-center justify-between p-3 rounded-xl border border-slate-200 ${domainSubs.length > 0 ? 'bg-slate-100' : 'bg-slate-50'}`}>

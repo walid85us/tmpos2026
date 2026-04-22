@@ -4426,7 +4426,17 @@ export default function ShippingCenter() {
               <span className="flex items-center gap-1"><span className="material-symbols-outlined text-sm">analytics</span>Analytics</span>
             </button>
           )}
-          {canManageProviderSettings && (
+          {/* Phase 2 Final Settings Scoping correction — the Settings tab is a
+              CONTAINER for multiple independent subsections (Shipping Provider
+              configuration, Carrier Locators, general shipping settings).
+              Visibility of the tab itself must NOT be gated on a single
+              subsection's plan/permission state, otherwise disabling the
+              Shipping Provider Configuration plan feature would collapse the
+              whole tab and the operator could not see the truthful
+              "not included for your plan" state for the provider subsection.
+              Show the tab if the operator has any reason to enter it; gate
+              each subsection independently inside. */}
+          {(canManageProviderSettings || canManageCarrierLocators || checkSubPermission('manage_shipping_settings')) && (
             <button
               onClick={() => setActiveTab('settings')}
               className={`px-4 py-2.5 text-[10px] font-black uppercase tracking-widest border-b-2 transition-all ${activeTab === 'settings' ? 'text-primary border-primary' : 'text-slate-400 hover:text-slate-600 border-transparent hover:border-slate-300'}`}

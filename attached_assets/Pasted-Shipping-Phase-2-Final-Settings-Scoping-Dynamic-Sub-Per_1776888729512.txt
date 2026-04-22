@@ -1,0 +1,264 @@
+Shipping Phase 2 — Final Settings Scoping + Dynamic Sub-Permission Count Correction Pass
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated final correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen previously closed shipping work except where directly required by the exact issues below.
+Do not implement Customs Docs or Insurance Rules in this pass.
+Do not mix in broader Addon governance redesign in this pass.
+
+Your job is to close the last remaining QA failures cleanly and accurately.
+
+==================================================
+MANDATORY CONTEXT
+==================================================
+
+Most of the entitlement correction is now working.
+The remaining failures are:
+
+1) When Shipping Provider Configuration is disabled at the plan level, going to store level causes the ENTIRE Settings tab to disappear.
+This is wrong.
+
+Required behavior:
+- disabling Shipping Provider Configuration must affect only the Shipping Provider configuration area/subsection
+- it must NOT remove the entire Settings tab unless the whole Settings tab itself is actually governed by a separate parent entitlement that is disabled
+- keep Settings IA intact
+
+2) The plan-disabled reason is not being shown truthfully in the correct scoped surface.
+Because the whole Settings tab disappears, the user cannot see the correct reason at the Shipping Provider area level.
+
+Required behavior:
+- preserve the Settings tab
+- scope entitlement gating to the Shipping Provider configuration section
+- show a truthful unavailable-for-plan state in the Shipping Provider configuration area if that area is not included for the plan
+- do not collapse the entire Settings tab because one settings subsection is disabled
+
+3) Sub-permission counts are not dynamically reflecting disappeared linked permissions.
+If a plan-disabled feature causes linked sub-permissions to disappear from the Store Permissions Matrix, the displayed sub-permission count must also reduce accordingly.
+
+Example:
+- if count was 10
+- one linked sub-permission disappears due to plan disable
+- displayed count must become 9
+- counts must reflect the actual rendered/available sub-permission list, not the static master definition
+
+This pass must close those issues completely.
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Node/Express carrier-integration engineer
+- Senior RBAC / entitlement systems architect
+- Senior UI information architecture engineer
+- Senior multi-tenant commercial-controls architect
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Important behavior:
+Do not implement a shallow patch.
+Think through the best architecture for scoped entitlement rendering.
+If there is a cleaner and more durable implementation than the current one, use it and explain it clearly.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- Ref.txt
+- replit.md
+
+Use them as the continuity and source-of-truth documents.
+
+==================================================
+PRESERVE WITHOUT BREAKING
+==================================================
+
+Preserve exactly unless this correction explicitly requires touching it:
+- current design baseline exactly
+- auth behavior
+- preview-mode safety
+- live System Owner plan gating behavior
+- store permission gating
+- provider/manual mode split
+- shipping lifecycle integrity
+- existing shipping core flow
+- reverse-logistics flow
+- pickup forecast / fee transparency / exact pickup-rate selection
+- two-stage address readiness
+- truthful USPS/FedEx/UPS provider-state handling
+- shipment-cancel dependency on confirmed pickup
+- orphan/local-dismiss resolution logic
+- label-lock and pickup-override behavior
+- enabled-state non-regression when features are turned back on
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Implement the final correction so that:
+
+A) Shipping Provider Configuration plan disable only affects the Shipping Provider configuration subsection, not the whole Settings tab
+
+B) The store-level UX shows a truthful unavailable-for-plan reason in the correct scoped area
+
+C) Sub-permission counts in Store Permissions Matrix always reflect the actual visible linked sub-permissions after plan filtering
+
+==================================================
+PART A — SETTINGS TAB SCOPING FIX
+==================================================
+
+Required:
+- audit the current gating/render path that causes the entire Settings tab to disappear when Shipping Provider Configuration is disabled
+- fix the architecture so the entitlement is scoped to the correct subsection only
+
+Required behavior:
+- the Settings tab must remain visible if other settings content is still valid and available
+- only the Shipping Provider configuration subsection/area should be hidden or replaced by a truthful unavailable-for-plan state
+- do not let a child subsection entitlement remove the parent Settings tab shell unless the parent feature itself is disabled
+
+Important:
+- distinguish parent navigation/tab rendering from subsection rendering
+- do not over-gate parent containers because a nested subsection is disabled
+
+Implementation expectation:
+- use clean parent/child entitlement boundaries
+- keep the IA stable
+- do not introduce confusing tab disappearance
+
+==================================================
+PART B — TRUTHFUL PLAN-DISABLED UX IN THE RIGHT PLACE
+==================================================
+
+Required:
+- when Shipping Provider Configuration is not included in the plan, show the reason at the Shipping Provider configuration area level
+- do not convert this into a generic missing-tab condition
+
+Allowed patterns:
+- hidden subsection with nearby truthful explanatory state
+- visible subsection container with locked/unavailable-for-plan card/message
+Choose the stronger cleaner pattern for the current UI, but do not remove the entire Settings tab.
+
+Required:
+- message must clearly indicate this is unavailable for the current plan
+- do not misrepresent it as a broken configuration or permission issue
+- keep plan-disabled distinct from permission-denied and unconfigured
+
+==================================================
+PART C — DYNAMIC SUB-PERMISSION COUNT FIX
+==================================================
+
+Required:
+- sub-permission counts shown in Store Permissions Matrix must be based on the actual rendered/available sub-permission list after plan filtering
+- do not use static counts from the full master definition when linked sub-permissions have disappeared due to plan disable
+- counts must always match what the operator can actually expand and see
+
+Required behavior:
+- if linked sub-permissions disappear because their parent feature is plan-disabled, the count decreases accordingly
+- if the feature is re-enabled and the linked sub-permissions return, the count increases accordingly
+- the count must be truthful in all plan states
+
+Implementation expectation:
+- count from filtered/renderable items, not raw master arrays
+- ensure no stale memoization/cache keeps old counts
+- ensure same-tab and cross-tab plan updates re-render counts correctly if that architecture already exists
+
+==================================================
+PART D — KEEP EXISTING ENTITLEMENT RULES INTACT
+==================================================
+
+Required:
+Do NOT regress the working rules already fixed:
+- linked feature permissions disappear from Store Permissions Matrix when plan-disabled
+- explicit Shipping Provider configuration permission exists
+- Shipping Provider full deactivation + config clearing on plan disable remains working
+- provider-backed actions remain blocked when the feature is disabled
+- re-enabled state restores coherent behavior
+
+==================================================
+PART E — TRUTHFUL STATE MODEL
+==================================================
+
+Keep these states clearly distinct:
+- feature enabled and configured
+- feature enabled but unconfigured
+- feature disabled for plan
+- feature enabled for plan but permission denied
+- subsection unavailable because plan disabled
+- parent tab still available
+- provider config removed because entitlement disabled
+
+Do not conflate these.
+
+==================================================
+PART F — OUT OF SCOPE
+==================================================
+
+Do NOT implement in this pass:
+- Customs Docs
+- Insurance Rules
+- broader Addon governance redesign
+
+Documentation only:
+- keep Customs Docs and Insurance Rules recorded as the next shipping improvements after this correction closes
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Disabling Shipping Provider Configuration does not remove the entire Settings tab
+2) The Shipping Provider configuration area is gated at the correct subsection level
+3) The plan-disabled reason is shown truthfully in the correct scoped surface
+4) Dynamic sub-permission counts reflect the actual visible linked sub-permissions
+5) Previously fixed entitlement behavior remains intact
+6) Re-enabled state non-regression remains intact
+7) Customs Docs and Insurance Rules remain unimplemented in this pass
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Fix parent-tab vs subsection entitlement scoping for Settings
+2) Fix truthful unavailable-for-plan rendering in the Shipping Provider configuration area
+3) Fix dynamic sub-permission count derivation
+4) Re-check previously fixed Shipping Provider deactivation behavior
+5) Re-test enabled-state non-regression
+6) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- final parent-tab vs subsection entitlement scoping rule
+- Shipping Provider configuration area gating behavior
+- truthful unavailable-for-plan rendering behavior for that area
+- dynamic sub-permission count rule
+- confirmation that linked feature permissions still disappear from Store Permissions Matrix when plan-disabled
+- note that Customs Docs and Insurance Rules are next shipping improvements after this correction closes
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Settings Tab vs Shipping Provider Subsection Scoping Fix
+3. Truthful Plan-Disabled UX Fix
+4. Dynamic Sub-Permission Count Fix
+5. Files Changed
+6. Documentation Updated
+7. Non-Regression Notes
