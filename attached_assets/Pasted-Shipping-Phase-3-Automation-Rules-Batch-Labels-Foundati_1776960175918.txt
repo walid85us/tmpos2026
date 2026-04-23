@@ -1,0 +1,376 @@
+Shipping Phase 3 — Automation Rules + Batch Labels Foundation
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated implementation pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen previously closed shipping workstreams unless a real regression is found.
+Do not implement Packing Workflows, SLA Optimization, or Carrier Scorecards in this pass.
+Do not implement Customs Docs or Insurance Rules in this pass.
+Keep those items in the project record as future planned improvements only.
+
+Implement the first active Shipping Phase 3 workstream:
+1) Automation Rules foundation
+2) Batch Labels foundation
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Node/Express carrier-integration engineer
+- Enterprise shipping systems architect
+- Senior operations automation systems architect
+- Senior shipping workflow optimization expert
+- Senior RBAC / entitlement systems architect
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Important behavior:
+Do not implement a shallow patch.
+Think through the cleanest foundation architecture for future Shipping Phase 3 expansion.
+If there is a stronger, more extensible implementation approach than the obvious one, use it and explain it clearly in the required output.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- Ref.txt
+- replit.md
+
+Use them as the continuity and source-of-truth documents.
+
+==================================================
+PRESERVE WITHOUT BREAKING
+==================================================
+
+Preserve exactly unless this workstream explicitly requires touching it:
+- current design baseline exactly
+- auth behavior
+- preview-mode safety
+- live System Owner plan gating behavior
+- store permission gating
+- provider/manual mode split
+- shipping lifecycle integrity
+- existing shipping core flow
+- reverse-logistics flow
+- pickup forecast / fee transparency / exact pickup-rate selection
+- two-stage address readiness
+- truthful USPS/FedEx/UPS provider-state handling
+- shipment-cancel dependency on confirmed pickup
+- orphan/local-dismiss resolution logic
+- label-lock and pickup-override behavior
+- Carrier Analytics foundation
+- entitlement propagation / linked feature-permission disappearance
+- Shipping Provider explicit permission model
+- Shipping Provider hard-disable + config clearing
+- Settings tab vs subsection entitlement scoping
+- dynamic sub-permission counts
+- enabled-state non-regression
+
+==================================================
+WORKSTREAM GOAL
+==================================================
+
+Add a solid Shipping Center foundation for:
+1) Automation Rules
+2) Batch Labels
+
+This must be:
+- production-minded
+- truthful
+- auditable
+- extensible
+- safe
+
+Do NOT fake capabilities that are not truly implemented.
+Build the data model usage, UI, rule engine behavior, batch eligibility, batch execution flow, and operator feedback correctly.
+
+==================================================
+PART A — AUTOMATION RULES FOUNDATION
+==================================================
+
+Required concepts:
+- Automation Rules must be deterministic, auditable, and operator-trustworthy
+- Rules must not silently perform risky or irreversible actions without clear design control
+- Rules must not bypass existing shipping truthfulness, lifecycle gating, or provider prerequisites
+- Rules foundation should prepare the system for later Phase 3 expansion without overreaching now
+
+Required features:
+
+1) Automation Rules surface inside Shipping Center
+Required:
+- add an Automation Rules surface inside Shipping Center or Shipping settings in a way that fits the current IA
+- keep it native to the current design baseline
+- do not create a disconnected mini-app
+
+2) Rule model foundation
+At minimum support:
+- rule name
+- enabled / disabled state
+- scope / store context if applicable
+- trigger type
+- condition set
+- action set
+- created by / updated by / timestamps
+- execution logging / audit trail
+- safe extensibility for future advanced automation
+
+3) Trigger foundation
+At minimum support clearly defined triggers such as:
+- shipment created
+- shipment updated
+- status changed
+- label purchased
+- pickup requested
+- pickup confirmed
+- pickup cancelled
+- tracking/status synced
+- return shipment created
+- shipment becomes Ready / Label Created / Packed / Dispatched / In Transit / Delivered / Cancelled
+Only include triggers that can be implemented truthfully from the current architecture.
+
+4) Condition foundation
+At minimum support conditions grounded in current shipment data such as:
+- provider mode vs manual mode
+- shipment type / source type / outbound vs return
+- store / location if present
+- provider / carrier / service level where available
+- current shipment status
+- address validation state
+- label existence
+- pickup state
+- tracking state
+- shipping cost thresholds where stored cost exists
+- manual vs provider-backed shipment distinctions
+Do not invent conditions that are not supportable from the current data model.
+
+5) Safe action foundation
+In this pass, actions must be safe, truthful, and auditable.
+Allowed action types should focus on foundation-safe behaviors such as:
+- add shipment flag / priority / queue marker
+- add internal operational note or timeline/audit event
+- surface review-needed / exception-needed / ready-for-batch state
+- assign shipment to a batch candidate queue or batch label bucket
+- surface operator-facing recommendation / task / review state
+- mark internal automation result state
+Do NOT implement risky or misleading actions such as fake carrier operations, hidden financial changes, or silent status manipulation without explicit safe control.
+
+6) Rule execution transparency
+Required:
+- when a rule runs, the result must be visible and auditable
+- operators should be able to understand why a shipment was flagged / queued / marked
+- avoid invisible automation firing
+- avoid “magic” behavior
+
+7) Safe activation discipline
+Required:
+- rules must be enable/disable-able
+- foundation should support testability or safe evaluation visibility where practical
+- do not allow automation to bypass existing manual checks that are still required by the current shipping architecture
+
+==================================================
+PART B — BATCH LABELS FOUNDATION
+==================================================
+
+Required concepts:
+- Batch Labels must be truthful and itemized
+- Batch execution must not pretend to be a provider-native bulk API if it is actually app-level orchestration of individual shipment label purchases
+- Eligibility must be explicit per shipment
+- Partial success / partial failure must be handled honestly
+
+Required features:
+
+1) Batch Labels surface inside Shipping Center
+Required:
+- add a Batch Labels surface inside Shipping Center in a way that fits current IA
+- support multi-shipment operational workflow without redesigning unrelated shipping screens
+
+2) Batch selection model
+Required:
+- allow operators to assemble a batch from eligible shipments
+- support manual selection and/or rules-driven batch candidates if implemented in Part A
+- preserve clear distinction between:
+  - eligible shipments
+  - ineligible shipments
+  - partially ready shipments
+- show the reason when a shipment is not eligible for batch label purchase
+
+3) Batch eligibility evaluator
+Required:
+- batch eligibility must be based on the same truthful prerequisites as single-shipment label purchase
+- do not invent a separate weaker path for batch mode
+- preserve provider/manual distinction
+- manual shipments must not be treated as provider-label-purchasable shipments
+- eligibility should account for current shipping truth such as:
+  - provider feature enabled
+  - provider configured and available
+  - shipment in valid lifecycle state
+  - packages present
+  - required validations satisfied
+  - any selected rate or provider prerequisites that already exist in current architecture
+
+4) Batch execution model
+Required:
+- batch label purchase should execute truthfully as a controlled multi-shipment operation
+- if this is implemented as app-level iteration across individual shipments, say so in documentation and UI logic
+- each shipment in the batch must return its own outcome:
+  - success
+  - failed
+  - skipped / ineligible
+- do not fake all-or-nothing success
+- preserve current provider error truthfulness and feedback patterns
+
+5) Batch results / auditability
+Required:
+- show itemized results
+- preserve per-shipment audit/history updates
+- allow operators to see which shipments succeeded vs failed vs skipped
+- label artifacts and tracking results must remain tied to each shipment record individually
+- do not collapse detailed truth into a vague batch toast
+
+6) Batch safety / idempotency mindset
+Required:
+- avoid accidental double-processing
+- avoid ambiguous repeated label purchases
+- preserve existing label-lock behavior
+- do not let batch mode bypass safeguards that single-shipment mode already enforces
+
+7) Batch operational usefulness
+Required:
+- make the batch workflow operationally valuable now, not just a placeholder
+- foundation should support a practical operator flow for purchasing labels across multiple eligible shipments
+- however, do not broaden this into full Packing Workflows or future scorecard logic
+
+==================================================
+PART C — AUTOMATION RULES + BATCH LABELS INTERPLAY
+==================================================
+
+Required:
+- design the foundation so Automation Rules can feed Batch Labels in a truthful way
+- example: rules can mark shipments as ready-for-batch or assign them into an internal batch queue/candidate state
+- do not auto-purchase labels through rules in this pass unless there is an extremely safe, explicit, auditable path and it does not violate current shipping safeguards
+- prefer queueing / flagging / recommendation over hidden execution
+
+==================================================
+PART D — PLAN / PERMISSION / SETTINGS INTEGRITY
+==================================================
+
+Required:
+- update System Owner / plan-level treatment if Automation Rules and Batch Labels are surfaced as distinct shipping capabilities or sub-features
+- update Store Owner Permissions Matrix for the relevant capabilities
+- permissions must be explicit and coherent, for example:
+  - manage_shipping_automation_rules
+  - view_shipping_automation_results if needed
+  - manage_batch_labels / purchase_batch_labels
+- follow the current entitlement architecture:
+  - plan decides whether the capability exists
+  - role decides who can use/manage it
+- do not repeat prior gating mistakes
+- linked permissions should behave coherently with plan state under the current disappearance rule
+
+==================================================
+PART E — DO NOT FAKE WHAT IS NOT BUILT
+==================================================
+
+Required:
+- do not pretend the app has provider-native bulk label APIs if it does not
+- do not pretend rules are performing advanced orchestration that is not truly implemented
+- do not pretend packing workflows exist yet
+- do not pretend SLA optimization exists yet
+- do not pretend carrier scorecards exist yet
+- show truthful states such as:
+  - rule triggered
+  - rule queued shipment for batch review
+  - batch processed as itemized shipment-by-shipment operation
+  - partial success
+  - skipped because ineligible
+when appropriate
+
+==================================================
+PART F — OUT OF SCOPE
+==================================================
+
+Do NOT implement in this pass:
+- Packing Workflows
+- SLA Optimization
+- Carrier Scorecards
+- Customs Docs
+- Insurance Rules
+- broader non-shipping commercial/add-on redesign
+
+Documentation only:
+- keep those items recorded as future planned improvements
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Automation Rules foundation exists and is auditable, safe, and truthful
+2) Batch Labels foundation exists and is operationally useful now
+3) Batch eligibility follows the same truthful prerequisites as single-shipment flows
+4) Batch results are itemized and honest
+5) Automation Rules and Batch Labels interact coherently without hidden risky behavior
+6) Plan/permission/gating integrity remains coherent
+7) Existing shipping and reverse-logistics flows remain intact
+8) Out-of-scope future shipping items remain unimplemented in this pass
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Design Automation Rules foundation and rule execution logging
+2) Implement safe rule triggers / conditions / actions
+3) Design Batch Labels eligibility and batch execution model
+4) Implement Batch Labels surface and itemized result flow
+5) Wire Automation Rules to Batch Labels candidate/queue behavior where appropriate
+6) Wire plan / permission / gating integrity
+7) Re-test shipping non-regression
+8) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Automation Rules foundation scope
+- supported triggers / conditions / safe actions
+- execution logging / audit behavior
+- Batch Labels foundation scope
+- exact batch eligibility rules
+- exact batch execution model
+- Automation Rules to Batch Labels interaction
+- plan/permission/gating treatment
+- what remains future work:
+  - Packing Workflows
+  - SLA Optimization
+  - Carrier Scorecards
+  - Customs Docs
+  - Insurance Rules
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Automation Rules Foundation
+3. Rule Triggers / Conditions / Safe Actions
+4. Batch Labels Foundation
+5. Batch Eligibility / Execution / Results Logic
+6. Plan / Permission / Gating Updates
+7. Files Changed
+8. Documentation Updated
+9. Non-Regression Notes

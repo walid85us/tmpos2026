@@ -104,6 +104,10 @@ export const SUB_PERMISSIONS: SubPermissionDef[] = [
   { id: 'view_carrier_analytics', label: 'View Carrier Analytics', parentDomain: 'shipping', minModuleLevel: 'view', defaultLevel: 'manage', description: 'View Shipping Center carrier analytics — shipment counts, status buckets (Dispatched separate from In Transit), carrier/service distribution, and lifecycle timing derived from real shipment, pickup, and event data. Default-grants only at manage-level on Shipping (admin/manager); other roles must be explicitly opted in. Cost-related metrics also require View Shipping Costs. Pickup analytics blocks additionally require the View Pickup Analytics sub-permission and the Pickup Requests plan feature.' },
   { id: 'view_pickup_analytics', label: 'View Pickup Analytics', parentDomain: 'shipping', minModuleLevel: 'view', defaultLevel: 'manage', description: 'View pickup-analytics surfaces inside Carrier Analytics — counts of requested / provider-confirmed / local-only / cancelled / failed pickups. Independently gated from operational pickup permissions so analytics visibility can be granted (or withheld) without giving the operator the ability to schedule or cancel pickups. Also requires the Pickup Requests plan feature.' },
   { id: 'manage_carrier_locator_settings', label: 'Manage Carrier Locator Settings', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Configure per-store carrier-locator adapters (USPS / FedEx / UPS / DHL / GLS) used for live service-point lookup. Independent of Manage Shipping Settings (which controls aggregator-level provider configuration like EasyPost / Shippo / ShipStation). Requires the Service Points plan feature.' },
+  { id: 'manage_shipping_automation_rules', label: 'Manage Shipping Automation Rules', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Create, edit, enable / disable and delete Shipping Center Automation Rules. Rules are operator-trustworthy: they can only flag shipments, add internal notes, mark review-needed, queue ready-for-batch, and set priority — they cannot purchase labels, change status, or perform irreversible carrier operations. Requires the Shipping Automation Rules plan feature.' },
+  { id: 'view_shipping_automation_results', label: 'View Automation Results', parentDomain: 'shipping', minModuleLevel: 'view', defaultLevel: 'view', description: 'View the auditable execution log of Automation Rules — which rule fired against which shipment, when, and which actions were applied. Granted independently of the management permission so an auditor can see results without being able to change rules.' },
+  { id: 'manage_batch_labels', label: 'Manage Batch Labels', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Assemble Shipment batches, mark candidates ready-for-batch, view per-shipment eligibility detail, and remove shipments from a batch. Required to use the Batch Labels surface in Shipping Center. Requires the Batch Labels plan feature.' },
+  { id: 'purchase_batch_labels', label: 'Purchase Batch Labels', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Execute a Batch Labels run. Each shipment in the batch is processed individually with the same truthful prerequisites as single-shipment label purchase; per-shipment outcomes (success / failed / skipped) are itemized. Requires both the Batch Labels and Shipping Provider Configuration plan features.' },
   { id: 'create_return', label: 'Create Return', parentDomain: 'returns', minModuleLevel: 'create', defaultLevel: 'create', description: 'Initiate a new return request' },
   { id: 'approve_return', label: 'Approve Return', parentDomain: 'returns', minModuleLevel: 'manage', defaultLevel: 'approve', description: 'Approve or reject return requests' },
   { id: 'receive_return', label: 'Receive Return', parentDomain: 'returns', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Mark returns as received and perform intake' },
@@ -146,6 +150,26 @@ export const FEATURE_PERMISSION_DEPENDENCIES: Record<string, string[]> = {
     'purchase_shipping_label',
     'validate_shipping_address',
     'sync_shipping_tracking',
+    // Batch label execution depends on the provider feature too — buying
+    // labels in batch is the same provider-backed operation, just iterated.
+    'purchase_batch_labels',
+  ],
+  // Shipping Automation Rules — operator-trustworthy rule engine. Foundation
+  // pass: rules can flag, queue, prioritize, and annotate shipments only.
+  // They cannot purchase labels, change status, or perform irreversible
+  // carrier operations. Without the plan feature, no role can manage rules
+  // or view automation results.
+  shipping_automation_rules: [
+    'manage_shipping_automation_rules',
+    'view_shipping_automation_results',
+  ],
+  // Batch Labels — multi-shipment label purchase orchestration. Foundation
+  // pass: app-level iteration over individual shipment label purchases with
+  // itemized per-shipment outcomes (success / failed / skipped). Without
+  // the plan feature, no role can assemble batches or run them.
+  batch_labels: [
+    'manage_batch_labels',
+    'purchase_batch_labels',
   ],
   // Pickup Requests controls operational pickup flows AND pickup analytics
   // visibility. Without the plan feature there is nothing to schedule, cancel,
@@ -313,6 +337,10 @@ export const tenantRoles: EmployeeRole[] = [
       complete_return_disposition: true,
       cancel_return: true,
       create_return_shipment: true,
+      manage_shipping_automation_rules: true,
+      view_shipping_automation_results: true,
+      manage_batch_labels: true,
+      purchase_batch_labels: true,
     },
     description: 'Store management access'
   },
@@ -393,6 +421,10 @@ export const tenantRoles: EmployeeRole[] = [
       complete_return_disposition: false,
       cancel_return: false,
       create_return_shipment: false,
+      manage_shipping_automation_rules: false,
+      view_shipping_automation_results: false,
+      manage_batch_labels: false,
+      purchase_batch_labels: false,
     },
     description: 'Repair and parts access'
   },
@@ -473,6 +505,10 @@ export const tenantRoles: EmployeeRole[] = [
       complete_return_disposition: false,
       cancel_return: false,
       create_return_shipment: false,
+      manage_shipping_automation_rules: false,
+      view_shipping_automation_results: false,
+      manage_batch_labels: false,
+      purchase_batch_labels: false,
     },
     description: 'Sales and customer access'
   },
@@ -482,8 +518,8 @@ export const roles = [...platformRoles, ...tenantRoles];
 
 export const planFeatures: Record<Plan, string[]> = {
   starter: ['dashboard', 'sales', 'customers', 'invoices', 'support'],
-  growth: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'employees', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests', 'shipping_providers', 'carrier_analytics'],
-  advanced: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'employees', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests', 'shipping_providers', 'carrier_analytics'],
+  growth: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'employees', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests', 'shipping_providers', 'carrier_analytics', 'shipping_automation_rules', 'batch_labels'],
+  advanced: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'employees', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests', 'shipping_providers', 'carrier_analytics', 'shipping_automation_rules', 'batch_labels'],
 };
 
 export const permissions = PERMISSION_DOMAINS;

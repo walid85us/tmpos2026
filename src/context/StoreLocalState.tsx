@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useMemo, useEffect, useRef } from 'react';
-import { Customer, HeldOrder, CartItem, PaymentMethod, Discount, RepairTicket, RepairTicketStatus, Invoice, RepairService, RepairCategory, DocumentTemplate, StoreBranding, LogoPlacement, Supplier, StockMovement, StockMovementType, PurchaseOrder, GoodsReceivedNote, RMA, InventoryTransfer, InventoryCount, TradeInItem, RefurbishmentJob, SupplierRefundEntry, Shipment, ShippingProviderConfig, Return } from '../types';
+import { Customer, HeldOrder, CartItem, PaymentMethod, Discount, RepairTicket, RepairTicketStatus, Invoice, RepairService, RepairCategory, DocumentTemplate, StoreBranding, LogoPlacement, Supplier, StockMovement, StockMovementType, PurchaseOrder, GoodsReceivedNote, RMA, InventoryTransfer, InventoryCount, TradeInItem, RefurbishmentJob, SupplierRefundEntry, Shipment, ShippingProviderConfig, Return, AutomationRule, AutomationLogEntry, ShipmentBatch } from '../types';
 import { useAccess } from './AccessContext';
 import { buildTemplateHtml, getDefaultEnabledTags } from '../utils/templateBuilder';
 
@@ -239,6 +239,16 @@ interface StoreLocalStateContextType {
   shipments: Shipment[];
   addShipment: (s: Shipment) => void;
   updateShipment: (id: string, updates: Partial<Shipment>) => void;
+  automationRules: AutomationRule[];
+  addAutomationRule: (rule: AutomationRule) => void;
+  updateAutomationRule: (id: string, updates: Partial<AutomationRule>) => void;
+  deleteAutomationRule: (id: string) => void;
+  bumpAutomationRuleStats: (entries: { ruleId: string; runDelta: number; matchDelta: number }[], lastRunAt: string) => void;
+  automationLogs: AutomationLogEntry[];
+  appendAutomationLogs: (entries: AutomationLogEntry[]) => void;
+  shipmentBatches: ShipmentBatch[];
+  addShipmentBatch: (batch: ShipmentBatch) => void;
+  updateShipmentBatch: (id: string, updates: Partial<ShipmentBatch>) => void;
   shippingProviderConfig: ShippingProviderConfig | null;
   setShippingProviderConfig: (config: ShippingProviderConfig | null) => void;
   returns: Return[];
@@ -1020,6 +1030,32 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const updateRefurbishmentJob = useCallback((id: string, updates: Partial<RefurbishmentJob>) => { setRefurbishmentJobs(prev => prev.map(j => j.id === id ? { ...j, ...updates } : j)); }, []);
   const addShipment = useCallback((s: Shipment) => { setShipments(prev => [s, ...prev]); }, []);
   const updateShipment = useCallback((id: string, updates: Partial<Shipment>) => { setShipments(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s)); }, []);
+  const [automationRules, setAutomationRules] = useState<AutomationRule[]>([]);
+  const addAutomationRule = useCallback((rule: AutomationRule) => { setAutomationRules(prev => [rule, ...prev]); }, []);
+  const updateAutomationRule = useCallback((id: string, updates: Partial<AutomationRule>) => { setAutomationRules(prev => prev.map(r => r.id === id ? { ...r, ...updates, updatedAt: new Date().toISOString() } : r)); }, []);
+  const deleteAutomationRule = useCallback((id: string) => { setAutomationRules(prev => prev.filter(r => r.id !== id)); }, []);
+  const bumpAutomationRuleStats = useCallback((entries: { ruleId: string; runDelta: number; matchDelta: number }[], lastRunAt: string) => {
+    if (!entries || entries.length === 0) return;
+    const map = new Map(entries.map(e => [e.ruleId, e]));
+    setAutomationRules(prev => prev.map(r => {
+      const e = map.get(r.id);
+      if (!e) return r;
+      return {
+        ...r,
+        runCount: (r.runCount || 0) + e.runDelta,
+        matchCount: (r.matchCount || 0) + e.matchDelta,
+        lastRunAt,
+      };
+    }));
+  }, []);
+  const [automationLogs, setAutomationLogs] = useState<AutomationLogEntry[]>([]);
+  const appendAutomationLogs = useCallback((entries: AutomationLogEntry[]) => {
+    if (!entries || entries.length === 0) return;
+    setAutomationLogs(prev => [...entries, ...prev].slice(0, 500));
+  }, []);
+  const [shipmentBatches, setShipmentBatches] = useState<ShipmentBatch[]>([]);
+  const addShipmentBatch = useCallback((batch: ShipmentBatch) => { setShipmentBatches(prev => [batch, ...prev]); }, []);
+  const updateShipmentBatch = useCallback((id: string, updates: Partial<ShipmentBatch>) => { setShipmentBatches(prev => prev.map(b => b.id === id ? { ...b, ...updates } : b)); }, []);
 
   const [returns, setReturns] = useState<Return[]>(SEED_RETURNS);
   const addReturn = useCallback((r: Return) => { setReturns(prev => [r, ...prev]); }, []);
@@ -1076,6 +1112,9 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
       refurbishmentJobs, addRefurbishmentJob, updateRefurbishmentJob,
       supplierRefundEntries, addSupplierRefundEntry,
       shipments, addShipment, updateShipment,
+      automationRules, addAutomationRule, updateAutomationRule, deleteAutomationRule, bumpAutomationRuleStats,
+      automationLogs, appendAutomationLogs,
+      shipmentBatches, addShipmentBatch, updateShipmentBatch,
       shippingProviderConfig, setShippingProviderConfig,
       returns, addReturn, updateReturn,
       storeLocations, getItemMovements,

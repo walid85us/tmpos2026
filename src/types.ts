@@ -918,6 +918,17 @@ export interface Shipment {
   syncFailureCount?: number;
   lastSyncError?: string;
 
+  // Phase 3: automation/batch foundation. All optional — present only when
+  // an Automation Rule has fired against the shipment or an operator has
+  // assembled it into a batch. Truthful: rules cannot purchase labels or
+  // change status; they can only flag, queue, prioritize, and annotate.
+  flags?: string[];
+  priority?: 'normal' | 'high' | 'urgent';
+  reviewNeeded?: { reason?: string; ruleId?: string; ruleName?: string; markedAt: string } | null;
+  batchQueueState?: 'ready_for_batch' | 'batched' | null;
+  batchQueueMarkedAt?: string;
+  batchQueueRuleId?: string;
+  internalNotes?: ShipmentInternalNote[];
   customsInfo?: {
     contentsType?: string;
     contentsExplanation?: string;
@@ -1165,4 +1176,117 @@ export type LogoPlacement = 'top-left' | 'top-center' | 'top-right';
 export interface StoreBranding {
   logoUrl: string | null;
   logoPlacement: LogoPlacement;
+}
+
+export type AutomationTriggerType =
+  | 'shipment_created'
+  | 'shipment_updated'
+  | 'status_changed'
+  | 'label_purchased'
+  | 'pickup_requested'
+  | 'pickup_confirmed'
+  | 'pickup_cancelled'
+  | 'tracking_synced'
+  | 'return_shipment_created';
+
+export type AutomationConditionField =
+  | 'mode'
+  | 'status'
+  | 'sourceType'
+  | 'carrier'
+  | 'serviceLevel'
+  | 'addressValidationState'
+  | 'hasLabel'
+  | 'hasPickup'
+  | 'shippingCost';
+
+export type AutomationConditionOp =
+  | 'eq' | 'neq' | 'in' | 'notIn'
+  | 'gt' | 'gte' | 'lt' | 'lte'
+  | 'truthy' | 'falsy';
+
+export interface AutomationCondition {
+  field: AutomationConditionField;
+  op: AutomationConditionOp;
+  value?: any;
+}
+
+export type AutomationActionType =
+  | 'add_flag'
+  | 'add_internal_note'
+  | 'mark_review_needed'
+  | 'mark_ready_for_batch'
+  | 'set_priority';
+
+export interface AutomationAction {
+  type: AutomationActionType;
+  params?: Record<string, any>;
+}
+
+export interface AutomationRule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  trigger: AutomationTriggerType;
+  conditions: AutomationCondition[];
+  actions: AutomationAction[];
+  description?: string;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string;
+  updatedBy: string;
+  lastRunAt?: string;
+  runCount?: number;
+  matchCount?: number;
+}
+
+export interface AutomationLogEntry {
+  id: string;
+  ruleId: string;
+  ruleName: string;
+  shipmentId: string;
+  shipmentNumber: string;
+  trigger: AutomationTriggerType;
+  matched: boolean;
+  actionsApplied: string[];
+  reason?: string;
+  timestamp: string;
+}
+
+export type BatchStatus = 'draft' | 'processing' | 'completed' | 'completed_with_errors' | 'cancelled';
+
+export type BatchOutcome = 'success' | 'failed' | 'skipped';
+
+export interface BatchLabelResult {
+  shipmentId: string;
+  shipmentNumber: string;
+  outcome: BatchOutcome;
+  reason?: string;
+  trackingNumber?: string;
+  carrier?: string;
+  service?: string;
+  cost?: number;
+  timestamp: string;
+}
+
+export interface ShipmentBatch {
+  id: string;
+  name: string;
+  status: BatchStatus;
+  shipmentIds: string[];
+  results: BatchLabelResult[];
+  createdAt: string;
+  createdBy: string;
+  startedAt?: string;
+  completedAt?: string;
+  notes?: string;
+}
+
+export interface ShipmentInternalNote {
+  id: string;
+  text: string;
+  timestamp: string;
+  source: 'rule' | 'operator';
+  ruleId?: string;
+  ruleName?: string;
 }

@@ -11,6 +11,10 @@ import PageShell from './PageShell';
 import { TrackingNumber } from './shared/TrackingNumber';
 import ShippingProvidersPage from './ShippingProvidersPage';
 import { CarrierAnalytics } from './shipping/CarrierAnalytics';
+import AutomationRules from './shipping/AutomationRules';
+import BatchLabels, { type BatchEligibility } from './shipping/BatchLabels';
+import { runAutomation } from '../shipping/automationEngine';
+import type { AutomationTriggerType } from '../types';
 import { featureMatrix as staticFeatureMatrix } from '../owner/mockData';
 import { normalizeStateCode, normalizeZip, normalizePhone } from '../utils/inputNormalizers';
 
@@ -369,7 +373,10 @@ function formatDateTime(iso: string): string {
 }
 
 export default function ShippingCenter() {
-  const { shipments, addShipment, updateShipment, invoices, repairTickets, rmas, inventoryTransfers, suppliers, customers } = useStoreLocalState();
+  const { shipments, addShipment, updateShipment, invoices, repairTickets, rmas, inventoryTransfers, suppliers, customers,
+    automationRules, addAutomationRule, updateAutomationRule, deleteAutomationRule, bumpAutomationRuleStats,
+    automationLogs, appendAutomationLogs,
+    shipmentBatches, addShipmentBatch, updateShipmentBatch } = useStoreLocalState();
   const { checkPermission, checkSubPermission, hasPermission, isWriteBlocked, canAccess, tenant } = useAccess();
   // Force re-render when System Owner Plans & Features matrix changes via sessionStorage.
   // Without this, toggling a feature in the System Owner UI in another tab would leave
@@ -460,8 +467,14 @@ export default function ShippingCenter() {
   // locator settings card in the Settings tab can be granted independently
   // from aggregator (EasyPost / Shippo / ShipStation) provider configuration.
   const canManageCarrierLocators = checkSubPermission('manage_carrier_locator_settings');
+  const canManageAutomationRules = checkSubPermission('manage_shipping_automation_rules');
+  const canViewAutomationResults = checkSubPermission('view_shipping_automation_results');
+  const canManageBatchLabels = checkSubPermission('manage_batch_labels');
+  const canPurchaseBatchLabels = checkSubPermission('purchase_batch_labels');
+  const planAllowsAutomationRules = isPlanFeatureLive('shipping_automation_rules');
+  const planAllowsBatchLabels = isPlanFeatureLive('batch_labels');
 
-  const [activeTab, setActiveTab] = useState<'shipments' | 'analytics' | 'settings'>('shipments');
+  const [activeTab, setActiveTab] = useState<'shipments' | 'analytics' | 'automation' | 'batch' | 'settings'>('shipments');
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<ShipmentStatus | 'all'>('all');
   const [sourceFilter, setSourceFilter] = useState<ShipmentSourceType | 'all'>('all');
@@ -1215,7 +1228,8 @@ export default function ShippingCenter() {
       performedBy: 'Current User',
     };
     updates.events = [...shipment.events, newEvent];
-    updateShipment(id, updates);
+    const automationUpdates = triggerAutomation(shipment, 'status_changed', updates);
+    updateShipment(id, automationUpdates);
     setShowStatusConfirm(null);
     setReasonModal(null);
     setSelectedReason('');
@@ -1247,7 +1261,8 @@ export default function ShippingCenter() {
       createdAt: now,
       updatedAt: now,
     };
-    addShipment(shipment);
+    const automationUpdates = triggerAutomation(shipment, 'shipment_created');
+    addShipment({ ...shipment, ...automationUpdates });
     resetCreateForm();
     setShowCreateModal(false);
     setSelectedShipment(newId);
@@ -1304,7 +1319,8 @@ export default function ShippingCenter() {
       updates.originAddressValidation = undefined;
     }
     updates.shippingCost = newCost ? parseFloat(newCost) : undefined;
-    updateShipment(editingShipment, updates);
+    const automationUpdates = shipment ? triggerAutomation(shipment, 'shipment_updated', updates) : updates;
+    updateShipment(editingShipment, automationUpdates);
     setEditingShipment(null);
   }
 
@@ -3549,6 +3565,110 @@ export default function ShippingCenter() {
     return EASYPOST_TEST_CODES.has(trackingNumber.toUpperCase());
   }
 
+  // Phase 3 — Automation trigger dispatcher. Called from create/update/label/status flows.
+  // Truthful gating: only runs when the plan includes shipping_automation_rules.
+  // Records every match in automationLogs and applies aggregate updates from runAutomation.
+  function triggerAutomation(shipment: Shipment, trigger: AutomationTriggerType, extraUpdates?: Partial<Shipment>) {
+    if (!planAllowsAutomationRules) return extraUpdates ? { ...extraUpdates } : {};
+    if (automationRules.length === 0) return extraUpdates ? { ...extraUpdates } : {};
+    const merged: Shipment = extraUpdates ? { ...shipment, ...extraUpdates } : shipment;
+    const result = runAutomation(automationRules, merged, trigger);
+    const nowTs = new Date().toISOString();
+    // runCount counts every rule evaluation for this trigger (independent of
+    // whether conditions matched). Updates are applied via a single functional
+    // setter inside `bumpAutomationRuleStats` so that back-to-back trigger
+    // invocations (e.g. status_changed immediately after label_purchased, or
+    // a Batch Labels loop) cannot drop counter increments due to stale closure
+    // values of `automationRules`.
+    const matchedRuleIds = new Set(result.logs.map(l => l.ruleId));
+    const statsEntries = automationRules
+      .filter(r => r.enabled && r.trigger === trigger)
+      .map(r => ({ ruleId: r.id, runDelta: 1, matchDelta: matchedRuleIds.has(r.id) ? 1 : 0 }));
+    if (statsEntries.length > 0) bumpAutomationRuleStats(statsEntries, nowTs);
+    if (result.logs.length > 0) appendAutomationLogs(result.logs);
+    return { ...(extraUpdates || {}), ...result.shipmentUpdates };
+  }
+
+  // Phase 3 — Single-shipment label purchase used by Batch Labels iteration.
+  // Returns a structured outcome instead of mutating UI state, but still updates
+  // the shipment via updateShipment so the per-shipment record reflects the label.
+  async function purchaseLabelForBatch(shipmentId: string): Promise<{ ok: boolean; reason?: string; trackingNumber?: string; carrier?: string; service?: string; cost?: number }> {
+    // Phase 3 — defense-in-depth runtime guards. The Batch Labels UI already
+    // disables the run button when these are not satisfied, but the mutation
+    // path must enforce them itself so a stale UI/programmatic call cannot
+    // bypass plan or permission gating.
+    if (isWriteBlocked) return { ok: false, reason: 'Writes are currently blocked for this tenant' };
+    if (!planAllowsBatchLabels) return { ok: false, reason: 'Batch Labels feature is not included in your current plan' };
+    if (!planAllowsShippingProviders) return { ok: false, reason: 'Shipping Provider Configuration is not included in your current plan' };
+    if (!canPurchaseBatchLabels) return { ok: false, reason: 'You lack the Purchase Batch Labels permission' };
+    if (!canPurchaseLabel) return { ok: false, reason: 'You lack the Purchase Shipping Label permission' };
+    const shipment = shipments.find(s => s.id === shipmentId);
+    if (!shipment) return { ok: false, reason: 'Shipment not found' };
+    const prereqs = getLabelPrerequisites(shipment);
+    if (prereqs.length > 0) return { ok: false, reason: prereqs.join('; ') };
+    try {
+      const result = await shippingApi.purchaseLabel(
+        shipment.originAddress, shipment.destinationAddress, shipment.packages,
+        shipment.selectedRate?.providerRateRef || '',
+        shipment.carrier || shipment.selectedRate?.carrier || '',
+        shipment.serviceLevel || shipment.selectedRate?.serviceName || '',
+        shipment.shipmentNumber,
+      );
+      if (!result.success || !result.label) {
+        return { ok: false, reason: result.error?.message || 'Label purchase failed' };
+      }
+      // Phase 3 parity — mirror the single-shipment flow's non-PDF normalization
+      // (convert image labels to inline PDF blob, fall back to a proxy URL on
+      // conversion failure) so single and batch outcomes are byte-for-byte
+      // equivalent.
+      const label = { ...result.label };
+      const actualFmt = getLabelActualFormat(label);
+      if (actualFmt !== 'pdf') {
+        label.originalFormat = actualFmt;
+        try {
+          const pdfBlobUrl = await convertImageToPdfBlobUrl(label.url);
+          label.pdfUrl = pdfBlobUrl;
+          label.format = 'pdf';
+        } catch {
+          label.pdfUrl = `/api/shipping/label-proxy?url=${encodeURIComponent(label.url)}`;
+          label.format = actualFmt;
+        }
+      }
+      const now = new Date().toISOString();
+      const newEvent: ShipmentEvent = {
+        id: `evt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: now, status: 'Label Created',
+        description: `Label purchased via batch — ${label.carrier} ${label.service}, tracking: ${label.trackingNumber}`,
+        performedBy: 'Current User',
+      };
+      const baseUpdates: Partial<Shipment> = {
+        label, labelUrl: label.pdfUrl || label.url, trackingNumber: label.trackingNumber,
+        carrier: label.carrier, serviceLevel: label.service, shippingCost: label.cost,
+        providerShipmentId: result.providerShipmentId,
+        status: 'Label Created', events: [...shipment.events, newEvent],
+        batchQueueState: shipment.batchQueueState === 'ready_for_batch' ? 'batched' : shipment.batchQueueState,
+        updatedAt: now,
+      };
+      const automationUpdates = triggerAutomation(shipment, 'label_purchased', baseUpdates);
+      const statusAutomationUpdates = triggerAutomation(shipment, 'status_changed', automationUpdates);
+      updateShipment(shipmentId, { ...statusAutomationUpdates, updatedAt: now });
+      return { ok: true, trackingNumber: label.trackingNumber, carrier: label.carrier, service: label.service, cost: label.cost };
+    } catch (err: any) {
+      return { ok: false, reason: err?.message || 'Unexpected error' };
+    }
+  }
+
+  function evaluateBatchEligibility(shipment: Shipment): BatchEligibility {
+    const reasons: string[] = [];
+    if (shipment.label) reasons.push('Label already purchased');
+    if (!['Draft', 'Ready', 'Packed', 'Label Created'].includes(shipment.status)) reasons.push(`Status ${shipment.status} is not batch-eligible`);
+    if (!planAllowsShippingProviders) reasons.push('Shipping provider plan feature required');
+    if (!activeProviderId) reasons.push('No active shipping provider configured');
+    const prereqs = getLabelPrerequisites(shipment);
+    reasons.push(...prereqs);
+    return { eligible: reasons.length === 0, reasons };
+  }
+
   function getLabelPrerequisites(shipment: Shipment): string[] {
     const missing: string[] = [];
     if (!isOriginAddressAccepted(shipment)) missing.push('Validate origin address');
@@ -3784,7 +3904,7 @@ export default function ShippingCenter() {
         description: `Label purchased — ${labelArtifact.carrier} ${labelArtifact.service}, tracking: ${labelArtifact.trackingNumber}`,
         performedBy: 'Current User',
       };
-      updateShipment(shipmentId, {
+      const baseUpdates: Partial<Shipment> = {
         label: labelArtifact,
         labelUrl: labelArtifact.pdfUrl || labelArtifact.url,
         trackingNumber: labelArtifact.trackingNumber,
@@ -3795,7 +3915,10 @@ export default function ShippingCenter() {
         status: 'Label Created',
         events: [...shipment.events, newEvent],
         updatedAt: now,
-      });
+      };
+      const afterLabelTrigger = triggerAutomation(shipment, 'label_purchased', baseUpdates);
+      const afterStatusTrigger = triggerAutomation(shipment, 'status_changed', afterLabelTrigger);
+      updateShipment(shipmentId, afterStatusTrigger);
       setProviderSuccess('Label purchased successfully. Shipment status updated to Label Created.');
     } else {
       setProviderError(friendlyProviderError(result.error || { code: 'UNKNOWN', message: 'Label purchase failed.' }));
@@ -4436,6 +4559,22 @@ export default function ShippingCenter() {
               "not included for your plan" state for the provider subsection.
               Show the tab if the operator has any reason to enter it; gate
               each subsection independently inside. */}
+          {planAllowsAutomationRules && (canManageAutomationRules || canViewAutomationResults) && (
+            <button
+              onClick={() => setActiveTab('automation')}
+              className={`px-4 py-2.5 text-[10px] font-black uppercase tracking-widest border-b-2 transition-all ${activeTab === 'automation' ? 'text-primary border-primary' : 'text-slate-400 hover:text-slate-600 border-transparent hover:border-slate-300'}`}
+            >
+              <span className="flex items-center gap-1"><span className="material-symbols-outlined text-sm">bolt</span>Automation</span>
+            </button>
+          )}
+          {planAllowsBatchLabels && (canManageBatchLabels || canPurchaseBatchLabels) && (
+            <button
+              onClick={() => setActiveTab('batch')}
+              className={`px-4 py-2.5 text-[10px] font-black uppercase tracking-widest border-b-2 transition-all ${activeTab === 'batch' ? 'text-primary border-primary' : 'text-slate-400 hover:text-slate-600 border-transparent hover:border-slate-300'}`}
+            >
+              <span className="flex items-center gap-1"><span className="material-symbols-outlined text-sm">layers</span>Batch Labels</span>
+            </button>
+          )}
           {(canManageProviderSettings || canManageCarrierLocators || checkSubPermission('manage_shipping_settings')) && (
             <button
               onClick={() => setActiveTab('settings')}
@@ -4455,6 +4594,46 @@ export default function ShippingCenter() {
             canViewPickupAnalytics={canViewPickupAnalytics}
             activeProviderId={activeProviderId}
           />
+        ) : activeTab === 'automation' ? (
+          planAllowsAutomationRules ? (
+            <AutomationRules
+              rules={automationRules}
+              logs={automationLogs}
+              canManage={canManageAutomationRules}
+              canViewResults={canViewAutomationResults}
+              currentUser="Current User"
+              onAdd={addAutomationRule}
+              onUpdate={updateAutomationRule}
+              onDelete={deleteAutomationRule}
+            />
+          ) : (
+            <div className="bg-white rounded-2xl border border-amber-200 p-6 text-center">
+              <span className="material-symbols-outlined text-amber-500 text-3xl">workspace_premium</span>
+              <p className="text-sm font-black text-slate-700 mt-2">Shipping Automation Rules are not included in your current plan</p>
+              <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">Automation requires a plan with the <span className="font-mono">Shipping Automation Rules</span> feature.</p>
+            </div>
+          )
+        ) : activeTab === 'batch' ? (
+          planAllowsBatchLabels ? (
+            <BatchLabels
+              shipments={shipments}
+              batches={shipmentBatches}
+              canManage={canManageBatchLabels}
+              canPurchase={canPurchaseBatchLabels}
+              currentUser="Current User"
+              evaluateEligibility={evaluateBatchEligibility}
+              onCreateBatch={addShipmentBatch}
+              onUpdateBatch={updateShipmentBatch}
+              onPurchaseSingle={purchaseLabelForBatch}
+              planAllowsShippingProviders={planAllowsShippingProviders}
+            />
+          ) : (
+            <div className="bg-white rounded-2xl border border-amber-200 p-6 text-center">
+              <span className="material-symbols-outlined text-amber-500 text-3xl">workspace_premium</span>
+              <p className="text-sm font-black text-slate-700 mt-2">Batch Labels are not included in your current plan</p>
+              <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">Batch label purchase requires a plan with the <span className="font-mono">Batch Labels</span> feature.</p>
+            </div>
+          )
         ) : activeTab === 'settings' ? (
           <div className="space-y-6">
             {/* Phase 2 correction — Shipping Provider configuration is now
