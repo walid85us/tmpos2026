@@ -1,0 +1,356 @@
+Shipping Phase 3 — Automation Rules Clarity + Execution Transparency Correction Pass
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen closed shipping workstreams except where directly required by the Automation Rules issues identified in manual QA.
+Do not implement Packing Workflows, SLA Optimization, Carrier Scorecards, Customs Docs, or Insurance Rules in this pass.
+
+Implement only the corrections needed to make Automation Rules understandable, testable, and operator-trustworthy.
+
+==================================================
+MANDATORY CONTEXT
+==================================================
+
+Batch Labels passed well enough.
+The remaining failure is in Automation Rules clarity and execution transparency.
+
+Current issues from QA:
+
+1) The condition operator dropdown is too technical and unclear to normal users.
+Current values like:
+- eq
+- neq
+- in
+- notIn
+- gt
+- gte
+- lt
+- lte
+- truthy
+- falsy
+are not acceptable as the user-facing final language.
+
+2) The rule builder does not make it clear which operators are valid for which field types.
+Example:
+- "Has Label" is conceptually boolean
+- showing generic operators and accepting a value like "6" creates confusion
+- the user expected something like "label value >= 6" but chose "Has Label eq 6" because the builder did not guide them correctly
+
+3) Delete confirmation currently uses a browser-level confirm dialog.
+This is not acceptable.
+Delete confirmation must be handled with an in-app modal/dialog consistent with the app UX.
+
+4) Rule execution is not sufficiently visible or understandable.
+The operator must be able to understand:
+- what the rule means in plain language
+- what fields/conditions it is using
+- when it fired
+- why it fired or did not fire
+- what action it performed
+
+This pass must make Automation Rules clear enough for a non-technical operator to use safely.
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Node/Express carrier-integration engineer
+- Senior workflow automation UX architect
+- Senior rules-engine UX designer
+- Senior RBAC / entitlement systems architect
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Important behavior:
+Do not make a shallow label rename patch.
+Think through the correct typed-rule-builder UX.
+If there is a cleaner, safer, more extensible rule-builder model than the current generic one, use it and explain it clearly.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- Ref.txt
+- replit.md
+
+Use them as the continuity and source-of-truth documents.
+
+==================================================
+PRESERVE WITHOUT BREAKING
+==================================================
+
+Preserve exactly unless this correction explicitly requires touching it:
+- current design baseline exactly
+- auth behavior
+- preview-mode safety
+- live System Owner plan gating behavior
+- store permission gating
+- provider/manual mode split
+- shipping lifecycle integrity
+- existing shipping core flow
+- reverse-logistics flow
+- Batch Labels foundation
+- batch eligibility and itemized result behavior
+- Carrier Analytics foundation
+- entitlement propagation / linked feature-permission disappearance
+- Shipping Provider explicit permission model
+- Shipping Provider hard-disable + config clearing
+- Settings tab vs subsection entitlement scoping
+- dynamic sub-permission counts
+- enabled-state non-regression
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Implement the correction so that:
+
+A) Automation Rules use clear human-readable operators and field logic
+B) The builder becomes type-aware and prevents invalid or misleading rule construction
+C) Delete confirmation uses an in-app confirmation modal
+D) Rule execution becomes visible and understandable enough for real operator validation
+
+==================================================
+PART A — HUMAN-READABLE, TYPE-AWARE RULE BUILDER
+==================================================
+
+Required:
+Replace technical operator labels in the UI with clear operator language appropriate for the selected field type.
+
+Do not expose raw developer/operator codes like:
+- eq
+- neq
+- in
+- notIn
+- gt
+- gte
+- lt
+- lte
+- truthy
+- falsy
+as the user-facing final labels.
+
+Required typed behavior:
+1) Boolean fields should only show boolean-friendly operators, for example:
+- is true
+- is false
+
+2) Numeric / currency fields should show numeric-friendly operators, for example:
+- equals
+- does not equal
+- greater than
+- greater than or equal to
+- less than
+- less than or equal to
+
+3) Enum / status / provider / carrier fields should show list-friendly operators, for example:
+- is
+- is not
+- is one of
+- is not one of
+
+4) Text fields should show text-friendly operators only where appropriate, for example:
+- equals
+- does not equal
+- contains
+- does not contain
+- starts with
+- ends with
+Only if these are truly supported by the current rules foundation.
+
+Required:
+- the available operators must change based on the selected condition field
+- the value input type must also change based on field type
+  - toggle or boolean selector for boolean
+  - numeric/currency input for numeric
+  - dropdown or multi-select for enums where possible
+  - text input only where appropriate
+
+==================================================
+PART B — REMOVE MISLEADING FIELD/OPERATOR COMBINATIONS
+==================================================
+
+Required:
+The builder must prevent nonsensical combinations.
+
+Example:
+- if the selected field is "Has Label", the user should not be able to create something like "Has Label eq 6"
+- that condition should instead be limited to something like:
+  - Has Label is true
+  - Has Label is false
+
+If the business intent is "label value >= 6", then the builder must expose the correct underlying field explicitly, such as a label/shipping cost/value field if that data truly exists and is already supported.
+
+Required:
+- audit the current condition field list
+- separate boolean fields from numeric fields clearly
+- do not let a boolean field masquerade as a numeric one
+- do not keep redundant or confusing field choices if they create operator ambiguity
+
+==================================================
+PART C — PLAIN-LANGUAGE RULE EXPLANATION
+==================================================
+
+Required:
+Every rule should present a human-readable explanation/summary sentence.
+
+Example pattern:
+- "When Label Purchased occurs, and shipping cost is greater than or equal to 6, mark review needed."
+or
+- "When shipment status changes, and Has Label is true, queue shipment for batch review."
+
+Required:
+- show this summary during rule creation/editing
+- update it live as the user changes the rule
+- make it easy for the operator to understand what the rule will do before saving
+
+==================================================
+PART D — RULE EXECUTION VISIBILITY / TRANSPARENCY
+==================================================
+
+Required:
+Rule execution must be visible enough for QA and operators to trust it.
+
+At minimum support:
+- visible execution history/log entry
+- which shipment triggered the rule
+- which rule triggered
+- what trigger event occurred
+- what conditions matched
+- what action was executed
+- timestamp
+
+Required:
+- if a rule does not run because conditions did not match, provide enough visibility where practical to understand behavior without turning this into a full debugging console
+- prefer a clean operator-friendly execution log/history model
+- avoid invisible automation firing
+
+If there is already logging:
+- make it more operator-readable, not just developer-readable
+
+==================================================
+PART E — SAFE RULE VALIDATION / TESTABILITY
+==================================================
+
+Required:
+Add enough operator-facing support so a user can validate rule meaning safely.
+
+Acceptable approaches include one or more of:
+- live rule summary
+- field-type-aware builder
+- sample condition label/help text
+- recent execution list
+- small explanatory helper text under each condition/action
+- optional “This rule will evaluate against…” style guidance
+
+Do NOT overbuild a full simulation engine unless it is very lightweight and clearly worth it.
+The goal is clarity and safe operator understanding, not a massive new subsystem.
+
+==================================================
+PART F — IN-APP DELETE CONFIRMATION
+==================================================
+
+Required:
+Replace browser-native confirm dialogs for rule deletion with an in-app modal/dialog.
+
+Required behavior:
+- consistent with current app design language
+- clearly names the rule being deleted
+- confirms the deletion action explicitly
+- supports cancel safely
+- no browser alert/confirm usage for this rule deletion path
+
+==================================================
+PART G — KEEP AUTOMATION ACTIONS SAFE
+==================================================
+
+Required:
+Do not broaden automation actions in this correction pass.
+Keep the current safety model intact.
+The point of this pass is clarity and trust, not adding risky power.
+
+==================================================
+PART H — PLAN / PERMISSION / GATING INTEGRITY
+==================================================
+
+Required:
+Do not regress the existing plan/permission behavior for Automation Rules.
+Any new execution log/history surface or rule-builder improvements must still respect current entitlement and role controls.
+
+==================================================
+PART I — OUT OF SCOPE
+==================================================
+
+Do NOT implement in this pass:
+- Packing Workflows
+- SLA Optimization
+- Carrier Scorecards
+- Customs Docs
+- Insurance Rules
+- major automation engine redesign beyond what is required for typed clarity and execution transparency
+- broader non-shipping commercial/add-on redesign
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Operator labels are human-readable and no longer expose raw codes like eq/neq/gt/truthy as final UI labels
+2) The rule builder is type-aware and prevents misleading combinations like boolean field + numeric value
+3) The user can clearly understand what a rule means before saving it
+4) Rule execution is visible enough to understand when and why a rule fired
+5) Rule deletion uses an in-app confirmation modal, not a browser dialog
+6) Existing Batch Labels and closed shipping behavior remain intact
+7) Out-of-scope future items remain unimplemented in this pass
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Audit condition fields and classify them by type
+2) Implement type-aware operator/value UX
+3) Add live plain-language rule summary
+4) Improve operator-readable rule execution visibility
+5) Replace browser confirm with in-app delete modal
+6) Re-test plan/permission/non-regression behavior
+7) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Automation Rules field typing model
+- supported operator language by field type
+- rule summary / explanation behavior
+- execution log / visibility behavior
+- deletion confirmation UX change
+- note that future shipping items remain unchanged and out of scope
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Typed Rule Builder / Human-Readable Operators
+3. Plain-Language Rule Summary
+4. Rule Execution Visibility Improvements
+5. In-App Delete Confirmation
+6. Files Changed
+7. Documentation Updated
+8. Non-Regression Notes

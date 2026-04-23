@@ -243,7 +243,7 @@ interface StoreLocalStateContextType {
   addAutomationRule: (rule: AutomationRule) => void;
   updateAutomationRule: (id: string, updates: Partial<AutomationRule>) => void;
   deleteAutomationRule: (id: string) => void;
-  bumpAutomationRuleStats: (entries: { ruleId: string; runDelta: number; matchDelta: number }[], lastRunAt: string) => void;
+  bumpAutomationRuleStats: (entries: { ruleId: string; runDelta: number; matchDelta: number; lastEvaluation?: AutomationRule['lastEvaluation'] }[], lastRunAt: string) => void;
   automationLogs: AutomationLogEntry[];
   appendAutomationLogs: (entries: AutomationLogEntry[]) => void;
   shipmentBatches: ShipmentBatch[];
@@ -1034,7 +1034,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const addAutomationRule = useCallback((rule: AutomationRule) => { setAutomationRules(prev => [rule, ...prev]); }, []);
   const updateAutomationRule = useCallback((id: string, updates: Partial<AutomationRule>) => { setAutomationRules(prev => prev.map(r => r.id === id ? { ...r, ...updates, updatedAt: new Date().toISOString() } : r)); }, []);
   const deleteAutomationRule = useCallback((id: string) => { setAutomationRules(prev => prev.filter(r => r.id !== id)); }, []);
-  const bumpAutomationRuleStats = useCallback((entries: { ruleId: string; runDelta: number; matchDelta: number }[], lastRunAt: string) => {
+  const bumpAutomationRuleStats = useCallback((entries: { ruleId: string; runDelta: number; matchDelta: number; lastEvaluation?: AutomationRule['lastEvaluation'] }[], lastRunAt: string) => {
     if (!entries || entries.length === 0) return;
     const map = new Map(entries.map(e => [e.ruleId, e]));
     setAutomationRules(prev => prev.map(r => {
@@ -1045,6 +1045,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
         runCount: (r.runCount || 0) + e.runDelta,
         matchCount: (r.matchCount || 0) + e.matchDelta,
         lastRunAt,
+        lastEvaluation: e.lastEvaluation ?? r.lastEvaluation,
       };
     }));
   }, []);

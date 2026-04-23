@@ -1203,7 +1203,13 @@ export type AutomationConditionField =
 export type AutomationConditionOp =
   | 'eq' | 'neq' | 'in' | 'notIn'
   | 'gt' | 'gte' | 'lt' | 'lte'
-  | 'truthy' | 'falsy';
+  | 'truthy' | 'falsy'
+  | 'contains' | 'not_contains' | 'starts_with' | 'ends_with';
+
+// Phase 3 correction — typed field model. Each AutomationConditionField is
+// classified as boolean / number / enum / text so the rule builder can offer
+// only operators and value-input shapes that make sense for that field.
+export type AutomationFieldKind = 'boolean' | 'number' | 'enum' | 'text';
 
 export interface AutomationCondition {
   field: AutomationConditionField;
@@ -1238,12 +1244,29 @@ export interface AutomationRule {
   lastRunAt?: string;
   runCount?: number;
   matchCount?: number;
+  // Phase 3 correction — last evaluation snapshot for operator transparency.
+  // Captured per rule on every trigger evaluation (matched OR not matched) so
+  // the operator can see why a rule recently did or did not fire without
+  // scrolling through the global execution log.
+  lastEvaluation?: {
+    matched: boolean;
+    shipmentId: string;
+    shipmentNumber: string;
+    trigger: AutomationTriggerType;
+    timestamp: string;
+    failedConditionIndex?: number;
+    failedConditionDescription?: string;
+  };
 }
 
 export interface AutomationLogEntry {
   id: string;
   ruleId: string;
   ruleName: string;
+  // Phase 3 correction — snapshot of the rule's plain-language summary at the
+  // time it executed. Stored on the log entry so historical audit rows do not
+  // drift if the rule is later edited or deleted.
+  ruleSummary?: string;
   shipmentId: string;
   shipmentNumber: string;
   trigger: AutomationTriggerType;

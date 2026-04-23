@@ -3580,10 +3580,31 @@ export default function ShippingCenter() {
     // invocations (e.g. status_changed immediately after label_purchased, or
     // a Batch Labels loop) cannot drop counter increments due to stale closure
     // values of `automationRules`.
+    // Phase 3 correction — also persist a per-rule lastEvaluation snapshot so the
+    // operator can see, on the rule card, whether the most recent evaluation
+    // matched and (if not) which condition failed. Pulled from the engine's
+    // per-rule evaluations rather than recomputed.
+    const evalByRuleId = new Map(result.evaluations.map(e => [e.rule.id, e.evaluation]));
     const matchedRuleIds = new Set(result.logs.map(l => l.ruleId));
     const statsEntries = automationRules
       .filter(r => r.enabled && r.trigger === trigger)
-      .map(r => ({ ruleId: r.id, runDelta: 1, matchDelta: matchedRuleIds.has(r.id) ? 1 : 0 }));
+      .map(r => {
+        const ev = evalByRuleId.get(r.id);
+        return {
+          ruleId: r.id,
+          runDelta: 1,
+          matchDelta: matchedRuleIds.has(r.id) ? 1 : 0,
+          lastEvaluation: ev ? {
+            matched: ev.matched,
+            shipmentId: shipment.id,
+            shipmentNumber: shipment.shipmentNumber,
+            trigger,
+            timestamp: nowTs,
+            failedConditionIndex: ev.failedConditionIndex,
+            failedConditionDescription: ev.failedConditionDescription,
+          } : undefined,
+        };
+      });
     if (statsEntries.length > 0) bumpAutomationRuleStats(statsEntries, nowTs);
     if (result.logs.length > 0) appendAutomationLogs(result.logs);
     return { ...(extraUpdates || {}), ...result.shipmentUpdates };
