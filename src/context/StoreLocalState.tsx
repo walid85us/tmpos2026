@@ -244,6 +244,17 @@ interface StoreLocalStateContextType {
   // rule source for audit) and appends an internal audit note in the same
   // setter so the resolution is auditable end-to-end.
   resolveShipmentReview: (id: string, args: { resolvedBy: string; note?: string }) => void;
+  // Phase 3 correction #3 — generalized review-outcome setter. Resolution
+  // 'resolve' clears a review-needed badge (legacy behavior, observational
+  // rules); 'approve' approves a guardrail exception so a flagged action can
+  // proceed; 'override' overrides a still-failing block; 'dismiss' marks a
+  // review needed as no-op (false alarm). Each writes its own audit note and
+  // sets the matching state on `Shipment.reviewNeeded`.
+  setReviewOutcome: (id: string, args: {
+    resolution: 'resolve' | 'approve' | 'override' | 'dismiss';
+    actor: string;
+    note?: string;
+  }) => void;
   automationRules: AutomationRule[];
   addAutomationRule: (rule: AutomationRule) => void;
   updateAutomationRule: (id: string, updates: Partial<AutomationRule>) => void;
@@ -1035,33 +1046,72 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const updateRefurbishmentJob = useCallback((id: string, updates: Partial<RefurbishmentJob>) => { setRefurbishmentJobs(prev => prev.map(j => j.id === id ? { ...j, ...updates } : j)); }, []);
   const addShipment = useCallback((s: Shipment) => { setShipments(prev => [s, ...prev]); }, []);
   const updateShipment = useCallback((id: string, updates: Partial<Shipment>) => { setShipments(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s)); }, []);
-  const resolveShipmentReview = useCallback((id: string, args: { resolvedBy: string; note?: string }) => {
+  // Phase 3 correction #3 — generalized review-outcome setter. Each
+  // resolution writes the matching state machine value, the matching audit
+  // note, and the matching actor/timestamp pair. Treats anything with
+  // resolved===true OR state!=='pending' as a no-op so a re-click cannot
+  // overwrite an existing terminal outcome (audit integrity).
+  const setReviewOutcome = useCallback((id: string, args: {
+    resolution: 'resolve' | 'approve' | 'override' | 'dismiss';
+    actor: string;
+    note?: string;
+  }) => {
     const now = new Date().toISOString();
+    const noteText = args.note?.trim() || undefined;
+    const actionLabel: Record<typeof args.resolution, string> = {
+      resolve: 'Review resolved',
+      approve: 'Guardrail exception approved',
+      override: 'Guardrail block overridden',
+      dismiss: 'Review dismissed',
+    };
+    const stateValue: Record<typeof args.resolution, NonNullable<Shipment['reviewNeeded']>['state']> = {
+      resolve: 'resolved', approve: 'approved', override: 'overridden', dismiss: 'dismissed',
+    };
     setShipments(prev => prev.map(s => {
       if (s.id !== id) return s;
-      if (!s.reviewNeeded || s.reviewNeeded.resolved) return s;
-      const resolvedReview = {
-        ...s.reviewNeeded,
+      const rn = s.reviewNeeded;
+      if (!rn) return s;
+      const alreadyTerminal = rn.resolved === true || (rn.state && rn.state !== 'pending');
+      if (alreadyTerminal) return s;
+      const updatedReview: NonNullable<Shipment['reviewNeeded']> = {
+        ...rn,
+        state: stateValue[args.resolution],
+        // Keep `resolved` true for any terminal outcome so existing UI that
+        // only checks `resolved` continues to clear the badge.
         resolved: true,
-        resolvedAt: now,
-        resolvedBy: args.resolvedBy,
-        resolutionNote: args.note?.trim() || undefined,
+        ...(args.resolution === 'resolve' || args.resolution === 'dismiss'
+          ? { resolvedAt: now, resolvedBy: args.actor, resolutionNote: noteText }
+          : {}),
+        ...(args.resolution === 'approve'
+          ? { approvedAt: now, approvedBy: args.actor, resolutionNote: noteText }
+          : {}),
+        ...(args.resolution === 'override'
+          ? { overriddenAt: now, overriddenBy: args.actor, resolutionNote: noteText }
+          : {}),
+        ...(args.resolution === 'dismiss'
+          ? { dismissedAt: now, dismissedBy: args.actor }
+          : {}),
       };
       const auditNote = {
         id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        text: `Review resolved by ${args.resolvedBy}${args.note?.trim() ? ` — ${args.note.trim()}` : ''} (rule: ${s.reviewNeeded.ruleName || 'unknown'})`,
+        text: `${actionLabel[args.resolution]} by ${args.actor}${noteText ? ` — ${noteText}` : ''} (rule: ${rn.ruleName || 'unknown'})`,
         timestamp: now,
         source: 'system' as const,
-        ruleId: s.reviewNeeded.ruleId,
-        ruleName: s.reviewNeeded.ruleName,
+        ruleId: rn.ruleId,
+        ruleName: rn.ruleName,
       };
       return {
         ...s,
-        reviewNeeded: resolvedReview,
+        reviewNeeded: updatedReview,
         internalNotes: [...(s.internalNotes || []), auditNote],
       };
     }));
   }, []);
+  // Back-compat wrapper for existing call sites — delegates to the
+  // generalized setter with resolution='resolve'.
+  const resolveShipmentReview = useCallback((id: string, args: { resolvedBy: string; note?: string }) => {
+    setReviewOutcome(id, { resolution: 'resolve', actor: args.resolvedBy, note: args.note });
+  }, [setReviewOutcome]);
   const [automationRules, setAutomationRules] = useState<AutomationRule[]>([]);
   const addAutomationRule = useCallback((rule: AutomationRule) => { setAutomationRules(prev => [rule, ...prev]); }, []);
   const updateAutomationRule = useCallback((id: string, updates: Partial<AutomationRule>) => { setAutomationRules(prev => prev.map(r => r.id === id ? { ...r, ...updates, updatedAt: new Date().toISOString() } : r)); }, []);
@@ -1144,7 +1194,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
       tradeIns, addTradeIn, updateTradeIn, deleteTradeIn,
       refurbishmentJobs, addRefurbishmentJob, updateRefurbishmentJob,
       supplierRefundEntries, addSupplierRefundEntry,
-      shipments, addShipment, updateShipment, resolveShipmentReview,
+      shipments, addShipment, updateShipment, resolveShipmentReview, setReviewOutcome,
       automationRules, addAutomationRule, updateAutomationRule, deleteAutomationRule, bumpAutomationRuleStats,
       automationLogs, appendAutomationLogs,
       shipmentBatches, addShipmentBatch, updateShipmentBatch,

@@ -105,7 +105,14 @@ export const SUB_PERMISSIONS: SubPermissionDef[] = [
   { id: 'view_pickup_analytics', label: 'View Pickup Analytics', parentDomain: 'shipping', minModuleLevel: 'view', defaultLevel: 'manage', description: 'View pickup-analytics surfaces inside Carrier Analytics — counts of requested / provider-confirmed / local-only / cancelled / failed pickups. Independently gated from operational pickup permissions so analytics visibility can be granted (or withheld) without giving the operator the ability to schedule or cancel pickups. Also requires the Pickup Requests plan feature.' },
   { id: 'manage_carrier_locator_settings', label: 'Manage Carrier Locator Settings', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Configure per-store carrier-locator adapters (USPS / FedEx / UPS / DHL / GLS) used for live service-point lookup. Independent of Manage Shipping Settings (which controls aggregator-level provider configuration like EasyPost / Shippo / ShipStation). Requires the Service Points plan feature.' },
   { id: 'manage_shipping_automation_rules', label: 'Manage Shipping Automation Rules', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Create, edit, enable / disable and delete Shipping Center Automation Rules. Rules are operator-trustworthy: they can only flag shipments, add internal notes, mark review-needed, queue ready-for-batch, and set priority — they cannot purchase labels, change status, or perform irreversible carrier operations. Requires the Shipping Automation Rules plan feature.' },
-  { id: 'view_shipping_automation_results', label: 'View Automation Results', parentDomain: 'shipping', minModuleLevel: 'view', defaultLevel: 'view', description: 'View the auditable execution log of Automation Rules — which rule fired against which shipment, when, and which actions were applied. Granted independently of the management permission so an auditor can see results without being able to change rules.' },
+  { id: 'view_shipping_automation_results', label: 'View Automation History', parentDomain: 'shipping', minModuleLevel: 'view', defaultLevel: 'view', description: 'View the auditable execution history of Automation Rules — which rule fired against which shipment, when, which actions were applied, and the operational outcome (matched / blocked / approved / overridden). Granted independently of the management permission so an auditor can see history without being able to change rules.' },
+  // Phase 3 correction #3 — operator-action perms for the guardrail / approval
+  // workflow. Independent from `manage_shipping_automation_rules` (which only
+  // covers RULE editing) so an operator can resolve / approve / override
+  // without being able to change the underlying rules.
+  { id: 'resolve_shipping_automation_reviews', label: 'Resolve Automation Reviews', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'edit', description: 'Mark a "Review Needed" shipment as resolved or dismissed. Required to clear review-needed badges raised by observational rules. Does not allow approving guardrail blocks or overriding pre-action gates.' },
+  { id: 'approve_shipping_automation_exceptions', label: 'Approve Automation Exceptions', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Approve a guardrail exception so a flagged action (e.g. label purchase) can proceed. Used when a guardrail rule says "require approval" or when an authorized operator decides a "block unless approved" rule\'s concerns are satisfied. Does not include the harder override that bypasses a still-failing block.' },
+  { id: 'override_shipping_automation_guardrails', label: 'Override Automation Guardrails', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Override a "block unless approved" guardrail and proceed with the underlying action even though the block conditions are still true. Strictly for managers — every override is recorded with actor and reason in execution history.' },
   { id: 'manage_batch_labels', label: 'Manage Batch Labels', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Assemble Shipment batches, mark candidates ready-for-batch, view per-shipment eligibility detail, and remove shipments from a batch. Required to use the Batch Labels surface in Shipping Center. Requires the Batch Labels plan feature.' },
   { id: 'purchase_batch_labels', label: 'Purchase Batch Labels', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Execute a Batch Labels run. Each shipment in the batch is processed individually with the same truthful prerequisites as single-shipment label purchase; per-shipment outcomes (success / failed / skipped) are itemized. Requires both the Batch Labels and Shipping Provider Configuration plan features.' },
   { id: 'create_return', label: 'Create Return', parentDomain: 'returns', minModuleLevel: 'create', defaultLevel: 'create', description: 'Initiate a new return request' },
@@ -162,6 +169,13 @@ export const FEATURE_PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   shipping_automation_rules: [
     'manage_shipping_automation_rules',
     'view_shipping_automation_results',
+    // Phase 3 correction #3 — guardrail / approval workflow operator perms.
+    // Plan-locked under the same feature: if a tenant doesn't have automation
+    // rules, the resolve / approve / override operator actions can't exist
+    // either (there is nothing to resolve, approve, or override).
+    'resolve_shipping_automation_reviews',
+    'approve_shipping_automation_exceptions',
+    'override_shipping_automation_guardrails',
   ],
   // Batch Labels — multi-shipment label purchase orchestration. Foundation
   // pass: app-level iteration over individual shipment label purchases with
@@ -339,6 +353,9 @@ export const tenantRoles: EmployeeRole[] = [
       create_return_shipment: true,
       manage_shipping_automation_rules: true,
       view_shipping_automation_results: true,
+      resolve_shipping_automation_reviews: true,
+      approve_shipping_automation_exceptions: true,
+      override_shipping_automation_guardrails: true,
       manage_batch_labels: true,
       purchase_batch_labels: true,
     },
@@ -423,6 +440,9 @@ export const tenantRoles: EmployeeRole[] = [
       create_return_shipment: false,
       manage_shipping_automation_rules: false,
       view_shipping_automation_results: false,
+      resolve_shipping_automation_reviews: false,
+      approve_shipping_automation_exceptions: false,
+      override_shipping_automation_guardrails: false,
       manage_batch_labels: false,
       purchase_batch_labels: false,
     },
@@ -507,6 +527,9 @@ export const tenantRoles: EmployeeRole[] = [
       create_return_shipment: false,
       manage_shipping_automation_rules: false,
       view_shipping_automation_results: false,
+      resolve_shipping_automation_reviews: false,
+      approve_shipping_automation_exceptions: false,
+      override_shipping_automation_guardrails: false,
       manage_batch_labels: false,
       purchase_batch_labels: false,
     },

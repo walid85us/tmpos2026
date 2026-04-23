@@ -3,52 +3,66 @@ import type {
   AutomationRule, AutomationLogEntry, AutomationTriggerType,
   AutomationCondition, AutomationAction, AutomationActionType,
   AutomationConditionField, AutomationConditionOp,
+  AutomationRuleProcessType, Shipment,
 } from '../../types';
 import {
   FIELD_DESCRIPTORS, OPERATORS_BY_KIND, getFieldDescriptor, getOperatorChoice,
-  describeRule, getTriggerTitle,
+  describeRule, getTriggerTitle, getRuleProcessType,
+  triggersForProcessType, actionsForProcessType,
 } from '../../shipping/automationEngine';
 
 interface Props {
   rules: AutomationRule[];
   logs: AutomationLogEntry[];
+  shipments?: Shipment[];
   canManage: boolean;
   canViewResults: boolean;
   currentUser: string;
   onAdd: (rule: AutomationRule) => void;
   onUpdate: (id: string, updates: Partial<AutomationRule>) => void;
   onDelete: (id: string) => void;
+  // Phase 3 correction #3 — execution history shipment numbers are clickable.
+  // Caller wires this to ShippingCenter to open the shipment detail panel.
+  onOpenShipment?: (shipmentId: string) => void;
 }
 
-const TRIGGERS: { value: AutomationTriggerType; label: string }[] = [
-  { value: 'shipment_created', label: 'A shipment is created' },
-  { value: 'shipment_updated', label: 'A shipment is edited' },
-  { value: 'status_changed', label: 'Shipment status changes' },
-  { value: 'label_purchased', label: 'A carrier label is purchased' },
-  { value: 'pickup_requested', label: 'A pickup is requested' },
-  { value: 'pickup_confirmed', label: 'A pickup is confirmed' },
-  { value: 'pickup_cancelled', label: 'A pickup is cancelled' },
-  { value: 'tracking_synced', label: 'Tracking is synced' },
-  { value: 'return_shipment_created', label: 'A return shipment is created' },
-];
+const TRIGGER_LABELS_BY_TYPE: Record<AutomationTriggerType, string> = {
+  shipment_created: 'A shipment is created',
+  shipment_updated: 'A shipment is edited',
+  status_changed: 'Shipment status changes',
+  label_purchased: 'A carrier label is purchased',
+  pickup_requested: 'A pickup is requested',
+  pickup_confirmed: 'A pickup is confirmed',
+  pickup_cancelled: 'A pickup is cancelled',
+  tracking_synced: 'Tracking is synced',
+  return_shipment_created: 'A return shipment is created',
+  pre_label_purchase: 'A carrier label is about to be purchased',
+};
 
-const ACTION_TYPES: { value: AutomationActionType; label: string }[] = [
-  { value: 'add_flag', label: 'Add a flag to the shipment' },
-  { value: 'add_internal_note', label: 'Add an internal note' },
-  { value: 'mark_review_needed', label: 'Mark the shipment for review' },
-  { value: 'mark_ready_for_batch', label: 'Queue for Batch Labels' },
-  { value: 'set_priority', label: 'Set shipment priority' },
-];
+const ACTION_LABELS_BY_TYPE: Record<AutomationActionType, string> = {
+  add_flag: 'Add a flag to the shipment',
+  add_internal_note: 'Add an internal note',
+  mark_review_needed: 'Mark the shipment for review',
+  mark_ready_for_batch: 'Queue for Batch Labels',
+  set_priority: 'Set shipment priority',
+  require_approval: 'Require operator approval before the action proceeds',
+  block_unless_approved: 'Block the action unless approved or overridden',
+};
 
-function blankRule(currentUser: string): AutomationRule {
+function blankRule(currentUser: string, ruleType: AutomationRuleProcessType = 'observational'): AutomationRule {
   const now = new Date().toISOString();
+  const trigger: AutomationTriggerType = ruleType === 'guardrail' ? 'pre_label_purchase' : 'shipment_created';
+  const action: AutomationAction = ruleType === 'guardrail'
+    ? { type: 'block_unless_approved', params: {} }
+    : { type: 'mark_ready_for_batch', params: {} };
   return {
     id: `rule-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     name: '',
     enabled: true,
-    trigger: 'shipment_created',
+    ruleType,
+    trigger,
     conditions: [],
-    actions: [{ type: 'mark_ready_for_batch', params: {} }],
+    actions: [action],
     description: '',
     createdAt: now, updatedAt: now,
     createdBy: currentUser, updatedBy: currentUser,
@@ -85,20 +99,44 @@ function defaultValueForOperator(field: AutomationConditionField, op: Automation
   return '';
 }
 
-export default function AutomationRules({ rules, logs, canManage, canViewResults, currentUser, onAdd, onUpdate, onDelete }: Props) {
+export default function AutomationRules({ rules, logs, shipments, canManage, canViewResults, currentUser, onAdd, onUpdate, onDelete, onOpenShipment }: Props) {
   const [editing, setEditing] = useState<AutomationRule | null>(null);
   const [creating, setCreating] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<AutomationRule | null>(null);
 
   const liveSummary = useMemo(() => editing ? describeRule(editing) : '', [editing]);
+  const editingType: AutomationRuleProcessType = editing ? getRuleProcessType(editing) : 'observational';
+  const allowedTriggers = useMemo(() => triggersForProcessType(editingType), [editingType]);
+  const allowedActions = useMemo(() => actionsForProcessType(editingType), [editingType]);
+  // Index shipments by id for O(1) lookup when rendering history outcome chips.
+  const shipmentsById = useMemo(() => {
+    const m = new Map<string, Shipment>();
+    (shipments || []).forEach(s => m.set(s.id, s));
+    return m;
+  }, [shipments]);
 
-  function startCreate() { setEditing(blankRule(currentUser)); setCreating(true); }
+  function startCreate() { setEditing(blankRule(currentUser, 'observational')); setCreating(true); }
   function startEdit(rule: AutomationRule) {
-    setEditing({ ...rule, conditions: rule.conditions.map(c => ({ ...c })), actions: rule.actions.map(a => ({ ...a, params: { ...(a.params || {}) } })) });
+    setEditing({ ...rule, ruleType: getRuleProcessType(rule), conditions: rule.conditions.map(c => ({ ...c })), actions: rule.actions.map(a => ({ ...a, params: { ...(a.params || {}) } })) });
     setCreating(false);
   }
   function cancelEdit() { setEditing(null); setCreating(false); }
+
+  // Phase 3 correction #3 — switching rule type resets trigger and actions to
+  // the first valid option for the chosen type, so the rule cannot end up in
+  // an inconsistent state (e.g. observational rule with a guardrail action).
+  function changeRuleType(nextType: AutomationRuleProcessType) {
+    if (!editing) return;
+    const triggers = triggersForProcessType(nextType);
+    const actions = actionsForProcessType(nextType);
+    setEditing({
+      ...editing,
+      ruleType: nextType,
+      trigger: triggers[0],
+      actions: [{ type: actions[0], params: {} }],
+    });
+  }
 
   function saveRule() {
     if (!editing) return;
@@ -106,7 +144,7 @@ export default function AutomationRules({ rules, logs, canManage, canViewResults
     if (editing.actions.length === 0) return;
     if (creating) onAdd(editing);
     else onUpdate(editing.id, {
-      name: editing.name, enabled: editing.enabled, trigger: editing.trigger,
+      name: editing.name, enabled: editing.enabled, ruleType: editing.ruleType, trigger: editing.trigger,
       conditions: editing.conditions, actions: editing.actions, description: editing.description,
       updatedBy: currentUser,
     });
@@ -188,18 +226,45 @@ export default function AutomationRules({ rules, logs, canManage, canViewResults
 
         {editing && (
           <div className="mt-4 border border-indigo-200 rounded-xl p-4 bg-indigo-50/40 space-y-4">
+            {/* Phase 3 correction #3 — rule type selector. Observational rules
+                react after an event (current behavior). Guardrail rules
+                evaluate BEFORE a risky action and can block / require
+                approval before that action proceeds. */}
+            <div>
+              <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Rule Type</p>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <label className={`flex-1 cursor-pointer border rounded-lg p-2.5 ${editingType === 'observational' ? 'border-indigo-400 bg-white' : 'border-slate-200 bg-white/50'}`}>
+                  <span className="flex items-center gap-2">
+                    <input type="radio" name="ruleType" checked={editingType === 'observational'} onChange={() => changeRuleType('observational')} />
+                    <span className="text-xs font-bold text-slate-700">Observational</span>
+                  </span>
+                  <span className="block text-[11px] text-slate-500 mt-1 ml-5 leading-snug">
+                    Reacts after an event happens. Can flag, note, queue, prioritize, or mark for review.
+                  </span>
+                </label>
+                <label className={`flex-1 cursor-pointer border rounded-lg p-2.5 ${editingType === 'guardrail' ? 'border-amber-400 bg-white' : 'border-slate-200 bg-white/50'}`}>
+                  <span className="flex items-center gap-2">
+                    <input type="radio" name="ruleType" checked={editingType === 'guardrail'} onChange={() => changeRuleType('guardrail')} />
+                    <span className="text-xs font-bold text-slate-700">Guardrail</span>
+                  </span>
+                  <span className="block text-[11px] text-slate-500 mt-1 ml-5 leading-snug">
+                    Evaluates BEFORE a risky action (e.g. label purchase). Can block the action or require operator approval.
+                  </span>
+                </label>
+              </div>
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <label className="text-xs font-bold text-slate-700">
                 Rule Name
                 <input value={editing.name} onChange={e => updateField('name', e.target.value)}
                   className="mt-1 w-full text-xs border border-slate-200 rounded-lg px-2 py-1.5"
-                  placeholder="e.g. Flag high-value international shipments" />
+                  placeholder={editingType === 'guardrail' ? 'e.g. Block high-cost express labels' : 'e.g. Flag high-value international shipments'} />
               </label>
               <label className="text-xs font-bold text-slate-700">
-                Run this rule when…
+                {editingType === 'guardrail' ? 'Evaluate this rule when…' : 'Run this rule when…'}
                 <select value={editing.trigger} onChange={e => updateField('trigger', e.target.value as AutomationTriggerType)}
                   className="mt-1 w-full text-xs border border-slate-200 rounded-lg px-2 py-1.5">
-                  {TRIGGERS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                  {allowedTriggers.map(t => <option key={t} value={t}>{TRIGGER_LABELS_BY_TYPE[t]}</option>)}
                 </select>
               </label>
             </div>
@@ -265,13 +330,15 @@ export default function AutomationRules({ rules, logs, canManage, canViewResults
                     mark_review_needed: 'Pauses the shipment for a human check. Adds a Review Needed badge on the row, surfaces in the Review Needed filter, and requires an operator to Resolve from the detail view.',
                     mark_ready_for_batch: 'Queues the shipment for the Batch Labels workflow. Surfaces a Ready for Batch badge and the corresponding outcome chip on the shipment list.',
                     set_priority: 'Sets the shipment priority. High/Urgent show as a colored badge on the row and are findable via the High Priority outcome chip.',
+                    require_approval: 'Pauses the action and asks an authorized operator to approve before it proceeds. Operators with Approve Automation Exceptions can clear it from the shipment detail view.',
+                    block_unless_approved: 'Halts the action unless an authorized operator approves or overrides. Approve requires Approve Automation Exceptions; override requires the stricter Override Automation Guardrails permission.',
                   };
                   return (
                   <div key={i} className="bg-white border border-slate-200 rounded-lg p-2">
                     <div className="flex items-center gap-2 flex-wrap">
                       <select value={a.type} onChange={e => updateAction(i, { type: e.target.value as AutomationActionType, params: {} })}
                         className="text-xs border border-slate-200 rounded px-1.5 py-1">
-                        {ACTION_TYPES.map(at => <option key={at.value} value={at.value}>{at.label}</option>)}
+                        {allowedActions.map(at => <option key={at} value={at}>{ACTION_LABELS_BY_TYPE[at]}</option>)}
                       </select>
                       {a.type === 'add_flag' && (
                         <input value={a.params?.flag || ''} onChange={e => updateAction(i, { params: { ...(a.params || {}), flag: e.target.value } })}
@@ -284,6 +351,10 @@ export default function AutomationRules({ rules, logs, canManage, canViewResults
                       {a.type === 'mark_review_needed' && (
                         <input value={a.params?.reason || ''} onChange={e => updateAction(i, { params: { ...(a.params || {}), reason: e.target.value } })}
                           className="flex-1 text-xs border border-slate-200 rounded px-1.5 py-1" placeholder="Review reason (optional)" />
+                      )}
+                      {(a.type === 'require_approval' || a.type === 'block_unless_approved') && (
+                        <input value={a.params?.reason || ''} onChange={e => updateAction(i, { params: { ...(a.params || {}), reason: e.target.value } })}
+                          className="flex-1 text-xs border border-slate-200 rounded px-1.5 py-1" placeholder="Reason shown to operator (optional)" />
                       )}
                       {a.type === 'set_priority' && (
                         <select value={a.params?.priority || 'high'} onChange={e => updateAction(i, { params: { ...(a.params || {}), priority: e.target.value } })}
@@ -333,6 +404,9 @@ export default function AutomationRules({ rules, logs, canManage, canViewResults
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="text-sm font-bold text-slate-700">{rule.name}</span>
                         <span className={`px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest rounded ${rule.enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{rule.enabled ? 'Enabled' : 'Disabled'}</span>
+                        {/* Phase 3 correction #3 — rule type badge so the
+                            list distinguishes guardrails from observational rules at a glance. */}
+                        <span className={`px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border ${getRuleProcessType(rule) === 'guardrail' ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-slate-50 text-slate-600 border-slate-200'}`}>{getRuleProcessType(rule)}</span>
                         <span className="px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest rounded bg-indigo-50 text-indigo-700 border border-indigo-100">{getTriggerTitle(rule.trigger)}</span>
                       </div>
                       <p className="text-xs text-slate-700 mt-1 leading-relaxed">{describeRule(rule)}</p>
@@ -390,21 +464,65 @@ export default function AutomationRules({ rules, logs, canManage, canViewResults
               <p className="text-xs text-slate-400 italic mt-2">No automation matches recorded yet.</p>
             ) : (
               <div className="mt-2 max-h-96 overflow-y-auto divide-y divide-slate-100">
-                {matchedLogs.map(l => (
-                  <div key={l.id} className="py-2 text-xs">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-bold text-slate-700">{l.ruleName}</span>
-                      <span className="text-slate-400">→</span>
-                      <span className="text-slate-700 font-mono">{l.shipmentNumber}</span>
-                      <span className="px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest rounded bg-indigo-50 text-indigo-700">{getTriggerTitle(l.trigger)}</span>
-                      <span className="px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest rounded bg-emerald-100 text-emerald-700">Matched</span>
+                {matchedLogs.map(l => {
+                  // Phase 3 correction #3 — outcome-aware history. Look up the
+                  // live shipment so a stale "Matched" badge doesn't claim a
+                  // review-needed shipment is still pending after an operator
+                  // resolved / approved / overrode it. Falls back to the log
+                  // entry's own guardrail outcome if no live shipment exists.
+                  const shipment = shipmentsById.get(l.shipmentId);
+                  const rn = shipment?.reviewNeeded;
+                  const isThisRuleReview = rn && rn.ruleId === l.ruleId;
+                  let outcomeChip: { label: string; className: string } | null = null;
+                  if (isThisRuleReview) {
+                    if (rn?.state === 'resolved') outcomeChip = { label: 'Resolved', className: 'bg-emerald-100 text-emerald-700' };
+                    else if (rn?.state === 'approved') outcomeChip = { label: 'Approved', className: 'bg-sky-100 text-sky-700' };
+                    else if (rn?.state === 'overridden') outcomeChip = { label: 'Overridden', className: 'bg-amber-100 text-amber-700' };
+                    else if (rn?.state === 'dismissed') outcomeChip = { label: 'Dismissed', className: 'bg-slate-100 text-slate-600' };
+                    else if (rn?.kind === 'block') outcomeChip = { label: 'Blocked', className: 'bg-rose-100 text-rose-700' };
+                    else if (rn?.kind === 'approval') outcomeChip = { label: 'Approval Needed', className: 'bg-amber-100 text-amber-700' };
+                    else outcomeChip = { label: 'Review Needed', className: 'bg-amber-100 text-amber-700' };
+                  } else if (l.guardrailOutcome) {
+                    const map: Record<NonNullable<typeof l.guardrailOutcome>, { label: string; className: string }> = {
+                      blocked: { label: 'Blocked', className: 'bg-rose-100 text-rose-700' },
+                      approval_required: { label: 'Approval Required', className: 'bg-amber-100 text-amber-700' },
+                      approved: { label: 'Approved', className: 'bg-sky-100 text-sky-700' },
+                      overridden: { label: 'Overridden', className: 'bg-amber-100 text-amber-700' },
+                      cleared_by_alternate_rate: { label: 'Cleared (alt rate)', className: 'bg-slate-100 text-slate-600' },
+                    };
+                    outcomeChip = map[l.guardrailOutcome];
+                  }
+                  return (
+                    <div key={l.id} className="py-2 text-xs">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-bold text-slate-700">{l.ruleName}</span>
+                        <span className="text-slate-400">→</span>
+                        {/* Phase 3 correction #3 — clickable shipment number.
+                            Wired to ShippingCenter via onOpenShipment. */}
+                        {onOpenShipment ? (
+                          <button onClick={() => onOpenShipment(l.shipmentId)}
+                            className="text-slate-700 font-mono underline hover:text-primary">
+                            {l.shipmentNumber}
+                          </button>
+                        ) : (
+                          <span className="text-slate-700 font-mono">{l.shipmentNumber}</span>
+                        )}
+                        <span className="px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest rounded bg-indigo-50 text-indigo-700">{getTriggerTitle(l.trigger)}</span>
+                        {l.ruleType === 'guardrail' && (
+                          <span className="px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest rounded bg-amber-50 text-amber-700 border border-amber-200">Guardrail</span>
+                        )}
+                        <span className="px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest rounded bg-emerald-100 text-emerald-700">Matched</span>
+                        {outcomeChip && (
+                          <span className={`px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest rounded ${outcomeChip.className}`}>{outcomeChip.label}</span>
+                        )}
+                      </div>
+                      {l.ruleSummary && <p className="text-[11px] text-slate-500 mt-0.5 italic">{l.ruleSummary}</p>}
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        {new Date(l.timestamp).toLocaleString()} · actions: {l.actionsApplied.length === 0 ? 'none' : l.actionsApplied.join(', ')}
+                      </p>
                     </div>
-                    {l.ruleSummary && <p className="text-[11px] text-slate-500 mt-0.5 italic">{l.ruleSummary}</p>}
-                    <p className="text-[11px] text-slate-500 mt-0.5">
-                      {new Date(l.timestamp).toLocaleString()} · actions: {l.actionsApplied.length === 0 ? 'none' : l.actionsApplied.join(', ')}
-                    </p>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )
           )}

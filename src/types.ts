@@ -934,10 +934,25 @@ export interface Shipment {
     ruleId?: string;
     ruleName?: string;
     markedAt: string;
+    // Phase 3 correction #3 — distinguish review-needed from approval-needed
+    // and from blocked-pending-approval. Default 'review' for legacy entries.
+    kind?: 'review' | 'approval' | 'block';
+    // Phase 3 correction #3 — explicit state machine. Default 'pending' until
+    // an authorized operator resolves / approves / overrides / dismisses.
+    state?: 'pending' | 'resolved' | 'approved' | 'overridden' | 'dismissed';
+    // Optional context captured at the moment the guardrail fired (e.g. the
+    // selected rate that triggered a high-cost-label block).
+    triggerContext?: Record<string, any>;
     resolved?: boolean;
     resolvedAt?: string;
     resolvedBy?: string;
     resolutionNote?: string;
+    approvedAt?: string;
+    approvedBy?: string;
+    overriddenAt?: string;
+    overriddenBy?: string;
+    dismissedAt?: string;
+    dismissedBy?: string;
   } | null;
   batchQueueState?: 'ready_for_batch' | 'batched' | null;
   batchQueueMarkedAt?: string;
@@ -1201,7 +1216,16 @@ export type AutomationTriggerType =
   | 'pickup_confirmed'
   | 'pickup_cancelled'
   | 'tracking_synced'
-  | 'return_shipment_created';
+  | 'return_shipment_created'
+  // Phase 3 correction #3 — guardrail-only trigger that evaluates BEFORE a
+  // label purchase completes (not after). Only valid on rules with
+  // ruleType='guardrail'.
+  | 'pre_label_purchase';
+
+// Phase 3 correction #3 — automation rule process type. Observational rules
+// react after an event (current behavior). Guardrail rules evaluate before a
+// risky action and can block / require approval before that action proceeds.
+export type AutomationRuleProcessType = 'observational' | 'guardrail';
 
 export type AutomationConditionField =
   | 'mode'
@@ -1236,7 +1260,12 @@ export type AutomationActionType =
   | 'add_internal_note'
   | 'mark_review_needed'
   | 'mark_ready_for_batch'
-  | 'set_priority';
+  | 'set_priority'
+  // Phase 3 correction #3 — guardrail-only actions. They do nothing in the
+  // observational engine; they are evaluated by `evaluateGuardrails` and
+  // surfaced via the pre-action guardrail UI (e.g. pre-label-purchase modal).
+  | 'require_approval'
+  | 'block_unless_approved';
 
 export interface AutomationAction {
   type: AutomationActionType;
@@ -1247,6 +1276,12 @@ export interface AutomationRule {
   id: string;
   name: string;
   enabled: boolean;
+  // Phase 3 correction #3 — process type. Defaults to 'observational' for
+  // backward compatibility with rules created before the guardrail model
+  // existed. 'guardrail' rules can only use guardrail triggers
+  // (e.g. pre_label_purchase) and guardrail actions
+  // (require_approval / block_unless_approved).
+  ruleType?: AutomationRuleProcessType;
   trigger: AutomationTriggerType;
   conditions: AutomationCondition[];
   actions: AutomationAction[];
@@ -1288,6 +1323,15 @@ export interface AutomationLogEntry {
   actionsApplied: string[];
   reason?: string;
   timestamp: string;
+  // Phase 3 correction #3 — process type the rule was acting under at time of
+  // execution. 'guardrail' entries are written when a guardrail rule decides
+  // (block / require approval) BEFORE the action; 'observational' is the
+  // existing post-event behavior. Optional for back-compat with old entries.
+  ruleType?: AutomationRuleProcessType;
+  // Phase 3 correction #3 — guardrail outcome captured at decision time so
+  // execution history can show the operational result (e.g. "blocked",
+  // "approved", "overridden") without needing to look up the shipment.
+  guardrailOutcome?: 'blocked' | 'approval_required' | 'approved' | 'overridden' | 'cleared_by_alternate_rate';
 }
 
 export type BatchStatus = 'draft' | 'processing' | 'completed' | 'completed_with_errors' | 'cancelled';

@@ -13,7 +13,7 @@ import ShippingProvidersPage from './ShippingProvidersPage';
 import { CarrierAnalytics } from './shipping/CarrierAnalytics';
 import AutomationRules from './shipping/AutomationRules';
 import BatchLabels, { type BatchEligibility } from './shipping/BatchLabels';
-import { runAutomation } from '../shipping/automationEngine';
+import { runAutomation, evaluateGuardrails, type GuardrailEvaluation, describeRule } from '../shipping/automationEngine';
 import type { AutomationTriggerType } from '../types';
 import { featureMatrix as staticFeatureMatrix } from '../owner/mockData';
 import { normalizeStateCode, normalizeZip, normalizePhone } from '../utils/inputNormalizers';
@@ -373,7 +373,7 @@ function formatDateTime(iso: string): string {
 }
 
 export default function ShippingCenter() {
-  const { shipments, addShipment, updateShipment, resolveShipmentReview, invoices, repairTickets, rmas, inventoryTransfers, suppliers, customers,
+  const { shipments, addShipment, updateShipment, resolveShipmentReview, setReviewOutcome, invoices, repairTickets, rmas, inventoryTransfers, suppliers, customers,
     automationRules, addAutomationRule, updateAutomationRule, deleteAutomationRule, bumpAutomationRuleStats,
     automationLogs, appendAutomationLogs,
     shipmentBatches, addShipmentBatch, updateShipmentBatch } = useStoreLocalState();
@@ -469,6 +469,12 @@ export default function ShippingCenter() {
   const canManageCarrierLocators = checkSubPermission('manage_carrier_locator_settings');
   const canManageAutomationRules = checkSubPermission('manage_shipping_automation_rules');
   const canViewAutomationResults = checkSubPermission('view_shipping_automation_results');
+  // Phase 3 correction #3 — operator-action perms for the guardrail / approval
+  // workflow. Independent of management so an operator can clear / approve /
+  // override without being able to edit the underlying rules.
+  const canResolveAutomationReviews = checkSubPermission('resolve_shipping_automation_reviews');
+  const canApproveAutomationExceptions = checkSubPermission('approve_shipping_automation_exceptions');
+  const canOverrideAutomationGuardrails = checkSubPermission('override_shipping_automation_guardrails');
   const canManageBatchLabels = checkSubPermission('manage_batch_labels');
   const canPurchaseBatchLabels = checkSubPermission('purchase_batch_labels');
   const planAllowsAutomationRules = isPlanFeatureLive('shipping_automation_rules');
@@ -485,6 +491,16 @@ export default function ShippingCenter() {
   const [automationFilter, setAutomationFilter] = useState<'all' | 'review_needed' | 'ready_for_batch' | 'priority' | 'flagged'>('all');
   const [reviewResolveTarget, setReviewResolveTarget] = useState<string | null>(null);
   const [reviewResolveNote, setReviewResolveNote] = useState('');
+  // Phase 3 correction #3 — pre-label-purchase guardrail modal state. When set,
+  // a purchase attempt was paused because one or more guardrail rules matched.
+  // The modal lets the operator choose another rate, request approval, approve
+  // / override (perm-gated) and proceed, or cancel.
+  const [pendingGuardrail, setPendingGuardrail] = useState<{
+    shipmentId: string;
+    blockingRules: GuardrailEvaluation[];
+    approvalRules: GuardrailEvaluation[];
+  } | null>(null);
+  const [guardrailNote, setGuardrailNote] = useState('');
   const [selectedShipment, setSelectedShipment] = useState<string | null>(null);
   const [detailTab, setDetailTab] = useState<'overview' | 'tracking' | 'packages' | 'logistics'>('overview');
   // Service Points & Pickup Requests (Phase 2) — UI state
@@ -3647,6 +3663,58 @@ export default function ShippingCenter() {
     if (!shipment) return { ok: false, reason: 'Shipment not found' };
     const prereqs = getLabelPrerequisites(shipment);
     if (prereqs.length > 0) return { ok: false, reason: prereqs.join('; ') };
+    // Phase 3 correction #3 — pre-label-purchase guardrails apply to batch
+    // runs too. Batch is non-interactive, so a blocking guardrail marks the
+    // shipment with a pending block (operators can resolve from the detail
+    // panel) and returns a structured "blocked" outcome; an approval-only
+    // guardrail does the same with kind='approval'. The batch loop continues
+    // with other shipments unaffected. We log the guardrail decision so it
+    // shows up in execution history with its own outcome chip.
+    // If the operator has already cleared a guardrail review for this
+    // shipment (state === 'approved' or 'overridden'), the batch path honors
+    // that decision and skips re-evaluation, matching the single-shipment
+    // path's bypassGuardrails semantics. A 'pending' approval/block still
+    // halts the batch row.
+    const preApproved = shipment.reviewNeeded
+      && (shipment.reviewNeeded.kind === 'approval' || shipment.reviewNeeded.kind === 'block')
+      && (shipment.reviewNeeded.state === 'approved' || shipment.reviewNeeded.state === 'overridden');
+    if (!preApproved && planAllowsAutomationRules && automationRules.length > 0) {
+      const guardEval = evaluateGuardrails(automationRules, shipment, 'pre_label_purchase', { selectedRate: shipment.selectedRate });
+      if (!guardEval.allClear) {
+        const now = new Date().toISOString();
+        const firstBlocking = guardEval.blockingRules[0];
+        const firstApproval = guardEval.approvalRules[0];
+        const sourceRule = firstBlocking || firstApproval;
+        if (sourceRule) {
+          updateShipment(shipmentId, {
+            reviewNeeded: {
+              reason: sourceRule.reason,
+              ruleId: sourceRule.rule.id,
+              ruleName: sourceRule.rule.name,
+              markedAt: now,
+              kind: firstBlocking ? 'block' : 'approval',
+              state: 'pending',
+              triggerContext: shipment.selectedRate ? { selectedRate: shipment.selectedRate } : undefined,
+            },
+            updatedAt: now,
+          });
+          appendAutomationLogs([{
+            id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            ruleId: sourceRule.rule.id, ruleName: sourceRule.rule.name,
+            ruleSummary: describeRule(sourceRule.rule),
+            shipmentId: shipment.id, shipmentNumber: shipment.shipmentNumber,
+            trigger: 'pre_label_purchase', matched: true,
+            actionsApplied: firstBlocking ? ['guardrail:blocked'] : ['guardrail:approval_required'],
+            timestamp: now,
+            ruleType: 'guardrail',
+            guardrailOutcome: firstBlocking ? 'blocked' : 'approval_required',
+          }]);
+        }
+        return { ok: false, reason: firstBlocking
+          ? `Blocked by guardrail rule: ${firstBlocking.rule.name}`
+          : `Approval required by guardrail rule: ${firstApproval?.rule.name || 'unknown'}` };
+      }
+    }
     try {
       const result = await shippingApi.purchaseLabel(
         shipment.originAddress, shipment.destinationAddress, shipment.packages,
@@ -3902,7 +3970,7 @@ export default function ShippingCenter() {
     setProviderSuccess(`Selected: ${rate.carrier} ${rate.serviceName} — $${rate.rate.toFixed(2)}`);
   }
 
-  async function handlePurchaseLabel(shipmentId: string) {
+  async function handlePurchaseLabel(shipmentId: string, opts?: { bypassGuardrails?: boolean; guardrailOutcome?: 'approved' | 'overridden' }) {
     if (guardShippingProviderPlan('Purchasing a shipping label')) return;
     if (isWriteBlocked) return;
     const shipment = shipments.find(s => s.id === shipmentId);
@@ -3911,6 +3979,23 @@ export default function ShippingCenter() {
     if (prereqs.length > 0) {
       setProviderError({ code: 'PREREQUISITES', message: `Before purchasing a label: ${prereqs.join('; ')}.`, retryable: false });
       return;
+    }
+    // Phase 3 correction #3 — pre-label-purchase guardrail check. Runs only if
+    // the plan has automation rules and we have not already been told to
+    // bypass (i.e. the operator already approved or overrode in the modal).
+    if (!opts?.bypassGuardrails && planAllowsAutomationRules && automationRules.length > 0) {
+      const guardEval = evaluateGuardrails(automationRules, shipment, 'pre_label_purchase', {
+        selectedRate: shipment.selectedRate,
+      });
+      if (!guardEval.allClear) {
+        setPendingGuardrail({
+          shipmentId,
+          blockingRules: guardEval.blockingRules,
+          approvalRules: guardEval.approvalRules,
+        });
+        setGuardrailNote('');
+        return;
+      }
     }
     clearProviderFeedback();
     setProviderLoading('label');
@@ -4640,12 +4725,14 @@ export default function ShippingCenter() {
             <AutomationRules
               rules={automationRules}
               logs={automationLogs}
+              shipments={shipments}
               canManage={canManageAutomationRules}
               canViewResults={canViewAutomationResults}
               currentUser="Current User"
               onAdd={addAutomationRule}
               onUpdate={updateAutomationRule}
               onDelete={deleteAutomationRule}
+              onOpenShipment={(id) => { setSelectedShipment(id); setActiveTab('shipments'); }}
             />
           ) : (
             <div className="bg-white rounded-2xl border border-amber-200 p-6 text-center">
@@ -8564,14 +8651,207 @@ export default function ShippingCenter() {
         )}
       </AnimatePresence>
 
+      {/* Phase 3 correction #3 — Pre-Label-Purchase Guardrail modal. Opens
+          when handlePurchaseLabel detects matching guardrail rules. Lets the
+          operator pick another rate, request approval, approve / override
+          (perm-gated) and proceed, or cancel. Never bypasses normal label-
+          purchase prerequisites — those have already been validated by the
+          time we reach the guardrail check. */}
+      <AnimatePresence>
+        {pendingGuardrail && (() => {
+          const target = shipments.find(s => s.id === pendingGuardrail.shipmentId);
+          if (!target) return null;
+          const blocking = pendingGuardrail.blockingRules;
+          const approval = pendingGuardrail.approvalRules;
+          const isHardBlock = blocking.length > 0;
+          const canApprove = canApproveAutomationExceptions || canOverrideAutomationGuardrails;
+          const canOverride = canOverrideAutomationGuardrails;
+          // "Approve & Purchase" is meaningful when there are no blockers OR
+          // when the operator can override blockers. Otherwise the only way
+          // forward is to override (perm-gated) or pick a different rate.
+          const approveEnabled = canApprove && !isHardBlock;
+          const overrideEnabled = canOverride;
+          function recordOutcomeAndPurchase(outcome: 'approved' | 'overridden') {
+            const now = new Date().toISOString();
+            const sourceRule = (isHardBlock ? blocking[0] : approval[0])?.rule;
+            // Persist a reviewNeeded record + audit log so history reflects
+            // the decision even though the purchase succeeded.
+            if (sourceRule) {
+              const reviewKind = isHardBlock ? 'block' : 'approval';
+              updateShipment(target.id, {
+                reviewNeeded: {
+                  reason: (isHardBlock ? blocking[0] : approval[0]).reason,
+                  ruleId: sourceRule.id, ruleName: sourceRule.name,
+                  markedAt: now, kind: reviewKind, state: outcome,
+                  resolved: true,
+                  triggerContext: target.selectedRate ? { selectedRate: target.selectedRate } : undefined,
+                  ...(outcome === 'approved'
+                    ? { approvedAt: now, approvedBy: 'Current User', resolutionNote: guardrailNote.trim() || undefined }
+                    : { overriddenAt: now, overriddenBy: 'Current User', resolutionNote: guardrailNote.trim() || undefined }),
+                },
+              });
+              appendAutomationLogs([{
+                id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                ruleId: sourceRule.id, ruleName: sourceRule.name,
+                ruleSummary: describeRule(sourceRule),
+                shipmentId: target.id, shipmentNumber: target.shipmentNumber,
+                trigger: 'pre_label_purchase', matched: true,
+                actionsApplied: [outcome === 'approved' ? 'guardrail:approved' : 'guardrail:overridden'],
+                timestamp: now,
+                ruleType: 'guardrail',
+                guardrailOutcome: outcome,
+              }]);
+            }
+            setPendingGuardrail(null);
+            setGuardrailNote('');
+            // Bypass guardrails on this resumed purchase — we already recorded
+            // the decision above.
+            void handlePurchaseLabel(target.id, { bypassGuardrails: true, guardrailOutcome: outcome });
+          }
+          function requestApprovalOnly() {
+            const now = new Date().toISOString();
+            const sourceRule = (isHardBlock ? blocking[0] : approval[0])?.rule;
+            if (sourceRule) {
+              updateShipment(target.id, {
+                reviewNeeded: {
+                  reason: (isHardBlock ? blocking[0] : approval[0]).reason,
+                  ruleId: sourceRule.id, ruleName: sourceRule.name,
+                  markedAt: now,
+                  kind: isHardBlock ? 'block' : 'approval',
+                  state: 'pending',
+                  triggerContext: target.selectedRate ? { selectedRate: target.selectedRate } : undefined,
+                },
+              });
+              appendAutomationLogs([{
+                id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                ruleId: sourceRule.id, ruleName: sourceRule.name,
+                ruleSummary: describeRule(sourceRule),
+                shipmentId: target.id, shipmentNumber: target.shipmentNumber,
+                trigger: 'pre_label_purchase', matched: true,
+                actionsApplied: [isHardBlock ? 'guardrail:blocked' : 'guardrail:approval_required'],
+                timestamp: now,
+                ruleType: 'guardrail',
+                guardrailOutcome: isHardBlock ? 'blocked' : 'approval_required',
+              }]);
+            }
+            setPendingGuardrail(null);
+            setGuardrailNote('');
+          }
+          function chooseAnotherRate() {
+            setPendingGuardrail(null);
+            setGuardrailNote('');
+            setSelectedShipment(target.id);
+            setShowRatesPanel(true);
+          }
+          return (
+            <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.96, y: 12 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.96, y: 12 }}
+                className="bg-white rounded-3xl shadow-2xl w-full max-w-lg p-6 space-y-4"
+              >
+                <div>
+                  <p className={`text-[10px] font-black uppercase tracking-widest mb-1 ${isHardBlock ? 'text-rose-600' : 'text-amber-600'}`}>
+                    {isHardBlock ? 'Label Purchase Blocked' : 'Approval Required'}
+                  </p>
+                  <h3 className="text-lg font-black text-slate-800">{target.shipmentNumber}</h3>
+                  <p className="text-[11px] text-slate-500 mt-1">
+                    {isHardBlock
+                      ? 'A guardrail rule blocks this label purchase. You can pick another rate, request approval, or — if permitted — override and continue.'
+                      : 'A guardrail rule requires operator approval before this label purchase can proceed.'}
+                  </p>
+                </div>
+                <div className="space-y-2 max-h-56 overflow-y-auto">
+                  {[...blocking, ...approval].map((g, idx) => (
+                    <div key={idx} className={`border rounded-xl p-3 text-xs ${g.blocking ? 'border-rose-200 bg-rose-50' : 'border-amber-200 bg-amber-50'}`}>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-bold text-slate-800">{g.rule.name}</span>
+                        <span className={`px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest rounded ${g.blocking ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-700'}`}>
+                          {g.blocking ? 'Block' : 'Requires Approval'}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-700 mt-1 leading-snug">{g.reason}</p>
+                    </div>
+                  ))}
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Decision Note (optional)</label>
+                  <textarea
+                    value={guardrailNote}
+                    onChange={(e) => setGuardrailNote(e.target.value)}
+                    rows={2}
+                    placeholder="Why are you proceeding?"
+                    className="mt-1 w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-amber-200"
+                  />
+                </div>
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <button
+                    onClick={() => { setPendingGuardrail(null); setGuardrailNote(''); }}
+                    className="flex-1 py-2.5 rounded-xl bg-slate-100 text-slate-600 font-black text-[10px] uppercase tracking-widest hover:bg-slate-200"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={chooseAnotherRate}
+                    className="flex-1 py-2.5 rounded-xl bg-slate-200 text-slate-700 font-black text-[10px] uppercase tracking-widest hover:bg-slate-300"
+                  >
+                    Choose Other Rate
+                  </button>
+                  <button
+                    onClick={requestApprovalOnly}
+                    disabled={isWriteBlocked}
+                    className="flex-1 py-2.5 rounded-xl bg-amber-100 text-amber-700 font-black text-[10px] uppercase tracking-widest hover:bg-amber-200 disabled:opacity-50"
+                  >
+                    Request Approval
+                  </button>
+                  {approveEnabled && (
+                    <button
+                      onClick={() => recordOutcomeAndPurchase('approved')}
+                      disabled={isWriteBlocked}
+                      className="flex-1 py-2.5 rounded-xl bg-sky-600 text-white font-black text-[10px] uppercase tracking-widest hover:bg-sky-700 disabled:opacity-50"
+                    >
+                      Approve & Purchase
+                    </button>
+                  )}
+                  {isHardBlock && overrideEnabled && (
+                    <button
+                      onClick={() => recordOutcomeAndPurchase('overridden')}
+                      disabled={isWriteBlocked}
+                      className="flex-1 py-2.5 rounded-xl bg-rose-600 text-white font-black text-[10px] uppercase tracking-widest hover:bg-rose-700 disabled:opacity-50"
+                    >
+                      Override & Purchase
+                    </button>
+                  )}
+                </div>
+              </motion.div>
+            </div>
+          );
+        })()}
+      </AnimatePresence>
+
       {/* Phase 3 correction — Resolve Review modal. Captures an optional
-          operator note, calls resolveShipmentReview which atomically clears
-          the unresolved state and writes a system audit internal note. */}
+          operator note and calls setReviewOutcome with the right resolution
+          for the review's kind (review / approval / block). The trio of new
+          permissions (resolve / approve / override) gate the available
+          actions; "Dismiss" is always available to anyone with resolve. */}
       <AnimatePresence>
         {reviewResolveTarget && (() => {
           const target = shipments.find(s => s.id === reviewResolveTarget);
           if (!target || !target.reviewNeeded) return null;
           const rn = target.reviewNeeded;
+          const kind = rn.kind || 'review';
+          // Phase 3 correction #3 — resolution-kind-aware buttons. For
+          // approval-needed and block reviews, "Resolve" becomes "Approve"
+          // (perm-gated). For block reviews, an "Override" button is also
+          // available for stricter perm.
+          const canResolveBasic = canResolveAutomationReviews || canManageAutomationRules || canEditPreDispatch;
+          const canApprove = canApproveAutomationExceptions || canOverrideAutomationGuardrails;
+          const canOverride = canOverrideAutomationGuardrails;
+          const accentClass = kind === 'block' ? 'rose' : kind === 'approval' ? 'sky' : 'emerald';
+          const titleLabel = kind === 'block' ? 'Resolve Block'
+            : kind === 'approval' ? 'Resolve Approval'
+            : 'Resolve Review';
           return (
             <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
               <motion.div
@@ -8581,8 +8861,9 @@ export default function ShippingCenter() {
                 className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-6 space-y-4"
               >
                 <div>
-                  <p className="text-[10px] font-black text-emerald-600 uppercase tracking-widest mb-1">Resolve Review</p>
+                  <p className={`text-[10px] font-black text-${accentClass}-600 uppercase tracking-widest mb-1`}>{titleLabel}</p>
                   <h3 className="text-lg font-black text-slate-800">{target.shipmentNumber}</h3>
+                  <p className="text-[10px] text-slate-500 mt-1 uppercase tracking-widest">Kind: {kind}</p>
                 </div>
                 <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs">
                   <p className="font-bold text-amber-700">Reason on file</p>
@@ -8599,28 +8880,65 @@ export default function ShippingCenter() {
                     className="mt-1 w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-200"
                   />
                 </div>
-                <div className="flex gap-2 pt-2">
+                <div className="flex flex-wrap gap-2 pt-2">
                   <button
                     onClick={() => { setReviewResolveTarget(null); setReviewResolveNote(''); }}
                     className="flex-1 py-2.5 rounded-xl bg-slate-100 text-slate-600 font-black text-[10px] uppercase tracking-widest hover:bg-slate-200"
                   >
                     Cancel
                   </button>
-                  <button
-                    disabled={isWriteBlocked || !(canManageAutomationRules || canEditPreDispatch)}
-                    onClick={() => {
-                      // Phase 3 correction — defense-in-depth: re-check permission and
-                      // write-block in the action handler, not just on the trigger UI.
-                      if (isWriteBlocked) return;
-                      if (!(canManageAutomationRules || canEditPreDispatch)) return;
-                      resolveShipmentReview(target.id, { resolvedBy: 'Current User', note: reviewResolveNote.trim() || undefined });
-                      setReviewResolveTarget(null);
-                      setReviewResolveNote('');
-                    }}
-                    className="flex-1 py-2.5 rounded-xl bg-emerald-600 text-white font-black text-[10px] uppercase tracking-widest hover:bg-emerald-700 disabled:opacity-50"
-                  >
-                    Resolve Review
-                  </button>
+                  {canResolveBasic && (
+                    <button
+                      disabled={isWriteBlocked}
+                      onClick={() => {
+                        if (isWriteBlocked) return;
+                        setReviewOutcome(target.id, { resolution: 'dismiss', actor: 'Current User', note: reviewResolveNote.trim() || undefined });
+                        setReviewResolveTarget(null); setReviewResolveNote('');
+                      }}
+                      className="flex-1 py-2.5 rounded-xl bg-slate-200 text-slate-700 font-black text-[10px] uppercase tracking-widest hover:bg-slate-300 disabled:opacity-50"
+                    >
+                      Dismiss
+                    </button>
+                  )}
+                  {kind === 'block' && canOverride && (
+                    <button
+                      disabled={isWriteBlocked}
+                      onClick={() => {
+                        if (isWriteBlocked) return;
+                        setReviewOutcome(target.id, { resolution: 'override', actor: 'Current User', note: reviewResolveNote.trim() || undefined });
+                        setReviewResolveTarget(null); setReviewResolveNote('');
+                      }}
+                      className="flex-1 py-2.5 rounded-xl bg-amber-600 text-white font-black text-[10px] uppercase tracking-widest hover:bg-amber-700 disabled:opacity-50"
+                    >
+                      Override
+                    </button>
+                  )}
+                  {(kind === 'approval' || kind === 'block') && canApprove && (
+                    <button
+                      disabled={isWriteBlocked}
+                      onClick={() => {
+                        if (isWriteBlocked) return;
+                        setReviewOutcome(target.id, { resolution: 'approve', actor: 'Current User', note: reviewResolveNote.trim() || undefined });
+                        setReviewResolveTarget(null); setReviewResolveNote('');
+                      }}
+                      className="flex-1 py-2.5 rounded-xl bg-sky-600 text-white font-black text-[10px] uppercase tracking-widest hover:bg-sky-700 disabled:opacity-50"
+                    >
+                      Approve
+                    </button>
+                  )}
+                  {kind === 'review' && canResolveBasic && (
+                    <button
+                      disabled={isWriteBlocked}
+                      onClick={() => {
+                        if (isWriteBlocked) return;
+                        setReviewOutcome(target.id, { resolution: 'resolve', actor: 'Current User', note: reviewResolveNote.trim() || undefined });
+                        setReviewResolveTarget(null); setReviewResolveNote('');
+                      }}
+                      className="flex-1 py-2.5 rounded-xl bg-emerald-600 text-white font-black text-[10px] uppercase tracking-widest hover:bg-emerald-700 disabled:opacity-50"
+                    >
+                      Resolve Review
+                    </button>
+                  )}
                 </div>
               </motion.div>
             </div>

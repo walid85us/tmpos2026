@@ -1,0 +1,420 @@
+Shipping Phase 3 — Automation Guardrails + Approval Workflow Correction Pass
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated correction pass.
+Do not redesign the app.
+Do not broaden scope beyond the automation process model, permissions, and approval/override workflow required by the latest QA.
+Do not reopen closed shipping workstreams except where directly required by the automation issues identified below.
+Do not implement Packing Workflows, SLA Optimization, Carrier Scorecards, Customs Docs, or Insurance Rules in this pass.
+
+Implement only the corrections needed to make Shipping Automation operationally correct, permission-aware, and logically enforceable.
+
+==================================================
+MANDATORY CONTEXT
+==================================================
+
+The current automation implementation is partially working, but the workflow model is still wrong.
+
+Current issue discovered in QA:
+
+Example rule:
+- When a carrier label is purchased
+- and Shipping Cost > $6.00
+- mark the shipment for review
+
+What currently happens:
+- label is purchased
+- rule fires afterward
+- shipment gets review-needed state
+- review can be resolved later
+
+Why this is not sufficient:
+- in a real workflow, this kind of rule should often act as a pre-action guardrail, not just a post-action review
+- if the business rule is “labels above $6 require review/approval,” then the label purchase should not complete normally before that review is addressed
+- or the operator should choose a lower-cost rate that avoids the rule
+- or a user with permission should approve/override the guardrail
+
+This means the current automation model is too flat.
+It treats all rules as post-event reactions, but some must be modeled as pre-action guardrails.
+
+Additional issues:
+1) There is not yet a strong permission model for automation outcomes.
+2) Review resolution is too generic — it should distinguish resolve / approve / override depending on action type.
+3) Execution History should be more operational:
+   - shipment number should be clickable
+   - operator should be able to open the shipment from history
+   - resolved items should show resolved state
+4) Rule triggers, conditions, actions, and permission model must now be logically linked as a practical workflow system.
+
+This correction pass must solve that.
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Node/Express carrier-integration engineer
+- Senior workflow automation architect
+- Senior shipping operations and exception-control architect
+- Senior RBAC / entitlement systems architect
+- Senior approval/override workflow designer
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Important behavior:
+Do not make a shallow patch.
+Think through the correct automation process model.
+Use the cleanest, most extensible approach that keeps Phase 3 foundation realistic and safe.
+If a stronger architecture is needed, implement it and explain it clearly.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- Ref.txt
+- replit.md
+
+Use them as continuity and source-of-truth documents.
+
+==================================================
+PRESERVE WITHOUT BREAKING
+==================================================
+
+Preserve exactly unless this correction explicitly requires touching it:
+- current design baseline exactly
+- auth behavior
+- preview-mode safety
+- live System Owner plan gating behavior
+- store permission gating
+- provider/manual mode split
+- shipping lifecycle integrity
+- existing shipping core flow
+- reverse-logistics flow
+- Batch Labels foundation
+- batch eligibility and itemized result behavior
+- Carrier Analytics foundation
+- entitlement propagation / linked feature-permission disappearance
+- Shipping Provider explicit permission model
+- Shipping Provider hard-disable + config clearing
+- Settings tab vs subsection entitlement scoping
+- dynamic sub-permission counts
+- typed Automation Rules builder
+- human-readable operators
+- plain-language rule summary
+- in-app delete confirmation
+- review-needed visible state and execution history foundation
+- enabled-state non-regression
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Implement the correction so that:
+
+A) Automation supports two distinct process types:
+- post-event observational rules
+- pre-action guardrail rules
+
+B) Rules, conditions, actions, permissions, and operator workflow become logically linked
+
+C) Review / approval / override workflow is practical and permission-aware
+
+D) Execution History becomes operationally useful
+
+==================================================
+PART A — INTRODUCE RULE PROCESS TYPES
+==================================================
+
+Required:
+Refactor the automation foundation so supported rules are explicitly classified as one of these types:
+
+1) Observational / Post-Event
+Purpose:
+- reacts after an event already happened
+Examples:
+- shipment created
+- shipment edited
+- shipment status changed
+- carrier label purchased
+- pickup requested
+- pickup confirmed
+- pickup cancelled
+- tracking synced
+- return shipment created
+
+Allowed behavior:
+- add internal note
+- add audit/timeline event
+- set priority
+- queue for batch
+- mark review needed
+- surface recommendation / follow-up
+These must remain safe and truthful.
+
+2) Guardrail / Pre-Action
+Purpose:
+- evaluates before a risky or policy-sensitive action completes
+Examples that should be supported where practical in current shipping architecture:
+- before carrier label purchase
+- before pickup request confirmation
+- before rate selection finalization if architecture allows
+At minimum support the pre-label-purchase guardrail path if that is the cleanest current implementation.
+
+Allowed behavior:
+- allow action
+- require review/approval before action proceeds
+- block action with clear reason unless approved/overridden
+- allow operator to choose a different compliant option instead
+
+Important:
+Not every trigger from the current dropdown must become guardrail-capable.
+Only make guardrails where they are operationally valid and supportable from current architecture.
+Explain the final supported matrix clearly.
+
+==================================================
+PART B — BUILD A LOGIC PROCESS MATRIX FOR EACH RULE / TRIGGER FAMILY
+==================================================
+
+Required:
+Create a clear internal process matrix linking:
+- trigger
+- rule type
+- supported conditions
+- supported actions/outcomes
+- whether the action is post-event, review-required, approval-required, or blocking
+- who can resolve / approve / override
+
+You must think through the logic for the current trigger families visible in the automation UI, including:
+- a shipment is created
+- a shipment is edited
+- shipment status changes
+- a carrier label is purchased
+- a pickup is requested
+- a pickup is confirmed
+- a pickup is cancelled
+- tracking is synced
+- a return shipment is created
+
+For each trigger family, define the practical action model.
+Example guidance:
+- Shipment created: good for tagging, routing, review flagging, batch candidacy, notes
+- Shipment edited: good for re-evaluation, review flagging, note/audit, queue update
+- Shipment status changes: good for queue movement, exception flagging, follow-up markers
+- Carrier label purchased: good for post-event audit/flagging; but policy controls like high-cost label approval likely belong to pre-label guardrail instead
+- Pickup requested/confirmed/cancelled: good for follow-up, review, note, queue, exception states
+- Tracking synced: good for exception flagging, delay/follow-up, resolution prompts
+- Return shipment created: good for routing, return review, note/queue state
+
+Important:
+Do not keep illogical trigger-action relationships.
+For example:
+- “after label purchased” should not be the only available way to enforce pre-purchase cost approval
+- guardrail logic must exist for the rules that are clearly policy-enforcement rules
+
+==================================================
+PART C — PRE-LABEL PURCHASE GUARDRAIL WORKFLOW
+==================================================
+
+This is mandatory because it directly addresses the QA example.
+
+Required:
+Introduce a clean guardrail workflow for label purchase where policy-sensitive rules can evaluate before purchase completes.
+
+Example supported business outcome:
+- if Shipping Cost > threshold
+- require review/approval before purchase
+- allow approved user to proceed
+- allow normal operator to choose a cheaper rate instead
+- do not let label purchase complete silently and only review afterward if the business rule is a pre-purchase control
+
+At minimum, support:
+- guardrail evaluation point before label purchase
+- visible hold / approval-needed / review-needed state
+- clear reason shown to operator
+- action options depending on permission:
+  - select another rate
+  - request approval
+  - approve/override if authorized
+  - cancel
+
+Do not silently downgrade this back into a post-event flag.
+
+==================================================
+PART D — PERMISSION MODEL FOR AUTOMATION
+==================================================
+
+Required:
+Define and implement a stronger Shipping Automation permission model in Store Permissions Matrix.
+
+At minimum separate these concerns into explicit permissions/sub-permissions where appropriate:
+- manage_shipping_automation_rules
+- view_shipping_automation_history
+- resolve_shipping_automation_reviews
+- approve_shipping_automation_exceptions
+- override_shipping_automation_guardrails
+- view_shipping_automation_outcomes
+- manage_shipping_batch_labels (keep coherent with existing batch labels model)
+
+Required:
+Think through default practical role expectations, while still supporting the app’s custom role system.
+For example:
+- Store Owner / Admin: can manage rules, resolve reviews, approve exceptions, override guardrails
+- Manager / Operations Lead: can resolve reviews, approve exceptions, possibly override depending on policy
+- Standard shipping operator / technician / sales: may only view outcomes and request approval, not approve/override
+Do not hardcode titles as the only model — build permission logic, not title logic.
+
+Important:
+Permissions must be logically linked to rule outcomes.
+If a rule creates approval-needed state, someone must have a defined permission to approve it.
+If a rule creates review-needed state, someone must have a defined permission to resolve it.
+
+==================================================
+PART E — REVIEW / APPROVAL / OVERRIDE STATE MODEL
+==================================================
+
+Required:
+Do not treat all automation outcomes as the same generic “review needed”.
+
+Introduce a clear state model distinguishing at minimum:
+- informational outcome
+- review needed
+- approval needed
+- blocked pending approval
+- resolved
+- approved
+- overridden
+- dismissed / cleared if appropriate
+
+Required:
+For each unresolved state:
+- show source rule
+- show trigger context
+- show timestamp
+- show current resolution status
+- show who resolved/approved/overrode when applicable
+- support optional note
+
+Important:
+Keep this practical and lightweight.
+Do not build a huge BPM engine.
+But do make the workflow real.
+
+==================================================
+PART F — EXECUTION HISTORY MUST BECOME OPERATIONAL
+==================================================
+
+Required:
+Execution History must remain the audit trail, but now it must help operators act.
+
+At minimum:
+- shipment number in execution history must be clickable to open the shipment
+- if the outcome is unresolved, history should make that clear
+- if the outcome is resolved/approved/overridden, history should make that clear
+- history should reflect the actual state transition, not just raw action text
+
+Required:
+When a review is resolved or approval is granted, the system should show that truthfully in both:
+- shipment outcome state
+- execution history / rule history where appropriate
+
+==================================================
+PART G — RULE ACTION SEMANTICS MUST BE CLEAR
+==================================================
+
+Required:
+Clarify action language in the rules builder and rule cards so operators understand whether the action is:
+- informational
+- queueing
+- review flagging
+- approval gate
+- blocking guardrail
+- priority change
+- batch candidate routing
+
+Do not leave vague action names that hide real workflow meaning.
+
+==================================================
+PART H — PLAN / PERMISSION / GATING INTEGRITY
+==================================================
+
+Required:
+Keep plan and permission integrity coherent.
+Any new review/approval/override surfaces must respect the current entitlement model.
+Do not regress current shipping or automation gating behavior.
+
+==================================================
+PART I — OUT OF SCOPE
+==================================================
+
+Do NOT implement in this pass:
+- Packing Workflows
+- SLA Optimization
+- Carrier Scorecards
+- Customs Docs
+- Insurance Rules
+- broader non-shipping approval engine redesign
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Automation supports a clear distinction between post-event observational rules and pre-action guardrail rules
+2) Policy-sensitive rules such as high-cost label controls can act before label purchase completes
+3) Rules, conditions, actions, permissions, and outcome states are logically linked
+4) Review / approval / override workflow is practical and permission-aware
+5) Execution History is operationally useful, including clickable shipment navigation and truthful resolved state
+6) Existing Batch Labels and closed shipping behavior remain intact
+7) Out-of-scope future items remain unimplemented in this pass
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Define rule process types and trigger-action matrix
+2) Implement pre-label-purchase guardrail workflow
+3) Implement stronger automation permission model
+4) Implement review / approval / override outcome states
+5) Upgrade execution history into an operational audit surface
+6) Re-test plan/permission/non-regression behavior
+7) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- automation process types (observational vs guardrail)
+- trigger / condition / action / outcome matrix
+- pre-label-purchase guardrail behavior
+- automation permission model
+- review / approval / override state model
+- execution history operational behavior
+- note that future shipping items remain unchanged and out of scope
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Automation Process Type Model
+3. Trigger / Condition / Action / Outcome Matrix
+4. Pre-Label Purchase Guardrail Workflow
+5. Automation Permission Model
+6. Review / Approval / Override State Model
+7. Execution History Operational Improvements
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes

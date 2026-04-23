@@ -2,7 +2,9 @@ import type {
   AutomationRule,
   AutomationCondition,
   AutomationAction,
+  AutomationActionType,
   AutomationTriggerType,
+  AutomationRuleProcessType,
   AutomationLogEntry,
   AutomationConditionField,
   AutomationConditionOp,
@@ -10,6 +12,40 @@ import type {
   Shipment,
   ShipmentInternalNote,
 } from '../types';
+
+// Phase 3 correction #3 — process-type registry. Defines which triggers and
+// actions are valid under each process type (observational vs guardrail) so
+// the rule builder and engine cannot drift apart.
+export function getRuleProcessType(rule: Pick<AutomationRule, 'ruleType'>): AutomationRuleProcessType {
+  return rule.ruleType === 'guardrail' ? 'guardrail' : 'observational';
+}
+
+export const OBSERVATIONAL_TRIGGERS: AutomationTriggerType[] = [
+  'shipment_created', 'shipment_updated', 'status_changed', 'label_purchased',
+  'pickup_requested', 'pickup_confirmed', 'pickup_cancelled', 'tracking_synced',
+  'return_shipment_created',
+];
+
+export const GUARDRAIL_TRIGGERS: AutomationTriggerType[] = [
+  'pre_label_purchase',
+];
+
+export const OBSERVATIONAL_ACTIONS: AutomationActionType[] = [
+  'add_flag', 'add_internal_note', 'mark_review_needed',
+  'mark_ready_for_batch', 'set_priority',
+];
+
+export const GUARDRAIL_ACTIONS: AutomationActionType[] = [
+  'require_approval', 'block_unless_approved',
+];
+
+export function triggersForProcessType(t: AutomationRuleProcessType): AutomationTriggerType[] {
+  return t === 'guardrail' ? GUARDRAIL_TRIGGERS : OBSERVATIONAL_TRIGGERS;
+}
+
+export function actionsForProcessType(t: AutomationRuleProcessType): AutomationActionType[] {
+  return t === 'guardrail' ? GUARDRAIL_ACTIONS : OBSERVATIONAL_ACTIONS;
+}
 
 export interface RuleEvaluation {
   matched: boolean;
@@ -172,6 +208,19 @@ export function ruleTriggerMatches(rule: AutomationRule, trigger: AutomationTrig
   return rule.enabled && rule.trigger === trigger;
 }
 
+// Phase 3 correction #3 — observational vs guardrail dispatch helpers. The
+// post-event engine (`runAutomation`) must only consider observational rules;
+// the pre-action engine (`evaluateGuardrails`) must only consider guardrail
+// rules. Process type is the source of truth, not trigger family alone, so a
+// rule mis-typed at creation time still fails fast.
+function isObservationalRule(rule: AutomationRule, trigger: AutomationTriggerType): boolean {
+  return ruleTriggerMatches(rule, trigger) && getRuleProcessType(rule) === 'observational';
+}
+
+function isGuardrailRule(rule: AutomationRule, trigger: AutomationTriggerType): boolean {
+  return ruleTriggerMatches(rule, trigger) && getRuleProcessType(rule) === 'guardrail';
+}
+
 export function evaluateRule(rule: AutomationRule, shipment: Shipment): RuleEvaluation {
   if (!rule.conditions || rule.conditions.length === 0) return { matched: true };
   for (let i = 0; i < rule.conditions.length; i++) {
@@ -203,6 +252,10 @@ function applyActionsToShipment(
   let newPriority = shipment.priority;
 
   for (const action of actions) {
+    // Phase 3 correction #3 — guardrail-only actions are evaluated by
+    // evaluateGuardrails, not here. Skip silently if accidentally placed on
+    // an observational rule (the rule builder also prevents this at edit time).
+    if (action.type === 'require_approval' || action.type === 'block_unless_approved') continue;
     switch (action.type) {
       case 'add_flag': {
         const flag = String(action.params?.flag || '').trim();
@@ -281,7 +334,10 @@ export function runAutomation(
   const evaluations: { rule: AutomationRule; evaluation: RuleEvaluation }[] = [];
   let workingShipment = shipment;
   for (const rule of rules) {
-    if (!ruleTriggerMatches(rule, trigger)) continue;
+    // Phase 3 correction #3 — runAutomation is the post-event path. Guardrail
+    // rules are evaluated by `evaluateGuardrails` only; they never fire here,
+    // so a guardrail rule cannot accidentally double as a post-event flag.
+    if (!isObservationalRule(rule, trigger)) continue;
     const evalResult = evaluateRule(rule, workingShipment);
     evaluations.push({ rule, evaluation: evalResult });
     if (!evalResult.matched) continue;
@@ -306,6 +362,54 @@ export function runAutomation(
   return { shipmentUpdates: mergedUpdates, logs, evaluations };
 }
 
+// Phase 3 correction #3 — pre-action guardrail evaluation. Pure: no log
+// writes, no shipment mutation. Caller (e.g. ShippingCenter pre-label-purchase
+// flow) decides what to do with the result and what to record. `candidatePatch`
+// is an optional shallow overlay merged onto the shipment for evaluation only,
+// letting callers test "if I purchased with THIS rate" without committing.
+export interface GuardrailEvaluation {
+  rule: AutomationRule;
+  evaluation: RuleEvaluation;
+  // True if this rule has at least one block_unless_approved action.
+  blocking: boolean;
+  // True if this rule has at least one require_approval action.
+  approvalRequested: boolean;
+  // Plain-language summary for the modal copy.
+  reason: string;
+}
+
+export interface GuardrailEvaluationResult {
+  blockingRules: GuardrailEvaluation[];
+  approvalRules: GuardrailEvaluation[];
+  allClear: boolean;
+}
+
+export function evaluateGuardrails(
+  rules: AutomationRule[],
+  shipment: Shipment,
+  trigger: AutomationTriggerType,
+  candidatePatch?: Partial<Shipment>,
+): GuardrailEvaluationResult {
+  const subject: Shipment = candidatePatch ? { ...shipment, ...candidatePatch } : shipment;
+  const blockingRules: GuardrailEvaluation[] = [];
+  const approvalRules: GuardrailEvaluation[] = [];
+  for (const rule of rules) {
+    if (!isGuardrailRule(rule, trigger)) continue;
+    const evaluation = evaluateRule(rule, subject);
+    if (!evaluation.matched) continue;
+    const blocking = rule.actions.some(a => a.type === 'block_unless_approved');
+    const approvalRequested = rule.actions.some(a => a.type === 'require_approval');
+    // A guardrail rule with no guardrail actions is a no-op; skip so it does
+    // not silently halt the user's purchase flow.
+    if (!blocking && !approvalRequested) continue;
+    const reason = describeRule(rule);
+    const entry: GuardrailEvaluation = { rule, evaluation, blocking, approvalRequested, reason };
+    if (blocking) blockingRules.push(entry);
+    else approvalRules.push(entry);
+  }
+  return { blockingRules, approvalRules, allClear: blockingRules.length === 0 && approvalRules.length === 0 };
+}
+
 export const TRIGGER_LABELS: Record<AutomationTriggerType, string> = {
   shipment_created: 'a shipment is created',
   shipment_updated: 'a shipment is edited',
@@ -316,6 +420,7 @@ export const TRIGGER_LABELS: Record<AutomationTriggerType, string> = {
   pickup_cancelled: 'a pickup is cancelled',
   tracking_synced: 'tracking is synced',
   return_shipment_created: 'a return shipment is created',
+  pre_label_purchase: 'a carrier label is about to be purchased',
 };
 
 const TRIGGER_LABELS_TITLECASE: Record<AutomationTriggerType, string> = {
@@ -328,6 +433,7 @@ const TRIGGER_LABELS_TITLECASE: Record<AutomationTriggerType, string> = {
   pickup_cancelled: 'Pickup Cancelled',
   tracking_synced: 'Tracking Synced',
   return_shipment_created: 'Return Shipment Created',
+  pre_label_purchase: 'Before Label Purchase',
 };
 
 export function getTriggerTitle(t: AutomationTriggerType): string { return TRIGGER_LABELS_TITLECASE[t]; }
@@ -338,6 +444,8 @@ export const ACTION_LABELS: Record<string, string> = {
   mark_review_needed: 'mark the shipment for review',
   mark_ready_for_batch: 'queue the shipment for batch labels',
   set_priority: 'set shipment priority',
+  require_approval: 'require operator approval before the action proceeds',
+  block_unless_approved: 'block the action unless an authorized operator approves or overrides',
 };
 
 function describeValue(condition: AutomationCondition, descriptor?: FieldDescriptor): string {
@@ -373,6 +481,12 @@ export function describeAction(action: AutomationAction): string {
     case 'mark_review_needed': return action.params?.reason ? `mark the shipment for review (${action.params.reason})` : 'mark the shipment for review';
     case 'mark_ready_for_batch': return 'queue the shipment for batch labels';
     case 'set_priority': return `set shipment priority to ${action.params?.priority || 'normal'}`;
+    case 'require_approval': return action.params?.reason
+      ? `require operator approval (${action.params.reason})`
+      : 'require operator approval before the action proceeds';
+    case 'block_unless_approved': return action.params?.reason
+      ? `block the action unless approved or overridden (${action.params.reason})`
+      : 'block the action unless an authorized operator approves or overrides';
     default: return ACTION_LABELS[action.type] || action.type;
   }
 }
