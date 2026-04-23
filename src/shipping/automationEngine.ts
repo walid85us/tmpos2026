@@ -221,6 +221,15 @@ function applyActionsToShipment(
         break;
       }
       case 'mark_review_needed': {
+        // Phase 3 correction — do not spam re-marks. If this same rule already
+        // has an active (unresolved) review on this shipment, skip so the
+        // execution log stays truthful (no duplicate "review_needed" rows for
+        // an already-flagged shipment). A different rule, or a re-trigger
+        // after the operator resolved the prior review, will mark fresh.
+        const existing = newReview;
+        if (existing && !existing.resolved && existing.ruleId === rule.id) {
+          break;
+        }
         newReview = {
           reason: String(action.params?.reason || `Marked for review by rule "${rule.name}"`),
           ruleId: rule.id, ruleName: rule.name, markedAt: now,

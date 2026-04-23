@@ -924,7 +924,21 @@ export interface Shipment {
   // change status; they can only flag, queue, prioritize, and annotate.
   flags?: string[];
   priority?: 'normal' | 'high' | 'urgent';
-  reviewNeeded?: { reason?: string; ruleId?: string; ruleName?: string; markedAt: string } | null;
+  // Phase 3 correction — review-needed is a real operational state with an
+  // explicit resolution path. When resolved=true the badge clears from the UI
+  // but the historical record (who resolved, when, with what note) stays on
+  // the shipment for audit. Rule source (ruleId/ruleName/reason/markedAt)
+  // also remains on the resolved record so audit history survives.
+  reviewNeeded?: {
+    reason?: string;
+    ruleId?: string;
+    ruleName?: string;
+    markedAt: string;
+    resolved?: boolean;
+    resolvedAt?: string;
+    resolvedBy?: string;
+    resolutionNote?: string;
+  } | null;
   batchQueueState?: 'ready_for_batch' | 'batched' | null;
   batchQueueMarkedAt?: string;
   batchQueueRuleId?: string;
@@ -1309,7 +1323,7 @@ export interface ShipmentInternalNote {
   id: string;
   text: string;
   timestamp: string;
-  source: 'rule' | 'operator';
+  source: 'rule' | 'operator' | 'system';
   ruleId?: string;
   ruleName?: string;
 }

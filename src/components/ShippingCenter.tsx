@@ -373,7 +373,7 @@ function formatDateTime(iso: string): string {
 }
 
 export default function ShippingCenter() {
-  const { shipments, addShipment, updateShipment, invoices, repairTickets, rmas, inventoryTransfers, suppliers, customers,
+  const { shipments, addShipment, updateShipment, resolveShipmentReview, invoices, repairTickets, rmas, inventoryTransfers, suppliers, customers,
     automationRules, addAutomationRule, updateAutomationRule, deleteAutomationRule, bumpAutomationRuleStats,
     automationLogs, appendAutomationLogs,
     shipmentBatches, addShipmentBatch, updateShipmentBatch } = useStoreLocalState();
@@ -478,6 +478,13 @@ export default function ShippingCenter() {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<ShipmentStatus | 'all'>('all');
   const [sourceFilter, setSourceFilter] = useState<ShipmentSourceType | 'all'>('all');
+  // Phase 3 correction — automation outcome filter so operators can find
+  // shipments flagged by rules (review_needed, ready_for_batch, high/urgent
+  // priority, or carrying any rule-set flag) without hunting through the
+  // execution log.
+  const [automationFilter, setAutomationFilter] = useState<'all' | 'review_needed' | 'ready_for_batch' | 'priority' | 'flagged'>('all');
+  const [reviewResolveTarget, setReviewResolveTarget] = useState<string | null>(null);
+  const [reviewResolveNote, setReviewResolveNote] = useState('');
   const [selectedShipment, setSelectedShipment] = useState<string | null>(null);
   const [detailTab, setDetailTab] = useState<'overview' | 'tracking' | 'packages' | 'logistics'>('overview');
   // Service Points & Pickup Requests (Phase 2) — UI state
@@ -1134,6 +1141,10 @@ export default function ShippingCenter() {
     let items = [...shipments];
     if (statusFilter !== 'all') items = items.filter(s => s.status === statusFilter);
     if (sourceFilter !== 'all') items = items.filter(s => s.sourceType === sourceFilter);
+    if (automationFilter === 'review_needed') items = items.filter(s => s.reviewNeeded && !s.reviewNeeded.resolved);
+    else if (automationFilter === 'ready_for_batch') items = items.filter(s => s.batchQueueState === 'ready_for_batch');
+    else if (automationFilter === 'priority') items = items.filter(s => s.priority === 'high' || s.priority === 'urgent');
+    else if (automationFilter === 'flagged') items = items.filter(s => (s.flags?.length || 0) > 0);
     if (search.trim()) {
       const q = search.toLowerCase();
       items = items.filter(s =>
@@ -1145,7 +1156,16 @@ export default function ShippingCenter() {
       );
     }
     return items.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [shipments, statusFilter, sourceFilter, search]);
+  }, [shipments, statusFilter, sourceFilter, automationFilter, search]);
+
+  // Phase 3 correction — counts for the automation outcome filter chips so
+  // operators can see at a glance how much rule-flagged work is queued.
+  const automationCounts = useMemo(() => ({
+    review_needed: shipments.filter(s => s.reviewNeeded && !s.reviewNeeded.resolved).length,
+    ready_for_batch: shipments.filter(s => s.batchQueueState === 'ready_for_batch').length,
+    priority: shipments.filter(s => s.priority === 'high' || s.priority === 'urgent').length,
+    flagged: shipments.filter(s => (s.flags?.length || 0) > 0).length,
+  }), [shipments]);
 
   const statusCounts = useMemo(() => {
     const counts: Record<string, number> = { all: shipments.length };
@@ -4841,6 +4861,41 @@ export default function ShippingCenter() {
           ))}
         </div>
 
+        {/* Phase 3 correction — automation outcome chips. Hidden when the plan
+            excludes automation rules so the surface stays truthful. */}
+        {planAllowsAutomationRules && (automationCounts.review_needed + automationCounts.ready_for_batch + automationCounts.priority + automationCounts.flagged > 0 || automationFilter !== 'all') && (
+          <div className="flex flex-wrap gap-2 items-center">
+            <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 mr-1 flex items-center gap-1">
+              <span className="material-symbols-outlined text-xs">bolt</span>Automation Outcomes:
+            </span>
+            {([
+              { key: 'all', label: 'All', count: shipments.length, color: 'slate' },
+              { key: 'review_needed', label: 'Review Needed', count: automationCounts.review_needed, color: 'amber' },
+              { key: 'ready_for_batch', label: 'Ready for Batch', count: automationCounts.ready_for_batch, color: 'sky' },
+              { key: 'priority', label: 'High Priority', count: automationCounts.priority, color: 'rose' },
+              { key: 'flagged', label: 'Flagged', count: automationCounts.flagged, color: 'violet' },
+            ] as const).map(c => {
+              const active = automationFilter === c.key;
+              const tone = active
+                ? (c.color === 'amber' ? 'bg-amber-500 text-white border-amber-500'
+                  : c.color === 'sky' ? 'bg-sky-600 text-white border-sky-600'
+                  : c.color === 'rose' ? 'bg-rose-500 text-white border-rose-500'
+                  : c.color === 'violet' ? 'bg-violet-600 text-white border-violet-600'
+                  : 'bg-slate-700 text-white border-slate-700')
+                : 'bg-white/60 text-slate-500 border-slate-200 hover:text-slate-700';
+              return (
+                <button
+                  key={c.key}
+                  onClick={() => setAutomationFilter(c.key as typeof automationFilter)}
+                  className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all border ${tone}`}
+                >
+                  {c.label} {c.key !== 'all' ? `(${c.count})` : ''}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden">
           {filtered.length === 0 ? (
             <div className="flex flex-col items-center py-16">
@@ -4867,6 +4922,28 @@ export default function ShippingCenter() {
                       {s.returnInfo?.isReturn && (
                         <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md bg-teal-100 text-teal-700 border border-teal-200 flex items-center gap-0.5">
                           <span className="material-symbols-outlined" style={{ fontSize: 10 }}>assignment_return</span>Return
+                        </span>
+                      )}
+                      {/* Phase 3 correction — automation outcome badges so the
+                          flagged state is visible at the row level. */}
+                      {s.reviewNeeded && !s.reviewNeeded.resolved && (
+                        <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md bg-amber-100 text-amber-700 border border-amber-200 flex items-center gap-0.5" title={s.reviewNeeded.reason || 'Marked for review by automation rule'}>
+                          <span className="material-symbols-outlined" style={{ fontSize: 10 }}>flag</span>Review Needed
+                        </span>
+                      )}
+                      {s.batchQueueState === 'ready_for_batch' && (
+                        <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md bg-sky-100 text-sky-700 border border-sky-200 flex items-center gap-0.5">
+                          <span className="material-symbols-outlined" style={{ fontSize: 10 }}>inventory_2</span>Ready for Batch
+                        </span>
+                      )}
+                      {(s.priority === 'high' || s.priority === 'urgent') && (
+                        <span className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md border flex items-center gap-0.5 ${s.priority === 'urgent' ? 'bg-rose-100 text-rose-700 border-rose-200' : 'bg-orange-100 text-orange-700 border-orange-200'}`}>
+                          <span className="material-symbols-outlined" style={{ fontSize: 10 }}>{s.priority === 'urgent' ? 'priority_high' : 'arrow_upward'}</span>{s.priority === 'urgent' ? 'Urgent' : 'High Priority'}
+                        </span>
+                      )}
+                      {(s.flags?.length || 0) > 0 && (
+                        <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md bg-violet-100 text-violet-700 border border-violet-200 flex items-center gap-0.5" title={s.flags!.join(', ')}>
+                          <span className="material-symbols-outlined" style={{ fontSize: 10 }}>label</span>{s.flags!.length} Flag{s.flags!.length > 1 ? 's' : ''}
                         </span>
                       )}
                     </div>
@@ -4939,6 +5016,113 @@ export default function ShippingCenter() {
               <div className="p-8 overflow-y-auto flex-1 space-y-6">
                 {detailTab === 'overview' && (
                   <>
+                    {/* Phase 3 correction — Automation Outcomes panel. Surfaces every
+                        rule-set state on the shipment (review-needed with rule source,
+                        priority, ready-for-batch, flags, recent rule notes) and provides
+                        the operator-facing resolution path for review-needed. */}
+                    {(() => {
+                      const rn = selectedShip.reviewNeeded;
+                      const flags = selectedShip.flags || [];
+                      const ruleNotes = (selectedShip.internalNotes || []).filter(n => n.source === 'rule');
+                      const sysNotes = (selectedShip.internalNotes || []).filter(n => n.source === 'system');
+                      const prio = selectedShip.priority;
+                      const batched = selectedShip.batchQueueState;
+                      const hasAny = !!rn || flags.length > 0 || (prio && prio !== 'normal') || batched || ruleNotes.length > 0 || sysNotes.length > 0;
+                      if (!hasAny) return null;
+                      const canResolve = canManageAutomationRules || canEditPreDispatch;
+                      return (
+                        <div className="rounded-2xl border border-indigo-100 bg-indigo-50/30 p-5 space-y-4">
+                          <div className="flex items-center justify-between">
+                            <p className="text-[10px] font-black text-indigo-600 uppercase tracking-widest flex items-center gap-1.5">
+                              <span className="material-symbols-outlined text-sm">bolt</span>Automation Outcomes
+                            </p>
+                            <span className="text-[10px] text-slate-400">From shipping automation rules</span>
+                          </div>
+                          {rn && !rn.resolved && (
+                            <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 space-y-2">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-xs font-black text-amber-700 flex items-center gap-1">
+                                    <span className="material-symbols-outlined text-sm">flag</span>Marked for Review
+                                  </p>
+                                  <p className="text-xs text-amber-800 mt-1">{rn.reason || 'Marked for review by automation rule.'}</p>
+                                  <p className="text-[10px] text-amber-600 mt-1">
+                                    Rule: <span className="font-bold">{rn.ruleName || 'unknown rule'}</span> · marked {formatDateTime(rn.markedAt)}
+                                  </p>
+                                </div>
+                                {canResolve && !isWriteBlocked && (
+                                  <button
+                                    onClick={() => { setReviewResolveTarget(selectedShip.id); setReviewResolveNote(''); }}
+                                    className="px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 shrink-0"
+                                  >
+                                    Resolve
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                          {rn && rn.resolved && (
+                            <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3">
+                              <p className="text-xs font-black text-emerald-700 flex items-center gap-1">
+                                <span className="material-symbols-outlined text-sm">check_circle</span>Review Resolved
+                              </p>
+                              <p className="text-[11px] text-emerald-700 mt-1">
+                                Resolved by <span className="font-bold">{rn.resolvedBy || 'unknown'}</span> on {rn.resolvedAt ? formatDateTime(rn.resolvedAt) : 'unknown date'}
+                                {' · originally flagged by '}<span className="font-bold">{rn.ruleName || 'unknown rule'}</span>
+                              </p>
+                              {rn.resolutionNote && <p className="text-[11px] text-emerald-800 mt-1 italic">"{rn.resolutionNote}"</p>}
+                            </div>
+                          )}
+                          {(prio === 'high' || prio === 'urgent' || batched === 'ready_for_batch' || flags.length > 0) && (
+                            <div className="flex flex-wrap gap-2">
+                              {prio === 'urgent' && (
+                                <span className="px-2 py-1 text-[10px] font-black uppercase tracking-widest rounded-md bg-rose-100 text-rose-700 border border-rose-200 flex items-center gap-1">
+                                  <span className="material-symbols-outlined text-xs">priority_high</span>Priority: Urgent
+                                </span>
+                              )}
+                              {prio === 'high' && (
+                                <span className="px-2 py-1 text-[10px] font-black uppercase tracking-widest rounded-md bg-orange-100 text-orange-700 border border-orange-200 flex items-center gap-1">
+                                  <span className="material-symbols-outlined text-xs">arrow_upward</span>Priority: High
+                                </span>
+                              )}
+                              {batched === 'ready_for_batch' && (
+                                <span className="px-2 py-1 text-[10px] font-black uppercase tracking-widest rounded-md bg-sky-100 text-sky-700 border border-sky-200 flex items-center gap-1">
+                                  <span className="material-symbols-outlined text-xs">inventory_2</span>Ready for Batch Labels
+                                </span>
+                              )}
+                              {batched === 'batched' && (
+                                <span className="px-2 py-1 text-[10px] font-black uppercase tracking-widest rounded-md bg-slate-100 text-slate-600 border border-slate-200 flex items-center gap-1">
+                                  <span className="material-symbols-outlined text-xs">done_all</span>Batch Processed
+                                </span>
+                              )}
+                              {flags.map(f => (
+                                <span key={f} className="px-2 py-1 text-[10px] font-black uppercase tracking-widest rounded-md bg-violet-100 text-violet-700 border border-violet-200 flex items-center gap-1">
+                                  <span className="material-symbols-outlined text-xs">label</span>{f}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          {(ruleNotes.length > 0 || sysNotes.length > 0) && (
+                            <div className="bg-white rounded-xl border border-slate-200 p-3">
+                              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Internal Notes (Automation & Audit)</p>
+                              <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                                {[...ruleNotes, ...sysNotes].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).map(n => (
+                                  <div key={n.id} className="text-[11px] text-slate-700">
+                                    <span className={`px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest rounded mr-1.5 ${n.source === 'rule' ? 'bg-indigo-50 text-indigo-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                                      {n.source === 'rule' ? 'Rule' : 'Audit'}
+                                    </span>
+                                    <span>{n.text}</span>
+                                    <span className="text-slate-400 ml-1">· {formatDateTime(n.timestamp)}</span>
+                                    {n.ruleName && n.source === 'rule' && <span className="text-slate-400 ml-1 italic">({n.ruleName})</span>}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+
                     <div className="grid grid-cols-2 gap-6">
                       <div className="bg-slate-50 rounded-2xl p-5 space-y-3">
                         <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1"><span className="material-symbols-outlined text-xs">location_on</span>Origin</p>
@@ -8378,6 +8562,70 @@ export default function ShippingCenter() {
             </motion.div>
           </div>
         )}
+      </AnimatePresence>
+
+      {/* Phase 3 correction — Resolve Review modal. Captures an optional
+          operator note, calls resolveShipmentReview which atomically clears
+          the unresolved state and writes a system audit internal note. */}
+      <AnimatePresence>
+        {reviewResolveTarget && (() => {
+          const target = shipments.find(s => s.id === reviewResolveTarget);
+          if (!target || !target.reviewNeeded) return null;
+          const rn = target.reviewNeeded;
+          return (
+            <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.96, y: 12 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.96, y: 12 }}
+                className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-6 space-y-4"
+              >
+                <div>
+                  <p className="text-[10px] font-black text-emerald-600 uppercase tracking-widest mb-1">Resolve Review</p>
+                  <h3 className="text-lg font-black text-slate-800">{target.shipmentNumber}</h3>
+                </div>
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs">
+                  <p className="font-bold text-amber-700">Reason on file</p>
+                  <p className="text-amber-800 mt-0.5">{rn.reason || '(no reason recorded)'}</p>
+                  <p className="text-[10px] text-amber-600 mt-1">Rule: {rn.ruleName || 'unknown'} · {formatDateTime(rn.markedAt)}</p>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Resolution Note (optional)</label>
+                  <textarea
+                    value={reviewResolveNote}
+                    onChange={(e) => setReviewResolveNote(e.target.value)}
+                    rows={3}
+                    placeholder="What did you check or change?"
+                    className="mt-1 w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-200"
+                  />
+                </div>
+                <div className="flex gap-2 pt-2">
+                  <button
+                    onClick={() => { setReviewResolveTarget(null); setReviewResolveNote(''); }}
+                    className="flex-1 py-2.5 rounded-xl bg-slate-100 text-slate-600 font-black text-[10px] uppercase tracking-widest hover:bg-slate-200"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    disabled={isWriteBlocked || !(canManageAutomationRules || canEditPreDispatch)}
+                    onClick={() => {
+                      // Phase 3 correction — defense-in-depth: re-check permission and
+                      // write-block in the action handler, not just on the trigger UI.
+                      if (isWriteBlocked) return;
+                      if (!(canManageAutomationRules || canEditPreDispatch)) return;
+                      resolveShipmentReview(target.id, { resolvedBy: 'Current User', note: reviewResolveNote.trim() || undefined });
+                      setReviewResolveTarget(null);
+                      setReviewResolveNote('');
+                    }}
+                    className="flex-1 py-2.5 rounded-xl bg-emerald-600 text-white font-black text-[10px] uppercase tracking-widest hover:bg-emerald-700 disabled:opacity-50"
+                  >
+                    Resolve Review
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          );
+        })()}
       </AnimatePresence>
     </PageShell>
   );

@@ -239,6 +239,11 @@ interface StoreLocalStateContextType {
   shipments: Shipment[];
   addShipment: (s: Shipment) => void;
   updateShipment: (id: string, updates: Partial<Shipment>) => void;
+  // Phase 3 correction — atomic resolve for the automation review-needed
+  // state. Sets resolved fields on `reviewNeeded` (preserving the original
+  // rule source for audit) and appends an internal audit note in the same
+  // setter so the resolution is auditable end-to-end.
+  resolveShipmentReview: (id: string, args: { resolvedBy: string; note?: string }) => void;
   automationRules: AutomationRule[];
   addAutomationRule: (rule: AutomationRule) => void;
   updateAutomationRule: (id: string, updates: Partial<AutomationRule>) => void;
@@ -1030,6 +1035,33 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const updateRefurbishmentJob = useCallback((id: string, updates: Partial<RefurbishmentJob>) => { setRefurbishmentJobs(prev => prev.map(j => j.id === id ? { ...j, ...updates } : j)); }, []);
   const addShipment = useCallback((s: Shipment) => { setShipments(prev => [s, ...prev]); }, []);
   const updateShipment = useCallback((id: string, updates: Partial<Shipment>) => { setShipments(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s)); }, []);
+  const resolveShipmentReview = useCallback((id: string, args: { resolvedBy: string; note?: string }) => {
+    const now = new Date().toISOString();
+    setShipments(prev => prev.map(s => {
+      if (s.id !== id) return s;
+      if (!s.reviewNeeded || s.reviewNeeded.resolved) return s;
+      const resolvedReview = {
+        ...s.reviewNeeded,
+        resolved: true,
+        resolvedAt: now,
+        resolvedBy: args.resolvedBy,
+        resolutionNote: args.note?.trim() || undefined,
+      };
+      const auditNote = {
+        id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        text: `Review resolved by ${args.resolvedBy}${args.note?.trim() ? ` — ${args.note.trim()}` : ''} (rule: ${s.reviewNeeded.ruleName || 'unknown'})`,
+        timestamp: now,
+        source: 'system' as const,
+        ruleId: s.reviewNeeded.ruleId,
+        ruleName: s.reviewNeeded.ruleName,
+      };
+      return {
+        ...s,
+        reviewNeeded: resolvedReview,
+        internalNotes: [...(s.internalNotes || []), auditNote],
+      };
+    }));
+  }, []);
   const [automationRules, setAutomationRules] = useState<AutomationRule[]>([]);
   const addAutomationRule = useCallback((rule: AutomationRule) => { setAutomationRules(prev => [rule, ...prev]); }, []);
   const updateAutomationRule = useCallback((id: string, updates: Partial<AutomationRule>) => { setAutomationRules(prev => prev.map(r => r.id === id ? { ...r, ...updates, updatedAt: new Date().toISOString() } : r)); }, []);
@@ -1112,7 +1144,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
       tradeIns, addTradeIn, updateTradeIn, deleteTradeIn,
       refurbishmentJobs, addRefurbishmentJob, updateRefurbishmentJob,
       supplierRefundEntries, addSupplierRefundEntry,
-      shipments, addShipment, updateShipment,
+      shipments, addShipment, updateShipment, resolveShipmentReview,
       automationRules, addAutomationRule, updateAutomationRule, deleteAutomationRule, bumpAutomationRuleStats,
       automationLogs, appendAutomationLogs,
       shipmentBatches, addShipmentBatch, updateShipmentBatch,

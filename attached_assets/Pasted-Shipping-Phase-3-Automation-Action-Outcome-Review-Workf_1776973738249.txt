@@ -1,0 +1,333 @@
+Shipping Phase 3 — Automation Action Outcome + Review Workflow Correction Pass
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen closed shipping workstreams except where directly required by the Automation Rules issues identified in manual QA.
+Do not implement Packing Workflows, SLA Optimization, Carrier Scorecards, Customs Docs, or Insurance Rules in this pass.
+
+Implement only the corrections needed to make Automation Rule actions create real, visible, operational outcomes.
+
+==================================================
+MANDATORY CONTEXT
+==================================================
+
+Automation Rules are now understandable enough to define and read.
+Execution History is also visible.
+
+But the core remaining failure is this:
+
+The rule can evaluate as matched and show an action such as:
+- review_needed
+yet the shipment is not visibly marked in a meaningful operational way.
+
+Current QA issue:
+- the rule appears to fire
+- execution history records it
+- but there is no clear place where the shipment is marked for review
+- no clear review queue / filter / badge / workflow exists
+- no clear operator path exists to act on that rule outcome
+- no clear resolution path exists once the shipment has been reviewed
+
+Example from QA:
+- rule says “When a carrier label is purchased and Has Carrier Label is true, mark the shipment for review”
+- execution log shows the rule fired
+- but the shipment is not visibly review-marked in a meaningful operational surface
+
+Second example:
+- rule says “When a carrier label is purchased and Shipping Cost greater than $6.00, mark the shipment for review”
+- execution log shows actions: review_needed
+- but there is no operational meaning for that result
+
+This correction pass must solve that gap.
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Node/Express carrier-integration engineer
+- Senior workflow automation UX architect
+- Senior operations queue / exception management designer
+- Senior RBAC / entitlement systems architect
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Important behavior:
+Do not make a shallow visual patch.
+Think through the proper action-to-outcome contract for Shipping Automation.
+If there is a cleaner and more extensible implementation than the current action logging-only model, use it and explain it clearly.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- Ref.txt
+- replit.md
+
+Use them as the continuity and source-of-truth documents.
+
+==================================================
+PRESERVE WITHOUT BREAKING
+==================================================
+
+Preserve exactly unless this correction explicitly requires touching it:
+- current design baseline exactly
+- auth behavior
+- preview-mode safety
+- live System Owner plan gating behavior
+- store permission gating
+- provider/manual mode split
+- shipping lifecycle integrity
+- existing shipping core flow
+- reverse-logistics flow
+- Batch Labels foundation
+- batch eligibility and itemized result behavior
+- Carrier Analytics foundation
+- entitlement propagation / linked feature-permission disappearance
+- Shipping Provider explicit permission model
+- Shipping Provider hard-disable + config clearing
+- Settings tab vs subsection entitlement scoping
+- dynamic sub-permission counts
+- typed Automation Rules builder
+- human-readable operators
+- plain-language rule summary
+- in-app delete confirmation
+- enabled-state non-regression
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Implement the correction so that:
+
+A) Every supported Automation Rule action produces a real, durable, operator-visible outcome
+B) “Mark for review” becomes a real review/exception workflow state, not just a log line
+C) Operators can find, understand, act on, and resolve automation-created review states
+D) Execution History and shipment state agree with each other truthfully
+
+==================================================
+PART A — DEFINE ACTION-TO-OUTCOME CONTRACT
+==================================================
+
+Required:
+Audit each currently supported Automation Rule action and define its concrete operational outcome.
+
+At minimum, make these actions real and visible if they already exist or are surfaced:
+- mark review needed
+- queue for batch
+- set priority
+- add internal note / audit note / timeline note
+- any similar safe action currently exposed in the rules builder
+
+Required:
+For each action, define:
+- what persistent shipment state/field changes
+- where the operator sees that result
+- how the result is cleared/resolved if applicable
+- how it appears in shipment list / detail / queue surfaces
+- how it appears in audit history
+
+Do not leave any action as “execution history only” if the UI suggests it changed shipment state.
+
+==================================================
+PART B — MARK FOR REVIEW MUST BECOME A REAL OPERATIONAL STATE
+==================================================
+
+This is mandatory.
+
+Required:
+“Mark for review” / review_needed must create a real shipment review state.
+
+At minimum support:
+- visible review-needed badge/flag on the shipment
+- visible review-needed state in shipment detail
+- visible reason/source showing it came from automation rule
+- visible rule name that caused it
+- visible timestamp
+- visible unresolved vs resolved state
+
+Required operator flow:
+- operator can find review-needed shipments from Shipping Center
+- provide a practical surface such as:
+  - filter
+  - queue
+  - badge
+  - highlighted row state
+  - dedicated section if appropriate
+- operator must be able to open the shipment and understand why it was flagged
+- operator must be able to resolve/clear the review-needed state with an auditable action and optional note
+
+Important:
+Do NOT overbuild a full approval engine in this pass.
+The goal is a practical review/exception workflow, not enterprise BPM.
+
+==================================================
+PART C — QUEUE / FILTER / FINDABILITY
+==================================================
+
+Required:
+If a shipment is flagged by automation, the operator must be able to find it easily.
+
+At minimum:
+- add meaningful filtering or queue behavior in Shipping Center for automation-created outcomes
+- support finding:
+  - review-needed shipments
+  - ready-for-batch shipments if that action exists
+  - prioritized shipments if that action exists
+
+Required:
+Do not make the user hunt through raw execution history to know what changed.
+
+==================================================
+PART D — EXECUTION HISTORY MUST MATCH REAL OUTCOME
+==================================================
+
+Required:
+Execution History should remain as the audit trail, but it must now correspond to a real operational result.
+
+Example:
+If history says:
+- action: review_needed
+then the shipment must actually show:
+- review-needed state
+- rule source
+- review resolution path
+
+If history says:
+- queued for batch
+then the shipment must appear in the relevant batch-ready or queued state/surface
+
+Avoid false logging where history implies an action succeeded but the shipment state did not actually change.
+
+==================================================
+PART E — RESOLUTION / CLEARING WORKFLOW
+==================================================
+
+Required:
+For automation outcomes that create unresolved operator work, define a resolution path.
+
+For review-needed:
+- user with appropriate permission should be able to clear/resolve it
+- resolution should be auditable
+- optional resolution note should be supported if practical
+- shipment should record:
+  - resolved by
+  - resolved at
+  - resolution note if provided
+
+Do not silently remove review state without audit trail.
+
+==================================================
+PART F — RULE ACTION EXPLANATION
+==================================================
+
+Required:
+The action meaning should be clearer in the rules builder and on rule cards.
+
+For example, “mark for review” should read/behave like:
+- flag shipment for operator review
+rather than a vague internal token
+
+Where practical:
+- show helper text explaining what each action does operationally
+- make it clear whether the action:
+  - flags the shipment
+  - queues it
+  - adds a note
+  - changes priority
+Do not leave operators guessing what the action means.
+
+==================================================
+PART G — PERMISSIONS / GATING / SAFETY
+==================================================
+
+Required:
+Any new review resolution or automation-outcome surfaces must respect current plan/role gating.
+
+Examples:
+- creating/managing rules remains permissioned
+- resolving automation-created review states should be permission-aware if appropriate
+- do not regress current shipping entitlement behavior
+
+Keep actions safe:
+- do not introduce hidden status changes
+- do not introduce silent financial/provider actions
+- do not broaden to risky automation
+
+==================================================
+PART H — OUT OF SCOPE
+==================================================
+
+Do NOT implement in this pass:
+- full approval workflow engine
+- Packing Workflows
+- SLA Optimization
+- Carrier Scorecards
+- Customs Docs
+- Insurance Rules
+- broader non-shipping workflow engine redesign
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Supported automation actions produce real visible shipment outcomes, not just execution log entries
+2) “Mark for review” becomes a real review-needed state with visible shipment flagging
+3) Operators can find review-needed shipments easily inside Shipping Center
+4) Operators can understand why the shipment was flagged
+5) Operators can resolve/clear review-needed state with auditability
+6) Execution History and shipment state match truthfully
+7) Existing Batch Labels and closed shipping behavior remain intact
+8) Out-of-scope future items remain unimplemented in this pass
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Define action-to-outcome contract for currently supported automation actions
+2) Implement real shipment review-needed state and visibility
+3) Implement queue/filter/findability for automation-created outcomes
+4) Implement resolution/clearing workflow with auditability
+5) Align Execution History with real shipment state changes
+6) Re-test plan/permission/non-regression behavior
+7) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Automation action-to-outcome contract
+- review-needed state behavior
+- where automation-created outcomes appear in Shipping Center
+- review resolution workflow
+- execution history alignment with actual shipment state
+- note that future shipping items remain unchanged and out of scope
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Automation Action-to-Outcome Contract
+3. Review-Needed State + Operator Workflow
+4. Queue / Filter / Findability Updates
+5. Execution History Alignment
+6. Files Changed
+7. Documentation Updated
+8. Non-Regression Notes

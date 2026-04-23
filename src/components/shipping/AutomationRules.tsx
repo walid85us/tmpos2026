@@ -256,35 +256,49 @@ export default function AutomationRules({ rules, logs, canManage, canViewResults
                 <button onClick={addAction} className="text-[10px] font-black uppercase tracking-widest text-primary hover:underline">+ Add Action</button>
               </div>
               <div className="space-y-2">
-                {editing.actions.map((a, i) => (
-                  <div key={i} className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg p-2 flex-wrap">
-                    <select value={a.type} onChange={e => updateAction(i, { type: e.target.value as AutomationActionType, params: {} })}
-                      className="text-xs border border-slate-200 rounded px-1.5 py-1">
-                      {ACTION_TYPES.map(at => <option key={at.value} value={at.value}>{at.label}</option>)}
-                    </select>
-                    {a.type === 'add_flag' && (
-                      <input value={a.params?.flag || ''} onChange={e => updateAction(i, { params: { ...(a.params || {}), flag: e.target.value } })}
-                        className="flex-1 text-xs border border-slate-200 rounded px-1.5 py-1" placeholder="Flag label (e.g. high_value)" />
-                    )}
-                    {a.type === 'add_internal_note' && (
-                      <input value={a.params?.text || ''} onChange={e => updateAction(i, { params: { ...(a.params || {}), text: e.target.value } })}
-                        className="flex-1 text-xs border border-slate-200 rounded px-1.5 py-1" placeholder="Note text" />
-                    )}
-                    {a.type === 'mark_review_needed' && (
-                      <input value={a.params?.reason || ''} onChange={e => updateAction(i, { params: { ...(a.params || {}), reason: e.target.value } })}
-                        className="flex-1 text-xs border border-slate-200 rounded px-1.5 py-1" placeholder="Review reason (optional)" />
-                    )}
-                    {a.type === 'set_priority' && (
-                      <select value={a.params?.priority || 'high'} onChange={e => updateAction(i, { params: { ...(a.params || {}), priority: e.target.value } })}
+                {editing.actions.map((a, i) => {
+                  // Phase 3 correction — explain the operational outcome of each
+                  // action so operators know exactly what happens and where to find it.
+                  const helper: Record<AutomationActionType, string> = {
+                    add_flag: 'Adds a label chip to the shipment. Visible on the row and filterable via the Flagged outcome chip.',
+                    add_internal_note: 'Appends a rule-sourced note to the shipment\u2019s internal notes log. Visible in the Automation Outcomes panel.',
+                    mark_review_needed: 'Pauses the shipment for a human check. Adds a Review Needed badge on the row, surfaces in the Review Needed filter, and requires an operator to Resolve from the detail view.',
+                    mark_ready_for_batch: 'Queues the shipment for the Batch Labels workflow. Surfaces a Ready for Batch badge and the corresponding outcome chip on the shipment list.',
+                    set_priority: 'Sets the shipment priority. High/Urgent show as a colored badge on the row and are findable via the High Priority outcome chip.',
+                  };
+                  return (
+                  <div key={i} className="bg-white border border-slate-200 rounded-lg p-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <select value={a.type} onChange={e => updateAction(i, { type: e.target.value as AutomationActionType, params: {} })}
                         className="text-xs border border-slate-200 rounded px-1.5 py-1">
-                        <option value="normal">Normal</option>
-                        <option value="high">High</option>
-                        <option value="urgent">Urgent</option>
+                        {ACTION_TYPES.map(at => <option key={at.value} value={at.value}>{at.label}</option>)}
                       </select>
-                    )}
-                    <button onClick={() => removeAction(i)} className="text-rose-500 hover:text-rose-700 text-xs ml-auto px-1">×</button>
+                      {a.type === 'add_flag' && (
+                        <input value={a.params?.flag || ''} onChange={e => updateAction(i, { params: { ...(a.params || {}), flag: e.target.value } })}
+                          className="flex-1 text-xs border border-slate-200 rounded px-1.5 py-1" placeholder="Flag label (e.g. high_value)" />
+                      )}
+                      {a.type === 'add_internal_note' && (
+                        <input value={a.params?.text || ''} onChange={e => updateAction(i, { params: { ...(a.params || {}), text: e.target.value } })}
+                          className="flex-1 text-xs border border-slate-200 rounded px-1.5 py-1" placeholder="Note text" />
+                      )}
+                      {a.type === 'mark_review_needed' && (
+                        <input value={a.params?.reason || ''} onChange={e => updateAction(i, { params: { ...(a.params || {}), reason: e.target.value } })}
+                          className="flex-1 text-xs border border-slate-200 rounded px-1.5 py-1" placeholder="Review reason (optional)" />
+                      )}
+                      {a.type === 'set_priority' && (
+                        <select value={a.params?.priority || 'high'} onChange={e => updateAction(i, { params: { ...(a.params || {}), priority: e.target.value } })}
+                          className="text-xs border border-slate-200 rounded px-1.5 py-1">
+                          <option value="normal">Normal</option>
+                          <option value="high">High</option>
+                          <option value="urgent">Urgent</option>
+                        </select>
+                      )}
+                      <button onClick={() => removeAction(i)} className="text-rose-500 hover:text-rose-700 text-xs ml-auto px-1">×</button>
+                    </div>
+                    <p className="text-[10px] text-slate-500 mt-1.5 leading-snug">{helper[a.type]}</p>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
 
