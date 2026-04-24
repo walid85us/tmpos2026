@@ -1271,6 +1271,11 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
       const now = new Date().toISOString();
       const existing = s.packingPackageVerifications || [];
       const idx = existing.findIndex(v => v.packageId === args.packageId);
+      // Phase 3 Pass #11 — snapshot the package's current physical fields
+      // at the moment of verification, so a later edit to weight/length/
+      // width/height (or unit) makes the verification reactively stale at
+      // the UI layer without needing a separate invalidation hook.
+      const pkg = (s.packages || []).find(p => p.id === args.packageId);
       const next: PackingPackageVerification = {
         packageId: args.packageId,
         weightConfirmed: args.weightConfirmed,
@@ -1278,6 +1283,14 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
         verifiedBy: args.actor,
         verifiedAt: now,
         ...(args.note ? { note: args.note } : {}),
+        ...(pkg ? {
+          ...(typeof pkg.weight === 'number' ? { snapshotWeight: pkg.weight } : {}),
+          ...(pkg.weightUnit ? { snapshotWeightUnit: pkg.weightUnit } : {}),
+          ...(typeof pkg.length === 'number' ? { snapshotLength: pkg.length } : {}),
+          ...(typeof pkg.width === 'number' ? { snapshotWidth: pkg.width } : {}),
+          ...(typeof pkg.height === 'number' ? { snapshotHeight: pkg.height } : {}),
+          ...(pkg.dimensionUnit ? { snapshotDimensionUnit: pkg.dimensionUnit } : {}),
+        } : {}),
       };
       const nextVerifications = idx >= 0
         ? existing.map((v, i) => i === idx ? next : v)

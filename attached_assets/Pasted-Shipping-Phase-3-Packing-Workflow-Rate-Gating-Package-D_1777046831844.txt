@@ -1,0 +1,268 @@
+Shipping Phase 3 — Packing Workflow Rate-Gating + Package Dimension Correction Pass
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen closed shipping workstreams except where directly required by packing/rate-gating logic.
+Do not implement SLA Optimization, Carrier Scorecards, Customs Docs, or Insurance Rules.
+
+==================================================
+CURRENT ISSUE
+==================================================
+
+Packing Workflows were added, but the operational sequence must be corrected.
+
+For provider-backed shipping, package weight and dimensions determine carrier rates.
+Therefore Packing must be completed before Get Rates is enabled.
+
+Correct workflow:
+1) shipment created
+2) origin and destination addresses validated
+3) packing workflow starts/completes
+4) shipment is marked Packed
+5) Get Rates becomes enabled
+6) selected rate is calculated from verified packed package weight/dimensions
+7) label purchase continues normally
+
+Current issue:
+- Get Rates may not be properly gated behind packing completion / not-required state.
+- Shipment overview does not provide a clear Packed action aligned to packing state.
+- Package Verification shows “Dims (missing)” even when package dimension values were entered in the shipment package editor.
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior shipping carrier integration engineer
+- Senior fulfillment / packing workflow architect
+- Senior QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Think through the real shipping sequence.
+Do not patch only text.
+Fix the actual gating and package dimension logic.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve closed behavior unless this correction explicitly requires updating packing/rate gating.
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Restructure Packing Workflow so it correctly gates Get Rates and aligns package verification with real package data.
+
+==================================================
+PART A — PACKING BEFORE GET RATES
+==================================================
+
+Required:
+Provider-backed Get Rates must be blocked until packing readiness is satisfied.
+
+Get Rates is enabled only when all are true:
+1) Origin address is validated
+2) Destination address is validated
+3) Packages exist
+4) Packing is either:
+   - not_required, or
+   - packed / completed
+5) Required package weight/dimensions are present according to provider/rating requirements
+
+Required:
+- update Get Rates prerequisite evaluator to include packing readiness
+- show clear lock reason:
+  “Complete packing or mark packing not required before fetching rates.”
+- do not allow provider-backed Get Rates to bypass packing readiness
+- manual mode should remain truthful and not be broken
+
+==================================================
+PART B — PACKED ACTION IN SHIPMENT OVERVIEW
+==================================================
+
+Required:
+Add a clear “Packed” action/button in the shipment Overview tab near existing major actions such as Cancel.
+
+Behavior:
+- Button should be enabled only when packing is complete or packing is marked not_required
+- When clicked, shipment should move to / confirm Packed status according to existing lifecycle rules
+- Do not skip required lifecycle states incorrectly
+- If packing is incomplete, show clear reason and guide operator to Packing tab
+- If shipment is already Packed, show packed state clearly
+
+Required:
+- Packed action must align with packingStatus
+- do not create a second conflicting packed state
+
+==================================================
+PART C — PACKING STATUS / SHIPMENT STATUS ALIGNMENT
+==================================================
+
+Required:
+Define clear relationship:
+- packingStatus = packed means packing workflow complete
+- shipment status = Packed means shipment operationally packed in shipping lifecycle
+- Get Rates depends on packing readiness, not just a loose package record
+
+Required:
+- if packingStatus is not_required, Packed action can be allowed if other conditions are met
+- if packingStatus is packed, Packed action can be allowed if other conditions are met
+- if packingStatus is not_started / in_progress / exception, Packed action and Get Rates should be blocked
+
+==================================================
+PART D — PACKAGE DIMENSION VERIFICATION FIX
+==================================================
+
+Required:
+Fix Package Verification showing “Dims (missing)” when dimensions exist.
+
+Audit package fields used by:
+- shipment create/edit package editor
+- Packing tab package verification
+- Get Rates payload
+
+Required:
+- use the same source of truth for package weight and dimensions across:
+  - package editor
+  - package verification
+  - rate request
+- if required dimensions are length/width/height, the UI must clearly collect and display all three fields
+- do not treat one dimension value as complete dimensions
+- do not show “Dims (missing)” if all required dimension fields exist
+- if only length exists but width/height are missing, show exactly which fields are missing:
+  - length missing
+  - width missing
+  - height missing
+- if provider allows weight-only in some cases, document and handle truthfully
+
+Important:
+The attached user case:
+- package editor shows weight 2.5, length 17, and another numeric value 269.97
+- Packing tab shows “2.5 lb · no dims” and “Dims (missing)”
+- Fix the mapping/labels so package values are correctly interpreted and the user understands what is missing.
+
+==================================================
+PART E — RATE REQUEST MUST USE PACKED PACKAGE DATA
+==================================================
+
+Required:
+When Get Rates runs:
+- use verified packed package data
+- do not use stale package values
+- if package data changed after packing verification, packing verification should become stale or require re-verification
+- prevent rate calculation from using unverified or incomplete packing data unless not_required is explicitly set and package prerequisites are still met
+
+==================================================
+PART F — AUDITABILITY
+==================================================
+
+Required:
+Audit these actions:
+- packing marked not required
+- packing completed
+- shipment marked Packed
+- package verification
+- package data changed after verification
+- Get Rates blocked due to incomplete packing
+- Get Rates allowed after packing readiness
+
+==================================================
+PART G — PERMISSION / GATING INTEGRITY
+==================================================
+
+Required:
+Respect existing packing permissions:
+- complete_packing
+- override_packing_requirements
+- resolve_packing_exceptions
+- manage_packing_workflows
+
+Do not allow unauthorized users to mark packing complete, mark not required, or mark shipment Packed if restricted.
+
+==================================================
+PART H — NON-REGRESSION
+==================================================
+
+Preserve:
+- address validation flow
+- provider/manual split
+- selected-rate approval guardrails
+- batch labels
+- automation rules
+- shipping provider hard-disable
+- returns/reverse logistics
+- existing label purchase flow after rates are valid
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Get Rates is blocked until packing is completed or not_required
+2) Get Rates lock reason is clear and actionable
+3) Overview has a Packed action aligned with packing readiness
+4) Packed action does not skip lifecycle incorrectly
+5) Package Verification correctly reads package weight/dimensions from package editor
+6) Missing dimension messages identify exact missing fields
+7) Rate request uses current verified packed package data
+8) Package changes after verification invalidate/recheck packing verification as needed
+9) Permissions remain coherent
+10) Existing shipping flows remain intact after packing readiness is satisfied
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Audit package data model and package editor field mapping
+2) Fix package verification dimension/weight source of truth
+3) Add packing readiness to Get Rates prerequisites
+4) Add/align Packed action in Overview tab
+5) Add stale-verification handling when package data changes
+6) Add audit notes
+7) Re-test non-regression
+8) Update replit.md
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- packing-before-rates workflow
+- Get Rates packing readiness rule
+- Packed action behavior
+- package dimension source of truth
+- stale verification behavior
+- permission behavior
+- audit behavior
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Packing Before Get Rates Rule
+3. Packed Action / Lifecycle Alignment
+4. Package Dimension Verification Fix
+5. Rate Request Package Data Alignment
+6. Permission / Audit Updates
+7. Files Changed
+8. Documentation Updated
+9. Non-Regression Notes

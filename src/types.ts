@@ -1338,6 +1338,19 @@ export interface PackingPackageVerification {
   verifiedBy?: string;
   verifiedAt?: string;
   note?: string;
+  // Phase 3 Pass #11 — snapshot of the package's physical fields at the
+  // moment of verification. Used to derive a "stale" state at render time
+  // when the package weight/dimensions are edited after verification: the
+  // operator must re-verify before Get Rates is unlocked again. Snapshots
+  // are written by recordPackingPackageVerification and never mutated;
+  // staleness is computed reactively (current pkg vs snapshot) so no
+  // separate invalidation pass is required when packages are edited.
+  snapshotWeight?: number;
+  snapshotWeightUnit?: 'lb' | 'kg';
+  snapshotLength?: number;
+  snapshotWidth?: number;
+  snapshotHeight?: number;
+  snapshotDimensionUnit?: 'in' | 'cm';
 }
 
 export type PackingHistoryAction =

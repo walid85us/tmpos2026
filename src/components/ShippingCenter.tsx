@@ -3,7 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
-import { Shipment, ShipmentStatus, ShipmentSourceType, ShipmentType, ShipmentAddress, ShipmentPackage, ShipmentEvent, ShippingRate, AddressValidationResult, ProviderTrackingEvent, ServicePoint, PickupRequest, PickupRequestStatus, PackingExceptionType, PackingStatus } from '../types';
+import { Shipment, ShipmentStatus, ShipmentSourceType, ShipmentType, ShipmentAddress, ShipmentPackage, ShipmentEvent, ShippingRate, AddressValidationResult, ProviderTrackingEvent, ServicePoint, PickupRequest, PickupRequestStatus, PackingExceptionType, PackingStatus, PackingPackageVerification } from '../types';
 import * as shippingApi from '../shipping/shippingApiClient';
 import type { ProviderError } from '../shipping/types';
 import type { ReturnPrefill } from './ReturnsPortal';
@@ -3800,6 +3800,11 @@ export default function ShippingCenter() {
     if (!isOriginAddressAccepted(shipment)) missing.push('Validate origin address');
     if (!isAddressAccepted(shipment)) missing.push('Validate destination address');
     if (!hasShippablePackages(shipment)) missing.push('Add packages with weight or contents');
+    // Phase 3 Pass #11 — rate calculations consume package weight +
+    // dimensions, so the operator must complete (or explicitly waive)
+    // packing first. Stale verifications also count as not-ready.
+    const packingLock = getPackingReadinessLockReason(shipment);
+    if (packingLock) missing.push(packingLock);
     const providerMsg = getProviderPrerequisiteMessage();
     if (providerMsg) missing.push(providerMsg);
     return missing;
@@ -4019,6 +4024,14 @@ export default function ShippingCenter() {
     if (!isAddressAccepted(shipment)) missing.push('Validate destination address');
     if (!hasShippablePackages(shipment)) missing.push('Add packages with weight or contents');
     if (!shipment.selectedRate && (!shipment.carrier || !shipment.serviceLevel)) missing.push('Select a shipping rate or set carrier and service level');
+    // Phase 3 Pass #11 — label purchase / batch label flow inherits the
+    // same packing-readiness gate as rate fetching. Applies to both the
+    // single-shipment Purchase Label call site and the multi-shipment
+    // batch labels evaluator (each shipment is filtered through this
+    // function), so a stale or incomplete packing verification blocks
+    // both paths uniformly.
+    const packingLock = getPackingReadinessLockReason(shipment);
+    if (packingLock) missing.push(packingLock);
     if (isCarrierRequiringPhone(shipment)) {
       if (!isValidPhone(shipment.destinationAddress.phone)) {
         missing.push('Recipient phone number required for UPS/FedEx (at least 10 digits)');
@@ -4823,6 +4836,69 @@ export default function ShippingCenter() {
     return !!shipment.selectedRate;
   }
 
+  // Phase 3 Pass #11 — staleness derivation. A package verification is
+  // "stale" when the package's current weight/length/width/height (or
+  // their units) differ from the snapshot recorded at verification time.
+  // Computed reactively so that no separate invalidation pass is required
+  // when the operator edits a package — the next render correctly shows
+  // the verification as stale and Get Rates / Mark Packed / Purchase Label
+  // see it as not-verified. Only fields the verifier confirmed are
+  // checked: a verifier who only confirmed weight does not invalidate on
+  // a dimensions edit, and vice versa.
+  function isPackageVerificationStale(pkg: ShipmentPackage, v: PackingPackageVerification | undefined): boolean {
+    if (!v) return false;
+    // Backward compatibility — verifications recorded before Pass #11
+    // have no snapshot fields. We must NOT treat them as stale, because
+    // we have no baseline to compare against; doing so would incorrectly
+    // lock Get Rates / Mark Packed / Purchase Label on every previously
+    // verified shipment. A field-by-field check (snapshot defined → compare,
+    // snapshot undefined → skip) preserves legacy verifications as
+    // non-stale while still catching real edits to snapshotted fields.
+    if (v.weightConfirmed) {
+      if (v.snapshotWeight !== undefined && (pkg.weight ?? null) !== v.snapshotWeight) return true;
+      if (v.snapshotWeightUnit !== undefined && (pkg.weightUnit ?? null) !== v.snapshotWeightUnit) return true;
+    }
+    if (v.dimensionsConfirmed) {
+      if (v.snapshotLength !== undefined && (pkg.length ?? null) !== v.snapshotLength) return true;
+      if (v.snapshotWidth !== undefined && (pkg.width ?? null) !== v.snapshotWidth) return true;
+      if (v.snapshotHeight !== undefined && (pkg.height ?? null) !== v.snapshotHeight) return true;
+      if (v.snapshotDimensionUnit !== undefined && (pkg.dimensionUnit ?? null) !== v.snapshotDimensionUnit) return true;
+    }
+    return false;
+  }
+
+  // Phase 3 Pass #11 — packing readiness gate consumed by getRatePrerequisites,
+  // getLabelPrerequisites, and canDoTransition('Packed'). Returns either null
+  // (ready) or a single human-readable lock reason. Three failure modes:
+  //   1. Packing in_progress / exception / not_started → operator must
+  //      complete packing or mark not_required first.
+  //   2. Packing packed but a verification is stale → operator must
+  //      re-verify on the Packing tab.
+  //   3. Packing packed but a package now lacks weight/dimensions → same
+  //      (treated as stale, since verification snapshot pre-dates the
+  //      delete).
+  // Returns null when the packing feature is disabled (no plan or no perm),
+  // so non-packing tenants behave exactly as they did pre-Pass-#11.
+  function getPackingReadinessLockReason(shipment: Shipment): string | null {
+    if (!packingFeatureEnabled) return null;
+    const ps = shipment.packingStatus || 'not_started';
+    if (ps !== 'packed' && ps !== 'not_required') {
+      return 'Complete packing or mark packing not required before fetching rates.';
+    }
+    if (ps === 'not_required') return null;
+    const verifications = shipment.packingPackageVerifications || [];
+    for (const pkg of (shipment.packages || [])) {
+      const v = verifications.find(x => x.packageId === pkg.id);
+      if (!v || !v.weightConfirmed || !v.dimensionsConfirmed) {
+        return 'Re-verify packages on the Packing tab — package data changed after verification.';
+      }
+      if (isPackageVerificationStale(pkg, v)) {
+        return 'Re-verify packages on the Packing tab — package data changed after verification.';
+      }
+    }
+    return null;
+  }
+
   function getNextStatuses(current: ShipmentStatus, shipment?: Shipment | null): ShipmentStatus[] {
     const mode = getShipmentMode(shipment);
     const isManual = mode === 'manual';
@@ -4862,6 +4938,17 @@ export default function ShippingCenter() {
     if (newStatus === 'Rejected' || newStatus === 'Returned') return canDispatch;
     if (newStatus === 'Dispatched') return canDispatch;
     if (['In Transit', 'Delivered', 'Exception'].includes(newStatus)) return false;
+    // Phase 3 Pass #11 — Mark Packed (Overview tab) requires the same
+    // packing-readiness as Get Rates / Purchase Label. Hides the button
+    // when packing is in_progress / exception / not_started, OR when any
+    // verification has gone stale, so the operator cannot transition to
+    // 'Packed' from an inconsistent packing state. Pre-dispatch edit
+    // permission is still required.
+    if (newStatus === 'Packed') {
+      if (!canEditPreDispatch) return false;
+      if (shipment && getPackingReadinessLockReason(shipment)) return false;
+      return true;
+    }
     return canEditPreDispatch;
   }
 
@@ -6493,6 +6580,30 @@ export default function ShippingCenter() {
                         ))}
                       </div>
                     )}
+                    {/* Phase 3 Pass #11 — when 'Packed' is in the allowed
+                        next statuses (Ready/manual or Label Created) and
+                        the operator HAS pre-dispatch edit permission but
+                        packing readiness is blocking the transition,
+                        render a disabled placeholder + Open Packing Tab
+                        affordance so the missing button does not look
+                        like a permission bug. Hidden when 'Packed' is
+                        not on the path at all (e.g. Draft, post-dispatch
+                        statuses) or the operator lacks permission. */}
+                    {(() => {
+                      const nexts = getNextStatuses(selectedShip.status, selectedShip);
+                      if (!nexts.includes('Packed')) return null;
+                      if (canDoTransition(selectedShip.status, 'Packed', selectedShip)) return null;
+                      if (!canEditPreDispatch) return null;
+                      const lockReason = getPackingReadinessLockReason(selectedShip);
+                      if (!lockReason) return null;
+                      return (
+                        <div className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-amber-50 border border-amber-200 text-[11px] text-amber-700 flex-wrap">
+                          <span className="material-symbols-outlined text-sm">lock</span>
+                          <span><span className="font-black uppercase tracking-widest text-[10px]">Mark Packed locked</span> — {lockReason}</span>
+                          <button onClick={() => setDetailTab('packing')} className="ml-1 px-3 py-1.5 bg-amber-500 text-white font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-amber-600 transition-all flex items-center gap-1"><span className="material-symbols-outlined text-xs">inventory_2</span>Open Packing Tab</button>
+                        </div>
+                      );
+                    })()}
                     {canAccess('returns') && checkSubPermission('create_return') && selectedShip.status === 'Delivered' && !selectedShip.returnInfo?.isReturn && (
                       <button onClick={() => {
                         const customer = customers.find(c =>
@@ -8233,9 +8344,13 @@ export default function ShippingCenter() {
                     const v = verifications.find(x => x.sourceItemKey === si.key);
                     return !!v && v.verifiedQty >= si.expectedQty;
                   });
+                  // Phase 3 Pass #11 — stale verifications count as not-verified
+                  // for completion + downstream gating (Get Rates, Mark Packed,
+                  // Purchase Label). The operator must re-verify after editing
+                  // the package's weight/dimensions.
                   const allPackagesVerified = selectedShip.packages.length > 0 && selectedShip.packages.every(p => {
                     const v = pkgVerifications.find(x => x.packageId === p.id);
-                    return !!v && v.weightConfirmed && v.dimensionsConfirmed;
+                    return !!v && v.weightConfirmed && v.dimensionsConfirmed && !isPackageVerificationStale(p, v);
                   });
                   const meetsPrereqs = openExceptions.length === 0 && allPackagesVerified && allItemsVerified;
                   // Action permissions, layered. canManagePackingWorkflows enables
@@ -8487,21 +8602,38 @@ export default function ShippingCenter() {
                           {selectedShip.packages.map((pkg, i) => {
                             const v = pkgVerifications.find(x => x.packageId === pkg.id);
                             const draft = packingPackageDraft[pkg.id] ?? { weightConfirmed: !!v?.weightConfirmed, dimensionsConfirmed: !!v?.dimensionsConfirmed, note: '' };
-                            const isFull = !!v && v.weightConfirmed && v.dimensionsConfirmed;
-                            const isPartial = !!v && (v.weightConfirmed || v.dimensionsConfirmed) && !isFull;
-                            const hasWeight = !!pkg.weight;
-                            const hasDims = !!(pkg.length && pkg.width && pkg.height);
+                            // Phase 3 Pass #11 — stale verifications visually
+                            // demote to "needs re-verification" so the
+                            // operator sees the row colour-shift after
+                            // editing weight/dimensions, and the precise
+                            // missing fields are listed instead of a
+                            // generic "(missing)".
+                            const stale = isPackageVerificationStale(pkg, v);
+                            const effectiveWeightConfirmed = !!v?.weightConfirmed && !stale;
+                            const effectiveDimsConfirmed = !!v?.dimensionsConfirmed && !stale;
+                            const isFull = effectiveWeightConfirmed && effectiveDimsConfirmed;
+                            const isPartial = !!v && (effectiveWeightConfirmed || effectiveDimsConfirmed) && !isFull;
+                            const hasWeight = typeof pkg.weight === 'number' && pkg.weight > 0;
+                            const hasLength = typeof pkg.length === 'number' && pkg.length > 0;
+                            const hasWidth = typeof pkg.width === 'number' && pkg.width > 0;
+                            const hasHeight = typeof pkg.height === 'number' && pkg.height > 0;
+                            const hasDims = hasLength && hasWidth && hasHeight;
+                            const missingDims: string[] = [];
+                            if (!hasLength) missingDims.push('Length');
+                            if (!hasWidth) missingDims.push('Width');
+                            if (!hasHeight) missingDims.push('Height');
                             return (
-                              <div key={pkg.id} className={`rounded-xl border p-3 ${isFull ? 'bg-emerald-50/30 border-emerald-100' : isPartial ? 'bg-amber-50/30 border-amber-100' : 'bg-white border-slate-100'}`}>
+                              <div key={pkg.id} className={`rounded-xl border p-3 ${stale ? 'bg-amber-50/40 border-amber-200' : isFull ? 'bg-emerald-50/30 border-emerald-100' : isPartial ? 'bg-amber-50/30 border-amber-100' : 'bg-white border-slate-100'}`}>
                                 <div className="flex items-center justify-between gap-3 flex-wrap">
                                   <div className="flex items-center gap-2 min-w-0">
-                                    <span className={`material-symbols-outlined text-sm ${isFull ? 'text-emerald-500' : isPartial ? 'text-amber-500' : 'text-slate-300'}`}>{isFull ? 'check_circle' : isPartial ? 'pending' : 'radio_button_unchecked'}</span>
+                                    <span className={`material-symbols-outlined text-sm ${stale ? 'text-amber-500' : isFull ? 'text-emerald-500' : isPartial ? 'text-amber-500' : 'text-slate-300'}`}>{stale ? 'sync_problem' : isFull ? 'check_circle' : isPartial ? 'pending' : 'radio_button_unchecked'}</span>
                                     <div>
-                                      <p className="text-xs font-black text-slate-700">Package {i + 1}</p>
+                                      <p className="text-xs font-black text-slate-700 flex items-center gap-1.5">Package {i + 1}{stale && <span className="px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md bg-amber-100 text-amber-700 border border-amber-200">Re-verify</span>}</p>
                                       <p className="text-[10px] text-slate-400">
-                                        {hasWeight ? `${pkg.weight} ${pkg.weightUnit || 'lb'}` : 'no weight'} · {hasDims ? `${pkg.length}x${pkg.width}x${pkg.height} ${pkg.dimensionUnit || 'in'}` : 'no dims'}
+                                        {hasWeight ? `${pkg.weight} ${pkg.weightUnit || 'lb'}` : 'no weight'} · {hasDims ? `${pkg.length}x${pkg.width}x${pkg.height} ${pkg.dimensionUnit || 'in'}` : `dims missing: ${missingDims.join(', ') || '—'}`}
                                         {v?.verifiedAt && <> · Verified {new Date(v.verifiedAt).toLocaleString()} by {v.verifiedBy || 'unknown'}</>}
                                       </p>
+                                      {stale && <p className="text-[10px] text-amber-700 mt-0.5">Package data changed after verification — re-verify to unlock Get Rates / Mark Packed.</p>}
                                     </div>
                                   </div>
                                   {canVerify && (
@@ -8512,7 +8644,7 @@ export default function ShippingCenter() {
                                       </label>
                                       <label className="flex items-center gap-1.5 text-[11px] text-slate-600">
                                         <input type="checkbox" disabled={!hasDims} checked={draft.dimensionsConfirmed} onChange={e => setPackingPackageDraft(prev => ({ ...prev, [pkg.id]: { ...draft, dimensionsConfirmed: e.target.checked } }))} />
-                                        Dims {hasDims ? 'OK' : '(missing)'}
+                                        Dims {hasDims ? 'OK' : `(missing: ${missingDims.join(', ')})`}
                                       </label>
                                       <input type="text" value={draft.note} onChange={e => setPackingPackageDraft(prev => ({ ...prev, [pkg.id]: { ...draft, note: e.target.value } }))} placeholder="Note (optional)" className="px-2 py-1 border border-slate-200 rounded-lg text-xs w-32" />
                                       <button onClick={() => handleVerifyPackage(pkg.id)} className="px-3 py-1.5 bg-emerald-500 text-white font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-emerald-600 transition-all">Verify</button>
@@ -9087,10 +9219,38 @@ export default function ShippingCenter() {
                             <p className="text-[10px] font-black text-slate-400 uppercase">Package {i + 1}</p>
                             {!packagesLocked && <button onClick={() => removePackage('edit', pkg.id)} className="text-slate-400 hover:text-red-500"><span className="material-symbols-outlined text-sm">close</span></button>}
                           </div>
+                          {/* Phase 3 Pass #11 — explicit Width + Height
+                              fields. Previously the editor rendered a single
+                              "L x W x H" placeholder bound only to `length`,
+                              so width/height were never written and the
+                              Packing Tab Package Verification correctly but
+                              confusingly reported "Dims (missing)" even after
+                              the operator filled what looked like every
+                              field. Declared $ moves to its own row to keep
+                              dimension fields visually grouped. */}
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Weight</label>
+                              <input type="number" step="0.1" placeholder="lb" disabled={packagesLocked} value={pkg.weight ?? ''} onChange={e => updatePackageField('edit', pkg.id, 'weight', e.target.value ? parseFloat(e.target.value) : undefined)} className="mt-1 w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" />
+                            </div>
+                            <div>
+                              <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Declared $</label>
+                              <input type="number" step="0.01" placeholder="0.00" disabled={packagesLocked} value={pkg.declaredValue ?? ''} onChange={e => updatePackageField('edit', pkg.id, 'declaredValue', e.target.value ? parseFloat(e.target.value) : undefined)} className="mt-1 w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" />
+                            </div>
+                          </div>
                           <div className="grid grid-cols-3 gap-2">
-                            <input type="number" step="0.1" placeholder="Weight" disabled={packagesLocked} value={pkg.weight || ''} onChange={e => updatePackageField('edit', pkg.id, 'weight', e.target.value ? parseFloat(e.target.value) : undefined)} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" />
-                            <input type="number" step="0.1" placeholder="Length" disabled={packagesLocked} value={pkg.length || ''} onChange={e => updatePackageField('edit', pkg.id, 'length', e.target.value ? parseFloat(e.target.value) : undefined)} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" />
-                            <input type="number" step="0.01" placeholder="Declared $" disabled={packagesLocked} value={pkg.declaredValue || ''} onChange={e => updatePackageField('edit', pkg.id, 'declaredValue', e.target.value ? parseFloat(e.target.value) : undefined)} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" />
+                            <div>
+                              <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Length</label>
+                              <input type="number" step="0.1" placeholder="in" disabled={packagesLocked} value={pkg.length ?? ''} onChange={e => updatePackageField('edit', pkg.id, 'length', e.target.value ? parseFloat(e.target.value) : undefined)} className="mt-1 w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" />
+                            </div>
+                            <div>
+                              <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Width</label>
+                              <input type="number" step="0.1" placeholder="in" disabled={packagesLocked} value={pkg.width ?? ''} onChange={e => updatePackageField('edit', pkg.id, 'width', e.target.value ? parseFloat(e.target.value) : undefined)} className="mt-1 w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" />
+                            </div>
+                            <div>
+                              <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Height</label>
+                              <input type="number" step="0.1" placeholder="in" disabled={packagesLocked} value={pkg.height ?? ''} onChange={e => updatePackageField('edit', pkg.id, 'height', e.target.value ? parseFloat(e.target.value) : undefined)} className="mt-1 w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" />
+                            </div>
                           </div>
                           <input placeholder="Contents summary" disabled={packagesLocked} value={pkg.contentsSummary || ''} onChange={e => updatePackageField('edit', pkg.id, 'contentsSummary', e.target.value || undefined)} className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed" />
                         </div>
@@ -9253,10 +9413,34 @@ export default function ShippingCenter() {
                             <p className="text-[10px] font-black text-slate-400 uppercase">Package {i + 1}</p>
                             <button onClick={() => removePackage('create', pkg.id)} className="text-slate-400 hover:text-red-500"><span className="material-symbols-outlined text-sm">close</span></button>
                           </div>
+                          {/* Phase 3 Pass #11 — explicit Width + Height
+                              fields. See Edit form for the same correction;
+                              the create form previously rendered a single
+                              "L x W x H" placeholder bound to `length`
+                              alone, leaving width/height undefined. */}
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Weight</label>
+                              <input type="number" step="0.1" placeholder="lb" value={pkg.weight ?? ''} onChange={e => updatePackageField('create', pkg.id, 'weight', e.target.value ? parseFloat(e.target.value) : undefined)} className="mt-1 w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                            </div>
+                            <div>
+                              <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Declared $</label>
+                              <input type="number" step="0.01" placeholder="0.00" value={pkg.declaredValue ?? ''} onChange={e => updatePackageField('create', pkg.id, 'declaredValue', e.target.value ? parseFloat(e.target.value) : undefined)} className="mt-1 w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                            </div>
+                          </div>
                           <div className="grid grid-cols-3 gap-2">
-                            <input type="number" step="0.1" placeholder="Weight" value={pkg.weight || ''} onChange={e => updatePackageField('create', pkg.id, 'weight', e.target.value ? parseFloat(e.target.value) : undefined)} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20" />
-                            <input type="number" step="0.1" placeholder="L x W x H" value={pkg.length || ''} onChange={e => updatePackageField('create', pkg.id, 'length', e.target.value ? parseFloat(e.target.value) : undefined)} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20" />
-                            <input type="number" step="0.01" placeholder="Declared $" value={pkg.declaredValue || ''} onChange={e => updatePackageField('create', pkg.id, 'declaredValue', e.target.value ? parseFloat(e.target.value) : undefined)} className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                            <div>
+                              <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Length</label>
+                              <input type="number" step="0.1" placeholder="in" value={pkg.length ?? ''} onChange={e => updatePackageField('create', pkg.id, 'length', e.target.value ? parseFloat(e.target.value) : undefined)} className="mt-1 w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                            </div>
+                            <div>
+                              <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Width</label>
+                              <input type="number" step="0.1" placeholder="in" value={pkg.width ?? ''} onChange={e => updatePackageField('create', pkg.id, 'width', e.target.value ? parseFloat(e.target.value) : undefined)} className="mt-1 w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                            </div>
+                            <div>
+                              <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Height</label>
+                              <input type="number" step="0.1" placeholder="in" value={pkg.height ?? ''} onChange={e => updatePackageField('create', pkg.id, 'height', e.target.value ? parseFloat(e.target.value) : undefined)} className="mt-1 w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20" />
+                            </div>
                           </div>
                           <input placeholder="Contents summary" value={pkg.contentsSummary || ''} onChange={e => updatePackageField('create', pkg.id, 'contentsSummary', e.target.value || undefined)} className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20" />
                         </div>
