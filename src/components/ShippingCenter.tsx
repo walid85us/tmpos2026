@@ -6357,7 +6357,16 @@ export default function ShippingCenter() {
                           );
                         })()}
 
-                        {!isManualMode && canFetchRates && !isWriteBlocked && ['Draft', 'Ready'].includes(selectedShip.status) && (() => {
+                        {/* Phase 3 Pass #13 — Get Rates remains visible in
+                            'Packed' status (the new pre-rate state introduced
+                            by Pass #12) so completing packing does not hide
+                            the rates action. Hidden once a label is purchased
+                            (preserves the original intent of suppressing the
+                            button after 'Label Created'). The disabled-state
+                            tooltip explains any blocker — packing readiness
+                            included — replacing Pass #11's separate
+                            "Mark Packed locked" banner. */}
+                        {!isManualMode && canFetchRates && !isWriteBlocked && !selectedShip.label && ['Draft', 'Ready', 'Packed'].includes(selectedShip.status) && (() => {
                           const ratePrereqs = getRatePrerequisites(selectedShip);
                           const disabled = providerLoading !== null || ratePrereqs.length > 0;
                           return (
@@ -6379,7 +6388,12 @@ export default function ShippingCenter() {
                           );
                         })()}
 
-                        {!isManualMode && canPurchaseLabel && !isWriteBlocked && selectedShip.status === 'Ready' && !selectedShip.label && (() => {
+                        {/* Phase 3 Pass #13 — Purchase Label is now also
+                            valid in 'Packed' status (the post-Pass-#12
+                            pre-rate state). The packing-readiness gate is
+                            already enforced inside getLabelPrerequisites,
+                            and the label-existence guard is unchanged. */}
+                        {!isManualMode && canPurchaseLabel && !isWriteBlocked && ['Ready', 'Packed'].includes(selectedShip.status) && !selectedShip.label && (() => {
                           const labelPrereqs = getLabelPrerequisites(selectedShip);
                           const disabled = providerLoading !== null || labelPrereqs.length > 0;
                           return (
@@ -6611,30 +6625,15 @@ export default function ShippingCenter() {
                         ))}
                       </div>
                     )}
-                    {/* Phase 3 Pass #11 — when 'Packed' is in the allowed
-                        next statuses (Ready/manual or Label Created) and
-                        the operator HAS pre-dispatch edit permission but
-                        packing readiness is blocking the transition,
-                        render a disabled placeholder + Open Packing Tab
-                        affordance so the missing button does not look
-                        like a permission bug. Hidden when 'Packed' is
-                        not on the path at all (e.g. Draft, post-dispatch
-                        statuses) or the operator lacks permission. */}
-                    {(() => {
-                      const nexts = getNextStatuses(selectedShip.status, selectedShip);
-                      if (!nexts.includes('Packed')) return null;
-                      if (canDoTransition(selectedShip.status, 'Packed', selectedShip)) return null;
-                      if (!canEditPreDispatch) return null;
-                      const lockReason = getPackingReadinessLockReason(selectedShip);
-                      if (!lockReason) return null;
-                      return (
-                        <div className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-amber-50 border border-amber-200 text-[11px] text-amber-700 flex-wrap">
-                          <span className="material-symbols-outlined text-sm">lock</span>
-                          <span><span className="font-black uppercase tracking-widest text-[10px]">Mark Packed locked</span> — {lockReason}</span>
-                          <button onClick={() => setDetailTab('packing')} className="ml-1 px-3 py-1.5 bg-amber-500 text-white font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-amber-600 transition-all flex items-center gap-1"><span className="material-symbols-outlined text-xs">inventory_2</span>Open Packing Tab</button>
-                        </div>
-                      );
-                    })()}
+                    {/* Phase 3 Pass #13 — Removed Pass #11's large amber
+                        "Mark Packed locked" banner. The disabled-state
+                        tooltip on the Get Rates button now carries the
+                        same lock reason ("Complete packing or mark
+                        packing not required before fetching rates."), so
+                        a separate Overview banner duplicated information
+                        and consumed too much vertical space. Operators
+                        can still navigate to the Packing tab via the
+                        existing tab strip. */}
                     {canAccess('returns') && checkSubPermission('create_return') && selectedShip.status === 'Delivered' && !selectedShip.returnInfo?.isReturn && (
                       <button onClick={() => {
                         const customer = customers.find(c =>

@@ -1,0 +1,252 @@
+Shipping Phase 3 — Packing Rate-Gating UI + Not Required / Packed Get Rates Fix
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen unrelated shipping workstreams.
+Fix only the packing/rate-gating UI and Get Rates behavior issues found during QA.
+
+==================================================
+CURRENT QA ISSUES
+==================================================
+
+Packing Workflow and Packed status alignment are mostly working, but three issues remain:
+
+1) The Overview tab now shows a large amber “Mark Packed Locked” card.
+This is too heavy and not needed.
+The existing disabled Get Rates tooltip already explains why rates are locked.
+
+2) When the operator clicks “Mark Not Required” in the Packing tab, Get Rates remains disabled.
+This is wrong.
+If packingStatus = not_required, packing readiness should be satisfied.
+
+3) After packing is completed and the shipment is marked Packed, the Get Rates button disappears.
+This is wrong.
+Packed is now the correct pre-rate state.
+Get Rates should remain visible and enabled when:
+- addresses are validated
+- packages exist
+- package/rating prerequisites are met
+- packing is completed/packed OR packing is not_required
+- provider is available and enabled
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior shipping lifecycle architect
+- Senior fulfillment workflow architect
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Do not make a cosmetic-only fix.
+Fix the real prerequisite and visibility logic.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve all closed shipping behavior unless this correction explicitly requires touching packing/rate gating.
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Make the packing-before-rates workflow clean and usable:
+
+- no large unnecessary locked banner
+- Get Rates remains visible
+- Get Rates disables with clear tooltip when prerequisites are missing
+- Mark Not Required enables rating when all other prerequisites are met
+- Packed status enables rating when all other prerequisites are met
+
+==================================================
+PART A — REMOVE LARGE “MARK PACKED LOCKED” BANNER
+==================================================
+
+Required:
+Remove the large amber “Mark Packed Locked” card from the Overview tab.
+
+Do not replace it with another large card.
+
+Desired behavior:
+- Keep the Get Rates button visible.
+- If disabled, use the existing tooltip / small inline reason pattern.
+- If the operator needs packing, the tooltip can say:
+  “Complete packing or mark packing not required before fetching rates.”
+
+Optional:
+- A small link or compact helper to open the Packing tab is acceptable.
+- Do not consume a large section of the Overview tab.
+
+==================================================
+PART B — GET RATES BUTTON MUST REMAIN VISIBLE
+==================================================
+
+Required:
+The Get Rates button should not disappear because shipment status is Packed.
+
+Update the button visibility / lifecycle logic so:
+- Packed is an allowed status for Get Rates
+- Packed is an allowed status for the provider rating workflow
+- Get Rates remains visible in Packed status
+- Get Rates is enabled only when all prerequisites are satisfied
+
+Important:
+Packed must not be treated as a post-rate or post-label terminal state.
+In the new workflow, Packed is the correct state before Get Rates.
+
+==================================================
+PART C — MARK NOT REQUIRED MUST SATISFY PACKING READINESS
+==================================================
+
+Required:
+If packingStatus = not_required:
+- packing readiness lock reason should be null
+- Get Rates should not be blocked by packing readiness
+- Purchase Label / Batch Labels should use the same coherent readiness logic
+
+Important:
+If Get Rates is still disabled after Not Required, the reason must be from another prerequisite, such as:
+- missing package
+- missing dimensions
+- unvalidated address
+- no provider
+- plan-disabled provider
+But it must not still say packing is incomplete.
+
+==================================================
+PART D — PACKED MUST SATISFY PACKING READINESS
+==================================================
+
+Required:
+If packingStatus = packed and shipment.status = Packed:
+- packing readiness lock reason should be null
+- Get Rates should be enabled if all other prerequisites are satisfied
+- button must not disappear
+
+Important:
+Do not regress:
+- package verification staleness
+- incomplete package data checks
+- label purchase safeguards
+- selected-rate approval guardrails
+
+==================================================
+PART E — PREREQUISITE REASON PRIORITY
+==================================================
+
+Required:
+If Get Rates is disabled, the tooltip should show the actual current blocking reason.
+
+Examples:
+- if packing incomplete:
+  “Complete packing or mark packing not required before fetching rates.”
+- if dimensions missing:
+  “Package dimensions are missing: Width, Height.”
+- if address not validated:
+  “Validate origin and destination addresses before fetching rates.”
+- if provider disabled:
+  “Shipping Provider is not available for this plan.”
+
+Do not show stale packing reason after packing is Not Required or Packed.
+
+==================================================
+PART F — RATE / LABEL / BATCH CONSISTENCY
+==================================================
+
+Required:
+Use one shared readiness model where possible.
+
+Ensure consistency across:
+- Get Rates
+- Purchase Label
+- Batch Labels eligibility
+- Mark Packed behavior
+
+Avoid one path saying ready while another path says blocked for the same shipment state.
+
+==================================================
+PART G — NON-REGRESSION
+==================================================
+
+Preserve:
+- packing completion sets shipment status to Packed
+- reopening packing before label purchase clears stale selected rate
+- package edits after verification trigger re-verification
+- post-label package/packing lock
+- package dimension fixes
+- selected-rate approval guardrails
+- batch labels
+- automation rules
+- shipping provider hard-disable
+- returns/reverse logistics
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Large “Mark Packed Locked” banner is removed from Overview
+2) Get Rates button remains visible when packing is incomplete
+3) Disabled Get Rates explains the blocker through tooltip / compact reason
+4) Mark Not Required clears packing-readiness blocker
+5) Packed status clears packing-readiness blocker
+6) Get Rates remains visible and enabled in Packed status when all prerequisites are met
+7) If Get Rates is disabled after Not Required/Packed, the tooltip shows the true non-packing blocker
+8) Purchase Label and Batch Labels remain consistent with the readiness model
+9) Existing packing, automation, and shipping flows remain intact
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Audit Get Rates visibility conditions by shipment status
+2) Add/confirm Packed as valid pre-rate status
+3) Fix packing readiness evaluator for not_required and packed
+4) Remove large locked banner from Overview
+5) Ensure disabled tooltip shows correct current blocker
+6) Re-test Get Rates, Purchase Label, and Batch Labels readiness consistency
+7) Update replit.md
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Get Rates visibility in Packed status
+- packingStatus not_required behavior
+- packingStatus packed behavior
+- compact lock reason / tooltip behavior
+- removal of large Overview locked banner
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Get Rates Visibility / Packed Status Fix
+3. Mark Not Required Readiness Fix
+4. Overview UI Cleanup
+5. Prerequisite Tooltip / Reason Priority
+6. Rate / Label / Batch Consistency
+7. Files Changed
+8. Documentation Updated
+9. Non-Regression Notes
