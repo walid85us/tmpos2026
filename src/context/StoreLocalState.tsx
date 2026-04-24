@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useMemo, useEffect, useRef } from 'react';
-import { Customer, HeldOrder, CartItem, PaymentMethod, Discount, RepairTicket, RepairTicketStatus, Invoice, RepairService, RepairCategory, DocumentTemplate, StoreBranding, LogoPlacement, Supplier, StockMovement, StockMovementType, PurchaseOrder, GoodsReceivedNote, RMA, InventoryTransfer, InventoryCount, TradeInItem, RefurbishmentJob, SupplierRefundEntry, Shipment, ShippingProviderConfig, Return, AutomationRule, AutomationLogEntry, ShipmentBatch } from '../types';
+import { Customer, HeldOrder, CartItem, PaymentMethod, Discount, RepairTicket, RepairTicketStatus, Invoice, RepairService, RepairCategory, DocumentTemplate, StoreBranding, LogoPlacement, Supplier, StockMovement, StockMovementType, PurchaseOrder, GoodsReceivedNote, RMA, InventoryTransfer, InventoryCount, TradeInItem, RefurbishmentJob, SupplierRefundEntry, Shipment, ShippingProviderConfig, Return, AutomationRule, AutomationLogEntry, ShipmentBatch, PackingException, PackingExceptionType, PackingHistoryEntry, PackingItemVerification, PackingPackageVerification, PackingHistoryAction } from '../types';
 import { useAccess } from './AccessContext';
 import { buildTemplateHtml, getDefaultEnabledTags } from '../utils/templateBuilder';
 
@@ -255,6 +255,33 @@ interface StoreLocalStateContextType {
     actor: string;
     note?: string;
   }) => void;
+  // Phase 3 Pass #10 — Packing Workflows mutators. Each call writes the
+  // matching packing field(s), appends a PackingHistoryEntry, and appends a
+  // matching internal-note audit row in the same setShipments transaction so
+  // the audit trail is atomic. The UI is responsible for firing the matching
+  // observational automation trigger AFTER calling the mutator.
+  startPacking: (id: string, args: { actor: string; note?: string }) => { ok: boolean };
+  recordPackingItemVerification: (id: string, args: {
+    sourceItemKey: string; name: string; expectedQty: number; verifiedQty: number;
+    actor: string; note?: string;
+  }) => void;
+  recordPackingPackageVerification: (id: string, args: {
+    packageId: string; weightConfirmed: boolean; dimensionsConfirmed: boolean;
+    actor: string; note?: string;
+  }) => void;
+  addPackingException: (id: string, args: {
+    type: PackingExceptionType; description: string; actor: string;
+    packageId?: string; sourceItemKey?: string;
+  }) => string | null;
+  resolvePackingException: (id: string, args: {
+    exceptionId: string; actor: string; resolutionNote: string;
+  }) => void;
+  completePackingForShipment: (id: string, args: {
+    actor: string; note?: string; override?: boolean; overrideReason?: string;
+    expectedSourceItems?: { key: string; expectedQty: number }[];
+  }) => { ok: true } | { ok: false; reason: string };
+  reopenPacking: (id: string, args: { actor: string; note: string }) => void;
+  markPackingNotRequired: (id: string, args: { actor: string; note: string }) => void;
   automationRules: AutomationRule[];
   addAutomationRule: (rule: AutomationRule) => void;
   updateAutomationRule: (id: string, updates: Partial<AutomationRule>) => void;
@@ -1133,6 +1160,305 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const resolveShipmentReview = useCallback((id: string, args: { resolvedBy: string; note?: string }) => {
     setReviewOutcome(id, { resolution: 'resolve', actor: args.resolvedBy, note: args.note });
   }, [setReviewOutcome]);
+  // Phase 3 Pass #10 — Packing Workflows mutators. Each writes the matching
+  // packing field(s) AND appends a PackingHistoryEntry AND appends a matching
+  // internal-note audit entry inside the same setShipments transaction so
+  // every packing action is auditable atomically.
+  const buildPackingHistoryEntry = (action: PackingHistoryAction, actor: string, note?: string, ref?: PackingHistoryEntry['ref']): PackingHistoryEntry => ({
+    id: `ph-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    action, actor, at: new Date().toISOString(),
+    ...(note ? { note } : {}),
+    ...(ref ? { ref } : {}),
+  });
+  const buildPackingAuditNote = (text: string) => ({
+    id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    text,
+    timestamp: new Date().toISOString(),
+    source: 'system' as const,
+  });
+  // Compute next packingStatus when an exception is added or resolved. If any
+  // open exception exists → 'exception'. Otherwise preserve the prior
+  // operational state (in_progress when packing has been started, packed
+  // when already complete, not_required when explicitly marked, or
+  // not_started when nothing has happened yet).
+  const recomputePackingStatusForExceptions = (s: Shipment, nextExceptions: PackingException[]) => {
+    const hasOpen = nextExceptions.some(e => !e.resolvedAt);
+    if (hasOpen) return 'exception' as const;
+    // No open exceptions — fall back to the underlying operational state.
+    if (s.packingStatus === 'packed') return 'packed' as const;
+    if (s.packingStatus === 'not_required') return 'not_required' as const;
+    if (s.packingStartedAt || s.packingItemVerifications?.length || s.packingPackageVerifications?.length) {
+      return 'in_progress' as const;
+    }
+    return 'not_started' as const;
+  };
+  // Phase 3 Pass #10 correction — mutators that can no-op (idempotent /
+  // already-in-state) now return a result so the caller can avoid firing an
+  // observational automation trigger ('packing_started' / 'packing_exception_created')
+  // for events that did not actually transition state. This closes the
+  // false-trigger window the architect flagged where a rapid double-click
+  // or call from a state that disallows the transition would still fire
+  // automations.
+  const startPacking = useCallback((id: string, args: { actor: string; note?: string }): { ok: boolean } => {
+    let result = { ok: false };
+    setShipments(prev => prev.map(s => {
+      if (s.id !== id) return s;
+      // Idempotent: re-starting a shipment that's already in_progress / packed /
+      // exception is a no-op (audit-preserving). Allow re-start from
+      // not_required (operator changed their mind) and from not_started.
+      if (s.packingStatus && s.packingStatus !== 'not_started' && s.packingStatus !== 'not_required') return s;
+      const now = new Date().toISOString();
+      const history = buildPackingHistoryEntry('started', args.actor, args.note, { kind: 'shipment', id: s.id });
+      const noteText = args.note?.trim() ? ` — ${args.note.trim()}` : '';
+      const audit = buildPackingAuditNote(`Packing started by ${args.actor}${noteText}`);
+      result = { ok: true };
+      return {
+        ...s,
+        packingStatus: 'in_progress',
+        packingStartedBy: args.actor,
+        packingStartedAt: now,
+        packingHistory: [...(s.packingHistory || []), history],
+        internalNotes: [...(s.internalNotes || []), audit],
+      };
+    }));
+    return result;
+  }, []);
+  const recordPackingItemVerification = useCallback((id: string, args: {
+    sourceItemKey: string; name: string; expectedQty: number; verifiedQty: number;
+    actor: string; note?: string;
+  }) => {
+    setShipments(prev => prev.map(s => {
+      if (s.id !== id) return s;
+      // Auto-promote to in_progress on the first verification action so the
+      // packing lifecycle stays internally consistent even if the operator
+      // forgot to click Start. Preserves 'exception' / 'packed' if already set.
+      const now = new Date().toISOString();
+      const existing = s.packingItemVerifications || [];
+      const idx = existing.findIndex(v => v.sourceItemKey === args.sourceItemKey);
+      const next: PackingItemVerification = {
+        sourceItemKey: args.sourceItemKey,
+        name: args.name,
+        expectedQty: args.expectedQty,
+        verifiedQty: args.verifiedQty,
+        verifiedBy: args.actor,
+        verifiedAt: now,
+        ...(args.note ? { note: args.note } : {}),
+      };
+      const nextVerifications = idx >= 0
+        ? existing.map((v, i) => i === idx ? next : v)
+        : [...existing, next];
+      const status = (s.packingStatus === 'packed' || s.packingStatus === 'exception')
+        ? s.packingStatus
+        : 'in_progress';
+      const history = buildPackingHistoryEntry('item_verified', args.actor, `${args.name}: ${args.verifiedQty}/${args.expectedQty}${args.note ? ` — ${args.note}` : ''}`, { kind: 'item', id: args.sourceItemKey });
+      const audit = buildPackingAuditNote(`Item verified by ${args.actor} — ${args.name} ${args.verifiedQty}/${args.expectedQty}${args.note ? ` (${args.note})` : ''}`);
+      return {
+        ...s,
+        packingStatus: status,
+        ...(s.packingStartedAt ? {} : { packingStartedAt: now, packingStartedBy: args.actor }),
+        packingItemVerifications: nextVerifications,
+        packingHistory: [...(s.packingHistory || []), history],
+        internalNotes: [...(s.internalNotes || []), audit],
+      };
+    }));
+  }, []);
+  const recordPackingPackageVerification = useCallback((id: string, args: {
+    packageId: string; weightConfirmed: boolean; dimensionsConfirmed: boolean;
+    actor: string; note?: string;
+  }) => {
+    setShipments(prev => prev.map(s => {
+      if (s.id !== id) return s;
+      const now = new Date().toISOString();
+      const existing = s.packingPackageVerifications || [];
+      const idx = existing.findIndex(v => v.packageId === args.packageId);
+      const next: PackingPackageVerification = {
+        packageId: args.packageId,
+        weightConfirmed: args.weightConfirmed,
+        dimensionsConfirmed: args.dimensionsConfirmed,
+        verifiedBy: args.actor,
+        verifiedAt: now,
+        ...(args.note ? { note: args.note } : {}),
+      };
+      const nextVerifications = idx >= 0
+        ? existing.map((v, i) => i === idx ? next : v)
+        : [...existing, next];
+      const status = (s.packingStatus === 'packed' || s.packingStatus === 'exception')
+        ? s.packingStatus
+        : 'in_progress';
+      const summary = `Package ${args.packageId} weight=${args.weightConfirmed ? 'ok' : 'missing'} dim=${args.dimensionsConfirmed ? 'ok' : 'missing'}`;
+      const history = buildPackingHistoryEntry('package_verified', args.actor, summary, { kind: 'package', id: args.packageId });
+      const audit = buildPackingAuditNote(`Package verified by ${args.actor} — ${summary}`);
+      return {
+        ...s,
+        packingStatus: status,
+        ...(s.packingStartedAt ? {} : { packingStartedAt: now, packingStartedBy: args.actor }),
+        packingPackageVerifications: nextVerifications,
+        packingHistory: [...(s.packingHistory || []), history],
+        internalNotes: [...(s.internalNotes || []), audit],
+      };
+    }));
+  }, []);
+  const addPackingException = useCallback((id: string, args: {
+    type: PackingExceptionType; description: string; actor: string;
+    packageId?: string; sourceItemKey?: string;
+  }): string | null => {
+    const exceptionId = `pe-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    let created = false;
+    setShipments(prev => prev.map(s => {
+      if (s.id !== id) return s;
+      created = true;
+      const now = new Date().toISOString();
+      const exc: PackingException = {
+        id: exceptionId,
+        type: args.type,
+        description: args.description,
+        createdBy: args.actor,
+        createdAt: now,
+        ...(args.packageId ? { packageId: args.packageId } : {}),
+        ...(args.sourceItemKey ? { sourceItemKey: args.sourceItemKey } : {}),
+      };
+      const nextExceptions = [...(s.packingExceptions || []), exc];
+      const nextStatus = recomputePackingStatusForExceptions(s, nextExceptions);
+      const history = buildPackingHistoryEntry('exception_created', args.actor, `[${args.type}] ${args.description}`, { kind: 'exception', id: exceptionId });
+      const audit = buildPackingAuditNote(`Packing exception created by ${args.actor} — [${args.type}] ${args.description}`);
+      return {
+        ...s,
+        packingStatus: nextStatus,
+        packingExceptions: nextExceptions,
+        packingHistory: [...(s.packingHistory || []), history],
+        internalNotes: [...(s.internalNotes || []), audit],
+      };
+    }));
+    return created ? exceptionId : null;
+  }, []);
+  const resolvePackingException = useCallback((id: string, args: {
+    exceptionId: string; actor: string; resolutionNote: string;
+  }) => {
+    setShipments(prev => prev.map(s => {
+      if (s.id !== id) return s;
+      const existing = s.packingExceptions || [];
+      const target = existing.find(e => e.id === args.exceptionId);
+      if (!target || target.resolvedAt) return s; // no-op for unknown / already-resolved
+      const now = new Date().toISOString();
+      const nextExceptions = existing.map(e => e.id === args.exceptionId
+        ? { ...e, resolvedBy: args.actor, resolvedAt: now, resolutionNote: args.resolutionNote }
+        : e);
+      const nextStatus = recomputePackingStatusForExceptions(s, nextExceptions);
+      const history = buildPackingHistoryEntry('exception_resolved', args.actor, `[${target.type}] resolved — ${args.resolutionNote}`, { kind: 'exception', id: args.exceptionId });
+      const audit = buildPackingAuditNote(`Packing exception resolved by ${args.actor} — [${target.type}] ${args.resolutionNote}`);
+      return {
+        ...s,
+        packingStatus: nextStatus,
+        packingExceptions: nextExceptions,
+        packingHistory: [...(s.packingHistory || []), history],
+        internalNotes: [...(s.internalNotes || []), audit],
+      };
+    }));
+  }, []);
+  const completePackingForShipment = useCallback((id: string, args: {
+    actor: string; note?: string; override?: boolean; overrideReason?: string;
+    // Phase 3 Pass #10 correction — caller supplies the source-item
+    // expectations it computed (the data layer can't see invoices/repairs/
+    // transfers/RMAs). When provided and !override, the mutator validates
+    // every key has a verification with verifiedQty >= expectedQty. When
+    // omitted (e.g. source item list unavailable), this prereq is skipped
+    // — same semantics as the UI shows ("N/A — source items unavailable").
+    expectedSourceItems?: { key: string; expectedQty: number }[];
+  }): { ok: true } | { ok: false; reason: string } => {
+    // Phase 3 Pass #10 correction — defense-in-depth: the override path
+    // requires a non-empty reason at the mutator layer too (the UI also
+    // enforces this, but a future programmatic caller could bypass UI).
+    if (args.override) {
+      const overrideText = (args.overrideReason || args.note || '').trim();
+      if (!overrideText) return { ok: false, reason: 'override_reason_required' };
+    }
+    let result: { ok: true } | { ok: false; reason: string } = { ok: false, reason: 'shipment_not_found' };
+    setShipments(prev => prev.map(s => {
+      if (s.id !== id) return s;
+      // Idempotent: already-packed is a no-op-success.
+      if (s.packingStatus === 'packed') { result = { ok: true }; return s; }
+      // Prerequisite checks (skipped only when override=true).
+      const openExceptions = (s.packingExceptions || []).filter(e => !e.resolvedAt);
+      const packageVerifications = s.packingPackageVerifications || [];
+      const itemVerifications = s.packingItemVerifications || [];
+      const allPackagesVerified = s.packages.every(p => {
+        const v = packageVerifications.find(pv => pv.packageId === p.id);
+        return !!v && v.weightConfirmed && v.dimensionsConfirmed;
+      });
+      // Phase 3 Pass #10 correction — validate caller-supplied source items
+      // at the data layer so packingStatus='packed' cannot be reached
+      // through a programmatic call that skipped the UI's checklist.
+      const allItemsVerified = !args.expectedSourceItems || args.expectedSourceItems.every(si => {
+        const v = itemVerifications.find(iv => iv.sourceItemKey === si.key);
+        return !!v && v.verifiedQty >= si.expectedQty;
+      });
+      if (!args.override) {
+        if (openExceptions.length > 0) { result = { ok: false, reason: 'open_exceptions' }; return s; }
+        if (!allPackagesVerified) { result = { ok: false, reason: 'packages_unverified' }; return s; }
+        if (!allItemsVerified) { result = { ok: false, reason: 'items_unverified' }; return s; }
+      }
+      const now = new Date().toISOString();
+      const baseHistory: PackingHistoryEntry[] = [...(s.packingHistory || [])];
+      const baseNotes: any[] = [...(s.internalNotes || [])];
+      if (args.override) {
+        const reason = (args.overrideReason || args.note || '').trim();
+        baseHistory.push(buildPackingHistoryEntry('override_used', args.actor, `Completion override — ${reason} (open exceptions: ${openExceptions.length}, packages verified: ${allPackagesVerified ? 'yes' : 'no'}, items verified: ${allItemsVerified ? 'yes' : 'no'})`, { kind: 'shipment', id: s.id }));
+        baseNotes.push(buildPackingAuditNote(`Packing completion override used by ${args.actor} — ${reason} (open exceptions: ${openExceptions.length}, packages verified: ${allPackagesVerified ? 'yes' : 'no'}, items verified: ${allItemsVerified ? 'yes' : 'no'})`));
+      }
+      const noteText = args.note?.trim() ? ` — ${args.note.trim()}` : '';
+      baseHistory.push(buildPackingHistoryEntry('completed', args.actor, args.note, { kind: 'shipment', id: s.id }));
+      baseNotes.push(buildPackingAuditNote(`Packing completed by ${args.actor}${noteText}`));
+      result = { ok: true };
+      return {
+        ...s,
+        packingStatus: 'packed',
+        packedBy: args.actor,
+        packedAt: now,
+        ...(args.note ? { packingNotes: args.note } : {}),
+        packingHistory: baseHistory,
+        internalNotes: baseNotes,
+      };
+    }));
+    return result;
+  }, []);
+  const reopenPacking = useCallback((id: string, args: { actor: string; note: string }) => {
+    setShipments(prev => prev.map(s => {
+      if (s.id !== id) return s;
+      // Reopen only meaningful from packed / not_required. From any other
+      // state it's a no-op so audit doesn't pile up duplicate entries.
+      if (s.packingStatus !== 'packed' && s.packingStatus !== 'not_required') return s;
+      // Recompute base operational status (open exceptions wins).
+      const exceptions = s.packingExceptions || [];
+      const nextStatus = exceptions.some(e => !e.resolvedAt) ? 'exception' as const : 'in_progress' as const;
+      const history = buildPackingHistoryEntry('reopened', args.actor, args.note, { kind: 'shipment', id: s.id });
+      const audit = buildPackingAuditNote(`Packing reopened by ${args.actor} — ${args.note}`);
+      return {
+        ...s,
+        packingStatus: nextStatus,
+        packedBy: undefined,
+        packedAt: undefined,
+        packingHistory: [...(s.packingHistory || []), history],
+        internalNotes: [...(s.internalNotes || []), audit],
+      };
+    }));
+  }, []);
+  const markPackingNotRequired = useCallback((id: string, args: { actor: string; note: string }) => {
+    setShipments(prev => prev.map(s => {
+      if (s.id !== id) return s;
+      // Cannot mark not-required while open exceptions exist — operator must
+      // resolve or override first. UI prevents this; server-side guard for safety.
+      const openExceptions = (s.packingExceptions || []).filter(e => !e.resolvedAt);
+      if (openExceptions.length > 0) return s;
+      const history = buildPackingHistoryEntry('override_used', args.actor, `Marked not required — ${args.note}`, { kind: 'shipment', id: s.id });
+      const audit = buildPackingAuditNote(`Packing marked not required by ${args.actor} — ${args.note}`);
+      return {
+        ...s,
+        packingStatus: 'not_required',
+        packingHistory: [...(s.packingHistory || []), history],
+        internalNotes: [...(s.internalNotes || []), audit],
+      };
+    }));
+  }, []);
   const [automationRules, setAutomationRules] = useState<AutomationRule[]>([]);
   const addAutomationRule = useCallback((rule: AutomationRule) => { setAutomationRules(prev => [rule, ...prev]); }, []);
   const updateAutomationRule = useCallback((id: string, updates: Partial<AutomationRule>) => { setAutomationRules(prev => prev.map(r => r.id === id ? { ...r, ...updates, updatedAt: new Date().toISOString() } : r)); }, []);
@@ -1216,6 +1542,9 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
       refurbishmentJobs, addRefurbishmentJob, updateRefurbishmentJob,
       supplierRefundEntries, addSupplierRefundEntry,
       shipments, addShipment, updateShipment, resolveShipmentReview, setReviewOutcome,
+      startPacking, recordPackingItemVerification, recordPackingPackageVerification,
+      addPackingException, resolvePackingException, completePackingForShipment,
+      reopenPacking, markPackingNotRequired,
       automationRules, addAutomationRule, updateAutomationRule, deleteAutomationRule, bumpAutomationRuleStats,
       automationLogs, appendAutomationLogs,
       shipmentBatches, addShipmentBatch, updateShipmentBatch,

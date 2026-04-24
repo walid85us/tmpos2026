@@ -3,7 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
-import { Shipment, ShipmentStatus, ShipmentSourceType, ShipmentType, ShipmentAddress, ShipmentPackage, ShipmentEvent, ShippingRate, AddressValidationResult, ProviderTrackingEvent, ServicePoint, PickupRequest, PickupRequestStatus } from '../types';
+import { Shipment, ShipmentStatus, ShipmentSourceType, ShipmentType, ShipmentAddress, ShipmentPackage, ShipmentEvent, ShippingRate, AddressValidationResult, ProviderTrackingEvent, ServicePoint, PickupRequest, PickupRequestStatus, PackingExceptionType, PackingStatus } from '../types';
 import * as shippingApi from '../shipping/shippingApiClient';
 import type { ProviderError } from '../shipping/types';
 import type { ReturnPrefill } from './ReturnsPortal';
@@ -485,7 +485,12 @@ export default function ShippingCenter() {
   const { shipments, addShipment, updateShipment, resolveShipmentReview, setReviewOutcome, invoices, repairTickets, rmas, inventoryTransfers, suppliers, customers,
     automationRules, addAutomationRule, updateAutomationRule, deleteAutomationRule, bumpAutomationRuleStats,
     automationLogs, appendAutomationLogs,
-    shipmentBatches, addShipmentBatch, updateShipmentBatch } = useStoreLocalState();
+    shipmentBatches, addShipmentBatch, updateShipmentBatch,
+    // Phase 3 Pass #10 — Packing Workflows mutators.
+    startPacking, recordPackingItemVerification, recordPackingPackageVerification,
+    addPackingException, resolvePackingException, completePackingForShipment,
+    reopenPacking, markPackingNotRequired,
+  } = useStoreLocalState();
   const { checkPermission, checkSubPermission, hasPermission, isWriteBlocked, canAccess, tenant } = useAccess();
   // Force re-render when System Owner Plans & Features matrix changes via sessionStorage.
   // Without this, toggling a feature in the System Owner UI in another tab would leave
@@ -602,8 +607,22 @@ export default function ShippingCenter() {
   }), [canApproveAutomationExceptions, canOverrideAutomationGuardrails, canResolveAutomationReviews]);
   const canManageBatchLabels = checkSubPermission('manage_batch_labels');
   const canPurchaseBatchLabels = checkSubPermission('purchase_batch_labels');
+  // Phase 3 Pass #10 — Packing Workflows perms. View vs manage vs the
+  // higher-trust completion / exception-resolution / override perms are
+  // independent. The plan-level gate (planAllowsPackingWorkflows) is
+  // computed below alongside other plan-feature checks.
+  const canViewPackingWorkflows = checkSubPermission('view_packing_workflows');
+  const canManagePackingWorkflows = checkSubPermission('manage_packing_workflows');
+  const canCompletePacking = checkSubPermission('complete_packing');
+  const canResolvePackingExceptions = checkSubPermission('resolve_packing_exceptions');
+  const canOverridePackingRequirements = checkSubPermission('override_packing_requirements');
   const planAllowsAutomationRules = isPlanFeatureLive('shipping_automation_rules');
   const planAllowsBatchLabels = isPlanFeatureLive('batch_labels');
+  // Phase 3 Pass #10 — Packing Workflows plan gate. Without this feature,
+  // the Packing tab does not render, packing chips are suppressed in the
+  // shipment list, and packing automation triggers never fire.
+  const planAllowsPackingWorkflows = isPlanFeatureLive('packing_workflows');
+  const packingFeatureEnabled = planAllowsPackingWorkflows && canViewPackingWorkflows;
 
   const [activeTab, setActiveTab] = useState<'shipments' | 'analytics' | 'automation' | 'batch' | 'settings'>('shipments');
   const [search, setSearch] = useState('');
@@ -632,7 +651,21 @@ export default function ShippingCenter() {
   } | null>(null);
   const [guardrailNote, setGuardrailNote] = useState('');
   const [selectedShipment, setSelectedShipment] = useState<string | null>(null);
-  const [detailTab, setDetailTab] = useState<'overview' | 'tracking' | 'packages' | 'logistics'>('overview');
+  const [detailTab, setDetailTab] = useState<'overview' | 'tracking' | 'packages' | 'logistics' | 'packing'>('overview');
+  // Phase 3 Pass #10 — local UI state for the Packing tab forms. Kept
+  // outside the StoreLocalState mutators so transient typing doesn't end
+  // up in the audit trail until the operator explicitly submits.
+  const [packingItemDraft, setPackingItemDraft] = useState<Record<string, { verifiedQty: string; note: string }>>({});
+  const [packingPackageDraft, setPackingPackageDraft] = useState<Record<string, { weightConfirmed: boolean; dimensionsConfirmed: boolean; note: string }>>({});
+  const [packingExceptionDraft, setPackingExceptionDraft] = useState<{ type: PackingExceptionType; description: string; packageId: string; sourceItemKey: string }>({ type: 'missing_item', description: '', packageId: '', sourceItemKey: '' });
+  const [packingResolveDraft, setPackingResolveDraft] = useState<Record<string, string>>({});
+  const [packingCompleteNote, setPackingCompleteNote] = useState('');
+  const [packingOverrideMode, setPackingOverrideMode] = useState(false);
+  const [packingReopenNote, setPackingReopenNote] = useState('');
+  const [packingNotRequiredNote, setPackingNotRequiredNote] = useState('');
+  const [packingStartNote, setPackingStartNote] = useState('');
+  const [packingShowReopen, setPackingShowReopen] = useState(false);
+  const [packingShowNotRequired, setPackingShowNotRequired] = useState(false);
   // Service Points & Pickup Requests (Phase 2) — UI state
   const [showServicePointModal, setShowServicePointModal] = useState<string | null>(null);
   const [servicePointSearchResults, setServicePointSearchResults] = useState<ServicePoint[]>([]);
@@ -1079,6 +1112,66 @@ export default function ShippingCenter() {
   const ELIGIBLE_REPAIR_STATUSES = ['Ready for Pickup', 'Completed'];
   const ELIGIBLE_TRANSFER_STATUSES = ['Draft', 'Sent', 'In Transit'];
   const ELIGIBLE_RMA_STATUSES = ['Pending', 'Shipped'];
+
+  // Phase 3 Pass #10 — extract the source line items for a shipment so the
+  // Packing tab can render an item/content verification checklist tied to the
+  // actual source document. Returns null with a reason when source data is not
+  // available (deleted, inaccessible, or source-type that doesn't expose an
+  // item list). The UI must NOT fabricate a checklist when null is returned —
+  // it surfaces a "contents not available from source" notice and falls back
+  // to package-only verification.
+  function extractPackingSourceItems(s: Shipment): { items: { key: string; name: string; expectedQty: number }[]; sourceLabel: string } | { items: null; reason: string; sourceLabel: string } {
+    if (s.sourceType === 'invoice') {
+      const inv = invoices.find(i => i.id === s.sourceId);
+      if (!inv) return { items: null, reason: 'Invoice not found.', sourceLabel: `Invoice ${s.sourceNumber}` };
+      const physicalItems = inv.items.filter(it => it.type === 'product');
+      if (physicalItems.length === 0) return { items: null, reason: 'Invoice has no physical product line items.', sourceLabel: `Invoice ${inv.invoiceNumber}` };
+      return {
+        items: physicalItems.map(it => ({ key: `invoice:${it.id}`, name: it.name, expectedQty: it.quantity })),
+        sourceLabel: `Invoice ${inv.invoiceNumber}`,
+      };
+    }
+    if (s.sourceType === 'repair') {
+      const r = repairTickets.find(rt => rt.id === s.sourceId);
+      if (!r) return { items: null, reason: 'Repair ticket not found.', sourceLabel: `Repair ${s.sourceNumber}` };
+      const parts = r.partsUsed || [];
+      if (parts.length === 0) return { items: null, reason: 'Repair has no parts to verify — verify packages directly.', sourceLabel: `Repair ${r.id}` };
+      return {
+        items: parts.map((p, idx) => ({ key: `repair:${p.itemId || `idx${idx}`}`, name: p.name, expectedQty: p.quantity })),
+        sourceLabel: `Repair ${r.id}`,
+      };
+    }
+    if (s.sourceType === 'transfer') {
+      const t = inventoryTransfers.find(x => x.id === s.sourceId);
+      if (!t) return { items: null, reason: 'Inventory transfer not found.', sourceLabel: `Transfer ${s.sourceNumber}` };
+      if (t.items.length === 0) return { items: null, reason: 'Transfer has no line items.', sourceLabel: `Transfer ${t.transferNumber}` };
+      return {
+        items: t.items.map(it => ({ key: `transfer:${it.productId}`, name: it.name, expectedQty: it.quantity })),
+        sourceLabel: `Transfer ${t.transferNumber}`,
+      };
+    }
+    if (s.sourceType === 'rma') {
+      const r = rmas.find(x => x.id === s.sourceId);
+      if (!r) return { items: null, reason: 'RMA not found.', sourceLabel: `RMA ${s.sourceNumber}` };
+      if (r.items.length === 0) return { items: null, reason: 'RMA has no line items.', sourceLabel: `RMA ${r.rmaNumber}` };
+      return {
+        items: r.items.map(it => ({ key: `rma:${it.productId}`, name: it.name, expectedQty: it.quantity })),
+        sourceLabel: `RMA ${r.rmaNumber}`,
+      };
+    }
+    return { items: null, reason: 'Source type does not expose item lists.', sourceLabel: s.sourceNumber };
+  }
+
+  // Phase 3 Pass #10 — packing status display metadata. Drives the chip on
+  // the shipment list row, the badge on the Packing tab header, and the
+  // status copy on the audit history entries.
+  const PACKING_STATUS_DISPLAY: Record<PackingStatus, { label: string; chipClass: string; icon: string }> = {
+    not_started: { label: 'Packing Not Started', chipClass: 'bg-slate-100 text-slate-600 border-slate-200', icon: 'inventory_2' },
+    in_progress: { label: 'Packing In Progress', chipClass: 'bg-amber-100 text-amber-700 border-amber-200', icon: 'pending_actions' },
+    packed: { label: 'Packing Complete', chipClass: 'bg-emerald-100 text-emerald-700 border-emerald-200', icon: 'check_circle' },
+    exception: { label: 'Packing Exception', chipClass: 'bg-rose-100 text-rose-700 border-rose-200', icon: 'error' },
+    not_required: { label: 'Packing Not Required', chipClass: 'bg-slate-100 text-slate-500 border-slate-200', icon: 'block' },
+  };
 
   function resolveSourceReference() {
     const ref = newSourceNumber.trim();
@@ -3879,7 +3972,10 @@ export default function ShippingCenter() {
           label.format = 'pdf';
         } catch {
           label.pdfUrl = `/api/shipping/label-proxy?url=${encodeURIComponent(label.url)}`;
-          label.format = actualFmt;
+          // Keep label.format as the original carrier-supplied format; only
+          // overwrite when getLabelActualFormat returned a known label format.
+          // 'other' means we couldn't classify it — leave the carrier's value.
+          if (actualFmt === 'png') label.format = actualFmt;
         }
       }
       const now = new Date().toISOString();
@@ -4197,7 +4293,10 @@ export default function ShippingCenter() {
           labelArtifact.format = 'pdf';
         } catch {
           labelArtifact.pdfUrl = `/api/shipping/label-proxy?url=${encodeURIComponent(labelArtifact.url)}`;
-          labelArtifact.format = actualFmt;
+          // Keep labelArtifact.format as the original carrier-supplied format;
+          // only overwrite when getLabelActualFormat returned a known format.
+          // 'other' means we couldn't classify it — leave the carrier's value.
+          if (actualFmt === 'png') labelArtifact.format = actualFmt;
         }
       }
       const now = new Date().toISOString();
@@ -5234,6 +5333,29 @@ export default function ShippingCenter() {
                           <span className="material-symbols-outlined" style={{ fontSize: 10 }}>{s.priority === 'urgent' ? 'priority_high' : 'arrow_upward'}</span>{s.priority === 'urgent' ? 'Urgent' : 'High Priority'}
                         </span>
                       )}
+                      {/* Phase 3 Pass #10 — packing-status chip on the
+                          shipment list row. Suppressed when:
+                            * the plan / perm don't allow viewing packing
+                            * status is 'not_started' (no signal to give)
+                            * status is 'packed' AND shipment.status is also
+                              'Packed' (would duplicate the lifecycle status
+                              chip already rendered for the shipment row).
+                          The chip stays for 'in_progress', 'exception',
+                          and 'not_required' so the operator can spot work
+                          in flight or manager-overridden shipments at a
+                          glance from the list. */}
+                      {packingFeatureEnabled && s.packingStatus && s.packingStatus !== 'not_started' && !(s.packingStatus === 'packed' && s.status === 'Packed') && (() => {
+                        const display = PACKING_STATUS_DISPLAY[s.packingStatus];
+                        const openExc = (s.packingExceptions || []).filter(e => !e.resolvedAt).length;
+                        const tooltip = s.packingStatus === 'exception'
+                          ? `${display.label} — ${openExc} open exception${openExc === 1 ? '' : 's'}`
+                          : display.label;
+                        return (
+                          <span className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md border flex items-center gap-0.5 ${display.chipClass}`} title={tooltip}>
+                            <span className="material-symbols-outlined" style={{ fontSize: 10 }}>{display.icon}</span>{display.label.replace('Packing ', '')}
+                          </span>
+                        );
+                      })()}
                       {canViewAutomationOutcomes && (s.flags?.length || 0) > 0 && (
                         <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md bg-violet-100 text-violet-700 border border-violet-200 flex items-center gap-0.5" title={s.flags!.join(', ')}>
                           <span className="material-symbols-outlined" style={{ fontSize: 10 }}>label</span>{s.flags!.length} Flag{s.flags!.length > 1 ? 's' : ''}
@@ -5334,9 +5456,16 @@ export default function ShippingCenter() {
               </div>
 
               <div className="flex border-b border-slate-100 bg-slate-50/30 shrink-0">
-                {(['overview', 'tracking', 'packages', 'logistics'] as const).map(tab => (
+                {((): Array<'overview' | 'tracking' | 'packages' | 'logistics' | 'packing'> => {
+                  const base: Array<'overview' | 'tracking' | 'packages' | 'logistics' | 'packing'> = ['overview', 'tracking', 'packages', 'logistics'];
+                  // Phase 3 Pass #10 — Packing sub-tab is plan + perm gated.
+                  // Insert after Packages so the operator's mental model goes
+                  // overview → tracking → packages → packing → logistics.
+                  if (packingFeatureEnabled) base.splice(3, 0, 'packing');
+                  return base;
+                })().map(tab => (
                   <button key={tab} onClick={() => { setDetailTab(tab); setShowTestTrackerMenu(false); }} className={`flex-1 py-3.5 text-[10px] font-black uppercase tracking-widest transition-all ${detailTab === tab ? 'text-primary border-b-2 border-primary bg-white/50' : 'text-slate-400 hover:text-slate-600'}`}>
-                    {tab === 'overview' ? 'Overview' : tab === 'tracking' ? 'Tracking & Events' : tab === 'packages' ? 'Packages' : 'Logistics'}
+                    {tab === 'overview' ? 'Overview' : tab === 'tracking' ? 'Tracking & Events' : tab === 'packages' ? 'Packages' : tab === 'packing' ? 'Packing' : 'Logistics'}
                   </button>
                 ))}
               </div>
@@ -8079,6 +8208,450 @@ export default function ShippingCenter() {
                       </div>
                     )}
                   </>
+                )}
+
+                {/* Phase 3 Pass #10 — Packing Workflows. Plan + perm gated.
+                    Renders a cohesive Packing surface inside the shipment
+                    detail modal (no separate top-level page) so the
+                    operator's flow stays inside the shipment they already
+                    opened. The mutators in StoreLocalState handle the
+                    audit trail; the UI here translates operator actions
+                    into mutator calls and fires the matching observational
+                    automation triggers AFTER the mutator runs. */}
+                {detailTab === 'packing' && packingFeatureEnabled && (() => {
+                  const ps: PackingStatus = selectedShip.packingStatus || 'not_started';
+                  const display = PACKING_STATUS_DISPLAY[ps];
+                  const verifications = selectedShip.packingItemVerifications || [];
+                  const pkgVerifications = selectedShip.packingPackageVerifications || [];
+                  const exceptions = selectedShip.packingExceptions || [];
+                  const openExceptions = exceptions.filter(e => !e.resolvedAt);
+                  const resolvedExceptions = exceptions.filter(e => !!e.resolvedAt);
+                  const history = (selectedShip.packingHistory || []).slice().reverse();
+                  const sourceData = extractPackingSourceItems(selectedShip);
+                  const itemsAvailable = sourceData.items !== null;
+                  const allItemsVerified = !itemsAvailable || (sourceData.items as { key: string; name: string; expectedQty: number }[]).every(si => {
+                    const v = verifications.find(x => x.sourceItemKey === si.key);
+                    return !!v && v.verifiedQty >= si.expectedQty;
+                  });
+                  const allPackagesVerified = selectedShip.packages.length > 0 && selectedShip.packages.every(p => {
+                    const v = pkgVerifications.find(x => x.packageId === p.id);
+                    return !!v && v.weightConfirmed && v.dimensionsConfirmed;
+                  });
+                  const meetsPrereqs = openExceptions.length === 0 && allPackagesVerified && allItemsVerified;
+                  // Action permissions, layered. canManagePackingWorkflows enables
+                  // verification + exception creation. canCompletePacking enables
+                  // marking packed. canResolvePackingExceptions enables resolving
+                  // open exceptions. canOverridePackingRequirements enables both
+                  // completing without prereqs AND marking not-required.
+                  const canStart = canManagePackingWorkflows && !isWriteBlocked && (ps === 'not_started' || ps === 'not_required');
+                  const canVerify = canManagePackingWorkflows && !isWriteBlocked && (ps === 'in_progress' || ps === 'exception' || ps === 'not_started');
+                  const canAddException = canManagePackingWorkflows && !isWriteBlocked && (ps === 'in_progress' || ps === 'exception' || ps === 'not_started');
+                  const canCompleteCleanly = canCompletePacking && !isWriteBlocked && meetsPrereqs && (ps === 'in_progress' || ps === 'exception');
+                  const canCompleteWithOverride = canOverridePackingRequirements && !isWriteBlocked && !meetsPrereqs && (ps === 'in_progress' || ps === 'exception' || ps === 'not_started');
+                  const canReopen = canOverridePackingRequirements && !isWriteBlocked && (ps === 'packed' || ps === 'not_required');
+                  const canMarkNotRequired = canOverridePackingRequirements && !isWriteBlocked && openExceptions.length === 0 && (ps === 'not_started' || ps === 'in_progress');
+                  const actor = 'Current User';
+                  const handleStart = () => {
+                    if (!canStart) return;
+                    // Phase 3 Pass #10 correction — only fire the observational
+                    // 'packing_started' trigger if startPacking actually mutated
+                    // state (the mutator no-ops in disallowed lifecycle states).
+                    const startResult = startPacking(selectedShip.id, { actor, note: packingStartNote.trim() || undefined });
+                    if (startResult.ok) {
+                      triggerAutomation(selectedShip, 'packing_started', { packingStatus: 'in_progress', packingStartedBy: actor, packingStartedAt: new Date().toISOString() });
+                    }
+                    setPackingStartNote('');
+                  };
+                  const handleComplete = (override: boolean) => {
+                    if (override && !canCompleteWithOverride) return;
+                    if (!override && !canCompleteCleanly) return;
+                    // Phase 3 Pass #10 correction — pass the source-item
+                    // expectations to the mutator so it can validate items
+                    // were verified before flipping packingStatus to 'packed'.
+                    // Omitted when source items are unavailable (mutator skips
+                    // the check, matching the UI's "N/A" semantics).
+                    const expectedSourceItems = itemsAvailable
+                      ? (sourceData.items as { key: string; expectedQty: number }[]).map(si => ({ key: si.key, expectedQty: si.expectedQty }))
+                      : undefined;
+                    const result = completePackingForShipment(selectedShip.id, {
+                      actor,
+                      note: packingCompleteNote.trim() || undefined,
+                      override,
+                      overrideReason: override ? (packingCompleteNote.trim() || undefined) : undefined,
+                      expectedSourceItems,
+                    });
+                    if (result.ok) {
+                      triggerAutomation(selectedShip, 'packing_completed', { packingStatus: 'packed', packedBy: actor, packedAt: new Date().toISOString() });
+                      setPackingCompleteNote('');
+                      setPackingOverrideMode(false);
+                    }
+                  };
+                  const handleReopen = () => {
+                    if (!canReopen || !packingReopenNote.trim()) return;
+                    reopenPacking(selectedShip.id, { actor, note: packingReopenNote.trim() });
+                    setPackingReopenNote('');
+                    setPackingShowReopen(false);
+                  };
+                  const handleMarkNotRequired = () => {
+                    if (!canMarkNotRequired || !packingNotRequiredNote.trim()) return;
+                    markPackingNotRequired(selectedShip.id, { actor, note: packingNotRequiredNote.trim() });
+                    setPackingNotRequiredNote('');
+                    setPackingShowNotRequired(false);
+                  };
+                  const handleVerifyItem = (key: string, name: string, expectedQty: number) => {
+                    if (!canVerify) return;
+                    const draft = packingItemDraft[key] || { verifiedQty: String(expectedQty), note: '' };
+                    const qty = Math.max(0, parseInt(draft.verifiedQty || '0', 10) || 0);
+                    recordPackingItemVerification(selectedShip.id, {
+                      sourceItemKey: key, name, expectedQty, verifiedQty: qty, actor,
+                      note: draft.note.trim() || undefined,
+                    });
+                    setPackingItemDraft(prev => ({ ...prev, [key]: { verifiedQty: String(qty), note: '' } }));
+                  };
+                  const handleVerifyPackage = (packageId: string) => {
+                    if (!canVerify) return;
+                    const draft = packingPackageDraft[packageId] || { weightConfirmed: false, dimensionsConfirmed: false, note: '' };
+                    recordPackingPackageVerification(selectedShip.id, {
+                      packageId,
+                      weightConfirmed: draft.weightConfirmed,
+                      dimensionsConfirmed: draft.dimensionsConfirmed,
+                      actor,
+                      note: draft.note.trim() || undefined,
+                    });
+                    setPackingPackageDraft(prev => ({ ...prev, [packageId]: { ...draft, note: '' } }));
+                  };
+                  const handleAddException = () => {
+                    if (!canAddException || !packingExceptionDraft.description.trim()) return;
+                    const exId = addPackingException(selectedShip.id, {
+                      type: packingExceptionDraft.type,
+                      description: packingExceptionDraft.description.trim(),
+                      actor,
+                      packageId: packingExceptionDraft.packageId || undefined,
+                      sourceItemKey: packingExceptionDraft.sourceItemKey || undefined,
+                    });
+                    if (exId) {
+                      triggerAutomation(selectedShip, 'packing_exception_created', { packingStatus: 'exception' });
+                    }
+                    setPackingExceptionDraft({ type: 'missing_item', description: '', packageId: '', sourceItemKey: '' });
+                  };
+                  const handleResolveException = (exceptionId: string) => {
+                    // Phase 3 Pass #10 correction — gate by isWriteBlocked too
+                    // (parity with all other packing handlers and with the
+                    // approval / review resolve paths).
+                    if (!canResolvePackingExceptions || isWriteBlocked) return;
+                    const note = (packingResolveDraft[exceptionId] || '').trim();
+                    if (!note) return;
+                    resolvePackingException(selectedShip.id, { exceptionId, actor, resolutionNote: note });
+                    setPackingResolveDraft(prev => { const next = { ...prev }; delete next[exceptionId]; return next; });
+                  };
+
+                  const EXCEPTION_TYPE_LABELS: Record<PackingExceptionType, string> = {
+                    missing_item: 'Missing Item',
+                    quantity_mismatch: 'Quantity Mismatch',
+                    damaged_item: 'Damaged Item',
+                    package_weight_missing: 'Package Weight Missing',
+                    package_dimensions_missing: 'Package Dimensions Missing',
+                    source_item_mismatch: 'Source Item Mismatch',
+                    cannot_verify_contents: 'Cannot Verify Contents',
+                    other: 'Other',
+                  };
+                  const HISTORY_ACTION_LABELS: Record<string, string> = {
+                    started: 'Packing started',
+                    item_verified: 'Item verified',
+                    package_verified: 'Package verified',
+                    exception_created: 'Exception created',
+                    exception_resolved: 'Exception resolved',
+                    completed: 'Packing completed',
+                    reopened: 'Packing reopened',
+                    override_used: 'Override used',
+                  };
+
+                  return (
+                    <div className="space-y-5">
+                      {/* Status header */}
+                      <div className={`rounded-2xl border p-5 ${display.chipClass.replace('text-', 'bg-').split(' ')[0]}/20 border-slate-100`}>
+                        <div className="flex items-start justify-between gap-4 flex-wrap">
+                          <div className="flex items-center gap-3">
+                            <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${display.chipClass}`}>
+                              <span className="material-symbols-outlined text-lg">{display.icon}</span>
+                            </div>
+                            <div>
+                              <p className={`text-[10px] font-black uppercase tracking-widest ${display.chipClass.split(' ').filter(c => c.startsWith('text-')).join(' ')}`}>{display.label}</p>
+                              <p className="text-xs text-slate-500 mt-0.5">
+                                {selectedShip.packingStartedAt && <>Started {new Date(selectedShip.packingStartedAt).toLocaleString()} by {selectedShip.packingStartedBy || 'unknown'}</>}
+                                {!selectedShip.packingStartedAt && ps === 'not_started' && <>No packing activity yet.</>}
+                                {ps === 'packed' && selectedShip.packedAt && <> · Packed {new Date(selectedShip.packedAt).toLocaleString()} by {selectedShip.packedBy || 'unknown'}</>}
+                                {ps === 'not_required' && <>This shipment was marked as not requiring a packing workflow.</>}
+                              </p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            {ps === 'not_started' && canStart && (
+                              <div className="flex items-center gap-2">
+                                <input type="text" value={packingStartNote} onChange={e => setPackingStartNote(e.target.value)} placeholder="Optional note" className="px-3 py-2 border border-slate-200 rounded-xl text-xs w-44" />
+                                <button onClick={handleStart} className="px-4 py-2 bg-amber-500 text-white font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-amber-600 transition-all">Start Packing</button>
+                              </div>
+                            )}
+                            {canReopen && (
+                              <button onClick={() => setPackingShowReopen(v => !v)} className="px-3 py-2 bg-white border border-slate-200 text-slate-600 font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-slate-50">{packingShowReopen ? 'Cancel' : 'Reopen Packing'}</button>
+                            )}
+                            {canMarkNotRequired && (
+                              <button onClick={() => setPackingShowNotRequired(v => !v)} className="px-3 py-2 bg-white border border-slate-200 text-slate-600 font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-slate-50">{packingShowNotRequired ? 'Cancel' : 'Mark Not Required'}</button>
+                            )}
+                          </div>
+                        </div>
+                        {ps === 'not_started' && !canStart && canViewPackingWorkflows && (
+                          <p className="text-[11px] text-slate-400 italic mt-3">You don't have permission to start packing on this shipment.</p>
+                        )}
+                        {packingShowReopen && canReopen && (
+                          <div className="mt-4 pt-4 border-t border-slate-100 flex items-center gap-2">
+                            <input type="text" value={packingReopenNote} onChange={e => setPackingReopenNote(e.target.value)} placeholder="Reopen reason (required)" className="flex-1 px-3 py-2 border border-slate-200 rounded-xl text-xs" />
+                            <button onClick={handleReopen} disabled={!packingReopenNote.trim()} className="px-4 py-2 bg-orange-500 text-white font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-orange-600 disabled:bg-slate-200 disabled:text-slate-400 transition-all">Confirm Reopen</button>
+                          </div>
+                        )}
+                        {packingShowNotRequired && canMarkNotRequired && (
+                          <div className="mt-4 pt-4 border-t border-slate-100 flex items-center gap-2">
+                            <input type="text" value={packingNotRequiredNote} onChange={e => setPackingNotRequiredNote(e.target.value)} placeholder="Reason for marking not required (required)" className="flex-1 px-3 py-2 border border-slate-200 rounded-xl text-xs" />
+                            <button onClick={handleMarkNotRequired} disabled={!packingNotRequiredNote.trim()} className="px-4 py-2 bg-slate-500 text-white font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-slate-600 disabled:bg-slate-200 disabled:text-slate-400 transition-all">Confirm</button>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Item / contents verification */}
+                      <div className="rounded-2xl border border-slate-100 p-5">
+                        <div className="flex items-center justify-between mb-3">
+                          <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-1.5">
+                            <span className="material-symbols-outlined text-sm">checklist</span>Item / Contents Verification
+                          </p>
+                          <span className="text-[10px] text-slate-400">{sourceData.sourceLabel}</span>
+                        </div>
+                        {!itemsAvailable && (
+                          <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-start gap-2">
+                            <span className="material-symbols-outlined text-amber-500 text-sm mt-0.5">info</span>
+                            <div className="text-xs text-amber-700">
+                              <p className="font-black">Source contents not available for verification</p>
+                              <p className="mt-0.5">{(sourceData as { reason: string }).reason} You can still verify packages and create exceptions below.</p>
+                            </div>
+                          </div>
+                        )}
+                        {itemsAvailable && (
+                          <div className="space-y-2">
+                            {(sourceData.items as { key: string; name: string; expectedQty: number }[]).map(si => {
+                              const v = verifications.find(x => x.sourceItemKey === si.key);
+                              const draft = packingItemDraft[si.key] ?? { verifiedQty: v ? String(v.verifiedQty) : String(si.expectedQty), note: '' };
+                              const isVerified = !!v && v.verifiedQty >= si.expectedQty;
+                              const isPartial = !!v && v.verifiedQty > 0 && v.verifiedQty < si.expectedQty;
+                              return (
+                                <div key={si.key} className={`rounded-xl border p-3 ${isVerified ? 'bg-emerald-50/30 border-emerald-100' : isPartial ? 'bg-amber-50/30 border-amber-100' : 'bg-white border-slate-100'}`}>
+                                  <div className="flex items-center justify-between gap-3 flex-wrap">
+                                    <div className="flex items-center gap-2 flex-1 min-w-0">
+                                      <span className={`material-symbols-outlined text-sm ${isVerified ? 'text-emerald-500' : isPartial ? 'text-amber-500' : 'text-slate-300'}`}>{isVerified ? 'check_circle' : isPartial ? 'pending' : 'radio_button_unchecked'}</span>
+                                      <div className="min-w-0">
+                                        <p className="text-xs font-black text-slate-700 truncate">{si.name}</p>
+                                        <p className="text-[10px] text-slate-400">Expected qty: {si.expectedQty}{v && v.verifiedAt && <> · Last verified {new Date(v.verifiedAt).toLocaleString()} by {v.verifiedBy || 'unknown'}</>}</p>
+                                      </div>
+                                    </div>
+                                    {canVerify && (
+                                      <div className="flex items-center gap-2">
+                                        <input
+                                          type="number" min={0} value={draft.verifiedQty}
+                                          onChange={e => setPackingItemDraft(prev => ({ ...prev, [si.key]: { ...draft, verifiedQty: e.target.value } }))}
+                                          className="w-16 px-2 py-1 border border-slate-200 rounded-lg text-xs text-center"
+                                        />
+                                        <input
+                                          type="text" value={draft.note}
+                                          onChange={e => setPackingItemDraft(prev => ({ ...prev, [si.key]: { ...draft, note: e.target.value } }))}
+                                          placeholder="Note (optional)" className="px-2 py-1 border border-slate-200 rounded-lg text-xs w-40"
+                                        />
+                                        <button onClick={() => handleVerifyItem(si.key, si.name, si.expectedQty)} className="px-3 py-1.5 bg-emerald-500 text-white font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-emerald-600 transition-all">Verify</button>
+                                      </div>
+                                    )}
+                                  </div>
+                                  {v?.note && <p className="text-[10px] text-slate-500 mt-1.5 italic">"{v.note}"</p>}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Package verification */}
+                      <div className="rounded-2xl border border-slate-100 p-5">
+                        <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-1.5 mb-3">
+                          <span className="material-symbols-outlined text-sm">inventory_2</span>Package Verification
+                        </p>
+                        {selectedShip.packages.length === 0 && (
+                          <p className="text-xs text-slate-400 italic">No packages defined on this shipment yet — add packages on the Packages tab first.</p>
+                        )}
+                        <div className="space-y-2">
+                          {selectedShip.packages.map((pkg, i) => {
+                            const v = pkgVerifications.find(x => x.packageId === pkg.id);
+                            const draft = packingPackageDraft[pkg.id] ?? { weightConfirmed: !!v?.weightConfirmed, dimensionsConfirmed: !!v?.dimensionsConfirmed, note: '' };
+                            const isFull = !!v && v.weightConfirmed && v.dimensionsConfirmed;
+                            const isPartial = !!v && (v.weightConfirmed || v.dimensionsConfirmed) && !isFull;
+                            const hasWeight = !!pkg.weight;
+                            const hasDims = !!(pkg.length && pkg.width && pkg.height);
+                            return (
+                              <div key={pkg.id} className={`rounded-xl border p-3 ${isFull ? 'bg-emerald-50/30 border-emerald-100' : isPartial ? 'bg-amber-50/30 border-amber-100' : 'bg-white border-slate-100'}`}>
+                                <div className="flex items-center justify-between gap-3 flex-wrap">
+                                  <div className="flex items-center gap-2 min-w-0">
+                                    <span className={`material-symbols-outlined text-sm ${isFull ? 'text-emerald-500' : isPartial ? 'text-amber-500' : 'text-slate-300'}`}>{isFull ? 'check_circle' : isPartial ? 'pending' : 'radio_button_unchecked'}</span>
+                                    <div>
+                                      <p className="text-xs font-black text-slate-700">Package {i + 1}</p>
+                                      <p className="text-[10px] text-slate-400">
+                                        {hasWeight ? `${pkg.weight} ${pkg.weightUnit || 'lb'}` : 'no weight'} · {hasDims ? `${pkg.length}x${pkg.width}x${pkg.height} ${pkg.dimensionUnit || 'in'}` : 'no dims'}
+                                        {v?.verifiedAt && <> · Verified {new Date(v.verifiedAt).toLocaleString()} by {v.verifiedBy || 'unknown'}</>}
+                                      </p>
+                                    </div>
+                                  </div>
+                                  {canVerify && (
+                                    <div className="flex items-center gap-3 flex-wrap">
+                                      <label className="flex items-center gap-1.5 text-[11px] text-slate-600">
+                                        <input type="checkbox" disabled={!hasWeight} checked={draft.weightConfirmed} onChange={e => setPackingPackageDraft(prev => ({ ...prev, [pkg.id]: { ...draft, weightConfirmed: e.target.checked } }))} />
+                                        Weight {hasWeight ? 'OK' : '(missing)'}
+                                      </label>
+                                      <label className="flex items-center gap-1.5 text-[11px] text-slate-600">
+                                        <input type="checkbox" disabled={!hasDims} checked={draft.dimensionsConfirmed} onChange={e => setPackingPackageDraft(prev => ({ ...prev, [pkg.id]: { ...draft, dimensionsConfirmed: e.target.checked } }))} />
+                                        Dims {hasDims ? 'OK' : '(missing)'}
+                                      </label>
+                                      <input type="text" value={draft.note} onChange={e => setPackingPackageDraft(prev => ({ ...prev, [pkg.id]: { ...draft, note: e.target.value } }))} placeholder="Note (optional)" className="px-2 py-1 border border-slate-200 rounded-lg text-xs w-32" />
+                                      <button onClick={() => handleVerifyPackage(pkg.id)} className="px-3 py-1.5 bg-emerald-500 text-white font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-emerald-600 transition-all">Verify</button>
+                                    </div>
+                                  )}
+                                </div>
+                                {v?.note && <p className="text-[10px] text-slate-500 mt-1.5 italic">"{v.note}"</p>}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Exceptions */}
+                      <div className="rounded-2xl border border-slate-100 p-5">
+                        <div className="flex items-center justify-between mb-3">
+                          <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-1.5">
+                            <span className="material-symbols-outlined text-sm">error</span>Packing Exceptions
+                          </p>
+                          {openExceptions.length > 0 && <span className="px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md bg-rose-100 text-rose-700 border border-rose-200">{openExceptions.length} open</span>}
+                        </div>
+                        {exceptions.length === 0 && <p className="text-xs text-slate-400 italic">No packing exceptions on this shipment.</p>}
+                        <div className="space-y-2">
+                          {openExceptions.map(ex => {
+                            const draftNote = packingResolveDraft[ex.id] || '';
+                            return (
+                              <div key={ex.id} className="rounded-xl border border-rose-100 bg-rose-50/30 p-3">
+                                <div className="flex items-center justify-between gap-2 flex-wrap">
+                                  <div>
+                                    <p className="text-xs font-black text-rose-700">[{EXCEPTION_TYPE_LABELS[ex.type]}] {ex.description}</p>
+                                    <p className="text-[10px] text-rose-600 mt-0.5">Created {new Date(ex.createdAt).toLocaleString()} by {ex.createdBy}{ex.packageId && <> · Package: {ex.packageId}</>}{ex.sourceItemKey && <> · Item: {ex.sourceItemKey}</>}</p>
+                                  </div>
+                                </div>
+                                {canResolvePackingExceptions && (
+                                  <div className="mt-2 pt-2 border-t border-rose-100 flex items-center gap-2">
+                                    <input type="text" value={draftNote} onChange={e => setPackingResolveDraft(prev => ({ ...prev, [ex.id]: e.target.value }))} placeholder="Resolution note (required)" className="flex-1 px-2 py-1.5 border border-slate-200 rounded-lg text-xs" />
+                                    <button onClick={() => handleResolveException(ex.id)} disabled={!draftNote.trim()} className="px-3 py-1.5 bg-emerald-500 text-white font-black text-[10px] uppercase tracking-widest rounded-lg hover:bg-emerald-600 disabled:bg-slate-200 disabled:text-slate-400 transition-all">Resolve</button>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                          {resolvedExceptions.map(ex => (
+                            <div key={ex.id} className="rounded-xl border border-emerald-100 bg-emerald-50/20 p-3">
+                              <p className="text-xs font-black text-emerald-700">[{EXCEPTION_TYPE_LABELS[ex.type]}] {ex.description}</p>
+                              <p className="text-[10px] text-emerald-600 mt-0.5">Resolved {ex.resolvedAt ? new Date(ex.resolvedAt).toLocaleString() : ''} by {ex.resolvedBy || 'unknown'}{ex.resolutionNote ? ` — "${ex.resolutionNote}"` : ''}</p>
+                            </div>
+                          ))}
+                        </div>
+                        {canAddException && (
+                          <div className="mt-4 pt-4 border-t border-slate-100 space-y-2">
+                            <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Create Exception</p>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                              <select value={packingExceptionDraft.type} onChange={e => setPackingExceptionDraft(prev => ({ ...prev, type: e.target.value as PackingExceptionType }))} className="px-3 py-2 border border-slate-200 rounded-xl text-xs">
+                                {(Object.keys(EXCEPTION_TYPE_LABELS) as PackingExceptionType[]).map(t => <option key={t} value={t}>{EXCEPTION_TYPE_LABELS[t]}</option>)}
+                              </select>
+                              <input type="text" value={packingExceptionDraft.description} onChange={e => setPackingExceptionDraft(prev => ({ ...prev, description: e.target.value }))} placeholder="Description (required)" className="px-3 py-2 border border-slate-200 rounded-xl text-xs" />
+                              <select value={packingExceptionDraft.packageId} onChange={e => setPackingExceptionDraft(prev => ({ ...prev, packageId: e.target.value }))} className="px-3 py-2 border border-slate-200 rounded-xl text-xs">
+                                <option value="">No specific package</option>
+                                {selectedShip.packages.map((p, i) => <option key={p.id} value={p.id}>Package {i + 1}</option>)}
+                              </select>
+                              <select value={packingExceptionDraft.sourceItemKey} onChange={e => setPackingExceptionDraft(prev => ({ ...prev, sourceItemKey: e.target.value }))} className="px-3 py-2 border border-slate-200 rounded-xl text-xs" disabled={!itemsAvailable}>
+                                <option value="">No specific item</option>
+                                {itemsAvailable && (sourceData.items as { key: string; name: string; expectedQty: number }[]).map(si => <option key={si.key} value={si.key}>{si.name}</option>)}
+                              </select>
+                            </div>
+                            <button onClick={handleAddException} disabled={!packingExceptionDraft.description.trim()} className="px-4 py-2 bg-rose-500 text-white font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-rose-600 disabled:bg-slate-200 disabled:text-slate-400 transition-all">Create Exception</button>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Completion */}
+                      {(ps === 'in_progress' || ps === 'exception' || ps === 'not_started') && (
+                        <div className="rounded-2xl border border-slate-100 p-5">
+                          <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-1.5 mb-3">
+                            <span className="material-symbols-outlined text-sm">task_alt</span>Complete Packing
+                          </p>
+                          <div className="space-y-2 text-xs">
+                            <div className="flex items-center gap-2">
+                              <span className={`material-symbols-outlined text-sm ${allItemsVerified ? 'text-emerald-500' : 'text-slate-300'}`}>{allItemsVerified ? 'check_circle' : 'radio_button_unchecked'}</span>
+                              <span className={allItemsVerified ? 'text-emerald-700' : 'text-slate-500'}>All source items verified {!itemsAvailable && '(N/A — source items unavailable)'}</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className={`material-symbols-outlined text-sm ${allPackagesVerified ? 'text-emerald-500' : 'text-slate-300'}`}>{allPackagesVerified ? 'check_circle' : 'radio_button_unchecked'}</span>
+                              <span className={allPackagesVerified ? 'text-emerald-700' : 'text-slate-500'}>All packages verified (weight + dimensions)</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className={`material-symbols-outlined text-sm ${openExceptions.length === 0 ? 'text-emerald-500' : 'text-rose-500'}`}>{openExceptions.length === 0 ? 'check_circle' : 'error'}</span>
+                              <span className={openExceptions.length === 0 ? 'text-emerald-700' : 'text-rose-700'}>No open exceptions ({openExceptions.length} open)</span>
+                            </div>
+                          </div>
+                          <div className="mt-4 pt-4 border-t border-slate-100 space-y-2">
+                            <input type="text" value={packingCompleteNote} onChange={e => setPackingCompleteNote(e.target.value)} placeholder={packingOverrideMode ? 'Override reason (required)' : 'Completion note (optional)'} className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs" />
+                            <div className="flex items-center gap-2 flex-wrap">
+                              {canCompleteCleanly && (
+                                <button onClick={() => handleComplete(false)} className="px-4 py-2 bg-emerald-500 text-white font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-emerald-600 transition-all">Mark Packed</button>
+                              )}
+                              {!canCompleteCleanly && canCompletePacking && !canCompleteWithOverride && (
+                                <button disabled className="px-4 py-2 bg-slate-200 text-slate-400 font-black text-[10px] uppercase tracking-widest rounded-xl cursor-not-allowed" title="Resolve all prerequisites first, or have a manager use override">Mark Packed</button>
+                              )}
+                              {canCompleteWithOverride && (
+                                <button onClick={() => { setPackingOverrideMode(true); if (packingCompleteNote.trim()) handleComplete(true); }} disabled={packingOverrideMode && !packingCompleteNote.trim()} className="px-4 py-2 bg-orange-500 text-white font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-orange-600 disabled:bg-slate-200 disabled:text-slate-400 transition-all">{packingOverrideMode ? 'Confirm Override' : 'Override & Mark Packed'}</button>
+                              )}
+                              {canCompletePacking && selectedShip.status !== 'Packed' && ps === 'in_progress' && allPackagesVerified && allItemsVerified && openExceptions.length === 0 && (
+                                <span className="text-[10px] text-slate-400 italic">After marking packed, you can also move shipment status to "Packed" from the Overview tab.</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* History */}
+                      <div className="rounded-2xl border border-slate-100 p-5">
+                        <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-1.5 mb-3">
+                          <span className="material-symbols-outlined text-sm">history</span>Packing History
+                        </p>
+                        {history.length === 0 && <p className="text-xs text-slate-400 italic">No packing actions recorded yet.</p>}
+                        <div className="space-y-2">
+                          {history.map(h => (
+                            <div key={h.id} className="flex items-start gap-3 py-2 border-b border-slate-50 last:border-0">
+                              <span className="material-symbols-outlined text-slate-400 text-sm mt-0.5">history</span>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-xs font-black text-slate-700">{HISTORY_ACTION_LABELS[h.action] || h.action}</p>
+                                <p className="text-[10px] text-slate-500">{new Date(h.at).toLocaleString()} · {h.actor}</p>
+                                {h.note && <p className="text-[11px] text-slate-600 italic mt-0.5">"{h.note}"</p>}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+                {detailTab === 'packing' && !packingFeatureEnabled && (
+                  <div className="rounded-2xl border border-slate-100 bg-slate-50/40 p-8 text-center">
+                    <span className="material-symbols-outlined text-3xl text-slate-300 mb-2">inventory_2</span>
+                    <p className="text-sm font-black text-slate-500">Packing Workflows not available</p>
+                    <p className="text-xs text-slate-400 mt-1">Your plan or role doesn't include the Packing Workflows surface.</p>
+                  </div>
                 )}
               </div>
             </motion.div>

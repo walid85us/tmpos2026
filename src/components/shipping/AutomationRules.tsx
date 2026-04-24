@@ -39,6 +39,11 @@ const TRIGGER_LABELS_BY_TYPE: Record<AutomationTriggerType, string> = {
   tracking_synced: 'Tracking is synced',
   return_shipment_created: 'A return shipment is created',
   pre_label_purchase: 'A carrier label is about to be purchased',
+  // Phase 3 Pass #10 — packing observational triggers. Used by flag_note
+  // and require_review purposes; not eligible for guardrail/blocking.
+  packing_started: 'Packing is started on a shipment',
+  packing_completed: 'Packing is completed on a shipment',
+  packing_exception_created: 'A packing exception is created',
 };
 
 const ACTION_LABELS_BY_TYPE: Record<AutomationActionType, string> = {
