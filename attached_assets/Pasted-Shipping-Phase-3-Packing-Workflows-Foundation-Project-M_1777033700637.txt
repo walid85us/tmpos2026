@@ -1,0 +1,393 @@
+Shipping Phase 3 — Packing Workflows Foundation
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated implementation pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen closed shipping workstreams unless a real regression is found.
+Do not implement SLA Optimization or Carrier Scorecards in this pass.
+Do not implement Customs Docs or Insurance Rules in this pass.
+Keep those items recorded as future planned improvements only.
+
+Implement the next active Shipping Phase 3 workstream:
+1) Packing Workflows foundation
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior shipping operations architect
+- Senior warehouse / fulfillment workflow architect
+- Senior RBAC / entitlement systems architect
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Think through the correct operational workflow before coding.
+Do not make a shallow UI-only packing checklist.
+Build a practical, auditable, permission-aware packing foundation.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- Ref.txt
+- replit.md
+
+Use them as continuity and source-of-truth documents.
+
+==================================================
+PRESERVE WITHOUT BREAKING
+==================================================
+
+Preserve exactly unless this workstream explicitly requires touching it:
+- current design baseline
+- auth behavior
+- preview-mode safety
+- live System Owner plan gating
+- store permission gating
+- provider/manual mode split
+- shipping lifecycle integrity
+- existing shipping core flow
+- reverse-logistics flow
+- Shipping Phase 2 completed behavior
+- Carrier Analytics foundation
+- Automation Rules foundation
+- selected-rate approval guardrails
+- Batch Labels foundation
+- approval/requester/approver workflow
+- entitlement propagation
+- Shipping Provider permission/hard-disable behavior
+- dynamic sub-permission counts
+- enabled-state non-regression
+
+==================================================
+WORKSTREAM GOAL
+==================================================
+
+Add a solid Packing Workflows foundation inside Shipping Center.
+
+The goal is to support a practical packing process before dispatch:
+- verify shipment contents
+- verify packages
+- record packing status
+- prevent accidental dispatch/label workflows when packing is incomplete where required
+- support audit trail
+- prepare for future SLA optimization and carrier scorecards
+
+Do NOT build a full warehouse management system.
+Do NOT fake barcode scanning if not truly implemented.
+Do NOT break existing label, pickup, return, batch label, or automation flows.
+
+==================================================
+PART A — PACKING WORKFLOW SURFACE
+==================================================
+
+Required:
+Add a Packing workflow surface inside Shipping Center.
+
+It may be:
+- a Packing tab,
+- a section inside shipment detail,
+- or a native workflow area that fits current IA.
+
+Required:
+- must feel native to current Shipping Center design
+- must not create a disconnected mini-app
+- must support both outbound and return shipments where appropriate
+
+==================================================
+PART B — PACKING STATE MODEL
+==================================================
+
+Required:
+Introduce a clear packing state model.
+
+At minimum support:
+- not_started
+- in_progress
+- packed
+- exception
+- not_required if applicable
+
+Required fields:
+- packingStatus
+- packedBy
+- packedAt
+- packingStartedBy
+- packingStartedAt
+- packingNotes
+- packingExceptions
+- package verification state
+- item verification state where shipment items exist
+- audit/history events
+
+Required:
+- packing state must be visible in shipment detail
+- packing state should be visible in shipment list where relevant
+- packing state must be auditable
+
+==================================================
+PART C — ITEM / CONTENT VERIFICATION
+==================================================
+
+Required:
+Packing workflow should verify shipment contents when shipment items exist.
+
+At minimum:
+- show expected shipment items / source items where available
+- allow operator to mark items as packed/verified
+- support quantity verification where quantity exists
+- show missing / mismatch / exception state
+- do not invent source items where no source data exists
+- if source contents are unavailable, show truthful “contents not available from source” or manual packing note state
+
+Required:
+- preserve link to invoice / repair / return / transfer source where available
+- avoid disconnected duplicate data if source items already exist
+
+==================================================
+PART D — PACKAGE VERIFICATION
+==================================================
+
+Required:
+Packing workflow must verify packages.
+
+At minimum:
+- show existing shipment packages
+- confirm package count
+- confirm package weight/dimensions where available
+- allow package-level packing notes
+- flag missing package information
+- prevent marking as packed if package data is incomplete, unless authorized override or exception path exists
+
+Important:
+Do not break existing package management or label purchase prerequisites.
+
+==================================================
+PART E — PACKED STATUS / SHIPPING LIFECYCLE RELATIONSHIP
+==================================================
+
+Required:
+Define how Packing Workflow relates to existing shipment status.
+
+Current shipping lifecycle already uses statuses like:
+- Draft
+- Ready
+- Label Created
+- Packed
+- Dispatched
+- In Transit
+- Delivered
+- Cancelled
+
+Required:
+- packing workflow must align with existing Packed status
+- marking packing complete should move or support movement to Packed only when appropriate
+- do not collapse Label Created / Packed / Dispatched
+- preserve the already-fixed truth that Dispatched is not In Transit
+- do not allow packing workflow to silently skip required shipping lifecycle states
+
+Acceptance logic:
+- shipment should not be considered operationally packed until packing workflow is complete
+- if shipment status is already Packed from prior flows, packing UI must reflect that coherently
+- if packing is incomplete, show a clear not-packed state
+
+==================================================
+PART F — PACKING EXCEPTION WORKFLOW
+==================================================
+
+Required:
+Support packing exceptions.
+
+Examples:
+- missing item
+- quantity mismatch
+- package weight missing
+- package dimensions missing
+- damaged item
+- source item mismatch
+- cannot verify contents
+
+Required:
+- exceptions must be visible
+- exceptions must be auditable
+- exception should block or warn before dispatch where appropriate
+- authorized users should be able to resolve packing exceptions with note
+- do not hide exceptions after resolution; keep history
+
+==================================================
+PART G — PERMISSIONS / PLAN GATING
+==================================================
+
+Required:
+Add Packing Workflows as a distinct shipping sub-feature if surfaced in System Owner Plans & Features.
+
+Required:
+- add coherent Store Permissions Matrix treatment
+- permissions should be explicit and practical, such as:
+  - view_packing_workflows
+  - manage_packing_workflows
+  - complete_packing
+  - resolve_packing_exceptions
+  - override_packing_requirements if needed
+
+Follow the current entitlement rules:
+- plan decides whether feature exists
+- role decides who can use it
+- linked permissions disappear when feature is plan-disabled
+- role permissions must not resurrect plan-disabled features
+
+==================================================
+PART H — INTEGRATION WITH AUTOMATION + BATCH LABELS
+==================================================
+
+Required:
+Packing Workflows should integrate coherently with existing Phase 3 foundations.
+
+Automation Rules:
+- allow packing-related events or conditions only if supportable now
+- examples:
+  - packing started
+  - packing completed
+  - packing exception created
+- do not overbuild automation if not needed, but design for safe future extension
+
+Batch Labels:
+- batch label workflow should not be broken
+- where appropriate, batch candidates can show packing state
+- do not require packing before label purchase unless explicitly designed and documented
+- packing should mainly protect dispatch/fulfillment readiness unless current app architecture supports more
+
+==================================================
+PART I — AUDITABILITY
+==================================================
+
+Required:
+Every major packing action must be auditable:
+- packing started
+- item verified
+- package verified
+- exception created
+- exception resolved
+- packing completed
+- packing reopened if supported
+- override used if supported
+
+Audit entries should include:
+- user
+- timestamp
+- action
+- notes/reason where relevant
+
+==================================================
+PART J — DO NOT FAKE WHAT IS NOT BUILT
+==================================================
+
+Required:
+Do not pretend to support:
+- live barcode scanning unless implemented
+- warehouse bin scanning unless implemented
+- carrier manifesting unless implemented
+- full WMS workflows unless implemented
+- SLA optimization unless implemented
+- carrier scorecards unless implemented
+
+Show truthful states like:
+- manual verification
+- source items unavailable
+- package data incomplete
+- packing exception pending
+- packing completed
+
+==================================================
+PART K — OUT OF SCOPE
+==================================================
+
+Do NOT implement:
+- SLA Optimization
+- Carrier Scorecards
+- Customs Docs
+- Insurance Rules
+- full warehouse management
+- barcode hardware scanning
+- carrier manifests
+- unrelated add-on governance redesign
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Packing Workflow foundation exists inside Shipping Center
+2) Packing state is visible and auditable
+3) Shipment items can be verified where source data exists
+4) Packages can be verified and incomplete package data is handled truthfully
+5) Packing completion aligns with existing Packed status without breaking lifecycle
+6) Packing exceptions are visible, resolvable, and auditable
+7) Plan/permission gating is coherent
+8) Automation and Batch Labels are not regressed
+9) Existing shipping and reverse-logistics flows remain intact
+10) Out-of-scope future items remain unimplemented
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Design packing state model and lifecycle relationship
+2) Implement Packing surface inside Shipping Center
+3) Implement item/content verification
+4) Implement package verification
+5) Implement packing completion and exception workflow
+6) Wire plan/permission/gating treatment
+7) Check Automation and Batch Label non-regression
+8) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Packing Workflow scope
+- packing state model
+- item/content verification behavior
+- package verification behavior
+- Packed status relationship
+- packing exception workflow
+- audit behavior
+- plan/permission/gating treatment
+- relationship to Automation Rules and Batch Labels
+- future out-of-scope items:
+  - SLA Optimization
+  - Carrier Scorecards
+  - Customs Docs
+  - Insurance Rules
+  - barcode/WMS/manifesting
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Packing State Model
+3. Packing Surface + Workflow
+4. Item / Content Verification
+5. Package Verification
+6. Packing Exceptions + Resolution
+7. Plan / Permission / Gating Updates
+8. Automation / Batch Labels Non-Regression
+9. Files Changed
+10. Documentation Updated
+11. Non-Regression Notes
