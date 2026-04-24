@@ -5436,14 +5436,29 @@ export default function ShippingCenter() {
                                       <p className={`text-[11px] mt-1 italic ${tone.sub}`}>"{rn.requesterNote}"</p>
                                     )}
                                   </div>
-                                  {canResolve && !isWriteBlocked && (
-                                    <button
-                                      onClick={() => { setReviewResolveTarget(selectedShip.id); setReviewResolveNote(''); }}
-                                      className={`px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg shrink-0 text-white ${isApprovalPending ? 'bg-sky-600 hover:bg-sky-700' : isBlockPending ? 'bg-rose-600 hover:bg-rose-700' : 'bg-emerald-600 hover:bg-emerald-700'}`}
-                                    >
-                                      {isApprovalPending ? 'Review Request' : isBlockPending ? 'Resolve Block' : 'Resolve'}
-                                    </button>
-                                  )}
+                                  {canResolve && !isWriteBlocked && (() => {
+                                    // Phase 3 correction #9 — role-aware
+                                    // detail-panel CTA. Approver sees
+                                    // "Review Approval" (action framing),
+                                    // requester sees "Review Request"
+                                    // (their outstanding request). Same
+                                    // modal opens; the modal itself is
+                                    // also role-aware.
+                                    const isApprover = canApproveAutomationExceptions || canOverrideAutomationGuardrails;
+                                    const ctaLabel = isApprovalPending
+                                      ? (isApprover ? 'Review Approval' : 'Review Request')
+                                      : isBlockPending
+                                        ? (isApprover ? 'Review Approval' : 'Review Request')
+                                        : 'Resolve';
+                                    return (
+                                      <button
+                                        onClick={() => { setReviewResolveTarget(selectedShip.id); setReviewResolveNote(''); }}
+                                        className={`px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg shrink-0 text-white ${isApprovalPending ? 'bg-sky-600 hover:bg-sky-700' : isBlockPending ? 'bg-rose-600 hover:bg-rose-700' : 'bg-emerald-600 hover:bg-emerald-700'}`}
+                                      >
+                                        {ctaLabel}
+                                      </button>
+                                    );
+                                  })()}
                                 </div>
                               </div>
                             );
@@ -9360,10 +9375,29 @@ export default function ShippingCenter() {
           const canResolveBasic = canResolveAutomationReviews || canManageAutomationRules || canEditPreDispatch;
           const canApprove = canApproveAutomationExceptions || canOverrideAutomationGuardrails;
           const canOverride = canOverrideAutomationGuardrails;
+          // Phase 3 correction #9 — role-aware modal copy + dismiss-note
+          // validation. The modal opens for both the requester (who can
+          // dismiss/cancel their own request) and the approver (who can
+          // approve/override/dismiss). Until now the title and the note
+          // label were approver-flavoured for everyone, so the requester
+          // saw "Approver Note (optional)" when cancelling their own
+          // request. Now we split copy by viewer role and require a
+          // Request Note from the requester on dismiss.
+          const isApprover = canApprove || canOverride;
+          const isRequesterFlow = (kind === 'approval' || kind === 'block') && !isApprover;
           const accentClass = kind === 'block' ? 'rose' : kind === 'approval' ? 'sky' : 'emerald';
-          const titleLabel = kind === 'block' ? 'Resolve Block'
-            : kind === 'approval' ? 'Resolve Approval'
-            : 'Resolve Review';
+          const titleLabel = kind === 'review'
+            ? 'Resolve Review'
+            : (isApprover ? 'Review Approval' : 'Review Request');
+          const noteLabel = kind === 'review'
+            ? 'Resolution Note (optional)'
+            : (isRequesterFlow ? 'Request Note (required to dismiss)' : 'Approver Note (optional)');
+          const notePlaceholder = isRequesterFlow
+            ? 'Why are you cancelling this request?'
+            : 'What did you check or change?';
+          const noteIsRequiredForDismiss = isRequesterFlow;
+          const noteIsEmpty = reviewResolveNote.trim().length === 0;
+          const dismissBlockedForRequester = noteIsRequiredForDismiss && noteIsEmpty;
           return (
             <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
               <motion.div
@@ -9382,29 +9416,46 @@ export default function ShippingCenter() {
                   <p className="text-amber-800 mt-0.5">{rn.reason || '(no reason recorded)'}</p>
                   <p className="text-[10px] text-amber-600 mt-1">Rule: {rn.ruleName || 'unknown'} · {formatDateTime(rn.markedAt)}</p>
                 </div>
-                {/* Phase 3 correction #5 — surface requester metadata so the
-                    approver sees who/why before approving/denying/overriding. */}
+                {/* Phase 3 correction #5 + #9 — surface requester
+                    metadata. Approver sees "Approval Request" framing
+                    (action context). Requester sees "Your Request"
+                    framing (their own outstanding submission, shown
+                    so they can confirm what they're cancelling). */}
                 {(kind === 'approval' || kind === 'block') && (rn.requestedBy || rn.requesterNote || rn.selectedRateContext) && (
                   <div className="bg-sky-50 border border-sky-200 rounded-xl p-3 text-xs space-y-1">
-                    <p className="font-bold text-sky-700 uppercase tracking-widest text-[10px]">Approval Request</p>
+                    <p className="font-bold text-sky-700 uppercase tracking-widest text-[10px]">{isRequesterFlow ? 'Your Request' : 'Approval Request'}</p>
                     {rn.requestedBy && (
-                      <p className="text-sky-800">Requested by <span className="font-bold">{rn.requestedBy}</span>{rn.requestedAt ? ` on ${formatDateTime(rn.requestedAt)}` : ''}</p>
+                      <p className="text-sky-800">{isRequesterFlow ? 'Submitted' : 'Requested'} by <span className="font-bold">{rn.requestedBy}</span>{rn.requestedAt ? ` on ${formatDateTime(rn.requestedAt)}` : ''}</p>
                     )}
                     {rn.selectedRateContext && (
                       <p className="text-sky-800">Selected rate: <span className="font-bold">{rn.selectedRateContext.carrier} {rn.selectedRateContext.service}</span>{typeof rn.selectedRateContext.cost === 'number' ? ` — $${rn.selectedRateContext.cost.toFixed(2)}` : ''}</p>
                     )}
-                    {rn.requesterNote && <p className="text-sky-800 italic">"{rn.requesterNote}"</p>}
+                    {rn.requesterNote && <p className="text-sky-800 italic">{isRequesterFlow ? 'Your note: ' : ''}"{rn.requesterNote}"</p>}
                   </div>
                 )}
                 <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{(kind === 'approval' || kind === 'block') ? 'Approver Note (optional)' : 'Resolution Note (optional)'}</label>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{noteLabel}</label>
                   <textarea
                     value={reviewResolveNote}
                     onChange={(e) => setReviewResolveNote(e.target.value)}
                     rows={3}
-                    placeholder="What did you check or change?"
-                    className="mt-1 w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-200"
+                    placeholder={notePlaceholder}
+                    className={`mt-1 w-full px-3 py-2 rounded-xl border text-xs focus:outline-none focus:ring-2 ${dismissBlockedForRequester ? 'border-rose-300 focus:ring-rose-200' : 'border-slate-200 focus:ring-emerald-200'}`}
                   />
+                  {/* Phase 3 correction #9 — inline validation hint. The
+                      requester must enter a Request Note to dismiss/
+                      cancel their own pending request, so the audit
+                      trail records why. The hint is informational
+                      until they click Dismiss with an empty field, at
+                      which point it turns into an error message
+                      (handled below on the button click). */}
+                  {isRequesterFlow && (
+                    <p className={`text-[10px] mt-1 ${dismissBlockedForRequester ? 'text-rose-600 font-bold' : 'text-slate-400'}`}>
+                      {dismissBlockedForRequester
+                        ? 'A request note is required to cancel your approval request.'
+                        : 'Required if you cancel this request — recorded in execution history.'}
+                    </p>
+                  )}
                 </div>
                 <div className="flex flex-wrap gap-2 pt-2">
                   <button
@@ -9415,15 +9466,22 @@ export default function ShippingCenter() {
                   </button>
                   {canResolveBasic && (
                     <button
-                      disabled={isWriteBlocked}
+                      disabled={isWriteBlocked || dismissBlockedForRequester}
                       onClick={() => {
                         if (isWriteBlocked) return;
+                        // Phase 3 correction #9 — requester dismiss/cancel
+                        // requires a Request Note so the audit trail and
+                        // execution history capture why the request was
+                        // pulled. Defensive guard in addition to the
+                        // disabled state above.
+                        if (noteIsRequiredForDismiss && reviewResolveNote.trim().length === 0) return;
                         setReviewOutcome(target.id, { resolution: 'dismiss', actor: 'Current User', note: reviewResolveNote.trim() || undefined });
                         setReviewResolveTarget(null); setReviewResolveNote('');
                       }}
-                      className="flex-1 py-2.5 rounded-xl bg-slate-200 text-slate-700 font-black text-[10px] uppercase tracking-widest hover:bg-slate-300 disabled:opacity-50"
+                      title={dismissBlockedForRequester ? 'Enter a Request Note to cancel this approval request.' : undefined}
+                      className="flex-1 py-2.5 rounded-xl bg-slate-200 text-slate-700 font-black text-[10px] uppercase tracking-widest hover:bg-slate-300 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      Dismiss
+                      {isRequesterFlow ? 'Cancel Request' : 'Dismiss'}
                     </button>
                   )}
                   {kind === 'block' && canOverride && (

@@ -1,0 +1,76 @@
+Shipping Phase 3 — Approval Modal Role-Copy + Mandatory Dismiss Note Correction
+
+Scope:
+Strict isolated correction pass.
+Do not redesign the app.
+Do not change the approval lifecycle logic except where required for role-specific copy and dismiss-note validation.
+Do not broaden scope.
+
+Current issue:
+The approval lifecycle and badges are now mostly visible, but the approval modal copy is mixed between requester and approver language.
+
+Observed:
+- requester sees Automation Outcomes and Pending Approval badge correctly
+- clicking Review Request opens a modal
+- modal shows mixed requester/approver language
+- field label says “Approver Note (Optional)” even when requester is dismissing/cancelling their own request
+
+Required correction:
+1) Role-specific wording:
+- requester-facing action/view should say “Review Request”
+- approver-facing action/view should say “Review Approval”
+- requester sees waiting/request language
+- approver sees action/approval language
+
+2) Note label correction:
+- for requester dismissal/cancellation, field label must be “Request Note”
+- do not show “Approver Note” to requester
+- approver decision note can remain “Approver Note” or “Approval Note”
+
+3) Mandatory note on dismiss:
+- when requester dismisses/cancels an approval request, Request Note is required
+- user cannot dismiss without entering a note
+- show clear validation message if empty
+- persist the dismiss/request note in the automation outcome and execution history
+
+4) Preserve permission safety:
+- requester can dismiss/cancel their own pending request only if this is intended by current lifecycle
+- requester cannot approve or override
+- approver can approve/override only with correct permission
+- action buttons remain permission-gated
+
+5) Modal content must be role-aware:
+Requester modal should show:
+- Review Request
+- Pending Approval / waiting for authorized review
+- original request reason/note
+- Request Note required if dismissing/cancelling
+
+Approver modal should show:
+- Review Approval
+- Approval Request / action required
+- requester name
+- requester note
+- selected rate context
+- Approver Note / Approval Note
+- approve / override / deny / dismiss actions based on permission
+
+Acceptance criteria:
+1) Requester does not see “Approver Note” when dismissing/cancelling their own request
+2) Requester sees “Request Note”
+3) Request Note is mandatory for dismiss/cancel
+4) Approver sees “Review Approval”
+5) Requester sees “Review Request”
+6) Requester cannot approve/override
+7) Approver permissions remain enforced
+8) Execution History records dismiss/cancel note truthfully
+9) Existing approval lifecycle remains intact
+
+Output format:
+1. Implementation Status
+2. Role-Specific Modal Copy
+3. Request Note Validation
+4. Permission Safety
+5. Execution History Update
+6. Files Changed
+7. Non-Regression Notes
