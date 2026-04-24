@@ -5195,17 +5195,28 @@ export default function ShippingCenter() {
                       )}
                       {/* Phase 3 correction — automation outcome badges so the
                           flagged state is visible at the row level.
-                          Phase 3 correction #4 — gated by the dedicated
-                          outcomes permission so operators without it see a
-                          clean row even when shipments carry live outcomes.
                           Phase 3 correction #6 — uses the canonical
                           deriveAutomationBadge so requester sees Pending
                           Approval / Approved / Resolved transitions
-                          directly in the list (not just generic Review
-                          Needed), and so the chip matches the detail
-                          panel + execution history exactly. */}
-                      {canViewAutomationOutcomes && (() => {
+                          directly in the list, matching the detail
+                          panel + execution history exactly.
+                          Phase 3 correction #8 — visibility is NO
+                          LONGER gated by view_shipping_automation_
+                          outcomes. Status visibility must be available
+                          to anyone who can see the shipment so the
+                          requester (who typically lacks the outcomes
+                          perm) can see Pending Approval immediately
+                          after submitting. Action buttons remain
+                          perm-gated by their own checks. */}
+                      {(() => {
                         const badge = deriveAutomationBadge(s, automationViewerRoles);
+                        if (s.reviewNeeded && !badge && s.reviewNeeded.state !== 'dismissed') {
+                          // Phase 3 correction #8 — debug warning when a
+                          // shipment carries automation state but no badge
+                          // is rendered, so a silent UI-binding failure
+                          // cannot recur unnoticed.
+                          console.warn('[ShippingCenter] automation state exists but badge not rendered for shipment', s.shipmentNumber, s.reviewNeeded);
+                        }
                         if (!badge) return null;
                         return (
                           <span className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md border flex items-center gap-0.5 ${badge.chipClass}`} title={badge.description}>
@@ -5270,9 +5281,20 @@ export default function ShippingCenter() {
                         approval/review state right next to the shipment
                         number so the requester sees Pending Approval /
                         Approved / Resolved without scrolling into the
-                        Automation Outcomes section. Permission-gated. */}
-                    {canViewAutomationOutcomes && (() => {
+                        Automation Outcomes section.
+                        Phase 3 correction #8 — visibility ungated.
+                        Anyone who can see the shipment must see the
+                        status chip; action buttons remain perm-gated. */}
+                    {(() => {
                       const badge = deriveAutomationBadge(selectedShip, automationViewerRoles);
+                      if (selectedShip.reviewNeeded && !badge && selectedShip.reviewNeeded.state !== 'dismissed') {
+                        console.warn('[ShippingCenter] detail header — automation state exists but badge not rendered for shipment', selectedShip.shipmentNumber, selectedShip.reviewNeeded);
+                      } else if (badge && import.meta.env.DEV) {
+                        // Phase 3 correction #8 — render-time trace so a
+                        // silent UI failure at the detail header cannot
+                        // recur unnoticed. Dev-only to avoid prod noise.
+                        console.debug('[ShippingCenter] detail header badge', selectedShip.shipmentNumber, badge.tone, badge.label);
+                      }
                       if (!badge) return null;
                       return (
                         <span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border flex items-center gap-1 ${badge.chipClass}`} title={badge.description}>
@@ -5283,14 +5305,9 @@ export default function ShippingCenter() {
                   </div>
                   <p className="text-sm text-slate-500">{TYPE_LABELS[selectedShip.type]} · {SOURCE_LABELS[selectedShip.sourceType]} {selectedShip.sourceNumber}</p>
                   {/* Phase 3 correction #6 — one-line plain-language summary
-                      of the automation outcome under the meta line. Reads
-                      naturally for the requester ("Automation approval
-                      pending — waiting for an authorized approver.") and
-                      stays visible after approval ("Automation approval
-                      approved — label purchase exception cleared.") so
-                      the resolved state is auditable without opening
-                      the Outcomes panel. */}
-                  {canViewAutomationOutcomes && (() => {
+                      of the automation outcome under the meta line.
+                      Phase 3 correction #8 — visibility ungated. */}
+                  {(() => {
                     const badge = deriveAutomationBadge(selectedShip, automationViewerRoles);
                     if (!badge) return null;
                     return (
@@ -5340,11 +5357,15 @@ export default function ShippingCenter() {
                       const batched = selectedShip.batchQueueState;
                       const hasAny = !!rn || flags.length > 0 || (prio && prio !== 'normal') || batched || ruleNotes.length > 0 || sysNotes.length > 0;
                       if (!hasAny) return null;
-                      // Phase 3 correction #4 — gate the entire Automation Outcomes
-                      // panel on the new dedicated outcomes permission so an
-                      // operator without it cannot see live per-shipment outcomes
-                      // even when other detail surfaces are visible.
-                      if (!canViewAutomationOutcomes) return null;
+                      // Phase 3 correction #8 — visibility ungated. The
+                      // Automation Outcomes panel content (badge state,
+                      // requester note, rule name, etc.) is shown to
+                      // anyone who can open the shipment. Action buttons
+                      // inside the panel remain perm-gated by canResolve
+                      // (and the resolve modal further gates Approve /
+                      // Override / Dismiss by their own checks), so a
+                      // viewer who lacks action perms still sees the
+                      // status without unlocking actions.
                       const canResolve = canManageAutomationRules || canEditPreDispatch;
                       return (
                         <div className="rounded-2xl border border-indigo-100 bg-indigo-50/30 p-5 space-y-4">

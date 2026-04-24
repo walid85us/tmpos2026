@@ -1,0 +1,159 @@
+Shipping Phase 3 — Approval Badge UI Binding Fix (Hard Correction)
+
+Scope:
+This is NOT a logic change.
+This is NOT a label change.
+This is a UI binding correction.
+
+The previous pass implemented helper logic but failed to render it in the actual UI.
+
+==================================================
+CRITICAL FAILURE
+==================================================
+
+Automation approval state exists in data.
+
+BUT:
+- requester does NOT see any badge
+- shipment list does NOT show pending state
+- shipment detail top does NOT show pending state
+
+This is a UI rendering failure.
+
+DO NOT respond with logic explanation.
+DO NOT respond with helper updates.
+You must physically bind the state into the UI components.
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Make automation outcome state ALWAYS VISIBLE to users in:
+
+1) Shipping Center → Shipment List
+2) Shipment Detail → Top header area
+3) Automation Outcomes panel
+
+==================================================
+PART A — REMOVE INCORRECT VISIBILITY GATING
+==================================================
+
+Required:
+
+DO NOT hide automation badges based on:
+- requester vs approver
+- approval permissions
+- role differences
+
+Only actions are permission-gated.
+STATE IS NEVER HIDDEN.
+
+If user can view shipment → they MUST see:
+- Pending Approval
+- Pending Review
+- Approved / Resolved
+- etc.
+
+==================================================
+PART B — FORCE BADGE RENDERING IN SHIPMENT LIST
+==================================================
+
+Required:
+
+In Shipping Center shipment list:
+
+- Add automation badge column or inline chip
+- ALWAYS render badge when automation outcome exists
+- Use role-specific label:
+  - requester → Pending Approval / Pending Review
+  - approver → Approval Request / Review Request
+
+Critical:
+Do not rely on lazy helper calls that are not used.
+Explicitly bind deriveAutomationBadge() result into row rendering.
+
+==================================================
+PART C — FORCE TOP-LEVEL SHIPMENT DETAIL BADGE
+==================================================
+
+Required:
+
+In shipment detail modal/page:
+
+- Add top-level badge near shipment status/title
+- Must show:
+  - Pending Approval (requester)
+  - Approval Request (approver)
+  - Approved / Resolved after action
+
+This must NOT be hidden behind:
+- collapsible panels
+- Automation Outcomes only
+
+It must be immediately visible.
+
+==================================================
+PART D — AUTOMATION OUTCOMES PANEL ALIGNMENT
+==================================================
+
+Required:
+
+- Panel must show same state as badge
+- Must not drift (no “Approval Request (Blocking)” mismatch)
+- Must use same canonical source
+
+==================================================
+PART E — DEBUG REQUIREMENT (MANDATORY)
+==================================================
+
+Add temporary debug visibility:
+
+- Log badge state to console when rendering shipment row and detail
+- If shipment has automation state but badge not rendering → log warning
+
+Example:
+"Automation state exists but badge not rendered for shipment XYZ"
+
+This ensures no silent failure.
+
+==================================================
+PART F — VERIFY DATA FLOW
+==================================================
+
+Explicitly verify:
+
+- shipment object contains automation outcome state
+- UI components receive it
+- deriveAutomationBadge() is actually called in:
+  - shipment list row
+  - shipment detail header
+
+If not → fix data flow
+
+==================================================
+PART G — ACCEPTANCE CRITERIA
+==================================================
+
+Must be visually confirmed:
+
+1) Requester sees Pending Approval in shipment list
+2) Requester sees Pending Approval in shipment detail top
+3) Approver sees Approval Request in same places
+4) Badge is visible WITHOUT opening panels
+5) Badge updates after approval
+6) Badge is not hidden due to permission
+7) No stale state after approval
+
+If any of the above is not visible → FAIL
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+1. Implementation Status
+2. Shipment List Badge Binding (explicit)
+3. Shipment Detail Badge Binding (explicit)
+4. Visibility Gating Fix
+5. Debug Verification Added
+6. Files Changed
+7. Non-Regression Notes
