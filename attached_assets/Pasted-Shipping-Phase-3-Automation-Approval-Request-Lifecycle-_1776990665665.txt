@@ -1,0 +1,327 @@
+Shipping Phase 3 — Automation Approval Request Lifecycle Fix
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen unrelated shipping workstreams.
+Do not implement Packing Workflows, SLA Optimization, Carrier Scorecards, Customs Docs, or Insurance Rules.
+
+Fix only the approval-request lifecycle bug in Shipping Automation guardrails.
+
+==================================================
+CURRENT BUG
+==================================================
+
+Tested rule:
+“When a carrier label is about to be purchased and Selected Rate Cost greater than $6.00, require operator approval.”
+
+Observed issues:
+
+1) A user without approval permission requests approval.
+Expected:
+- the shipment should show Pending Approval to that user
+- the shipment should clearly show that approval was requested
+
+Actual:
+- requester does not see the approval request state clearly
+
+2) When switching to a user with approval permission, the shipment shows “Review Needed.”
+Expected:
+- approver should see Approval Requested / Pending Approval, not generic Review Needed
+
+3) Decision/request note from requester is not visible to the approver.
+Expected:
+- approver must see the requester’s note/reason before approving/denying/overriding
+
+4) User can submit the same approval request repeatedly.
+Expected:
+- once a pending approval request already exists for the same rule + shipment + selected rate context, duplicate request should be blocked
+- show message: “Approval request already submitted.”
+
+5) After approval, the original requester still sees the Approval Required popup again.
+Expected:
+- once approved, the same rule/shipment/rate context should be treated as cleared/pre-approved
+- user should be allowed to continue purchase without being trapped in a loop
+- shipment should show approved/resolved state truthfully
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior workflow approval-state architect
+- Senior RBAC / entitlement systems architect
+- Senior shipping operations architect
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Do not patch only the visible text.
+Fix the approval lifecycle state machine correctly.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve all closed shipping behavior unless this correction explicitly requires touching the approval workflow.
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Fix the guardrail approval workflow so it has a correct lifecycle:
+
+approval_required
+→ approval_requested / pending_approval
+→ approved / denied / overridden / dismissed
+→ cleared for the approved rule-context
+
+The requester, approver, shipment detail, execution history, and purchase flow must all agree.
+
+==================================================
+PART A — DEFINE APPROVAL REQUEST STATE MODEL
+==================================================
+
+Required:
+Create or correct a clear state model for guardrail approvals.
+
+At minimum support:
+- approval_required
+- approval_requested
+- pending_approval
+- approved
+- denied, if currently supported
+- overridden
+- dismissed / cancelled if supported
+- resolved / cleared
+
+Required fields:
+- ruleId
+- ruleName
+- shipmentId
+- selectedRateId or stable selected-rate context
+- selectedRateCost
+- selectedCarrier
+- selectedService
+- requestedBy
+- requestedAt
+- requesterNote / decision note
+- approvedBy
+- approvedAt
+- approverNote
+- state
+- context hash or stable key for deduplication
+
+Important:
+The approval state must be tied to the exact rule + shipment + selected rate context.
+Do not accidentally approve all future rates or unrelated rules.
+
+==================================================
+PART B — REQUESTER VIEW MUST SHOW PENDING APPROVAL
+==================================================
+
+Required:
+When a non-approver requests approval:
+- shipment must immediately show Pending Approval
+- the approval request must be visible in the shipment’s Automation Outcomes area
+- the user should not see nothing or generic review language
+- the Purchase Label flow should show that approval is pending
+
+Required copy:
+Use clear language such as:
+“Approval requested — waiting for an authorized user to approve this label purchase exception.”
+
+==================================================
+PART C — APPROVER VIEW MUST SHOW APPROVAL REQUEST, NOT GENERIC REVIEW
+==================================================
+
+Required:
+When an authorized approver opens the shipment:
+- show Approval Requested / Pending Approval
+- show the rule name
+- show selected rate, carrier, service, cost
+- show requester name/user
+- show requester note
+- show requested timestamp
+- provide approve / deny / override actions based on permission
+
+Do not show this as generic “Review Needed” when the underlying state is approval-requested.
+
+==================================================
+PART D — REQUESTER NOTE MUST BE VISIBLE TO APPROVER
+==================================================
+
+Required:
+The note entered by the requester when requesting approval must persist and display to the approver.
+
+Do not store it only in transient modal state.
+Do not lose it after switching users or refreshing.
+
+Show it in:
+- approval modal or approval card
+- shipment Automation Outcomes section
+- execution/history detail where appropriate
+
+==================================================
+PART E — PREVENT DUPLICATE APPROVAL REQUESTS
+==================================================
+
+Required:
+Once an approval request exists in pending state for the same:
+- shipment
+- rule
+- selected rate / rate context
+
+the user must not be able to submit another duplicate approval request.
+
+Required behavior:
+- disable or hide duplicate Request Approval action
+- show message:
+  “Approval request already submitted.”
+- keep the existing pending request visible
+
+Important:
+If the user selects a different rate, the system may evaluate a new context.
+If the new rate does not violate the rule, no approval should be required.
+If the new rate violates the rule differently, handle it as a separate context only if necessary and document the rule.
+
+==================================================
+PART F — APPROVAL MUST CLEAR THE LOOP
+==================================================
+
+Required:
+After an authorized user approves the pending request:
+- state changes to approved/resolved
+- requester sees approved/resolved state
+- the same rule/shipment/rate context no longer triggers the Approval Required popup again
+- user can continue with Purchase Label
+- execution history reflects approval/resolution truthfully
+
+Critical:
+Do not allow the same approved exception to be challenged again immediately.
+Use a stable approval key/context hash so the evaluator recognizes it as already approved.
+
+==================================================
+PART G — SELECTING DIFFERENT RATE BEHAVIOR
+==================================================
+
+Required:
+If the requester chooses another rate:
+- if the new rate is compliant, clear or bypass the pending blocker for purchase path
+- do not incorrectly carry over a pending high-cost approval to a lower-cost compliant rate
+- if the old pending request remains in history, mark it as superseded/dismissed if appropriate and audit it
+- do not silently delete history
+
+==================================================
+PART H — EXECUTION HISTORY ALIGNMENT
+==================================================
+
+Required:
+Execution History must show:
+- approval requested
+- approval pending
+- approval approved / denied / overridden
+- who performed each action
+- timestamp
+- requester note and approver note where appropriate
+- shipment number clickable as already implemented
+
+The history must not say “review needed” when the state is actually “approval requested.”
+
+==================================================
+PART I — PERMISSION INTEGRITY
+==================================================
+
+Required:
+Respect existing automation permissions:
+- normal user can request approval but cannot approve/override
+- approver can approve if they have approve exception permission
+- override requires override guardrail permission
+- resolving review is distinct from approving exception
+
+Do not allow role switching or stale client state to bypass permissions.
+
+==================================================
+PART J — NON-REGRESSION
+==================================================
+
+Preserve:
+- purpose-driven automation builder
+- selected-rate pre-label guardrail evaluation
+- batch labels behavior
+- shipping provider behavior
+- carrier analytics
+- plan/permission gating
+- existing shipping and reverse-logistics flows
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Requester sees Pending Approval immediately after submitting approval request
+2) Approver sees Approval Requested / Pending Approval, not generic Review Needed
+3) Requester note is visible to approver
+4) Duplicate approval requests are blocked for the same rule/shipment/rate context
+5) Approved request clears the loop and allows purchase for the approved context
+6) Selecting a compliant lower rate avoids the approval blocker
+7) Execution History reflects requested / pending / approved states truthfully
+8) Permissions remain correct
+9) Existing shipping behavior remains intact
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Fix approval request state model and persistent fields
+2) Fix requester Pending Approval visibility
+3) Fix approver Approval Requested view and requester note visibility
+4) Add duplicate approval request prevention
+5) Add approved-context recognition to prevent the approval loop
+6) Fix different-rate behavior
+7) Align Execution History labels/states
+8) Re-test permission and non-regression behavior
+9) Update replit.md
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- approval request lifecycle
+- approval context/deduplication key
+- requester vs approver views
+- duplicate approval request prevention
+- approved-context loop prevention
+- lower-rate behavior
+- permission behavior
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Approval Request State Model
+3. Requester Pending Approval View
+4. Approver Approval Request View
+5. Duplicate Request Prevention
+6. Approved-Context Loop Prevention
+7. Execution History Alignment
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes

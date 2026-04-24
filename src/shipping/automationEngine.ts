@@ -553,6 +553,21 @@ export interface GuardrailEvaluationResult {
   allClear: boolean;
 }
 
+// Phase 3 correction #5 — stable approval-context key. Combines the rule
+// id, shipment id, and a deterministic signature of the selected rate so
+// the same approval decision can be recognized across re-evaluations of
+// the same purchase attempt. Selecting a different rate produces a
+// different key, so a prior approval does not leak to a different rate.
+export function buildApprovalContextKey(
+  ruleId: string,
+  shipmentId: string,
+  selectedRate?: { providerRateRef?: string; carrier?: string; serviceName?: string; rate?: number; currency?: string } | null,
+): string {
+  const rateId = selectedRate?.providerRateRef
+    || (selectedRate ? `${selectedRate.carrier ?? ''}|${selectedRate.serviceName ?? ''}|${selectedRate.rate ?? ''}|${selectedRate.currency ?? ''}` : '');
+  return `${ruleId}::${shipmentId}::${rateId || 'no-rate'}`;
+}
+
 export function evaluateGuardrails(
   rules: AutomationRule[],
   shipment: Shipment,
@@ -563,6 +578,14 @@ export function evaluateGuardrails(
   const blockingRules: GuardrailEvaluation[] = [];
   const approvalRules: GuardrailEvaluation[] = [];
   const reviewRules: GuardrailEvaluation[] = [];
+  // Phase 3 correction #5 — already-approved-context recognition. Any
+  // rule whose computed approval context key is in the shipment's
+  // approvedGuardrailContexts list is treated as cleared and skipped, so
+  // re-purchase attempts with the same rule + rate do not re-prompt.
+  const approvedContexts = shipment.approvedGuardrailContexts || [];
+  const candidateRate = (candidatePatch && 'selectedRate' in candidatePatch)
+    ? (candidatePatch as { selectedRate?: typeof shipment.selectedRate }).selectedRate
+    : shipment.selectedRate;
   for (const rule of rules) {
     // Phase 3 correction #4 — accept rules whose ruleType is 'guardrail'
     // OR whose effective process type is guardrail (purpose='require_review'
@@ -573,6 +596,10 @@ export function evaluateGuardrails(
     const isGuardrail = isGuardrailRule(rule, trigger)
       || (rule.purpose === 'require_review' && trigger === 'pre_label_purchase');
     if (!isGuardrail) continue;
+    // Phase 3 correction #5 — skip rules whose context has already been
+    // approved/overridden for this shipment + rate.
+    const ctxKey = buildApprovalContextKey(rule.id, shipment.id, candidateRate as any);
+    if (approvedContexts.includes(ctxKey)) continue;
     const evaluation = evaluateRule(rule, subject);
     if (!evaluation.matched) continue;
     const blocking = rule.actions.some(a => a.type === 'block_unless_approved');

@@ -13,7 +13,7 @@ import ShippingProvidersPage from './ShippingProvidersPage';
 import { CarrierAnalytics } from './shipping/CarrierAnalytics';
 import AutomationRules from './shipping/AutomationRules';
 import BatchLabels, { type BatchEligibility } from './shipping/BatchLabels';
-import { runAutomation, evaluateGuardrails, type GuardrailEvaluation, describeRule } from '../shipping/automationEngine';
+import { runAutomation, evaluateGuardrails, buildApprovalContextKey, type GuardrailEvaluation, describeRule } from '../shipping/automationEngine';
 import type { AutomationTriggerType } from '../types';
 import { featureMatrix as staticFeatureMatrix } from '../owner/mockData';
 import { normalizeStateCode, normalizeZip, normalizePhone } from '../utils/inputNormalizers';
@@ -3977,13 +3977,51 @@ export default function ShippingCenter() {
   function handleSelectRate(shipmentId: string, rate: ShippingRate) {
     if (isWriteBlocked) return;
     clearProviderFeedback();
+    const now = new Date().toISOString();
+    const ship = shipments.find(s => s.id === shipmentId);
+    // Phase 3 correction #5 — superseding rate change. If an approval
+    // request is pending and is bound to a different rate context, mark
+    // the old request as dismissed (state='dismissed') with a system note
+    // explaining it was superseded by a new rate selection. This avoids
+    // the stale request blocking duplicate detection on the new rate.
+    let supersededReview: Shipment['reviewNeeded'] | undefined;
+    if (ship && ship.reviewNeeded
+      && (ship.reviewNeeded.kind === 'approval' || ship.reviewNeeded.kind === 'block')
+      && (ship.reviewNeeded.state === 'pending' || ship.reviewNeeded.state === 'approval_requested')
+      && ship.reviewNeeded.approvalContextKey
+      && ship.reviewNeeded.ruleId) {
+      const newKey = buildApprovalContextKey(ship.reviewNeeded.ruleId, ship.id, rate as any);
+      if (newKey !== ship.reviewNeeded.approvalContextKey) {
+        supersededReview = {
+          ...ship.reviewNeeded,
+          state: 'dismissed',
+          resolved: true,
+          dismissedAt: now,
+          dismissedBy: 'Current User',
+          resolutionNote: `Superseded by new rate selection (${rate.carrier} ${rate.serviceName} — $${rate.rate.toFixed(2)}).`,
+        };
+        appendAutomationLogs([{
+          id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          ruleId: ship.reviewNeeded.ruleId,
+          ruleName: ship.reviewNeeded.ruleName || 'unknown rule',
+          ruleSummary: ship.reviewNeeded.reason || '',
+          shipmentId: ship.id, shipmentNumber: ship.shipmentNumber,
+          trigger: 'pre_label_purchase', matched: true,
+          actionsApplied: ['guardrail:superseded_by_rate_change'],
+          timestamp: now,
+          ruleType: 'guardrail',
+          guardrailOutcome: 'cleared_by_alternate_rate',
+        }]);
+      }
+    }
     updateShipment(shipmentId, {
       selectedRate: rate,
       carrier: rate.carrier,
       serviceLevel: rate.serviceName,
       shippingCost: rate.rate,
       estimatedDelivery: rate.estimatedDelivery,
-      updatedAt: new Date().toISOString(),
+      updatedAt: now,
+      ...(supersededReview ? { reviewNeeded: supersededReview } : {}),
     });
     setShowRatesPanel(false);
     setProviderSuccess(`Selected: ${rate.carrier} ${rate.serviceName} — $${rate.rate.toFixed(2)}`);
@@ -5157,29 +5195,63 @@ export default function ShippingCenter() {
                             </p>
                             <span className="text-[10px] text-slate-400">From shipping automation rules</span>
                           </div>
-                          {rn && !rn.resolved && (
-                            <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 space-y-2">
-                              <div className="flex items-start justify-between gap-3">
-                                <div className="flex-1 min-w-0">
-                                  <p className="text-xs font-black text-amber-700 flex items-center gap-1">
-                                    <span className="material-symbols-outlined text-sm">flag</span>Marked for Review
-                                  </p>
-                                  <p className="text-xs text-amber-800 mt-1">{rn.reason || 'Marked for review by automation rule.'}</p>
-                                  <p className="text-[10px] text-amber-600 mt-1">
-                                    Rule: <span className="font-bold">{rn.ruleName || 'unknown rule'}</span> · marked {formatDateTime(rn.markedAt)}
-                                  </p>
+                          {rn && !rn.resolved && (() => {
+                            // Phase 3 correction #5 — render kind-aware
+                            // pending state. Approval requests surface as
+                            // "Pending Approval" (sky), blocking guardrails
+                            // as "Approval Required (Blocking)" (rose), and
+                            // generic review as "Marked for Review" (amber).
+                            // The requester / requested-at / requester note /
+                            // selected-rate context are surfaced so the
+                            // approver sees what they are approving.
+                            const isApprovalPending = rn.kind === 'approval'
+                              && (rn.state === 'approval_requested' || rn.state === 'pending');
+                            const isBlockPending = rn.kind === 'block' && rn.state === 'pending';
+                            const tone = isApprovalPending
+                              ? { wrap: 'bg-sky-50 border-sky-200', text: 'text-sky-700', sub: 'text-sky-800', meta: 'text-sky-600', icon: 'pending', title: 'Pending Approval' }
+                              : isBlockPending
+                                ? { wrap: 'bg-rose-50 border-rose-200', text: 'text-rose-700', sub: 'text-rose-800', meta: 'text-rose-600', icon: 'block', title: 'Approval Required (Blocking)' }
+                                : { wrap: 'bg-amber-50 border-amber-200', text: 'text-amber-700', sub: 'text-amber-800', meta: 'text-amber-600', icon: 'flag', title: 'Marked for Review' };
+                            const rate = rn.selectedRateContext;
+                            return (
+                              <div className={`border rounded-xl p-3 space-y-2 ${tone.wrap}`}>
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="flex-1 min-w-0">
+                                    <p className={`text-xs font-black flex items-center gap-1 ${tone.text}`}>
+                                      <span className="material-symbols-outlined text-sm">{tone.icon}</span>{tone.title}
+                                    </p>
+                                    <p className={`text-xs mt-1 ${tone.sub}`}>{rn.reason || 'Marked by automation rule.'}</p>
+                                    <p className={`text-[10px] mt-1 ${tone.meta}`}>
+                                      Rule: <span className="font-bold">{rn.ruleName || 'unknown rule'}</span> · marked {formatDateTime(rn.markedAt)}
+                                    </p>
+                                    {(isApprovalPending || isBlockPending) && rn.requestedBy && (
+                                      <p className={`text-[10px] mt-0.5 ${tone.meta}`}>
+                                        Requested by <span className="font-bold">{rn.requestedBy}</span>
+                                        {rn.requestedAt ? ` on ${formatDateTime(rn.requestedAt)}` : ''}
+                                      </p>
+                                    )}
+                                    {(isApprovalPending || isBlockPending) && rate && (
+                                      <p className={`text-[10px] mt-0.5 ${tone.meta}`}>
+                                        Selected rate: <span className="font-bold">{rate.carrier} {rate.service}</span>
+                                        {typeof rate.cost === 'number' ? ` — $${rate.cost.toFixed(2)}` : ''}
+                                      </p>
+                                    )}
+                                    {rn.requesterNote && (
+                                      <p className={`text-[11px] mt-1 italic ${tone.sub}`}>"{rn.requesterNote}"</p>
+                                    )}
+                                  </div>
+                                  {canResolve && !isWriteBlocked && (
+                                    <button
+                                      onClick={() => { setReviewResolveTarget(selectedShip.id); setReviewResolveNote(''); }}
+                                      className={`px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg shrink-0 text-white ${isApprovalPending ? 'bg-sky-600 hover:bg-sky-700' : isBlockPending ? 'bg-rose-600 hover:bg-rose-700' : 'bg-emerald-600 hover:bg-emerald-700'}`}
+                                    >
+                                      {isApprovalPending ? 'Review Request' : isBlockPending ? 'Resolve Block' : 'Resolve'}
+                                    </button>
+                                  )}
                                 </div>
-                                {canResolve && !isWriteBlocked && (
-                                  <button
-                                    onClick={() => { setReviewResolveTarget(selectedShip.id); setReviewResolveNote(''); }}
-                                    className="px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 shrink-0"
-                                  >
-                                    Resolve
-                                  </button>
-                                )}
                               </div>
-                            </div>
-                          )}
+                            );
+                          })()}
                           {rn && rn.resolved && (
                             <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3">
                               <p className="text-xs font-black text-emerald-700 flex items-center gap-1">
@@ -8710,29 +8782,75 @@ export default function ShippingCenter() {
           // forward is to override (perm-gated) or pick a different rate.
           const approveEnabled = canApprove && !isHardBlock;
           const overrideEnabled = canOverride;
+          // Phase 3 correction #5 — compute the approval context key for
+          // the primary guardrail (block first, then approval). Used both
+          // for duplicate-request detection and for marking the context
+          // approved so a re-purchase does not re-prompt.
+          const primaryRule = (isHardBlock ? blocking[0] : approval[0])?.rule;
+          const primaryReason = (isHardBlock ? blocking[0] : approval[0])?.reason;
+          const primaryCtxKey = primaryRule
+            ? buildApprovalContextKey(primaryRule.id, target.id, target.selectedRate as any)
+            : undefined;
+          // All keys for the current guardrail bundle (block + approval),
+          // so an Approve & Purchase clears every rule that fired in this
+          // attempt — not just the first one.
+          const allCtxKeys = [...blocking, ...approval]
+            .map(g => buildApprovalContextKey(g.rule.id, target.id, target.selectedRate as any));
+          const existingRn = target.reviewNeeded;
+          const existingPendingMatch = !!(
+            existingRn
+            && (existingRn.kind === 'approval' || existingRn.kind === 'block')
+            && (existingRn.state === 'pending' || existingRn.state === 'approval_requested')
+            && existingRn.approvalContextKey
+            && primaryCtxKey
+            && existingRn.approvalContextKey === primaryCtxKey
+          );
           function recordOutcomeAndPurchase(outcome: 'approved' | 'overridden') {
             const now = new Date().toISOString();
-            const sourceRule = (isHardBlock ? blocking[0] : approval[0])?.rule;
             // Persist a reviewNeeded record + audit log so history reflects
             // the decision even though the purchase succeeded.
-            if (sourceRule) {
+            if (primaryRule) {
               const reviewKind = isHardBlock ? 'block' : 'approval';
+              const note = guardrailNote.trim() || undefined;
               updateShipment(target.id, {
                 reviewNeeded: {
-                  reason: (isHardBlock ? blocking[0] : approval[0]).reason,
-                  ruleId: sourceRule.id, ruleName: sourceRule.name,
-                  markedAt: now, kind: reviewKind, state: outcome,
+                  reason: primaryReason,
+                  ruleId: primaryRule.id, ruleName: primaryRule.name,
+                  markedAt: existingRn?.markedAt || now,
+                  kind: reviewKind,
+                  state: outcome,
                   resolved: true,
                   triggerContext: target.selectedRate ? { selectedRate: target.selectedRate } : undefined,
+                  // Carry forward the original requester metadata so the
+                  // historical record still shows who asked for approval
+                  // (not just who approved it).
+                  requestedBy: existingRn?.requestedBy,
+                  requestedAt: existingRn?.requestedAt,
+                  requesterNote: existingRn?.requesterNote,
+                  approvalContextKey: primaryCtxKey,
+                  selectedRateContext: target.selectedRate ? {
+                    providerRateRef: target.selectedRate.providerRateRef,
+                    carrier: target.selectedRate.carrier,
+                    service: target.selectedRate.serviceName,
+                    cost: target.selectedRate.rate,
+                    currency: target.selectedRate.currency,
+                  } : undefined,
                   ...(outcome === 'approved'
-                    ? { approvedAt: now, approvedBy: 'Current User', resolutionNote: guardrailNote.trim() || undefined }
-                    : { overriddenAt: now, overriddenBy: 'Current User', resolutionNote: guardrailNote.trim() || undefined }),
+                    ? { approvedAt: now, approvedBy: 'Current User', approverNote: note, resolutionNote: note }
+                    : { overriddenAt: now, overriddenBy: 'Current User', approverNote: note, resolutionNote: note }),
                 },
+                // Phase 3 correction #5 — mark every fired rule's context
+                // as approved so re-purchase with the same rate does not
+                // re-trigger the guardrail modal.
+                approvedGuardrailContexts: Array.from(new Set([
+                  ...(target.approvedGuardrailContexts || []),
+                  ...allCtxKeys,
+                ])),
               });
               appendAutomationLogs([{
                 id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                ruleId: sourceRule.id, ruleName: sourceRule.name,
-                ruleSummary: describeRule(sourceRule),
+                ruleId: primaryRule.id, ruleName: primaryRule.name,
+                ruleSummary: describeRule(primaryRule),
                 shipmentId: target.id, shipmentNumber: target.shipmentNumber,
                 trigger: 'pre_label_purchase', matched: true,
                 actionsApplied: [outcome === 'approved' ? 'guardrail:approved' : 'guardrail:overridden'],
@@ -8748,29 +8866,52 @@ export default function ShippingCenter() {
             void handlePurchaseLabel(target.id, { bypassGuardrails: true, guardrailOutcome: outcome });
           }
           function requestApprovalOnly() {
+            // Phase 3 correction #5 — duplicate request prevention. If a
+            // pending request already exists for the same rule + rate, do
+            // not write another one. The button is also disabled at the
+            // render layer, but the handler enforces it as defense in depth.
+            if (existingPendingMatch) {
+              setPendingGuardrail(null);
+              setGuardrailNote('');
+              return;
+            }
             const now = new Date().toISOString();
-            const sourceRule = (isHardBlock ? blocking[0] : approval[0])?.rule;
-            if (sourceRule) {
+            if (primaryRule) {
+              const note = guardrailNote.trim() || undefined;
               updateShipment(target.id, {
                 reviewNeeded: {
-                  reason: (isHardBlock ? blocking[0] : approval[0]).reason,
-                  ruleId: sourceRule.id, ruleName: sourceRule.name,
+                  reason: primaryReason,
+                  ruleId: primaryRule.id, ruleName: primaryRule.name,
                   markedAt: now,
                   kind: isHardBlock ? 'block' : 'approval',
-                  state: 'pending',
+                  // Phase 3 correction #5 — explicit 'approval_requested'
+                  // for approval-kind rows; block-kind keeps 'pending'
+                  // because it requires override semantics, not approval.
+                  state: isHardBlock ? 'pending' : 'approval_requested',
                   triggerContext: target.selectedRate ? { selectedRate: target.selectedRate } : undefined,
+                  requestedBy: 'Current User',
+                  requestedAt: now,
+                  requesterNote: note,
+                  approvalContextKey: primaryCtxKey,
+                  selectedRateContext: target.selectedRate ? {
+                    providerRateRef: target.selectedRate.providerRateRef,
+                    carrier: target.selectedRate.carrier,
+                    service: target.selectedRate.serviceName,
+                    cost: target.selectedRate.rate,
+                    currency: target.selectedRate.currency,
+                  } : undefined,
                 },
               });
               appendAutomationLogs([{
                 id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                ruleId: sourceRule.id, ruleName: sourceRule.name,
-                ruleSummary: describeRule(sourceRule),
+                ruleId: primaryRule.id, ruleName: primaryRule.name,
+                ruleSummary: describeRule(primaryRule),
                 shipmentId: target.id, shipmentNumber: target.shipmentNumber,
                 trigger: 'pre_label_purchase', matched: true,
-                actionsApplied: [isHardBlock ? 'guardrail:blocked' : 'guardrail:approval_required'],
+                actionsApplied: [isHardBlock ? 'guardrail:blocked' : 'guardrail:approval_requested'],
                 timestamp: now,
                 ruleType: 'guardrail',
-                guardrailOutcome: isHardBlock ? 'blocked' : 'approval_required',
+                guardrailOutcome: isHardBlock ? 'blocked' : 'approval_requested',
               }]);
             }
             setPendingGuardrail(null);
@@ -8832,8 +8973,14 @@ export default function ShippingCenter() {
                 className="bg-white rounded-3xl shadow-2xl w-full max-w-lg p-6 space-y-4"
               >
                 <div>
-                  <p className={`text-[10px] font-black uppercase tracking-widest mb-1 ${isHardBlock ? 'text-rose-600' : reviewOnly ? 'text-indigo-600' : 'text-amber-600'}`}>
-                    {isHardBlock ? 'Label Purchase Blocked' : reviewOnly ? 'Review Required' : 'Approval Required'}
+                  <p className={`text-[10px] font-black uppercase tracking-widest mb-1 ${isHardBlock ? 'text-rose-600' : reviewOnly ? 'text-indigo-600' : existingPendingMatch ? 'text-sky-600' : 'text-amber-600'}`}>
+                    {isHardBlock
+                      ? 'Label Purchase Blocked'
+                      : reviewOnly
+                        ? 'Review Required'
+                        : existingPendingMatch
+                          ? 'Approval Pending'
+                          : 'Approval Required'}
                   </p>
                   <h3 className="text-lg font-black text-slate-800">{target.shipmentNumber}</h3>
                   <p className="text-[11px] text-slate-500 mt-1">
@@ -8841,8 +8988,20 @@ export default function ShippingCenter() {
                       ? 'A guardrail rule blocks this label purchase. You can pick another rate, request approval, or — if permitted — override and continue.'
                       : reviewOnly
                         ? 'A rule asks you to review this purchase before it proceeds. Acknowledge the review to continue, pick another rate, or cancel.'
-                        : 'A guardrail rule requires operator approval before this label purchase can proceed.'}
+                        : existingPendingMatch
+                          ? 'You have already requested approval for this rule and rate. An authorized approver must clear it before this label can be purchased.'
+                          : 'A guardrail rule requires operator approval before this label purchase can proceed.'}
                   </p>
+                  {/* Phase 3 correction #5 — duplicate-request banner so the
+                      operator understands why Request Approval is disabled.
+                      Surfaces the original request metadata for reference. */}
+                  {existingPendingMatch && existingRn && (
+                    <div className="mt-3 bg-sky-50 border border-sky-200 rounded-xl p-3 text-[11px] text-sky-800 space-y-0.5">
+                      <p className="font-black text-sky-700 uppercase tracking-widest text-[9px]">Approval request already submitted</p>
+                      <p>Requested by <span className="font-bold">{existingRn.requestedBy || 'unknown'}</span>{existingRn.requestedAt ? ` on ${formatDateTime(existingRn.requestedAt)}` : ''}.</p>
+                      {existingRn.requesterNote && <p className="italic">"{existingRn.requesterNote}"</p>}
+                    </div>
+                  )}
                 </div>
                 <div className="space-y-2 max-h-56 overflow-y-auto">
                   {[...blocking, ...approval, ...review].map((g, idx) => {
@@ -8893,10 +9052,11 @@ export default function ShippingCenter() {
                   {!reviewOnly && (
                     <button
                       onClick={requestApprovalOnly}
-                      disabled={isWriteBlocked}
+                      disabled={isWriteBlocked || existingPendingMatch}
+                      title={existingPendingMatch ? 'Approval request already submitted for this rule and rate.' : undefined}
                       className="flex-1 py-2.5 rounded-xl bg-amber-100 text-amber-700 font-black text-[10px] uppercase tracking-widest hover:bg-amber-200 disabled:opacity-50"
                     >
-                      Request Approval
+                      {existingPendingMatch ? 'Approval Request Submitted' : 'Request Approval'}
                     </button>
                   )}
                   {hasReview && !isHardBlock && (
@@ -8973,8 +9133,22 @@ export default function ShippingCenter() {
                   <p className="text-amber-800 mt-0.5">{rn.reason || '(no reason recorded)'}</p>
                   <p className="text-[10px] text-amber-600 mt-1">Rule: {rn.ruleName || 'unknown'} · {formatDateTime(rn.markedAt)}</p>
                 </div>
+                {/* Phase 3 correction #5 — surface requester metadata so the
+                    approver sees who/why before approving/denying/overriding. */}
+                {(kind === 'approval' || kind === 'block') && (rn.requestedBy || rn.requesterNote || rn.selectedRateContext) && (
+                  <div className="bg-sky-50 border border-sky-200 rounded-xl p-3 text-xs space-y-1">
+                    <p className="font-bold text-sky-700 uppercase tracking-widest text-[10px]">Approval Request</p>
+                    {rn.requestedBy && (
+                      <p className="text-sky-800">Requested by <span className="font-bold">{rn.requestedBy}</span>{rn.requestedAt ? ` on ${formatDateTime(rn.requestedAt)}` : ''}</p>
+                    )}
+                    {rn.selectedRateContext && (
+                      <p className="text-sky-800">Selected rate: <span className="font-bold">{rn.selectedRateContext.carrier} {rn.selectedRateContext.service}</span>{typeof rn.selectedRateContext.cost === 'number' ? ` — $${rn.selectedRateContext.cost.toFixed(2)}` : ''}</p>
+                    )}
+                    {rn.requesterNote && <p className="text-sky-800 italic">"{rn.requesterNote}"</p>}
+                  </div>
+                )}
                 <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Resolution Note (optional)</label>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{(kind === 'approval' || kind === 'block') ? 'Approver Note (optional)' : 'Resolution Note (optional)'}</label>
                   <textarea
                     value={reviewResolveNote}
                     onChange={(e) => setReviewResolveNote(e.target.value)}

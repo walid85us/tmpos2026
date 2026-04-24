@@ -1071,7 +1071,12 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
       if (s.id !== id) return s;
       const rn = s.reviewNeeded;
       if (!rn) return s;
-      const alreadyTerminal = rn.resolved === true || (rn.state && rn.state !== 'pending');
+      // Phase 3 correction #5 — only true terminal states block resolution.
+      // 'pending' AND 'approval_requested' are both pending-of-approver and
+      // must remain resolvable; previously 'approval_requested' was treated
+      // as terminal which made the Resolve modal a no-op for approvers.
+      const TERMINAL: Array<NonNullable<Shipment['reviewNeeded']>['state']> = ['resolved', 'approved', 'overridden', 'dismissed'];
+      const alreadyTerminal = rn.resolved === true || (rn.state ? TERMINAL.includes(rn.state) : false);
       if (alreadyTerminal) return s;
       const updatedReview: NonNullable<Shipment['reviewNeeded']> = {
         ...rn,
@@ -1082,11 +1087,13 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
         ...(args.resolution === 'resolve' || args.resolution === 'dismiss'
           ? { resolvedAt: now, resolvedBy: args.actor, resolutionNote: noteText }
           : {}),
+        // Phase 3 correction #5 — persist approverNote distinctly from any
+        // legacy resolutionNote so requester/approver history stays clear.
         ...(args.resolution === 'approve'
-          ? { approvedAt: now, approvedBy: args.actor, resolutionNote: noteText }
+          ? { approvedAt: now, approvedBy: args.actor, approverNote: noteText, resolutionNote: noteText }
           : {}),
         ...(args.resolution === 'override'
-          ? { overriddenAt: now, overriddenBy: args.actor, resolutionNote: noteText }
+          ? { overriddenAt: now, overriddenBy: args.actor, approverNote: noteText, resolutionNote: noteText }
           : {}),
         ...(args.resolution === 'dismiss'
           ? { dismissedAt: now, dismissedBy: args.actor }
@@ -1100,10 +1107,24 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
         ruleId: rn.ruleId,
         ruleName: rn.ruleName,
       };
+      // Phase 3 correction #5 — close the approval loop. When approve or
+      // override clears a pending request, append the approvalContextKey
+      // (rule + shipment + selected rate signature) to the shipment's
+      // approvedGuardrailContexts so evaluateGuardrails recognizes the
+      // same rule + rate combination as already cleared and skips it on
+      // a subsequent purchase attempt. Required for resolve-modal flow
+      // parity with the pre-label modal's recordOutcomeAndPurchase.
+      const shouldRegisterApproval = (args.resolution === 'approve' || args.resolution === 'override')
+        && rn.approvalContextKey
+        && (rn.kind === 'approval' || rn.kind === 'block');
+      const approvedContexts = shouldRegisterApproval
+        ? Array.from(new Set([...(s.approvedGuardrailContexts || []), rn.approvalContextKey!]))
+        : s.approvedGuardrailContexts;
       return {
         ...s,
         reviewNeeded: updatedReview,
         internalNotes: [...(s.internalNotes || []), auditNote],
+        ...(shouldRegisterApproval ? { approvedGuardrailContexts: approvedContexts } : {}),
       };
     }));
   }, []);

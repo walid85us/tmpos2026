@@ -596,6 +596,10 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
                     else if (rn?.state === 'approved') outcomeChip = { label: 'Approved', className: 'bg-sky-100 text-sky-700' };
                     else if (rn?.state === 'overridden') outcomeChip = { label: 'Overridden', className: 'bg-amber-100 text-amber-700' };
                     else if (rn?.state === 'dismissed') outcomeChip = { label: 'Dismissed', className: 'bg-slate-100 text-slate-600' };
+                    // Phase 3 correction #5 — distinguish a pending approval
+                    // request from a generic "approval needed" hit so the
+                    // history reflects requester action, not just rule fire.
+                    else if (rn?.state === 'approval_requested') outcomeChip = { label: 'Pending Approval', className: 'bg-sky-100 text-sky-700' };
                     else if (rn?.kind === 'block') outcomeChip = { label: 'Blocked', className: 'bg-rose-100 text-rose-700' };
                     else if (rn?.kind === 'approval') outcomeChip = { label: 'Approval Needed', className: 'bg-amber-100 text-amber-700' };
                     else outcomeChip = { label: 'Review Needed', className: 'bg-amber-100 text-amber-700' };
@@ -603,8 +607,11 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
                     const map: Record<NonNullable<typeof l.guardrailOutcome>, { label: string; className: string }> = {
                       blocked: { label: 'Blocked', className: 'bg-rose-100 text-rose-700' },
                       approval_required: { label: 'Approval Required', className: 'bg-amber-100 text-amber-700' },
+                      approval_requested: { label: 'Pending Approval', className: 'bg-sky-100 text-sky-700' },
+                      review_required: { label: 'Review Required', className: 'bg-indigo-100 text-indigo-700' },
                       approved: { label: 'Approved', className: 'bg-sky-100 text-sky-700' },
                       overridden: { label: 'Overridden', className: 'bg-amber-100 text-amber-700' },
+                      acknowledged: { label: 'Acknowledged', className: 'bg-indigo-100 text-indigo-700' },
                       cleared_by_alternate_rate: { label: 'Cleared (alt rate)', className: 'bg-slate-100 text-slate-600' },
                     };
                     outcomeChip = map[l.guardrailOutcome];

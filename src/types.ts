@@ -939,10 +939,37 @@ export interface Shipment {
     kind?: 'review' | 'approval' | 'block';
     // Phase 3 correction #3 — explicit state machine. Default 'pending' until
     // an authorized operator resolves / approves / overrides / dismisses.
-    state?: 'pending' | 'resolved' | 'approved' | 'overridden' | 'dismissed';
+    // Phase 3 correction #5 — 'approval_requested' is the explicit pending
+    // state for kind='approval' rows so requester/approver/history all
+    // surface it as Pending Approval (not generic Review Needed).
+    state?: 'pending' | 'approval_requested' | 'resolved' | 'approved' | 'overridden' | 'dismissed';
     // Optional context captured at the moment the guardrail fired (e.g. the
     // selected rate that triggered a high-cost-label block).
     triggerContext?: Record<string, any>;
+    // Phase 3 correction #5 — approval-request lifecycle fields. Captured
+    // when a non-approver clicks "Request Approval" so the approver sees
+    // who/when/why and the deduplication engine can recognize an existing
+    // pending request for the same rule + shipment + rate context.
+    requestedBy?: string;
+    requestedAt?: string;
+    requesterNote?: string;
+    approverNote?: string;
+    // Stable hash of (ruleId + shipmentId + selected-rate signature). Used
+    // both for duplicate-request prevention and for marking the context as
+    // already approved so a subsequent purchase attempt with the same rate
+    // does not re-prompt.
+    approvalContextKey?: string;
+    // Snapshot of the selected rate at the moment of request. Surfaces in
+    // the approver view so they can see what they are approving without
+    // navigating away.
+    selectedRateContext?: {
+      rateId?: string;
+      providerRateRef?: string;
+      carrier?: string;
+      service?: string;
+      cost?: number;
+      currency?: string;
+    };
     resolved?: boolean;
     resolvedAt?: string;
     resolvedBy?: string;
@@ -954,6 +981,11 @@ export interface Shipment {
     dismissedAt?: string;
     dismissedBy?: string;
   } | null;
+  // Phase 3 correction #5 — list of approval context keys that have been
+  // approved or overridden on this shipment. evaluateGuardrails consults
+  // this list and skips any rule whose computed key matches, so an already
+  // approved rule + rate context cannot re-prompt the same operator.
+  approvedGuardrailContexts?: string[];
   batchQueueState?: 'ready_for_batch' | 'batched' | null;
   batchQueueMarkedAt?: string;
   batchQueueRuleId?: string;
@@ -1355,7 +1387,7 @@ export interface AutomationLogEntry {
   // Phase 3 correction #3 — guardrail outcome captured at decision time so
   // execution history can show the operational result (e.g. "blocked",
   // "approved", "overridden") without needing to look up the shipment.
-  guardrailOutcome?: 'blocked' | 'approval_required' | 'review_required' | 'approved' | 'overridden' | 'acknowledged' | 'cleared_by_alternate_rate';
+  guardrailOutcome?: 'blocked' | 'approval_required' | 'approval_requested' | 'review_required' | 'approved' | 'overridden' | 'acknowledged' | 'cleared_by_alternate_rate';
 }
 
 export type BatchStatus = 'draft' | 'processing' | 'completed' | 'completed_with_errors' | 'cancelled';
