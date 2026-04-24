@@ -130,6 +130,17 @@ export const SUB_PERMISSIONS: SubPermissionDef[] = [
   { id: 'complete_packing', label: 'Complete Packing', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Mark a shipment as packing-complete. Requires all source items (where available) to be verified, all packages to be verified, and all open packing exceptions to be resolved — unless an authorized operator uses Override Packing Requirements. Does not on its own purchase labels or dispatch the shipment. Requires the Packing Workflows plan feature.' },
   { id: 'resolve_packing_exceptions', label: 'Resolve Packing Exceptions', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Resolve open packing exceptions (missing item, quantity mismatch, damaged item, package weight/dimensions missing, etc.) with a resolution note. Resolution does not delete the exception — history is preserved for audit. Requires the Packing Workflows plan feature.' },
   { id: 'override_packing_requirements', label: 'Override Packing Requirements', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Mark packing complete even when item/package verification is incomplete or unresolved exceptions exist, OR mark a shipment as packing-not-required. Strictly for managers — every override is recorded with actor and reason in packing history and as an internal note. Requires the Packing Workflows plan feature.' },
+  // Phase 3 Pass #15 — SLA Optimization Foundation. Five sub-permissions
+  // mirror the operational split in the Shipping Center SLA surface:
+  // visibility (view), policy editing (manage), pause/resume control,
+  // exception resolution, and per-target delay reasons. All are gated by
+  // the `shipping_sla_optimization` plan feature via FEATURE_PERMISSION_
+  // DEPENDENCIES so plan-disable removes them entirely from the matrix.
+  { id: 'view_shipping_sla', label: 'View Shipping SLA', parentDomain: 'shipping', minModuleLevel: 'view', defaultLevel: 'view', description: 'View SLA targets, statuses (on track / at risk / overdue / met / missed / paused / unknown), and explanations on shipments and in the shipment list. Read-only — does not include policy editing, pause/resume, exception resolution, or delay reason editing. Requires the SLA Optimization plan feature.' },
+  { id: 'manage_shipping_sla_policies', label: 'Manage Shipping SLA Policies', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Edit the tenant-wide SLA policy: default windows for pack-by, label-by, dispatch-by, deliver-by, return-receive-by, and the at-risk threshold percentage. Every change is recorded in the SLA policy audit log with actor, before/after windows, and timestamp. Requires the SLA Optimization plan feature.' },
+  { id: 'pause_shipping_sla', label: 'Pause / Resume Shipping SLA', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Pause the SLA on a shipment with a reason (e.g. customer hold, awaiting parts, weather event) and later resume it with an optional note. Pause does NOT delete or alter prior SLA history; every pause / resume is appended to the shipment\u2019s SLA history. Requires the SLA Optimization plan feature.' },
+  { id: 'resolve_shipping_sla_exceptions', label: 'Resolve Shipping SLA Exceptions', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Add a resolution note to an SLA exception (typically after a missed or overdue target) so the operator\u2019s explanation is part of the audit trail. Resolution does NOT change the missed/overdue status — historical truth is preserved. Requires the SLA Optimization plan feature.' },
+  { id: 'edit_shipping_sla_delay_reasons', label: 'Edit Shipping SLA Delay Reasons', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'edit', description: 'Add or update the per-target delay reason on a shipment (e.g. carrier weather hold for dispatch-by, parts shortage for pack-by). Delay reasons are recorded with actor and timestamp; updating an existing reason appends a new history entry rather than overwriting silently. Requires the SLA Optimization plan feature.' },
   { id: 'create_return', label: 'Create Return', parentDomain: 'returns', minModuleLevel: 'create', defaultLevel: 'create', description: 'Initiate a new return request' },
   { id: 'approve_return', label: 'Approve Return', parentDomain: 'returns', minModuleLevel: 'manage', defaultLevel: 'approve', description: 'Approve or reject return requests' },
   { id: 'receive_return', label: 'Receive Return', parentDomain: 'returns', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Mark returns as received and perform intake' },
@@ -235,6 +246,18 @@ export const FEATURE_PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // level.
   carrier_analytics: [
     'view_carrier_analytics',
+  ],
+  // Phase 3 Pass #15 — SLA Optimization. Without the plan feature there is
+  // no SLA card, no SLA filters, no SLA badges, no policy editor, no pause /
+  // resume / resolve workflow. Underlying lifecycle timestamps continue to
+  // be written by all other flows (packedAt, dispatchedAt, etc.) — they are
+  // simply not surfaced as SLA targets.
+  shipping_sla_optimization: [
+    'view_shipping_sla',
+    'manage_shipping_sla_policies',
+    'pause_shipping_sla',
+    'resolve_shipping_sla_exceptions',
+    'edit_shipping_sla_delay_reasons',
   ],
 };
 
@@ -394,6 +417,11 @@ export const tenantRoles: EmployeeRole[] = [
       complete_packing: true,
       resolve_packing_exceptions: true,
       override_packing_requirements: true,
+      view_shipping_sla: true,
+      manage_shipping_sla_policies: true,
+      pause_shipping_sla: true,
+      resolve_shipping_sla_exceptions: true,
+      edit_shipping_sla_delay_reasons: true,
     },
     description: 'Store management access'
   },
@@ -487,6 +515,11 @@ export const tenantRoles: EmployeeRole[] = [
       complete_packing: false,
       resolve_packing_exceptions: false,
       override_packing_requirements: false,
+      view_shipping_sla: false,
+      manage_shipping_sla_policies: false,
+      pause_shipping_sla: false,
+      resolve_shipping_sla_exceptions: false,
+      edit_shipping_sla_delay_reasons: false,
     },
     description: 'Repair and parts access'
   },
@@ -580,6 +613,11 @@ export const tenantRoles: EmployeeRole[] = [
       complete_packing: false,
       resolve_packing_exceptions: false,
       override_packing_requirements: false,
+      view_shipping_sla: false,
+      manage_shipping_sla_policies: false,
+      pause_shipping_sla: false,
+      resolve_shipping_sla_exceptions: false,
+      edit_shipping_sla_delay_reasons: false,
     },
     description: 'Sales and customer access'
   },
@@ -589,8 +627,8 @@ export const roles = [...platformRoles, ...tenantRoles];
 
 export const planFeatures: Record<Plan, string[]> = {
   starter: ['dashboard', 'sales', 'customers', 'invoices', 'support'],
-  growth: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'employees', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests', 'shipping_providers', 'carrier_analytics', 'shipping_automation_rules', 'batch_labels', 'packing_workflows'],
-  advanced: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'employees', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests', 'shipping_providers', 'carrier_analytics', 'shipping_automation_rules', 'batch_labels', 'packing_workflows'],
+  growth: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'employees', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests', 'shipping_providers', 'carrier_analytics', 'shipping_automation_rules', 'batch_labels', 'packing_workflows', 'shipping_sla_optimization'],
+  advanced: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'employees', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests', 'shipping_providers', 'carrier_analytics', 'shipping_automation_rules', 'batch_labels', 'packing_workflows', 'shipping_sla_optimization'],
 };
 
 export const permissions = PERMISSION_DOMAINS;

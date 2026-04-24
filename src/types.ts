@@ -863,6 +863,111 @@ export interface ShippingProvidersState {
   activeProviderId: string | null;
 }
 
+// Phase 3 Pass #15 — SLA Optimization Foundation type definitions.
+// Read-side: computed deterministically from real lifecycle timestamps via
+// src/utils/sla.ts. Persisted-side: only the human-driven artifacts live on
+// the Shipment record (slaPaused / slaDelayReasons / slaResolutions /
+// slaHistory) — targets themselves are pure derived state.
+export type SlaStatus =
+  | 'not_applicable'
+  | 'on_track'
+  | 'at_risk'
+  | 'overdue'
+  | 'met'
+  | 'missed'
+  | 'paused'
+  | 'unknown';
+
+export type SlaTargetType =
+  | 'pack_by'
+  | 'label_by'
+  | 'dispatch_by'
+  | 'deliver_by'
+  | 'return_receive_by';
+
+// Per-shipment SLA target row, computed on the fly. `sourceTimestamp` is the
+// real lifecycle event the deadline derives from (e.g. createdAt for pack_by);
+// `actualTimestamp` is the lifecycle event that satisfies the target (e.g.
+// packedAt for pack_by). When `sourceTimestamp` is missing, status is
+// 'unknown'. When `actualTimestamp` is set, status is 'met' or 'missed'
+// based on deadline. Variance is positive when actual is BEFORE deadline
+// (good), negative when AFTER (bad). All timestamps are ISO strings.
+export interface SlaTarget {
+  type: SlaTargetType;
+  status: SlaStatus;
+  sourceTimestamp?: string;
+  deadline?: string;
+  actualTimestamp?: string;
+  varianceMs?: number;
+  windowMs: number;
+  explanation: string;
+}
+
+// SLA policy: default windows in milliseconds per target type. Editable via
+// the policy editor; persisted in sessionStorage as `sla_policy` JSON. When
+// no override exists, getDefaultSlaPolicy() values apply. Optional variation
+// by carrier / type left for a later pass — foundation pass uses one global
+// policy per tenant.
+export interface SlaPolicy {
+  windows: Record<SlaTargetType, number>;
+  atRiskThresholdPct: number; // 0-100; e.g. 25 = at risk when ≤25% of window remains
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
+// Sticky pause state on a shipment. When set, every applicable SLA target
+// reports status='paused' and explanation includes the pause reason. Pausing
+// freezes deadlines from the operator's perspective; resume restores normal
+// computation. Recorded with reason for audit.
+export interface SlaPauseInfo {
+  reason: string;
+  pausedAt: string;
+  pausedBy: string;
+  resumedAt?: string;
+  resumedBy?: string;
+  resumeNote?: string;
+}
+
+// Operator-supplied delay reason for a specific target. Does NOT change
+// status calculation — at_risk / overdue / missed remain truthful — but
+// surfaces alongside the target so the operator's explanation is recorded.
+export interface SlaDelayReason {
+  reason: string;
+  addedAt: string;
+  addedBy: string;
+}
+
+// Operator-supplied resolution note for an SLA exception (typically used
+// after the deadline was missed and the operator wants to record what
+// happened / what action was taken). Does NOT delete the missed status —
+// audit history is preserved.
+export interface SlaResolutionNote {
+  note: string;
+  resolvedAt: string;
+  resolvedBy: string;
+}
+
+// Append-only audit log per shipment. Every SLA mutation (delay reason,
+// pause, resume, resolve) writes one entry. Policy changes are logged
+// separately at the tenant level.
+export interface SlaHistoryEntry {
+  id: string;
+  timestamp: string;
+  actor: string;
+  action:
+    | 'delay_reason_added'
+    | 'delay_reason_updated'
+    | 'paused'
+    | 'resumed'
+    | 'exception_resolved'
+    | 'status_recomputed';
+  targetType?: SlaTargetType;
+  fromStatus?: SlaStatus;
+  toStatus?: SlaStatus;
+  reason?: string;
+  note?: string;
+}
+
 export interface Shipment {
   id: string;
   shipmentNumber: string;
@@ -1011,6 +1116,17 @@ export interface Shipment {
   // purchase, dispatch, etc.). Only set when the mutator actually changed
   // status; never overwritten on idempotent re-completion.
   prePackingStatus?: ShipmentStatus;
+  // Phase 3 Pass #15 — SLA Optimization Foundation. SLA targets themselves
+  // are NOT persisted on the shipment — they are computed on the fly from
+  // existing lifecycle timestamps (createdAt, packedAt, label.purchasedAt,
+  // dispatchedAt, deliveredAt) plus the active SLA policy, so they cannot
+  // drift out of sync with reality. Only the human-driven artifacts (delay
+  // reasons, paused state, exception resolutions, audit history) live on
+  // the shipment record. See src/utils/sla.ts for the calculation surface.
+  slaPaused?: SlaPauseInfo | null;
+  slaDelayReasons?: Partial<Record<SlaTargetType, SlaDelayReason>>;
+  slaResolutions?: Partial<Record<SlaTargetType, SlaResolutionNote>>;
+  slaHistory?: SlaHistoryEntry[];
   batchQueueState?: 'ready_for_batch' | 'batched' | null;
   batchQueueMarkedAt?: string;
   batchQueueRuleId?: string;

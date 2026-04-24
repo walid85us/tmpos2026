@@ -1,0 +1,437 @@
+Shipping Phase 3 — SLA Optimization Foundation
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated implementation pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen closed shipping workstreams unless a real regression is found.
+Do not implement Carrier Scorecards in this pass.
+Do not implement Customs Docs or Insurance Rules in this pass.
+Keep those items recorded as future planned improvements only.
+
+Implement the next active Shipping Phase 3 workstream:
+1) SLA Optimization foundation
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior shipping operations architect
+- Senior logistics SLA / fulfillment performance architect
+- Senior RBAC / entitlement systems architect
+- Senior QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Think through the correct operational SLA model before coding.
+Do not make a shallow dashboard-only feature.
+Build a practical, auditable, permission-aware SLA foundation that can later support Carrier Scorecards.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- Ref.txt
+- replit.md
+
+Use them as continuity and source-of-truth documents.
+
+==================================================
+PRESERVE WITHOUT BREAKING
+==================================================
+
+Preserve exactly unless this workstream explicitly requires touching it:
+- current design baseline
+- auth behavior
+- preview-mode safety
+- live System Owner plan gating
+- store permission gating
+- provider/manual mode split
+- shipping lifecycle integrity
+- existing shipping core flow
+- reverse-logistics flow
+- Shipping Phase 2 completed behavior
+- Carrier Analytics foundation
+- Automation Rules foundation
+- selected-rate approval guardrails
+- Batch Labels foundation
+- Packing Workflows + Rate Gating foundation
+- package verification and stale re-verification
+- Packed status lifecycle alignment
+- dispatch only after label purchase / valid manual handoff
+- post-label packing/package lock
+- packing exceptions and auditability
+- entitlement propagation
+- Shipping Provider permission/hard-disable behavior
+- dynamic sub-permission counts
+- enabled-state non-regression
+
+==================================================
+WORKSTREAM GOAL
+==================================================
+
+Add a solid SLA Optimization foundation inside Shipping Center.
+
+The goal is to support operational SLA visibility and control:
+- define shipment SLA targets
+- calculate SLA deadlines from real shipment lifecycle events
+- surface at-risk / overdue shipments
+- track delay reasons
+- support exception handling and auditability
+- prepare data foundation for future Carrier Scorecards
+
+This is a foundation.
+Do NOT pretend advanced optimization or scorecards exist yet.
+Do NOT fake carrier performance predictions.
+Do NOT invent SLA data where timestamps are missing.
+
+==================================================
+PART A — SLA SURFACE INSIDE SHIPPING CENTER
+==================================================
+
+Required:
+Add SLA visibility inside Shipping Center in a native way.
+
+Possible surfaces:
+- SLA section/card in shipment detail
+- SLA filters in shipment list
+- SLA summary panel inside Shipping Center
+- SLA tab/section if it fits current IA
+
+Required:
+- must feel native to current Shipping Center design
+- must not create a disconnected mini-app
+- must support outbound and return shipments where appropriate
+
+==================================================
+PART B — SLA DATA MODEL FOUNDATION
+==================================================
+
+Required:
+Introduce a clear SLA model for shipments.
+
+At minimum support:
+- slaStatus:
+  - not_applicable
+  - on_track
+  - at_risk
+  - overdue
+  - met
+  - missed
+  - paused
+  - unknown
+- slaTargetType:
+  - pack_by
+  - label_by
+  - dispatch_by
+  - deliver_by
+  - return_receive_by where relevant
+- target timestamp / deadline
+- actual timestamp
+- calculated variance
+- delay reason
+- paused reason where applicable
+- resolution note
+- created/updated timestamps
+- audit/history events
+
+Required:
+- SLA state must be visible in shipment detail
+- SLA state should be visible/filterable in shipment list where useful
+- SLA calculations must be deterministic and auditable
+
+==================================================
+PART C — SLA TARGET DEFINITIONS
+==================================================
+
+Required:
+Support practical SLA target definitions grounded in current shipping workflow.
+
+At minimum support targets such as:
+1) Pack By
+- based on shipment creation or readiness timestamp
+- compares against packing completion timestamp
+
+2) Label By
+- based on packing completion / Packed timestamp or shipment readiness timestamp
+- compares against label purchase timestamp
+
+3) Dispatch By
+- based on label purchase / Label Created timestamp
+- compares against Dispatched timestamp
+
+4) Deliver By
+- based on Dispatched or In Transit timestamp where available
+- compares against Delivered timestamp
+
+5) Return Receive By, where relevant
+- based on return shipment label/dispatch/delivery context if current return flow supports it
+
+Important:
+- only calculate actual performance where the required timestamps exist
+- show unknown or insufficient data when timestamps are missing
+- do not fake carrier event timing
+
+==================================================
+PART D — SLA RULE / POLICY CONFIGURATION
+==================================================
+
+Required:
+Add a foundation for SLA policy configuration.
+
+At minimum:
+- default SLA windows by target type, such as:
+  - pack within X hours
+  - label within X hours after packed
+  - dispatch within X hours after label purchase
+  - deliver within X days after dispatch
+- optional variation by:
+  - shipment type / source type
+  - outbound vs return
+  - carrier/service if currently available
+  - store/location if architecture supports it
+
+Required:
+- configuration should be simple and practical
+- avoid overbuilding a full optimization engine
+- defaults should be reasonable and editable by authorized users
+- changes should be auditable where appropriate
+
+==================================================
+PART E — SLA STATUS CALCULATION
+==================================================
+
+Required:
+Implement deterministic SLA status calculation.
+
+Behavior:
+- on_track when current time is before threshold and no risk condition exists
+- at_risk when approaching deadline
+- overdue when deadline passed and actual completion has not happened
+- met when actual completion occurred on/before deadline
+- missed when actual completion occurred after deadline
+- paused when SLA is intentionally paused with reason
+- unknown when required data is missing
+
+Required:
+- do not calculate misleading SLA status if source timestamp is missing
+- expose concise explanation:
+  - “Pack by 3:00 PM today”
+  - “Label overdue by 2h”
+  - “Dispatch met 35m before deadline”
+  - “Delivery SLA unknown — no dispatch timestamp”
+- support refresh/recalculation without corrupting history
+
+==================================================
+PART F — AT-RISK / OVERDUE WORKFLOW
+==================================================
+
+Required:
+Create practical operator workflow for SLA risk.
+
+At minimum:
+- show at-risk and overdue shipments clearly
+- add filters or badges for:
+  - at risk
+  - overdue
+  - missed
+  - paused
+- allow operator to add delay reason
+- allow authorized user to pause/resume SLA with reason if supported
+- allow resolution note when SLA issue is addressed
+
+Required:
+- do not silently hide SLA issues
+- do not treat SLA warnings as carrier scorecards yet
+- SLA exceptions must be auditable
+
+==================================================
+PART G — RELATIONSHIP TO AUTOMATION RULES
+==================================================
+
+Required:
+Integrate carefully with existing Automation Rules only where safe.
+
+Possible allowed integration:
+- add SLA-related trigger/condition foundations if supportable now:
+  - SLA becomes at risk
+  - SLA becomes overdue
+  - SLA missed
+- allow safe actions such as:
+  - mark review needed
+  - add note
+  - set priority
+  - queue follow-up
+Do not implement hidden risky automation.
+
+If integration is not clean yet, document future linkage clearly instead of forcing it.
+
+==================================================
+PART H — RELATIONSHIP TO PACKING / BATCH / DISPATCH
+==================================================
+
+Required:
+SLA must align with completed lifecycle logic:
+- Pack By uses packing workflow timestamps
+- Label By uses Packed / label purchase timestamps
+- Dispatch By uses label purchase / Dispatched timestamps
+- Delivery SLA uses Dispatched / In Transit / Delivered timestamps where available
+- Dispatched remains distinct from In Transit
+- Batch Labels must not be broken
+- Packing gate must not be bypassed
+
+==================================================
+PART I — PLAN / PERMISSION / GATING
+==================================================
+
+Required:
+Add SLA Optimization as a distinct shipping sub-feature if surfaced in System Owner Plans & Features.
+
+Required:
+- add coherent Store Permissions Matrix treatment
+- permissions should be explicit and practical, such as:
+  - view_shipping_sla
+  - manage_shipping_sla_policies
+  - pause_shipping_sla
+  - resolve_shipping_sla_exceptions
+  - edit_shipping_sla_delay_reasons if needed
+
+Follow the current entitlement rules:
+- plan decides whether feature exists
+- role decides who can use it
+- linked permissions disappear when feature is plan-disabled
+- role permissions must not resurrect plan-disabled features
+
+==================================================
+PART J — AUDITABILITY
+==================================================
+
+Required:
+Every major SLA action must be auditable:
+- SLA target assigned/calculated
+- SLA status changed
+- delay reason added
+- SLA paused
+- SLA resumed
+- SLA exception resolved
+- SLA policy changed
+
+Audit entries should include:
+- user
+- timestamp
+- action
+- old/new value where relevant
+- reason/note where relevant
+
+==================================================
+PART K — DO NOT FAKE WHAT IS NOT BUILT
+==================================================
+
+Required:
+Do not pretend to support:
+- carrier scorecards
+- AI route optimization
+- predictive carrier performance
+- guaranteed delivery estimates unless provider actually returns them
+- automatic compensation/claim logic
+- live SLA optimization beyond deterministic rules
+
+Show truthful states:
+- based on recorded timestamps
+- insufficient data
+- unknown carrier event coverage
+- SLA paused
+- SLA at risk
+- SLA overdue
+
+==================================================
+PART L — OUT OF SCOPE
+==================================================
+
+Do NOT implement:
+- Carrier Scorecards
+- Customs Docs
+- Insurance Rules
+- automatic carrier claims
+- AI delivery prediction
+- broad non-shipping SLA engine
+- unrelated add-on governance redesign
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) SLA Optimization foundation exists inside Shipping Center
+2) SLA states are visible and deterministic
+3) SLA targets use real lifecycle timestamps
+4) Missing timestamps produce unknown/insufficient-data states, not fake calculations
+5) At-risk and overdue shipments are easy to identify
+6) Delay reasons / pause / resume / resolution behavior is auditable where implemented
+7) SLA policy configuration is practical and permission-aware
+8) Plan/permission gating is coherent
+9) Automation, Batch Labels, Packing, Dispatch, and reverse logistics are not regressed
+10) Carrier Scorecards and other future items remain out of scope
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Design SLA data model and target definitions
+2) Implement deterministic SLA status calculation
+3) Add SLA visibility inside Shipping Center
+4) Add SLA filters/badges and at-risk/overdue workflow
+5) Add policy configuration foundation
+6) Wire plan/permission/gating treatment
+7) Carefully integrate with Automation Rules only if safe
+8) Re-test Packing, Batch Labels, Dispatch, and reverse-logistics non-regression
+9) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- SLA Optimization scope
+- SLA data model
+- SLA target definitions
+- SLA status calculation rules
+- at-risk / overdue workflow
+- delay reason / pause / resume / resolution behavior
+- SLA policy configuration
+- plan/permission/gating treatment
+- relationship to Packing, Batch Labels, Automation, Dispatch
+- future out-of-scope items:
+  - Carrier Scorecards
+  - Customs Docs
+  - Insurance Rules
+  - predictive optimization
+  - automatic carrier claims
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. SLA Data Model + Target Definitions
+3. SLA Status Calculation
+4. SLA Surface + Filters
+5. At-Risk / Overdue Workflow
+6. SLA Policy Configuration
+7. Plan / Permission / Gating Updates
+8. Automation / Packing / Batch / Dispatch Non-Regression
+9. Files Changed
+10. Documentation Updated
+11. Non-Regression Notes

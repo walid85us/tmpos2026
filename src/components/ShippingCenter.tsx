@@ -3,7 +3,15 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
-import { Shipment, ShipmentStatus, ShipmentSourceType, ShipmentType, ShipmentAddress, ShipmentPackage, ShipmentEvent, ShippingRate, AddressValidationResult, ProviderTrackingEvent, ServicePoint, PickupRequest, PickupRequestStatus, PackingExceptionType, PackingStatus, PackingPackageVerification } from '../types';
+import { Shipment, ShipmentStatus, ShipmentSourceType, ShipmentType, ShipmentAddress, ShipmentPackage, ShipmentEvent, ShippingRate, AddressValidationResult, ProviderTrackingEvent, ServicePoint, PickupRequest, PickupRequestStatus, PackingExceptionType, PackingStatus, PackingPackageVerification, SlaTargetType, SlaPolicy, SlaHistoryEntry, SlaStatus } from '../types';
+// Phase 3 Pass #15 — SLA Optimization Foundation. All SLA math is in
+// src/utils/sla.ts; this surface only owns wiring, gating, and rendering.
+import {
+  loadSlaPolicy, saveSlaPolicy, appendPolicyAudit, getDefaultSlaPolicy,
+  summarizeShipmentSla, computeSlaTargets, getApplicableTargetTypes,
+  labelForTarget, formatDuration, toneForStatus, formatWindowMs,
+  type SlaShipmentSummary,
+} from '../utils/sla';
 import * as shippingApi from '../shipping/shippingApiClient';
 import type { ProviderError } from '../shipping/types';
 import type { ReturnPrefill } from './ReturnsPortal';
@@ -624,6 +632,22 @@ export default function ShippingCenter() {
   const planAllowsPackingWorkflows = isPlanFeatureLive('packing_workflows');
   const packingFeatureEnabled = planAllowsPackingWorkflows && canViewPackingWorkflows;
 
+  // Phase 3 Pass #15 — SLA Optimization perms + plan gating. Five
+  // independent sub-perms scope view / policy edit / pause / exception
+  // resolution / delay-reason editing separately so a viewer can see SLA
+  // status without unlocking action buttons. The plan-feature gate hides
+  // the whole surface (badges, chips, card, history, policy editor) when
+  // shipping_sla_optimization is disabled — underlying lifecycle
+  // timestamps continue to be written by all other flows; they are simply
+  // not surfaced as SLA targets.
+  const canViewSla = checkSubPermission('view_shipping_sla');
+  const canManageSlaPolicy = checkSubPermission('manage_shipping_sla_policies');
+  const canPauseSla = checkSubPermission('pause_shipping_sla');
+  const canResolveSlaException = checkSubPermission('resolve_shipping_sla_exceptions');
+  const canEditSlaDelayReason = checkSubPermission('edit_shipping_sla_delay_reasons');
+  const planAllowsSlaOptimization = isPlanFeatureLive('shipping_sla_optimization');
+  const slaFeatureEnabled = planAllowsSlaOptimization && canViewSla;
+
   const [activeTab, setActiveTab] = useState<'shipments' | 'analytics' | 'automation' | 'batch' | 'settings'>('shipments');
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<ShipmentStatus | 'all'>('all');
@@ -635,6 +659,34 @@ export default function ShippingCenter() {
   const [automationFilter, setAutomationFilter] = useState<'all' | 'review_needed' | 'ready_for_batch' | 'priority' | 'flagged'>('all');
   const [reviewResolveTarget, setReviewResolveTarget] = useState<string | null>(null);
   const [reviewResolveNote, setReviewResolveNote] = useState('');
+  // Phase 3 Pass #15 — SLA filter (chip-driven), policy editor visibility,
+  // a 60-second tick so live (non-met) status transitions update without
+  // a manual refresh, and a sessionStorage-synced policy mirror that
+  // recomputes whenever sla-policy-changed fires.
+  const [slaFilter, setSlaFilter] = useState<'all' | 'at_risk' | 'overdue' | 'missed' | 'paused'>('all');
+  const [showSlaPolicyModal, setShowSlaPolicyModal] = useState(false);
+  const [slaPolicy, setSlaPolicy] = useState<SlaPolicy>(() => loadSlaPolicy());
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const onPolicyChanged = () => setSlaPolicy(loadSlaPolicy());
+    window.addEventListener('sla-policy-changed', onPolicyChanged);
+    const tick = window.setInterval(() => setNowMs(Date.now()), 60_000);
+    return () => {
+      window.removeEventListener('sla-policy-changed', onPolicyChanged);
+      window.clearInterval(tick);
+    };
+  }, []);
+  // Per-target action state (delay reason / resolution / pause workflows).
+  // We keep these as a single discriminated tuple so only one workflow can
+  // be open at a time and dismissing one cleanly closes the rest.
+  const [slaActionTarget, setSlaActionTarget] = useState<
+    | null
+    | { kind: 'delay_reason'; shipmentId: string; targetType: SlaTargetType }
+    | { kind: 'resolve'; shipmentId: string; targetType: SlaTargetType }
+    | { kind: 'pause'; shipmentId: string }
+    | { kind: 'resume'; shipmentId: string }
+  >(null);
+  const [slaActionNote, setSlaActionNote] = useState('');
   // Phase 3 correction #3 — pre-label-purchase guardrail modal state. When set,
   // a purchase attempt was paused because one or more guardrail rules matched.
   // The modal lets the operator choose another rate, request approval, approve
@@ -1376,6 +1428,18 @@ export default function ShippingCenter() {
     }
   }, [location.state]);
 
+  // Phase 3 Pass #15 — SLA summaries map computed once per render. Pure
+  // derivation; no persistence. Keyed by shipment id so list, filter,
+  // detail card, and counts all read from the same source of truth.
+  const slaSummaries = useMemo<Record<string, SlaShipmentSummary>>(() => {
+    if (!slaFeatureEnabled) return {};
+    const map: Record<string, SlaShipmentSummary> = {};
+    for (const s of shipments) {
+      map[s.id] = summarizeShipmentSla(s, slaPolicy, nowMs);
+    }
+    return map;
+  }, [shipments, slaPolicy, nowMs, slaFeatureEnabled]);
+
   const filtered = useMemo(() => {
     let items = [...shipments];
     if (statusFilter !== 'all') items = items.filter(s => s.status === statusFilter);
@@ -1384,6 +1448,19 @@ export default function ShippingCenter() {
     else if (automationFilter === 'ready_for_batch') items = items.filter(s => s.batchQueueState === 'ready_for_batch');
     else if (automationFilter === 'priority') items = items.filter(s => s.priority === 'high' || s.priority === 'urgent');
     else if (automationFilter === 'flagged') items = items.filter(s => (s.flags?.length || 0) > 0);
+    // Phase 3 Pass #15 — SLA filter. Inactive when the feature is off so
+    // operators on starter / non-SLA-perm roles see no SLA-driven culling.
+    if (slaFeatureEnabled && slaFilter !== 'all') {
+      items = items.filter(s => {
+        const sum = slaSummaries[s.id];
+        if (!sum || !sum.applicable) return false;
+        if (slaFilter === 'paused') return sum.paused;
+        if (slaFilter === 'at_risk') return sum.atRiskCount > 0;
+        if (slaFilter === 'overdue') return sum.overdueCount > 0;
+        if (slaFilter === 'missed') return sum.missedCount > 0;
+        return true;
+      });
+    }
     if (search.trim()) {
       const q = search.toLowerCase();
       items = items.filter(s =>
@@ -1395,7 +1472,23 @@ export default function ShippingCenter() {
       );
     }
     return items.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [shipments, statusFilter, sourceFilter, automationFilter, search]);
+  }, [shipments, statusFilter, sourceFilter, automationFilter, slaFilter, slaFeatureEnabled, slaSummaries, search]);
+
+  // Phase 3 Pass #15 — counts across all shipments (not the filtered set)
+  // so the chip totals reflect everything the operator could pivot to.
+  const slaCounts = useMemo(() => {
+    if (!slaFeatureEnabled) return { at_risk: 0, overdue: 0, missed: 0, paused: 0 };
+    let at_risk = 0, overdue = 0, missed = 0, paused = 0;
+    for (const s of shipments) {
+      const sum = slaSummaries[s.id];
+      if (!sum || !sum.applicable) continue;
+      if (sum.paused) paused++;
+      if (sum.atRiskCount > 0) at_risk++;
+      if (sum.overdueCount > 0) overdue++;
+      if (sum.missedCount > 0) missed++;
+    }
+    return { at_risk, overdue, missed, paused };
+  }, [shipments, slaSummaries, slaFeatureEnabled]);
 
   // Phase 3 correction — counts for the automation outcome filter chips so
   // operators can see at a glance how much rule-flagged work is queued.
@@ -1621,6 +1714,135 @@ export default function ShippingCenter() {
     setProviderError(null);
     setProviderSuccess(null);
     setProviderWarning(null);
+  }
+
+  // ─── Phase 3 Pass #15 — SLA mutators ────────────────────────────────────
+  // Each mutator: (1) builds an SlaHistoryEntry capturing actor + action +
+  // before/after (where applicable); (2) merges its specific persisted
+  // artifact (slaPaused / slaDelayReasons / slaResolutions); (3) appends to
+  // slaHistory. Status itself is never written — it is recomputed by
+  // summarizeShipmentSla on every render.
+  function appendSlaHistory(shipment: Shipment, entry: SlaHistoryEntry): SlaHistoryEntry[] {
+    const prev = shipment.slaHistory || [];
+    return [...prev, entry];
+  }
+
+  function setSlaDelayReasonForShipment(shipmentId: string, targetType: SlaTargetType, reason: string): void {
+    if (isWriteBlocked) return;
+    if (!canEditSlaDelayReason) return;
+    const shipment = shipments.find(s => s.id === shipmentId);
+    if (!shipment) return;
+    const trimmed = reason.trim();
+    if (!trimmed) return;
+    const now = new Date().toISOString();
+    const prev = shipment.slaDelayReasons || {};
+    const wasUpdate = !!prev[targetType];
+    const next = { ...prev, [targetType]: { reason: trimmed, addedAt: now, addedBy: 'Current User' } };
+    const history = appendSlaHistory(shipment, {
+      id: `sla-${Date.now()}`,
+      timestamp: now,
+      actor: 'Current User',
+      action: wasUpdate ? 'delay_reason_updated' : 'delay_reason_added',
+      targetType,
+      reason: trimmed,
+    });
+    updateShipment(shipmentId, { slaDelayReasons: next, slaHistory: history, updatedAt: now });
+  }
+
+  function pauseSlaForShipment(shipmentId: string, reason: string): void {
+    if (isWriteBlocked) return;
+    if (!canPauseSla) return;
+    const shipment = shipments.find(s => s.id === shipmentId);
+    if (!shipment) return;
+    const trimmed = reason.trim();
+    if (!trimmed) return;
+    const now = new Date().toISOString();
+    const history = appendSlaHistory(shipment, {
+      id: `sla-${Date.now()}`,
+      timestamp: now,
+      actor: 'Current User',
+      action: 'paused',
+      reason: trimmed,
+    });
+    updateShipment(shipmentId, {
+      slaPaused: { reason: trimmed, pausedAt: now, pausedBy: 'Current User' },
+      slaHistory: history,
+      updatedAt: now,
+    });
+  }
+
+  function resumeSlaForShipment(shipmentId: string, note: string): void {
+    if (isWriteBlocked) return;
+    if (!canPauseSla) return;
+    const shipment = shipments.find(s => s.id === shipmentId);
+    if (!shipment || !shipment.slaPaused || shipment.slaPaused.resumedAt) return;
+    const now = new Date().toISOString();
+    const trimmedNote = note.trim() || undefined;
+    const history = appendSlaHistory(shipment, {
+      id: `sla-${Date.now()}`,
+      timestamp: now,
+      actor: 'Current User',
+      action: 'resumed',
+      note: trimmedNote,
+    });
+    updateShipment(shipmentId, {
+      // Marking resumedAt rather than nulling slaPaused preserves the
+      // pause record for audit. Status recomputation in computeSlaTarget
+      // checks `slaPaused && !slaPaused.resumedAt` so a resumed pause
+      // does not gate calculations.
+      slaPaused: { ...shipment.slaPaused, resumedAt: now, resumedBy: 'Current User', resumeNote: trimmedNote },
+      slaHistory: history,
+      updatedAt: now,
+    });
+  }
+
+  function resolveSlaExceptionForShipment(shipmentId: string, targetType: SlaTargetType, note: string): void {
+    if (isWriteBlocked) return;
+    if (!canResolveSlaException) return;
+    const shipment = shipments.find(s => s.id === shipmentId);
+    if (!shipment) return;
+    const trimmed = note.trim();
+    if (!trimmed) return;
+    const now = new Date().toISOString();
+    const prev = shipment.slaResolutions || {};
+    const next = { ...prev, [targetType]: { note: trimmed, resolvedAt: now, resolvedBy: 'Current User' } };
+    const history = appendSlaHistory(shipment, {
+      id: `sla-${Date.now()}`,
+      timestamp: now,
+      actor: 'Current User',
+      action: 'exception_resolved',
+      targetType,
+      note: trimmed,
+    });
+    updateShipment(shipmentId, { slaResolutions: next, slaHistory: history, updatedAt: now });
+  }
+
+  function commitSlaAction(): void {
+    if (!slaActionTarget) return;
+    const note = slaActionNote;
+    const target = slaActionTarget;
+    if (target.kind === 'delay_reason') setSlaDelayReasonForShipment(target.shipmentId, target.targetType, note);
+    else if (target.kind === 'resolve') resolveSlaExceptionForShipment(target.shipmentId, target.targetType, note);
+    else if (target.kind === 'pause') pauseSlaForShipment(target.shipmentId, note);
+    else if (target.kind === 'resume') resumeSlaForShipment(target.shipmentId, note);
+    setSlaActionTarget(null);
+    setSlaActionNote('');
+  }
+
+  function savePolicyChange(next: SlaPolicy): void {
+    if (isWriteBlocked) return;
+    if (!canManageSlaPolicy) return;
+    const before = slaPolicy;
+    const stamped: SlaPolicy = { ...next, updatedAt: new Date().toISOString(), updatedBy: 'Current User' };
+    saveSlaPolicy(stamped);
+    setSlaPolicy(stamped);
+    appendPolicyAudit({
+      id: `slapol-${Date.now()}`,
+      timestamp: stamped.updatedAt!,
+      actor: 'Current User',
+      before,
+      after: stamped,
+    });
   }
 
   function friendlyProviderError(raw: ProviderError): ProviderError {
@@ -5417,6 +5639,50 @@ export default function ShippingCenter() {
           </div>
         )}
 
+        {/* Phase 3 Pass #15 — SLA filter chips. Hidden when the SLA feature
+            is off (plan or perm) so non-SLA tenants never see SLA scaffolding.
+            The "Open Policy" button is permission-gated separately and only
+            appears alongside the chips for users who can edit policy. */}
+        {slaFeatureEnabled && (slaCounts.at_risk + slaCounts.overdue + slaCounts.missed + slaCounts.paused > 0 || slaFilter !== 'all') && (
+          <div className="flex flex-wrap gap-2 items-center">
+            <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 mr-1 flex items-center gap-1">
+              <span className="material-symbols-outlined text-xs">schedule</span>SLA:
+            </span>
+            {([
+              { key: 'all', label: 'All', count: shipments.length, color: 'slate' as const },
+              { key: 'at_risk', label: 'At Risk', count: slaCounts.at_risk, color: 'amber' as const },
+              { key: 'overdue', label: 'Overdue', count: slaCounts.overdue, color: 'rose' as const },
+              { key: 'missed', label: 'Missed', count: slaCounts.missed, color: 'rose' as const },
+              { key: 'paused', label: 'Paused', count: slaCounts.paused, color: 'slate' as const },
+            ]).map(c => {
+              const active = slaFilter === c.key;
+              const tone = active
+                ? (c.color === 'amber' ? 'bg-amber-500 text-white border-amber-500'
+                  : c.color === 'rose' ? 'bg-rose-500 text-white border-rose-500'
+                  : 'bg-slate-700 text-white border-slate-700')
+                : 'bg-white/60 text-slate-500 border-slate-200 hover:text-slate-700';
+              return (
+                <button
+                  key={c.key}
+                  onClick={() => setSlaFilter(c.key as typeof slaFilter)}
+                  className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all border ${tone}`}
+                >
+                  {c.label} {c.key !== 'all' ? `(${c.count})` : ''}
+                </button>
+              );
+            })}
+            {canManageSlaPolicy && (
+              <button
+                onClick={() => setShowSlaPolicyModal(true)}
+                className="ml-auto px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest border border-slate-200 bg-white/60 text-slate-500 hover:text-slate-700 flex items-center gap-1"
+                title="Edit SLA Policy"
+              >
+                <span className="material-symbols-outlined text-xs">tune</span>SLA Policy
+              </button>
+            )}
+          </div>
+        )}
+
         <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden">
           {filtered.length === 0 ? (
             <div className="flex flex-col items-center py-16">
@@ -5440,6 +5706,25 @@ export default function ShippingCenter() {
                       <span className="text-sm font-black text-slate-800">{s.shipmentNumber}</span>
                       <span className={`px-2.5 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-lg border ${STATUS_COLORS[s.status]}`}>{s.status}</span>
                       <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">{TYPE_LABELS[s.type]}</span>
+                      {/* Phase 3 Pass #15 — SLA worst-status badge. Suppressed
+                          for not_applicable (cancelled/rejected/no targets)
+                          and for met-only summaries to avoid visual noise.
+                          Click does not interfere with row navigation since
+                          we use a span. */}
+                      {slaFeatureEnabled && (() => {
+                        const sum = slaSummaries[s.id];
+                        if (!sum || !sum.applicable) return null;
+                        if (sum.worst === 'met' || sum.worst === 'on_track') return null;
+                        const tone = toneForStatus(sum.worst);
+                        return (
+                          <span
+                            className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md border flex items-center gap-0.5 ${tone.bg} ${tone.text} ${tone.border}`}
+                            title={sum.targets.map(t => `${labelForTarget(t.type)}: ${t.explanation}`).join('\n')}
+                          >
+                            <span className="material-symbols-outlined" style={{ fontSize: 10 }}>schedule</span>SLA {tone.label}
+                          </span>
+                        );
+                      })()}
                       {s.returnInfo?.isReturn && (
                         <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md bg-teal-100 text-teal-700 border border-teal-200 flex items-center gap-0.5">
                           <span className="material-symbols-outlined" style={{ fontSize: 10 }}>assignment_return</span>Return
@@ -5636,6 +5921,118 @@ export default function ShippingCenter() {
               <div className="p-8 overflow-y-auto flex-1 space-y-6">
                 {detailTab === 'overview' && (
                   <>
+                    {/* Phase 3 Pass #15 — SLA card. Per-target rows with badge,
+                        explanation, optional delay reason / resolution note,
+                        and per-target action buttons. Plan + view-perm gated;
+                        action buttons further gated by their own perms. */}
+                    {slaFeatureEnabled && (() => {
+                      const targets = computeSlaTargets(selectedShip, slaPolicy, nowMs);
+                      const applicable = getApplicableTargetTypes(selectedShip).length > 0;
+                      const paused = !!selectedShip.slaPaused && !selectedShip.slaPaused.resumedAt;
+                      return (
+                        <div className="rounded-2xl border border-slate-200 bg-white/60 p-5 space-y-4">
+                          <div className="flex items-center justify-between">
+                            <h4 className="text-[11px] font-black uppercase tracking-widest text-slate-500 flex items-center gap-2">
+                              <span className="material-symbols-outlined text-sm">schedule</span>SLA Targets
+                            </h4>
+                            <div className="flex items-center gap-2">
+                              {canPauseSla && !paused && applicable && (
+                                <button
+                                  onClick={() => { setSlaActionTarget({ kind: 'pause', shipmentId: selectedShip.id }); setSlaActionNote(''); }}
+                                  className="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest border border-slate-200 text-slate-600 hover:bg-slate-50 flex items-center gap-1"
+                                  disabled={isWriteBlocked}
+                                >
+                                  <span className="material-symbols-outlined text-xs">pause_circle</span>Pause SLA
+                                </button>
+                              )}
+                              {canPauseSla && paused && (
+                                <button
+                                  onClick={() => { setSlaActionTarget({ kind: 'resume', shipmentId: selectedShip.id }); setSlaActionNote(''); }}
+                                  className="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest border border-emerald-200 text-emerald-700 bg-emerald-50/40 hover:bg-emerald-50 flex items-center gap-1"
+                                  disabled={isWriteBlocked}
+                                >
+                                  <span className="material-symbols-outlined text-xs">play_circle</span>Resume SLA
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                          {!applicable ? (
+                            <div className="text-[11px] text-slate-400">SLA does not apply to this shipment (cancelled or rejected).</div>
+                          ) : targets.length === 0 ? (
+                            <div className="text-[11px] text-slate-400">No SLA targets currently apply.</div>
+                          ) : (
+                            <div className="space-y-2">
+                              {targets.map(t => {
+                                const tone = toneForStatus(t.status);
+                                const delay = selectedShip.slaDelayReasons?.[t.type];
+                                const resolution = selectedShip.slaResolutions?.[t.type];
+                                const showResolveBtn = canResolveSlaException && (t.status === 'overdue' || t.status === 'missed') && !resolution;
+                                return (
+                                  <div key={t.type} className="rounded-xl border border-slate-100 bg-white px-4 py-3">
+                                    <div className="flex items-center gap-3 flex-wrap">
+                                      <span className={`px-2.5 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${tone.bg} ${tone.text} ${tone.border}`}>{tone.label}</span>
+                                      <span className="text-xs font-black text-slate-700">{labelForTarget(t.type)}</span>
+                                      <span className="text-[11px] text-slate-500 flex-1 min-w-0">{t.explanation}</span>
+                                      <div className="flex items-center gap-1 shrink-0">
+                                        {canEditSlaDelayReason && (
+                                          <button
+                                            onClick={() => { setSlaActionTarget({ kind: 'delay_reason', shipmentId: selectedShip.id, targetType: t.type }); setSlaActionNote(delay?.reason || ''); }}
+                                            className="px-2 py-1 rounded-md text-[9px] font-black uppercase tracking-widest border border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-50"
+                                            disabled={isWriteBlocked}
+                                            title={delay ? 'Edit delay reason' : 'Add delay reason'}
+                                          >
+                                            {delay ? 'Edit Reason' : 'Add Reason'}
+                                          </button>
+                                        )}
+                                        {showResolveBtn && (
+                                          <button
+                                            onClick={() => { setSlaActionTarget({ kind: 'resolve', shipmentId: selectedShip.id, targetType: t.type }); setSlaActionNote(''); }}
+                                            className="px-2 py-1 rounded-md text-[9px] font-black uppercase tracking-widest border border-emerald-200 text-emerald-700 bg-emerald-50/40 hover:bg-emerald-50"
+                                            disabled={isWriteBlocked}
+                                          >
+                                            Resolve
+                                          </button>
+                                        )}
+                                      </div>
+                                    </div>
+                                    {(delay || resolution) && (
+                                      <div className="mt-2 space-y-1 pl-1">
+                                        {delay && (
+                                          <div className="text-[10px] text-slate-500"><span className="font-black uppercase tracking-widest mr-1">Delay reason:</span>{delay.reason} <span className="text-slate-400">— {delay.addedBy}</span></div>
+                                        )}
+                                        {resolution && (
+                                          <div className="text-[10px] text-emerald-700"><span className="font-black uppercase tracking-widest mr-1">Resolved:</span>{resolution.note} <span className="text-emerald-600">— {resolution.resolvedBy}</span></div>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                          {/* SLA history — append-only audit trail. Collapsed
+                              below targets so it doesn't dominate the card. */}
+                          {(selectedShip.slaHistory && selectedShip.slaHistory.length > 0) && (
+                            <details className="rounded-xl border border-slate-100 bg-slate-50/40 px-4 py-2">
+                              <summary className="cursor-pointer text-[10px] font-black uppercase tracking-widest text-slate-500">SLA History ({selectedShip.slaHistory.length})</summary>
+                              <div className="mt-2 space-y-1.5">
+                                {[...selectedShip.slaHistory].reverse().map(h => (
+                                  <div key={h.id} className="text-[10px] text-slate-500 flex items-start gap-2">
+                                    <span className="text-slate-400 shrink-0">{new Date(h.timestamp).toLocaleString()}</span>
+                                    <span className="font-black uppercase tracking-widest text-slate-600">{h.action.replace(/_/g, ' ')}</span>
+                                    {h.targetType && <span className="text-slate-500">{labelForTarget(h.targetType)}</span>}
+                                    {h.reason && <span className="text-slate-500 italic truncate">"{h.reason}"</span>}
+                                    {h.note && <span className="text-slate-500 italic truncate">"{h.note}"</span>}
+                                    <span className="text-slate-400 ml-auto shrink-0">— {h.actor}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </details>
+                          )}
+                        </div>
+                      );
+                    })()}
+
                     {/* Phase 3 correction — Automation Outcomes panel. Surfaces every
                         rule-set state on the shipment (review-needed with rule source,
                         priority, ready-for-batch, flags, recent rule notes) and provides
@@ -10436,6 +10833,249 @@ export default function ShippingCenter() {
           );
         })()}
       </AnimatePresence>
+
+      {/* Phase 3 Pass #15 — SLA action prompt modal. One modal handles all
+          four kinds (delay reason, resolve, pause, resume) since each is a
+          short text-note write. The kind drives the title, prompt copy, and
+          required vs optional input. */}
+      {slaActionTarget && (
+        <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-6" onClick={() => { setSlaActionTarget(null); setSlaActionNote(''); }}>
+          <div className="bg-white rounded-3xl border border-slate-200 max-w-md w-full p-6 space-y-4" onClick={e => e.stopPropagation()}>
+            {(() => {
+              const t = slaActionTarget;
+              const ship = shipments.find(s => s.id === t.shipmentId);
+              const targetLabel = (t.kind === 'delay_reason' || t.kind === 'resolve') ? labelForTarget(t.targetType) : '';
+              const title = t.kind === 'delay_reason' ? `${targetLabel} — Delay Reason`
+                : t.kind === 'resolve' ? `${targetLabel} — Resolve Exception`
+                : t.kind === 'pause' ? 'Pause SLA'
+                : 'Resume SLA';
+              const prompt = t.kind === 'delay_reason' ? 'Why is this target delayed? (visible in the SLA card and history)'
+                : t.kind === 'resolve' ? 'How was this SLA exception resolved? (recorded in audit history)'
+                : t.kind === 'pause' ? 'Why is the SLA being paused? (required — appears in pause record and history)'
+                : 'Optional note to include with the resume action.';
+              const required = t.kind !== 'resume';
+              const submitDisabled = isWriteBlocked || (required && !slaActionNote.trim());
+              return (
+                <>
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-sm font-black text-slate-800">{title}</h3>
+                    <button onClick={() => { setSlaActionTarget(null); setSlaActionNote(''); }} className="text-slate-400 hover:text-slate-600">
+                      <span className="material-symbols-outlined text-base">close</span>
+                    </button>
+                  </div>
+                  {ship && <div className="text-[11px] text-slate-500">{ship.shipmentNumber}</div>}
+                  <p className="text-[11px] text-slate-500">{prompt}</p>
+                  <textarea
+                    value={slaActionNote}
+                    onChange={e => setSlaActionNote(e.target.value)}
+                    rows={3}
+                    placeholder={required ? 'Required' : 'Optional'}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none focus:border-primary"
+                    autoFocus
+                  />
+                  <div className="flex gap-2 pt-1">
+                    <button
+                      onClick={() => { setSlaActionTarget(null); setSlaActionNote(''); }}
+                      className="flex-1 py-2.5 rounded-xl border border-slate-200 text-slate-600 font-black text-[10px] uppercase tracking-widest hover:bg-slate-50"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={commitSlaAction}
+                      disabled={submitDisabled}
+                      className="flex-1 py-2.5 rounded-xl bg-primary text-white font-black text-[10px] uppercase tracking-widest hover:opacity-90 disabled:opacity-40"
+                    >
+                      {t.kind === 'pause' ? 'Pause' : t.kind === 'resume' ? 'Resume' : 'Save'}
+                    </button>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
+      {/* Phase 3 Pass #15 — SLA Policy Editor modal. Hours / days inputs per
+          target type plus the at-risk threshold percentage. Saves through
+          savePolicyChange which writes the audit log and persists to
+          sessionStorage with a custom-event broadcast. */}
+      {showSlaPolicyModal && canManageSlaPolicy && (
+        <SlaPolicyEditor
+          policy={slaPolicy}
+          onClose={() => setShowSlaPolicyModal(false)}
+          onSave={(next) => { savePolicyChange(next); setShowSlaPolicyModal(false); }}
+          isWriteBlocked={isWriteBlocked}
+        />
+      )}
     </PageShell>
+  );
+}
+
+// ─── Phase 3 Pass #15 — SLA Policy Editor ─────────────────────────────────
+// Local component so the policy editor lives next to its only caller.
+// Inputs are unit-aware (hours for pack/label/dispatch, days for deliver
+// and return-receive). Invalid inputs disable Save rather than silently
+// reverting, so the operator gets explicit feedback.
+function SlaPolicyEditor({
+  policy,
+  onClose,
+  onSave,
+  isWriteBlocked,
+}: {
+  policy: SlaPolicy;
+  onClose: () => void;
+  onSave: (next: SlaPolicy) => void;
+  isWriteBlocked: boolean;
+}) {
+  const HOUR = 60 * 60 * 1000;
+  const DAY = 24 * HOUR;
+  type Unit = 'hours' | 'days';
+  const targetMeta: Array<{ type: SlaTargetType; label: string; defaultUnit: Unit }> = [
+    { type: 'pack_by', label: 'Pack', defaultUnit: 'hours' },
+    { type: 'label_by', label: 'Label', defaultUnit: 'hours' },
+    { type: 'dispatch_by', label: 'Dispatch', defaultUnit: 'hours' },
+    { type: 'deliver_by', label: 'Delivery', defaultUnit: 'days' },
+    { type: 'return_receive_by', label: 'Return Receive', defaultUnit: 'days' },
+  ];
+  const initialState = useMemo(() => {
+    const out: Record<SlaTargetType, { value: string; unit: Unit }> = {
+      pack_by: { value: '', unit: 'hours' },
+      label_by: { value: '', unit: 'hours' },
+      dispatch_by: { value: '', unit: 'hours' },
+      deliver_by: { value: '', unit: 'days' },
+      return_receive_by: { value: '', unit: 'days' },
+    };
+    for (const m of targetMeta) {
+      const ms = policy.windows[m.type];
+      const unit: Unit = m.defaultUnit;
+      const value = unit === 'hours' ? (ms / HOUR).toString() : (ms / DAY).toString();
+      out[m.type] = { value, unit };
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [policy]);
+  const [draft, setDraft] = useState(initialState);
+  const [atRisk, setAtRisk] = useState<string>(policy.atRiskThresholdPct.toString());
+
+  function parseDraftValue(v: string, unit: Unit): number | null {
+    const n = parseFloat(v);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return unit === 'hours' ? n * HOUR : n * DAY;
+  }
+  const parsedWindows = (() => {
+    const out: Partial<Record<SlaTargetType, number>> = {};
+    for (const m of targetMeta) {
+      const d = draft[m.type];
+      const ms = parseDraftValue(d.value, d.unit);
+      if (ms == null) return null;
+      out[m.type] = ms;
+    }
+    return out as Record<SlaTargetType, number>;
+  })();
+  const atRiskNum = parseFloat(atRisk);
+  const atRiskValid = Number.isFinite(atRiskNum) && atRiskNum >= 1 && atRiskNum <= 99;
+  const canSave = !isWriteBlocked && parsedWindows !== null && atRiskValid;
+
+  function submit() {
+    if (!canSave || !parsedWindows) return;
+    onSave({
+      windows: parsedWindows,
+      atRiskThresholdPct: Math.round(atRiskNum),
+    });
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-6" onClick={onClose}>
+      <div className="bg-white rounded-3xl border border-slate-200 max-w-lg w-full p-6 space-y-4 max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-black text-slate-800 flex items-center gap-2">
+            <span className="material-symbols-outlined text-base">tune</span>SLA Policy
+          </h3>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
+            <span className="material-symbols-outlined text-base">close</span>
+          </button>
+        </div>
+        <p className="text-[11px] text-slate-500">
+          Each target's window is measured from its source lifecycle event
+          (e.g. <span className="font-bold">Pack</span> from shipment creation,
+          {' '}<span className="font-bold">Dispatch</span> from label purchase or
+          packing). Status is recomputed every minute; saving here recomputes
+          immediately for all shipments.
+        </p>
+        <div className="space-y-2">
+          {targetMeta.map(m => {
+            const d = draft[m.type];
+            const ms = parseDraftValue(d.value, d.unit);
+            const valid = ms !== null;
+            return (
+              <div key={m.type} className="flex items-center gap-3">
+                <span className="text-[11px] font-black uppercase tracking-widest text-slate-600 w-32 shrink-0">{m.label}</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.5"
+                  value={d.value}
+                  onChange={e => setDraft(prev => ({ ...prev, [m.type]: { ...prev[m.type], value: e.target.value } }))}
+                  className={`w-24 px-3 py-1.5 rounded-lg border text-sm focus:outline-none ${valid ? 'border-slate-200 focus:border-primary' : 'border-rose-300'}`}
+                />
+                <select
+                  value={d.unit}
+                  onChange={e => setDraft(prev => ({ ...prev, [m.type]: { ...prev[m.type], unit: e.target.value as Unit } }))}
+                  className="px-2 py-1.5 rounded-lg border border-slate-200 text-xs focus:outline-none focus:border-primary"
+                >
+                  <option value="hours">hours</option>
+                  <option value="days">days</option>
+                </select>
+                <span className="text-[10px] text-slate-400 ml-auto">{valid ? formatWindowMs(ms!) : 'invalid'}</span>
+              </div>
+            );
+          })}
+        </div>
+        <div className="flex items-center gap-3 pt-2 border-t border-slate-100">
+          <span className="text-[11px] font-black uppercase tracking-widest text-slate-600 w-32 shrink-0">At Risk Threshold</span>
+          <input
+            type="number"
+            min="1"
+            max="99"
+            value={atRisk}
+            onChange={e => setAtRisk(e.target.value)}
+            className={`w-24 px-3 py-1.5 rounded-lg border text-sm focus:outline-none ${atRiskValid ? 'border-slate-200 focus:border-primary' : 'border-rose-300'}`}
+          />
+          <span className="text-[10px] text-slate-500">% of window remaining</span>
+        </div>
+        <div className="flex gap-2 pt-2">
+          <button
+            onClick={() => {
+              const def = getDefaultSlaPolicy();
+              const reset: Record<SlaTargetType, { value: string; unit: Unit }> = {
+                pack_by: { value: (def.windows.pack_by / HOUR).toString(), unit: 'hours' },
+                label_by: { value: (def.windows.label_by / HOUR).toString(), unit: 'hours' },
+                dispatch_by: { value: (def.windows.dispatch_by / HOUR).toString(), unit: 'hours' },
+                deliver_by: { value: (def.windows.deliver_by / DAY).toString(), unit: 'days' },
+                return_receive_by: { value: (def.windows.return_receive_by / DAY).toString(), unit: 'days' },
+              };
+              setDraft(reset);
+              setAtRisk(def.atRiskThresholdPct.toString());
+            }}
+            className="px-3 py-2 rounded-xl border border-slate-200 text-slate-500 font-black text-[10px] uppercase tracking-widest hover:bg-slate-50"
+          >
+            Reset to Defaults
+          </button>
+          <button
+            onClick={onClose}
+            className="ml-auto px-4 py-2 rounded-xl border border-slate-200 text-slate-600 font-black text-[10px] uppercase tracking-widest hover:bg-slate-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={submit}
+            disabled={!canSave}
+            className="px-4 py-2 rounded-xl bg-primary text-white font-black text-[10px] uppercase tracking-widest hover:opacity-90 disabled:opacity-40"
+          >
+            Save Policy
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
