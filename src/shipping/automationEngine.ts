@@ -9,6 +9,7 @@ import type {
   AutomationConditionField,
   AutomationConditionOp,
   AutomationFieldKind,
+  RulePurpose,
   Shipment,
   ShipmentInternalNote,
 } from '../types';
@@ -36,7 +37,7 @@ export const OBSERVATIONAL_ACTIONS: AutomationActionType[] = [
 ];
 
 export const GUARDRAIL_ACTIONS: AutomationActionType[] = [
-  'require_approval', 'block_unless_approved',
+  'require_approval', 'block_unless_approved', 'require_review_before_action',
 ];
 
 export function triggersForProcessType(t: AutomationRuleProcessType): AutomationTriggerType[] {
@@ -45,6 +46,158 @@ export function triggersForProcessType(t: AutomationRuleProcessType): Automation
 
 export function actionsForProcessType(t: AutomationRuleProcessType): AutomationActionType[] {
   return t === 'guardrail' ? GUARDRAIL_ACTIONS : OBSERVATIONAL_ACTIONS;
+}
+
+// Phase 3 correction #4 — purpose-driven model. The operator picks a business
+// purpose first; the engine derives the internal process type and filters
+// triggers, conditions, and actions to logical combinations.
+
+export const PURPOSE_LABELS: Record<RulePurpose, string> = {
+  flag_note: 'Flag / Note',
+  queue_batch: 'Queue for Batch',
+  require_review: 'Require Review',
+  require_approval: 'Require Approval',
+  block_action: 'Block Action',
+};
+
+export const PURPOSE_DESCRIPTIONS: Record<RulePurpose, string> = {
+  flag_note: 'After an event happens, flag a shipment, add an internal note, or set a priority. Does not pause any operator action.',
+  queue_batch: 'Mark eligible shipments as candidates for the Batch Labels workflow.',
+  require_review: 'Require an operator to review the shipment. After an event for observational triggers; before the action for pre-action triggers (e.g. before label purchase).',
+  require_approval: 'Pause a risky action and require an authorized approver before it proceeds.',
+  block_action: 'Halt a risky action until conditions change or an authorized override is applied.',
+};
+
+export function purposeToProcessType(purpose: RulePurpose): AutomationRuleProcessType {
+  switch (purpose) {
+    case 'require_approval':
+    case 'block_action':
+      return 'guardrail';
+    case 'require_review':
+      // 'require_review' becomes guardrail only on pre-action triggers; for
+      // observational triggers it remains observational. Decided by the
+      // (purpose + trigger) combination at builder time, not here.
+      return 'observational';
+    case 'flag_note':
+    case 'queue_batch':
+    default:
+      return 'observational';
+  }
+}
+
+// Trigger compatibility per the Pass #4 spec matrix.
+export const PURPOSE_TRIGGER_MATRIX: Record<RulePurpose, AutomationTriggerType[]> = {
+  flag_note: [
+    'shipment_created', 'shipment_updated', 'status_changed', 'label_purchased',
+    'pickup_requested', 'pickup_confirmed', 'pickup_cancelled', 'tracking_synced',
+    'return_shipment_created',
+  ],
+  queue_batch: [
+    'shipment_created', 'shipment_updated', 'status_changed', 'return_shipment_created',
+  ],
+  require_review: [
+    'shipment_created', 'shipment_updated', 'status_changed', 'label_purchased',
+    'pickup_requested', 'pickup_confirmed', 'pickup_cancelled', 'tracking_synced',
+    'return_shipment_created', 'pre_label_purchase',
+  ],
+  require_approval: ['pre_label_purchase'],
+  block_action: ['pre_label_purchase'],
+};
+
+export function purposesForTrigger(trigger: AutomationTriggerType): RulePurpose[] {
+  const out: RulePurpose[] = [];
+  (Object.keys(PURPOSE_TRIGGER_MATRIX) as RulePurpose[]).forEach(p => {
+    if (PURPOSE_TRIGGER_MATRIX[p].includes(trigger)) out.push(p);
+  });
+  return out;
+}
+
+export function triggersForPurpose(purpose: RulePurpose): AutomationTriggerType[] {
+  return PURPOSE_TRIGGER_MATRIX[purpose];
+}
+
+// Resolve the effective process type for a given (purpose, trigger).
+// 'require_review' on pre_label_purchase becomes a guardrail review so it can
+// gate the action; on any other trigger it stays observational.
+export function effectiveProcessType(purpose: RulePurpose, trigger: AutomationTriggerType): AutomationRuleProcessType {
+  if (purpose === 'require_review' && trigger === 'pre_label_purchase') return 'guardrail';
+  return purposeToProcessType(purpose);
+}
+
+// Implicit primary action per purpose + (sometimes) trigger. The builder
+// renders this as a fixed chip; supplementary actions can be added for
+// purposes that allow them.
+export function primaryActionFor(purpose: RulePurpose, trigger: AutomationTriggerType): AutomationActionType | null {
+  switch (purpose) {
+    case 'queue_batch': return 'mark_ready_for_batch';
+    case 'require_review':
+      return trigger === 'pre_label_purchase' ? 'require_review_before_action' : 'mark_review_needed';
+    case 'require_approval': return 'require_approval';
+    case 'block_action': return 'block_unless_approved';
+    case 'flag_note':
+    default: return null;
+  }
+}
+
+// Supplementary actions (in addition to the implicit primary) the operator may
+// add for a given purpose. flag_note has no primary; it picks from the full
+// observational supplementary set. queue_batch may also add note/flag/priority.
+// Pre-action purposes (review/approval/block) keep their primary atomic.
+export function supplementaryActionsFor(purpose: RulePurpose): AutomationActionType[] {
+  switch (purpose) {
+    case 'flag_note': return ['add_flag', 'add_internal_note', 'set_priority'];
+    case 'queue_batch': return ['add_flag', 'add_internal_note', 'set_priority'];
+    default: return [];
+  }
+}
+
+export function actionsForPurpose(purpose: RulePurpose, trigger: AutomationTriggerType): AutomationActionType[] {
+  const primary = primaryActionFor(purpose, trigger);
+  const supp = supplementaryActionsFor(purpose);
+  return primary ? [primary, ...supp] : supp;
+}
+
+// Per-trigger condition field allow-list. Most triggers can use the full
+// observational field set; pre_label_purchase additionally exposes
+// selectedRateCost; pickup/tracking triggers narrow the set so the builder
+// does not offer fields with no operational meaning at that point.
+const ALL_OBSERVATIONAL_FIELDS: AutomationConditionField[] = [
+  'mode', 'status', 'sourceType', 'carrier', 'serviceLevel',
+  'addressValidationState', 'hasLabel', 'hasPickup', 'shippingCost',
+];
+
+export function conditionFieldsForTrigger(trigger: AutomationTriggerType): AutomationConditionField[] {
+  switch (trigger) {
+    case 'pre_label_purchase':
+      return ['mode', 'sourceType', 'carrier', 'serviceLevel', 'addressValidationState', 'selectedRateCost'];
+    case 'pickup_requested':
+    case 'pickup_confirmed':
+    case 'pickup_cancelled':
+      return ['mode', 'sourceType', 'carrier', 'serviceLevel', 'hasPickup'];
+    case 'tracking_synced':
+      return ['mode', 'sourceType', 'carrier', 'serviceLevel', 'status'];
+    case 'label_purchased':
+      return ['mode', 'sourceType', 'carrier', 'serviceLevel', 'shippingCost'];
+    case 'return_shipment_created':
+      return ['mode', 'sourceType', 'carrier', 'serviceLevel', 'addressValidationState'];
+    default:
+      return ALL_OBSERVATIONAL_FIELDS;
+  }
+}
+
+// Derive purpose for legacy rules created before the purpose-driven model.
+// Inspects actions in priority order so the most specific intent wins.
+export function inferPurposeFromActions(actions: AutomationAction[]): RulePurpose {
+  const types = new Set(actions.map(a => a.type));
+  if (types.has('block_unless_approved')) return 'block_action';
+  if (types.has('require_approval')) return 'require_approval';
+  if (types.has('require_review_before_action') || types.has('mark_review_needed')) return 'require_review';
+  if (types.has('mark_ready_for_batch')) return 'queue_batch';
+  return 'flag_note';
+}
+
+export function getRulePurpose(rule: Pick<AutomationRule, 'purpose' | 'actions'>): RulePurpose {
+  return rule.purpose || inferPurposeFromActions(rule.actions);
 }
 
 export interface RuleEvaluation {
@@ -108,6 +261,8 @@ export const FIELD_DESCRIPTORS: FieldDescriptor[] = [
   { field: 'hasLabel', label: 'Has Carrier Label', kind: 'boolean' },
   { field: 'hasPickup', label: 'Has Pickup Scheduled', kind: 'boolean' },
   { field: 'shippingCost', label: 'Shipping Cost', kind: 'number', unit: 'currency' },
+  // Phase 3 correction #4 — selected rate cost (pre-label-purchase).
+  { field: 'selectedRateCost', label: 'Selected Rate Cost', kind: 'number', unit: 'currency' },
 ];
 
 // Phase 3 correction — operator catalog by field kind. Underlying op codes
@@ -178,6 +333,13 @@ function getShipmentFieldValue(shipment: Shipment, field: AutomationConditionFie
     case 'hasLabel': return !!shipment.label;
     case 'hasPickup': return !!shipment.pickupInfo?.pickupRequested || !!(shipment as any).pickupRequest;
     case 'shippingCost': return typeof shipment.shippingCost === 'number' ? shipment.shippingCost : null;
+    case 'selectedRateCost': {
+      // Reads the candidate rate's price. evaluateGuardrails passes a
+      // candidatePatch with selectedRate set so this resolves correctly even
+      // when the operator has just picked but not yet purchased.
+      const r = shipment.selectedRate?.rate;
+      return typeof r === 'number' ? r : null;
+    }
     default: return null;
   }
 }
@@ -255,7 +417,7 @@ function applyActionsToShipment(
     // Phase 3 correction #3 — guardrail-only actions are evaluated by
     // evaluateGuardrails, not here. Skip silently if accidentally placed on
     // an observational rule (the rule builder also prevents this at edit time).
-    if (action.type === 'require_approval' || action.type === 'block_unless_approved') continue;
+    if (action.type === 'require_approval' || action.type === 'block_unless_approved' || action.type === 'require_review_before_action') continue;
     switch (action.type) {
       case 'add_flag': {
         const flag = String(action.params?.flag || '').trim();
@@ -374,6 +536,9 @@ export interface GuardrailEvaluation {
   blocking: boolean;
   // True if this rule has at least one require_approval action.
   approvalRequested: boolean;
+  // Phase 3 correction #4 — true if this rule has at least one
+  // require_review_before_action (Require Review purpose, pre-action trigger).
+  reviewRequested: boolean;
   // Plain-language summary for the modal copy.
   reason: string;
 }
@@ -381,6 +546,10 @@ export interface GuardrailEvaluation {
 export interface GuardrailEvaluationResult {
   blockingRules: GuardrailEvaluation[];
   approvalRules: GuardrailEvaluation[];
+  // Phase 3 correction #4 — review-only guardrail rules. Distinct from
+  // approvalRules because clearing them does not require approver
+  // permission; any operator can acknowledge.
+  reviewRules: GuardrailEvaluation[];
   allClear: boolean;
 }
 
@@ -393,21 +562,36 @@ export function evaluateGuardrails(
   const subject: Shipment = candidatePatch ? { ...shipment, ...candidatePatch } : shipment;
   const blockingRules: GuardrailEvaluation[] = [];
   const approvalRules: GuardrailEvaluation[] = [];
+  const reviewRules: GuardrailEvaluation[] = [];
   for (const rule of rules) {
-    if (!isGuardrailRule(rule, trigger)) continue;
+    // Phase 3 correction #4 — accept rules whose ruleType is 'guardrail'
+    // OR whose effective process type is guardrail (purpose='require_review'
+    // on a pre-action trigger). isGuardrailRule covers the former; we
+    // additionally pick up purpose-driven review-on-pre-action rules here so
+    // legacy and new rule shapes both work.
+    if (!ruleTriggerMatches(rule, trigger)) continue;
+    const isGuardrail = isGuardrailRule(rule, trigger)
+      || (rule.purpose === 'require_review' && trigger === 'pre_label_purchase');
+    if (!isGuardrail) continue;
     const evaluation = evaluateRule(rule, subject);
     if (!evaluation.matched) continue;
     const blocking = rule.actions.some(a => a.type === 'block_unless_approved');
     const approvalRequested = rule.actions.some(a => a.type === 'require_approval');
+    const reviewRequested = rule.actions.some(a => a.type === 'require_review_before_action')
+      || (rule.purpose === 'require_review' && trigger === 'pre_label_purchase');
     // A guardrail rule with no guardrail actions is a no-op; skip so it does
     // not silently halt the user's purchase flow.
-    if (!blocking && !approvalRequested) continue;
+    if (!blocking && !approvalRequested && !reviewRequested) continue;
     const reason = describeRule(rule);
-    const entry: GuardrailEvaluation = { rule, evaluation, blocking, approvalRequested, reason };
+    const entry: GuardrailEvaluation = { rule, evaluation, blocking, approvalRequested, reviewRequested, reason };
     if (blocking) blockingRules.push(entry);
-    else approvalRules.push(entry);
+    else if (approvalRequested) approvalRules.push(entry);
+    else reviewRules.push(entry);
   }
-  return { blockingRules, approvalRules, allClear: blockingRules.length === 0 && approvalRules.length === 0 };
+  return {
+    blockingRules, approvalRules, reviewRules,
+    allClear: blockingRules.length === 0 && approvalRules.length === 0 && reviewRules.length === 0,
+  };
 }
 
 export const TRIGGER_LABELS: Record<AutomationTriggerType, string> = {
@@ -446,6 +630,7 @@ export const ACTION_LABELS: Record<string, string> = {
   set_priority: 'set shipment priority',
   require_approval: 'require operator approval before the action proceeds',
   block_unless_approved: 'block the action unless an authorized operator approves or overrides',
+  require_review_before_action: 'require an operator to acknowledge a review before the action proceeds',
 };
 
 function describeValue(condition: AutomationCondition, descriptor?: FieldDescriptor): string {
@@ -487,6 +672,9 @@ export function describeAction(action: AutomationAction): string {
     case 'block_unless_approved': return action.params?.reason
       ? `block the action unless approved or overridden (${action.params.reason})`
       : 'block the action unless an authorized operator approves or overrides';
+    case 'require_review_before_action': return action.params?.reason
+      ? `require operator review before the action proceeds (${action.params.reason})`
+      : 'require operator review before the action proceeds';
     default: return ACTION_LABELS[action.type] || action.type;
   }
 }

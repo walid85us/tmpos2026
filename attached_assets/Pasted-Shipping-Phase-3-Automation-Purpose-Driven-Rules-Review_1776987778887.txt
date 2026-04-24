@@ -1,0 +1,532 @@
+Shipping Phase 3 — Automation Purpose-Driven Rules + Review/Approval Workflow Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated correction pass.
+Do not redesign the whole app.
+Do not broaden scope beyond Shipping Automation rule logic, rule-builder UX, review/approval workflow, and permission alignment.
+Do not reopen closed shipping workstreams except where directly required by this automation correction.
+Do not implement Packing Workflows, SLA Optimization, Carrier Scorecards, Customs Docs, or Insurance Rules in this pass.
+
+==================================================
+MANDATORY CONTEXT
+==================================================
+
+The current Automation Rules design is still confusing.
+
+Current problem:
+- The UI asks the user to choose technical rule types:
+  - Observational
+  - Guardrail
+- This is not a good operator-facing model.
+- The operator should not need to understand internal engine categories.
+
+The better model:
+Start with the business purpose of the rule:
+
+“What do you want this rule to do?”
+
+Then internally map that purpose to the correct automation process.
+
+Required user-facing purposes:
+1) Flag / Note
+2) Queue for Batch
+3) Require Review
+4) Require Approval
+5) Block Action
+
+The app should then expose only compatible triggers, conditions, and actions.
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Node/Express carrier-integration engineer
+- Senior workflow automation architect
+- Senior shipping operations and exception-control architect
+- Senior RBAC / entitlement systems architect
+- Senior approval/override workflow designer
+- Senior UX architect for rule-builder systems
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Important:
+Do not make a shallow rename from Observational/Guardrail to new labels.
+Redesign the rule-builder logic so the operator works from business intent.
+Use the cleanest extensible foundation.
+Explain the approach in the required output.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- Ref.txt
+- replit.md
+
+Use them as continuity and source-of-truth documents.
+
+==================================================
+PRESERVE WITHOUT BREAKING
+==================================================
+
+Preserve exactly unless this correction explicitly requires touching it:
+- current design baseline
+- auth behavior
+- preview-mode safety
+- live System Owner plan gating
+- store permission gating
+- provider/manual mode split
+- shipping lifecycle integrity
+- existing shipping core flow
+- reverse-logistics flow
+- Batch Labels foundation
+- batch eligibility and itemized result behavior
+- Carrier Analytics foundation
+- entitlement propagation / linked feature-permission disappearance
+- Shipping Provider explicit permission model
+- Shipping Provider hard-disable + config clearing
+- Settings tab vs subsection entitlement scoping
+- dynamic sub-permission counts
+- typed Automation Rules builder
+- human-readable operators
+- plain-language rule summary
+- in-app delete confirmation
+- automation outcome visibility
+- enabled-state non-regression
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Replace the current technical rule-type UX with a purpose-driven automation model.
+
+The operator should choose:
+- Flag / Note
+- Queue for Batch
+- Require Review
+- Require Approval
+- Block Action
+
+Then the app should guide the operator through compatible:
+- trigger
+- conditions
+- action/outcome
+- permission implications
+
+The workflow must be logically linked and operationally correct.
+
+==================================================
+PART A — REPLACE TECHNICAL RULE TYPES WITH BUSINESS PURPOSE
+==================================================
+
+Required:
+Remove “Observational” and “Guardrail” as primary user-facing choices.
+
+Replace with:
+
+1) Flag / Note
+Purpose:
+- after an event happens, flag a shipment, add an internal note, or create a visible follow-up marker.
+
+2) Queue for Batch
+Purpose:
+- mark eligible shipments as candidates for batch labels.
+
+3) Require Review
+Purpose:
+- require an operator review before a defined next step proceeds, or flag a shipment for review after an event depending on trigger.
+
+4) Require Approval
+Purpose:
+- require authorized approval before a risky action proceeds.
+
+5) Block Action
+Purpose:
+- block a risky action until the condition changes or an authorized override is applied, if override is allowed.
+
+Required:
+The system may still use internal rule modes if useful, but the operator-facing experience must be purpose-driven.
+
+==================================================
+PART B — TRIGGER / CONDITION / ACTION COMPATIBILITY MATRIX
+==================================================
+
+Required:
+Build a clear compatibility matrix so the builder only shows logical combinations.
+
+Current visible trigger families include:
+- A shipment is created
+- A shipment is edited
+- Shipment status changes
+- A carrier label is purchased
+- A carrier label is about to be purchased
+- A pickup is requested
+- A pickup is confirmed
+- A pickup is cancelled
+- Tracking is synced
+- A return shipment is created
+
+Required:
+For each trigger family, define compatible purposes, conditions, and outcomes.
+
+Guidance:
+
+1) A shipment is created
+Compatible purposes:
+- Flag / Note
+- Queue for Batch
+- Require Review
+Compatible conditions:
+- source type
+- shipment mode
+- destination / return vs outbound
+- address validation state
+- package presence
+- provider/manual mode
+Compatible outcomes:
+- add note
+- mark review needed
+- queue for batch
+- set priority
+
+2) A shipment is edited
+Compatible purposes:
+- Flag / Note
+- Require Review
+- Queue for Batch
+Compatible conditions:
+- address validation changed
+- provider/manual mode
+- package state
+- shipment status
+- service level/carrier if available
+Compatible outcomes:
+- add note
+- mark review needed
+- queue/requeue for batch
+- clear/re-evaluate automation outcome where appropriate
+
+3) Shipment status changes
+Compatible purposes:
+- Flag / Note
+- Queue for Batch
+- Require Review
+Compatible conditions:
+- from status
+- to status
+- source type
+- return vs outbound
+- provider/manual mode
+Compatible outcomes:
+- add note
+- mark review needed
+- queue for batch
+- set priority
+
+4) A carrier label is about to be purchased
+This is the primary pre-action control trigger.
+Compatible purposes:
+- Require Review
+- Require Approval
+- Block Action
+Compatible conditions:
+- selected shipping rate / cost
+- carrier
+- service level
+- provider
+- shipment mode
+- address validation state
+- package presence
+- return vs outbound
+Compatible outcomes:
+- require review before purchase
+- require approval before purchase
+- block purchase
+- allow choosing another rate
+- allow authorized approval/override based on permission
+
+5) A carrier label is purchased
+This is post-event only.
+Compatible purposes:
+- Flag / Note
+- Require Review for post-purchase audit only
+- Queue for Batch only if operationally meaningful
+Compatible conditions:
+- actual shipping cost
+- carrier
+- service level
+- provider
+- source type
+Compatible outcomes:
+- add note
+- flag for post-purchase review
+- set priority
+Do NOT use this trigger as the only way to enforce pre-purchase cost approval.
+
+6) A pickup is requested / confirmed / cancelled
+Compatible purposes:
+- Flag / Note
+- Require Review
+Compatible conditions:
+- pickup state
+- provider/manual pickup source
+- cancellation/failure reason
+- carrier/provider
+Compatible outcomes:
+- add note
+- mark review needed
+- set priority
+- create follow-up marker
+
+7) Tracking is synced
+Compatible purposes:
+- Flag / Note
+- Require Review
+Compatible conditions:
+- tracking state
+- exception state
+- delivered/in-transit/open state
+- provider event availability
+Compatible outcomes:
+- add note
+- mark review needed
+- set priority
+- create follow-up marker
+
+8) A return shipment is created
+Compatible purposes:
+- Flag / Note
+- Queue for Batch
+- Require Review
+Compatible conditions:
+- source type
+- return reason if available
+- destination/origin
+- provider/manual mode
+Compatible outcomes:
+- add note
+- queue for batch
+- mark review needed
+- set priority
+
+Required:
+If a selected purpose is incompatible with a trigger, the builder must not show it.
+If a selected trigger is incompatible with a condition/action, hide or disable that option with clear explanation.
+Do not allow illogical rules.
+
+==================================================
+PART C — SELECTED-RATE REVIEW BEFORE LABEL PURCHASE
+==================================================
+
+This is mandatory.
+
+Required workflow:
+For rules like:
+- selected shipping rate > $6
+- require review before label purchase
+
+The correct process is:
+1) User selects a rate
+2) App evaluates relevant “A carrier label is about to be purchased” rules
+3) If selected rate is compliant, allow Purchase Label
+4) If selected rate violates a Require Review / Require Approval / Block Action rule:
+   - do not purchase the label yet
+   - show the reason
+   - create a visible pending review/approval/block state
+   - allow the user to choose a lower rate if available
+   - allow an authorized user to approve/override when permitted
+   - after approval/override, allow label purchase
+5) If the user selects a lower compliant rate, clear or bypass the pending issue appropriately with audit trail
+
+Required:
+The rule must block the next risky step, not the whole shipment.
+The user should still be able to change rate or cancel.
+
+==================================================
+PART D — REVIEW / APPROVAL / BLOCK WORKFLOW
+==================================================
+
+Required:
+Create a practical workflow for:
+- Review Required
+- Approval Required
+- Blocked
+
+Each state must show:
+- source rule
+- trigger
+- condition matched
+- selected rate / carrier / service context where applicable
+- who requested it if applicable
+- who approved/resolved/overrode
+- timestamp
+- resolution note if provided
+
+Required actions:
+- Request Review / Request Approval
+- Resolve Review
+- Approve Exception
+- Override Guardrail
+- Choose Other Rate
+- Cancel / Do Nothing
+
+Required:
+Do not treat all outcomes as the same generic “review needed.”
+Use distinct states:
+- review_pending
+- approval_pending
+- blocked
+- resolved
+- approved
+- overridden
+- dismissed
+
+==================================================
+PART E — STORE PERMISSIONS MATRIX ALIGNMENT
+==================================================
+
+Required:
+Update automation permissions so the workflow is role-aware and practical.
+
+At minimum support explicit sub-permissions:
+- manage_shipping_automation_rules
+- view_shipping_automation_outcomes
+- view_shipping_automation_history
+- resolve_shipping_automation_reviews
+- approve_shipping_automation_exceptions
+- override_shipping_automation_guardrails
+- manage_shipping_batch_labels / purchase_batch_labels if not already coherent
+
+Permission expectations:
+- Admin / Store Owner: can manage rules, approve, override, resolve
+- Manager / Operations Lead: can approve or resolve depending on assigned permissions
+- Standard operator: can see the reason and request approval, but cannot approve/override unless explicitly granted
+
+Important:
+Do not hardcode only by role name.
+Use the permission engine.
+Defaults may be seeded, but permissions must be configurable.
+
+==================================================
+PART F — EXECUTION HISTORY + OPERATIONAL NAVIGATION
+==================================================
+
+Required:
+Execution History must be operationally useful.
+
+At minimum:
+- shipment number must be clickable and open the shipment
+- unresolved outcomes must show pending state
+- resolved/approved/overridden outcomes must show final state
+- when a review is resolved, the history must reflect that
+- the history entry must not imply an action succeeded if it only created a pending review/approval/block
+
+==================================================
+PART G — RULE BUILDER COPY / UX CLARITY
+==================================================
+
+Required:
+Use plain language.
+
+Examples:
+- “When a carrier label is about to be purchased and selected shipping cost is greater than $6.00, require approval before label purchase.”
+- “When a pickup is cancelled, add an internal note and mark the shipment for review.”
+- “When a return shipment is created, queue it for batch labels.”
+
+Required:
+Action help text must explain what actually happens operationally.
+Do not expose raw internal tokens as the main operator language.
+
+==================================================
+PART H — PLAN / PERMISSION / GATING INTEGRITY
+==================================================
+
+Required:
+All new automation purpose, review, approval, override, and history features must respect:
+- System Owner plan state
+- Store Permissions Matrix
+- linked feature-permission disappearance rule
+- preview-mode write safety
+
+Do not regress existing entitlement behavior.
+
+==================================================
+PART I — OUT OF SCOPE
+==================================================
+
+Do NOT implement:
+- Packing Workflows
+- SLA Optimization
+- Carrier Scorecards
+- Customs Docs
+- Insurance Rules
+- broad non-shipping approval workflow engine
+- unrelated Addon governance redesign
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Rule builder starts from business purpose, not technical Observational/Guardrail choice
+2) Trigger / condition / action options are logically filtered
+3) High-cost selected-rate rules evaluate before label purchase
+4) Review / approval / block workflow is practical and permission-aware
+5) Operators can choose a compliant rate instead of being stuck
+6) Authorized users can approve/override; unauthorized users cannot
+7) Execution History is clickable and reflects pending/resolved/approved/overridden truthfully
+8) Store Permissions Matrix supports the automation workflow cleanly
+9) Existing Batch Labels and closed shipping behavior remain intact
+10) Out-of-scope items remain unimplemented
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Replace technical rule-type UI with business-purpose-first model
+2) Implement trigger / condition / action compatibility matrix
+3) Implement selected-rate pre-label purchase review/approval/block workflow
+4) Implement permission-aware review/approval/override handling
+5) Improve execution history operational navigation and state truthfulness
+6) Re-test plan/permission/non-regression behavior
+7) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- purpose-driven automation model
+- trigger / condition / action compatibility matrix
+- selected-rate pre-label-purchase workflow
+- review / approval / block state model
+- automation permission model
+- execution history behavior
+- future out-of-scope items unchanged
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Purpose-Driven Rule Builder
+3. Trigger / Condition / Action Compatibility Matrix
+4. Selected-Rate Pre-Label Purchase Workflow
+5. Review / Approval / Block Workflow
+6. Automation Permission Alignment
+7. Execution History Improvements
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes

@@ -3,12 +3,14 @@ import type {
   AutomationRule, AutomationLogEntry, AutomationTriggerType,
   AutomationCondition, AutomationAction, AutomationActionType,
   AutomationConditionField, AutomationConditionOp,
-  AutomationRuleProcessType, Shipment,
+  AutomationRuleProcessType, RulePurpose, Shipment,
 } from '../../types';
 import {
   FIELD_DESCRIPTORS, OPERATORS_BY_KIND, getFieldDescriptor, getOperatorChoice,
   describeRule, getTriggerTitle, getRuleProcessType,
-  triggersForProcessType, actionsForProcessType,
+  PURPOSE_LABELS, PURPOSE_DESCRIPTIONS,
+  triggersForPurpose, actionsForPurpose, primaryActionFor, supplementaryActionsFor,
+  conditionFieldsForTrigger, getRulePurpose, effectiveProcessType,
 } from '../../shipping/automationEngine';
 
 interface Props {
@@ -47,22 +49,40 @@ const ACTION_LABELS_BY_TYPE: Record<AutomationActionType, string> = {
   set_priority: 'Set shipment priority',
   require_approval: 'Require operator approval before the action proceeds',
   block_unless_approved: 'Block the action unless approved or overridden',
+  require_review_before_action: 'Require operator review before the action proceeds',
 };
 
-function blankRule(currentUser: string, ruleType: AutomationRuleProcessType = 'observational'): AutomationRule {
+const ACTION_HELPER_BY_TYPE: Record<AutomationActionType, string> = {
+  add_flag: 'Adds a label chip to the shipment. Visible on the row and filterable via the Flagged outcome chip.',
+  add_internal_note: 'Appends a rule-sourced note to the shipment\u2019s internal notes log. Visible in the Automation Outcomes panel.',
+  mark_review_needed: 'Pauses the shipment for a human check. Adds a Review Needed badge on the row, surfaces in the Review Needed filter, and requires an operator to Resolve from the detail view.',
+  mark_ready_for_batch: 'Queues the shipment for the Batch Labels workflow. Surfaces a Ready for Batch badge and the corresponding outcome chip on the shipment list.',
+  set_priority: 'Sets the shipment priority. High/Urgent show as a colored badge on the row and are findable via the High Priority outcome chip.',
+  require_approval: 'Pauses the action and asks an authorized operator to approve before it proceeds. Operators with Approve Automation Exceptions can clear it from the shipment detail view.',
+  block_unless_approved: 'Halts the action unless an authorized operator approves or overrides. Approve requires Approve Automation Exceptions; override requires the stricter Override Automation Guardrails permission.',
+  require_review_before_action: 'Pauses the action until an operator acknowledges a review. Any operator can clear the review from the pre-action modal — no approver permission required.',
+};
+
+function blankRule(currentUser: string, purpose: RulePurpose = 'flag_note'): AutomationRule {
   const now = new Date().toISOString();
-  const trigger: AutomationTriggerType = ruleType === 'guardrail' ? 'pre_label_purchase' : 'shipment_created';
-  const action: AutomationAction = ruleType === 'guardrail'
-    ? { type: 'block_unless_approved', params: {} }
-    : { type: 'mark_ready_for_batch', params: {} };
+  const triggers = triggersForPurpose(purpose);
+  const trigger: AutomationTriggerType = triggers[0];
+  const ruleType = effectiveProcessType(purpose, trigger);
+  const primary = primaryActionFor(purpose, trigger);
+  // flag_note has no implicit primary — start with one supplementary action so
+  // the rule is saveable; the operator can swap or add more.
+  const initialAction: AutomationAction = primary
+    ? { type: primary, params: {} }
+    : { type: 'add_flag', params: {} };
   return {
     id: `rule-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     name: '',
     enabled: true,
     ruleType,
+    purpose,
     trigger,
     conditions: [],
-    actions: [action],
+    actions: [initialAction],
     description: '',
     createdAt: now, updatedAt: now,
     createdBy: currentUser, updatedBy: currentUser,
@@ -106,9 +126,24 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
   const [deleteTarget, setDeleteTarget] = useState<AutomationRule | null>(null);
 
   const liveSummary = useMemo(() => editing ? describeRule(editing) : '', [editing]);
-  const editingType: AutomationRuleProcessType = editing ? getRuleProcessType(editing) : 'observational';
-  const allowedTriggers = useMemo(() => triggersForProcessType(editingType), [editingType]);
-  const allowedActions = useMemo(() => actionsForProcessType(editingType), [editingType]);
+  const editingPurpose: RulePurpose = editing ? getRulePurpose(editing) : 'flag_note';
+  const editingType: AutomationRuleProcessType = editing
+    ? effectiveProcessType(editingPurpose, editing.trigger)
+    : 'observational';
+  const allowedTriggers = useMemo(() => triggersForPurpose(editingPurpose), [editingPurpose]);
+  const allowedActions = useMemo(
+    () => editing ? actionsForPurpose(editingPurpose, editing.trigger) : [],
+    [editingPurpose, editing?.trigger],
+  );
+  const allowedFields = useMemo(
+    () => editing ? conditionFieldsForTrigger(editing.trigger) : [],
+    [editing?.trigger],
+  );
+  const primaryAction = useMemo(
+    () => editing ? primaryActionFor(editingPurpose, editing.trigger) : null,
+    [editingPurpose, editing?.trigger],
+  );
+  const supplementaryAllowed = useMemo(() => supplementaryActionsFor(editingPurpose), [editingPurpose]);
   // Index shipments by id for O(1) lookup when rendering history outcome chips.
   const shipmentsById = useMemo(() => {
     const m = new Map<string, Shipment>();
@@ -116,25 +151,69 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
     return m;
   }, [shipments]);
 
-  function startCreate() { setEditing(blankRule(currentUser, 'observational')); setCreating(true); }
+  function startCreate() { setEditing(blankRule(currentUser, 'flag_note')); setCreating(true); }
   function startEdit(rule: AutomationRule) {
-    setEditing({ ...rule, ruleType: getRuleProcessType(rule), conditions: rule.conditions.map(c => ({ ...c })), actions: rule.actions.map(a => ({ ...a, params: { ...(a.params || {}) } })) });
+    // Phase 3 correction #4 — derive purpose for legacy rules so the
+    // purpose-first builder always has a concrete value to edit against.
+    const purpose = getRulePurpose(rule);
+    setEditing({
+      ...rule,
+      purpose,
+      ruleType: effectiveProcessType(purpose, rule.trigger),
+      conditions: rule.conditions.map(c => ({ ...c })),
+      actions: rule.actions.map(a => ({ ...a, params: { ...(a.params || {}) } })),
+    });
     setCreating(false);
   }
   function cancelEdit() { setEditing(null); setCreating(false); }
 
-  // Phase 3 correction #3 — switching rule type resets trigger and actions to
-  // the first valid option for the chosen type, so the rule cannot end up in
-  // an inconsistent state (e.g. observational rule with a guardrail action).
-  function changeRuleType(nextType: AutomationRuleProcessType) {
+  // Phase 3 correction #4 — switching purpose resets trigger to the first
+  // compatible option, drops conditions on now-invalid fields, and rebuilds
+  // actions to the new purpose's primary (+ keeps any still-allowed
+  // supplementary action).
+  function changePurpose(nextPurpose: RulePurpose) {
     if (!editing) return;
-    const triggers = triggersForProcessType(nextType);
-    const actions = actionsForProcessType(nextType);
+    const triggers = triggersForPurpose(nextPurpose);
+    const trigger = triggers.includes(editing.trigger) ? editing.trigger : triggers[0];
+    const allowedFieldSet = new Set(conditionFieldsForTrigger(trigger));
+    const conditions = editing.conditions.filter(c => allowedFieldSet.has(c.field));
+    const primary = primaryActionFor(nextPurpose, trigger);
+    const supp = new Set(supplementaryActionsFor(nextPurpose));
+    const keptSupp = editing.actions.filter(a => supp.has(a.type));
+    const actions: AutomationAction[] = primary
+      ? [{ type: primary, params: {} }, ...keptSupp]
+      : (keptSupp.length > 0 ? keptSupp : [{ type: 'add_flag', params: {} }]);
     setEditing({
       ...editing,
-      ruleType: nextType,
-      trigger: triggers[0],
-      actions: [{ type: actions[0], params: {} }],
+      purpose: nextPurpose,
+      trigger,
+      ruleType: effectiveProcessType(nextPurpose, trigger),
+      conditions,
+      actions,
+    });
+  }
+
+  // Phase 3 correction #4 — changing trigger drops conditions on
+  // now-invalid fields and rebuilds the implicit primary action (which can
+  // change between mark_review_needed and require_review_before_action when
+  // toggling the require_review purpose between observational and pre-action
+  // triggers).
+  function changeTrigger(nextTrigger: AutomationTriggerType) {
+    if (!editing) return;
+    const allowedFieldSet = new Set(conditionFieldsForTrigger(nextTrigger));
+    const conditions = editing.conditions.filter(c => allowedFieldSet.has(c.field));
+    const primary = primaryActionFor(editingPurpose, nextTrigger);
+    const supp = new Set(supplementaryActionsFor(editingPurpose));
+    const keptSupp = editing.actions.filter(a => supp.has(a.type));
+    const actions: AutomationAction[] = primary
+      ? [{ type: primary, params: {} }, ...keptSupp]
+      : (keptSupp.length > 0 ? keptSupp : [{ type: 'add_flag', params: {} }]);
+    setEditing({
+      ...editing,
+      trigger: nextTrigger,
+      ruleType: effectiveProcessType(editingPurpose, nextTrigger),
+      conditions,
+      actions,
     });
   }
 
@@ -144,7 +223,8 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
     if (editing.actions.length === 0) return;
     if (creating) onAdd(editing);
     else onUpdate(editing.id, {
-      name: editing.name, enabled: editing.enabled, ruleType: editing.ruleType, trigger: editing.trigger,
+      name: editing.name, enabled: editing.enabled, ruleType: editing.ruleType, purpose: editing.purpose,
+      trigger: editing.trigger,
       conditions: editing.conditions, actions: editing.actions, description: editing.description,
       updatedBy: currentUser,
     });
@@ -158,7 +238,13 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
 
   function addCondition() {
     if (!editing) return;
-    setEditing({ ...editing, conditions: [...editing.conditions, defaultConditionForField('status')] });
+    // Phase 3 correction #4 — default to the first field allowed by the
+    // current trigger so the new row never starts in an invalid state (e.g.
+    // adding a 'status' condition on a pre_label_purchase trigger that does
+    // not expose status).
+    const fields = conditionFieldsForTrigger(editing.trigger);
+    const firstField = (fields[0] || 'status') as AutomationConditionField;
+    setEditing({ ...editing, conditions: [...editing.conditions, defaultConditionForField(firstField)] });
   }
   function updateConditionField(idx: number, field: AutomationConditionField) {
     if (!editing) return;
@@ -185,7 +271,14 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
 
   function addAction() {
     if (!editing) return;
-    setEditing({ ...editing, actions: [...editing.actions, { type: 'mark_ready_for_batch', params: {} }] });
+    // Phase 3 correction #4 — only purposes with a supplementary set can add
+    // additional actions. Pick the first supplementary type not already on the
+    // rule, so the operator gets a useful default rather than a duplicate.
+    const supp = supplementaryActionsFor(editingPurpose);
+    if (supp.length === 0) return;
+    const taken = new Set(editing.actions.map(a => a.type));
+    const next = supp.find(t => !taken.has(t)) || supp[0];
+    setEditing({ ...editing, actions: [...editing.actions, { type: next, params: {} }] });
   }
   function updateAction(idx: number, patch: Partial<AutomationAction>) {
     if (!editing) return;
@@ -226,32 +319,41 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
 
         {editing && (
           <div className="mt-4 border border-indigo-200 rounded-xl p-4 bg-indigo-50/40 space-y-4">
-            {/* Phase 3 correction #3 — rule type selector. Observational rules
-                react after an event (current behavior). Guardrail rules
-                evaluate BEFORE a risky action and can block / require
-                approval before that action proceeds. */}
+            {/* Phase 3 correction #4 — purpose-first selector. The operator
+                picks WHAT they want to happen, and the builder derives the
+                trigger options, condition fields, and primary action from
+                that. Five purposes: Flag/Note (observational tagging),
+                Queue for Batch (route to batch labels), Require Review
+                (mark for human check; on pre-label trigger this gates the
+                purchase), Require Approval (gates pre-action with approver
+                permission), Block Action (gates pre-action and only an
+                override can proceed). */}
             <div>
-              <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Rule Type</p>
-              <div className="flex flex-col sm:flex-row gap-2">
-                <label className={`flex-1 cursor-pointer border rounded-lg p-2.5 ${editingType === 'observational' ? 'border-indigo-400 bg-white' : 'border-slate-200 bg-white/50'}`}>
-                  <span className="flex items-center gap-2">
-                    <input type="radio" name="ruleType" checked={editingType === 'observational'} onChange={() => changeRuleType('observational')} />
-                    <span className="text-xs font-bold text-slate-700">Observational</span>
-                  </span>
-                  <span className="block text-[11px] text-slate-500 mt-1 ml-5 leading-snug">
-                    Reacts after an event happens. Can flag, note, queue, prioritize, or mark for review.
-                  </span>
-                </label>
-                <label className={`flex-1 cursor-pointer border rounded-lg p-2.5 ${editingType === 'guardrail' ? 'border-amber-400 bg-white' : 'border-slate-200 bg-white/50'}`}>
-                  <span className="flex items-center gap-2">
-                    <input type="radio" name="ruleType" checked={editingType === 'guardrail'} onChange={() => changeRuleType('guardrail')} />
-                    <span className="text-xs font-bold text-slate-700">Guardrail</span>
-                  </span>
-                  <span className="block text-[11px] text-slate-500 mt-1 ml-5 leading-snug">
-                    Evaluates BEFORE a risky action (e.g. label purchase). Can block the action or require operator approval.
-                  </span>
-                </label>
+              <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Purpose</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
+                {(['flag_note','queue_batch','require_review','require_approval','block_action'] as RulePurpose[]).map(p => {
+                  const accent = p === 'block_action'
+                    ? (editingPurpose === p ? 'border-rose-400' : 'border-slate-200')
+                    : (p === 'require_approval' || p === 'require_review')
+                      ? (editingPurpose === p ? 'border-amber-400' : 'border-slate-200')
+                      : (editingPurpose === p ? 'border-indigo-400' : 'border-slate-200');
+                  return (
+                    <label key={p} className={`cursor-pointer border rounded-lg p-2.5 bg-white ${accent}`}>
+                      <span className="flex items-center gap-2">
+                        <input type="radio" name="rulePurpose" checked={editingPurpose === p} onChange={() => changePurpose(p)} />
+                        <span className="text-xs font-bold text-slate-700">{PURPOSE_LABELS[p]}</span>
+                      </span>
+                      <span className="block text-[11px] text-slate-500 mt-1 ml-5 leading-snug">
+                        {PURPOSE_DESCRIPTIONS[p]}
+                      </span>
+                    </label>
+                  );
+                })}
               </div>
+              <p className="text-[10px] text-slate-500 mt-2 leading-snug">
+                Process type derived from purpose + trigger:
+                <span className={`ml-1 px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border ${editingType === 'guardrail' ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-slate-50 text-slate-600 border-slate-200'}`}>{editingType}</span>
+              </p>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <label className="text-xs font-bold text-slate-700">
@@ -262,7 +364,7 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
               </label>
               <label className="text-xs font-bold text-slate-700">
                 {editingType === 'guardrail' ? 'Evaluate this rule when…' : 'Run this rule when…'}
-                <select value={editing.trigger} onChange={e => updateField('trigger', e.target.value as AutomationTriggerType)}
+                <select value={editing.trigger} onChange={e => changeTrigger(e.target.value as AutomationTriggerType)}
                   className="mt-1 w-full text-xs border border-slate-200 rounded-lg px-2 py-1.5">
                   {allowedTriggers.map(t => <option key={t} value={t}>{TRIGGER_LABELS_BY_TYPE[t]}</option>)}
                 </select>
@@ -299,7 +401,13 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
                     <div key={i} className="flex items-start gap-2 bg-white border border-slate-200 rounded-lg p-2 flex-wrap md:flex-nowrap">
                       <select value={c.field} onChange={e => updateConditionField(i, e.target.value as AutomationConditionField)}
                         className="text-xs border border-slate-200 rounded px-1.5 py-1">
-                        {FIELD_DESCRIPTORS.map(f => <option key={f.field} value={f.field}>{f.label}</option>)}
+                        {/* Phase 3 correction #4 — only fields the matrix
+                            allows for the current trigger are offered, so the
+                            operator can never compose a meaningless condition
+                            (e.g. selectedRateCost outside pre_label_purchase). */}
+                        {FIELD_DESCRIPTORS.filter(f => allowedFields.includes(f.field)).map(f => (
+                          <option key={f.field} value={f.field}>{f.label}</option>
+                        ))}
                       </select>
                       <select value={c.op} onChange={e => updateConditionOp(i, e.target.value as AutomationConditionOp)}
                         className="text-xs border border-slate-200 rounded px-1.5 py-1">
@@ -318,28 +426,35 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
             <div>
               <div className="flex items-center justify-between mb-2">
                 <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Actions</p>
-                <button onClick={addAction} className="text-[10px] font-black uppercase tracking-widest text-primary hover:underline">+ Add Action</button>
+                {/* Phase 3 correction #4 — only purposes that allow
+                    supplementary actions show the "+ Add" affordance.
+                    Pre-action purposes (review/approval/block) are atomic. */}
+                {supplementaryAllowed.length > 0 && (
+                  <button onClick={addAction} className="text-[10px] font-black uppercase tracking-widest text-primary hover:underline">+ Add Supplementary Action</button>
+                )}
               </div>
               <div className="space-y-2">
                 {editing.actions.map((a, i) => {
-                  // Phase 3 correction — explain the operational outcome of each
-                  // action so operators know exactly what happens and where to find it.
-                  const helper: Record<AutomationActionType, string> = {
-                    add_flag: 'Adds a label chip to the shipment. Visible on the row and filterable via the Flagged outcome chip.',
-                    add_internal_note: 'Appends a rule-sourced note to the shipment\u2019s internal notes log. Visible in the Automation Outcomes panel.',
-                    mark_review_needed: 'Pauses the shipment for a human check. Adds a Review Needed badge on the row, surfaces in the Review Needed filter, and requires an operator to Resolve from the detail view.',
-                    mark_ready_for_batch: 'Queues the shipment for the Batch Labels workflow. Surfaces a Ready for Batch badge and the corresponding outcome chip on the shipment list.',
-                    set_priority: 'Sets the shipment priority. High/Urgent show as a colored badge on the row and are findable via the High Priority outcome chip.',
-                    require_approval: 'Pauses the action and asks an authorized operator to approve before it proceeds. Operators with Approve Automation Exceptions can clear it from the shipment detail view.',
-                    block_unless_approved: 'Halts the action unless an authorized operator approves or overrides. Approve requires Approve Automation Exceptions; override requires the stricter Override Automation Guardrails permission.',
-                  };
+                  // Phase 3 correction #4 — the action at index 0 is the
+                  // implicit primary action when the purpose has one. We
+                  // render it as a fixed chip with only its params editable
+                  // (no type swap, no remove). Other actions are
+                  // supplementary; their type can be swapped within the
+                  // purpose's supplementary set and they can be removed.
+                  const isPrimary = primaryAction != null && i === 0 && a.type === primaryAction;
                   return (
-                  <div key={i} className="bg-white border border-slate-200 rounded-lg p-2">
+                  <div key={i} className={`bg-white border rounded-lg p-2 ${isPrimary ? 'border-indigo-200 bg-indigo-50/30' : 'border-slate-200'}`}>
                     <div className="flex items-center gap-2 flex-wrap">
-                      <select value={a.type} onChange={e => updateAction(i, { type: e.target.value as AutomationActionType, params: {} })}
-                        className="text-xs border border-slate-200 rounded px-1.5 py-1">
-                        {allowedActions.map(at => <option key={at} value={at}>{ACTION_LABELS_BY_TYPE[at]}</option>)}
-                      </select>
+                      {isPrimary ? (
+                        <span className="text-[10px] font-black uppercase tracking-widest px-1.5 py-1 rounded bg-indigo-100 text-indigo-700 border border-indigo-200">
+                          {ACTION_LABELS_BY_TYPE[a.type]}
+                        </span>
+                      ) : (
+                        <select value={a.type} onChange={e => updateAction(i, { type: e.target.value as AutomationActionType, params: {} })}
+                          className="text-xs border border-slate-200 rounded px-1.5 py-1">
+                          {supplementaryAllowed.map(at => <option key={at} value={at}>{ACTION_LABELS_BY_TYPE[at]}</option>)}
+                        </select>
+                      )}
                       {a.type === 'add_flag' && (
                         <input value={a.params?.flag || ''} onChange={e => updateAction(i, { params: { ...(a.params || {}), flag: e.target.value } })}
                           className="flex-1 text-xs border border-slate-200 rounded px-1.5 py-1" placeholder="Flag label (e.g. high_value)" />
@@ -352,7 +467,7 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
                         <input value={a.params?.reason || ''} onChange={e => updateAction(i, { params: { ...(a.params || {}), reason: e.target.value } })}
                           className="flex-1 text-xs border border-slate-200 rounded px-1.5 py-1" placeholder="Review reason (optional)" />
                       )}
-                      {(a.type === 'require_approval' || a.type === 'block_unless_approved') && (
+                      {(a.type === 'require_approval' || a.type === 'block_unless_approved' || a.type === 'require_review_before_action') && (
                         <input value={a.params?.reason || ''} onChange={e => updateAction(i, { params: { ...(a.params || {}), reason: e.target.value } })}
                           className="flex-1 text-xs border border-slate-200 rounded px-1.5 py-1" placeholder="Reason shown to operator (optional)" />
                       )}
@@ -364,9 +479,11 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
                           <option value="urgent">Urgent</option>
                         </select>
                       )}
-                      <button onClick={() => removeAction(i)} className="text-rose-500 hover:text-rose-700 text-xs ml-auto px-1">×</button>
+                      {!isPrimary && (
+                        <button onClick={() => removeAction(i)} className="text-rose-500 hover:text-rose-700 text-xs ml-auto px-1">×</button>
+                      )}
                     </div>
-                    <p className="text-[10px] text-slate-500 mt-1.5 leading-snug">{helper[a.type]}</p>
+                    <p className="text-[10px] text-slate-500 mt-1.5 leading-snug">{ACTION_HELPER_BY_TYPE[a.type]}</p>
                   </div>
                   );
                 })}

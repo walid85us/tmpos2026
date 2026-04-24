@@ -1227,6 +1227,17 @@ export type AutomationTriggerType =
 // risky action and can block / require approval before that action proceeds.
 export type AutomationRuleProcessType = 'observational' | 'guardrail';
 
+// Phase 3 correction #4 — purpose-driven model. The operator picks a business
+// purpose first; trigger / condition / action options are then filtered to
+// only logical combinations for that purpose. The internal process type
+// (observational | guardrail) is derived from purpose.
+export type RulePurpose =
+  | 'flag_note'
+  | 'queue_batch'
+  | 'require_review'
+  | 'require_approval'
+  | 'block_action';
+
 export type AutomationConditionField =
   | 'mode'
   | 'status'
@@ -1236,7 +1247,11 @@ export type AutomationConditionField =
   | 'addressValidationState'
   | 'hasLabel'
   | 'hasPickup'
-  | 'shippingCost';
+  | 'shippingCost'
+  // Phase 3 correction #4 — selected rate cost (pre-label-purchase). Reads
+  // shipment.selectedRate?.rate so a rule can intercept a chosen-but-unlabeled
+  // rate (e.g. "selected rate > $6 → require approval before purchase").
+  | 'selectedRateCost';
 
 export type AutomationConditionOp =
   | 'eq' | 'neq' | 'in' | 'notIn'
@@ -1265,7 +1280,12 @@ export type AutomationActionType =
   // observational engine; they are evaluated by `evaluateGuardrails` and
   // surfaced via the pre-action guardrail UI (e.g. pre-label-purchase modal).
   | 'require_approval'
-  | 'block_unless_approved';
+  | 'block_unless_approved'
+  // Phase 3 correction #4 — guardrail-only "Require Review" action. Used by
+  // purpose='require_review' rules on the pre_label_purchase trigger so the
+  // operator must acknowledge a review before the action proceeds, but no
+  // approver permission is needed (any operator can clear it).
+  | 'require_review_before_action';
 
 export interface AutomationAction {
   type: AutomationActionType;
@@ -1282,6 +1302,10 @@ export interface AutomationRule {
   // (e.g. pre_label_purchase) and guardrail actions
   // (require_approval / block_unless_approved).
   ruleType?: AutomationRuleProcessType;
+  // Phase 3 correction #4 — operator-facing business purpose. Optional for
+  // back-compat with rules created before the purpose-driven model; the
+  // engine derives a purpose from actions when this is missing.
+  purpose?: RulePurpose;
   trigger: AutomationTriggerType;
   conditions: AutomationCondition[];
   actions: AutomationAction[];
@@ -1331,7 +1355,7 @@ export interface AutomationLogEntry {
   // Phase 3 correction #3 — guardrail outcome captured at decision time so
   // execution history can show the operational result (e.g. "blocked",
   // "approved", "overridden") without needing to look up the shipment.
-  guardrailOutcome?: 'blocked' | 'approval_required' | 'approved' | 'overridden' | 'cleared_by_alternate_rate';
+  guardrailOutcome?: 'blocked' | 'approval_required' | 'review_required' | 'approved' | 'overridden' | 'acknowledged' | 'cleared_by_alternate_rate';
 }
 
 export type BatchStatus = 'draft' | 'processing' | 'completed' | 'completed_with_errors' | 'cancelled';

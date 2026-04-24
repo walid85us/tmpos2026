@@ -106,6 +106,11 @@ export const SUB_PERMISSIONS: SubPermissionDef[] = [
   { id: 'manage_carrier_locator_settings', label: 'Manage Carrier Locator Settings', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Configure per-store carrier-locator adapters (USPS / FedEx / UPS / DHL / GLS) used for live service-point lookup. Independent of Manage Shipping Settings (which controls aggregator-level provider configuration like EasyPost / Shippo / ShipStation). Requires the Service Points plan feature.' },
   { id: 'manage_shipping_automation_rules', label: 'Manage Shipping Automation Rules', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Create, edit, enable / disable and delete Shipping Center Automation Rules. Rules are operator-trustworthy: they can only flag shipments, add internal notes, mark review-needed, queue ready-for-batch, and set priority — they cannot purchase labels, change status, or perform irreversible carrier operations. Requires the Shipping Automation Rules plan feature.' },
   { id: 'view_shipping_automation_results', label: 'View Automation History', parentDomain: 'shipping', minModuleLevel: 'view', defaultLevel: 'view', description: 'View the auditable execution history of Automation Rules — which rule fired against which shipment, when, which actions were applied, and the operational outcome (matched / blocked / approved / overridden). Granted independently of the management permission so an auditor can see history without being able to change rules.' },
+  // Phase 3 correction #4 — outcome surfaces (per-shipment badges, filter
+  // chips, detail-panel "Automation Outcomes" section) gated separately from
+  // the historical execution log so an operator can see live state without
+  // necessarily seeing the full audit history, or vice versa.
+  { id: 'view_shipping_automation_outcomes', label: 'View Automation Outcomes', parentDomain: 'shipping', minModuleLevel: 'view', defaultLevel: 'view', description: 'View per-shipment Automation Outcomes — review-needed / approval-pending / blocked / ready-for-batch / priority / flag badges on the shipment list, the matching outcome filter chips above the list, and the Automation Outcomes panel inside the shipment detail. Independent of execution history so an operator can act on live outcomes without auditing past runs.' },
   // Phase 3 correction #3 — operator-action perms for the guardrail / approval
   // workflow. Independent from `manage_shipping_automation_rules` (which only
   // covers RULE editing) so an operator can resolve / approve / override
@@ -169,6 +174,8 @@ export const FEATURE_PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   shipping_automation_rules: [
     'manage_shipping_automation_rules',
     'view_shipping_automation_results',
+    // Phase 3 correction #4 — outcomes surface gated separately from history.
+    'view_shipping_automation_outcomes',
     // Phase 3 correction #3 — guardrail / approval workflow operator perms.
     // Plan-locked under the same feature: if a tenant doesn't have automation
     // rules, the resolve / approve / override operator actions can't exist
@@ -353,6 +360,7 @@ export const tenantRoles: EmployeeRole[] = [
       create_return_shipment: true,
       manage_shipping_automation_rules: true,
       view_shipping_automation_results: true,
+      view_shipping_automation_outcomes: true,
       resolve_shipping_automation_reviews: true,
       approve_shipping_automation_exceptions: true,
       override_shipping_automation_guardrails: true,
@@ -440,6 +448,7 @@ export const tenantRoles: EmployeeRole[] = [
       create_return_shipment: false,
       manage_shipping_automation_rules: false,
       view_shipping_automation_results: false,
+      view_shipping_automation_outcomes: false,
       resolve_shipping_automation_reviews: false,
       approve_shipping_automation_exceptions: false,
       override_shipping_automation_guardrails: false,
@@ -527,6 +536,7 @@ export const tenantRoles: EmployeeRole[] = [
       create_return_shipment: false,
       manage_shipping_automation_rules: false,
       view_shipping_automation_results: false,
+      view_shipping_automation_outcomes: false,
       resolve_shipping_automation_reviews: false,
       approve_shipping_automation_exceptions: false,
       override_shipping_automation_guardrails: false,
