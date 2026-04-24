@@ -25,6 +25,9 @@ export const OBSERVATIONAL_TRIGGERS: AutomationTriggerType[] = [
   'shipment_created', 'shipment_updated', 'status_changed', 'label_purchased',
   'pickup_requested', 'pickup_confirmed', 'pickup_cancelled', 'tracking_synced',
   'return_shipment_created',
+  // Phase 3 Pass #10 — observational packing-workflow events. Fire AFTER
+  // the corresponding packing action; never gate the underlying action.
+  'packing_started', 'packing_completed', 'packing_exception_created',
 ];
 
 export const GUARDRAIL_TRIGGERS: AutomationTriggerType[] = [
@@ -91,6 +94,8 @@ export const PURPOSE_TRIGGER_MATRIX: Record<RulePurpose, AutomationTriggerType[]
     'shipment_created', 'shipment_updated', 'status_changed', 'label_purchased',
     'pickup_requested', 'pickup_confirmed', 'pickup_cancelled', 'tracking_synced',
     'return_shipment_created',
+    // Phase 3 Pass #10 — packing events support flag/note for visibility.
+    'packing_started', 'packing_completed', 'packing_exception_created',
   ],
   queue_batch: [
     'shipment_created', 'shipment_updated', 'status_changed', 'return_shipment_created',
@@ -99,6 +104,11 @@ export const PURPOSE_TRIGGER_MATRIX: Record<RulePurpose, AutomationTriggerType[]
     'shipment_created', 'shipment_updated', 'status_changed', 'label_purchased',
     'pickup_requested', 'pickup_confirmed', 'pickup_cancelled', 'tracking_synced',
     'return_shipment_created', 'pre_label_purchase',
+    // Phase 3 Pass #10 — packing events can also raise a review (e.g. require
+    // a manager review when an exception is created). Cannot be a guardrail
+    // on these triggers because they are observational (the event has
+    // already happened).
+    'packing_started', 'packing_completed', 'packing_exception_created',
   ],
   require_approval: ['pre_label_purchase'],
   block_action: ['pre_label_purchase'],
@@ -632,6 +642,9 @@ export const TRIGGER_LABELS: Record<AutomationTriggerType, string> = {
   tracking_synced: 'tracking is synced',
   return_shipment_created: 'a return shipment is created',
   pre_label_purchase: 'a carrier label is about to be purchased',
+  packing_started: 'packing is started on a shipment',
+  packing_completed: 'packing is completed on a shipment',
+  packing_exception_created: 'a packing exception is created',
 };
 
 const TRIGGER_LABELS_TITLECASE: Record<AutomationTriggerType, string> = {
@@ -645,6 +658,9 @@ const TRIGGER_LABELS_TITLECASE: Record<AutomationTriggerType, string> = {
   tracking_synced: 'Tracking Synced',
   return_shipment_created: 'Return Shipment Created',
   pre_label_purchase: 'Before Label Purchase',
+  packing_started: 'Packing Started',
+  packing_completed: 'Packing Completed',
+  packing_exception_created: 'Packing Exception Created',
 };
 
 export function getTriggerTitle(t: AutomationTriggerType): string { return TRIGGER_LABELS_TITLECASE[t]; }

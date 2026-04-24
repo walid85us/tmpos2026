@@ -986,6 +986,24 @@ export interface Shipment {
   // this list and skips any rule whose computed key matches, so an already
   // approved rule + rate context cannot re-prompt the same operator.
   approvedGuardrailContexts?: string[];
+  // Phase 3 Pass #10 — Packing Workflows Foundation. Distinct, auditable
+  // packing state that aligns with — but does not collapse — the existing
+  // 'Packed' shipment status. `packingStatus` is the operational packing
+  // state (independent of the shipping lifecycle status); when packing is
+  // completed, the operator can also move the shipment status to 'Packed'
+  // when the lifecycle permits. Item/content verification only renders
+  // when source items are available; package verification renders for
+  // every shipment. Exceptions and history are append-only audit records.
+  packingStatus?: PackingStatus;
+  packingStartedBy?: string;
+  packingStartedAt?: string;
+  packedBy?: string;
+  packedAt?: string;
+  packingNotes?: string;
+  packingExceptions?: PackingException[];
+  packingItemVerifications?: PackingItemVerification[];
+  packingPackageVerifications?: PackingPackageVerification[];
+  packingHistory?: PackingHistoryEntry[];
   batchQueueState?: 'ready_for_batch' | 'batched' | null;
   batchQueueMarkedAt?: string;
   batchQueueRuleId?: string;
@@ -1252,7 +1270,95 @@ export type AutomationTriggerType =
   // Phase 3 correction #3 — guardrail-only trigger that evaluates BEFORE a
   // label purchase completes (not after). Only valid on rules with
   // ruleType='guardrail'.
-  | 'pre_label_purchase';
+  | 'pre_label_purchase'
+  // Phase 3 Pass #10 — observational packing-workflow events. Fire AFTER
+  // the corresponding packing action so they support flag/note/review
+  // purposes only (not pre-action guardrails). They never gate the label
+  // purchase or dispatch flow on their own — gating is enforced by the
+  // packing-status checks in the UI, not by these triggers.
+  | 'packing_started'
+  | 'packing_completed'
+  | 'packing_exception_created';
+
+// Phase 3 Pass #10 — Packing Workflows Foundation. Distinct, auditable
+// packing state model. Aligns with — but does not collapse — the existing
+// 'Packed' shipment status. Operator semantics:
+//   not_started   — no packing has begun
+//   in_progress   — packing has started, items/packages partially verified
+//   packed        — packing completed; shipment may also be moved to status='Packed'
+//   exception     — at least one open packing exception blocking completion
+//   not_required  — operator (with override perm) marked the shipment as
+//                   not requiring a packing workflow (e.g. digital, intangible,
+//                   or upstream-packed). Auditable, never silent.
+export type PackingStatus = 'not_started' | 'in_progress' | 'packed' | 'exception' | 'not_required';
+
+export type PackingExceptionType =
+  | 'missing_item'
+  | 'quantity_mismatch'
+  | 'damaged_item'
+  | 'package_weight_missing'
+  | 'package_dimensions_missing'
+  | 'source_item_mismatch'
+  | 'cannot_verify_contents'
+  | 'other';
+
+export interface PackingException {
+  id: string;
+  type: PackingExceptionType;
+  description: string;
+  createdBy: string;
+  createdAt: string;
+  resolvedBy?: string;
+  resolvedAt?: string;
+  resolutionNote?: string;
+  // Optional anchors so the exception can point at a specific package or
+  // source-item line. Both optional — exceptions can also be shipment-wide.
+  packageId?: string;
+  sourceItemKey?: string;
+}
+
+export interface PackingItemVerification {
+  // Stable composite key: `${sourceType}:${sourceItemId}` so the same
+  // source line maps to a single verification record.
+  sourceItemKey: string;
+  // Snapshot of the source line at the time of first verification — guards
+  // against the source mutating between verification and dispatch.
+  name: string;
+  expectedQty: number;
+  verifiedQty: number;
+  verifiedBy?: string;
+  verifiedAt?: string;
+  note?: string;
+}
+
+export interface PackingPackageVerification {
+  packageId: string;
+  weightConfirmed: boolean;
+  dimensionsConfirmed: boolean;
+  verifiedBy?: string;
+  verifiedAt?: string;
+  note?: string;
+}
+
+export type PackingHistoryAction =
+  | 'started'
+  | 'item_verified'
+  | 'package_verified'
+  | 'exception_created'
+  | 'exception_resolved'
+  | 'completed'
+  | 'reopened'
+  | 'override_used';
+
+export interface PackingHistoryEntry {
+  id: string;
+  action: PackingHistoryAction;
+  actor: string;
+  at: string;
+  note?: string;
+  // Optional reference to the affected entity for audit replay.
+  ref?: { kind: 'item' | 'package' | 'exception' | 'shipment'; id: string };
+}
 
 // Phase 3 correction #3 — automation rule process type. Observational rules
 // react after an event (current behavior). Guardrail rules evaluate before a

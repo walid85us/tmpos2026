@@ -120,6 +120,16 @@ export const SUB_PERMISSIONS: SubPermissionDef[] = [
   { id: 'override_shipping_automation_guardrails', label: 'Override Automation Guardrails', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Override a "block unless approved" guardrail and proceed with the underlying action even though the block conditions are still true. Strictly for managers — every override is recorded with actor and reason in execution history.' },
   { id: 'manage_batch_labels', label: 'Manage Batch Labels', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Assemble Shipment batches, mark candidates ready-for-batch, view per-shipment eligibility detail, and remove shipments from a batch. Required to use the Batch Labels surface in Shipping Center. Requires the Batch Labels plan feature.' },
   { id: 'purchase_batch_labels', label: 'Purchase Batch Labels', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Execute a Batch Labels run. Each shipment in the batch is processed individually with the same truthful prerequisites as single-shipment label purchase; per-shipment outcomes (success / failed / skipped) are itemized. Requires both the Batch Labels and Shipping Provider Configuration plan features.' },
+  // Phase 3 Pass #10 — Packing Workflows Foundation. Distinct sub-feature
+  // gated under the `packing_workflows` plan feature. View vs manage vs the
+  // higher-trust completion / exception-resolution / override perms are
+  // separated so an operator can be allowed to verify items and packages
+  // without being able to mark a shipment packed or override missing data.
+  { id: 'view_packing_workflows', label: 'View Packing Workflows', parentDomain: 'shipping', minModuleLevel: 'view', defaultLevel: 'view', description: 'View the Packing tab inside the shipment detail — packing status, item/content verification, package verification, exceptions, and packing history. Read-only; cannot start, verify, complete, or override. Requires the Packing Workflows plan feature.' },
+  { id: 'manage_packing_workflows', label: 'Manage Packing Workflows', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'edit', description: 'Start packing on a shipment, verify shipment items / contents, verify packages, and add packing notes. Does not include marking a shipment packed (Complete Packing), resolving packing exceptions, or overriding packing requirements. Requires the Packing Workflows plan feature.' },
+  { id: 'complete_packing', label: 'Complete Packing', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Mark a shipment as packing-complete. Requires all source items (where available) to be verified, all packages to be verified, and all open packing exceptions to be resolved — unless an authorized operator uses Override Packing Requirements. Does not on its own purchase labels or dispatch the shipment. Requires the Packing Workflows plan feature.' },
+  { id: 'resolve_packing_exceptions', label: 'Resolve Packing Exceptions', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Resolve open packing exceptions (missing item, quantity mismatch, damaged item, package weight/dimensions missing, etc.) with a resolution note. Resolution does not delete the exception — history is preserved for audit. Requires the Packing Workflows plan feature.' },
+  { id: 'override_packing_requirements', label: 'Override Packing Requirements', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Mark packing complete even when item/package verification is incomplete or unresolved exceptions exist, OR mark a shipment as packing-not-required. Strictly for managers — every override is recorded with actor and reason in packing history and as an internal note. Requires the Packing Workflows plan feature.' },
   { id: 'create_return', label: 'Create Return', parentDomain: 'returns', minModuleLevel: 'create', defaultLevel: 'create', description: 'Initiate a new return request' },
   { id: 'approve_return', label: 'Approve Return', parentDomain: 'returns', minModuleLevel: 'manage', defaultLevel: 'approve', description: 'Approve or reject return requests' },
   { id: 'receive_return', label: 'Receive Return', parentDomain: 'returns', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Mark returns as received and perform intake' },
@@ -191,6 +201,19 @@ export const FEATURE_PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   batch_labels: [
     'manage_batch_labels',
     'purchase_batch_labels',
+  ],
+  // Phase 3 Pass #10 — Packing Workflows. Without the plan feature there is
+  // no Packing tab, no item/package verification, no exception workflow, no
+  // completion action, and no override. The Packed shipment status itself
+  // remains independent (it is a lifecycle status, not a packing-workflow
+  // artifact) so existing flows that already mark a shipment Packed by
+  // other means continue to work even on plans that exclude this feature.
+  packing_workflows: [
+    'view_packing_workflows',
+    'manage_packing_workflows',
+    'complete_packing',
+    'resolve_packing_exceptions',
+    'override_packing_requirements',
   ],
   // Pickup Requests controls operational pickup flows AND pickup analytics
   // visibility. Without the plan feature there is nothing to schedule, cancel,
@@ -366,6 +389,11 @@ export const tenantRoles: EmployeeRole[] = [
       override_shipping_automation_guardrails: true,
       manage_batch_labels: true,
       purchase_batch_labels: true,
+      view_packing_workflows: true,
+      manage_packing_workflows: true,
+      complete_packing: true,
+      resolve_packing_exceptions: true,
+      override_packing_requirements: true,
     },
     description: 'Store management access'
   },
@@ -454,6 +482,11 @@ export const tenantRoles: EmployeeRole[] = [
       override_shipping_automation_guardrails: false,
       manage_batch_labels: false,
       purchase_batch_labels: false,
+      view_packing_workflows: false,
+      manage_packing_workflows: false,
+      complete_packing: false,
+      resolve_packing_exceptions: false,
+      override_packing_requirements: false,
     },
     description: 'Repair and parts access'
   },
@@ -542,6 +575,11 @@ export const tenantRoles: EmployeeRole[] = [
       override_shipping_automation_guardrails: false,
       manage_batch_labels: false,
       purchase_batch_labels: false,
+      view_packing_workflows: false,
+      manage_packing_workflows: false,
+      complete_packing: false,
+      resolve_packing_exceptions: false,
+      override_packing_requirements: false,
     },
     description: 'Sales and customer access'
   },
@@ -551,8 +589,8 @@ export const roles = [...platformRoles, ...tenantRoles];
 
 export const planFeatures: Record<Plan, string[]> = {
   starter: ['dashboard', 'sales', 'customers', 'invoices', 'support'],
-  growth: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'employees', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests', 'shipping_providers', 'carrier_analytics', 'shipping_automation_rules', 'batch_labels'],
-  advanced: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'employees', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests', 'shipping_providers', 'carrier_analytics', 'shipping_automation_rules', 'batch_labels'],
+  growth: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'employees', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests', 'shipping_providers', 'carrier_analytics', 'shipping_automation_rules', 'batch_labels', 'packing_workflows'],
+  advanced: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'employees', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests', 'shipping_providers', 'carrier_analytics', 'shipping_automation_rules', 'batch_labels', 'packing_workflows'],
 };
 
 export const permissions = PERMISSION_DOMAINS;
