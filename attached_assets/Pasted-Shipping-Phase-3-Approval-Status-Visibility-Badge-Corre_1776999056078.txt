@@ -1,0 +1,179 @@
+Shipping Phase 3 — Approval Status Visibility Badge Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated UI/state-visibility correction pass.
+Do not redesign the app.
+Do not change the approval lifecycle logic unless required to expose the correct existing state.
+Do not broaden scope.
+Do not implement unrelated shipping features.
+
+==================================================
+CURRENT STATUS
+==================================================
+
+The approval lifecycle now mostly works:
+- requester can request approval
+- approver sees Approval Requested / Pending Approval
+- requester note is visible
+- duplicate approval requests are blocked
+- approval clears the loop
+- permissions work
+- execution history is truthful
+
+Remaining failure:
+The requester does not clearly see the approval request/result state in the main shipment surfaces.
+
+Required:
+- requester should see Pending Approval while approval is pending
+- requester should see Approved / Resolved after approval
+- this should be visible without needing to dig into hidden history
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior workflow UX engineer
+- Senior shipping operations architect
+- QA gatekeeper
+- Systems thinker
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve all closed shipping and automation behavior.
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Make automation approval state visible and understandable in the shipment UI for both requester and approver.
+
+==================================================
+PART A — SHIPMENT LIST BADGE
+==================================================
+
+Required:
+Add a visible badge/state indicator in the Shipping Center shipment list when a shipment has an automation approval/review outcome.
+
+At minimum support:
+- Pending Approval
+- Approved
+- Review Needed
+- Resolved
+- Overridden / Blocked if already supported by state model
+
+Required:
+- badge must be based on live shipment automation outcome state
+- badge must update after approval/resolution
+- badge must not show stale pending state after approval
+
+==================================================
+PART B — SHIPMENT DETAIL TOP-LEVEL STATUS
+==================================================
+
+Required:
+Inside the shipment detail window/panel, show a clear top-level automation outcome summary near the top of the shipment details when relevant.
+
+Examples:
+- “Automation Approval Pending — waiting for authorized approval.”
+- “Automation Approval Approved — label purchase exception approved.”
+- “Review Needed — shipment requires operator review.”
+- “Review Resolved.”
+
+Required:
+- requester can see pending and approved states
+- approver can see pending states and action controls if permitted
+- approved/resolved state remains visible enough for audit/clarity
+
+==================================================
+PART C — STATE CONSISTENCY
+==================================================
+
+Required:
+The shipment list badge, shipment detail summary, Automation Outcomes section, and Execution History must agree.
+
+Required:
+- pending approval should show pending everywhere
+- approved should show approved/resolved everywhere
+- resolved review should not still show as pending
+- stale state must not remain after approval or resolution
+
+==================================================
+PART D — PERMISSION SAFETY
+==================================================
+
+Required:
+Do not expose unauthorized action buttons.
+Visibility of status is allowed where user can access the shipment, but action buttons must remain permission-gated.
+
+==================================================
+PART E — NON-REGRESSION
+==================================================
+
+Preserve:
+- approval request lifecycle
+- duplicate prevention
+- approved-context loop prevention
+- lower-rate behavior
+- execution history
+- batch labels
+- normal shipping flows
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+1) Requester sees Pending Approval in shipment list or detail top-level surface
+2) Requester sees Approved / Resolved after approval
+3) Shipment list, shipment detail, Automation Outcomes, and Execution History agree
+4) No stale pending state remains after approval
+5) Permission-gated action buttons remain protected
+6) Existing shipping and automation behavior remains intact
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+1) Identify canonical automation outcome state source
+2) Add shipment list badge/state indicator
+3) Add shipment detail top-level automation outcome summary
+4) Ensure state updates after approval/resolution
+5) Re-test non-regression
+6) Update replit.md
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- automation approval/review status visibility behavior
+- shipment list badge behavior
+- shipment detail top-level status behavior
+- state consistency expectations
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Shipment List Approval/Review Badge
+3. Shipment Detail Top-Level Outcome Summary
+4. State Consistency Fix
+5. Files Changed
+6. Documentation Updated
+7. Non-Regression Notes

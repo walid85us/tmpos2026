@@ -372,6 +372,87 @@ function formatDateTime(iso: string): string {
   return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
+// Phase 3 correction #6 — single canonical derivation of an automation
+// approval/review badge from a shipment's reviewNeeded state. Used by the
+// shipment list row badge AND the shipment detail header summary so the two
+// surfaces cannot disagree, and so requester/approver both see the same
+// "Pending Approval" → "Approved/Resolved" transition without digging.
+// Returns null when there is no automation outcome to surface (no
+// reviewNeeded, or the request was superseded/dismissed).
+type AutomationBadge = {
+  label: string;
+  short: string;
+  icon: string;
+  // Tailwind classes for compact (list) and expanded (detail header) variants.
+  chipClass: string;
+  bannerWrap: string;
+  bannerText: string;
+  bannerSub: string;
+  description: string;
+  tone: 'pending-approval' | 'pending-block' | 'pending-review' | 'approved' | 'overridden' | 'resolved';
+};
+function deriveAutomationBadge(s: Shipment): AutomationBadge | null {
+  const rn = s.reviewNeeded;
+  if (!rn) return null;
+  // Dismissed (e.g. superseded by alternate-rate selection) is intentionally
+  // hidden — it is no longer the operative state.
+  if (rn.state === 'dismissed') return null;
+  const isApprovalPending = rn.kind === 'approval'
+    && (rn.state === 'approval_requested' || rn.state === 'pending');
+  const isBlockPending = rn.kind === 'block' && rn.state === 'pending';
+  const isReviewPending = (rn.kind === 'review' || !rn.kind)
+    && (!rn.state || rn.state === 'pending') && !rn.resolved;
+  if (isApprovalPending) {
+    return {
+      label: 'Pending Approval', short: 'Pending Approval', icon: 'pending', tone: 'pending-approval',
+      chipClass: 'bg-sky-100 text-sky-700 border-sky-200',
+      bannerWrap: 'bg-sky-50 border-sky-200', bannerText: 'text-sky-700', bannerSub: 'text-sky-800',
+      description: 'Automation approval pending — waiting for an authorized approver.',
+    };
+  }
+  if (isBlockPending) {
+    return {
+      label: 'Approval Required', short: 'Approval Required', icon: 'block', tone: 'pending-block',
+      chipClass: 'bg-rose-100 text-rose-700 border-rose-200',
+      bannerWrap: 'bg-rose-50 border-rose-200', bannerText: 'text-rose-700', bannerSub: 'text-rose-800',
+      description: 'Automation guardrail is blocking purchase — approval required.',
+    };
+  }
+  if (isReviewPending) {
+    return {
+      label: 'Review Needed', short: 'Review Needed', icon: 'flag', tone: 'pending-review',
+      chipClass: 'bg-amber-100 text-amber-700 border-amber-200',
+      bannerWrap: 'bg-amber-50 border-amber-200', bannerText: 'text-amber-700', bannerSub: 'text-amber-800',
+      description: 'Shipment requires operator review before purchase.',
+    };
+  }
+  if (rn.state === 'approved') {
+    return {
+      label: 'Approval Approved', short: 'Approved', icon: 'verified', tone: 'approved',
+      chipClass: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+      bannerWrap: 'bg-emerald-50 border-emerald-200', bannerText: 'text-emerald-700', bannerSub: 'text-emerald-800',
+      description: 'Automation approval approved — label purchase exception cleared.',
+    };
+  }
+  if (rn.state === 'overridden') {
+    return {
+      label: 'Approval Overridden', short: 'Overridden', icon: 'gpp_maybe', tone: 'overridden',
+      chipClass: 'bg-amber-100 text-amber-800 border-amber-200',
+      bannerWrap: 'bg-amber-50 border-amber-200', bannerText: 'text-amber-800', bannerSub: 'text-amber-900',
+      description: 'Automation guardrail overridden by an authorized operator.',
+    };
+  }
+  if (rn.state === 'resolved' || rn.resolved) {
+    return {
+      label: 'Review Resolved', short: 'Resolved', icon: 'check_circle', tone: 'resolved',
+      chipClass: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+      bannerWrap: 'bg-emerald-50 border-emerald-200', bannerText: 'text-emerald-700', bannerSub: 'text-emerald-800',
+      description: 'Review resolved.',
+    };
+  }
+  return null;
+}
+
 export default function ShippingCenter() {
   const { shipments, addShipment, updateShipment, resolveShipmentReview, setReviewOutcome, invoices, repairTickets, rmas, inventoryTransfers, suppliers, customers,
     automationRules, addAutomationRule, updateAutomationRule, deleteAutomationRule, bumpAutomationRuleStats,
@@ -5077,12 +5158,22 @@ export default function ShippingCenter() {
                           flagged state is visible at the row level.
                           Phase 3 correction #4 — gated by the dedicated
                           outcomes permission so operators without it see a
-                          clean row even when shipments carry live outcomes. */}
-                      {canViewAutomationOutcomes && s.reviewNeeded && !s.reviewNeeded.resolved && (
-                        <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md bg-amber-100 text-amber-700 border border-amber-200 flex items-center gap-0.5" title={s.reviewNeeded.reason || 'Marked for review by automation rule'}>
-                          <span className="material-symbols-outlined" style={{ fontSize: 10 }}>flag</span>Review Needed
-                        </span>
-                      )}
+                          clean row even when shipments carry live outcomes.
+                          Phase 3 correction #6 — uses the canonical
+                          deriveAutomationBadge so requester sees Pending
+                          Approval / Approved / Resolved transitions
+                          directly in the list (not just generic Review
+                          Needed), and so the chip matches the detail
+                          panel + execution history exactly. */}
+                      {canViewAutomationOutcomes && (() => {
+                        const badge = deriveAutomationBadge(s);
+                        if (!badge) return null;
+                        return (
+                          <span className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md border flex items-center gap-0.5 ${badge.chipClass}`} title={badge.description}>
+                            <span className="material-symbols-outlined" style={{ fontSize: 10 }}>{badge.icon}</span>{badge.short}
+                          </span>
+                        );
+                      })()}
                       {canViewAutomationOutcomes && s.batchQueueState === 'ready_for_batch' && (
                         <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md bg-sky-100 text-sky-700 border border-sky-200 flex items-center gap-0.5">
                           <span className="material-symbols-outlined" style={{ fontSize: 10 }}>inventory_2</span>Ready for Batch
@@ -5133,11 +5224,40 @@ export default function ShippingCenter() {
             <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-3xl overflow-hidden max-h-[90vh] flex flex-col">
               <div className="p-8 border-b border-slate-100 bg-slate-50/50 flex justify-between items-start shrink-0">
                 <div>
-                  <div className="flex items-center gap-3 mb-1">
+                  <div className="flex items-center gap-3 mb-1 flex-wrap">
                     <h2 className="text-xl font-black text-primary">{selectedShip.shipmentNumber}</h2>
                     <span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${STATUS_COLORS[selectedShip.status]}`}>{selectedShip.status}</span>
+                    {/* Phase 3 correction #6 — surface the live automation
+                        approval/review state right next to the shipment
+                        number so the requester sees Pending Approval /
+                        Approved / Resolved without scrolling into the
+                        Automation Outcomes section. Permission-gated. */}
+                    {canViewAutomationOutcomes && (() => {
+                      const badge = deriveAutomationBadge(selectedShip);
+                      if (!badge) return null;
+                      return (
+                        <span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border flex items-center gap-1 ${badge.chipClass}`} title={badge.description}>
+                          <span className="material-symbols-outlined" style={{ fontSize: 12 }}>{badge.icon}</span>{badge.label}
+                        </span>
+                      );
+                    })()}
                   </div>
                   <p className="text-sm text-slate-500">{TYPE_LABELS[selectedShip.type]} · {SOURCE_LABELS[selectedShip.sourceType]} {selectedShip.sourceNumber}</p>
+                  {/* Phase 3 correction #6 — one-line plain-language summary
+                      of the automation outcome under the meta line. Reads
+                      naturally for the requester ("Automation approval
+                      pending — waiting for an authorized approver.") and
+                      stays visible after approval ("Automation approval
+                      approved — label purchase exception cleared.") so
+                      the resolved state is auditable without opening
+                      the Outcomes panel. */}
+                  {canViewAutomationOutcomes && (() => {
+                    const badge = deriveAutomationBadge(selectedShip);
+                    if (!badge) return null;
+                    return (
+                      <p className={`text-xs font-bold mt-2 ${badge.bannerText}`}>{badge.description}</p>
+                    );
+                  })()}
                 </div>
                 <div className="flex items-center gap-2">
                   {canEditPreDispatch && isEditable(selectedShip.status) && (
@@ -5252,18 +5372,71 @@ export default function ShippingCenter() {
                               </div>
                             );
                           })()}
-                          {rn && rn.resolved && (
-                            <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3">
-                              <p className="text-xs font-black text-emerald-700 flex items-center gap-1">
-                                <span className="material-symbols-outlined text-sm">check_circle</span>Review Resolved
+                          {rn && rn.state === 'dismissed' && (
+                            // Phase 3 correction #6 — explicit Dismissed /
+                            // Superseded surface so the detail panel agrees
+                            // with the list (no chip), header (no chip),
+                            // and execution history ("Dismissed"). Without
+                            // this branch a superseded request would fall
+                            // through into the generic "Review Resolved"
+                            // banner and contradict the other surfaces.
+                            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3">
+                              <p className="text-xs font-black text-slate-600 flex items-center gap-1">
+                                <span className="material-symbols-outlined text-sm">cancel</span>Request Dismissed
                               </p>
-                              <p className="text-[11px] text-emerald-700 mt-1">
-                                Resolved by <span className="font-bold">{rn.resolvedBy || 'unknown'}</span> on {rn.resolvedAt ? formatDateTime(rn.resolvedAt) : 'unknown date'}
+                              <p className="text-[11px] text-slate-600 mt-1">
+                                Dismissed by <span className="font-bold">{rn.dismissedBy || rn.resolvedBy || 'system'}</span>
+                                {(rn.dismissedAt || rn.resolvedAt) ? <> on {formatDateTime((rn.dismissedAt || rn.resolvedAt)!)}</> : null}
                                 {' · originally flagged by '}<span className="font-bold">{rn.ruleName || 'unknown rule'}</span>
                               </p>
-                              {rn.resolutionNote && <p className="text-[11px] text-emerald-800 mt-1 italic">"{rn.resolutionNote}"</p>}
+                              {rn.resolutionNote && <p className="text-[11px] text-slate-500 mt-1 italic">"{rn.resolutionNote}"</p>}
                             </div>
                           )}
+                          {rn && rn.resolved && rn.state !== 'dismissed' && (() => {
+                            // Phase 3 correction #6 — terminal-state aware
+                            // resolved banner. Approve / Override / Resolve
+                            // each get distinct copy so requester and
+                            // approver agree on what happened, and so the
+                            // detail panel matches the list badge + header
+                            // chip + execution history.
+                            const resolvedBadge = deriveAutomationBadge(selectedShip);
+                            const isApproved = rn.state === 'approved';
+                            const isOverridden = rn.state === 'overridden';
+                            const wrapClass = resolvedBadge?.bannerWrap || 'bg-emerald-50 border-emerald-200';
+                            const textClass = resolvedBadge?.bannerText || 'text-emerald-700';
+                            const subClass = resolvedBadge?.bannerSub || 'text-emerald-800';
+                            const heading = isApproved
+                              ? 'Approval Approved'
+                              : isOverridden
+                                ? 'Approval Overridden'
+                                : 'Review Resolved';
+                            const icon = isApproved ? 'verified' : isOverridden ? 'gpp_maybe' : 'check_circle';
+                            const actor = isApproved
+                              ? rn.approvedBy
+                              : isOverridden
+                                ? rn.overriddenBy
+                                : rn.resolvedBy;
+                            const at = isApproved
+                              ? rn.approvedAt
+                              : isOverridden
+                                ? rn.overriddenAt
+                                : rn.resolvedAt;
+                            const verb = isApproved ? 'Approved' : isOverridden ? 'Overridden' : 'Resolved';
+                            return (
+                              <div className={`border rounded-xl p-3 ${wrapClass}`}>
+                                <p className={`text-xs font-black flex items-center gap-1 ${textClass}`}>
+                                  <span className="material-symbols-outlined text-sm">{icon}</span>{heading}
+                                </p>
+                                <p className={`text-[11px] mt-1 ${textClass}`}>
+                                  {verb} by <span className="font-bold">{actor || 'unknown'}</span> on {at ? formatDateTime(at) : 'unknown date'}
+                                  {' · originally flagged by '}<span className="font-bold">{rn.ruleName || 'unknown rule'}</span>
+                                  {rn.requestedBy && <> · requested by <span className="font-bold">{rn.requestedBy}</span>{rn.requestedAt ? ` on ${formatDateTime(rn.requestedAt)}` : ''}</>}
+                                </p>
+                                {rn.requesterNote && <p className={`text-[11px] mt-1 italic ${subClass}`}>Requester: "{rn.requesterNote}"</p>}
+                                {(rn.approverNote || rn.resolutionNote) && <p className={`text-[11px] mt-1 italic ${subClass}`}>{isApproved || isOverridden ? 'Approver' : 'Resolver'}: "{rn.approverNote || rn.resolutionNote}"</p>}
+                              </div>
+                            );
+                          })()}
                           {(prio === 'high' || prio === 'urgent' || batched === 'ready_for_batch' || flags.length > 0) && (
                             <div className="flex flex-wrap gap-2">
                               {prio === 'urgent' && (
