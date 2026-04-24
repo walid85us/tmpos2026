@@ -3990,11 +3990,20 @@ export default function ShippingCenter() {
         description: `Label purchased via batch — ${label.carrier} ${label.service}, tracking: ${label.trackingNumber}`,
         performedBy: 'Current User',
       };
+      // Phase 3 Pass #12 Part A — preserve 'Packed' status when packing
+      // already completed before the (batch) label purchase. Without this
+      // guard, the status would regress from 'Packed' (set by packing
+      // completion) back to 'Label Created' on label purchase, which
+      // contradicts the spec's "completing packing changes shipment
+      // status to Packed". The label artifact itself is the source of
+      // truth for "label purchased" — packagesLocked / Packing tab lock
+      // both key off `shipment.label`, not the status string.
+      const nextStatus: Shipment['status'] = shipment.status === 'Packed' ? 'Packed' : 'Label Created';
       const baseUpdates: Partial<Shipment> = {
         label, labelUrl: label.pdfUrl || label.url, trackingNumber: label.trackingNumber,
         carrier: label.carrier, serviceLevel: label.service, shippingCost: label.cost,
         providerShipmentId: result.providerShipmentId,
-        status: 'Label Created', events: [...shipment.events, newEvent],
+        status: nextStatus, events: [...shipment.events, newEvent],
         batchQueueState: shipment.batchQueueState === 'ready_for_batch' ? 'batched' : shipment.batchQueueState,
         updatedAt: now,
       };
@@ -4320,6 +4329,11 @@ export default function ShippingCenter() {
         description: `Label purchased — ${labelArtifact.carrier} ${labelArtifact.service}, tracking: ${labelArtifact.trackingNumber}`,
         performedBy: 'Current User',
       };
+      // Phase 3 Pass #12 Part A — preserve 'Packed' status when packing
+      // already completed before the (single-shipment) label purchase.
+      // See the matching guard in the batch label flow above for the
+      // full rationale.
+      const nextStatusSingle: Shipment['status'] = shipment.status === 'Packed' ? 'Packed' : 'Label Created';
       const baseUpdates: Partial<Shipment> = {
         label: labelArtifact,
         labelUrl: labelArtifact.pdfUrl || labelArtifact.url,
@@ -4328,14 +4342,14 @@ export default function ShippingCenter() {
         serviceLevel: labelArtifact.service,
         shippingCost: labelArtifact.cost,
         providerShipmentId: result.providerShipmentId,
-        status: 'Label Created',
+        status: nextStatusSingle,
         events: [...shipment.events, newEvent],
         updatedAt: now,
       };
       const afterLabelTrigger = triggerAutomation(shipment, 'label_purchased', baseUpdates);
       const afterStatusTrigger = triggerAutomation(shipment, 'status_changed', afterLabelTrigger);
       updateShipment(shipmentId, afterStatusTrigger);
-      setProviderSuccess('Label purchased successfully. Shipment status updated to Label Created.');
+      setProviderSuccess(`Label purchased successfully. Shipment status updated to ${nextStatusSingle}.`);
     } else {
       setProviderError(friendlyProviderError(result.error || { code: 'UNKNOWN', message: 'Label purchase failed.' }));
     }
@@ -4903,9 +4917,16 @@ export default function ShippingCenter() {
     const mode = getShipmentMode(shipment);
     const isManual = mode === 'manual';
 
+    // Phase 3 Pass #12 Part A — Draft → Packed is now a valid manual
+    // transition, mirroring the new lifecycle where packing completes
+    // before rates / labels. completePackingForShipment performs the
+    // actual flip via setShipments and bypasses canDoTransition, but
+    // surfacing 'Packed' in getNextStatuses keeps the manual status
+    // dropdown consistent for operators using the Mark Packed shortcut
+    // on Overview without going through the Packing tab.
     const transitions: Record<ShipmentStatus, ShipmentStatus[]> = {
-      'Draft': ['Ready', 'Cancelled'],
-      'Ready': isManual ? ['Packed', 'Dispatched', 'Cancelled'] : ['Cancelled'],
+      'Draft': ['Ready', 'Packed', 'Cancelled'],
+      'Ready': isManual ? ['Packed', 'Dispatched', 'Cancelled'] : ['Packed', 'Cancelled'],
       'Label Created': ['Packed', 'Cancelled'],
       'Packed': ['Dispatched', 'Cancelled'],
       'Dispatched': ['Rejected'],
@@ -5431,7 +5452,17 @@ export default function ShippingCenter() {
                           and 'not_required' so the operator can spot work
                           in flight or manager-overridden shipments at a
                           glance from the list. */}
-                      {packingFeatureEnabled && s.packingStatus && s.packingStatus !== 'not_started' && !(s.packingStatus === 'packed' && s.status === 'Packed') && (() => {
+                      {/* Phase 3 Pass #12 Part E — suppress the chip
+                          unconditionally when packing is complete. With
+                          Pass #12, packing completion always flips
+                          shipment.status to 'Packed' (when pre-dispatch),
+                          so the shipment-status pill already conveys
+                          "packed". A separate green packing chip would
+                          be redundant noise. The chip still renders for
+                          'in_progress', 'exception', and 'not_required'
+                          so operators can spot in-flight or override
+                          states from the list. */}
+                      {packingFeatureEnabled && s.packingStatus && s.packingStatus !== 'not_started' && s.packingStatus !== 'packed' && (() => {
                         const display = PACKING_STATUS_DISPLAY[s.packingStatus];
                         const openExc = (s.packingExceptions || []).filter(e => !e.resolvedAt).length;
                         const tooltip = s.packingStatus === 'exception'
@@ -8358,13 +8389,24 @@ export default function ShippingCenter() {
                   // marking packed. canResolvePackingExceptions enables resolving
                   // open exceptions. canOverridePackingRequirements enables both
                   // completing without prereqs AND marking not-required.
-                  const canStart = canManagePackingWorkflows && !isWriteBlocked && (ps === 'not_started' || ps === 'not_required');
-                  const canVerify = canManagePackingWorkflows && !isWriteBlocked && (ps === 'in_progress' || ps === 'exception' || ps === 'not_started');
-                  const canAddException = canManagePackingWorkflows && !isWriteBlocked && (ps === 'in_progress' || ps === 'exception' || ps === 'not_started');
-                  const canCompleteCleanly = canCompletePacking && !isWriteBlocked && meetsPrereqs && (ps === 'in_progress' || ps === 'exception');
-                  const canCompleteWithOverride = canOverridePackingRequirements && !isWriteBlocked && !meetsPrereqs && (ps === 'in_progress' || ps === 'exception' || ps === 'not_started');
-                  const canReopen = canOverridePackingRequirements && !isWriteBlocked && (ps === 'packed' || ps === 'not_required');
-                  const canMarkNotRequired = canOverridePackingRequirements && !isWriteBlocked && openExceptions.length === 0 && (ps === 'not_started' || ps === 'in_progress');
+                  // Phase 3 Pass #12 Part D — once a label has been
+                  // purchased, packing and package details must be locked.
+                  // Rates and labels were calculated against the packed
+                  // package data; allowing edits afterwards would create
+                  // inconsistencies between the purchased label and the
+                  // physical package. The lock blocks every packing action
+                  // (start, verify, exception, complete, override, reopen,
+                  // mark-not-required) by ANDing !hasPurchasedLabel into
+                  // the existing capability flags. A banner near the top
+                  // of the Packing tab explains the lock.
+                  const hasPurchasedLabel = !!selectedShip.label;
+                  const canStart = canManagePackingWorkflows && !isWriteBlocked && !hasPurchasedLabel && (ps === 'not_started' || ps === 'not_required');
+                  const canVerify = canManagePackingWorkflows && !isWriteBlocked && !hasPurchasedLabel && (ps === 'in_progress' || ps === 'exception' || ps === 'not_started');
+                  const canAddException = canManagePackingWorkflows && !isWriteBlocked && !hasPurchasedLabel && (ps === 'in_progress' || ps === 'exception' || ps === 'not_started');
+                  const canCompleteCleanly = canCompletePacking && !isWriteBlocked && !hasPurchasedLabel && meetsPrereqs && (ps === 'in_progress' || ps === 'exception');
+                  const canCompleteWithOverride = canOverridePackingRequirements && !isWriteBlocked && !hasPurchasedLabel && !meetsPrereqs && (ps === 'in_progress' || ps === 'exception' || ps === 'not_started');
+                  const canReopen = canOverridePackingRequirements && !isWriteBlocked && !hasPurchasedLabel && (ps === 'packed' || ps === 'not_required');
+                  const canMarkNotRequired = canOverridePackingRequirements && !isWriteBlocked && !hasPurchasedLabel && openExceptions.length === 0 && (ps === 'not_started' || ps === 'in_progress');
                   const actor = 'Current User';
                   const handleStart = () => {
                     if (!canStart) return;
@@ -8483,6 +8525,24 @@ export default function ShippingCenter() {
 
                   return (
                     <div className="space-y-5">
+                      {/* Phase 3 Pass #12 Part D — locked banner. Surfaces
+                          why every action button on this tab is disabled
+                          once the shipment has a purchased label, so an
+                          operator does not assume a perm or plan issue.
+                          The banner replaces the action affordances; the
+                          per-package verify rows below also stay disabled
+                          via canVerify=false so re-verifying mid-flight
+                          (which would invalidate the purchased label) is
+                          impossible. Packing History remains visible. */}
+                      {hasPurchasedLabel && (
+                        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 flex items-start gap-3">
+                          <span className="material-symbols-outlined text-slate-500 mt-0.5">lock</span>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs font-black text-slate-700 uppercase tracking-widest">Packing locked</p>
+                            <p className="text-[11px] text-slate-600 mt-1">Packing and package details are locked after label purchase. Void or refund the label to make changes.</p>
+                          </div>
+                        </div>
+                      )}
                       {/* Status header */}
                       <div className={`rounded-2xl border p-5 ${display.chipClass.replace('text-', 'bg-').split(' ')[0]}/20 border-slate-100`}>
                         <div className="flex items-start justify-between gap-4 flex-wrap">
@@ -9103,7 +9163,15 @@ export default function ShippingCenter() {
 
         {editingShipment && (() => {
           const editShipData = shipments.find(s => s.id === editingShipment);
-          const packagesLocked = editShipData ? STATUS_ORDER.indexOf(editShipData.status) >= STATUS_ORDER.indexOf('Label Created') : false;
+          // Phase 3 Pass #12 Part D — packages lock is driven by label
+          // presence, not status order. With Pass #12, status='Packed'
+          // can be reached BEFORE label purchase (via packing completion),
+          // and STATUS_ORDER puts 'Packed' after 'Label Created' — using
+          // the index would lock packages while the user still needs to
+          // get rates / buy a label. Driving lock from `label` matches
+          // the Packing tab's hasPurchasedLabel signal so both surfaces
+          // agree on when edits are forbidden.
+          const packagesLocked = editShipData ? !!editShipData.label : false;
           const hasLabel = !!editShipData?.label;
           const hasSelectedRate = !!editShipData?.selectedRate;
           const trackingLocked = hasLabel;

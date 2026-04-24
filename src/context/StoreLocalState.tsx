@@ -1170,11 +1170,16 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
     ...(note ? { note } : {}),
     ...(ref ? { ref } : {}),
   });
+  // Phase 3 Pass #12 — packing audits use source='packing' (not 'system')
+  // so the Automation Outcomes panel (which surfaces 'rule' + 'system'
+  // notes) no longer leaks normal packing history into a section reserved
+  // for automation-rule outcomes. Packing audits remain visible in the
+  // Packing tab's Packing History surface.
   const buildPackingAuditNote = (text: string) => ({
     id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     text,
     timestamp: new Date().toISOString(),
-    source: 'system' as const,
+    source: 'packing' as const,
   });
   // Compute next packingStatus when an exception is added or resolved. If any
   // open exception exists → 'exception'. Otherwise preserve the prior
@@ -1421,6 +1426,21 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
       const noteText = args.note?.trim() ? ` — ${args.note.trim()}` : '';
       baseHistory.push(buildPackingHistoryEntry('completed', args.actor, args.note, { kind: 'shipment', id: s.id }));
       baseNotes.push(buildPackingAuditNote(`Packing completed by ${args.actor}${noteText}`));
+      // Phase 3 Pass #12 Part A — flip shipment.status to 'Packed' when
+      // packing completes. Snapshots the prior status into prePackingStatus
+      // so reopenPacking can revert. Skipped when status is already 'Packed'
+      // (no-op) or when a label has been purchased (defense-in-depth — UI
+      // also blocks packing completion after label purchase, but a
+      // programmatic caller could bypass UI). The snapshot is also skipped
+      // when the prior status is downstream of pre-dispatch (Dispatched,
+      // Delivered, etc.) so we never overwrite a terminal/in-flight status.
+      const PRE_DISPATCH_FOR_PACK: Shipment['status'][] = ['Draft', 'Ready', 'Label Created'];
+      const shouldFlipStatus = !s.label
+        && s.status !== 'Packed'
+        && PRE_DISPATCH_FOR_PACK.includes(s.status);
+      const statusUpdates: Partial<Shipment> = shouldFlipStatus
+        ? { status: 'Packed', prePackingStatus: s.status }
+        : {};
       result = { ok: true };
       return {
         ...s,
@@ -1430,6 +1450,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
         ...(args.note ? { packingNotes: args.note } : {}),
         packingHistory: baseHistory,
         internalNotes: baseNotes,
+        ...statusUpdates,
       };
     }));
     return result;
@@ -1440,11 +1461,29 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
       // Reopen only meaningful from packed / not_required. From any other
       // state it's a no-op so audit doesn't pile up duplicate entries.
       if (s.packingStatus !== 'packed' && s.packingStatus !== 'not_required') return s;
+      // Phase 3 Pass #12 Part C — defense-in-depth: never reopen packing
+      // after a label has been purchased. The UI also blocks the reopen
+      // button when label exists, but the mutator must hold the line in
+      // case a programmatic caller bypasses the UI.
+      if (s.label) return s;
       // Recompute base operational status (open exceptions wins).
       const exceptions = s.packingExceptions || [];
       const nextStatus = exceptions.some(e => !e.resolvedAt) ? 'exception' as const : 'in_progress' as const;
       const history = buildPackingHistoryEntry('reopened', args.actor, args.note, { kind: 'shipment', id: s.id });
       const audit = buildPackingAuditNote(`Packing reopened by ${args.actor} — ${args.note}`);
+      // Phase 3 Pass #12 Part C — revert the shipment status flip done by
+      // completePackingForShipment. Only revert when the current status is
+      // 'Packed' (the flip's target) AND a snapshot exists. This keeps the
+      // mutator backward-compatible with shipments whose 'Packed' status
+      // came from the legacy manual transition (no snapshot present), and
+      // never overwrites Dispatched/Delivered/etc. Selected rate is also
+      // cleared because Get Rates is going to re-block via Pass #11's
+      // packing-readiness gate, and the existing rate is no longer
+      // meaningful once the operator chose to reopen the pack-out.
+      const shouldRevertStatus = s.status === 'Packed' && !!s.prePackingStatus;
+      const statusUpdates: Partial<Shipment> = shouldRevertStatus
+        ? { status: s.prePackingStatus!, prePackingStatus: undefined, selectedRate: undefined }
+        : { prePackingStatus: undefined };
       return {
         ...s,
         packingStatus: nextStatus,
@@ -1452,6 +1491,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
         packedAt: undefined,
         packingHistory: [...(s.packingHistory || []), history],
         internalNotes: [...(s.internalNotes || []), audit],
+        ...statusUpdates,
       };
     }));
   }, []);

@@ -1004,6 +1004,13 @@ export interface Shipment {
   packingItemVerifications?: PackingItemVerification[];
   packingPackageVerifications?: PackingPackageVerification[];
   packingHistory?: PackingHistoryEntry[];
+  // Phase 3 Pass #12 — snapshot of `status` taken at the moment packing
+  // completion flips status to 'Packed', so reopenPacking can restore the
+  // prior status (e.g. 'Draft' or 'Ready') instead of guessing. Cleared
+  // when packing is reopened or when the status moves past 'Packed' (label
+  // purchase, dispatch, etc.). Only set when the mutator actually changed
+  // status; never overwritten on idempotent re-completion.
+  prePackingStatus?: ShipmentStatus;
   batchQueueState?: 'ready_for_batch' | 'batched' | null;
   batchQueueMarkedAt?: string;
   batchQueueRuleId?: string;
@@ -1542,7 +1549,15 @@ export interface ShipmentInternalNote {
   id: string;
   text: string;
   timestamp: string;
-  source: 'rule' | 'operator' | 'system';
+  // Phase 3 Pass #12 — 'packing' source separates packing-workflow audits
+  // (Item Verified, Package Verified, Packing Started, Packing Completed,
+  // Packing Reopened, Mark Not Required, Override Used, Exception Created/
+  // Resolved) from automation-related audits ('rule' for rule-fired notes,
+  // 'system' for approval/override/resolve audits, 'operator' for manual
+  // operator notes). The Automation Outcomes panel filters to 'rule' +
+  // 'system' so packing audits no longer leak in; packing audits remain
+  // visible in the Packing tab's Packing History surface.
+  source: 'rule' | 'operator' | 'system' | 'packing';
   ruleId?: string;
   ruleName?: string;
 }

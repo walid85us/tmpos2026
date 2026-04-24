@@ -1,0 +1,267 @@
+Shipping Phase 3 — Packing Status Lifecycle + UI Cleanup Correction Pass
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen closed shipping workstreams except where directly required by packing lifecycle alignment.
+Do not implement SLA Optimization, Carrier Scorecards, Customs Docs, or Insurance Rules.
+
+==================================================
+CURRENT ISSUE
+==================================================
+
+Packing Workflow is mostly working, but there are lifecycle and UI alignment gaps:
+
+1) Packing can be completed, but shipment status remains Draft.
+This is wrong.
+If packing is completed, the shipment should become operationally Packed.
+
+2) The shipment list shows a separate green “Complete” packing badge.
+This is not desired.
+Do not show a separate packing complete badge in the shipment list.
+Instead, the shipment status should change to Packed.
+
+3) Automation Outcomes is showing normal packing audit/history entries even when no automation rule was created.
+This is wrong.
+Packing history belongs in the Packing tab / Packing History, not Automation Outcomes, unless an actual automation rule fired.
+
+4) Until label is purchased, the user should be able to reopen packing.
+After label is purchased, packing and package details must be locked.
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior shipping lifecycle architect
+- Senior fulfillment / packing workflow architect
+- Senior QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Do not make a cosmetic-only patch.
+Fix the packing lifecycle relationship correctly.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- Ref.txt
+- replit.md
+
+Preserve all closed shipping behavior unless this correction explicitly requires touching packing lifecycle or package edit locks.
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Align Packing Workflow with the shipment lifecycle:
+
+- Completing packing should mark the shipment as Packed
+- Get Rates should unlock only after Packed / packing not required
+- Reopening packing before label purchase should re-lock rating
+- After label purchase, packing and package details should be locked
+- Shipment list should use shipment status, not an extra packing complete badge
+- Automation Outcomes should not show normal packing history
+
+==================================================
+PART A — PACKING COMPLETION SHOULD SET SHIPMENT STATUS TO PACKED
+==================================================
+
+Required:
+When packing is completed successfully from the Packing tab:
+
+- set packingStatus = packed
+- set shipment.status = Packed
+- write packing completion audit/history
+- keep existing lifecycle rules intact
+- do not leave shipment as Draft when packing is complete
+
+Required:
+The Packing tab should be the primary place to complete packing.
+Do not add a second competing Packed action in Overview unless it is only a link/shortcut to Packing.
+
+Preferred behavior:
+- Packing tab button should effectively be “Complete Packing & Mark Packed”
+- Overview should simply show current shipment status as Packed once complete
+
+==================================================
+PART B — GET RATES ENABLEMENT AFTER PACKED
+==================================================
+
+Required:
+Get Rates should remain blocked until packing readiness is satisfied.
+
+Get Rates should be enabled only when:
+- origin address is validated
+- destination address is validated
+- packages exist
+- package data is complete and verified as needed
+- shipment is Packed because packing was completed
+  OR packing is marked Not Required
+
+Required:
+If packing is completed and shipment status is set to Packed, Get Rates should become available under the current existing rate prerequisites.
+
+==================================================
+PART C — REOPEN PACKING BEFORE LABEL PURCHASE
+==================================================
+
+Required:
+Until a label is purchased, the user may reopen packing.
+
+When packing is reopened before label purchase:
+- packingStatus should move back to in_progress or equivalent
+- shipment should no longer remain operationally Packed
+- Get Rates should become blocked again
+- selected rate should be cleared or marked stale if package data/packing readiness changes
+- audit the reopen action
+
+Important:
+Do not let a stale Packed status allow rates after packing is reopened.
+
+==================================================
+PART D — LOCK PACKING AND PACKAGES AFTER LABEL PURCHASE
+==================================================
+
+Required:
+After label purchase / label created:
+
+- packing cannot be reopened
+- packing cannot be edited
+- package details cannot be edited
+- package verification cannot be changed
+- package add/remove/edit controls must be disabled or hidden
+- show a clear reason:
+  “Packing and package details are locked after label purchase.”
+
+Required:
+This lock must apply because rates and labels are based on package data.
+Do not allow edits that would make the purchased label inconsistent with the packed shipment.
+
+==================================================
+PART E — REMOVE PACKING COMPLETE BADGE FROM SHIPMENT LIST
+==================================================
+
+Required:
+Remove the separate green “Complete” packing badge from the shipment list.
+
+Desired behavior:
+- shipment list should show shipment status = Packed when packing is complete
+- do not show duplicate packing complete badge
+- keep other meaningful badges only where appropriate
+
+==================================================
+PART F — REMOVE NORMAL PACKING HISTORY FROM AUTOMATION OUTCOMES
+==================================================
+
+Required:
+Do not show normal packing audit/history entries under Automation Outcomes.
+
+Packing actions such as:
+- packing started
+- item verified
+- package verified
+- packing completed
+should appear in:
+- Packing tab / Packing History
+- general shipment audit/history if already designed
+
+They should NOT appear under Automation Outcomes unless:
+- an actual Shipping Automation Rule fired because of a packing trigger
+
+Required:
+Automation Outcomes should remain reserved for automation-created outcomes, not normal packing workflow logs.
+
+==================================================
+PART G — PACKING HISTORY REMAINS AUDITABLE
+==================================================
+
+Required:
+Packing history must remain visible and auditable in the Packing tab.
+
+Do not remove history entirely.
+Only remove it from the wrong surface.
+
+==================================================
+PART H — NON-REGRESSION
+==================================================
+
+Preserve:
+- address validation
+- provider/manual mode split
+- package dimension verification fix
+- stale package verification behavior
+- Get Rates packing gate
+- selected-rate approval guardrails
+- batch labels
+- automation rules
+- shipping provider hard-disable
+- returns/reverse logistics
+- existing label purchase flow after packing readiness is satisfied
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Completing packing changes shipment status to Packed
+2) Shipment no longer remains Draft after packing is complete
+3) Get Rates becomes available only after packing is completed / Packed or Not Required
+4) Reopening packing before label purchase blocks Get Rates again
+5) After label purchase, packing and package details are locked
+6) Shipment list does not show separate packing “Complete” badge
+7) Normal packing history does not appear under Automation Outcomes
+8) Packing History still appears under Packing tab
+9) Existing shipping and automation flows remain intact
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Fix packing completion to update shipment status to Packed
+2) Fix reopen packing behavior before label purchase
+3) Lock packing/package edits after label purchase
+4) Remove separate packing Complete badge from shipment list
+5) Remove normal packing audit entries from Automation Outcomes
+6) Confirm Packing History remains visible in Packing tab
+7) Re-test Get Rates / Purchase Label / Batch Labels non-regression
+8) Update replit.md
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- packing completion to Packed status rule
+- Get Rates relationship to Packed / Not Required
+- reopen packing before label purchase behavior
+- post-label packing/package lock behavior
+- shipment list badge cleanup
+- Automation Outcomes vs Packing History separation
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Packing Completion / Packed Status Alignment
+3. Reopen Packing Before Label Purchase
+4. Post-Label Packing + Package Lock
+5. Shipment List Badge Cleanup
+6. Automation Outcomes vs Packing History Cleanup
+7. Files Changed
+8. Documentation Updated
+9. Non-Regression Notes
