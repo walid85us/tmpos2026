@@ -1,0 +1,61 @@
+Shipping Phase 3 — Approval Visibility Role-Specific Label Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict isolated correction pass.
+Do not redesign the app.
+Do not change approval lifecycle logic except where needed to display the correct role-specific state.
+Do not broaden scope.
+
+Current issue:
+The approval state visibility is still wrong.
+
+Expected:
+1) The requester must see the approval/review state in the shipment list and shipment detail.
+2) The requester should see:
+   - Pending Review / Pending Approval
+   - meaning the request was submitted and is waiting for authorized action.
+3) The approver should see:
+   - Review Request / Approval Request
+   - meaning this requires their action.
+4) The approver should not be the only one seeing the state.
+5) The requester must not have to open execution history to know the request exists.
+
+Required fix:
+- Use the canonical automation outcome state as the source of truth.
+- Render automation outcome badges for both requester and approver.
+- Use role/permission-aware display labels:
+  - if current user is requester and state is pending: show “Pending Review” or “Pending Approval”
+  - if current user has approval/review permission and state is pending: show “Review Request” or “Approval Request”
+  - if state is approved: show “Approved” / “Resolved” to both
+  - if state is denied/overridden/dismissed: show final state to both
+- Do not hide the badge from the requester.
+- Do not show action buttons to unauthorized users.
+- Action buttons remain permission-gated.
+- Status visibility should be allowed for any user who can access the shipment.
+
+Surfaces to fix:
+1) Shipping Center shipment list
+2) Shipment detail top summary
+3) Automation Outcomes section
+4) Execution History state labels if needed
+
+Acceptance criteria:
+1) Requester sees Pending Review/Pending Approval in shipment list after submitting request.
+2) Requester sees Pending Review/Pending Approval in shipment detail.
+3) Approver sees Review Request/Approval Request in shipment list or detail.
+4) Approver sees action buttons only if permission allows.
+5) After approval, both requester and approver see Approved/Resolved.
+6) No stale pending state remains after approval.
+7) Existing duplicate prevention and approval-loop fix remain intact.
+8) Existing shipping and batch label flows remain intact.
+
+Output format:
+1. Implementation Status
+2. Role-Specific Badge/Label Logic
+3. Shipment List Visibility Fix
+4. Shipment Detail / Automation Outcomes Visibility Fix
+5. Permission-Gated Action Controls
+6. Non-Regression Notes

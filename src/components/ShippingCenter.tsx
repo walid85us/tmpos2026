@@ -379,6 +379,14 @@ function formatDateTime(iso: string): string {
 // "Pending Approval" → "Approved/Resolved" transition without digging.
 // Returns null when there is no automation outcome to surface (no
 // reviewNeeded, or the request was superseded/dismissed).
+//
+// Phase 3 correction #7 — role-specific labels for pending states.
+// Same canonical state, different copy depending on whether the viewer
+// is the authorized actor (approver/reviewer — "Approval Request" /
+// "Review Request" — action-needed framing) or anyone else, including
+// the requester (— "Pending Approval" / "Pending Review" — waiting
+// framing). Terminal states use the same copy for everyone since the
+// outcome is the same regardless of viewer.
 type AutomationBadge = {
   label: string;
   short: string;
@@ -391,7 +399,13 @@ type AutomationBadge = {
   description: string;
   tone: 'pending-approval' | 'pending-block' | 'pending-review' | 'approved' | 'overridden' | 'resolved';
 };
-function deriveAutomationBadge(s: Shipment): AutomationBadge | null {
+type AutomationViewerRoles = {
+  // Has approve/override permission for guardrails — sees "Approval Request".
+  canActOnApproval?: boolean;
+  // Has review-resolution permission — sees "Review Request".
+  canActOnReview?: boolean;
+};
+function deriveAutomationBadge(s: Shipment, viewer?: AutomationViewerRoles): AutomationBadge | null {
   const rn = s.reviewNeeded;
   if (!rn) return null;
   // Dismissed (e.g. superseded by alternate-rate selection) is intentionally
@@ -402,28 +416,42 @@ function deriveAutomationBadge(s: Shipment): AutomationBadge | null {
   const isBlockPending = rn.kind === 'block' && rn.state === 'pending';
   const isReviewPending = (rn.kind === 'review' || !rn.kind)
     && (!rn.state || rn.state === 'pending') && !rn.resolved;
+  const viewerIsApprover = !!viewer?.canActOnApproval;
+  const viewerIsReviewer = !!viewer?.canActOnReview;
   if (isApprovalPending) {
+    const label = viewerIsApprover ? 'Approval Request' : 'Pending Approval';
+    const description = viewerIsApprover
+      ? 'Approval request — your action is required to approve or override this shipment.'
+      : 'Automation approval pending — waiting for an authorized approver.';
     return {
-      label: 'Pending Approval', short: 'Pending Approval', icon: 'pending', tone: 'pending-approval',
+      label, short: label, icon: 'pending', tone: 'pending-approval',
       chipClass: 'bg-sky-100 text-sky-700 border-sky-200',
       bannerWrap: 'bg-sky-50 border-sky-200', bannerText: 'text-sky-700', bannerSub: 'text-sky-800',
-      description: 'Automation approval pending — waiting for an authorized approver.',
+      description,
     };
   }
   if (isBlockPending) {
+    const label = viewerIsApprover ? 'Approval Request' : 'Pending Approval';
+    const description = viewerIsApprover
+      ? 'Approval request (blocking) — your action is required to approve or override this shipment.'
+      : 'Automation guardrail is blocking purchase — waiting for an authorized approver.';
     return {
-      label: 'Approval Required', short: 'Approval Required', icon: 'block', tone: 'pending-block',
+      label, short: label, icon: 'block', tone: 'pending-block',
       chipClass: 'bg-rose-100 text-rose-700 border-rose-200',
       bannerWrap: 'bg-rose-50 border-rose-200', bannerText: 'text-rose-700', bannerSub: 'text-rose-800',
-      description: 'Automation guardrail is blocking purchase — approval required.',
+      description,
     };
   }
   if (isReviewPending) {
+    const label = viewerIsReviewer ? 'Review Request' : 'Pending Review';
+    const description = viewerIsReviewer
+      ? 'Review request — your action is required to review and resolve this shipment.'
+      : 'Shipment is awaiting operator review before purchase.';
     return {
-      label: 'Review Needed', short: 'Review Needed', icon: 'flag', tone: 'pending-review',
+      label, short: label, icon: 'flag', tone: 'pending-review',
       chipClass: 'bg-amber-100 text-amber-700 border-amber-200',
       bannerWrap: 'bg-amber-50 border-amber-200', bannerText: 'text-amber-700', bannerSub: 'text-amber-800',
-      description: 'Shipment requires operator review before purchase.',
+      description,
     };
   }
   if (rn.state === 'approved') {
@@ -561,6 +589,17 @@ export default function ShippingCenter() {
   const canResolveAutomationReviews = checkSubPermission('resolve_shipping_automation_reviews');
   const canApproveAutomationExceptions = checkSubPermission('approve_shipping_automation_exceptions');
   const canOverrideAutomationGuardrails = checkSubPermission('override_shipping_automation_guardrails');
+  // Phase 3 correction #7 — viewer-role hint passed to deriveAutomationBadge
+  // so the same canonical pending state renders as "Approval Request" /
+  // "Review Request" (action-needed framing) for users who can act, and
+  // as "Pending Approval" / "Pending Review" (waiting framing) for the
+  // requester and any other viewer. This is a labelling-only signal — it
+  // never gates action buttons, which remain perm-gated by their own
+  // checks.
+  const automationViewerRoles = useMemo<AutomationViewerRoles>(() => ({
+    canActOnApproval: canApproveAutomationExceptions || canOverrideAutomationGuardrails,
+    canActOnReview: canResolveAutomationReviews,
+  }), [canApproveAutomationExceptions, canOverrideAutomationGuardrails, canResolveAutomationReviews]);
   const canManageBatchLabels = checkSubPermission('manage_batch_labels');
   const canPurchaseBatchLabels = checkSubPermission('purchase_batch_labels');
   const planAllowsAutomationRules = isPlanFeatureLive('shipping_automation_rules');
@@ -5166,7 +5205,7 @@ export default function ShippingCenter() {
                           Needed), and so the chip matches the detail
                           panel + execution history exactly. */}
                       {canViewAutomationOutcomes && (() => {
-                        const badge = deriveAutomationBadge(s);
+                        const badge = deriveAutomationBadge(s, automationViewerRoles);
                         if (!badge) return null;
                         return (
                           <span className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md border flex items-center gap-0.5 ${badge.chipClass}`} title={badge.description}>
@@ -5233,7 +5272,7 @@ export default function ShippingCenter() {
                         Approved / Resolved without scrolling into the
                         Automation Outcomes section. Permission-gated. */}
                     {canViewAutomationOutcomes && (() => {
-                      const badge = deriveAutomationBadge(selectedShip);
+                      const badge = deriveAutomationBadge(selectedShip, automationViewerRoles);
                       if (!badge) return null;
                       return (
                         <span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border flex items-center gap-1 ${badge.chipClass}`} title={badge.description}>
@@ -5252,7 +5291,7 @@ export default function ShippingCenter() {
                       the resolved state is auditable without opening
                       the Outcomes panel. */}
                   {canViewAutomationOutcomes && (() => {
-                    const badge = deriveAutomationBadge(selectedShip);
+                    const badge = deriveAutomationBadge(selectedShip, automationViewerRoles);
                     if (!badge) return null;
                     return (
                       <p className={`text-xs font-bold mt-2 ${badge.bannerText}`}>{badge.description}</p>
@@ -5324,14 +5363,30 @@ export default function ShippingCenter() {
                             // The requester / requested-at / requester note /
                             // selected-rate context are surfaced so the
                             // approver sees what they are approving.
+                            // Phase 3 correction #7 — title is role-aware:
+                            // an approver/reviewer sees "Approval Request"
+                            // / "Review Request" (action-needed framing);
+                            // anyone else (including the requester) sees
+                            // "Pending Approval" / "Pending Review"
+                            // (waiting framing). Color/icon stay constant
+                            // since the underlying state is the same.
                             const isApprovalPending = rn.kind === 'approval'
                               && (rn.state === 'approval_requested' || rn.state === 'pending');
                             const isBlockPending = rn.kind === 'block' && rn.state === 'pending';
+                            // Phase 3 correction #7 — derive the panel
+                            // pending title from the same canonical badge
+                            // helper as the list row + detail header so
+                            // the three surfaces cannot drift apart
+                            // (e.g. badge "Approval Request" must not be
+                            // contradicted by panel "Approval Request
+                            // (Blocking)"). Color/icon stay constant per
+                            // kind since the underlying state is the same.
+                            const pendingBadge = deriveAutomationBadge(selectedShip, automationViewerRoles);
                             const tone = isApprovalPending
-                              ? { wrap: 'bg-sky-50 border-sky-200', text: 'text-sky-700', sub: 'text-sky-800', meta: 'text-sky-600', icon: 'pending', title: 'Pending Approval' }
+                              ? { wrap: 'bg-sky-50 border-sky-200', text: 'text-sky-700', sub: 'text-sky-800', meta: 'text-sky-600', icon: 'pending', title: pendingBadge?.label || 'Pending Approval' }
                               : isBlockPending
-                                ? { wrap: 'bg-rose-50 border-rose-200', text: 'text-rose-700', sub: 'text-rose-800', meta: 'text-rose-600', icon: 'block', title: 'Approval Required (Blocking)' }
-                                : { wrap: 'bg-amber-50 border-amber-200', text: 'text-amber-700', sub: 'text-amber-800', meta: 'text-amber-600', icon: 'flag', title: 'Marked for Review' };
+                                ? { wrap: 'bg-rose-50 border-rose-200', text: 'text-rose-700', sub: 'text-rose-800', meta: 'text-rose-600', icon: 'block', title: pendingBadge?.label || 'Pending Approval' }
+                                : { wrap: 'bg-amber-50 border-amber-200', text: 'text-amber-700', sub: 'text-amber-800', meta: 'text-amber-600', icon: 'flag', title: pendingBadge?.label || 'Pending Review' };
                             const rate = rn.selectedRateContext;
                             return (
                               <div className={`border rounded-xl p-3 space-y-2 ${tone.wrap}`}>
