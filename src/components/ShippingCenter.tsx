@@ -1468,6 +1468,21 @@ export default function ShippingCenter() {
       }
     }
 
+    // Phase 3 Pass #14 — defense-in-depth dispatch eligibility guard.
+    // The Overview button row already gates on getDispatchBlockReason via
+    // canDoTransition, but a programmatic / future code path could still
+    // invoke handleStatusTransition with newStatus='Dispatched'. Refusing
+    // here ensures provider shipments without a label and manual shipments
+    // without carrier+service can never reach Dispatched, regardless of UI
+    // path. Note: this guard intentionally does NOT block the carrier-
+    // acceptance auto-mapping (line ~4441), which is incoming-event-driven
+    // and represents the real handoff signal itself.
+    if (newStatus === 'Dispatched' && getDispatchBlockReason(shipment)) {
+      setShowStatusConfirm(null);
+      setReasonModal(null);
+      return;
+    }
+
     const now = new Date().toISOString();
     const updates: Partial<Shipment> = { status: newStatus, updatedAt: now };
 
@@ -4950,6 +4965,26 @@ export default function ShippingCenter() {
     return allowed;
   }
 
+  // Phase 3 Pass #14 — Dispatch eligibility gate. A shipment may only be
+  // marked Dispatched when it has a real carrier handoff basis: a provider
+  // shipment must have a purchased label artifact (s.label), and a manual
+  // shipment must have carrier + service level set. Without these,
+  // 'Dispatched' would collapse the lifecycle (Packed → Dispatched with no
+  // shipping evidence). Returns null when dispatch is allowed, or a single
+  // human-readable reason describing the missing handoff basis. Surfaced
+  // both as the canDoTransition('Dispatched') gate and as a tooltip on the
+  // disabled Dispatched button in the Overview transition row.
+  function getDispatchBlockReason(shipment: Shipment): string | null {
+    const mode = getShipmentMode(shipment);
+    if (mode === 'manual') {
+      if (!shipment.carrier) return 'Set carrier before dispatching this manual shipment.';
+      if (!shipment.serviceLevel) return 'Set service level before dispatching this manual shipment.';
+      return null;
+    }
+    if (!shipment.label) return 'Purchase a label before dispatching this provider shipment.';
+    return null;
+  }
+
   function canDoTransition(status: ShipmentStatus, newStatus: ShipmentStatus, shipment?: Shipment | null): boolean {
     if (newStatus === 'Cancelled') {
       if (!canCancel) return false;
@@ -4957,7 +4992,17 @@ export default function ShippingCenter() {
       return true;
     }
     if (newStatus === 'Rejected' || newStatus === 'Returned') return canDispatch;
-    if (newStatus === 'Dispatched') return canDispatch;
+    // Phase 3 Pass #14 — Dispatched additionally requires a real carrier
+    // handoff basis (label artifact for provider mode; carrier + service
+    // for manual mode). Pass #12 made packing flip status to 'Packed'
+    // BEFORE label purchase, so without this gate an operator could mark
+    // a freshly packed provider shipment Dispatched and skip the entire
+    // rate / label flow.
+    if (newStatus === 'Dispatched') {
+      if (!canDispatch) return false;
+      if (shipment && getDispatchBlockReason(shipment)) return false;
+      return true;
+    }
     if (['In Transit', 'Delivered', 'Exception'].includes(newStatus)) return false;
     // Phase 3 Pass #11 — Mark Packed (Overview tab) requires the same
     // packing-readiness as Get Rates / Purchase Label. Hides the button
@@ -6594,8 +6639,48 @@ export default function ShippingCenter() {
                     )}
                     {getNextStatuses(selectedShip.status, selectedShip).length > 0 && (
                       <div className="flex gap-2 flex-wrap">
-                        {getNextStatuses(selectedShip.status, selectedShip).map(next => (
-                          canDoTransition(selectedShip.status, next, selectedShip) && (
+                        {getNextStatuses(selectedShip.status, selectedShip).map(next => {
+                          // Phase 3 Pass #14 — Dispatched gets special
+                          // disabled-with-tooltip rendering when the operator
+                          // has the dispatch permission but the shipment lacks
+                          // a carrier handoff basis (no label for provider
+                          // mode; no carrier/service for manual mode). All
+                          // other transitions keep the original render-when-
+                          // allowed behaviour. The button calls
+                          // getDispatchBlockReason via canDoTransition; when
+                          // canDoTransition returns false, we still render the
+                          // button if dispatchReason is non-null + canDispatch
+                          // perm exists, so the operator sees both the action
+                          // affordance AND the missing-prereq reason in one
+                          // place rather than the button silently disappearing.
+                          if (next === 'Dispatched') {
+                            const dispatchReason = getDispatchBlockReason(selectedShip);
+                            const allowed = canDoTransition(selectedShip.status, next, selectedShip);
+                            if (!allowed && (!canDispatch || !dispatchReason)) return null;
+                            const disabled = !allowed;
+                            return (
+                              <div key={next} className="relative group">
+                                <button
+                                  onClick={() => {
+                                    if (disabled) return;
+                                    setShowStatusConfirm({ id: selectedShip.id, newStatus: next, label: `Move shipment to "${next}"?` });
+                                  }}
+                                  disabled={disabled}
+                                  title={disabled ? (dispatchReason || '') : 'Mark shipment as dispatched'}
+                                  className={`px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all active:scale-95 bg-primary text-white shadow-lg shadow-primary/20 hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-primary`}
+                                >
+                                  {next}
+                                </button>
+                                {disabled && dispatchReason && (
+                                  <div className="absolute bottom-full left-0 mb-1 hidden group-hover:block z-10">
+                                    <div className="bg-slate-800 text-white text-[10px] rounded-lg px-3 py-2 shadow-lg max-w-xs">{dispatchReason}</div>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          }
+                          if (!canDoTransition(selectedShip.status, next, selectedShip)) return null;
+                          return (
                             <button
                               key={next}
                               onClick={() => {
@@ -6612,17 +6697,15 @@ export default function ShippingCenter() {
                                     ? 'bg-orange-50 text-orange-600 border border-orange-200 hover:bg-orange-100'
                                     : next === 'Returned'
                                       ? 'bg-pink-50 text-pink-600 border border-pink-200 hover:bg-pink-100'
-                                      : next === 'Dispatched'
-                                        ? 'bg-primary text-white shadow-lg shadow-primary/20 hover:bg-primary/90'
-                                        : next === 'Delivered'
-                                          ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20 hover:bg-emerald-600'
-                                          : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                      : next === 'Delivered'
+                                        ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20 hover:bg-emerald-600'
+                                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                               }`}
                             >
                               {next}
                             </button>
-                          )
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
                     {/* Phase 3 Pass #13 — Removed Pass #11's large amber

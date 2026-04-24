@@ -1,0 +1,60 @@
+Shipping Phase 3 — Dispatch Eligibility After Label Purchase Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict isolated correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Fix only the Dispatch eligibility rule related to label/manual shipping readiness.
+
+Issue:
+Dispatched should not be available immediately after packing.
+Packing only means the shipment is packed and ready for rates/label flow.
+Dispatch should only be available after the shipment has a valid carrier handoff basis.
+
+Required logic:
+1) Provider-backed shipment:
+- Dispatched is enabled only after label purchase / label artifact / tracking reference exists.
+- Packing completed or Not Required alone must not enable Dispatched.
+- Get Rates and Purchase Label happen before Dispatched.
+
+2) Manual shipment, if supported:
+- Dispatched is enabled only when manual shipping requirements are satisfied.
+- At minimum, require carrier/service and tracking/reference if current manual flow expects it.
+- If manual dispatch is not fully supported, show a truthful disabled reason.
+
+3) Locked/blocked reason:
+- If user tries to dispatch before label purchase, show:
+  “Purchase a label before dispatching this provider shipment.”
+- If manual shipment is missing required manual fields, show the exact missing reason.
+
+4) Preserve lifecycle:
+- Packed is pre-rate/pre-label readiness.
+- Label Created means label exists.
+- Dispatched means shipment has left the store / is handed off.
+- Dispatched must not collapse into In Transit.
+
+Acceptance criteria:
+1) Provider shipment cannot be marked Dispatched before label purchase.
+2) Provider shipment can be marked Dispatched after label purchase if other lifecycle requirements are met.
+3) Packing complete alone does not enable Dispatch.
+4) Manual shipment dispatch respects manual shipping requirements.
+5) Disabled reason is clear and truthful.
+6) Existing Get Rates, Purchase Label, Packing, Batch Labels, and Automation flows remain intact.
+
+Update replit.md with:
+- Dispatch eligibility rule
+- provider-mode dispatch requirement
+- manual-mode dispatch requirement
+- Packed vs Label Created vs Dispatched distinction
+
+Output format:
+1. Implementation Status
+2. Provider Dispatch Eligibility
+3. Manual Dispatch Eligibility
+4. Lifecycle Alignment
+5. Files Changed
+6. Documentation Updated
+7. Non-Regression Notes
