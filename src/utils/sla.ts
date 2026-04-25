@@ -13,7 +13,10 @@
 // itself — see types.ts SlaPauseInfo / SlaDelayReason / SlaResolutionNote
 // / SlaHistoryEntry.
 
-import type { Shipment, SlaPolicy, SlaStatus, SlaTarget, SlaTargetType } from '../types';
+import type {
+  Shipment, SlaPolicy, SlaStatus, SlaTarget, SlaTargetType,
+  SlaHistoryEntry,
+} from '../types';
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -463,6 +466,46 @@ export function formatAbsoluteDeadline(deadlineMs: number, nowMs: number): strin
   }
 }
 
+// Phase 3 Pass #16 — SLA Automation Linkage. Severity ordering used to
+// derive a single shipment-level "worst status" across multiple SLA targets.
+// Higher rank = worse. `not_applicable` and `unknown` are treated as the
+// least-severe so they never out-rank a real signal. `met` ranks above
+// `on_track` because a "met" target is a closed/historical fact and a
+// shipment with mixed met + on_track is still on_track overall — but a
+// shipment with one missed target should report `missed` regardless of
+// whether other targets are on_track. Ranking matches the engine's
+// SLA_STATUS_RANK option ordering in FIELD_DESCRIPTORS.
+const SLA_STATUS_RANK: Record<SlaStatus, number> = {
+  not_applicable: 0,
+  unknown: 0,
+  met: 1,
+  on_track: 2,
+  paused: 3,
+  at_risk: 4,
+  overdue: 5,
+  missed: 6,
+};
+
+// Compute the shipment-level worst SLA status across all applicable
+// targets. Used by the automation SLA detector to populate
+// AutomationTriggerContext.slaWorstStatus so rules can match
+// "this shipment is currently overdue overall" deterministically. Returns
+// 'not_applicable' when there are no applicable targets so callers don't
+// have to handle null/undefined separately.
+export function worstSlaStatus(targets: SlaTarget[]): SlaStatus {
+  if (!targets || targets.length === 0) return 'not_applicable';
+  let worst: SlaStatus = 'not_applicable';
+  let worstRank = SLA_STATUS_RANK.not_applicable;
+  for (const t of targets) {
+    const r = SLA_STATUS_RANK[t.status] ?? 0;
+    if (r > worstRank) {
+      worst = t.status;
+      worstRank = r;
+    }
+  }
+  return worst;
+}
+
 // UI tone mapping — single source of truth for badge colors so the list
 // chip / detail card / filter chip stay consistent.
 export function toneForStatus(status: SlaStatus): {
@@ -508,4 +551,184 @@ export function formatWindowMs(ms: number): string {
 export function parseWindowInput(value: number, unit: 'hours' | 'days'): number | null {
   if (!Number.isFinite(value) || value <= 0) return null;
   return unit === 'hours' ? value * HOUR : value * DAY;
+}
+
+// =====================================================================
+// Phase 3 Pass #16 — SLA Automation Linkage helpers.
+// Pure, deterministic, no I/O. Used by ShippingCenter to detect
+// per-shipment SLA transitions between renders and dispatch them
+// through the existing automation engine. Snapshots compress the
+// transition-relevant SLA state into a small, stable shape so the
+// detector can:
+//   1. Diff per-target status to fire sla_at_risk / sla_overdue / sla_missed
+//      ONLY on actual transitions INTO those statuses.
+//   2. Walk new slaHistory entries since lastHistoryId to fire
+//      sla_paused / sla_resumed / sla_delay_reason_added based on the
+//      append-only audit log (the source of truth for those events).
+// First-load semantics: the dispatcher treats a missing snapshot for a
+// shipment as the baseline (no fires for already-at-risk/overdue state),
+// preventing replay storms when the page reloads.
+// =====================================================================
+
+export interface SlaAutomationSnapshot {
+  // Per-target status at last observation. Only applicable targets are
+  // present; absent keys mean the target isn't applicable on that shipment.
+  perTargetStatus: Partial<Record<SlaTargetType, SlaStatus>>;
+  // Whether the shipment was in an active SLA-paused state at last
+  // observation. Used as a backstop sanity check; the actual paused/resumed
+  // automation events come from slaHistory walking.
+  slaPaused: boolean;
+  // Last slaHistory entry id we have already dispatched for. Walking history
+  // since this id avoids re-firing paused/resumed/delay_reason events.
+  lastHistoryId: string | null;
+}
+
+export type SlaAutomationSnapshotMap = Record<string, SlaAutomationSnapshot>;
+
+const SNAPSHOT_SESSION_KEY = 'sla_automation_snapshot';
+
+export function loadSlaAutomationSnapshots(): SlaAutomationSnapshotMap {
+  try {
+    const raw = sessionStorage.getItem(SNAPSHOT_SESSION_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') return parsed as SlaAutomationSnapshotMap;
+  } catch {
+    // Corrupt JSON or sessionStorage unavailable — start clean rather
+    // than crashing the dispatcher. Worst case: one render of baselining.
+  }
+  return {};
+}
+
+export function saveSlaAutomationSnapshots(map: SlaAutomationSnapshotMap): void {
+  try {
+    sessionStorage.setItem(SNAPSHOT_SESSION_KEY, JSON.stringify(map));
+  } catch {
+    // Quota exceeded or unavailable — the next render will rebuild from
+    // the existing snapshot map in memory; missing persistence merely
+    // reverts to baseline-on-reload behavior.
+  }
+}
+
+export function buildSlaSnapshot(
+  shipment: Shipment,
+  summary: SlaShipmentSummary,
+): SlaAutomationSnapshot {
+  const perTargetStatus: Partial<Record<SlaTargetType, SlaStatus>> = {};
+  for (const t of summary.targets) {
+    perTargetStatus[t.type] = t.status;
+  }
+  const history = shipment.slaHistory || [];
+  return {
+    perTargetStatus,
+    slaPaused: !!(shipment.slaPaused && !shipment.slaPaused.resumedAt),
+    lastHistoryId: history.length > 0 ? history[history.length - 1].id : null,
+  };
+}
+
+// Status → transition kind. We only fire automation when the target's status
+// moves INTO at_risk / overdue / missed — staying at_risk across renders
+// must never re-fire, and moving away (e.g. operator pauses) must never fire
+// here either (the paused event comes from the history walk below).
+const TRANSITION_FIRE_STATUSES: ReadonlySet<SlaStatus> = new Set([
+  'at_risk', 'overdue', 'missed',
+]);
+
+export interface SlaTransitionEvent {
+  kind: 'at_risk' | 'overdue' | 'missed';
+  targetType: SlaTargetType;
+  fromStatus: SlaStatus;
+  toStatus: SlaStatus;
+  varianceMs?: number;
+}
+
+export function diffSlaSnapshots(
+  prev: SlaAutomationSnapshot | undefined,
+  current: SlaAutomationSnapshot,
+  currentTargets: SlaTarget[],
+): SlaTransitionEvent[] {
+  // First observation: treat as baseline. Returning [] here is what makes
+  // page reloads quiet — already-at-risk shipments do not re-fire just
+  // because we have no prior snapshot to compare against.
+  if (!prev) return [];
+  const events: SlaTransitionEvent[] = [];
+  // Index variance lookup so we can attach it to each emitted event.
+  const variances = new Map<SlaTargetType, number | undefined>();
+  for (const t of currentTargets) variances.set(t.type, t.varianceMs);
+  for (const targetType of Object.keys(current.perTargetStatus) as SlaTargetType[]) {
+    const toStatus = current.perTargetStatus[targetType];
+    if (!toStatus || !TRANSITION_FIRE_STATUSES.has(toStatus)) continue;
+    const fromStatus = prev.perTargetStatus[targetType] || 'unknown';
+    if (fromStatus === toStatus) continue;
+    // Map terminal status to the trigger kind. Only emit if the
+    // post-transition status is one of the three we care about.
+    const kind = toStatus as SlaTransitionEvent['kind'];
+    events.push({
+      kind, targetType, fromStatus, toStatus,
+      varianceMs: variances.get(targetType),
+    });
+  }
+  return events;
+}
+
+// Source-of-truth walk for paused / resumed / delay_reason events.
+// The slaHistory append-only log is mutated by the operator action handlers
+// in ShippingCenter (pauseSla / resumeSla / addDelayReason), so these events
+// are guaranteed-once per user action. We dispatch automation triggers for
+// every entry whose id is newer than the last-seen id stored on the snapshot.
+export interface SlaHistoryAutomationEvent {
+  entry: SlaHistoryEntry;
+  triggerKind: 'paused' | 'resumed' | 'delay_reason_added';
+}
+
+export function diffSlaHistorySinceId(
+  shipment: Shipment,
+  lastId: string | null,
+): SlaHistoryAutomationEvent[] {
+  const history = shipment.slaHistory || [];
+  if (history.length === 0) return [];
+  // Phase 3 Pass #16 — SLA Automation Linkage (correction). Semantics:
+  //   • lastId === null → the previous snapshot existed but recorded no
+  //     history at the time. Every entry currently in slaHistory is new
+  //     and must fire exactly once. (The first-snapshot baseline case
+  //     where there was NO previous snapshot at all is handled by the
+  //     caller, not here — the caller must skip invocation in that case.)
+  //   • lastId === "id" found in history → emit entries after that index.
+  //   • lastId not found in history (data drift, snapshot rebuild) →
+  //     fall back to baseline-from-now (no fires) so we never replay
+  //     potentially huge backlogs as a flood of automation events.
+  let startIdx = 0;
+  // Drift hardening: only treat lastId as a real reference when it's a
+  // non-empty string. Anything else (undefined from a snapshot missing the
+  // key, accidental number/object after JSON round-trip, empty string from
+  // legacy data) falls back to baseline-from-now so we never replay an
+  // entire history as a flood of automation events on snapshot corruption.
+  if (typeof lastId === 'string' && lastId.length > 0) {
+    const idx = history.findIndex(h => h.id === lastId);
+    if (idx >= 0) {
+      startIdx = idx + 1;
+    } else {
+      // Provided id not in history → drift; safer to emit nothing.
+      startIdx = history.length;
+    }
+  } else if (lastId !== null) {
+    // Non-null, non-string → drift; emit nothing rather than everything.
+    startIdx = history.length;
+  }
+  const out: SlaHistoryAutomationEvent[] = [];
+  for (let i = startIdx; i < history.length; i++) {
+    const entry = history[i];
+    if (entry.action === 'paused') out.push({ entry, triggerKind: 'paused' });
+    else if (entry.action === 'resumed') out.push({ entry, triggerKind: 'resumed' });
+    else if (entry.action === 'delay_reason_added' || entry.action === 'delay_reason_updated') {
+      // Updated reasons are intentionally collapsed under the same trigger
+      // (sla_delay_reason_added) so a rule can react to "operator recorded a
+      // reason" without distinguishing first-add vs revision.
+      out.push({ entry, triggerKind: 'delay_reason_added' });
+    }
+    // exception_resolved / status_recomputed are intentionally not surfaced
+    // as automation triggers (no business demand documented in Pass #16
+    // scope; out-of-scope per spec).
+  }
+  return out;
 }

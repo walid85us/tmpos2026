@@ -11,6 +11,9 @@ import {
   PURPOSE_LABELS, PURPOSE_DESCRIPTIONS,
   triggersForPurpose, actionsForPurpose, primaryActionFor, supplementaryActionsFor,
   conditionFieldsForTrigger, getRulePurpose, effectiveProcessType,
+  // Phase 3 Pass #16 — SLA Automation Linkage. SLA-trigger detection +
+  // human labels for execution-history chips.
+  isSlaTrigger, SLA_TRIGGERS, getSlaTargetLabel, getSlaStatusLabel,
 } from '../../shipping/automationEngine';
 
 interface Props {
@@ -26,6 +29,12 @@ interface Props {
   // Phase 3 correction #3 — execution history shipment numbers are clickable.
   // Caller wires this to ShippingCenter to open the shipment detail panel.
   onOpenShipment?: (shipmentId: string) => void;
+  // Phase 3 Pass #16 — SLA Automation Linkage. When false (plan disabled
+  // OR view_shipping_sla missing), the rule builder hides the SLA triggers
+  // and SLA-aware condition fields, and the execution history hides any
+  // SLA transition annotations. Defaults to false so a forgotten prop fails
+  // closed (no SLA UI) rather than open.
+  slaFeatureEnabled?: boolean;
 }
 
 const TRIGGER_LABELS_BY_TYPE: Record<AutomationTriggerType, string> = {
@@ -44,6 +53,15 @@ const TRIGGER_LABELS_BY_TYPE: Record<AutomationTriggerType, string> = {
   packing_started: 'Packing is started on a shipment',
   packing_completed: 'Packing is completed on a shipment',
   packing_exception_created: 'A packing exception is created',
+  // Phase 3 Pass #16 — SLA Automation Linkage. Operator-friendly phrasings
+  // that mirror the engine's TRIGGER_LABELS but capitalize the leading
+  // article for the dropdown.
+  sla_at_risk: 'An SLA target enters at-risk',
+  sla_overdue: 'An SLA target becomes overdue',
+  sla_missed: 'An SLA target is missed',
+  sla_paused: 'An SLA is paused on a shipment',
+  sla_resumed: 'An SLA is resumed on a shipment',
+  sla_delay_reason_added: 'An SLA delay reason is recorded',
 };
 
 const ACTION_LABELS_BY_TYPE: Record<AutomationActionType, string> = {
@@ -124,7 +142,7 @@ function defaultValueForOperator(field: AutomationConditionField, op: Automation
   return '';
 }
 
-export default function AutomationRules({ rules, logs, shipments, canManage, canViewResults, currentUser, onAdd, onUpdate, onDelete, onOpenShipment }: Props) {
+export default function AutomationRules({ rules, logs, shipments, canManage, canViewResults, currentUser, onAdd, onUpdate, onDelete, onOpenShipment, slaFeatureEnabled = false }: Props) {
   const [editing, setEditing] = useState<AutomationRule | null>(null);
   const [creating, setCreating] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
@@ -135,15 +153,29 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
   const editingType: AutomationRuleProcessType = editing
     ? effectiveProcessType(editingPurpose, editing.trigger)
     : 'observational';
-  const allowedTriggers = useMemo(() => triggersForPurpose(editingPurpose), [editingPurpose]);
+  // Phase 3 Pass #16 — SLA Automation Linkage. Trigger/condition lists are
+  // filtered down to non-SLA when the SLA feature is gated off so a starter
+  // tenant or operator missing view_shipping_sla never sees SLA UI. The
+  // filter happens at the dropdown layer so the engine's matrices remain
+  // the single source of truth for what is allowed in principle.
+  const SLA_TRIGGER_SET = useMemo(() => new Set<AutomationTriggerType>(SLA_TRIGGERS), []);
+  const SLA_FIELD_SET = useMemo(() => new Set<AutomationConditionField>([
+    'slaWorstStatus', 'slaTargetType', 'slaIsPaused', 'slaHasDelayReason',
+    'slaVarianceMinutes', 'isReturn',
+  ]), []);
+  const allowedTriggers = useMemo(() => {
+    const base = triggersForPurpose(editingPurpose);
+    return slaFeatureEnabled ? base : base.filter(t => !SLA_TRIGGER_SET.has(t));
+  }, [editingPurpose, slaFeatureEnabled, SLA_TRIGGER_SET]);
   const allowedActions = useMemo(
     () => editing ? actionsForPurpose(editingPurpose, editing.trigger) : [],
     [editingPurpose, editing?.trigger],
   );
-  const allowedFields = useMemo(
-    () => editing ? conditionFieldsForTrigger(editing.trigger) : [],
-    [editing?.trigger],
-  );
+  const allowedFields = useMemo(() => {
+    if (!editing) return [];
+    const base = conditionFieldsForTrigger(editing.trigger);
+    return slaFeatureEnabled ? base : base.filter(f => !SLA_FIELD_SET.has(f));
+  }, [editing?.trigger, slaFeatureEnabled, SLA_FIELD_SET]);
   const primaryAction = useMemo(
     () => editing ? primaryActionFor(editingPurpose, editing.trigger) : null,
     [editingPurpose, editing?.trigger],
@@ -646,6 +678,36 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
                         )}
                       </div>
                       {l.ruleSummary && <p className="text-[11px] text-slate-500 mt-0.5 italic">{l.ruleSummary}</p>}
+                      {/* Phase 3 Pass #16 — SLA Automation Linkage. When the
+                          fired trigger was an SLA transition, surface which
+                          target moved and how (status arrow + variance) so the
+                          audit trail explains "why now". Hidden when the SLA
+                          feature is disabled — those fields shouldn't appear
+                          but defense-in-depth never hurts. */}
+                      {slaFeatureEnabled && isSlaTrigger(l.trigger) && (l.slaTargetType || l.slaFromStatus || l.slaToStatus || typeof l.slaVarianceMinutes === 'number' || l.slaTriggerReason) && (
+                        <p className="text-[11px] text-slate-600 mt-0.5 flex items-center gap-1.5 flex-wrap">
+                          {l.slaTargetType && (
+                            <span className="px-1.5 py-0.5 text-[9px] font-black uppercase tracking-widest rounded bg-violet-50 text-violet-700">
+                              {getSlaTargetLabel(l.slaTargetType)}
+                            </span>
+                          )}
+                          {(l.slaFromStatus || l.slaToStatus) && (
+                            <span className="text-[10px] font-mono text-slate-600">
+                              {getSlaStatusLabel(l.slaFromStatus)} <span className="text-slate-400">→</span> {getSlaStatusLabel(l.slaToStatus)}
+                            </span>
+                          )}
+                          {typeof l.slaVarianceMinutes === 'number' && (
+                            <span className="text-[10px] text-slate-500">
+                              variance {l.slaVarianceMinutes >= 0 ? '+' : ''}{l.slaVarianceMinutes}m
+                            </span>
+                          )}
+                          {l.slaTriggerReason && (
+                            <span className="text-[10px] text-slate-500 italic truncate max-w-[18rem]" title={l.slaTriggerReason}>
+                              "{l.slaTriggerReason}"
+                            </span>
+                          )}
+                        </p>
+                      )}
                       <p className="text-[11px] text-slate-500 mt-0.5">
                         {new Date(l.timestamp).toLocaleString()} · actions: {l.actionsApplied.length === 0 ? 'none' : l.actionsApplied.join(', ')}
                       </p>

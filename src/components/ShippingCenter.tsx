@@ -10,7 +10,10 @@ import {
   loadSlaPolicy, saveSlaPolicy, appendPolicyAudit, getDefaultSlaPolicy,
   summarizeShipmentSla, computeSlaTargets, getApplicableTargetTypes,
   labelForTarget, formatDuration, toneForStatus, formatWindowMs,
-  type SlaShipmentSummary,
+  // Phase 3 Pass #16 — SLA Automation Linkage helpers.
+  buildSlaSnapshot, diffSlaSnapshots, diffSlaHistorySinceId, worstSlaStatus,
+  loadSlaAutomationSnapshots, saveSlaAutomationSnapshots,
+  type SlaShipmentSummary, type SlaAutomationSnapshotMap,
 } from '../utils/sla';
 import * as shippingApi from '../shipping/shippingApiClient';
 import type { ProviderError } from '../shipping/types';
@@ -22,7 +25,7 @@ import { CarrierAnalytics } from './shipping/CarrierAnalytics';
 import AutomationRules from './shipping/AutomationRules';
 import BatchLabels, { type BatchEligibility } from './shipping/BatchLabels';
 import { runAutomation, evaluateGuardrails, buildApprovalContextKey, type GuardrailEvaluation, describeRule } from '../shipping/automationEngine';
-import type { AutomationTriggerType } from '../types';
+import type { AutomationTriggerType, AutomationTriggerContext } from '../types';
 import { featureMatrix as staticFeatureMatrix } from '../owner/mockData';
 import { normalizeStateCode, normalizeZip, normalizePhone } from '../utils/inputNormalizers';
 
@@ -4069,11 +4072,21 @@ export default function ShippingCenter() {
   // Phase 3 — Automation trigger dispatcher. Called from create/update/label/status flows.
   // Truthful gating: only runs when the plan includes shipping_automation_rules.
   // Records every match in automationLogs and applies aggregate updates from runAutomation.
-  function triggerAutomation(shipment: Shipment, trigger: AutomationTriggerType, extraUpdates?: Partial<Shipment>) {
+  // Phase 3 Pass #16 — SLA Automation Linkage. The optional triggerContext
+  // is forwarded to the engine so SLA-aware conditions (slaTargetType,
+  // slaVarianceMinutes, slaWorstStatus) can match on per-event facts. Non-
+  // SLA call sites continue to omit it; engine evaluation falls back to
+  // shipment-only field reads in that case.
+  function triggerAutomation(
+    shipment: Shipment,
+    trigger: AutomationTriggerType,
+    extraUpdates?: Partial<Shipment>,
+    triggerContext?: AutomationTriggerContext,
+  ) {
     if (!planAllowsAutomationRules) return extraUpdates ? { ...extraUpdates } : {};
     if (automationRules.length === 0) return extraUpdates ? { ...extraUpdates } : {};
     const merged: Shipment = extraUpdates ? { ...shipment, ...extraUpdates } : shipment;
-    const result = runAutomation(automationRules, merged, trigger);
+    const result = runAutomation(automationRules, merged, trigger, triggerContext);
     const nowTs = new Date().toISOString();
     // runCount counts every rule evaluation for this trigger (independent of
     // whether conditions matched). Updates are applied via a single functional
@@ -4110,6 +4123,119 @@ export default function ShippingCenter() {
     if (result.logs.length > 0) appendAutomationLogs(result.logs);
     return { ...(extraUpdates || {}), ...result.shipmentUpdates };
   }
+
+  // Phase 3 Pass #16 — SLA Automation Linkage. Deterministic transition
+  // detector. Runs whenever shipments / slaSummaries / nowMs change. For
+  // each shipment it builds the current SLA snapshot, diffs against the
+  // last-saved snapshot in sessionStorage, and dispatches one automation
+  // event per detected transition through the normal triggerAutomation
+  // helper. Dedup mechanism (per spec):
+  //   • per-target status diff: only fires when a target status moves INTO
+  //     at_risk / overdue / missed (not when staying or moving away).
+  //   • slaHistory walk by id: paused/resumed/delay-reason events fire
+  //     once per appended history entry; lastHistoryId is advanced after.
+  //   • first observation for a shipment becomes the baseline (no fires)
+  //     so a page reload does not replay every existing risk state.
+  // Gating: BOTH plan features must be live AND the operator must hold
+  // view_shipping_sla. If either is false we skip everything (no snapshot
+  // updates, no fires) so a permissions change does not silently start
+  // emitting old transitions.
+  const slaSnapshotsRef = React.useRef<SlaAutomationSnapshotMap>(loadSlaAutomationSnapshots());
+  useEffect(() => {
+    if (!slaFeatureEnabled || !planAllowsAutomationRules) return;
+    if (automationRules.length === 0) return;
+    const prevMap = slaSnapshotsRef.current;
+    const nextMap: SlaAutomationSnapshotMap = { ...prevMap };
+    let dirty = false;
+    for (const shipment of shipments) {
+      const summary = slaSummaries[shipment.id];
+      if (!summary || !summary.applicable) continue;
+      const prevSnap = prevMap[shipment.id];
+      const currentSnap = buildSlaSnapshot(shipment, summary);
+      // Phase 3 Pass #16 (correction) — shipment-derived worst SLA status
+      // across all current targets, threaded into every SLA triggerContext
+      // so engine rules can match `slaWorstStatus` deterministically.
+      // Computed once per shipment per render rather than per event so a
+      // burst of transitions sees a consistent shipment-level snapshot.
+      const worstStatus = worstSlaStatus(summary.targets);
+      // Per-target status transitions → sla_at_risk / sla_overdue / sla_missed
+      const transitions = diffSlaSnapshots(prevSnap, currentSnap, summary.targets);
+      let aggregateUpdates: Partial<Shipment> = {};
+      let mutatedShipment: Shipment = shipment;
+      for (const ev of transitions) {
+        const trigger: AutomationTriggerType =
+          ev.kind === 'at_risk' ? 'sla_at_risk'
+          : ev.kind === 'overdue' ? 'sla_overdue'
+          : 'sla_missed';
+        const ctx: AutomationTriggerContext = {
+          slaTargetType: ev.targetType,
+          slaFromStatus: ev.fromStatus,
+          slaToStatus: ev.toStatus,
+          slaVarianceMs: ev.varianceMs,
+          slaWorstStatus: worstStatus,
+        };
+        const updates = triggerAutomation(mutatedShipment, trigger, undefined, ctx);
+        if (updates && Object.keys(updates).length > 0) {
+          aggregateUpdates = { ...aggregateUpdates, ...updates };
+          mutatedShipment = { ...mutatedShipment, ...updates };
+        }
+      }
+      // History-driven transitions → sla_paused / sla_resumed / sla_delay_reason_added.
+      // Phase 3 Pass #16 (correction) — only walk history when a previous
+      // snapshot exists. Without this guard, the very first observation
+      // would replay every existing slaHistory entry as a brand-new
+      // automation event. The diffSlaHistorySinceId helper now correctly
+      // emits ALL entries when prevSnap.lastHistoryId is null (the
+      // previously-broken case where a snapshot was taken before any
+      // history had been appended), so the first paused/resumed/delay
+      // action after baseline fires exactly once.
+      if (prevSnap) {
+        const historyEvents = diffSlaHistorySinceId(shipment, prevSnap.lastHistoryId);
+        for (const he of historyEvents) {
+          const trigger: AutomationTriggerType =
+            he.triggerKind === 'paused' ? 'sla_paused'
+            : he.triggerKind === 'resumed' ? 'sla_resumed'
+            : 'sla_delay_reason_added';
+          const ctx: AutomationTriggerContext = {
+            slaTargetType: he.entry.targetType,
+            slaFromStatus: he.entry.fromStatus,
+            slaToStatus: he.entry.toStatus,
+            slaReason: he.entry.reason,
+            slaWorstStatus: worstStatus,
+          };
+          const updates = triggerAutomation(mutatedShipment, trigger, undefined, ctx);
+          if (updates && Object.keys(updates).length > 0) {
+            aggregateUpdates = { ...aggregateUpdates, ...updates };
+            mutatedShipment = { ...mutatedShipment, ...updates };
+          }
+        }
+      }
+      // Persist any aggregate field updates the engine produced (flags,
+      // notes, review-needed, batch queue, priority). One updateShipment
+      // call per shipment keeps storage writes batched.
+      if (Object.keys(aggregateUpdates).length > 0) {
+        updateShipment(shipment.id, aggregateUpdates);
+      }
+      // Always advance snapshot for shipments we touched (or first-observed),
+      // even if no automation fired — otherwise a non-matching rule would
+      // re-evaluate the same transition next render.
+      const prevSerialized = prevSnap ? JSON.stringify(prevSnap) : '';
+      const nextSerialized = JSON.stringify(currentSnap);
+      if (prevSerialized !== nextSerialized) {
+        nextMap[shipment.id] = currentSnap;
+        dirty = true;
+      }
+    }
+    if (dirty) {
+      slaSnapshotsRef.current = nextMap;
+      saveSlaAutomationSnapshots(nextMap);
+    }
+    // Intentionally exclude triggerAutomation / updateShipment from deps —
+    // they are stable closures from the component scope and including them
+    // would force this effect to re-run for unrelated state changes,
+    // potentially double-firing transitions before the snapshot persists.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shipments, slaSummaries, slaFeatureEnabled, planAllowsAutomationRules, automationRules]);
 
   // Phase 3 — Single-shipment label purchase used by Batch Labels iteration.
   // Returns a structured outcome instead of mutating UI state, but still updates
@@ -5385,6 +5511,10 @@ export default function ShippingCenter() {
               onUpdate={updateAutomationRule}
               onDelete={deleteAutomationRule}
               onOpenShipment={(id) => { setSelectedShipment(id); setActiveTab('shipments'); }}
+              // Phase 3 Pass #16 — SLA Automation Linkage. Forwarded so the
+              // rule builder hides SLA triggers/conditions when the SLA
+              // feature is plan-disabled OR the operator lacks view_shipping_sla.
+              slaFeatureEnabled={slaFeatureEnabled}
             />
           ) : (
             <div className="bg-white rounded-2xl border border-amber-200 p-6 text-center">

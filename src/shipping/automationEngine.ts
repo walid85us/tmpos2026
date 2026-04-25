@@ -9,10 +9,26 @@ import type {
   AutomationConditionField,
   AutomationConditionOp,
   AutomationFieldKind,
+  AutomationTriggerContext,
   RulePurpose,
   Shipment,
   ShipmentInternalNote,
+  SlaStatus,
+  SlaTargetType,
 } from '../types';
+
+// Phase 3 Pass #16 — SLA Automation Linkage. Whitelist of observational SLA
+// triggers. Kept as a stable constant so the dispatcher (ShippingCenter SLA
+// transition useEffect), the rule builder filter, and engine gating all
+// reference one definition rather than drifting copies.
+export const SLA_TRIGGERS: AutomationTriggerType[] = [
+  'sla_at_risk', 'sla_overdue', 'sla_missed',
+  'sla_paused', 'sla_resumed', 'sla_delay_reason_added',
+];
+
+export function isSlaTrigger(trigger: AutomationTriggerType): boolean {
+  return SLA_TRIGGERS.includes(trigger);
+}
 
 // Phase 3 correction #3 — process-type registry. Defines which triggers and
 // actions are valid under each process type (observational vs guardrail) so
@@ -28,6 +44,11 @@ export const OBSERVATIONAL_TRIGGERS: AutomationTriggerType[] = [
   // Phase 3 Pass #10 — observational packing-workflow events. Fire AFTER
   // the corresponding packing action; never gate the underlying action.
   'packing_started', 'packing_completed', 'packing_exception_created',
+  // Phase 3 Pass #16 — SLA Automation Linkage. Strictly observational; the
+  // SLA-transition detector fires these after a transition is observed.
+  // They never gate the underlying action and the engine refuses to apply
+  // any guardrail action even if a malformed rule somehow lands here.
+  ...SLA_TRIGGERS,
 ];
 
 export const GUARDRAIL_TRIGGERS: AutomationTriggerType[] = [
@@ -96,9 +117,16 @@ export const PURPOSE_TRIGGER_MATRIX: Record<RulePurpose, AutomationTriggerType[]
     'return_shipment_created',
     // Phase 3 Pass #10 — packing events support flag/note for visibility.
     'packing_started', 'packing_completed', 'packing_exception_created',
+    // Phase 3 Pass #16 — SLA observational triggers. Useful for adding a flag
+    // (e.g. 'sla_at_risk_dispatch'), an internal note, or setting priority
+    // when an SLA boundary is crossed or an operator pauses/resumes/explains.
+    ...SLA_TRIGGERS,
   ],
   queue_batch: [
     'shipment_created', 'shipment_updated', 'status_changed', 'return_shipment_created',
+    // Phase 3 Pass #16 — let an at-risk/overdue dispatch SLA route the
+    // shipment into the Batch Labels queue for accelerated handling.
+    'sla_at_risk', 'sla_overdue',
   ],
   require_review: [
     'shipment_created', 'shipment_updated', 'status_changed', 'label_purchased',
@@ -109,7 +137,15 @@ export const PURPOSE_TRIGGER_MATRIX: Record<RulePurpose, AutomationTriggerType[]
     // on these triggers because they are observational (the event has
     // already happened).
     'packing_started', 'packing_completed', 'packing_exception_created',
+    // Phase 3 Pass #16 — SLA crossings are useful "ask a human to look"
+    // triggers. Always observational; can never be a guardrail because the
+    // SLA transition has already been observed by the time we dispatch.
+    ...SLA_TRIGGERS,
   ],
+  // Phase 3 Pass #16 — SLA triggers are STRICTLY observational and never
+  // valid for guardrail purposes. require_approval / block_action remain
+  // limited to pre_label_purchase so the safe-action whitelist is enforced
+  // by the matrix, not just by runtime checks.
   require_approval: ['pre_label_purchase'],
   block_action: ['pre_label_purchase'],
 };
@@ -176,6 +212,17 @@ const ALL_OBSERVATIONAL_FIELDS: AutomationConditionField[] = [
   'addressValidationState', 'hasLabel', 'hasPickup', 'shippingCost',
 ];
 
+// Phase 3 Pass #16 — SLA-aware condition field set. Available on every SLA
+// trigger so an operator can compose conditions like
+// "slaTargetType is dispatch_by AND slaVarianceMinutes < -10". Mixed with
+// the basic shipment fields so common filters (carrier, sourceType, mode)
+// remain composable on SLA triggers too.
+const SLA_TRIGGER_FIELDS: AutomationConditionField[] = [
+  'mode', 'sourceType', 'carrier', 'serviceLevel', 'status',
+  'slaWorstStatus', 'slaTargetType', 'slaIsPaused', 'slaHasDelayReason',
+  'slaVarianceMinutes', 'isReturn',
+];
+
 export function conditionFieldsForTrigger(trigger: AutomationTriggerType): AutomationConditionField[] {
   switch (trigger) {
     case 'pre_label_purchase':
@@ -190,6 +237,13 @@ export function conditionFieldsForTrigger(trigger: AutomationTriggerType): Autom
       return ['mode', 'sourceType', 'carrier', 'serviceLevel', 'shippingCost'];
     case 'return_shipment_created':
       return ['mode', 'sourceType', 'carrier', 'serviceLevel', 'addressValidationState'];
+    case 'sla_at_risk':
+    case 'sla_overdue':
+    case 'sla_missed':
+    case 'sla_paused':
+    case 'sla_resumed':
+    case 'sla_delay_reason_added':
+      return SLA_TRIGGER_FIELDS;
     default:
       return ALL_OBSERVATIONAL_FIELDS;
   }
@@ -273,6 +327,32 @@ export const FIELD_DESCRIPTORS: FieldDescriptor[] = [
   { field: 'shippingCost', label: 'Shipping Cost', kind: 'number', unit: 'currency' },
   // Phase 3 correction #4 — selected rate cost (pre-label-purchase).
   { field: 'selectedRateCost', label: 'Selected Rate Cost', kind: 'number', unit: 'currency' },
+  // Phase 3 Pass #16 — SLA-aware condition fields. Enum/boolean/number kinds
+  // are picked so the rule builder offers the same operator UX as for any
+  // other typed field (no special-cased SLA UI). Options match the SlaStatus
+  // / SlaTargetType union members in src/types.ts so the dropdowns stay in
+  // sync with the SLA foundation.
+  { field: 'slaWorstStatus', label: 'SLA Worst Status', kind: 'enum', options: [
+    { value: 'on_track', label: 'On Track' },
+    { value: 'at_risk', label: 'At Risk' },
+    { value: 'overdue', label: 'Overdue' },
+    { value: 'missed', label: 'Missed' },
+    { value: 'met', label: 'Met' },
+    { value: 'paused', label: 'Paused' },
+    { value: 'not_applicable', label: 'Not Applicable' },
+    { value: 'unknown', label: 'Unknown' },
+  ]},
+  { field: 'slaTargetType', label: 'SLA Target Type', kind: 'enum', options: [
+    { value: 'pack_by', label: 'Pack By' },
+    { value: 'label_by', label: 'Label By' },
+    { value: 'dispatch_by', label: 'Dispatch By' },
+    { value: 'deliver_by', label: 'Deliver By' },
+    { value: 'return_receive_by', label: 'Return Receive By' },
+  ]},
+  { field: 'slaIsPaused', label: 'SLA Is Paused', kind: 'boolean' },
+  { field: 'slaHasDelayReason', label: 'SLA Has Delay Reason', kind: 'boolean' },
+  { field: 'slaVarianceMinutes', label: 'SLA Variance (minutes)', kind: 'number' },
+  { field: 'isReturn', label: 'Is Return Shipment', kind: 'boolean' },
 ];
 
 // Phase 3 correction — operator catalog by field kind. Underlying op codes
@@ -324,7 +404,11 @@ export function getOperatorChoice(kind: AutomationFieldKind, op: AutomationCondi
   return OPERATORS_BY_KIND[kind].find(o => o.op === op);
 }
 
-function getShipmentFieldValue(shipment: Shipment, field: AutomationConditionField): any {
+function getShipmentFieldValue(
+  shipment: Shipment,
+  field: AutomationConditionField,
+  triggerContext?: AutomationTriggerContext,
+): any {
   switch (field) {
     case 'mode': return shipment.shipmentMode || (shipment.label ? 'provider' : 'manual');
     case 'status': return shipment.status;
@@ -350,12 +434,42 @@ function getShipmentFieldValue(shipment: Shipment, field: AutomationConditionFie
       const r = shipment.selectedRate?.rate;
       return typeof r === 'number' ? r : null;
     }
+    // Phase 3 Pass #16 — SLA-aware fields. Mix of shipment-derived
+    // (slaIsPaused, slaHasDelayReason, isReturn, slaWorstStatus) and
+    // event-context-derived (slaTargetType, slaVarianceMinutes).
+    //
+    // slaWorstStatus is the SHIPMENT-derived worst status across all
+    // applicable SLA targets at the moment the trigger fired — passed in
+    // via triggerContext.slaWorstStatus by the SLA detector in
+    // ShippingCenter (which has the live SlaSummary). This is distinct
+    // from slaToStatus (the per-target post-transition state). Falling
+    // back to slaToStatus would conflate "this one target moved into
+    // overdue" with "the shipment overall is overdue" — they differ when
+    // multiple targets exist (e.g. dispatch_by overdue but deliver_by
+    // still on_track means worst=overdue, not whatever the event was).
+    case 'slaIsPaused':
+      return !!(shipment.slaPaused && !shipment.slaPaused.resumedAt);
+    case 'slaHasDelayReason': {
+      const reasons = shipment.slaDelayReasons || {};
+      return Object.values(reasons).some(r => !!r && !!r.reason);
+    }
+    case 'isReturn': return !!shipment.returnInfo?.isReturn;
+    case 'slaTargetType': return triggerContext?.slaTargetType ?? null;
+    case 'slaVarianceMinutes': {
+      if (typeof triggerContext?.slaVarianceMs !== 'number') return null;
+      return Math.round(triggerContext.slaVarianceMs / 60000);
+    }
+    case 'slaWorstStatus': return triggerContext?.slaWorstStatus ?? null;
     default: return null;
   }
 }
 
-function evaluateCondition(shipment: Shipment, condition: AutomationCondition): boolean {
-  const actual = getShipmentFieldValue(shipment, condition.field);
+function evaluateCondition(
+  shipment: Shipment,
+  condition: AutomationCondition,
+  triggerContext?: AutomationTriggerContext,
+): boolean {
+  const actual = getShipmentFieldValue(shipment, condition.field, triggerContext);
   const v = condition.value;
   switch (condition.op) {
     case 'eq': return String(actual) === String(v);
@@ -393,10 +507,14 @@ function isGuardrailRule(rule: AutomationRule, trigger: AutomationTriggerType): 
   return ruleTriggerMatches(rule, trigger) && getRuleProcessType(rule) === 'guardrail';
 }
 
-export function evaluateRule(rule: AutomationRule, shipment: Shipment): RuleEvaluation {
+export function evaluateRule(
+  rule: AutomationRule,
+  shipment: Shipment,
+  triggerContext?: AutomationTriggerContext,
+): RuleEvaluation {
   if (!rule.conditions || rule.conditions.length === 0) return { matched: true };
   for (let i = 0; i < rule.conditions.length; i++) {
-    if (!evaluateCondition(shipment, rule.conditions[i])) {
+    if (!evaluateCondition(shipment, rule.conditions[i], triggerContext)) {
       return {
         matched: false,
         failedConditionIndex: i,
@@ -499,18 +617,31 @@ export function runAutomation(
   rules: AutomationRule[],
   shipment: Shipment,
   trigger: AutomationTriggerType,
+  triggerContext?: AutomationTriggerContext,
 ): RuleEvaluationResult {
   const now = new Date().toISOString();
   let mergedUpdates: Partial<Shipment> = {};
   const logs: AutomationLogEntry[] = [];
   const evaluations: { rule: AutomationRule; evaluation: RuleEvaluation }[] = [];
   let workingShipment = shipment;
+  // Phase 3 Pass #16 — capture per-event SLA context once so log entries for
+  // SLA-trigger matches always carry the same snapshot the engine evaluated
+  // against. Non-SLA triggers leave these fields unset on the log entry.
+  const slaLogFields = isSlaTrigger(trigger) ? {
+    slaTargetType: triggerContext?.slaTargetType,
+    slaFromStatus: triggerContext?.slaFromStatus,
+    slaToStatus: triggerContext?.slaToStatus,
+    slaVarianceMinutes: typeof triggerContext?.slaVarianceMs === 'number'
+      ? Math.round(triggerContext.slaVarianceMs / 60000)
+      : undefined,
+    slaTriggerReason: triggerContext?.slaReason,
+  } : {};
   for (const rule of rules) {
     // Phase 3 correction #3 — runAutomation is the post-event path. Guardrail
     // rules are evaluated by `evaluateGuardrails` only; they never fire here,
     // so a guardrail rule cannot accidentally double as a post-event flag.
     if (!isObservationalRule(rule, trigger)) continue;
-    const evalResult = evaluateRule(rule, workingShipment);
+    const evalResult = evaluateRule(rule, workingShipment, triggerContext);
     evaluations.push({ rule, evaluation: evalResult });
     if (!evalResult.matched) continue;
     const { updates, appliedLabels } = applyActionsToShipment(workingShipment, rule, rule.actions, now);
@@ -529,6 +660,7 @@ export function runAutomation(
       matched: true,
       actionsApplied: appliedLabels,
       timestamp: now,
+      ...slaLogFields,
     });
   }
   return { shipmentUpdates: mergedUpdates, logs, evaluations };
@@ -645,6 +777,13 @@ export const TRIGGER_LABELS: Record<AutomationTriggerType, string> = {
   packing_started: 'packing is started on a shipment',
   packing_completed: 'packing is completed on a shipment',
   packing_exception_created: 'a packing exception is created',
+  // Phase 3 Pass #16 — SLA Automation Linkage human strings.
+  sla_at_risk: 'an SLA target enters at-risk',
+  sla_overdue: 'an SLA target becomes overdue',
+  sla_missed: 'an SLA target is missed',
+  sla_paused: 'an SLA is paused on a shipment',
+  sla_resumed: 'an SLA is resumed on a shipment',
+  sla_delay_reason_added: 'an SLA delay reason is recorded',
 };
 
 const TRIGGER_LABELS_TITLECASE: Record<AutomationTriggerType, string> = {
@@ -661,9 +800,50 @@ const TRIGGER_LABELS_TITLECASE: Record<AutomationTriggerType, string> = {
   packing_started: 'Packing Started',
   packing_completed: 'Packing Completed',
   packing_exception_created: 'Packing Exception Created',
+  sla_at_risk: 'SLA At Risk',
+  sla_overdue: 'SLA Overdue',
+  sla_missed: 'SLA Missed',
+  sla_paused: 'SLA Paused',
+  sla_resumed: 'SLA Resumed',
+  sla_delay_reason_added: 'SLA Delay Reason Added',
 };
 
 export function getTriggerTitle(t: AutomationTriggerType): string { return TRIGGER_LABELS_TITLECASE[t]; }
+
+// Phase 3 Pass #16 — convenience accessors mirroring the spec's helper names.
+// These intentionally alias getTriggerTitle / getFieldDescriptor / ACTION_LABELS
+// so the rule builder and execution-history list can call a single named helper
+// per concept without importing several maps.
+export function getTriggerLabel(t: AutomationTriggerType): string { return TRIGGER_LABELS_TITLECASE[t] || t; }
+export function getConditionFieldLabel(field: AutomationConditionField): string {
+  return getFieldDescriptor(field)?.label || field;
+}
+export function getActionLabel(type: AutomationActionType): string {
+  return ACTION_LABELS[type] || type;
+}
+
+// Phase 3 Pass #16 — SLA target / status human labels for execution-history
+// chips ("Dispatch By: on_track → at_risk"). Local to the engine so the UI
+// does not duplicate these mappings.
+const SLA_TARGET_LABELS: Record<SlaTargetType, string> = {
+  pack_by: 'Pack By',
+  label_by: 'Label By',
+  dispatch_by: 'Dispatch By',
+  deliver_by: 'Deliver By',
+  return_receive_by: 'Return Receive By',
+};
+const SLA_STATUS_LABELS: Record<SlaStatus, string> = {
+  not_applicable: 'Not Applicable',
+  on_track: 'On Track',
+  at_risk: 'At Risk',
+  overdue: 'Overdue',
+  met: 'Met',
+  missed: 'Missed',
+  paused: 'Paused',
+  unknown: 'Unknown',
+};
+export function getSlaTargetLabel(t: SlaTargetType): string { return SLA_TARGET_LABELS[t] || t; }
+export function getSlaStatusLabel(s: SlaStatus): string { return SLA_STATUS_LABELS[s] || s; }
 
 export const ACTION_LABELS: Record<string, string> = {
   add_flag: 'add a flag',

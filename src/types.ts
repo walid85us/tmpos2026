@@ -1401,7 +1401,24 @@ export type AutomationTriggerType =
   // packing-status checks in the UI, not by these triggers.
   | 'packing_started'
   | 'packing_completed'
-  | 'packing_exception_created';
+  | 'packing_exception_created'
+  // Phase 3 Pass #16 — SLA Automation Linkage observational triggers. Fire
+  // when SLA-related state changes are detected in the deterministic
+  // SLA-transition detector (see ShippingCenter SLA transition useEffect
+  // and src/utils/sla.ts diff helpers). They never gate any underlying
+  // action and never fire from inside the SLA calculation itself; they
+  // only fire when an actual transition is detected (per-target into
+  // at_risk / overdue / missed) or a new operator-recorded SLA history
+  // entry appears (paused / resumed / delay reason added/updated).
+  // Carried trigger context (target type, from→to status, variance) is
+  // attached at dispatch time so SLA-aware conditions can match on per-
+  // event facts rather than derived shipment properties.
+  | 'sla_at_risk'
+  | 'sla_overdue'
+  | 'sla_missed'
+  | 'sla_paused'
+  | 'sla_resumed'
+  | 'sla_delay_reason_added';
 
 // Phase 3 Pass #10 — Packing Workflows Foundation. Distinct, auditable
 // packing state model. Aligns with — but does not collapse — the existing
@@ -1525,7 +1542,18 @@ export type AutomationConditionField =
   // Phase 3 correction #4 — selected rate cost (pre-label-purchase). Reads
   // shipment.selectedRate?.rate so a rule can intercept a chosen-but-unlabeled
   // rate (e.g. "selected rate > $6 → require approval before purchase").
-  | 'selectedRateCost';
+  | 'selectedRateCost'
+  // Phase 3 Pass #16 — SLA-aware condition fields. Some read directly from
+  // the shipment record; others read from the per-event AutomationTriggerContext
+  // attached at dispatch time. Engine-side evaluation falls back to falsy/null
+  // when a context-only field is read on a non-SLA trigger so a misplaced
+  // condition fails closed rather than throwing.
+  | 'slaWorstStatus'         // shipment-derived: worst SLA status across applicable targets
+  | 'slaTargetType'          // context-only: which SLA target type the trigger fired for
+  | 'slaIsPaused'            // shipment-derived: slaPaused.pausedAt set and not resumed
+  | 'slaHasDelayReason'      // shipment-derived: any delay reason recorded across any target
+  | 'slaVarianceMinutes'     // context-only: variance in minutes for the target that triggered
+  | 'isReturn';              // shipment-derived: returnInfo.isReturn truthy
 
 export type AutomationConditionOp =
   | 'eq' | 'neq' | 'in' | 'notIn'
@@ -1630,6 +1658,38 @@ export interface AutomationLogEntry {
   // execution history can show the operational result (e.g. "blocked",
   // "approved", "overridden") without needing to look up the shipment.
   guardrailOutcome?: 'blocked' | 'approval_required' | 'approval_requested' | 'review_required' | 'approved' | 'overridden' | 'acknowledged' | 'cleared_by_alternate_rate';
+  // Phase 3 Pass #16 — SLA Automation Linkage. When the entry was produced by
+  // an SLA trigger (sla_at_risk / sla_overdue / sla_missed / sla_paused /
+  // sla_resumed / sla_delay_reason_added), these fields snapshot the per-event
+  // facts the engine was evaluated against — useful for execution-history
+  // clarity (e.g. "Dispatch By: on_track → at_risk, variance −12 min"). All
+  // optional and only set on SLA-trigger entries.
+  slaTargetType?: SlaTargetType;
+  slaFromStatus?: SlaStatus;
+  slaToStatus?: SlaStatus;
+  slaVarianceMinutes?: number;
+  slaTriggerReason?: string;
+}
+
+// Phase 3 Pass #16 — SLA Automation Linkage. Per-event context attached when
+// an SLA trigger fires. The engine reads context-only condition fields
+// (slaTargetType, slaVarianceMinutes) from this object so SLA conditions can
+// match on per-event facts (which target is at risk, how much it overran)
+// rather than on shipment-derived state alone. For non-SLA triggers, no
+// context is attached and context-only conditions evaluate to null/false.
+export interface AutomationTriggerContext {
+  slaTargetType?: SlaTargetType;
+  slaFromStatus?: SlaStatus;
+  slaToStatus?: SlaStatus;
+  slaVarianceMs?: number;
+  slaReason?: string;
+  // Phase 3 Pass #16 — SLA Automation Linkage (correction). The
+  // shipment-derived worst SLA status across all applicable targets at the
+  // moment the trigger fired. Distinct from slaToStatus which is per-target.
+  // The caller (ShippingCenter SLA detector) computes this from the live
+  // SlaSummary so the engine can match `slaWorstStatus` deterministically
+  // without re-reading shipment state.
+  slaWorstStatus?: SlaStatus;
 }
 
 export type BatchStatus = 'draft' | 'processing' | 'completed' | 'completed_with_errors' | 'cancelled';

@@ -1,0 +1,320 @@
+Shipping Phase 3 — SLA Automation Linkage
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated enhancement pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen closed SLA, Packing, Batch Labels, or Automation workstreams unless a real regression is found.
+Do not implement Carrier Scorecards in this pass.
+Do not implement Customs Docs or Insurance Rules in this pass.
+
+Implement only the small linkage layer between:
+1) SLA Optimization foundation
+2) Shipping Automation Rules foundation
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior shipping operations architect
+- Senior SLA / workflow automation architect
+- Senior RBAC / entitlement systems architect
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Think through safe automation linkage.
+Do not create hidden risky automation.
+Do not redesign the automation engine.
+Add only deterministic, auditable, operator-safe SLA automation triggers/conditions/actions.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- Ref.txt
+- replit.md
+
+Use them as continuity and source-of-truth documents.
+
+==================================================
+PRESERVE WITHOUT BREAKING
+==================================================
+
+Preserve exactly unless this pass explicitly requires touching SLA automation linkage:
+- current design baseline
+- auth behavior
+- preview-mode safety
+- live System Owner plan gating
+- store permission gating
+- provider/manual mode split
+- shipping lifecycle integrity
+- existing shipping core flow
+- reverse-logistics flow
+- Carrier Analytics foundation
+- Automation Rules foundation
+- selected-rate approval guardrails
+- Batch Labels foundation
+- Packing Workflows + Rate Gating foundation
+- Dispatch lifecycle
+- SLA Optimization foundation
+- SLA policy configuration
+- SLA pause/resume/resolution behavior
+- entitlement propagation
+- Shipping Provider permission/hard-disable behavior
+- enabled-state non-regression
+
+==================================================
+WORKSTREAM GOAL
+==================================================
+
+Add SLA-aware triggers and conditions to Shipping Automation so the system can react safely when SLA states change.
+
+This pass should make SLA operationally connected without turning it into Carrier Scorecards.
+
+Core idea:
+- SLA detects state
+- Automation can safely flag, prioritize, note, or queue follow-up
+- No fake scorecards
+- No automatic risky shipping/provider actions
+
+==================================================
+PART A — SLA AUTOMATION TRIGGERS
+==================================================
+
+Required:
+Add safe SLA-related triggers to Automation Rules where supportable.
+
+At minimum support:
+
+1) SLA becomes At Risk
+Trigger:
+- fires when shipment SLA status changes to at_risk
+
+2) SLA becomes Overdue
+Trigger:
+- fires when shipment SLA status changes to overdue
+
+3) SLA is Missed
+Trigger:
+- fires when shipment SLA status changes to missed
+
+4) SLA is Paused
+Trigger:
+- fires when SLA is paused
+
+5) SLA is Resumed
+Trigger:
+- fires when SLA resumes from paused
+
+6) Delay Reason Added
+Trigger:
+- fires when delay reason is added or changed
+
+Required:
+- triggers must fire from actual SLA state changes, not fake timer-only assumptions unless current architecture supports a scheduled recalculation safely
+- if scheduled recalculation is not implemented, clearly document that triggers fire when SLA is recalculated/updated through existing app actions
+- avoid duplicate firing for the same state transition
+
+==================================================
+PART B — SLA AUTOMATION CONDITIONS
+==================================================
+
+Required:
+Add SLA-related conditions where supportable.
+
+Examples:
+- SLA status is at risk / overdue / missed / paused / unknown
+- SLA target type is Pack By / Label By / Dispatch By / Deliver By / Return Receive By
+- SLA delay reason exists
+- SLA is paused
+- SLA variance greater than X minutes/hours
+- shipment source type / return vs outbound
+- carrier / provider / service where already available
+- shipment priority if available
+
+Required:
+- conditions must be type-aware and human-readable
+- avoid raw internal tokens as final user-facing labels
+- only expose conditions that current data model can support truthfully
+
+==================================================
+PART C — SAFE SLA AUTOMATION ACTIONS
+==================================================
+
+Required:
+Use existing safe actions only, or add safe equivalents if needed.
+
+Allowed actions:
+- mark shipment for review
+- set priority / escalate priority
+- add internal note
+- create follow-up marker / queue follow-up if existing foundation supports it
+- queue for batch only where operationally logical
+- add SLA delay review marker if supported
+- add audit/timeline entry
+
+Not allowed:
+- auto-purchase label
+- auto-dispatch
+- auto-cancel shipment
+- auto-change SLA policy
+- fake carrier scorecard updates
+- hidden provider operations
+
+==================================================
+PART D — DUPLICATE / LOOP PREVENTION
+==================================================
+
+Required:
+SLA automation triggers must not fire repeatedly for the same unchanged SLA state.
+
+Examples:
+- if SLA is already overdue, do not repeatedly create new review outcomes every render
+- if delay reason was already processed, do not duplicate the same automation outcome
+- use stable event keys or transition keys where appropriate
+
+Required:
+- execution history should show one meaningful event per actual transition/change
+- duplicate suppression should be auditable or deterministic
+
+==================================================
+PART E — EXECUTION HISTORY + SHIPMENT VISIBILITY
+==================================================
+
+Required:
+SLA automation outcomes must be visible and understandable.
+
+Execution History should show:
+- SLA trigger name
+- shipment number clickable
+- old SLA state / new SLA state where available
+- SLA target type
+- action taken
+- timestamp
+- resolved state if it creates a review/outcome
+
+Shipment detail should show:
+- any review/priority/note outcome created by SLA automation
+- no confusion between SLA panel and Automation Outcomes
+- SLA panel remains the source for SLA facts
+- Automation Outcomes remains the source for automation-created outcomes
+
+==================================================
+PART F — RELATIONSHIP TO SLA FOUNDATION
+==================================================
+
+Required:
+Do not change SLA calculations unless needed for transition events.
+
+Preserve:
+- SLA target definitions
+- SLA status calculation
+- unknown/insufficient-data behavior
+- delay reason / pause / resume / resolution behavior
+- SLA policy configuration
+
+If a trigger depends on recalculation timing, document exactly when it fires.
+
+==================================================
+PART G — PLAN / PERMISSION / GATING
+==================================================
+
+Required:
+SLA automation linkage must respect both:
+- SLA Optimization plan/permission state
+- Automation Rules plan/permission state
+
+Behavior:
+- if SLA Optimization is plan-disabled, SLA triggers/conditions should disappear or be unavailable in the Automation builder
+- if Automation Rules is plan-disabled, no automation rule management should be available
+- linked permissions must follow the existing disappearance rule
+- role permissions must not resurrect plan-disabled features
+
+Required:
+- only authorized users can create/edit SLA automation rules
+- visibility of outcomes follows existing automation outcome permissions
+
+==================================================
+PART H — DOCUMENTATION
+==================================================
+
+Required:
+Update replit.md with:
+- supported SLA automation triggers
+- supported SLA conditions
+- allowed safe actions
+- duplicate/loop prevention
+- execution history behavior
+- when SLA triggers fire
+- plan/permission relationship between SLA Optimization and Automation Rules
+- note that Carrier Scorecards remain future work
+
+==================================================
+PART I — OUT OF SCOPE
+==================================================
+
+Do NOT implement:
+- Carrier Scorecards
+- predictive SLA optimization
+- automatic carrier ranking
+- automatic provider operations
+- Customs Docs
+- Insurance Rules
+- broader automation redesign
+- unrelated add-on governance
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) SLA-related triggers are available in Automation Rules when both SLA and Automation are enabled
+2) SLA triggers disappear or become unavailable when SLA feature is plan-disabled
+3) SLA conditions are human-readable and type-aware
+4) SLA automation actions are safe and truthful
+5) SLA automation creates visible and auditable outcomes
+6) Duplicate/loop prevention works
+7) Execution History reflects SLA automation clearly
+8) SLA calculations and existing SLA behavior are not regressed
+9) Automation, Packing, Batch Labels, Dispatch, and reverse logistics remain intact
+10) Carrier Scorecards remain out of scope
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Add SLA trigger definitions to Automation Rules
+2) Add SLA condition definitions with human-readable labels
+3) Wire safe action compatibility
+4) Add transition/dedup event key handling
+5) Update Execution History and shipment outcome visibility
+6) Wire plan/permission gating between SLA + Automation
+7) Re-test SLA and Automation non-regression
+8) Update replit.md
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. SLA Automation Triggers
+3. SLA Conditions + Safe Actions
+4. Duplicate / Loop Prevention
+5. Execution History + Shipment Visibility
+6. Plan / Permission / Gating Updates
+7. Files Changed
+8. Documentation Updated
+9. Non-Regression Notes
