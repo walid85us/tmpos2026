@@ -4,6 +4,7 @@ import type {
   AutomationCondition, AutomationAction, AutomationActionType,
   AutomationConditionField, AutomationConditionOp,
   AutomationRuleProcessType, RulePurpose, Shipment,
+  AutomationBackfillRun,
 } from '../../types';
 import {
   FIELD_DESCRIPTORS, OPERATORS_BY_KIND, getFieldDescriptor, getOperatorChoice,
@@ -14,7 +15,20 @@ import {
   // Phase 3 Pass #16 — SLA Automation Linkage. SLA-trigger detection +
   // human labels for execution-history chips.
   isSlaTrigger, SLA_TRIGGERS, getSlaTargetLabel, getSlaStatusLabel,
+  // Phase 3 SLA Automation Backfill — opt-in detector for the per-rule
+  // "Apply to Existing Matches" button.
+  isBackfillableTrigger,
 } from '../../shipping/automationEngine';
+
+// Phase 3 SLA Automation Backfill — same shape ShippingCenter computes from
+// `evaluateSlaBackfillCandidate`. Re-declared locally so this component does
+// not import from ShippingCenter (which would create a circular dep).
+export interface BackfillScan {
+  candidates: Array<{ shipmentId: string; shipmentNumber: string; slaTargetType?: import('../../types').SlaTargetType; backfillKey: string }>;
+  alreadyApplied: Array<{ shipmentId: string; shipmentNumber: string; slaTargetType?: import('../../types').SlaTargetType }>;
+  noState: Array<{ shipmentId: string; shipmentNumber: string; reason: string }>;
+  conditionsFailed: Array<{ shipmentId: string; shipmentNumber: string; reason?: string }>;
+}
 
 interface Props {
   rules: AutomationRule[];
@@ -35,6 +49,13 @@ interface Props {
   // SLA transition annotations. Defaults to false so a forgotten prop fails
   // closed (no SLA UI) rather than open.
   slaFeatureEnabled?: boolean;
+  // Phase 3 SLA Automation Backfill — when true, eligible SLA-trigger rule
+  // cards expose an "Apply to Existing Matches" button. The two callbacks
+  // are mandatory whenever this is true. Defaults to false so a forgotten
+  // prop fails closed (no backfill UI) rather than open.
+  canRunBackfill?: boolean;
+  scanBackfill?: (rule: AutomationRule) => BackfillScan;
+  runBackfill?: (rule: AutomationRule, scan: BackfillScan) => AutomationBackfillRun;
 }
 
 const TRIGGER_LABELS_BY_TYPE: Record<AutomationTriggerType, string> = {
@@ -142,11 +163,56 @@ function defaultValueForOperator(field: AutomationConditionField, op: Automation
   return '';
 }
 
-export default function AutomationRules({ rules, logs, shipments, canManage, canViewResults, currentUser, onAdd, onUpdate, onDelete, onOpenShipment, slaFeatureEnabled = false }: Props) {
+export default function AutomationRules({ rules, logs, shipments, canManage, canViewResults, currentUser, onAdd, onUpdate, onDelete, onOpenShipment, slaFeatureEnabled = false, canRunBackfill = false, scanBackfill, runBackfill }: Props) {
   const [editing, setEditing] = useState<AutomationRule | null>(null);
   const [creating, setCreating] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<AutomationRule | null>(null);
+  // Phase 3 SLA Automation Backfill — three-phase modal state. Phase tracks
+  // confirm → preview → results so the operator always knows what step they
+  // are on. `scan` is the dry preview (no UI mutation, no audit write); the
+  // operator must explicitly Run to apply.
+  const [backfillTarget, setBackfillTarget] = useState<AutomationRule | null>(null);
+  const [backfillPhase, setBackfillPhase] = useState<'confirm' | 'preview' | 'results'>('confirm');
+  const [backfillScan, setBackfillScan] = useState<BackfillScan | null>(null);
+  const [backfillRun, setBackfillRun] = useState<AutomationBackfillRun | null>(null);
+  const [backfillBusy, setBackfillBusy] = useState(false);
+
+  function openBackfill(rule: AutomationRule) {
+    setBackfillTarget(rule);
+    setBackfillPhase('confirm');
+    setBackfillScan(null);
+    setBackfillRun(null);
+  }
+  function closeBackfill() {
+    setBackfillTarget(null);
+    setBackfillPhase('confirm');
+    setBackfillScan(null);
+    setBackfillRun(null);
+    setBackfillBusy(false);
+  }
+  function doScan() {
+    if (!backfillTarget || !scanBackfill) return;
+    setBackfillBusy(true);
+    try {
+      const result = scanBackfill(backfillTarget);
+      setBackfillScan(result);
+      setBackfillPhase('preview');
+    } finally {
+      setBackfillBusy(false);
+    }
+  }
+  function doRun() {
+    if (!backfillTarget || !backfillScan || !runBackfill) return;
+    setBackfillBusy(true);
+    try {
+      const result = runBackfill(backfillTarget, backfillScan);
+      setBackfillRun(result);
+      setBackfillPhase('results');
+    } finally {
+      setBackfillBusy(false);
+    }
+  }
 
   const liveSummary = useMemo(() => editing ? describeRule(editing) : '', [editing]);
   const editingPurpose: RulePurpose = editing ? getRulePurpose(editing) : 'flag_note';
@@ -579,6 +645,23 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
                     </div>
                     {canManage && (
                       <div className="flex items-center gap-1 shrink-0">
+                        {/* Phase 3 SLA Automation Backfill — visible only for
+                            backfillable SLA triggers when the operator has
+                            permission, the SLA + automation features are
+                            both live, and writes are not blocked. The button
+                            is also hidden if the rule is disabled (a disabled
+                            rule cannot fire on new events; backfilling it
+                            would create misleading audit history). */}
+                        {canRunBackfill && rule.enabled && isBackfillableTrigger(rule.trigger) && (
+                          <button
+                            onClick={() => openBackfill(rule)}
+                            data-testid={`backfill-btn-${rule.id}`}
+                            className="text-[10px] font-black uppercase tracking-widest text-violet-600 hover:text-violet-800 px-2 py-1 border border-violet-200 rounded hover:bg-violet-50"
+                            title="Apply this rule to existing matching shipments. Itemized, duplicate-safe, audited."
+                          >
+                            Apply to Existing
+                          </button>
+                        )}
                         <button onClick={() => onUpdate(rule.id, { enabled: !rule.enabled, updatedBy: currentUser })}
                           className="text-[10px] font-black uppercase tracking-widest text-slate-500 hover:text-primary px-2 py-1">
                           {rule.enabled ? 'Disable' : 'Enable'}
@@ -589,6 +672,17 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
                       </div>
                     )}
                   </div>
+                  {/* Phase 3 SLA Automation Backfill — last-run summary
+                      strip on the rule card. Only rendered when at least
+                      one backfill has been recorded. */}
+                  {(rule.backfillRuns && rule.backfillRuns.length > 0) && (() => {
+                    const last = rule.backfillRuns[rule.backfillRuns.length - 1];
+                    return (
+                      <p className="text-[11px] text-violet-700 mt-2 border-t border-slate-100 pt-2">
+                        Last backfill: applied {last.applied} · already {last.alreadyApplied} · skipped {last.skipped} · not matched {last.notMatched}{last.failed ? ` · failed ${last.failed}` : ''} · by {last.ranBy} {new Date(last.ranAt).toLocaleString()}
+                      </p>
+                    );
+                  })()}
                 </div>
               ))}
             </div>
@@ -740,6 +834,191 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
                 className="px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
               <button onClick={() => { onDelete(deleteTarget.id); setDeleteTarget(null); }}
                 className="px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg bg-rose-500 text-white hover:bg-rose-600">Delete Rule</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Phase 3 SLA Automation Backfill — three-phase modal: confirm,
+          dry-preview, itemized results. The operator must explicitly
+          advance through each phase; closing the modal at any phase
+          aborts. Already-applied entries are surfaced so the operator
+          can see why a re-run did less than the first run. */}
+      {backfillTarget && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={closeBackfill}>
+          <div className="bg-white rounded-2xl border border-slate-200 max-w-2xl w-full p-5 max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <div className="flex items-start gap-3">
+              <span className="material-symbols-outlined text-violet-500 text-2xl">history_toggle_off</span>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-black text-slate-800">
+                  {backfillPhase === 'confirm' && 'Apply this rule to existing matching shipments?'}
+                  {backfillPhase === 'preview' && 'Backfill preview'}
+                  {backfillPhase === 'results' && 'Backfill results'}
+                </p>
+                <p className="text-xs text-slate-500 mt-1">
+                  Rule: <span className="font-bold text-slate-700">"{backfillTarget.name}"</span>
+                </p>
+                <p className="text-[11px] text-slate-400 mt-1 italic">{describeRule(backfillTarget)}</p>
+              </div>
+            </div>
+
+            {backfillPhase === 'confirm' && (
+              <div className="mt-3 text-xs text-slate-600 space-y-2">
+                <p>
+                  This action applies this SLA-trigger rule to existing matching shipments. The default
+                  future-only event behavior is unchanged — every action below is explicit, manual, and
+                  recorded in execution history with a backfill tag.
+                </p>
+                <p>
+                  Only the rule's safe observational actions run (add flag, add internal note, mark for
+                  review, queue for batch labels, set priority). Pre-action guardrail actions are skipped
+                  by the engine; the explicit backfill action does not change shipment status, purchase
+                  labels, or perform irreversible carrier operations.
+                </p>
+                <p>
+                  Each shipment is deduplicated by a stable backfill key (rule + SLA target). Re-running
+                  this backfill later will report already-applied shipments rather than running actions
+                  twice.
+                </p>
+              </div>
+            )}
+
+            {backfillPhase === 'preview' && backfillScan && (
+              <div className="mt-3 text-xs text-slate-700 space-y-2">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <div className="rounded-lg border border-violet-200 bg-violet-50 p-2 text-center">
+                    <p className="text-[20px] font-black text-violet-700">{backfillScan.candidates.length}</p>
+                    <p className="text-[10px] font-black uppercase tracking-widest text-violet-700">Will apply</p>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-2 text-center">
+                    <p className="text-[20px] font-black text-slate-700">{backfillScan.alreadyApplied.length}</p>
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-600">Already applied</p>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-2 text-center">
+                    <p className="text-[20px] font-black text-slate-700">{backfillScan.noState.length}</p>
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-600">No SLA state</p>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-2 text-center">
+                    <p className="text-[20px] font-black text-slate-700">{backfillScan.conditionsFailed.length}</p>
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-600">Did not match</p>
+                  </div>
+                </div>
+                {backfillScan.candidates.length === 0 && (
+                  <p className="text-[11px] text-slate-500 italic">
+                    Nothing will be applied. The rule has no new candidates right now.
+                  </p>
+                )}
+                {backfillScan.candidates.length > 0 && (
+                  <div className="border border-slate-200 rounded-lg max-h-40 overflow-y-auto">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 px-2 py-1 border-b border-slate-100 bg-slate-50">Will apply ({backfillScan.candidates.length})</p>
+                    <ul className="divide-y divide-slate-100">
+                      {backfillScan.candidates.map(c => (
+                        <li key={c.shipmentId} className="px-2 py-1 text-[11px] flex items-center justify-between gap-2">
+                          <span className="font-mono text-slate-700">{c.shipmentNumber}</span>
+                          {c.slaTargetType && <span className="text-[10px] uppercase tracking-widest text-slate-400">{getSlaTargetLabel(c.slaTargetType)}</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {backfillPhase === 'results' && backfillRun && (
+              <div className="mt-3 text-xs text-slate-700 space-y-2">
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                  <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-2 text-center">
+                    <p className="text-[20px] font-black text-emerald-700">{backfillRun.applied}</p>
+                    <p className="text-[10px] font-black uppercase tracking-widest text-emerald-700">Applied</p>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-2 text-center">
+                    <p className="text-[20px] font-black text-slate-700">{backfillRun.alreadyApplied}</p>
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-600">Already</p>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-2 text-center">
+                    <p className="text-[20px] font-black text-slate-700">{backfillRun.skipped}</p>
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-600">Skipped</p>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-2 text-center">
+                    <p className="text-[20px] font-black text-slate-700">{backfillRun.notMatched}</p>
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-600">Not matched</p>
+                  </div>
+                  <div className={`rounded-lg border p-2 text-center ${backfillRun.failed > 0 ? 'border-rose-200 bg-rose-50' : 'border-slate-200 bg-slate-50'}`}>
+                    <p className={`text-[20px] font-black ${backfillRun.failed > 0 ? 'text-rose-700' : 'text-slate-700'}`}>{backfillRun.failed}</p>
+                    <p className={`text-[10px] font-black uppercase tracking-widest ${backfillRun.failed > 0 ? 'text-rose-700' : 'text-slate-600'}`}>Failed</p>
+                  </div>
+                </div>
+                <div className="border border-slate-200 rounded-lg max-h-72 overflow-y-auto">
+                  <table className="w-full text-[11px]">
+                    <thead className="bg-slate-50 sticky top-0">
+                      <tr>
+                        <th className="text-left px-2 py-1 font-black uppercase tracking-widest text-slate-500">Shipment</th>
+                        <th className="text-left px-2 py-1 font-black uppercase tracking-widest text-slate-500">Outcome</th>
+                        <th className="text-left px-2 py-1 font-black uppercase tracking-widest text-slate-500">Detail</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {backfillRun.perShipment.map(r => {
+                        const outcomeStyle: Record<typeof r.outcome, string> = {
+                          applied: 'bg-emerald-100 text-emerald-700',
+                          already_applied: 'bg-slate-100 text-slate-600',
+                          skipped: 'bg-slate-100 text-slate-600',
+                          not_matched: 'bg-amber-100 text-amber-700',
+                          failed: 'bg-rose-100 text-rose-700',
+                        };
+                        return (
+                          <tr key={`${r.shipmentId}-${r.outcome}`}>
+                            <td className="px-2 py-1 font-mono">
+                              {onOpenShipment ? (
+                                <button onClick={() => { onOpenShipment(r.shipmentId); closeBackfill(); }} className="underline hover:text-primary">{r.shipmentNumber}</button>
+                              ) : (
+                                <span>{r.shipmentNumber}</span>
+                              )}
+                            </td>
+                            <td className="px-2 py-1">
+                              <span className={`inline-block px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-widest ${outcomeStyle[r.outcome]}`}>{r.outcome.replace('_', ' ')}</span>
+                            </td>
+                            <td className="px-2 py-1 text-slate-500">
+                              {r.slaTargetType && <span className="text-[10px] uppercase tracking-widest text-slate-400 mr-1">{getSlaTargetLabel(r.slaTargetType)}</span>}
+                              {r.actionsApplied && r.actionsApplied.length > 0 && <span className="text-slate-600">{r.actionsApplied.join(', ')}</span>}
+                              {r.reason && <span className="italic">{r.reason}</span>}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 mt-4">
+              {backfillPhase === 'confirm' && (
+                <>
+                  <button onClick={closeBackfill}
+                    className="px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+                  <button onClick={doScan} disabled={backfillBusy || !scanBackfill}
+                    data-testid="backfill-scan-btn"
+                    className="px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg bg-violet-500 text-white hover:bg-violet-600 disabled:opacity-40">
+                    {backfillBusy ? 'Scanning…' : 'Preview Matches'}
+                  </button>
+                </>
+              )}
+              {backfillPhase === 'preview' && backfillScan && (
+                <>
+                  <button onClick={closeBackfill}
+                    className="px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+                  <button onClick={doRun} disabled={backfillBusy || backfillScan.candidates.length === 0 || !runBackfill}
+                    data-testid="backfill-run-btn"
+                    className="px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-40">
+                    {backfillBusy ? 'Running…' : `Apply to ${backfillScan.candidates.length} Shipment${backfillScan.candidates.length === 1 ? '' : 's'}`}
+                  </button>
+                </>
+              )}
+              {backfillPhase === 'results' && (
+                <button onClick={closeBackfill}
+                  data-testid="backfill-close-btn"
+                  className="px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg bg-slate-700 text-white hover:bg-slate-800">Close</button>
+              )}
             </div>
           </div>
         </div>

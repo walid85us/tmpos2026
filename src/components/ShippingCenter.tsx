@@ -3,7 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState } from '../context/StoreLocalState';
 import { useAccess } from '../context/AccessContext';
-import { Shipment, ShipmentStatus, ShipmentSourceType, ShipmentType, ShipmentAddress, ShipmentPackage, ShipmentEvent, ShippingRate, AddressValidationResult, ProviderTrackingEvent, ServicePoint, PickupRequest, PickupRequestStatus, PackingExceptionType, PackingStatus, PackingPackageVerification, SlaTargetType, SlaPolicy, SlaHistoryEntry, SlaStatus } from '../types';
+import { Shipment, ShipmentStatus, ShipmentSourceType, ShipmentType, ShipmentAddress, ShipmentPackage, ShipmentEvent, ShippingRate, AddressValidationResult, ProviderTrackingEvent, ServicePoint, PickupRequest, PickupRequestStatus, PackingExceptionType, PackingStatus, PackingPackageVerification, SlaTargetType, SlaPolicy, SlaHistoryEntry, SlaStatus, AutomationRule, AutomationLogEntry, AutomationBackfillRun, AutomationBackfillResult, ShipmentInternalNote } from '../types';
 // Phase 3 Pass #15 — SLA Optimization Foundation. All SLA math is in
 // src/utils/sla.ts; this surface only owns wiring, gating, and rendering.
 import {
@@ -24,7 +24,7 @@ import ShippingProvidersPage from './ShippingProvidersPage';
 import { CarrierAnalytics } from './shipping/CarrierAnalytics';
 import AutomationRules from './shipping/AutomationRules';
 import BatchLabels, { type BatchEligibility } from './shipping/BatchLabels';
-import { runAutomation, evaluateGuardrails, buildApprovalContextKey, type GuardrailEvaluation, describeRule } from '../shipping/automationEngine';
+import { runAutomation, evaluateGuardrails, buildApprovalContextKey, type GuardrailEvaluation, describeRule, isBackfillableTrigger, evaluateSlaBackfillCandidate, buildBackfillKey, type SlaBackfillStateView } from '../shipping/automationEngine';
 import type { AutomationTriggerType, AutomationTriggerContext } from '../types';
 import { featureMatrix as staticFeatureMatrix } from '../owner/mockData';
 import { normalizeStateCode, normalizeZip, normalizePhone } from '../utils/inputNormalizers';
@@ -502,7 +502,7 @@ export default function ShippingCenter() {
     addPackingException, resolvePackingException, completePackingForShipment,
     reopenPacking, markPackingNotRequired,
   } = useStoreLocalState();
-  const { checkPermission, checkSubPermission, hasPermission, isWriteBlocked, canAccess, tenant } = useAccess();
+  const { checkPermission, checkSubPermission, hasPermission, isWriteBlocked, canAccess, tenant, session } = useAccess();
   // Force re-render when System Owner Plans & Features matrix changes via sessionStorage.
   // Without this, toggling a feature in the System Owner UI in another tab would leave
   // ShippingCenter's gating stale until next mount. Storage events fire on cross-document
@@ -594,6 +594,10 @@ export default function ShippingCenter() {
   const canManageCarrierLocators = checkSubPermission('manage_carrier_locator_settings');
   const canManageAutomationRules = checkSubPermission('manage_shipping_automation_rules');
   const canViewAutomationResults = checkSubPermission('view_shipping_automation_results');
+  // Phase 3 SLA Automation Backfill — manage-level permission to apply an
+  // SLA-trigger rule to existing matching shipments. Plan-gated under both
+  // shipping_automation_rules and shipping_sla_optimization (see accessConfig).
+  const canRunAutomationBackfill = checkSubPermission('run_shipping_automation_backfill');
   // Phase 3 correction #4 — outcome surfaces (badges, filter chips, detail
   // panel) gated independently of execution history. An operator may have
   // either, both, or neither; outcomes are forward-looking ("what do I need
@@ -4237,6 +4241,306 @@ export default function ShippingCenter() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shipments, slaSummaries, slaFeatureEnabled, planAllowsAutomationRules, automationRules]);
 
+  // Phase 3 SLA Automation Backfill — manual, confirmed, itemized application
+  // of an SLA-trigger rule to existing matching shipments. Default future-only
+  // event behavior is unchanged. Two-phase API: scan() returns a dry preview
+  // (no UI mutation, no audit write); run(candidates) executes the rule's
+  // safe actions per shipment, deduplicates via stable backfill keys, and
+  // appends a single AutomationBackfillRun to the rule + per-shipment log
+  // entries tagged `triggeredBy: 'backfill'` to the global execution history.
+  type BackfillCandidate = {
+    shipmentId: string;
+    shipmentNumber: string;
+    ctx: AutomationTriggerContext;
+    slaTargetType?: SlaTargetType;
+    backfillKey: string;
+  };
+  type BackfillScan = {
+    candidates: BackfillCandidate[];
+    alreadyApplied: { shipmentId: string; shipmentNumber: string; slaTargetType?: SlaTargetType }[];
+    noState: { shipmentId: string; shipmentNumber: string; reason: string }[];
+    conditionsFailed: { shipmentId: string; shipmentNumber: string; reason?: string }[];
+  };
+
+  function buildBackfillStateView(shipment: Shipment): SlaBackfillStateView | null {
+    const summary = slaSummaries[shipment.id];
+    if (!summary || !summary.applicable) return null;
+    return {
+      worst: summary.worst,
+      paused: summary.paused,
+      targets: summary.targets.map(t => ({ type: t.type, status: t.status, varianceMs: t.varianceMs })),
+      pause: shipment.slaPaused ? { reason: shipment.slaPaused.reason } : null,
+      delayReasons: shipment.slaDelayReasons,
+    };
+  }
+
+  function scanSlaBackfill(rule: AutomationRule): BackfillScan {
+    const out: BackfillScan = { candidates: [], alreadyApplied: [], noState: [], conditionsFailed: [] };
+    if (!rule.enabled) return out;
+    if (!isBackfillableTrigger(rule.trigger)) return out;
+    if (!slaFeatureEnabled || !planAllowsAutomationRules) return out;
+    const existingKeysByShipment = new Map<string, Set<string>>();
+    for (const s of shipments) {
+      existingKeysByShipment.set(s.id, new Set(s.slaAutomationBackfillKeys || []));
+    }
+    for (const shipment of shipments) {
+      const view = buildBackfillStateView(shipment);
+      if (!view) continue;
+      const outcome = evaluateSlaBackfillCandidate(rule, shipment, view);
+      if (outcome.kind === 'no_state') {
+        out.noState.push({ shipmentId: shipment.id, shipmentNumber: shipment.shipmentNumber, reason: outcome.reason });
+      } else if (outcome.kind === 'conditions_failed') {
+        out.conditionsFailed.push({ shipmentId: shipment.id, shipmentNumber: shipment.shipmentNumber, reason: outcome.failedConditionDescription });
+      } else {
+        const key = buildBackfillKey(rule.id, outcome.slaTargetType);
+        const already = existingKeysByShipment.get(shipment.id)?.has(key);
+        if (already) {
+          out.alreadyApplied.push({ shipmentId: shipment.id, shipmentNumber: shipment.shipmentNumber, slaTargetType: outcome.slaTargetType });
+        } else {
+          out.candidates.push({
+            shipmentId: shipment.id,
+            shipmentNumber: shipment.shipmentNumber,
+            ctx: outcome.ctx,
+            slaTargetType: outcome.slaTargetType,
+            backfillKey: key,
+          });
+        }
+      }
+    }
+    return out;
+  }
+
+  function runSlaBackfill(ruleArg: AutomationRule, scan: BackfillScan): AutomationBackfillRun {
+    const runId = `backfill-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const ranAt = new Date().toISOString();
+    // Audit attribution must use the authenticated principal, not a
+    // placeholder, so backfillRuns history and shipment notes are
+    // traceable to a real operator.
+    const ranBy = session?.user?.name || session?.user?.email || session?.user?.id || 'Unknown User';
+    const perShipment: AutomationBackfillResult[] = [];
+    const newLogs: AutomationLogEntry[] = [];
+    let applied = 0; let failed = 0;
+
+    // Resolve the canonical rule by id at execution time. The modal may
+    // hold a snapshot from when the operator opened the dialog; in the
+    // intervening moment the rule could have been disabled, edited to a
+    // different trigger, or deleted by another tab/operator. Using the
+    // freshest rule (and refusing to run if it has gone) closes that
+    // window so a stale modal cannot drive an out-of-scope mutation.
+    const currentRule = automationRules.find(r => r.id === ruleArg.id);
+    const rule = currentRule || ruleArg;
+    const ruleMissing = !currentRule;
+    // Trigger immutability between scan and run: the synthetic
+    // AutomationTriggerContext on each candidate (cand.ctx) was built
+    // for ruleArg.trigger at scan time. If the rule's trigger has since
+    // been edited (even from one backfillable trigger to another
+    // backfillable one) the per-candidate context no longer matches the
+    // rule's semantics — running it could mutate shipments that are not
+    // valid candidates under the current rule. Force the operator back
+    // to preview in that case rather than executing on stale matches.
+    const ruleTriggerChanged = !ruleMissing && currentRule!.trigger !== ruleArg.trigger;
+
+    // Defense-in-depth: even if the UI is disabled, refuse to mutate when
+    // writes are blocked or feature/permission gates have changed since
+    // the operator opened the modal. We additionally re-check rule scope
+    // here (present + enabled + backfillable trigger + trigger unchanged
+    // since scan) so a stale modal pointing at a rule that has since
+    // been disabled, deleted, or had its trigger edited cannot drive a
+    // mutation through the orchestrator.
+    const ruleOutOfScope =
+      ruleMissing ||
+      !rule.enabled ||
+      !isBackfillableTrigger(rule.trigger) ||
+      ruleTriggerChanged;
+    const writesBlocked =
+      isWriteBlocked ||
+      !slaFeatureEnabled ||
+      !planAllowsAutomationRules ||
+      !canRunAutomationBackfill ||
+      ruleOutOfScope;
+
+    for (const item of scan.alreadyApplied) {
+      perShipment.push({
+        shipmentId: item.shipmentId,
+        shipmentNumber: item.shipmentNumber,
+        outcome: 'already_applied',
+        slaTargetType: item.slaTargetType,
+        reason: 'Backfill already recorded for this shipment + target',
+      });
+    }
+    for (const item of scan.noState) {
+      perShipment.push({
+        shipmentId: item.shipmentId,
+        shipmentNumber: item.shipmentNumber,
+        outcome: 'skipped',
+        reason: item.reason,
+      });
+    }
+    for (const item of scan.conditionsFailed) {
+      perShipment.push({
+        shipmentId: item.shipmentId,
+        shipmentNumber: item.shipmentNumber,
+        outcome: 'not_matched',
+        reason: item.reason,
+      });
+    }
+
+    if (!writesBlocked) {
+      for (const cand of scan.candidates) {
+        const shipment = shipments.find(s => s.id === cand.shipmentId);
+        if (!shipment) {
+          failed++;
+          perShipment.push({
+            shipmentId: cand.shipmentId,
+            shipmentNumber: cand.shipmentNumber,
+            outcome: 'failed',
+            reason: 'Shipment no longer exists',
+            slaTargetType: cand.slaTargetType,
+          });
+          continue;
+        }
+        // Per-shipment execute-time dedup re-check. The scan classified
+        // this shipment as a candidate at scan time, but another operator
+        // (or a re-entrant click) may have written the backfill key in
+        // the interim. Re-reading current shipment state right before
+        // the mutation closes the scan→run race window so we never
+        // re-apply actions or double-tag audit history.
+        const currentKeys = shipment.slaAutomationBackfillKeys || [];
+        if (currentKeys.includes(cand.backfillKey)) {
+          perShipment.push({
+            shipmentId: cand.shipmentId,
+            shipmentNumber: cand.shipmentNumber,
+            outcome: 'already_applied',
+            slaTargetType: cand.slaTargetType,
+            reason: 'Backfill key written between scan and run',
+          });
+          continue;
+        }
+        try {
+          // Run only this one rule against the shipment with the synthetic
+          // context. Filtering to just `rule` keeps the engine matrix
+          // (observational gating, action whitelist) authoritative without
+          // letting unrelated rules also fire on the same shipment as a
+          // backfill side effect.
+          const result = runAutomation([rule], shipment, rule.trigger, cand.ctx);
+          if (result.logs.length === 0) {
+            // Engine evaluated but rule was not observational for this
+            // trigger or matrix-skipped — itemize as failed so the operator
+            // sees something is off rather than silently dropping.
+            failed++;
+            perShipment.push({
+              shipmentId: cand.shipmentId,
+              shipmentNumber: cand.shipmentNumber,
+              outcome: 'failed',
+              reason: 'Engine produced no log entry for this candidate',
+              slaTargetType: cand.slaTargetType,
+            });
+            continue;
+          }
+          const existingKeys = shipment.slaAutomationBackfillKeys || [];
+          const noteText = `SLA automation backfill applied: "${rule.name}" by ${ranBy}`;
+          const backfillNote: ShipmentInternalNote = {
+            id: `note-bf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            text: noteText,
+            timestamp: ranAt,
+            source: 'rule',
+            ruleId: rule.id,
+            ruleName: rule.name,
+          };
+          const mergedNotes = [...(result.shipmentUpdates.internalNotes || shipment.internalNotes || []), backfillNote];
+          const mergedKeys = existingKeys.includes(cand.backfillKey)
+            ? existingKeys
+            : [...existingKeys, cand.backfillKey];
+          updateShipment(shipment.id, {
+            ...result.shipmentUpdates,
+            internalNotes: mergedNotes,
+            slaAutomationBackfillKeys: mergedKeys,
+            updatedAt: ranAt,
+          });
+          // Tag the engine's logs with backfill metadata before pushing so
+          // execution history can group / filter them. The engine itself
+          // does not know about backfill — that's deliberate, so the
+          // dispatcher (here) is the single audit attribution point.
+          for (const lg of result.logs) {
+            newLogs.push({ ...lg, triggeredBy: 'backfill', backfillRunId: runId });
+          }
+          applied++;
+          perShipment.push({
+            shipmentId: cand.shipmentId,
+            shipmentNumber: cand.shipmentNumber,
+            outcome: 'applied',
+            slaTargetType: cand.slaTargetType,
+            actionsApplied: result.logs[0]?.actionsApplied || [],
+          });
+        } catch (err) {
+          failed++;
+          perShipment.push({
+            shipmentId: cand.shipmentId,
+            shipmentNumber: cand.shipmentNumber,
+            outcome: 'failed',
+            reason: err instanceof Error ? err.message : 'Unknown error',
+            slaTargetType: cand.slaTargetType,
+          });
+        }
+      }
+    } else {
+      // Writes blocked: itemize remaining candidates as failed with a clear
+      // reason. Already-applied / skipped / not-matched lines above are
+      // dry-scan facts and remain truthful to display.
+      const blockedReason = isWriteBlocked
+        ? 'Writes are currently blocked for this tenant'
+        : ruleMissing
+          ? 'Rule no longer exists'
+          : ruleTriggerChanged
+            ? 'Rule trigger changed since preview; re-run preview'
+            : !rule.enabled
+              ? 'Rule has been disabled since this backfill was opened'
+              : !isBackfillableTrigger(rule.trigger)
+                ? 'Rule trigger is no longer backfillable'
+                : 'Backfill permission or plan feature is no longer available';
+      for (const cand of scan.candidates) {
+        failed++;
+        perShipment.push({
+          shipmentId: cand.shipmentId,
+          shipmentNumber: cand.shipmentNumber,
+          outcome: 'failed',
+          reason: blockedReason,
+          slaTargetType: cand.slaTargetType,
+        });
+      }
+    }
+
+    if (newLogs.length > 0) appendAutomationLogs(newLogs);
+
+    const evaluated = scan.candidates.length + scan.alreadyApplied.length + scan.noState.length + scan.conditionsFailed.length;
+    const matched = scan.candidates.length + scan.alreadyApplied.length;
+    // Derive the displayed counts from actual per-shipment outcomes so
+    // the race-window dedup re-check (candidates that became
+    // already_applied at execute time) is reflected truthfully in the
+    // results phase and in the persisted rule.backfillRuns history.
+    const alreadyAppliedActual = perShipment.filter(r => r.outcome === 'already_applied').length;
+    const skippedActual = perShipment.filter(r => r.outcome === 'skipped').length;
+    const notMatchedActual = perShipment.filter(r => r.outcome === 'not_matched').length;
+    const run: AutomationBackfillRun = {
+      id: runId,
+      ranBy,
+      ranAt,
+      evaluated,
+      matched,
+      applied,
+      alreadyApplied: alreadyAppliedActual,
+      skipped: skippedActual,
+      notMatched: notMatchedActual,
+      failed,
+      perShipment,
+    };
+    // Capped at 10 most recent client-side so rule object stays compact.
+    const prior = rule.backfillRuns || [];
+    const nextRuns = [...prior, run].slice(-10);
+    updateAutomationRule(rule.id, { backfillRuns: nextRuns, updatedAt: ranAt, updatedBy: ranBy });
+    return run;
+  }
+
   // Phase 3 — Single-shipment label purchase used by Batch Labels iteration.
   // Returns a structured outcome instead of mutating UI state, but still updates
   // the shipment via updateShipment so the per-shipment record reflects the label.
@@ -5515,6 +5819,12 @@ export default function ShippingCenter() {
               // rule builder hides SLA triggers/conditions when the SLA
               // feature is plan-disabled OR the operator lacks view_shipping_sla.
               slaFeatureEnabled={slaFeatureEnabled}
+              // Phase 3 SLA Automation Backfill — manual, confirmed action
+              // gated by permission + plan + SLA feature. The component
+              // shows the button only when this is true.
+              canRunBackfill={canRunAutomationBackfill && slaFeatureEnabled && planAllowsAutomationRules && !isWriteBlocked}
+              scanBackfill={scanSlaBackfill}
+              runBackfill={runSlaBackfill}
             />
           ) : (
             <div className="bg-white rounded-2xl border border-amber-200 p-6 text-center">

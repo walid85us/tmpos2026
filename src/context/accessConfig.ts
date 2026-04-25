@@ -118,6 +118,13 @@ export const SUB_PERMISSIONS: SubPermissionDef[] = [
   { id: 'resolve_shipping_automation_reviews', label: 'Resolve Automation Reviews', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'edit', description: 'Mark a "Review Needed" shipment as resolved or dismissed. Required to clear review-needed badges raised by observational rules. Does not allow approving guardrail blocks or overriding pre-action gates.' },
   { id: 'approve_shipping_automation_exceptions', label: 'Approve Automation Exceptions', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Approve a guardrail exception so a flagged action (e.g. label purchase) can proceed. Used when a guardrail rule says "require approval" or when an authorized operator decides a "block unless approved" rule\'s concerns are satisfied. Does not include the harder override that bypasses a still-failing block.' },
   { id: 'override_shipping_automation_guardrails', label: 'Override Automation Guardrails', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Override a "block unless approved" guardrail and proceed with the underlying action even though the block conditions are still true. Strictly for managers — every override is recorded with actor and reason in execution history.' },
+  // Phase 3 SLA Automation Backfill — explicit, manual, confirmed action that
+  // applies an SLA-trigger automation rule to existing matching shipments.
+  // Default behavior is future-only; this permission opens the manual path.
+  // Scoped to manage-level so only operators trusted to change rules can also
+  // backfill existing data. Plan-locked under both Shipping Automation Rules
+  // and SLA Optimization (the trigger family being backfilled is SLA-only).
+  { id: 'run_shipping_automation_backfill', label: 'Run SLA Automation Backfill', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Manually apply an SLA-trigger automation rule to existing matching shipments. The action is itemized, duplicate-safe (re-runs skip already-applied shipments), and recorded in execution history. Requires both the Shipping Automation Rules and SLA Optimization plan features. Default future-only behavior of rules is unchanged — this permission only opens the explicit manual backfill path.' },
   { id: 'manage_batch_labels', label: 'Manage Batch Labels', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Assemble Shipment batches, mark candidates ready-for-batch, view per-shipment eligibility detail, and remove shipments from a batch. Required to use the Batch Labels surface in Shipping Center. Requires the Batch Labels plan feature.' },
   { id: 'purchase_batch_labels', label: 'Purchase Batch Labels', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Execute a Batch Labels run. Each shipment in the batch is processed individually with the same truthful prerequisites as single-shipment label purchase; per-shipment outcomes (success / failed / skipped) are itemized. Requires both the Batch Labels and Shipping Provider Configuration plan features.' },
   // Phase 3 Pass #10 — Packing Workflows Foundation. Distinct sub-feature
@@ -204,6 +211,10 @@ export const FEATURE_PERMISSION_DEPENDENCIES: Record<string, string[]> = {
     'resolve_shipping_automation_reviews',
     'approve_shipping_automation_exceptions',
     'override_shipping_automation_guardrails',
+    // Phase 3 SLA Automation Backfill — listed under both
+    // shipping_automation_rules and shipping_sla_optimization so the
+    // permission disappears whenever either feature is plan-disabled.
+    'run_shipping_automation_backfill',
   ],
   // Batch Labels — multi-shipment label purchase orchestration. Foundation
   // pass: app-level iteration over individual shipment label purchases with
@@ -258,6 +269,9 @@ export const FEATURE_PERMISSION_DEPENDENCIES: Record<string, string[]> = {
     'pause_shipping_sla',
     'resolve_shipping_sla_exceptions',
     'edit_shipping_sla_delay_reasons',
+    // Phase 3 SLA Automation Backfill — also gated under sla_optimization
+    // since the trigger family being backfilled is SLA-only.
+    'run_shipping_automation_backfill',
   ],
 };
 
@@ -410,6 +424,7 @@ export const tenantRoles: EmployeeRole[] = [
       resolve_shipping_automation_reviews: true,
       approve_shipping_automation_exceptions: true,
       override_shipping_automation_guardrails: true,
+      run_shipping_automation_backfill: true,
       manage_batch_labels: true,
       purchase_batch_labels: true,
       view_packing_workflows: true,
@@ -508,6 +523,7 @@ export const tenantRoles: EmployeeRole[] = [
       resolve_shipping_automation_reviews: false,
       approve_shipping_automation_exceptions: false,
       override_shipping_automation_guardrails: false,
+      run_shipping_automation_backfill: false,
       manage_batch_labels: false,
       purchase_batch_labels: false,
       view_packing_workflows: false,
@@ -606,6 +622,7 @@ export const tenantRoles: EmployeeRole[] = [
       resolve_shipping_automation_reviews: false,
       approve_shipping_automation_exceptions: false,
       override_shipping_automation_guardrails: false,
+      run_shipping_automation_backfill: false,
       manage_batch_labels: false,
       purchase_batch_labels: false,
       view_packing_workflows: false,

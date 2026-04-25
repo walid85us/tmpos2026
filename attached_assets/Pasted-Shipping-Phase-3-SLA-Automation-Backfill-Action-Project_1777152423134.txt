@@ -1,0 +1,375 @@
+Shipping Phase 3 — SLA Automation Backfill Action
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated enhancement pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen closed SLA, Packing, Batch Labels, Dispatch, Automation Guardrail, or Carrier Analytics workstreams unless a real regression is found.
+Do not implement Carrier Scorecards in this pass.
+Do not implement Customs Docs or Insurance Rules in this pass.
+
+Implement only the explicit manual backfill action for SLA Automation Rules.
+
+==================================================
+MANDATORY CONTEXT
+==================================================
+
+Current SLA Automation behavior is correct and accepted as the default:
+- SLA automation rules apply to future SLA state transitions only
+- already-overdue / already-at-risk shipments do not silently trigger newly created rules
+- no silent retroactive automation is allowed
+
+Now add an explicit operator-controlled backfill action:
+
+“Apply this rule to existing matching shipments”
+
+This must be manual, confirmed, itemized, auditable, and duplicate-safe.
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior shipping operations architect
+- Senior SLA / workflow automation architect
+- Senior RBAC / entitlement systems architect
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Do not implement a hidden backfill.
+Do not automatically apply rules to old shipments.
+Build a controlled backfill workflow that the operator must intentionally run.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- Ref.txt
+- replit.md
+
+Use them as continuity and source-of-truth documents.
+
+==================================================
+PRESERVE WITHOUT BREAKING
+==================================================
+
+Preserve exactly unless this pass explicitly requires touching SLA automation backfill:
+- current design baseline
+- auth behavior
+- preview-mode safety
+- live System Owner plan gating
+- store permission gating
+- existing future-only SLA automation behavior
+- SLA status calculation
+- SLA pause/resume/resolution behavior
+- SLA policy configuration
+- Automation Rules foundation
+- duplicate/loop prevention
+- approval/review/guardrail flows
+- Packing Workflows + Rate Gating
+- Batch Labels
+- Dispatch lifecycle
+- reverse logistics
+- shipping provider hard-disable
+- linked feature-permission disappearance rule
+- enabled-state non-regression
+
+==================================================
+WORKSTREAM GOAL
+==================================================
+
+Add a manual backfill option for SLA Automation Rules so an authorized user can intentionally apply an SLA rule to shipments that already match its conditions.
+
+Example:
+- A shipment is already overdue for Pack By SLA
+- User creates rule: “When SLA becomes Overdue, mark shipment for review”
+- Default behavior should still not fire retroactively
+- But user can click:
+  “Apply this rule to existing matching shipments”
+- The app scans matching shipments, shows count/result, applies the rule safely, and audits the backfill
+
+==================================================
+PART A — EXPLICIT BACKFILL ACTION
+==================================================
+
+Required:
+Add an explicit backfill action on applicable SLA automation rules.
+
+Suggested label:
+- “Apply to Existing Matching Shipments”
+or
+- “Backfill Existing Matches”
+
+Required:
+- show this action only for SLA automation rules where backfill is meaningful
+- do not show it for unrelated non-SLA automation rules unless there is a clear reason
+- do not auto-run it when a rule is created
+- do not auto-run it when a rule is enabled
+- user must click it intentionally
+
+==================================================
+PART B — CONFIRMATION STEP
+==================================================
+
+Required:
+Before running backfill, show an in-app confirmation modal.
+
+The modal must explain:
+- this action will evaluate existing shipments
+- it may create automation outcomes for multiple shipments
+- it will not purchase labels, dispatch shipments, or perform risky provider actions
+- it will be audited
+
+Required:
+Show a preview/count if practical:
+- number of matching shipments found
+- rule name
+- SLA trigger/condition being evaluated
+- action that will be applied
+
+If exact count cannot be calculated before confirmation, explain that clearly and show itemized results after run.
+
+Do not use browser-native confirm.
+
+==================================================
+PART C — MATCHING LOGIC
+==================================================
+
+Required:
+Backfill must evaluate current shipment state against the selected SLA automation rule.
+
+Supported examples:
+- current SLA status is at_risk
+- current SLA status is overdue
+- current SLA status is missed
+- SLA is paused
+- delay reason exists
+- SLA target type matches selected condition
+- return/outbound context matches selected condition
+- carrier/provider/service/source conditions match where available
+
+Required:
+- use the same condition logic as the rule engine where possible
+- do not use a weaker or separate inconsistent matcher
+- if a rule cannot be safely backfilled, disable the backfill action and show why
+
+==================================================
+PART D — SAFE ACTION EXECUTION
+==================================================
+
+Required:
+Backfill can only execute safe SLA automation actions already allowed by the SLA Automation Linkage scope, such as:
+- mark shipment for review
+- set priority
+- add internal note
+- create follow-up marker / queue follow-up if supported
+- add audit/timeline entry
+
+Not allowed:
+- auto-purchase label
+- auto-dispatch
+- auto-cancel shipment
+- auto-change SLA policy
+- fake scorecard update
+- hidden provider operations
+
+==================================================
+PART E — ITEMIZED RESULTS
+==================================================
+
+Required:
+After running backfill, show itemized results.
+
+Each evaluated shipment should show:
+- shipment number
+- matched / skipped / already processed / failed
+- reason
+- action applied
+- link/open action to shipment where possible
+
+Required summary:
+- total evaluated
+- total matched
+- total applied
+- total skipped
+- total failed
+
+==================================================
+PART F — DUPLICATE / RE-RUN SAFETY
+==================================================
+
+Required:
+Backfill must be duplicate-safe.
+
+If a shipment already has an automation outcome from:
+- the same rule
+- the same SLA target/context
+- the same backfill or transition key
+
+then do not create a duplicate.
+
+Show result as:
+- skipped — already processed
+or
+- already has active outcome
+
+Required:
+- generate stable backfill keys / context keys
+- do not create duplicate review outcomes on repeated backfill clicks
+- repeated backfills should be safe and predictable
+
+==================================================
+PART G — AUDITABILITY
+==================================================
+
+Required:
+Backfill run must be auditable.
+
+Record:
+- ruleId
+- ruleName
+- runBy
+- runAt
+- number evaluated
+- number applied
+- number skipped
+- number failed
+- per-shipment results where practical
+- reason/context
+
+Shipment-level history should also show:
+- SLA automation backfill applied
+- rule name
+- action applied
+- timestamp
+- actor
+
+==================================================
+PART H — PERMISSIONS / GATING
+==================================================
+
+Required:
+Add or reuse a clear permission for SLA automation backfill.
+
+Preferred:
+- manage_shipping_automation_rules can configure rules
+- add specific permission if needed:
+  - run_shipping_automation_backfill
+
+Recommended:
+Add explicit sub-permission:
+- run_shipping_automation_backfill
+
+Required:
+- only authorized users can run backfill
+- restricted users may see that backfill exists only if appropriate, but cannot run it
+- respect plan gating for both SLA Optimization and Automation Rules
+- if SLA Optimization is plan-disabled, SLA backfill is unavailable
+- if Automation Rules is plan-disabled, backfill is unavailable
+
+Follow current entitlement model:
+- plan decides whether capability exists
+- role decides who can use it
+- linked permissions disappear when feature is plan-disabled
+
+==================================================
+PART I — DEFAULT BEHAVIOR MUST REMAIN FUTURE-ONLY
+==================================================
+
+Required:
+Do not change the accepted default SLA automation behavior.
+
+Default rule behavior remains:
+- future SLA transitions only
+- no silent retroactive application
+- no auto-backfill on create
+- no auto-backfill on enable
+- first observation snapshot behavior remains intact
+
+Backfill is an explicit separate action.
+
+==================================================
+PART J — DOCUMENTATION
+==================================================
+
+Update replit.md with:
+- default SLA automation is future-only
+- backfill is explicit and manual
+- supported rule types for backfill
+- confirmation workflow
+- itemized result behavior
+- duplicate/re-run safety
+- permission model
+- audit behavior
+- out-of-scope items remain unchanged
+
+==================================================
+PART K — OUT OF SCOPE
+==================================================
+
+Do NOT implement:
+- Carrier Scorecards
+- predictive SLA optimization
+- automatic recurring backfill
+- scheduled batch backfill
+- automatic carrier ranking
+- automatic provider operations
+- Customs Docs
+- Insurance Rules
+- broader automation redesign
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) SLA automation rules remain future-only by default
+2) A manual backfill action exists for applicable SLA automation rules
+3) Backfill requires explicit in-app confirmation
+4) Backfill evaluates existing matching shipments using the same rule logic
+5) Backfill executes only safe actions
+6) Backfill results are itemized
+7) Re-running backfill does not create duplicate outcomes
+8) Backfill is auditable at rule/run and shipment levels
+9) Backfill is permission-gated
+10) Existing SLA, Automation, Packing, Batch Labels, Dispatch, and reverse logistics remain intact
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Add permission / gating model for backfill
+2) Add explicit backfill action to applicable SLA automation rules
+3) Add confirmation modal with count/preview where practical
+4) Implement matching logic using existing rule condition evaluation
+5) Implement safe itemized execution
+6) Implement duplicate/re-run safety
+7) Add backfill audit/run history
+8) Re-test SLA automation and non-regression behavior
+9) Update replit.md
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Backfill Action + Confirmation Workflow
+3. Matching Logic + Safe Execution
+4. Duplicate / Re-Run Safety
+5. Itemized Results + Auditability
+6. Permission / Gating Updates
+7. Files Changed
+8. Documentation Updated
+9. Non-Regression Notes

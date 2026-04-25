@@ -915,3 +915,157 @@ export function describeRule(rule: Pick<AutomationRule, 'name' | 'trigger' | 'co
     : rule.actions.map(describeAction).join(', then ');
   return `When ${triggerPart}${conditionPart}, ${actionPart}.`;
 }
+
+// =============================================================================
+// Phase 3 — SLA Automation Backfill
+// =============================================================================
+//
+// The default automation engine path is *future-only*: a rule fires when the
+// underlying event happens (a transition, a paused/resumed event, etc.). The
+// backfill helpers below let an authorized operator explicitly apply an
+// SLA-trigger rule to existing matching shipments — confirmed, itemized,
+// duplicate-safe, audited. They never run automatically. The engine here
+// only exposes pure helpers; the orchestration (scan + execute) lives in
+// ShippingCenter and reuses `runAutomation` so the action whitelist /
+// guardrail skipping rules remain the single source of truth.
+//
+// Excluded from backfill on purpose:
+//   - sla_resumed                — by definition a one-off transient event;
+//                                   nothing to "match" against current state.
+//   - all non-SLA triggers       — Phase 3 scope is SLA-only.
+//   - all guardrail process      — guardrails are pre-action gates, not
+//                                   post-event flags; backfilling a guardrail
+//                                   rule onto a shipment that already
+//                                   completed the gated action is meaningless.
+
+export const BACKFILLABLE_SLA_TRIGGERS: AutomationTriggerType[] = [
+  'sla_at_risk', 'sla_overdue', 'sla_missed',
+  'sla_paused', 'sla_delay_reason_added',
+];
+
+export function isBackfillableTrigger(trigger: AutomationTriggerType): boolean {
+  return BACKFILLABLE_SLA_TRIGGERS.includes(trigger);
+}
+
+// Stable key per (rule, target) used for re-run safety. Stored on the
+// shipment in `slaAutomationBackfillKeys`. A rule with no specific target in
+// the trigger context (e.g. `sla_paused` is shipment-global) uses '__any__'
+// as the target slot so re-runs of that exact rule are still deduped.
+export function buildBackfillKey(ruleId: string, targetType?: SlaTargetType): string {
+  return `${ruleId}|${targetType ?? '__any__'}`;
+}
+
+// Lightweight projection of `SlaShipmentSummary` the backfill helper needs.
+// Defined locally so the engine module does not have to import from
+// `../utils/sla` (which would create a longer dependency chain). Callers
+// (ShippingCenter) already compute the full summary and just pass the
+// pieces relevant for matching.
+export interface SlaBackfillStateView {
+  worst: SlaStatus;
+  paused: boolean;
+  targets: Array<Pick<import('../types').SlaTarget, 'type' | 'status' | 'varianceMs'>>;
+  pause?: { reason?: string } | null;
+  delayReasons?: Partial<Record<SlaTargetType, { reason: string }>>;
+}
+
+export type BackfillCandidateOutcome =
+  | { kind: 'match'; ctx: AutomationTriggerContext; slaTargetType?: SlaTargetType }
+  | { kind: 'no_state'; reason: string }
+  | { kind: 'conditions_failed'; failedConditionDescription?: string; ctx?: AutomationTriggerContext; slaTargetType?: SlaTargetType };
+
+function pickWorstTargetWithStatus(
+  targets: SlaBackfillStateView['targets'],
+  status: SlaStatus,
+): SlaBackfillStateView['targets'][number] | null {
+  let pick: SlaBackfillStateView['targets'][number] | null = null;
+  for (const t of targets) {
+    if (t.status !== status) continue;
+    if (!pick) { pick = t; continue; }
+    // Prefer larger variance magnitude (more impactful) when same status.
+    const a = Math.abs(pick.varianceMs ?? 0);
+    const b = Math.abs(t.varianceMs ?? 0);
+    if (b > a) pick = t;
+  }
+  return pick;
+}
+
+// Pure: derive the synthetic per-event context for one (rule, shipment) pair
+// given the shipment's current SLA state, then run the existing rule
+// evaluator. Returns one of three outcomes so the caller can itemize
+// per-shipment results without re-running matching twice.
+export function evaluateSlaBackfillCandidate(
+  rule: AutomationRule,
+  shipment: Shipment,
+  state: SlaBackfillStateView,
+): BackfillCandidateOutcome {
+  if (!isBackfillableTrigger(rule.trigger)) {
+    return { kind: 'no_state', reason: 'Trigger is not backfillable' };
+  }
+
+  let ctx: AutomationTriggerContext = { slaWorstStatus: state.worst };
+  let slaTargetType: SlaTargetType | undefined;
+
+  switch (rule.trigger) {
+    case 'sla_at_risk':
+    case 'sla_overdue':
+    case 'sla_missed': {
+      const wantStatus: SlaStatus =
+        rule.trigger === 'sla_at_risk' ? 'at_risk'
+        : rule.trigger === 'sla_overdue' ? 'overdue'
+        : 'missed';
+      const target = pickWorstTargetWithStatus(state.targets, wantStatus);
+      if (!target) {
+        return { kind: 'no_state', reason: `No ${wantStatus.replace('_', ' ')} SLA target on this shipment` };
+      }
+      slaTargetType = target.type;
+      ctx = {
+        ...ctx,
+        slaTargetType: target.type,
+        slaToStatus: target.status,
+        slaVarianceMs: target.varianceMs,
+      };
+      break;
+    }
+    case 'sla_paused': {
+      if (!state.paused) {
+        return { kind: 'no_state', reason: 'Shipment SLA is not currently paused' };
+      }
+      ctx = {
+        ...ctx,
+        slaToStatus: 'paused',
+        slaReason: state.pause?.reason,
+      };
+      break;
+    }
+    case 'sla_delay_reason_added': {
+      const entries = Object.entries(state.delayReasons || {}) as Array<[SlaTargetType, { reason: string } | undefined]>;
+      const found = entries.find(([, v]) => !!v);
+      if (!found) {
+        return { kind: 'no_state', reason: 'Shipment has no SLA delay reasons recorded' };
+      }
+      const [targetType, info] = found;
+      slaTargetType = targetType;
+      ctx = {
+        ...ctx,
+        slaTargetType: targetType,
+        slaReason: info?.reason,
+      };
+      break;
+    }
+    default:
+      return { kind: 'no_state', reason: 'Trigger is not backfillable' };
+  }
+
+  // Defer to the live engine so the same condition language (including SLA
+  // condition fields) decides matching. No drift between live and backfill.
+  const evalResult = evaluateRule(rule, shipment, ctx);
+  if (!evalResult.matched) {
+    return {
+      kind: 'conditions_failed',
+      failedConditionDescription: evalResult.failedConditionDescription,
+      ctx,
+      slaTargetType,
+    };
+  }
+  return { kind: 'match', ctx, slaTargetType };
+}

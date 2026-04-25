@@ -1127,6 +1127,14 @@ export interface Shipment {
   slaDelayReasons?: Partial<Record<SlaTargetType, SlaDelayReason>>;
   slaResolutions?: Partial<Record<SlaTargetType, SlaResolutionNote>>;
   slaHistory?: SlaHistoryEntry[];
+  // Phase 3 SLA Automation Backfill — stable keys recorded each time a
+  // manual backfill applied an SLA-trigger rule to this shipment. Format:
+  // "${ruleId}|${slaTargetType}". Used to make re-runs idempotent: a
+  // candidate whose key already appears here is reported as
+  // 'already_applied' instead of running rule actions a second time. The
+  // default future-only event path does NOT write into this list — it only
+  // grows from manual backfills, which is exactly what dedup is scoped to.
+  slaAutomationBackfillKeys?: string[];
   batchQueueState?: 'ready_for_batch' | 'batched' | null;
   batchQueueMarkedAt?: string;
   batchQueueRuleId?: string;
@@ -1632,6 +1640,11 @@ export interface AutomationRule {
     failedConditionIndex?: number;
     failedConditionDescription?: string;
   };
+  // Phase 3 SLA Automation Backfill — rolling history of manual backfill
+  // runs against this rule (most-recent last, capped to last 10 client-side
+  // to keep the rule object compact). Only populated for SLA-trigger rules
+  // that actually had a backfill run; absent on rules that never had one.
+  backfillRuns?: AutomationBackfillRun[];
 }
 
 export interface AutomationLogEntry {
@@ -1669,6 +1682,54 @@ export interface AutomationLogEntry {
   slaToStatus?: SlaStatus;
   slaVarianceMinutes?: number;
   slaTriggerReason?: string;
+  // Phase 3 SLA Automation Backfill — distinguishes a log entry produced by
+  // an explicit manual backfill action from the default future-only event
+  // path. When set to 'backfill', `backfillRunId` ties the entry to a
+  // specific backfill run recorded on the rule (so execution history can
+  // group + filter backfill activity). Absent / 'event' = default path.
+  triggeredBy?: 'event' | 'backfill';
+  backfillRunId?: string;
+}
+
+// Phase 3 SLA Automation Backfill — per-shipment outcome line for a single
+// backfill run. `outcome` is exhaustive over what the run can decide:
+//   applied         — rule actions executed against the shipment.
+//   already_applied — a stable backfill key for (rule, target) was already
+//                     present on the shipment; skipped to keep idempotent.
+//   skipped         — current SLA state has no target the rule's trigger
+//                     can match (e.g. sla_at_risk rule, but no at_risk
+//                     target right now).
+//   not_matched     — rule conditions evaluated to false against the
+//                     synthetic per-shipment context.
+//   failed          — runAutomation threw or produced no diff for an
+//                     otherwise-matched shipment.
+export interface AutomationBackfillResult {
+  shipmentId: string;
+  shipmentNumber: string;
+  outcome: 'applied' | 'already_applied' | 'skipped' | 'not_matched' | 'failed';
+  reason?: string;
+  slaTargetType?: SlaTargetType;
+  actionsApplied?: string[];
+}
+
+// Phase 3 SLA Automation Backfill — rule-level audit record of a single
+// manual backfill run. Stored on the rule (capped client-side to last 10)
+// so operators can see "last backfill: applied 7 / skipped 12 / by Sara
+// 2026-04-25 14:33" without scrolling the global execution log. The full
+// per-shipment outcomes also live in `automationLogs` keyed by
+// `backfillRunId`.
+export interface AutomationBackfillRun {
+  id: string;
+  ranBy: string;
+  ranAt: string;
+  evaluated: number;
+  matched: number;
+  applied: number;
+  alreadyApplied: number;
+  skipped: number;
+  notMatched: number;
+  failed: number;
+  perShipment: AutomationBackfillResult[];
 }
 
 // Phase 3 Pass #16 — SLA Automation Linkage. Per-event context attached when
