@@ -4318,9 +4318,11 @@ export default function ShippingCenter() {
         outcomeSlaTargetType = (outcome as any).slaTargetType;
         key = buildBackfillKey(rule.id, outcomeSlaTargetType);
       } else {
-        // Non-SLA current-state path. The candidate evaluator validates
-        // the trigger's per-shipment precondition (e.g. label exists for
-        // label_purchased) and runs the live engine for conditions.
+        // Non-SLA current-state path — inert today (CURRENT_STATE_NON_SLA_TRIGGERS
+        // is empty, so this branch is unreachable). Retained as scaffolding:
+        // the candidate evaluator validates the trigger's per-shipment
+        // current-state precondition and runs the live engine for conditions
+        // before any future genuinely current-state non-SLA trigger is enrolled.
         outcome = evaluateNonSlaBackfillCandidate(rule, shipment);
         key = buildNonSlaBackfillKey(rule.id, rule.trigger);
       }
@@ -4491,9 +4493,10 @@ export default function ShippingCenter() {
             continue;
           }
           const existingKeys = shipment.slaAutomationBackfillKeys || [];
-          // Note text is trigger-agnostic so non-SLA backfills (e.g. a
-          // label_purchased rule) don't get a misleading "SLA" label in
-          // the shipment's internal notes log.
+          // Note text is trigger-agnostic so any future non-SLA
+          // current-state backfill (none today; CURRENT_STATE_NON_SLA_TRIGGERS
+          // is empty) does not get a misleading "SLA" label in the
+          // shipment's internal notes log.
           const noteText = `Automation backfill applied: "${rule.name}" by ${ranBy}`;
           const backfillNote: ShipmentInternalNote = {
             id: `note-bf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,

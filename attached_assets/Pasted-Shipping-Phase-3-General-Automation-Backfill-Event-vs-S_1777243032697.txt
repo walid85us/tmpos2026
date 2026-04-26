@@ -1,0 +1,134 @@
+Shipping Phase 3 — General Automation Backfill Event-vs-State Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict isolated correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Fix only the backfill eligibility model so event triggers are not incorrectly treated as backfillable.
+
+==================================================
+CURRENT ISSUE
+==================================================
+
+The General Automation Backfill Framework was implemented, but it incorrectly allows some event triggers to be backfilled.
+
+Example from the implementation reply:
+- label_purchased shows “Apply to Existing”
+- evaluator checks whether shipment currently has a label
+
+This is not correct.
+
+“A carrier label is purchased” is an event trigger.
+It should fire when the purchase happens.
+It should not be backfilled later just because the shipment currently has a label.
+
+If we want to support backfill for labeled shipments, the rule must use a current-state rule such as:
+- Shipment currently has carrier label
+not:
+- A carrier label is purchased
+
+==================================================
+CORRECT MODEL
+==================================================
+
+Backfill must be based on rule semantics:
+
+1) Event-only triggers
+These represent something that happened at a moment in time.
+They are not backfillable by default.
+
+Examples:
+- shipment_updated
+- status_changed
+- label_purchased
+- pickup_requested
+- pickup_confirmed
+- pickup_cancelled
+- tracking_synced
+- pre_label_purchase
+- sla_resumed if implemented as transition-only
+
+Required behavior:
+- Backfill button must not appear for these triggers
+- Show disabled hint:
+  “Backfill is not available for event-only rules.”
+
+2) Current-state rules
+These evaluate current shipment data.
+They may be backfillable if safe.
+
+Examples:
+- Shipment currently has carrier label
+- Shipment currently has no carrier label
+- Shipment status is Packed / Label Created / Dispatched / etc.
+- Shipment mode is provider/manual
+- Packing status is exception / packed / not_required
+- Package verification is stale or complete
+- Shipment is eligible for batch labels
+- SLA status is overdue / at risk / missed / paused
+- Delay reason exists
+- Current pickup state is confirmed/cancelled only if a stable current pickup state field exists
+- Current tracking state is exception/delivered/in transit only if a stable current tracking state field exists
+
+Required:
+- If a current-state equivalent is useful, add it as a current-state condition/trigger family with clear wording
+- Do not reuse event trigger names for current-state backfill behavior
+
+==================================================
+REQUIRED FIXES
+==================================================
+
+1) Update getRuleBackfillEligibility so label_purchased is event_only_not_backfillable
+2) Ensure pickup_requested / pickup_confirmed / pickup_cancelled / tracking_synced remain event-only unless separate current-state equivalents are explicitly modeled
+3) Remove “Apply to Existing” from event-only rule cards
+4) If useful, add current-state backfillable alternatives with clear labels:
+   - Shipment currently has carrier label
+   - Shipment currently has no carrier label
+   - Current shipment status is...
+   - Current packing status is...
+   - Current SLA status is...
+5) Ensure backfill classification is based on rule semantics, not just whether a current field can be inferred
+6) Preserve SLA backfill behavior already accepted
+7) Preserve future-only default automation behavior
+8) Preserve duplicate-safe and itemized backfill results
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) “A carrier label is purchased” does NOT show Apply to Existing
+2) Event-only rules show Backfill N/A with clear explanation
+3) Current-state equivalents, if implemented, can show Apply to Existing
+4) Backfill is available only for true current-state rules
+5) SLA backfill remains intact
+6) No duplicate outcomes are created
+7) Existing Automation, SLA, Packing, Batch Labels, Dispatch, and reverse logistics remain intact
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- event-only vs current-state backfill distinction
+- label_purchased is event-only and not backfillable
+- current-state equivalents are the correct path for backfilling existing labeled shipments
+- SLA backfill remains accepted behavior
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Event-Only Trigger Backfill Correction
+3. Current-State Backfill Alternatives
+4. SLA Backfill Preservation
+5. Files Changed
+6. Documentation Updated
+7. Non-Regression Notes

@@ -1080,47 +1080,66 @@ export function evaluateSlaBackfillCandidate(
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Phase 3 — General Automation Backfill Framework
+// General Automation Backfill Framework
 //
-// Generalizes the SLA-only backfill into a tri-state eligibility model so
-// that other current-state-evaluable triggers (label_purchased,
-// pickup_requested, return_shipment_created, packing_started/completed/
-// exception_created, shipment_created) can also be backfilled — under the
-// exact same safety model: manual, confirmed, itemized, duplicate-safe,
-// audited, and constrained to the engine's safe-action whitelist.
+// Tri-state eligibility model — current_state_backfillable / event_only /
+// unsupported_backfill — implemented in getRuleBackfillEligibility(). The
+// only currently-shipping current_state_backfillable family is the
+// existing SLA backfill (BACKFILLABLE_SLA_TRIGGERS). The non-SLA
+// current-state branch — evaluateNonSlaBackfillCandidate, the 'non_sla'
+// triggerKind, and the |nonsla:<trigger> dedup-key namespace in
+// ShippingCenter — is retained as inert plumbing so a genuinely
+// current-state non-SLA trigger can be added later by appending it to
+// CURRENT_STATE_NON_SLA_TRIGGERS (today empty) and supplying its
+// per-trigger current-state precondition in evaluateNonSlaBackfillCandidate.
 //
-// Triggers that are intrinsically event-only (a transition or external
-// signal that has no current-state proxy) remain non-backfillable — see
-// EVENT_ONLY_TRIGGERS below. We do NOT replay historical events.
+// The triggers in EVENT_ONLY_TRIGGERS describe a transition or external
+// signal at a moment in time, not a persistent state. Current shipment
+// data cannot truthfully tell us "this event fired in the past", so we
+// never offer backfill for them — replaying would either fabricate the
+// event or replay history blindly. Backfill of those semantics must be
+// expressed instead via a current-state rule keyed on a current-state
+// condition. We do NOT replay historical events under any path.
 // ────────────────────────────────────────────────────────────────────────────
 
-// Triggers that depend on a transition or external event with no
-// current-state representation we can truthfully re-evaluate. Backfill is
-// intentionally not offered for these because applying them now would
-// either fabricate an event or replay history blindly.
+// Triggers that represent a transition or external signal at a moment
+// in time. They are NOT backfillable, because the current shipment state
+// cannot truthfully tell us "this event fired in the past". Re-applying
+// the rule now would either fabricate an event ("we're pretending the
+// label was just purchased") or replay history blindly. Backfill must
+// be expressed via current-state rules instead (e.g. a rule keyed on
+// "shipment currently has a carrier label" rather than the event
+// "a carrier label is purchased"). The seven triggers below were briefly
+// classified as backfillable during the General Automation Backfill
+// Framework rollout; they have been moved back here because each is an
+// event, not a state — see replit.md for the full rationale.
 export const EVENT_ONLY_TRIGGERS: AutomationTriggerType[] = [
+  'shipment_created',
   'shipment_updated',
   'status_changed',
+  'label_purchased',
+  'pickup_requested',
   'pickup_confirmed',
   'pickup_cancelled',
   'tracking_synced',
+  'return_shipment_created',
   'sla_resumed',
   'pre_label_purchase',
-];
-
-// Non-SLA triggers that we CAN truthfully evaluate against current
-// shipment state. Each has a precondition checked in
-// evaluateNonSlaBackfillCandidate so we never apply a label_purchased rule
-// to a shipment that does not currently have a label, etc.
-export const CURRENT_STATE_NON_SLA_TRIGGERS: AutomationTriggerType[] = [
-  'shipment_created',
-  'label_purchased',
-  'pickup_requested',
-  'return_shipment_created',
   'packing_started',
   'packing_completed',
   'packing_exception_created',
 ];
+
+// Reserved for genuinely current-state non-SLA triggers (none today).
+// The framework plumbing — evaluateNonSlaBackfillCandidate, the
+// 'non_sla' triggerKind, the '|nonsla:' dedup key prefix, and the
+// orchestrator dispatch in ShippingCenter — is retained so that a
+// future trigger like "shipment currently has a carrier label" can be
+// added by appending it here and supplying a per-trigger current-state
+// precondition in evaluateNonSlaBackfillCandidate. SLA-trigger backfill
+// (the only family currently routed through this framework) remains
+// unaffected and is handled by BACKFILLABLE_SLA_TRIGGERS below.
+export const CURRENT_STATE_NON_SLA_TRIGGERS: AutomationTriggerType[] = [];
 
 export type BackfillEligibilityKind =
   | 'current_state_backfillable'
