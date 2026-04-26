@@ -16,8 +16,10 @@ import {
   // human labels for execution-history chips.
   isSlaTrigger, SLA_TRIGGERS, getSlaTargetLabel, getSlaStatusLabel,
   // Phase 3 SLA Automation Backfill — opt-in detector for the per-rule
-  // "Apply to Existing Matches" button.
+  // "Apply to Existing Matches" button. Retained as a fallback when the
+  // newer `ruleBackfillEligibility` prop is not wired (legacy callers).
   isBackfillableTrigger,
+  type RuleBackfillEligibility,
 } from '../../shipping/automationEngine';
 
 // Phase 3 SLA Automation Backfill — same shape ShippingCenter computes from
@@ -49,13 +51,21 @@ interface Props {
   // SLA transition annotations. Defaults to false so a forgotten prop fails
   // closed (no SLA UI) rather than open.
   slaFeatureEnabled?: boolean;
-  // Phase 3 SLA Automation Backfill — when true, eligible SLA-trigger rule
-  // cards expose an "Apply to Existing Matches" button. The two callbacks
-  // are mandatory whenever this is true. Defaults to false so a forgotten
-  // prop fails closed (no backfill UI) rather than open.
+  // Phase 3 General Automation Backfill — when true, eligible rule cards
+  // (SLA + non-SLA current-state) expose an "Apply to Existing Matches"
+  // button. The two callbacks are mandatory whenever this is true.
+  // Defaults to false so a forgotten prop fails closed (no backfill UI)
+  // rather than open.
   canRunBackfill?: boolean;
   scanBackfill?: (rule: AutomationRule) => BackfillScan;
   runBackfill?: (rule: AutomationRule, scan: BackfillScan) => AutomationBackfillRun;
+  // Phase 3 General Automation Backfill — single source of truth for
+  // whether a given rule can be backfilled. When omitted, the component
+  // falls back to the legacy single-axis `isBackfillableTrigger` check
+  // for backwards compatibility, but ShippingCenter wires the canonical
+  // engine classifier here so SLA / non-SLA current-state / event-only
+  // / unsupported (no-safe-action) all resolve through one helper.
+  ruleBackfillEligibility?: (rule: Pick<AutomationRule, 'trigger' | 'actions'>) => RuleBackfillEligibility;
 }
 
 const TRIGGER_LABELS_BY_TYPE: Record<AutomationTriggerType, string> = {
@@ -163,7 +173,7 @@ function defaultValueForOperator(field: AutomationConditionField, op: Automation
   return '';
 }
 
-export default function AutomationRules({ rules, logs, shipments, canManage, canViewResults, currentUser, onAdd, onUpdate, onDelete, onOpenShipment, slaFeatureEnabled = false, canRunBackfill = false, scanBackfill, runBackfill }: Props) {
+export default function AutomationRules({ rules, logs, shipments, canManage, canViewResults, currentUser, onAdd, onUpdate, onDelete, onOpenShipment, slaFeatureEnabled = false, canRunBackfill = false, scanBackfill, runBackfill, ruleBackfillEligibility }: Props) {
   const [editing, setEditing] = useState<AutomationRule | null>(null);
   const [creating, setCreating] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
@@ -643,16 +653,33 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
                       )}
                       {rule.description && <p className="text-[11px] text-slate-400 mt-0.5 italic">{rule.description}</p>}
                     </div>
-                    {canManage && (
+                    {canManage && (() => {
+                      // Phase 3 General Automation Backfill — single
+                      // classifier drives both the action button and the
+                      // disabled inline hint. Falls back to the legacy
+                      // single-axis trigger check so older callers that
+                      // don't yet pass `ruleBackfillEligibility` still
+                      // work for SLA triggers only.
+                      const eligibility = ruleBackfillEligibility
+                        ? ruleBackfillEligibility(rule)
+                        : (isBackfillableTrigger(rule.trigger)
+                            ? { kind: 'current_state_backfillable' as const, triggerKind: 'sla' as const, hasSafeActions: true }
+                            : { kind: 'event_only' as const, triggerKind: 'event_only' as const, hasSafeActions: false, reason: 'Backfill is not available for event-only rules' });
+                      const showApplyButton =
+                        canRunBackfill && rule.enabled && eligibility.kind === 'current_state_backfillable';
+                      // Inline hints only render when the rule is enabled
+                      // (a disabled rule's "why no button" answer is just
+                      // "it's disabled") and only when the operator could
+                      // otherwise have run a backfill (canRunBackfill).
+                      // This avoids inviting confused questions on plans
+                      // that don't have backfill at all.
+                      const showEventOnlyHint =
+                        canRunBackfill && rule.enabled && eligibility.kind === 'event_only';
+                      const showUnsupportedHint =
+                        canRunBackfill && rule.enabled && eligibility.kind === 'unsupported_backfill';
+                      return (
                       <div className="flex items-center gap-1 shrink-0">
-                        {/* Phase 3 SLA Automation Backfill — visible only for
-                            backfillable SLA triggers when the operator has
-                            permission, the SLA + automation features are
-                            both live, and writes are not blocked. The button
-                            is also hidden if the rule is disabled (a disabled
-                            rule cannot fire on new events; backfilling it
-                            would create misleading audit history). */}
-                        {canRunBackfill && rule.enabled && isBackfillableTrigger(rule.trigger) && (
+                        {showApplyButton && (
                           <button
                             onClick={() => openBackfill(rule)}
                             data-testid={`backfill-btn-${rule.id}`}
@@ -662,6 +689,24 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
                             Apply to Existing
                           </button>
                         )}
+                        {showEventOnlyHint && (
+                          <span
+                            data-testid={`backfill-hint-event-only-${rule.id}`}
+                            className="text-[10px] font-black uppercase tracking-widest text-slate-400 px-2 py-1 border border-slate-200 rounded bg-slate-50 cursor-help"
+                            title={eligibility.reason || 'Backfill is not available for event-only rules'}
+                          >
+                            Backfill N/A
+                          </span>
+                        )}
+                        {showUnsupportedHint && (
+                          <span
+                            data-testid={`backfill-hint-unsupported-${rule.id}`}
+                            className="text-[10px] font-black uppercase tracking-widest text-slate-400 px-2 py-1 border border-slate-200 rounded bg-slate-50 cursor-help"
+                            title={eligibility.reason || 'This rule has no safe actions to apply during backfill'}
+                          >
+                            No Safe Actions
+                          </span>
+                        )}
                         <button onClick={() => onUpdate(rule.id, { enabled: !rule.enabled, updatedBy: currentUser })}
                           className="text-[10px] font-black uppercase tracking-widest text-slate-500 hover:text-primary px-2 py-1">
                           {rule.enabled ? 'Disable' : 'Enable'}
@@ -670,7 +715,8 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
                         <button onClick={() => setDeleteTarget(rule)}
                           className="text-[10px] font-black uppercase tracking-widest text-rose-500 hover:text-rose-700 px-2 py-1">Delete</button>
                       </div>
-                    )}
+                      );
+                    })()}
                   </div>
                   {/* Phase 3 SLA Automation Backfill — last-run summary
                       strip on the rule card. Only rendered when at least
@@ -864,9 +910,9 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
             {backfillPhase === 'confirm' && (
               <div className="mt-3 text-xs text-slate-600 space-y-2">
                 <p>
-                  This action applies this SLA-trigger rule to existing matching shipments. The default
-                  future-only event behavior is unchanged — every action below is explicit, manual, and
-                  recorded in execution history with a backfill tag.
+                  This action applies the rule to existing matching shipments. The default future-only
+                  event behavior is unchanged — every action below is explicit, manual, and recorded in
+                  execution history with a backfill tag.
                 </p>
                 <p>
                   Only the rule's safe observational actions run (add flag, add internal note, mark for
@@ -875,9 +921,8 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
                   labels, or perform irreversible carrier operations.
                 </p>
                 <p>
-                  Each shipment is deduplicated by a stable backfill key (rule + SLA target). Re-running
-                  this backfill later will report already-applied shipments rather than running actions
-                  twice.
+                  Each shipment is deduplicated by a stable backfill key. Re-running this backfill later
+                  will report already-applied shipments rather than running actions twice.
                 </p>
               </div>
             )}
@@ -895,7 +940,7 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
                   </div>
                   <div className="rounded-lg border border-slate-200 bg-slate-50 p-2 text-center">
                     <p className="text-[20px] font-black text-slate-700">{backfillScan.noState.length}</p>
-                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-600">No SLA state</p>
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-600">Not eligible</p>
                   </div>
                   <div className="rounded-lg border border-slate-200 bg-slate-50 p-2 text-center">
                     <p className="text-[20px] font-black text-slate-700">{backfillScan.conditionsFailed.length}</p>

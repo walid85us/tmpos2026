@@ -1,0 +1,377 @@
+Shipping Phase 3 — General Automation Backfill Framework
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated enhancement pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen closed SLA, Packing, Batch Labels, Dispatch, Automation Guardrail, or Carrier Analytics workstreams unless a real regression is found.
+Do not implement Carrier Scorecards in this pass.
+Do not implement Customs Docs or Insurance Rules in this pass.
+
+Implement a general automation backfill framework for safe, current-state automation rules beyond SLA.
+
+==================================================
+MANDATORY CONTEXT
+==================================================
+
+SLA Automation Backfill is already implemented and accepted as a manual, explicit, itemized, duplicate-safe, auditable action.
+
+Now extend the same design pattern to other automation rules where backfill is logically safe.
+
+Important:
+Do not make every automation rule backfillable.
+Do not replay historical events blindly.
+Do not auto-run backfill when a rule is created or enabled.
+
+Backfill must remain:
+- manual
+- confirmed
+- itemized
+- permission-gated
+- duplicate-safe
+- auditable
+- safe-action only
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior shipping operations automation architect
+- Senior rules-engine architect
+- Senior RBAC / entitlement systems architect
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Think through rule eligibility before coding.
+Do not implement a shallow “show backfill button on every rule” patch.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- Ref.txt
+- replit.md
+
+Use them as continuity and source-of-truth documents.
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Create a generalized Automation Backfill Framework that supports safe backfill for current-state rules, not just SLA rules.
+
+The framework must classify rules into:
+1) Backfillable — current-state
+2) Not backfillable — event-only or unsafe
+3) Future-only — historical-event replay not implemented
+
+==================================================
+PART A — BACKFILL ELIGIBILITY MODEL
+==================================================
+
+Required:
+Add a rule-level backfill eligibility model.
+
+Each automation rule should be classified as one of:
+
+1) current_state_backfillable
+Meaning:
+- the rule can be evaluated against current shipment state
+- safe to apply manually to existing matching shipments
+
+2) event_only_not_backfillable
+Meaning:
+- the rule depends on a past event transition
+- do not show backfill action
+
+3) unsupported_backfill
+Meaning:
+- theoretically possible, but not implemented safely yet
+
+Required:
+The UI should only show “Apply to Existing Matching Shipments” when the rule is current_state_backfillable.
+
+==================================================
+PART B — CURRENT-STATE BACKFILL CANDIDATES
+==================================================
+
+Support backfill where current data can truthfully evaluate the rule.
+
+Examples of current-state backfillable conditions:
+- shipment status is Draft / Ready / Packed / Label Created / Dispatched / In Transit / Delivered
+- shipment mode is provider or manual
+- shipment is outbound or return
+- shipment has label / does not have label
+- selected rate cost meets threshold where selected rate exists
+- carrier/provider/service matches current value
+- packing status is not_started / in_progress / packed / exception / not_required
+- packing exception exists
+- package verification is complete or stale
+- batch label eligibility is true
+- SLA status or SLA target conditions already implemented
+- delay reason exists
+- priority/review/outcome state exists
+
+Required:
+Only expose supported current-state fields that exist in the current data model.
+
+==================================================
+PART C — EVENT-ONLY RULES MUST NOT BE BACKFILLED BY DEFAULT
+==================================================
+
+Do not backfill historical event triggers unless explicit historical-event replay is implemented later.
+
+Event-only examples:
+- a shipment is edited
+- a label was purchased
+- a pickup was requested
+- a pickup was confirmed
+- a pickup was cancelled
+- tracking was synced
+
+For these:
+- hide the backfill button
+or
+- show disabled explanatory text:
+  “Backfill is not available for event-only rules.”
+
+Required:
+Do not replay old audit history in this pass.
+
+==================================================
+PART D — SAFE ACTIONS ONLY
+==================================================
+
+Backfill may execute only safe actions.
+
+Allowed:
+- mark shipment for review
+- set priority
+- add internal note
+- queue for batch
+- create follow-up marker
+- add audit/timeline entry
+
+Not allowed:
+- purchase label
+- dispatch shipment
+- cancel shipment
+- change provider settings
+- approve/override guardrails automatically
+- change financial values
+- change SLA policy
+
+If a rule action is unsafe for backfill, the backfill action must be unavailable with a clear explanation.
+
+==================================================
+PART E — CONFIRMATION WORKFLOW
+==================================================
+
+Required:
+Use the same standard as SLA Backfill.
+
+Before running:
+- show in-app confirmation modal
+- explain that existing shipments will be evaluated
+- show rule name
+- show matching scope
+- show action that will be applied
+- show estimated count if practical
+- confirm no risky provider actions will run
+
+Do not use browser-native confirm.
+
+==================================================
+PART F — MATCHING LOGIC
+==================================================
+
+Required:
+Use the same condition evaluator as normal automation rules where possible.
+
+Do not create a weaker separate evaluator.
+
+Backfill should evaluate:
+- current shipment data
+- current packing data
+- current batch eligibility
+- current SLA data where applicable
+- current review/outcome state where applicable
+
+Required:
+If a condition cannot be evaluated against current state, mark the rule not backfillable.
+
+==================================================
+PART G — ITEMIZED RESULTS
+==================================================
+
+Required:
+After running backfill, show itemized results.
+
+Each shipment row should show:
+- shipment number
+- matched / applied / skipped / already processed / failed
+- reason
+- action applied
+- open shipment action where possible
+
+Summary should show:
+- total evaluated
+- total matched
+- total applied
+- total skipped
+- total already processed
+- total failed
+
+==================================================
+PART H — DUPLICATE / RE-RUN SAFETY
+==================================================
+
+Required:
+Backfill must be duplicate-safe.
+
+Do not create duplicate outcomes for the same:
+- rule
+- shipment
+- current-state context
+- action type
+
+Repeated backfill should produce:
+- skipped — already processed
+or
+- already has active outcome
+
+Use stable backfill context keys.
+
+==================================================
+PART I — AUDITABILITY
+==================================================
+
+Required:
+Record backfill run history.
+
+At rule/run level:
+- ruleId
+- ruleName
+- runBy
+- runAt
+- total evaluated
+- applied
+- skipped
+- failed
+- context
+
+At shipment level:
+- backfill applied
+- rule name
+- action applied
+- actor
+- timestamp
+- note/reason
+
+Execution History should preserve the backfill event even if the created outcome is later resolved.
+
+==================================================
+PART J — PERMISSIONS / GATING
+==================================================
+
+Required:
+Use the existing backfill permission if already created:
+- run_shipping_automation_backfill
+
+If it does not exist, create it.
+
+Required:
+- only authorized users can run backfill
+- plan-disabled Automation Rules hides backfill
+- plan-disabled related feature hides related backfill support
+- linked permissions follow current disappearance rule
+
+==================================================
+PART K — DEFAULT BEHAVIOR REMAINS FUTURE-ONLY
+==================================================
+
+Required:
+Do not change normal automation behavior.
+
+Rules still apply to future events/transitions by default.
+Backfill runs only when explicitly triggered by authorized user.
+
+No auto-backfill on:
+- create rule
+- enable rule
+- edit rule
+- login
+- page refresh
+
+==================================================
+PART L — OUT OF SCOPE
+==================================================
+
+Do NOT implement:
+- historical event replay
+- recurring scheduled backfill
+- Carrier Scorecards
+- predictive optimization
+- Customs Docs
+- Insurance Rules
+- broad non-shipping automation engine
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Backfill is available only for safe current-state rules
+2) Backfill is hidden/unavailable for event-only rules
+3) Backfill executes only safe actions
+4) Backfill requires in-app confirmation
+5) Backfill uses current state and existing condition logic
+6) Backfill results are itemized
+7) Re-running backfill does not create duplicates
+8) Backfill is auditable at rule and shipment level
+9) Backfill is permission-gated
+10) Default automation remains future-only
+11) SLA, Packing, Batch Labels, Dispatch, and reverse logistics remain intact
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Define backfill eligibility model
+2) Add current-state rule classification
+3) Hide/disable backfill for event-only rules
+4) Reuse existing backfill confirmation/result UI where practical
+5) Implement current-state matching using existing condition logic
+6) Enforce safe actions only
+7) Add duplicate-safe context keys
+8) Add audit/run history
+9) Wire permission/gating
+10) Update replit.md
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Backfill Eligibility Model
+3. Current-State Matching Logic
+4. Event-Only Rule Handling
+5. Safe Action Enforcement
+6. Itemized Results + Duplicate Safety
+7. Permission / Gating Updates
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes

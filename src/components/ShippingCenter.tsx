@@ -24,7 +24,20 @@ import ShippingProvidersPage from './ShippingProvidersPage';
 import { CarrierAnalytics } from './shipping/CarrierAnalytics';
 import AutomationRules from './shipping/AutomationRules';
 import BatchLabels, { type BatchEligibility } from './shipping/BatchLabels';
-import { runAutomation, evaluateGuardrails, buildApprovalContextKey, type GuardrailEvaluation, describeRule, isBackfillableTrigger, evaluateSlaBackfillCandidate, buildBackfillKey, type SlaBackfillStateView } from '../shipping/automationEngine';
+import {
+  runAutomation,
+  evaluateGuardrails,
+  buildApprovalContextKey,
+  type GuardrailEvaluation,
+  describeRule,
+  evaluateSlaBackfillCandidate,
+  evaluateNonSlaBackfillCandidate,
+  buildBackfillKey,
+  buildNonSlaBackfillKey,
+  getRuleBackfillEligibility,
+  type SlaBackfillStateView,
+  type RuleBackfillEligibility,
+} from '../shipping/automationEngine';
 import type { AutomationTriggerType, AutomationTriggerContext } from '../types';
 import { featureMatrix as staticFeatureMatrix } from '../owner/mockData';
 import { normalizeStateCode, normalizeZip, normalizePhone } from '../utils/inputNormalizers';
@@ -4274,34 +4287,57 @@ export default function ShippingCenter() {
     };
   }
 
-  function scanSlaBackfill(rule: AutomationRule): BackfillScan {
+  // Phase 3 General Automation Backfill — dry scan that classifies every
+  // current shipment into one of four buckets per the engine's
+  // eligibility model. Dispatches between SLA and non-SLA candidate
+  // evaluators based on `getRuleBackfillEligibility(rule).triggerKind`.
+  // Idempotent: never mutates state. Returns an empty scan if the rule
+  // is not currently eligible (event_only, unsupported, disabled, plan
+  // gates not met).
+  function scanAutomationBackfill(rule: AutomationRule): BackfillScan {
     const out: BackfillScan = { candidates: [], alreadyApplied: [], noState: [], conditionsFailed: [] };
     if (!rule.enabled) return out;
-    if (!isBackfillableTrigger(rule.trigger)) return out;
-    if (!slaFeatureEnabled || !planAllowsAutomationRules) return out;
+    if (!planAllowsAutomationRules) return out;
+    const eligibility = getRuleBackfillEligibility(rule);
+    if (eligibility.kind !== 'current_state_backfillable') return out;
+    // SLA-trigger rules additionally require the SLA feature gate. Non-SLA
+    // current-state rules only require the parent automation-rules plan.
+    if (eligibility.triggerKind === 'sla' && !slaFeatureEnabled) return out;
     const existingKeysByShipment = new Map<string, Set<string>>();
     for (const s of shipments) {
       existingKeysByShipment.set(s.id, new Set(s.slaAutomationBackfillKeys || []));
     }
     for (const shipment of shipments) {
-      const view = buildBackfillStateView(shipment);
-      if (!view) continue;
-      const outcome = evaluateSlaBackfillCandidate(rule, shipment, view);
+      let outcome;
+      let key: string;
+      let outcomeSlaTargetType: SlaTargetType | undefined;
+      if (eligibility.triggerKind === 'sla') {
+        const view = buildBackfillStateView(shipment);
+        if (!view) continue;
+        outcome = evaluateSlaBackfillCandidate(rule, shipment, view);
+        outcomeSlaTargetType = (outcome as any).slaTargetType;
+        key = buildBackfillKey(rule.id, outcomeSlaTargetType);
+      } else {
+        // Non-SLA current-state path. The candidate evaluator validates
+        // the trigger's per-shipment precondition (e.g. label exists for
+        // label_purchased) and runs the live engine for conditions.
+        outcome = evaluateNonSlaBackfillCandidate(rule, shipment);
+        key = buildNonSlaBackfillKey(rule.id, rule.trigger);
+      }
       if (outcome.kind === 'no_state') {
         out.noState.push({ shipmentId: shipment.id, shipmentNumber: shipment.shipmentNumber, reason: outcome.reason });
       } else if (outcome.kind === 'conditions_failed') {
         out.conditionsFailed.push({ shipmentId: shipment.id, shipmentNumber: shipment.shipmentNumber, reason: outcome.failedConditionDescription });
       } else {
-        const key = buildBackfillKey(rule.id, outcome.slaTargetType);
         const already = existingKeysByShipment.get(shipment.id)?.has(key);
         if (already) {
-          out.alreadyApplied.push({ shipmentId: shipment.id, shipmentNumber: shipment.shipmentNumber, slaTargetType: outcome.slaTargetType });
+          out.alreadyApplied.push({ shipmentId: shipment.id, shipmentNumber: shipment.shipmentNumber, slaTargetType: outcomeSlaTargetType });
         } else {
           out.candidates.push({
             shipmentId: shipment.id,
             shipmentNumber: shipment.shipmentNumber,
             ctx: outcome.ctx,
-            slaTargetType: outcome.slaTargetType,
+            slaTargetType: outcomeSlaTargetType,
             backfillKey: key,
           });
         }
@@ -4309,8 +4345,10 @@ export default function ShippingCenter() {
     }
     return out;
   }
-
-  function runSlaBackfill(ruleArg: AutomationRule, scan: BackfillScan): AutomationBackfillRun {
+  // Phase 3 General Automation Backfill — execute the user-confirmed
+  // scan. Generalized over SLA and non-SLA current-state rules; the
+  // engine's safe-action whitelist still gates what actually mutates.
+  function runAutomationBackfill(ruleArg: AutomationRule, scan: BackfillScan): AutomationBackfillRun {
     const runId = `backfill-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const ranAt = new Date().toISOString();
     // Audit attribution must use the authenticated principal, not a
@@ -4340,21 +4378,36 @@ export default function ShippingCenter() {
     // to preview in that case rather than executing on stale matches.
     const ruleTriggerChanged = !ruleMissing && currentRule!.trigger !== ruleArg.trigger;
 
+    // Re-classify with the canonical rule at execution time. Eligibility
+    // is the single source of truth for "this rule can be backfilled";
+    // it covers event-only triggers, missing safe actions (rule has only
+    // guardrail actions), and unsupported triggers in one check.
+    const eligibility: RuleBackfillEligibility = ruleMissing
+      ? { kind: 'unsupported_backfill', reason: 'Rule no longer exists', triggerKind: 'event_only' }
+      : getRuleBackfillEligibility(rule);
+    const ruleNotEligible = eligibility.kind !== 'current_state_backfillable';
+    // SLA-trigger rules require the SLA feature; non-SLA current-state
+    // rules do not. We compute the effective feature gate from the
+    // canonical rule's triggerKind so a feature toggled off mid-flight
+    // blocks SLA backfill but does not falsely block non-SLA backfill.
+    const featureGateMissing =
+      eligibility.triggerKind === 'sla' ? !slaFeatureEnabled : false;
+
     // Defense-in-depth: even if the UI is disabled, refuse to mutate when
     // writes are blocked or feature/permission gates have changed since
     // the operator opened the modal. We additionally re-check rule scope
-    // here (present + enabled + backfillable trigger + trigger unchanged
+    // here (present + enabled + still-eligible + trigger unchanged
     // since scan) so a stale modal pointing at a rule that has since
     // been disabled, deleted, or had its trigger edited cannot drive a
     // mutation through the orchestrator.
     const ruleOutOfScope =
       ruleMissing ||
       !rule.enabled ||
-      !isBackfillableTrigger(rule.trigger) ||
+      ruleNotEligible ||
       ruleTriggerChanged;
     const writesBlocked =
       isWriteBlocked ||
-      !slaFeatureEnabled ||
+      featureGateMissing ||
       !planAllowsAutomationRules ||
       !canRunAutomationBackfill ||
       ruleOutOfScope;
@@ -4438,7 +4491,10 @@ export default function ShippingCenter() {
             continue;
           }
           const existingKeys = shipment.slaAutomationBackfillKeys || [];
-          const noteText = `SLA automation backfill applied: "${rule.name}" by ${ranBy}`;
+          // Note text is trigger-agnostic so non-SLA backfills (e.g. a
+          // label_purchased rule) don't get a misleading "SLA" label in
+          // the shipment's internal notes log.
+          const noteText = `Automation backfill applied: "${rule.name}" by ${ranBy}`;
           const backfillNote: ShipmentInternalNote = {
             id: `note-bf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             text: noteText,
@@ -4495,8 +4551,8 @@ export default function ShippingCenter() {
             ? 'Rule trigger changed since preview; re-run preview'
             : !rule.enabled
               ? 'Rule has been disabled since this backfill was opened'
-              : !isBackfillableTrigger(rule.trigger)
-                ? 'Rule trigger is no longer backfillable'
+              : ruleNotEligible
+                ? (eligibility.reason || 'Rule is no longer backfillable')
                 : 'Backfill permission or plan feature is no longer available';
       for (const cand of scan.candidates) {
         failed++;
@@ -5819,12 +5875,19 @@ export default function ShippingCenter() {
               // rule builder hides SLA triggers/conditions when the SLA
               // feature is plan-disabled OR the operator lacks view_shipping_sla.
               slaFeatureEnabled={slaFeatureEnabled}
-              // Phase 3 SLA Automation Backfill — manual, confirmed action
-              // gated by permission + plan + SLA feature. The component
-              // shows the button only when this is true.
-              canRunBackfill={canRunAutomationBackfill && slaFeatureEnabled && planAllowsAutomationRules && !isWriteBlocked}
-              scanBackfill={scanSlaBackfill}
-              runBackfill={runSlaBackfill}
+              // Phase 3 General Automation Backfill — manual, confirmed
+              // action gated by permission + plan + writes. Per-rule
+              // eligibility (SLA-trigger vs non-SLA current-state vs
+              // event-only vs no-safe-actions) is decided by
+              // `getRuleBackfillEligibility` below; the SLA feature gate
+              // is enforced inside the orchestrator and re-checked at
+              // run time so a rule is only allowed to fire when its own
+              // family's gates pass. This top-level prop is the broad
+              // "is the operator allowed to run any backfill at all" gate.
+              canRunBackfill={canRunAutomationBackfill && planAllowsAutomationRules && !isWriteBlocked}
+              scanBackfill={scanAutomationBackfill}
+              runBackfill={runAutomationBackfill}
+              ruleBackfillEligibility={getRuleBackfillEligibility}
             />
           ) : (
             <div className="bg-white rounded-2xl border border-amber-200 p-6 text-center">

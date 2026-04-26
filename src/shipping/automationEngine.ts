@@ -955,6 +955,15 @@ export function buildBackfillKey(ruleId: string, targetType?: SlaTargetType): st
   return `${ruleId}|${targetType ?? '__any__'}`;
 }
 
+// Stable key for non-SLA backfill applies. Distinct prefix so it cannot
+// shadow an existing SLA-format key on the same shipment if the rule's
+// trigger family changes between backfill runs (the runtime
+// trigger-changed guard also blocks that case, but the key format gives
+// us a second layer of guarantee for already-stored history).
+export function buildNonSlaBackfillKey(ruleId: string, trigger: AutomationTriggerType): string {
+  return `${ruleId}|nonsla:${trigger}`;
+}
+
 // Lightweight projection of `SlaShipmentSummary` the backfill helper needs.
 // Defined locally so the engine module does not have to import from
 // `../utils/sla` (which would create a longer dependency chain). Callers
@@ -1068,4 +1077,194 @@ export function evaluateSlaBackfillCandidate(
     };
   }
   return { kind: 'match', ctx, slaTargetType };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Phase 3 — General Automation Backfill Framework
+//
+// Generalizes the SLA-only backfill into a tri-state eligibility model so
+// that other current-state-evaluable triggers (label_purchased,
+// pickup_requested, return_shipment_created, packing_started/completed/
+// exception_created, shipment_created) can also be backfilled — under the
+// exact same safety model: manual, confirmed, itemized, duplicate-safe,
+// audited, and constrained to the engine's safe-action whitelist.
+//
+// Triggers that are intrinsically event-only (a transition or external
+// signal that has no current-state proxy) remain non-backfillable — see
+// EVENT_ONLY_TRIGGERS below. We do NOT replay historical events.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Triggers that depend on a transition or external event with no
+// current-state representation we can truthfully re-evaluate. Backfill is
+// intentionally not offered for these because applying them now would
+// either fabricate an event or replay history blindly.
+export const EVENT_ONLY_TRIGGERS: AutomationTriggerType[] = [
+  'shipment_updated',
+  'status_changed',
+  'pickup_confirmed',
+  'pickup_cancelled',
+  'tracking_synced',
+  'sla_resumed',
+  'pre_label_purchase',
+];
+
+// Non-SLA triggers that we CAN truthfully evaluate against current
+// shipment state. Each has a precondition checked in
+// evaluateNonSlaBackfillCandidate so we never apply a label_purchased rule
+// to a shipment that does not currently have a label, etc.
+export const CURRENT_STATE_NON_SLA_TRIGGERS: AutomationTriggerType[] = [
+  'shipment_created',
+  'label_purchased',
+  'pickup_requested',
+  'return_shipment_created',
+  'packing_started',
+  'packing_completed',
+  'packing_exception_created',
+];
+
+export type BackfillEligibilityKind =
+  | 'current_state_backfillable'
+  | 'event_only'
+  | 'unsupported_backfill';
+
+export interface RuleBackfillEligibility {
+  kind: BackfillEligibilityKind;
+  // Short, user-facing explanation surfaced in the rule card UI when the
+  // backfill action is hidden or disabled. Only populated for the two
+  // non-eligible kinds; the eligible kind has no reason to display.
+  reason?: string;
+  // Sub-classification used by the orchestrator to dispatch to the
+  // correct candidate evaluator (SLA path vs non-SLA current-state path).
+  // Always present, even for non-eligible rules, so downstream code can
+  // reason about the trigger family without re-deriving it.
+  triggerKind: 'sla' | 'non_sla' | 'event_only';
+}
+
+// True iff this rule has at least one action the engine will actually
+// mutate from inside applyActionsToShipment. Rules whose actions list is
+// 100% guardrails would produce zero engine effects during backfill (the
+// engine silently skips guardrail actions inside applyActionsToShipment),
+// which would be confusing — we prefer to surface that up-front via the
+// 'unsupported_backfill' eligibility classification.
+export function ruleHasAnySafeAction(rule: Pick<AutomationRule, 'actions'>): boolean {
+  if (!rule.actions || rule.actions.length === 0) return false;
+  return rule.actions.some(a => OBSERVATIONAL_ACTIONS.includes(a.type));
+}
+
+// Single source of truth for "is this rule backfillable, and if not, why
+// not?". Used by the AutomationRules UI to decide button visibility and
+// disabled-hint copy, and by the ShippingCenter orchestrator to gate
+// runtime execution. The orchestrator must re-call this at execute time
+// (not just at modal-open time) so a rule edited mid-flight cannot drive
+// an out-of-scope mutation.
+export function getRuleBackfillEligibility(
+  rule: Pick<AutomationRule, 'trigger' | 'actions'>,
+): RuleBackfillEligibility {
+  if (EVENT_ONLY_TRIGGERS.includes(rule.trigger)) {
+    return {
+      kind: 'event_only',
+      reason: 'Backfill is not available for event-only rules.',
+      triggerKind: 'event_only',
+    };
+  }
+  if (!ruleHasAnySafeAction(rule)) {
+    // Either no actions at all, or only guardrail actions — neither is
+    // mutated by the engine during the observational backfill path.
+    return {
+      kind: 'unsupported_backfill',
+      reason: 'This rule has no safe actions to apply during backfill.',
+      triggerKind: BACKFILLABLE_SLA_TRIGGERS.includes(rule.trigger)
+        ? 'sla'
+        : CURRENT_STATE_NON_SLA_TRIGGERS.includes(rule.trigger)
+          ? 'non_sla'
+          : 'event_only',
+    };
+  }
+  if (BACKFILLABLE_SLA_TRIGGERS.includes(rule.trigger)) {
+    return { kind: 'current_state_backfillable', triggerKind: 'sla' };
+  }
+  if (CURRENT_STATE_NON_SLA_TRIGGERS.includes(rule.trigger)) {
+    return { kind: 'current_state_backfillable', triggerKind: 'non_sla' };
+  }
+  // Defensive default — any trigger not explicitly classified above is
+  // treated as unsupported rather than silently allowed through.
+  return {
+    kind: 'unsupported_backfill',
+    reason: 'Backfill is not supported for this trigger.',
+    triggerKind: 'event_only',
+  };
+}
+
+// Pure: derive the synthetic per-event context for one (rule, shipment)
+// pair given the shipment's current non-SLA state, then run the existing
+// rule evaluator. Mirrors evaluateSlaBackfillCandidate so the orchestrator
+// can treat both candidate evaluators uniformly. Returns 'no_state' when
+// the trigger's current-state precondition is not met (e.g. a
+// label_purchased rule against a shipment with no label) so the
+// orchestrator can itemize that distinctly from "matched the trigger but
+// failed the conditions".
+export function evaluateNonSlaBackfillCandidate(
+  rule: AutomationRule,
+  shipment: Shipment,
+): BackfillCandidateOutcome {
+  if (!CURRENT_STATE_NON_SLA_TRIGGERS.includes(rule.trigger)) {
+    return { kind: 'no_state', reason: 'Trigger is not backfillable' };
+  }
+
+  // Per-trigger current-state precondition. If the precondition fails the
+  // shipment is not a truthful candidate — we never fabricate the event.
+  switch (rule.trigger) {
+    case 'shipment_created':
+      // Every persisted shipment trivially satisfies "was created".
+      break;
+    case 'label_purchased':
+      if (!shipment.label) {
+        return { kind: 'no_state', reason: 'Shipment does not currently have a label' };
+      }
+      break;
+    case 'pickup_requested':
+      if (!shipment.pickupInfo?.pickupRequested && !(shipment as any).pickupRequest) {
+        return { kind: 'no_state', reason: 'Shipment does not currently have a pickup request' };
+      }
+      break;
+    case 'return_shipment_created':
+      if (!shipment.returnInfo?.isReturn) {
+        return { kind: 'no_state', reason: 'Shipment is not currently a return' };
+      }
+      break;
+    case 'packing_started':
+      // The trigger fires the moment packing transitions out of
+      // not_started — for backfill purposes "packing has started" is
+      // truthful for any non-not_started status.
+      if (!shipment.packingStatus || shipment.packingStatus === 'not_started') {
+        return { kind: 'no_state', reason: 'Packing has not started for this shipment' };
+      }
+      break;
+    case 'packing_completed':
+      if (shipment.packingStatus !== 'packed') {
+        return { kind: 'no_state', reason: 'Shipment is not currently packed' };
+      }
+      break;
+    case 'packing_exception_created':
+      if (shipment.packingStatus !== 'exception') {
+        return { kind: 'no_state', reason: 'Shipment does not currently have a packing exception' };
+      }
+      break;
+    default:
+      return { kind: 'no_state', reason: 'Trigger is not backfillable' };
+  }
+
+  // Non-SLA triggers do not need any synthetic context fields — all of
+  // their conditions read directly from the shipment via
+  // getShipmentFieldValue. Passing an empty context is correct.
+  const ctx: AutomationTriggerContext = {};
+  const evalResult = evaluateRule(rule, shipment, ctx);
+  if (!evalResult.matched) {
+    return {
+      kind: 'conditions_failed',
+      failedConditionDescription: evalResult.failedConditionDescription,
+      ctx,
+    };
+  }
+  return { kind: 'match', ctx };
 }
