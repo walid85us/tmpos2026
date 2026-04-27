@@ -1,0 +1,108 @@
+Shipping Phase 3 — Automation Backfill Permission Label Generalization
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated cleanup pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not change backfill logic.
+Do not change SLA backfill behavior.
+Do not change automation execution behavior.
+Do not reopen closed shipping workstreams.
+
+Fix only the permission label / naming so Automation Backfill is no longer presented as SLA-only when the framework is now generalized.
+
+==================================================
+CURRENT ISSUE
+==================================================
+
+The Store Permissions Matrix currently shows:
+- Run SLA Automation Backfill
+
+This was acceptable when backfill was SLA-only, but now the backfill framework is generalized conceptually.
+
+Even though currently active backfill support is mainly SLA/current-state-safe, the permission should be named more generally.
+
+Required user-facing label:
+- Run Automation Backfill
+
+Recommended internal permission key:
+- run_shipping_automation_backfill
+
+If the current internal key already exists and is safe, preserve it.
+If the current internal key is SLA-specific, migrate or alias it carefully without breaking existing roles.
+
+==================================================
+REQUIRED BEHAVIOR
+==================================================
+
+1) Store Permissions Matrix should show:
+- Run Automation Backfill
+
+2) Description should say something like:
+- Allows user to manually apply eligible automation rules to existing matching shipments.
+
+3) Do not imply all rules can be backfilled.
+The label should remain general, but helper/description should make clear:
+- only eligible automation rules can be backfilled
+- event-only and pre-action rules remain not backfillable
+
+4) Existing permission assignments should not be lost.
+If managers/admins previously had Run SLA Automation Backfill, they should retain equivalent Run Automation Backfill access.
+
+5) Plan/permission behavior must remain unchanged:
+- permission appears only when Automation Rules / relevant shipping automation feature is plan-available
+- linked permission disappearance rules remain intact
+- role permissions cannot resurrect plan-disabled features
+
+==================================================
+DO NOT CHANGE
+==================================================
+
+Do not change:
+- SLA backfill behavior
+- future-only default automation behavior
+- event-only Backfill N/A behavior
+- pre-action non-backfillable behavior
+- itemized result behavior
+- duplicate/re-run safety
+- audit behavior
+- execution history
+- shipping flows
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+1) Store Permissions Matrix shows “Run Automation Backfill”
+2) It no longer shows “Run SLA Automation Backfill”
+3) Existing authorized roles keep the same effective backfill access
+4) Restricted roles remain restricted
+5) SLA backfill still works
+6) Event-only/pre-action rules remain not backfillable
+7) No shipping or automation regression
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- generalized backfill permission label
+- permission controls eligible automation backfill, currently including SLA backfill
+- event-only/pre-action rules remain not backfillable
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Permission Label Update
+3. Role / Assignment Preservation
+4. Gating / Visibility Confirmation
+5. Files Changed
+6. Documentation Updated
+7. Non-Regression Notes
