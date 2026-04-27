@@ -1402,6 +1402,17 @@ export type AutomationTriggerType =
   // label purchase completes (not after). Only valid on rules with
   // ruleType='guardrail'.
   | 'pre_label_purchase'
+  // Phase 3 matrix refinement — three additional pre-action guardrail
+  // triggers wired to the real engine hooks for: (a) carrier pickup
+  // requests (handleRequestPickup), (b) shipment dispatch transitions
+  // (handleStatusTransition newStatus='Dispatched'), and (c) batch
+  // label purchase loops (purchaseLabelForBatch). Each fires BEFORE
+  // the corresponding action runs. Block / approval / review outcomes
+  // halt the action until cleared. Like pre_label_purchase, these are
+  // never backfillable and are only valid on guardrail-purpose rules.
+  | 'pre_pickup_request'
+  | 'pre_shipment_dispatch'
+  | 'pre_batch_label_purchase'
   // Phase 3 Pass #10 — observational packing-workflow events. Fire AFTER
   // the corresponding packing action so they support flag/note/review
   // purposes only (not pre-action guardrails). They never gate the label

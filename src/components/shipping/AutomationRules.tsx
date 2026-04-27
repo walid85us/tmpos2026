@@ -15,6 +15,10 @@ import {
   // Phase 3 Pass #16 — SLA Automation Linkage. SLA-trigger detection +
   // human labels for execution-history chips.
   isSlaTrigger, SLA_TRIGGERS, getSlaTargetLabel, getSlaStatusLabel,
+  // Phase 3 matrix refinement — pre-action trigger detection so the
+  // rule editor can render the differentiating "evaluated BEFORE the
+  // action" helper text below the trigger dropdown.
+  isPreActionTrigger,
   // Phase 3 SLA Automation Backfill — opt-in detector for the per-rule
   // "Apply to Existing Matches" button. Retained as a fallback when the
   // newer `ruleBackfillEligibility` prop is not wired (legacy callers).
@@ -79,6 +83,14 @@ const TRIGGER_LABELS_BY_TYPE: Record<AutomationTriggerType, string> = {
   tracking_synced: 'Tracking is synced',
   return_shipment_created: 'A return shipment is created',
   pre_label_purchase: 'A carrier label is about to be purchased',
+  // Phase 3 matrix refinement — pre-action triggers for the additional
+  // operator-driven actions wired in ShippingCenter. Like
+  // pre_label_purchase, each is evaluated BEFORE the action runs and
+  // can halt it via require_review_before_action / require_approval /
+  // block_unless_approved.
+  pre_pickup_request: 'A carrier pickup is about to be requested',
+  pre_shipment_dispatch: 'A shipment is about to be dispatched',
+  pre_batch_label_purchase: 'A batch label purchase is about to run',
   // Phase 3 Pass #10 — packing observational triggers. Used by flag_note
   // and require_review purposes; not eligible for guardrail/blocking.
   packing_started: 'Packing is started on a shipment',
@@ -481,6 +493,26 @@ export default function AutomationRules({ rules, logs, shipments, canManage, can
                   className="mt-1 w-full text-xs border border-slate-200 rounded-lg px-2 py-1.5">
                   {allowedTriggers.map(t => <option key={t} value={t}>{TRIGGER_LABELS_BY_TYPE[t]}</option>)}
                 </select>
+                {/* Phase 3 matrix refinement — explicit pre-action vs
+                    post-event helper text so operators understand whether
+                    the rule will halt the action (pre-action) or fire
+                    after the fact (post-event). Kept as a small inline
+                    hint to avoid adding a separate explainer panel. */}
+                {isPreActionTrigger(editing.trigger) ? (
+                  <p
+                    data-testid="trigger-helper-pre-action"
+                    className="mt-1 text-[10px] font-normal text-amber-700 leading-snug"
+                  >
+                    Pre-action trigger: this rule is evaluated <span className="font-bold">before</span> the action runs. A blocking, approval, or review outcome will halt the action until the matching condition is cleared.
+                  </p>
+                ) : (
+                  <p
+                    data-testid="trigger-helper-post-event"
+                    className="mt-1 text-[10px] font-normal text-slate-500 leading-snug"
+                  >
+                    Post-event trigger: this rule fires <span className="font-bold">after</span> the event has happened and never halts the underlying action.
+                  </p>
+                )}
               </label>
             </div>
             <label className="text-xs font-bold text-slate-700 block">

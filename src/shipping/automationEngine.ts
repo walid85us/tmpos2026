@@ -53,7 +53,30 @@ export const OBSERVATIONAL_TRIGGERS: AutomationTriggerType[] = [
 
 export const GUARDRAIL_TRIGGERS: AutomationTriggerType[] = [
   'pre_label_purchase',
+  // Phase 3 matrix refinement — additional pre-action guardrail triggers
+  // wired to the real handlers in ShippingCenter (handleRequestPickup,
+  // handleStatusTransition→Dispatched, purchaseLabelForBatch). Kept as a
+  // single canonical list so the rule builder, engine, and event-only
+  // backfill registry all see the same set.
+  'pre_pickup_request',
+  'pre_shipment_dispatch',
+  'pre_batch_label_purchase',
 ];
+
+// Phase 3 matrix refinement — single source of truth for "this trigger
+// fires BEFORE the action runs and can halt it". Used by the matrix,
+// effectiveProcessType, primaryActionFor, evaluateGuardrails, and the
+// AutomationRules helper-text gating so all surfaces stay in lockstep.
+export const PRE_ACTION_TRIGGERS: AutomationTriggerType[] = [
+  'pre_label_purchase',
+  'pre_pickup_request',
+  'pre_shipment_dispatch',
+  'pre_batch_label_purchase',
+];
+
+export function isPreActionTrigger(t: AutomationTriggerType): boolean {
+  return PRE_ACTION_TRIGGERS.includes(t);
+}
 
 export const OBSERVATIONAL_ACTIONS: AutomationActionType[] = [
   'add_flag', 'add_internal_note', 'mark_review_needed',
@@ -87,7 +110,7 @@ export const PURPOSE_LABELS: Record<RulePurpose, string> = {
 export const PURPOSE_DESCRIPTIONS: Record<RulePurpose, string> = {
   flag_note: 'After an event happens, flag a shipment, add an internal note, or set a priority. Does not pause any operator action.',
   queue_batch: 'Mark eligible shipments as candidates for the Batch Labels workflow.',
-  require_review: 'Require an operator to review the shipment. After an event for observational triggers; before the action for pre-action triggers (e.g. before label purchase).',
+  require_review: 'Require an operator to review the shipment. After an event for observational triggers; before the action for pre-action triggers (label purchase, pickup request, dispatch, batch label purchase).',
   require_approval: 'Pause a risky action and require an authorized approver before it proceeds.',
   block_action: 'Halt a risky action until conditions change or an authorized override is applied.',
 };
@@ -124,6 +147,10 @@ export const PURPOSE_TRIGGER_MATRIX: Record<RulePurpose, AutomationTriggerType[]
   ],
   queue_batch: [
     'shipment_created', 'shipment_updated', 'status_changed', 'return_shipment_created',
+    // Phase 3 matrix refinement — packing_completed routes finished
+    // shipments straight into the Batch Labels queue once verification
+    // passes. Stays observational (post-event); no guardrail semantics.
+    'packing_completed',
     // Phase 3 Pass #16 — let an at-risk/overdue dispatch SLA route the
     // shipment into the Batch Labels queue for accelerated handling.
     'sla_at_risk', 'sla_overdue',
@@ -131,7 +158,11 @@ export const PURPOSE_TRIGGER_MATRIX: Record<RulePurpose, AutomationTriggerType[]
   require_review: [
     'shipment_created', 'shipment_updated', 'status_changed', 'label_purchased',
     'pickup_requested', 'pickup_confirmed', 'pickup_cancelled', 'tracking_synced',
-    'return_shipment_created', 'pre_label_purchase',
+    'return_shipment_created',
+    // Phase 3 matrix refinement — every pre-action trigger supports
+    // require_review (becomes a guardrail review on these triggers via
+    // effectiveProcessType so it can actually halt the action).
+    ...PRE_ACTION_TRIGGERS,
     // Phase 3 Pass #10 — packing events can also raise a review (e.g. require
     // a manager review when an exception is created). Cannot be a guardrail
     // on these triggers because they are observational (the event has
@@ -142,12 +173,14 @@ export const PURPOSE_TRIGGER_MATRIX: Record<RulePurpose, AutomationTriggerType[]
     // SLA transition has already been observed by the time we dispatch.
     ...SLA_TRIGGERS,
   ],
-  // Phase 3 Pass #16 — SLA triggers are STRICTLY observational and never
-  // valid for guardrail purposes. require_approval / block_action remain
-  // limited to pre_label_purchase so the safe-action whitelist is enforced
-  // by the matrix, not just by runtime checks.
-  require_approval: ['pre_label_purchase'],
-  block_action: ['pre_label_purchase'],
+  // Phase 3 Pass #16 + matrix refinement — SLA triggers are STRICTLY
+  // observational and never valid for guardrail purposes. require_approval
+  // and block_action are limited to the pre-action trigger set because
+  // each one is wired to a real engine handler that can be halted before
+  // the underlying action commits. The safe-action whitelist is enforced
+  // by the matrix here, not just by runtime checks.
+  require_approval: [...PRE_ACTION_TRIGGERS],
+  block_action: [...PRE_ACTION_TRIGGERS],
 };
 
 export function purposesForTrigger(trigger: AutomationTriggerType): RulePurpose[] {
@@ -166,7 +199,10 @@ export function triggersForPurpose(purpose: RulePurpose): AutomationTriggerType[
 // 'require_review' on pre_label_purchase becomes a guardrail review so it can
 // gate the action; on any other trigger it stays observational.
 export function effectiveProcessType(purpose: RulePurpose, trigger: AutomationTriggerType): AutomationRuleProcessType {
-  if (purpose === 'require_review' && trigger === 'pre_label_purchase') return 'guardrail';
+  // Phase 3 matrix refinement — require_review on ANY pre-action trigger
+  // (label purchase, pickup request, dispatch, batch label purchase)
+  // becomes a guardrail review so it can actually halt the action.
+  if (purpose === 'require_review' && PRE_ACTION_TRIGGERS.includes(trigger)) return 'guardrail';
   return purposeToProcessType(purpose);
 }
 
@@ -177,7 +213,11 @@ export function primaryActionFor(purpose: RulePurpose, trigger: AutomationTrigge
   switch (purpose) {
     case 'queue_batch': return 'mark_ready_for_batch';
     case 'require_review':
-      return trigger === 'pre_label_purchase' ? 'require_review_before_action' : 'mark_review_needed';
+      // Phase 3 matrix refinement — every pre-action trigger gets the
+      // gating require_review_before_action so the modal halts the
+      // action; observational triggers stay on the post-event
+      // mark_review_needed flag.
+      return PRE_ACTION_TRIGGERS.includes(trigger) ? 'require_review_before_action' : 'mark_review_needed';
     case 'require_approval': return 'require_approval';
     case 'block_action': return 'block_unless_approved';
     case 'flag_note':
@@ -227,6 +267,25 @@ export function conditionFieldsForTrigger(trigger: AutomationTriggerType): Autom
   switch (trigger) {
     case 'pre_label_purchase':
       return ['mode', 'sourceType', 'carrier', 'serviceLevel', 'addressValidationState', 'selectedRateCost'];
+    // Phase 3 matrix refinement — pre_batch_label_purchase mirrors
+    // pre_label_purchase: same buyable shipment shape, same selected-rate
+    // cost gate. The only difference is execution context (batch vs
+    // single), which the engine surfaces via the trigger name itself.
+    case 'pre_batch_label_purchase':
+      return ['mode', 'sourceType', 'carrier', 'serviceLevel', 'addressValidationState', 'selectedRateCost'];
+    // Phase 3 matrix refinement — pre_pickup_request fires before the
+    // carrier pickup booking call. addressValidationState is exposed so
+    // operators can write rules like "block when origin is not validated"
+    // before the truck is scheduled.
+    case 'pre_pickup_request':
+      return ['mode', 'sourceType', 'carrier', 'serviceLevel', 'hasPickup', 'addressValidationState'];
+    // Phase 3 matrix refinement — pre_shipment_dispatch fires before
+    // the operator-driven Status → Dispatched transition. status is
+    // exposed so a rule can read the FROM-status; hasLabel/hasPickup
+    // capture the readiness state that should normally be present
+    // before dispatch.
+    case 'pre_shipment_dispatch':
+      return ['mode', 'sourceType', 'carrier', 'serviceLevel', 'status', 'hasLabel', 'hasPickup'];
     case 'pickup_requested':
     case 'pickup_confirmed':
     case 'pickup_cancelled':
@@ -736,7 +795,10 @@ export function evaluateGuardrails(
     // legacy and new rule shapes both work.
     if (!ruleTriggerMatches(rule, trigger)) continue;
     const isGuardrail = isGuardrailRule(rule, trigger)
-      || (rule.purpose === 'require_review' && trigger === 'pre_label_purchase');
+      // Phase 3 matrix refinement — review-on-pre-action also lifts to
+      // guardrail semantics on every pre-action trigger, not just
+      // pre_label_purchase.
+      || (rule.purpose === 'require_review' && PRE_ACTION_TRIGGERS.includes(trigger));
     if (!isGuardrail) continue;
     // Phase 3 correction #5 — skip rules whose context has already been
     // approved/overridden for this shipment + rate.
@@ -747,7 +809,10 @@ export function evaluateGuardrails(
     const blocking = rule.actions.some(a => a.type === 'block_unless_approved');
     const approvalRequested = rule.actions.some(a => a.type === 'require_approval');
     const reviewRequested = rule.actions.some(a => a.type === 'require_review_before_action')
-      || (rule.purpose === 'require_review' && trigger === 'pre_label_purchase');
+      // Phase 3 matrix refinement — pick up review-on-pre-action across
+      // all four pre-action triggers so the modal dispatches the same
+      // way for pickup / dispatch / batch as it does for label purchase.
+      || (rule.purpose === 'require_review' && PRE_ACTION_TRIGGERS.includes(trigger));
     // A guardrail rule with no guardrail actions is a no-op; skip so it does
     // not silently halt the user's purchase flow.
     if (!blocking && !approvalRequested && !reviewRequested) continue;
@@ -774,6 +839,9 @@ export const TRIGGER_LABELS: Record<AutomationTriggerType, string> = {
   tracking_synced: 'tracking is synced',
   return_shipment_created: 'a return shipment is created',
   pre_label_purchase: 'a carrier label is about to be purchased',
+  pre_pickup_request: 'a carrier pickup is about to be requested',
+  pre_shipment_dispatch: 'a shipment is about to be dispatched',
+  pre_batch_label_purchase: 'a batch label purchase is about to run',
   packing_started: 'packing is started on a shipment',
   packing_completed: 'packing is completed on a shipment',
   packing_exception_created: 'a packing exception is created',
@@ -797,6 +865,9 @@ const TRIGGER_LABELS_TITLECASE: Record<AutomationTriggerType, string> = {
   tracking_synced: 'Tracking Synced',
   return_shipment_created: 'Return Shipment Created',
   pre_label_purchase: 'Before Label Purchase',
+  pre_pickup_request: 'Before Pickup Request',
+  pre_shipment_dispatch: 'Before Shipment Dispatch',
+  pre_batch_label_purchase: 'Before Batch Label Purchase',
   packing_started: 'Packing Started',
   packing_completed: 'Packing Completed',
   packing_exception_created: 'Packing Exception Created',
@@ -1125,6 +1196,12 @@ export const EVENT_ONLY_TRIGGERS: AutomationTriggerType[] = [
   'return_shipment_created',
   'sla_resumed',
   'pre_label_purchase',
+  // Phase 3 matrix refinement — the new pre-action triggers describe an
+  // imminent operator-driven action, not a persistent state. They are
+  // never backfillable for the same reason pre_label_purchase is not.
+  'pre_pickup_request',
+  'pre_shipment_dispatch',
+  'pre_batch_label_purchase',
   'packing_started',
   'packing_completed',
   'packing_exception_created',

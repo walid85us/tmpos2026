@@ -1,0 +1,320 @@
+Shipping Phase 3 — Automation Purpose Trigger Matrix Refinement
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict isolated correction pass.
+Do not redesign the app.
+Do not broaden scope beyond Automation purpose/trigger/condition/action compatibility.
+Do not reopen closed shipping workstreams except where directly required by this automation matrix correction.
+
+Current issue:
+The purpose-driven Automation Rules builder is improved, but some purpose-to-trigger lists are not fully aligned with the actual shipping workflow.
+
+Main issues:
+1) Queue for Batch is missing:
+- Packing is completed on a shipment
+
+2) Require Approval and Block Action are currently limited to:
+- A carrier label is about to be purchased
+
+But there are other real risky pre-action points that should support approval/blocking if they can be wired to actual action handlers:
+- A pickup is about to be requested
+- A shipment is about to be dispatched
+- A batch label purchase is about to run
+
+Important:
+Do NOT add these as fake dropdown choices.
+Only expose them if the rule engine actually evaluates them before the corresponding action proceeds.
+
+==================================================
+REQUIRED PURPOSE/TRIGGER MATRIX
+==================================================
+
+1) Flag / Note
+
+Allowed triggers:
+- A shipment is created
+- A shipment is edited
+- Shipment status changes
+- A carrier label is purchased
+- A pickup is requested
+- A pickup is confirmed
+- A pickup is cancelled
+- Tracking is synced
+- A return shipment is created
+- Packing is started on a shipment
+- Packing is completed on a shipment
+- A packing exception is created
+- An SLA target enters at-risk
+- An SLA target becomes overdue
+- An SLA target is missed
+- An SLA is paused on a shipment
+- An SLA is resumed on a shipment
+- An SLA delay reason is recorded
+
+Purpose:
+Safe after-event logging, note, flag, priority, or review marker.
+
+2) Queue for Batch
+
+Allowed triggers:
+- A shipment is created
+- A shipment is edited
+- Shipment status changes
+- A return shipment is created
+- Packing is completed on a shipment
+
+Optional only if implemented logically:
+- An SLA target enters at-risk
+- An SLA target becomes overdue
+
+Important:
+If SLA triggers are kept for Queue for Batch, only allow them when the SLA target/context can logically relate to label/batch readiness.
+Do not let generic SLA overdue automatically queue unrelated shipments for batch labels.
+
+Purpose:
+Mark eligible shipments as candidates for Batch Labels.
+This must respect packing readiness, package readiness, provider readiness, selected-rate/label readiness, and batch eligibility.
+
+3) Require Review
+
+Allowed triggers:
+- A shipment is created
+- A shipment is edited
+- Shipment status changes
+- A carrier label is purchased
+- A carrier label is about to be purchased
+- A pickup is requested
+- A pickup is confirmed
+- A pickup is cancelled
+- A pickup is about to be requested, if implemented as a real pre-action hook
+- A shipment is about to be dispatched, if implemented as a real pre-action hook
+- A batch label purchase is about to run, if implemented as a real pre-action hook
+- Tracking is synced
+- A return shipment is created
+- Packing is started on a shipment
+- Packing is completed on a shipment
+- A packing exception is created
+- An SLA target enters at-risk
+- An SLA target becomes overdue
+- An SLA target is missed
+- An SLA is paused on a shipment
+- An SLA is resumed on a shipment
+- An SLA delay reason is recorded
+
+Important:
+If the trigger is after-event, review is post-event.
+If the trigger is pre-action, review blocks the next action until resolved.
+Make this clear in helper text.
+
+4) Require Approval
+
+Allowed triggers:
+- A carrier label is about to be purchased
+- A pickup is about to be requested
+- A shipment is about to be dispatched
+- A batch label purchase is about to run
+
+Important:
+Only expose these if they are real pre-action hooks.
+Require Approval must pause the risky action before completion and require authorized approval before proceeding.
+Do not expose ordinary post-event triggers for Require Approval.
+
+Purpose:
+Pre-action approval before risky shipping operations.
+
+5) Block Action
+
+Allowed triggers:
+- A carrier label is about to be purchased
+- A pickup is about to be requested
+- A shipment is about to be dispatched
+- A batch label purchase is about to run
+
+Important:
+Only expose these if they are real pre-action hooks.
+Block Action must stop the action before completion until:
+- the condition changes, or
+- an authorized override is applied if override is allowed.
+
+Purpose:
+Pre-action hard stop before risky shipping operations.
+
+==================================================
+PRE-ACTION HOOK REQUIREMENTS
+==================================================
+
+For each pre-action trigger exposed, Replit must wire the rule evaluation into the actual handler before the action runs.
+
+1) A carrier label is about to be purchased
+Evaluate before provider label purchase.
+If blocked/review/approval is required, do not purchase label.
+
+2) A pickup is about to be requested
+Evaluate before provider pickup request is submitted.
+If blocked/review/approval is required, do not send pickup request.
+
+3) A shipment is about to be dispatched
+Evaluate before status changes to Dispatched.
+If blocked/review/approval is required, do not mark Dispatched.
+
+4) A batch label purchase is about to run
+Evaluate before batch execution purchases labels.
+If a shipment in the batch violates a rule:
+- skip that shipment
+- show itemized blocked/review/approval reason
+- do not silently purchase that row
+- allow approved/pre-cleared rows to proceed
+
+==================================================
+CONDITION FILTERING REQUIREMENTS
+==================================================
+
+Condition options must be compatible with purpose + trigger.
+
+Examples:
+
+For “A carrier label is about to be purchased”:
+- selected rate cost
+- carrier
+- provider
+- service level
+- package readiness
+- address validation
+- shipment mode
+- packing readiness
+
+For “A pickup is about to be requested”:
+- provider
+- carrier
+- pickup fee
+- pickup window/date
+- pickup address readiness
+- shipment status
+- packing readiness if relevant
+- shipment mode
+
+For “A shipment is about to be dispatched”:
+- shipment status
+- label exists
+- tracking exists
+- manual carrier/service/tracking completeness
+- packing status
+- package verification
+- unresolved automation review/approval state
+- SLA status if relevant
+
+For “A batch label purchase is about to run”:
+- selected rate cost
+- carrier
+- provider
+- service level
+- packing readiness
+- package verification
+- batch eligibility
+- unresolved review/approval state
+
+For “Packing is completed on a shipment”:
+- packing status
+- package verification state
+- source type
+- shipment mode
+- provider/manual mode
+- return/outbound
+
+For SLA triggers:
+- SLA status
+- SLA target type
+- SLA variance
+- delay reason
+- paused state
+- source type
+- return/outbound
+
+==================================================
+ACTION FILTERING REQUIREMENTS
+==================================================
+
+Flag / Note:
+- add note
+- set priority
+- mark review needed
+- add flag
+
+Queue for Batch:
+- queue for batch labels
+- optionally add note or priority if already supported
+- do not bypass batch eligibility
+
+Require Review:
+- require review / mark review needed
+- for pre-action triggers, block the next step until review is resolved
+
+Require Approval:
+- require approval before action proceeds
+- request approval / approve / override workflow remains permission-gated
+
+Block Action:
+- block action until condition changes or authorized override is applied
+
+==================================================
+PERMISSION REQUIREMENTS
+==================================================
+
+Reuse existing automation permissions where applicable:
+- manage_shipping_automation_rules
+- view_shipping_automation_outcomes
+- view_shipping_automation_history
+- resolve_shipping_automation_reviews
+- approve_shipping_automation_exceptions
+- override_shipping_automation_guardrails
+
+Required:
+- ordinary users may request approval/review where allowed
+- only users with approval permission can approve
+- only users with override permission can override
+- no role should bypass pre-action guardrails through stale UI or direct handler action
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+1) Queue for Batch includes Packing Completed as a trigger
+2) Require Approval includes only real pre-action triggers
+3) Block Action includes only real pre-action triggers
+4) Pickup request, dispatch, and batch label purchase pre-action hooks are real if exposed
+5) Flag / Note remains broad and safe
+6) Require Review clearly separates post-event review from pre-action review
+7) Conditions are filtered logically by purpose and trigger
+8) Actions are filtered logically by purpose and trigger
+9) Existing SLA automation, SLA backfill, general backfill, packing, batch labels, guardrails, dispatch, and shipping flows remain intact
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- final purpose-to-trigger matrix
+- condition compatibility notes
+- action compatibility notes
+- Queue for Batch relationship to Packing Completed
+- Require Approval / Block Action pre-action triggers
+- pre-action hook behavior for label purchase, pickup request, dispatch, and batch label execution
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Purpose-to-Trigger Matrix Updates
+3. Pre-Action Hook Implementation
+4. Condition Compatibility Updates
+5. Action Compatibility Updates
+6. Queue for Batch / Packing Completed Alignment
+7. Files Changed
+8. Documentation Updated
+9. Non-Regression Notes

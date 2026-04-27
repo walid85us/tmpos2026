@@ -716,10 +716,21 @@ export default function ShippingCenter() {
     blockingRules: GuardrailEvaluation[];
     approvalRules: GuardrailEvaluation[];
     // Phase 3 correction #4 — review-only rules (require_review purpose on
-    // pre_label_purchase). Distinct from approvalRules because clearing
+    // a pre-action trigger). Distinct from approvalRules because clearing
     // them does not require Approve Automation Exceptions — any operator
     // can acknowledge from this same modal.
     reviewRules: GuardrailEvaluation[];
+    // Phase 3 matrix refinement — discriminator so the modal knows which
+    // downstream action to resume on Approve / Override / Acknowledge.
+    // Defaults to 'pre_label_purchase' for legacy callers; the modal
+    // dispatches handleRequestPickup / handleStatusTransition /
+    // handlePurchaseLabel based on this value. pre_batch_label_purchase
+    // never reaches this modal because the batch path is non-interactive.
+    trigger: AutomationTriggerType;
+    // Optional payload threaded through for handleStatusTransition resume
+    // (currently only the dispatch path needs it; pickup uses the live
+    // pickupForm state and label uses the live selectedRate state).
+    dispatchTo?: ShipmentStatus;
   } | null>(null);
   const [guardrailNote, setGuardrailNote] = useState('');
   const [selectedShipment, setSelectedShipment] = useState<string | null>(null);
@@ -1528,7 +1539,7 @@ export default function ShippingCenter() {
   const isPreDispatch = (status: ShipmentStatus) => ['Draft', 'Ready', 'Label Created', 'Packed'].includes(status);
   const isEditable = (status: ShipmentStatus) => ['Draft', 'Ready', 'Label Created', 'Packed'].includes(status);
 
-  function handleStatusTransition(id: string, newStatus: ShipmentStatus, reason?: string, notes?: string) {
+  function handleStatusTransition(id: string, newStatus: ShipmentStatus, reason?: string, notes?: string, opts?: { bypassGuardrails?: boolean }) {
     if (isWriteBlocked) { setShowStatusConfirm(null); setReasonModal(null); return; }
     const shipment = shipments.find(s => s.id === id);
     if (!shipment) return;
@@ -1594,6 +1605,31 @@ export default function ShippingCenter() {
       setShowStatusConfirm(null);
       setReasonModal(null);
       return;
+    }
+
+    // Phase 3 matrix refinement — pre_shipment_dispatch guardrail. Only
+    // fires on the manual operator-driven transition to 'Dispatched';
+    // does NOT fire on the carrier-acceptance auto-mapping (which is
+    // an incoming-event signal, not an operator action) and does not
+    // affect the cancel / packed / rejected / returned paths above.
+    // opts.bypassGuardrails is set when the modal resumes the action
+    // after the operator approved / overrode / acknowledged.
+    if (newStatus === 'Dispatched' && !opts?.bypassGuardrails && planAllowsAutomationRules && automationRules.length > 0) {
+      const guardEval = evaluateGuardrails(automationRules, shipment, 'pre_shipment_dispatch');
+      if (!guardEval.allClear) {
+        setPendingGuardrail({
+          shipmentId: id,
+          blockingRules: guardEval.blockingRules,
+          approvalRules: guardEval.approvalRules,
+          reviewRules: guardEval.reviewRules,
+          trigger: 'pre_shipment_dispatch',
+          dispatchTo: newStatus,
+        });
+        setGuardrailNote('');
+        setShowStatusConfirm(null);
+        setReasonModal(null);
+        return;
+      }
     }
 
     const now = new Date().toISOString();
@@ -3189,7 +3225,7 @@ export default function ShippingCenter() {
     setProviderSuccess('Service point cleared.');
   }
 
-  async function handleRequestPickup(shipmentId: string) {
+  async function handleRequestPickup(shipmentId: string, opts?: { bypassGuardrails?: boolean }) {
     if (guardShippingProviderPlan('Requesting a carrier pickup')) return;
     if (isWriteBlocked) {
       setPickupAttemptResult({ kind: 'error', title: 'Write blocked', detail: 'You are in preview/read-only mode. Pickup booking is disabled.', steps: [], code: 'WRITE_BLOCKED' });
@@ -3239,6 +3275,27 @@ export default function ShippingCenter() {
       setProviderError(friendlyProviderError({ code: 'VALIDATION', message: msg }));
       setPickupAttemptResult({ kind: 'error', title: 'Missing pickup date', detail: msg, steps: [], code: 'VALIDATION' });
       return;
+    }
+    // Phase 3 matrix refinement — pre_pickup_request guardrail. Mirrors
+    // the pre_label_purchase pattern: the rule is evaluated BEFORE the
+    // carrier-bound pickup request fires, so a blocking, approval-only,
+    // or review-only outcome opens the same modal the operator already
+    // recognizes from label purchase. opts.bypassGuardrails is set when
+    // the modal resumes the action after the operator approved /
+    // overrode / acknowledged the matched rule.
+    if (!opts?.bypassGuardrails && planAllowsAutomationRules && automationRules.length > 0) {
+      const guardEval = evaluateGuardrails(automationRules, ship, 'pre_pickup_request');
+      if (!guardEval.allClear) {
+        setPendingGuardrail({
+          shipmentId,
+          blockingRules: guardEval.blockingRules,
+          approvalRules: guardEval.approvalRules,
+          reviewRules: guardEval.reviewRules,
+          trigger: 'pre_pickup_request',
+        });
+        setGuardrailNote('');
+        return;
+      }
     }
     clearProviderFeedback();
     setPickupAttemptResult(null);
@@ -4632,6 +4689,58 @@ export default function ShippingCenter() {
     const preApproved = shipment.reviewNeeded
       && (shipment.reviewNeeded.kind === 'approval' || shipment.reviewNeeded.kind === 'block')
       && (shipment.reviewNeeded.state === 'approved' || shipment.reviewNeeded.state === 'overridden');
+    // Phase 3 matrix refinement — pre_batch_label_purchase is a distinct
+    // pre-action trigger fired ONLY from the batch loop. It runs before
+    // the existing pre_label_purchase guardrail so an operator can scope
+    // batch-only blocks (e.g. "block batch label purchase when carrier=UPS
+    // and selectedRateCost > 50") without affecting single-shipment
+    // purchases. Same non-interactive halt pattern: write a pending
+    // reviewNeeded marker, append an audit log entry, and return a
+    // structured failure so the calling Batch Labels UI can show the
+    // per-row reason.
+    if (!preApproved && planAllowsAutomationRules && automationRules.length > 0) {
+      const batchEval = evaluateGuardrails(automationRules, shipment, 'pre_batch_label_purchase', { selectedRate: shipment.selectedRate });
+      if (!batchEval.allClear) {
+        const now = new Date().toISOString();
+        const firstBlocking = batchEval.blockingRules[0];
+        const firstApproval = batchEval.approvalRules[0];
+        const firstReview = batchEval.reviewRules[0];
+        const sourceRule = firstBlocking || firstApproval || firstReview;
+        if (sourceRule) {
+          const kind: 'block' | 'approval' | 'review' = firstBlocking ? 'block' : firstApproval ? 'approval' : 'review';
+          const outcome: 'blocked' | 'approval_required' | 'review_required' = firstBlocking
+            ? 'blocked' : firstApproval ? 'approval_required' : 'review_required';
+          updateShipment(shipmentId, {
+            reviewNeeded: {
+              reason: sourceRule.reason,
+              ruleId: sourceRule.rule.id,
+              ruleName: sourceRule.rule.name,
+              markedAt: now,
+              kind,
+              state: 'pending',
+              triggerContext: shipment.selectedRate ? { selectedRate: shipment.selectedRate } : undefined,
+            },
+            updatedAt: now,
+          });
+          appendAutomationLogs([{
+            id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            ruleId: sourceRule.rule.id, ruleName: sourceRule.rule.name,
+            ruleSummary: describeRule(sourceRule.rule),
+            shipmentId: shipment.id, shipmentNumber: shipment.shipmentNumber,
+            trigger: 'pre_batch_label_purchase', matched: true,
+            actionsApplied: [`guardrail:${outcome}`],
+            timestamp: now,
+            ruleType: 'guardrail',
+            guardrailOutcome: outcome,
+          }]);
+        }
+        return { ok: false, reason: firstBlocking
+          ? `Blocked by batch guardrail rule: ${firstBlocking.rule.name}`
+          : firstApproval
+            ? `Approval required by batch guardrail rule: ${firstApproval.rule.name}`
+            : `Review required by batch guardrail rule: ${firstReview?.rule.name || 'unknown'}` };
+      }
+    }
     if (!preApproved && planAllowsAutomationRules && automationRules.length > 0) {
       const guardEval = evaluateGuardrails(automationRules, shipment, 'pre_label_purchase', { selectedRate: shipment.selectedRate });
       if (!guardEval.allClear) {
@@ -5014,6 +5123,7 @@ export default function ShippingCenter() {
           blockingRules: guardEval.blockingRules,
           approvalRules: guardEval.approvalRules,
           reviewRules: guardEval.reviewRules,
+          trigger: 'pre_label_purchase',
         });
         setGuardrailNote('');
         return;
@@ -10829,16 +10939,103 @@ export default function ShippingCenter() {
         )}
       </AnimatePresence>
 
-      {/* Phase 3 correction #3 — Pre-Label-Purchase Guardrail modal. Opens
-          when handlePurchaseLabel detects matching guardrail rules. Lets the
-          operator pick another rate, request approval, approve / override
-          (perm-gated) and proceed, or cancel. Never bypasses normal label-
-          purchase prerequisites — those have already been validated by the
-          time we reach the guardrail check. */}
+      {/* Phase 3 correction #3 — Pre-Action Guardrail modal. Opens when
+          any of handlePurchaseLabel / handleRequestPickup /
+          handleStatusTransition→Dispatched detects matching guardrail
+          rules. Phase 3 matrix refinement extended this from the
+          single pre_label_purchase trigger to four pre-action triggers;
+          the modal copy and the resume callback both adapt to
+          pendingGuardrail.trigger. Lets the operator (rate-only path)
+          pick another rate, request approval, approve / override
+          (perm-gated) and proceed, or cancel. Never bypasses normal
+          per-action prerequisites — those have already been validated
+          by the time we reach the guardrail check. */}
       <AnimatePresence>
         {pendingGuardrail && (() => {
           const target = shipments.find(s => s.id === pendingGuardrail.shipmentId);
           if (!target) return null;
+          // Phase 3 matrix refinement — adapt copy + resume per trigger.
+          // The "other rate" option only makes sense for label purchase
+          // because that is the only flow where the rule's selectedRateCost
+          // condition is the typical reason for a halt.
+          const trigger = pendingGuardrail.trigger;
+          const isLabelTrigger = trigger === 'pre_label_purchase';
+          const isPickupTrigger = trigger === 'pre_pickup_request';
+          const isDispatchTrigger = trigger === 'pre_shipment_dispatch';
+          const actionNounMap: Record<string, { titleBlocked: string; titleReview: string; titlePending: string; titleApproval: string; bodyBlocked: string; bodyReview: string; bodyPending: string; bodyApproval: string; ackButton: string; approveButton: string; overrideButton: string }> = {
+            pre_label_purchase: {
+              titleBlocked: 'Label Purchase Blocked',
+              titleReview: 'Review Required',
+              titlePending: 'Approval Pending',
+              titleApproval: 'Approval Required',
+              bodyBlocked: 'A guardrail rule blocks this label purchase. You can pick another rate, request approval, or — if permitted — override and continue.',
+              bodyReview: 'A rule asks you to review this purchase before it proceeds. Acknowledge the review to continue, pick another rate, or cancel.',
+              bodyPending: 'You have already requested approval for this rule and rate. An authorized approver must clear it before this label can be purchased.',
+              bodyApproval: 'A guardrail rule requires operator approval before this label purchase can proceed.',
+              ackButton: 'Acknowledge & Purchase',
+              approveButton: 'Approve & Purchase',
+              overrideButton: 'Override & Purchase',
+            },
+            pre_pickup_request: {
+              titleBlocked: 'Pickup Request Blocked',
+              titleReview: 'Review Required',
+              titlePending: 'Approval Pending',
+              titleApproval: 'Approval Required',
+              bodyBlocked: 'A guardrail rule blocks this carrier pickup request. Request approval, or — if permitted — override and continue.',
+              bodyReview: 'A rule asks you to review this pickup request before it proceeds. Acknowledge the review to continue, or cancel.',
+              bodyPending: 'You have already requested approval for this rule. An authorized approver must clear it before the pickup can be requested.',
+              bodyApproval: 'A guardrail rule requires operator approval before this pickup request can proceed.',
+              ackButton: 'Acknowledge & Request Pickup',
+              approveButton: 'Approve & Request Pickup',
+              overrideButton: 'Override & Request Pickup',
+            },
+            pre_shipment_dispatch: {
+              titleBlocked: 'Dispatch Blocked',
+              titleReview: 'Review Required',
+              titlePending: 'Approval Pending',
+              titleApproval: 'Approval Required',
+              bodyBlocked: 'A guardrail rule blocks this dispatch. Request approval, or — if permitted — override and continue.',
+              bodyReview: 'A rule asks you to review this dispatch before it proceeds. Acknowledge the review to continue, or cancel.',
+              bodyPending: 'You have already requested approval for this rule. An authorized approver must clear it before this shipment can be dispatched.',
+              bodyApproval: 'A guardrail rule requires operator approval before this shipment can be dispatched.',
+              ackButton: 'Acknowledge & Dispatch',
+              approveButton: 'Approve & Dispatch',
+              overrideButton: 'Override & Dispatch',
+            },
+            pre_batch_label_purchase: {
+              // Defensive: batch flow never opens this modal (non-interactive),
+              // but we provide labels in case a future caller does.
+              titleBlocked: 'Batch Label Purchase Blocked',
+              titleReview: 'Review Required',
+              titlePending: 'Approval Pending',
+              titleApproval: 'Approval Required',
+              bodyBlocked: 'A guardrail rule blocks this batch label purchase.',
+              bodyReview: 'A rule asks you to review this batch label purchase before it proceeds.',
+              bodyPending: 'You have already requested approval for this rule and rate.',
+              bodyApproval: 'A guardrail rule requires operator approval before this batch label purchase can proceed.',
+              ackButton: 'Acknowledge & Continue',
+              approveButton: 'Approve & Continue',
+              overrideButton: 'Override & Continue',
+            },
+          };
+          const labels = actionNounMap[trigger] || actionNounMap.pre_label_purchase;
+          // Resume callback — dispatched on Approve / Override / Acknowledge.
+          // Each path passes bypassGuardrails so the engine does not re-fire
+          // the same matched rule. handleStatusTransition needs the original
+          // newStatus, which we threaded via dispatchTo on the pendingGuardrail.
+          const resumeAction = () => {
+            if (isPickupTrigger) {
+              void handleRequestPickup(target.id, { bypassGuardrails: true });
+            } else if (isDispatchTrigger) {
+              const to = pendingGuardrail.dispatchTo || 'Dispatched';
+              handleStatusTransition(target.id, to, undefined, undefined, { bypassGuardrails: true });
+            } else {
+              // pre_label_purchase (default) — preserves the existing
+              // guardrailOutcome metadata so the audit log keeps the
+              // 'approved' vs 'overridden' chip on resumed purchases.
+              void handlePurchaseLabel(target.id, { bypassGuardrails: true });
+            }
+          };
           const blocking = pendingGuardrail.blockingRules;
           const approval = pendingGuardrail.approvalRules;
           // Phase 3 correction #4 — review rules are gated only by being an
@@ -10882,7 +11079,7 @@ export default function ShippingCenter() {
           function recordOutcomeAndPurchase(outcome: 'approved' | 'overridden') {
             const now = new Date().toISOString();
             // Persist a reviewNeeded record + audit log so history reflects
-            // the decision even though the purchase succeeded.
+            // the decision even though the action succeeded.
             if (primaryRule) {
               const reviewKind = isHardBlock ? 'block' : 'approval';
               const note = guardrailNote.trim() || undefined;
@@ -10895,9 +11092,6 @@ export default function ShippingCenter() {
                   state: outcome,
                   resolved: true,
                   triggerContext: target.selectedRate ? { selectedRate: target.selectedRate } : undefined,
-                  // Carry forward the original requester metadata so the
-                  // historical record still shows who asked for approval
-                  // (not just who approved it).
                   requestedBy: existingRn?.requestedBy,
                   requestedAt: existingRn?.requestedAt,
                   requesterNote: existingRn?.requesterNote,
@@ -10913,9 +11107,6 @@ export default function ShippingCenter() {
                     ? { approvedAt: now, approvedBy: 'Current User', approverNote: note, resolutionNote: note }
                     : { overriddenAt: now, overriddenBy: 'Current User', approverNote: note, resolutionNote: note }),
                 },
-                // Phase 3 correction #5 — mark every fired rule's context
-                // as approved so re-purchase with the same rate does not
-                // re-trigger the guardrail modal.
                 approvedGuardrailContexts: Array.from(new Set([
                   ...(target.approvedGuardrailContexts || []),
                   ...allCtxKeys,
@@ -10926,7 +11117,11 @@ export default function ShippingCenter() {
                 ruleId: primaryRule.id, ruleName: primaryRule.name,
                 ruleSummary: describeRule(primaryRule),
                 shipmentId: target.id, shipmentNumber: target.shipmentNumber,
-                trigger: 'pre_label_purchase', matched: true,
+                // Phase 3 matrix refinement — log under the actual trigger
+                // that fired, not a hardcoded label-purchase string, so
+                // execution history accurately reflects pickup / dispatch /
+                // batch decisions.
+                trigger, matched: true,
                 actionsApplied: [outcome === 'approved' ? 'guardrail:approved' : 'guardrail:overridden'],
                 timestamp: now,
                 ruleType: 'guardrail',
@@ -10935,9 +11130,9 @@ export default function ShippingCenter() {
             }
             setPendingGuardrail(null);
             setGuardrailNote('');
-            // Bypass guardrails on this resumed purchase — we already recorded
-            // the decision above.
-            void handlePurchaseLabel(target.id, { bypassGuardrails: true, guardrailOutcome: outcome });
+            // Phase 3 matrix refinement — dispatch the right resume per
+            // trigger; bypassGuardrails so the engine does not re-fire.
+            resumeAction();
           }
           function requestApprovalOnly() {
             // Phase 3 correction #5 — duplicate request prevention. If a
@@ -10981,7 +11176,8 @@ export default function ShippingCenter() {
                 ruleId: primaryRule.id, ruleName: primaryRule.name,
                 ruleSummary: describeRule(primaryRule),
                 shipmentId: target.id, shipmentNumber: target.shipmentNumber,
-                trigger: 'pre_label_purchase', matched: true,
+                // Phase 3 matrix refinement — actual trigger, not hardcoded.
+                trigger, matched: true,
                 actionsApplied: [isHardBlock ? 'guardrail:blocked' : 'guardrail:approval_requested'],
                 timestamp: now,
                 ruleType: 'guardrail',
@@ -11022,7 +11218,10 @@ export default function ShippingCenter() {
               ruleId: r.rule.id, ruleName: r.rule.name,
               ruleSummary: describeRule(r.rule),
               shipmentId: target.id, shipmentNumber: target.shipmentNumber,
-              trigger: 'pre_label_purchase' as const, matched: true,
+              // Phase 3 matrix refinement — actual trigger, not hardcoded,
+              // so review-acknowledge entries on pickup / dispatch / batch
+              // show their real trigger in execution history.
+              trigger, matched: true,
               actionsApplied: ['guardrail:acknowledged'],
               timestamp: now,
               ruleType: 'guardrail' as const,
@@ -11030,7 +11229,9 @@ export default function ShippingCenter() {
             })));
             setPendingGuardrail(null);
             setGuardrailNote('');
-            void handlePurchaseLabel(target.id, { bypassGuardrails: true });
+            // Phase 3 matrix refinement — dispatch the right resume per
+            // trigger; bypassGuardrails so the engine does not re-fire.
+            resumeAction();
           }
           function chooseAnotherRate() {
             setPendingGuardrail(null);
@@ -11049,22 +11250,22 @@ export default function ShippingCenter() {
                 <div>
                   <p className={`text-[10px] font-black uppercase tracking-widest mb-1 ${isHardBlock ? 'text-rose-600' : reviewOnly ? 'text-indigo-600' : existingPendingMatch ? 'text-sky-600' : 'text-amber-600'}`}>
                     {isHardBlock
-                      ? 'Label Purchase Blocked'
+                      ? labels.titleBlocked
                       : reviewOnly
-                        ? 'Review Required'
+                        ? labels.titleReview
                         : existingPendingMatch
-                          ? 'Approval Pending'
-                          : 'Approval Required'}
+                          ? labels.titlePending
+                          : labels.titleApproval}
                   </p>
                   <h3 className="text-lg font-black text-slate-800">{target.shipmentNumber}</h3>
                   <p className="text-[11px] text-slate-500 mt-1">
                     {isHardBlock
-                      ? 'A guardrail rule blocks this label purchase. You can pick another rate, request approval, or — if permitted — override and continue.'
+                      ? labels.bodyBlocked
                       : reviewOnly
-                        ? 'A rule asks you to review this purchase before it proceeds. Acknowledge the review to continue, pick another rate, or cancel.'
+                        ? labels.bodyReview
                         : existingPendingMatch
-                          ? 'You have already requested approval for this rule and rate. An authorized approver must clear it before this label can be purchased.'
-                          : 'A guardrail rule requires operator approval before this label purchase can proceed.'}
+                          ? labels.bodyPending
+                          : labels.bodyApproval}
                   </p>
                   {/* Phase 3 correction #5 — duplicate-request banner so the
                       operator understands why Request Approval is disabled.
@@ -11113,12 +11314,18 @@ export default function ShippingCenter() {
                   >
                     Cancel
                   </button>
-                  <button
-                    onClick={chooseAnotherRate}
-                    className="flex-1 py-2.5 rounded-xl bg-slate-200 text-slate-700 font-black text-[10px] uppercase tracking-widest hover:bg-slate-300"
-                  >
-                    Choose Other Rate
-                  </button>
+                  {/* Phase 3 matrix refinement — "Choose Other Rate" only
+                      makes sense for pre_label_purchase, where the rule's
+                      selectedRateCost gate is the typical reason for a
+                      halt. Hidden on pickup/dispatch/batch triggers. */}
+                  {isLabelTrigger && (
+                    <button
+                      onClick={chooseAnotherRate}
+                      className="flex-1 py-2.5 rounded-xl bg-slate-200 text-slate-700 font-black text-[10px] uppercase tracking-widest hover:bg-slate-300"
+                    >
+                      Choose Other Rate
+                    </button>
+                  )}
                   {/* Phase 3 correction #4 — review-only matches don't need
                       an approver; any operator can acknowledge to continue.
                       We hide the "Request Approval" affordance in review-only
@@ -11139,7 +11346,7 @@ export default function ShippingCenter() {
                       disabled={isWriteBlocked}
                       className="flex-1 py-2.5 rounded-xl bg-indigo-600 text-white font-black text-[10px] uppercase tracking-widest hover:bg-indigo-700 disabled:opacity-50"
                     >
-                      Acknowledge &amp; Purchase
+                      {labels.ackButton}
                     </button>
                   )}
                   {approveEnabled && (
@@ -11148,7 +11355,7 @@ export default function ShippingCenter() {
                       disabled={isWriteBlocked}
                       className="flex-1 py-2.5 rounded-xl bg-sky-600 text-white font-black text-[10px] uppercase tracking-widest hover:bg-sky-700 disabled:opacity-50"
                     >
-                      Approve & Purchase
+                      {labels.approveButton}
                     </button>
                   )}
                   {isHardBlock && overrideEnabled && (
@@ -11157,7 +11364,7 @@ export default function ShippingCenter() {
                       disabled={isWriteBlocked}
                       className="flex-1 py-2.5 rounded-xl bg-rose-600 text-white font-black text-[10px] uppercase tracking-widest hover:bg-rose-700 disabled:opacity-50"
                     >
-                      Override & Purchase
+                      {labels.overrideButton}
                     </button>
                   )}
                 </div>
