@@ -842,7 +842,7 @@ export default function Employees() {
                   // feature is plan-disabled, the count must decrease
                   // accordingly (and recover when the plan re-enables it).
                   const allDomainSubs = getSubPermissionsForDomain(domain.id);
-                  const domainSubs = tenant ? allDomainSubs.filter(sub => isSubPermissionPlanAvailable(sub, tenant.plan)) : allDomainSubs;
+                  const domainSubs = tenant ? allDomainSubs.filter(sub => isSubPermissionPlanAvailable(sub, tenant.plan, tenant.id)) : allDomainSubs;
                   const hasSubs = domainSubs.length > 0;
 
                   return (
@@ -917,7 +917,7 @@ export default function Employees() {
                         // Truthful state model: plan decides if a capability
                         // exists at all; the matrix only shows capabilities
                         // that actually exist for this tenant's plan.
-                        const planAvailable = tenant ? isSubPermissionPlanAvailable(sub, tenant.plan) : true;
+                        const planAvailable = tenant ? isSubPermissionPlanAvailable(sub, tenant.plan, tenant.id) : true;
                         if (!planAvailable) return null;
                         return (
                         <tr key={sub.id} className="border-b border-slate-50/50 transition-colors bg-white hover:bg-slate-50/30">
@@ -1358,7 +1358,7 @@ export default function Employees() {
                       // actually exposes, so admins cannot grant sub-perms
                       // for a feature the plan disables.
                       const allDomainSubs = getSubPermissionsForDomain(domain.id);
-                      const domainSubs = tenant ? allDomainSubs.filter(sub => isSubPermissionPlanAvailable(sub, tenant.plan)) : allDomainSubs;
+                      const domainSubs = tenant ? allDomainSubs.filter(sub => isSubPermissionPlanAvailable(sub, tenant.plan, tenant.id)) : allDomainSubs;
                       return (
                         <React.Fragment key={domain.id}>
                           <div className={`flex items-center justify-between p-3 rounded-xl border border-slate-200 ${domainSubs.length > 0 ? 'bg-slate-100' : 'bg-slate-50'}`}>

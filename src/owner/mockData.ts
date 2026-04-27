@@ -145,14 +145,50 @@ export const tenants = [
 
 export type AddOnLifecycle = 'draft' | 'planned' | 'in_development' | 'active' | 'deprecated' | 'archived';
 
-export const addOns = [
-  { id: 'sms', name: 'SMS Credits', price: 10, compatiblePlans: ['growth', 'advanced'], status: 'active' as const, lifecycle: 'active' as AddOnLifecycle, description: 'Bulk SMS credits for customer notifications, marketing campaigns, and ticket updates.' },
-  { id: 'loyalty', name: 'Loyalty Program', price: 20, compatiblePlans: ['advanced'], status: 'active' as const, lifecycle: 'active' as AddOnLifecycle, description: 'Customer loyalty points, rewards tiers, and automated engagement campaigns.' },
-  { id: 'reporting', name: 'Advanced Reporting', price: 15, compatiblePlans: ['growth', 'advanced'], status: 'active' as const, lifecycle: 'active' as AddOnLifecycle, description: 'Custom report builder, scheduled reports, and advanced analytics dashboards.' },
-  { id: 'multistore', name: 'Multi-Store Pack', price: 30, compatiblePlans: ['growth', 'advanced'], status: 'active' as const, lifecycle: 'active' as AddOnLifecycle, description: 'Extra store locations, inter-store inventory transfers, and consolidated reporting.' },
-  { id: 'api', name: 'API Access', price: 25, compatiblePlans: ['advanced'], status: 'active' as const, lifecycle: 'active' as AddOnLifecycle, description: 'REST API access for custom integrations, webhooks, and third-party app connectivity.' },
-  { id: 'whitelabel', name: 'White-Label', price: 50, compatiblePlans: ['advanced'], status: 'active' as const, lifecycle: 'deprecated' as AddOnLifecycle, description: 'Remove platform branding, custom domain, and branded customer-facing portal.' },
-  { id: 'priority', name: 'Priority Support', price: 35, compatiblePlans: ['growth', 'advanced'], status: 'active' as const, lifecycle: 'active' as AddOnLifecycle, description: 'Dedicated support agent, 1-hour response SLA, and priority issue resolution.' },
+// System Owner commercial governance state for an add-on. Decides whether
+// the add-on is offerable to tenants. Independent of `lifecycle` (which is
+// product/PM intent only) and of legacy `status` (kept for back-compat).
+//   - active   → may be granted as trial / paid override; visible in tenant
+//                Features tab as available; permissions for linked feature
+//                appear when an active grant exists.
+//   - disabled → not offerable; existing active grants stop enabling the
+//                feature; permissions for linked feature disappear; record
+//                stays in catalog so it can be reactivated.
+//   - archived → terminal hidden state; not offerable; existing grants stop
+//                enabling the feature; hidden from default catalog views.
+export type AddOnGovernanceStatus = 'active' | 'disabled' | 'archived';
+
+export interface AddOn {
+  id: string;
+  name: string;
+  description: string;
+  price: number;
+  compatiblePlans: string[];
+  // Legacy gate. 'active' means listable; 'archived' means hidden. The
+  // governanceStatus field below is the authoritative commercial gate.
+  status: 'active' | 'archived';
+  lifecycle: AddOnLifecycle;
+  // Commercial governance fields (System Owner Commercial Controls).
+  governanceStatus: AddOnGovernanceStatus;
+  billingCadence: 'monthly' | 'annual' | 'one_time';
+  // Optional linkage to a feature in `featureMatrix` — when set, the add-on
+  // is the entitlement vehicle for that feature, and the resolver / matrix
+  // use this to decide whether the linked feature appears for a tenant.
+  linkedFeatureId?: string | null;
+  createdAt: string;
+  createdBy: string;
+  updatedAt: string;
+  updatedBy?: string;
+}
+
+export const addOns: AddOn[] = [
+  { id: 'sms', name: 'SMS Credits', price: 10, compatiblePlans: ['growth', 'advanced'], status: 'active', lifecycle: 'active', governanceStatus: 'active', billingCadence: 'monthly', linkedFeatureId: null, description: 'Bulk SMS credits for customer notifications, marketing campaigns, and ticket updates.', createdAt: '2025-08-01', createdBy: 'System', updatedAt: '2025-08-01' },
+  { id: 'loyalty', name: 'Loyalty Program', price: 20, compatiblePlans: ['advanced'], status: 'active', lifecycle: 'active', governanceStatus: 'active', billingCadence: 'monthly', linkedFeatureId: 'loyalty_management', description: 'Customer loyalty points, rewards tiers, and automated engagement campaigns.', createdAt: '2025-08-01', createdBy: 'System', updatedAt: '2025-08-01' },
+  { id: 'reporting', name: 'Advanced Reporting', price: 15, compatiblePlans: ['growth', 'advanced'], status: 'active', lifecycle: 'active', governanceStatus: 'active', billingCadence: 'monthly', linkedFeatureId: 'reports', description: 'Custom report builder, scheduled reports, and advanced analytics dashboards.', createdAt: '2025-08-01', createdBy: 'System', updatedAt: '2025-08-01' },
+  { id: 'multistore', name: 'Multi-Store Pack', price: 30, compatiblePlans: ['growth', 'advanced'], status: 'active', lifecycle: 'active', governanceStatus: 'active', billingCadence: 'monthly', linkedFeatureId: null, description: 'Extra store locations, inter-store inventory transfers, and consolidated reporting.', createdAt: '2025-08-01', createdBy: 'System', updatedAt: '2025-08-01' },
+  { id: 'api', name: 'API Access', price: 25, compatiblePlans: ['advanced'], status: 'active', lifecycle: 'active', governanceStatus: 'active', billingCadence: 'monthly', linkedFeatureId: 'api', description: 'REST API access for custom integrations, webhooks, and third-party app connectivity.', createdAt: '2025-08-01', createdBy: 'System', updatedAt: '2025-08-01' },
+  { id: 'whitelabel', name: 'White-Label', price: 50, compatiblePlans: ['advanced'], status: 'active', lifecycle: 'deprecated', governanceStatus: 'disabled', billingCadence: 'monthly', linkedFeatureId: 'whitelabel', description: 'Remove platform branding, custom domain, and branded customer-facing portal.', createdAt: '2025-08-01', createdBy: 'System', updatedAt: '2026-02-10', updatedBy: 'Admin Carol' },
+  { id: 'priority', name: 'Priority Support', price: 35, compatiblePlans: ['growth', 'advanced'], status: 'active', lifecycle: 'active', governanceStatus: 'active', billingCadence: 'monthly', linkedFeatureId: null, description: 'Dedicated support agent, 1-hour response SLA, and priority issue resolution.', createdAt: '2025-08-01', createdBy: 'Admin Carol', updatedAt: '2026-03-15', updatedBy: 'Admin Carol' },
 ];
 
 export type FeatureLifecycle = 'draft' | 'planned' | 'in_development' | 'implemented' | 'deprecated' | 'archived';
@@ -197,12 +233,76 @@ export type FeatureOverrideType = 'inherited' | 'overridden' | 'paid_override' |
 
 export type ActivationStatus = 'invited' | 'pending_activation' | 'account_setup' | 'active';
 
-export const tenantFeatureOverrides: { tenantId: string; featureId: string; type: FeatureOverrideType; trialEnd?: string; addedBy?: string; addedDate?: string; price?: number; pricingModel?: 'monthly' | 'one_time' | 'annual'; pricingNotes?: string; }[] = [
-  { tenantId: 't1', featureId: 'api', type: 'overridden', addedBy: 'Admin Alice', addedDate: '2026-01-15' },
-  { tenantId: 't1', featureId: 'reporting', type: 'addon', addedBy: 'System', addedDate: '2026-03-12' },
+// A tenant feature override row. The `type` column is preserved for
+// back-compat with existing UI; the *derived* override status (used by the
+// resolver) is computed from `type` + `trialEnd` + `revokedDate` + `nowMs`
+// in `src/owner/entitlements.ts → deriveOverrideStatus`.
+export interface TenantFeatureOverride {
+  tenantId: string;
+  featureId: string;
+  type: FeatureOverrideType;
+  trialEnd?: string;
+  addedBy?: string;
+  addedDate?: string;
+  price?: number;
+  pricingModel?: 'monthly' | 'one_time' | 'annual';
+  pricingNotes?: string;
+  // Optional commercial governance metadata.
+  addOnId?: string | null;
+  // When this override was revoked (ISO date) and by whom. Revoked
+  // overrides are kept (not deleted) so audit history remains intact;
+  // the resolver treats them as inactive.
+  revokedDate?: string;
+  revokedBy?: string;
+  revokeReason?: string;
+}
+
+export const tenantFeatureOverrides: TenantFeatureOverride[] = [
+  { tenantId: 't1', featureId: 'api', type: 'overridden', addedBy: 'Admin Alice', addedDate: '2026-01-15', addOnId: 'api', price: 25, pricingModel: 'monthly' },
+  { tenantId: 't1', featureId: 'reporting', type: 'addon', addedBy: 'System', addedDate: '2026-03-12', addOnId: 'reporting' },
   { tenantId: 't2', featureId: 'customers', type: 'trial', trialEnd: '2026-04-18', addedBy: 'Admin Alice', addedDate: '2026-03-20' },
-  { tenantId: 't4', featureId: 'api', type: 'trial', trialEnd: '2026-04-10', addedBy: 'Admin Bob', addedDate: '2026-03-10' },
+  { tenantId: 't4', featureId: 'api', type: 'trial', trialEnd: '2026-04-10', addedBy: 'Admin Bob', addedDate: '2026-03-10', addOnId: 'api' },
   { tenantId: 't2', featureId: 'reports', type: 'disabled', addedBy: 'Admin Bob', addedDate: '2026-03-01' },
+];
+
+// Commercial governance audit log — System Owner actions on the add-on
+// catalog and tenant-specific overrides. Distinct surface from the general
+// `auditLogs` array (which captures broad platform events). Entries here
+// are also mirrored into `auditLogs` with category 'commercial' so the
+// existing Audit / Activity surfaces continue to show them.
+export type CommercialAuditAction =
+  | 'addon_created'
+  | 'addon_updated'
+  | 'addon_status_changed'
+  | 'addon_default_price_changed'
+  | 'tenant_trial_granted'
+  | 'tenant_trial_revoked'
+  | 'tenant_paid_override_granted'
+  | 'tenant_paid_override_price_edited'
+  | 'tenant_override_revoked'
+  | 'tenant_pending_payment_approved'
+  | 'tenant_pending_payment_cancelled';
+
+export interface CommercialAuditEntry {
+  id: string;
+  timestamp: string;
+  actor: string;
+  action: CommercialAuditAction;
+  addOnId?: string | null;
+  tenantId?: string | null;
+  featureId?: string | null;
+  oldValue?: string | number | null;
+  newValue?: string | number | null;
+  note?: string;
+}
+
+export const commercialAuditLogs: CommercialAuditEntry[] = [
+  { id: 'ca1', timestamp: '2025-08-01', actor: 'System', action: 'addon_created', addOnId: 'priority', note: 'Initial catalog seed' },
+  { id: 'ca2', timestamp: '2026-02-10', actor: 'Admin Carol', action: 'addon_status_changed', addOnId: 'whitelabel', oldValue: 'active', newValue: 'disabled', note: 'White-Label deprecated; kept for existing tenants' },
+  { id: 'ca3', timestamp: '2026-03-10', actor: 'Admin Bob', action: 'tenant_trial_granted', tenantId: 't4', addOnId: 'api', featureId: 'api', newValue: '2026-04-10', note: 'API trial — evaluating Advanced plan upgrade' },
+  { id: 'ca4', timestamp: '2026-03-12', actor: 'System', action: 'tenant_paid_override_granted', tenantId: 't1', addOnId: 'reporting', featureId: 'reporting', newValue: 15 },
+  { id: 'ca5', timestamp: '2026-03-15', actor: 'Admin Carol', action: 'addon_updated', addOnId: 'priority', note: 'Description refresh' },
+  { id: 'ca6', timestamp: '2026-01-15', actor: 'Admin Alice', action: 'tenant_paid_override_granted', tenantId: 't1', addOnId: 'api', featureId: 'api', newValue: 25 },
 ];
 
 export const auditLogs = [

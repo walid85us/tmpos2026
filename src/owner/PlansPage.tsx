@@ -2,11 +2,12 @@ import React, { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { plans as initialPlans, featureMatrix as initialFeatures, addOns as initialAddOns } from './mockData';
-import type { FeatureLifecycle, AddOnLifecycle } from './mockData';
+import type { FeatureLifecycle, AddOnLifecycle, AddOn, AddOnGovernanceStatus } from './mockData';
+import { pushCommercialAudit, getCommercialAuditLog } from './commercialAudit';
 
 type PlanData = Omit<typeof initialPlans[0], 'status'> & { status: 'active' | 'archived' };
 type FeatureData = { id: string; name: string; planAvailability: Record<string, boolean>; source: 'inherited' | 'custom'; lifecycle: FeatureLifecycle };
-type AddOnData = Omit<typeof initialAddOns[0], 'status'> & { status: 'active' | 'archived' };
+type AddOnData = AddOn;
 
 const LIFECYCLE_ORDER: FeatureLifecycle[] = ['draft', 'planned', 'in_development', 'implemented', 'deprecated', 'archived'];
 const ADDON_LIFECYCLE_ORDER: AddOnLifecycle[] = ['draft', 'planned', 'in_development', 'active', 'deprecated', 'archived'];
@@ -85,7 +86,21 @@ const PlansPage: React.FC = () => {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
 
   const [planForm, setPlanForm] = useState({ name: '', price: '', seats: '', locations: '', features: '' as string, billingCycle: 'monthly' as 'monthly' | 'annual' });
-  const [addOnForm, setAddOnForm] = useState({ name: '', price: '', description: '', compatiblePlans: [] as string[], lifecycle: 'active' as AddOnLifecycle });
+  const [addOnForm, setAddOnForm] = useState({
+    name: '',
+    price: '',
+    description: '',
+    compatiblePlans: [] as string[],
+    lifecycle: 'active' as AddOnLifecycle,
+    governanceStatus: 'active' as AddOnGovernanceStatus,
+    billingCadence: 'monthly' as 'monthly' | 'annual' | 'one_time',
+    linkedFeatureId: '' as string,
+  });
+  const [showArchivedAddOns, setShowArchivedAddOns] = useState(false);
+  const [showAddOnDisableConfirm, setShowAddOnDisableConfirm] = useState<string | null>(null);
+  const [showCommercialAudit, setShowCommercialAudit] = useState(false);
+  const [auditTick, setAuditTick] = useState(0);
+  const recentAudit = React.useMemo(() => getCommercialAuditLog().slice(0, 25), [auditTick, addOnsData]);
   const [newFeatureName, setNewFeatureName] = useState('');
   const [newFeatureLifecycle, setNewFeatureLifecycle] = useState<FeatureLifecycle>('draft');
 
@@ -187,60 +202,139 @@ const PlansPage: React.FC = () => {
     return activePlans.filter(p => addon.compatiblePlans.includes(p.id));
   };
 
-  const changeAddOnLifecycle = (addonId: string, newLifecycle: AddOnLifecycle) => {
-    setAddOnsData(prev => prev.map(a => {
-      if (a.id !== addonId) return a;
-      if (newLifecycle !== 'active') {
-        return { ...a, lifecycle: newLifecycle, compatiblePlans: [] };
-      }
-      return { ...a, lifecycle: newLifecycle };
-    }));
-  };
-
   const removeAddOn = (addonId: string) => {
     setAddOnsData(prev => prev.filter(a => a.id !== addonId));
     setShowAddOnDelete(null);
   };
 
   const openCreateAddOn = () => {
-    setAddOnForm({ name: '', price: '', description: '', compatiblePlans: [], lifecycle: 'active' });
+    setAddOnForm({
+      name: '',
+      price: '',
+      description: '',
+      compatiblePlans: [],
+      lifecycle: 'active',
+      governanceStatus: 'active',
+      billingCadence: 'monthly',
+      linkedFeatureId: '',
+    });
     setEditingAddOn(null);
     setShowAddOnModal(true);
   };
 
   const openEditAddOn = (addon: AddOnData) => {
-    setAddOnForm({ name: addon.name, price: String(addon.price), description: addon.description, compatiblePlans: [...addon.compatiblePlans], lifecycle: addon.lifecycle });
+    setAddOnForm({
+      name: addon.name,
+      price: String(addon.price),
+      description: addon.description,
+      compatiblePlans: [...addon.compatiblePlans],
+      lifecycle: addon.lifecycle,
+      governanceStatus: addon.governanceStatus,
+      billingCadence: addon.billingCadence,
+      linkedFeatureId: addon.linkedFeatureId || '',
+    });
     setEditingAddOn(addon);
     setShowAddOnModal(true);
   };
 
   const saveAddOn = () => {
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const isCreate = !editingAddOn;
+    const id = editingAddOn?.id || addOnForm.name.toLowerCase().replace(/\s+/g, '-');
+    const oldAddOn = editingAddOn;
     const newAddOn: AddOnData = {
-      id: editingAddOn?.id || addOnForm.name.toLowerCase().replace(/\s+/g, '-'),
+      id,
       name: addOnForm.name,
       price: Number(addOnForm.price),
       description: addOnForm.description,
       compatiblePlans: addOnForm.lifecycle === 'active' ? addOnForm.compatiblePlans : [],
-      status: addOnForm.lifecycle === 'archived' ? 'archived' as const : 'active' as const,
+      status: addOnForm.governanceStatus === 'archived' ? 'archived' : 'active',
       lifecycle: addOnForm.lifecycle,
+      governanceStatus: addOnForm.governanceStatus,
+      billingCadence: addOnForm.billingCadence,
+      linkedFeatureId: addOnForm.linkedFeatureId || null,
+      createdAt: editingAddOn?.createdAt || todayIso,
+      createdBy: editingAddOn?.createdBy || 'System Owner',
+      updatedAt: todayIso,
+      updatedBy: editingAddOn ? 'System Owner' : (editingAddOn?.updatedBy ?? undefined),
     };
     if (editingAddOn) {
       setAddOnsData(prev => prev.map(a => a.id === editingAddOn.id ? newAddOn : a));
     } else {
       setAddOnsData(prev => [...prev, newAddOn]);
     }
+    if (isCreate) {
+      pushCommercialAudit({
+        actor: 'System Owner',
+        action: 'addon_created',
+        addOnId: id,
+        newValue: newAddOn.price,
+        note: `${newAddOn.name} (${newAddOn.governanceStatus}, ${newAddOn.billingCadence})`,
+      });
+    } else if (oldAddOn) {
+      if (oldAddOn.price !== newAddOn.price) {
+        pushCommercialAudit({
+          actor: 'System Owner',
+          action: 'addon_default_price_changed',
+          addOnId: id,
+          oldValue: oldAddOn.price,
+          newValue: newAddOn.price,
+        });
+      }
+      if (oldAddOn.governanceStatus !== newAddOn.governanceStatus) {
+        pushCommercialAudit({
+          actor: 'System Owner',
+          action: 'addon_status_changed',
+          addOnId: id,
+          oldValue: oldAddOn.governanceStatus,
+          newValue: newAddOn.governanceStatus,
+        });
+      }
+      pushCommercialAudit({
+        actor: 'System Owner',
+        action: 'addon_updated',
+        addOnId: id,
+        note: 'Catalog entry edited',
+      });
+    }
+    setAuditTick(t => t + 1);
     setShowAddOnModal(false);
     setEditingAddOn(null);
   };
 
-  const archiveAddOn = (addonId: string) => {
-    setAddOnsData(prev => prev.map(a => a.id === addonId ? { ...a, status: 'archived' as const, lifecycle: 'archived' as AddOnLifecycle } : a));
+  const setAddOnGovernance = (addonId: string, next: AddOnGovernanceStatus) => {
+    const todayIso = new Date().toISOString().slice(0, 10);
+    setAddOnsData(prev => prev.map(a => {
+      if (a.id !== addonId) return a;
+      const oldStatus = a.governanceStatus;
+      if (oldStatus === next) return a;
+      pushCommercialAudit({
+        actor: 'System Owner',
+        action: 'addon_status_changed',
+        addOnId: addonId,
+        oldValue: oldStatus,
+        newValue: next,
+      });
+      return {
+        ...a,
+        governanceStatus: next,
+        // Mirror legacy `status` so existing UI that reads it stays consistent.
+        status: next === 'archived' ? 'archived' : 'active',
+        // Mirror legacy `lifecycle` so the rest of the page stays in sync.
+        lifecycle: next === 'archived'
+          ? 'archived'
+          : (a.lifecycle === 'archived' ? 'active' : a.lifecycle),
+        updatedAt: todayIso,
+        updatedBy: 'System Owner',
+      };
+    }));
     setShowAddOnArchive(null);
+    setShowAddOnDisableConfirm(null);
+    setAuditTick(t => t + 1);
   };
 
-  const restoreAddOn = (addonId: string) => {
-    setAddOnsData(prev => prev.map(a => a.id === addonId ? { ...a, status: 'active' as const, lifecycle: 'active' as AddOnLifecycle } : a));
-  };
+  const archiveAddOn = (addonId: string) => setAddOnGovernance(addonId, 'archived');
+  const restoreAddOn = (addonId: string) => setAddOnGovernance(addonId, 'active');
 
   const toggleAddOnPlan = (plan: string) => {
     setAddOnForm(prev => ({
@@ -449,78 +543,143 @@ const PlansPage: React.FC = () => {
       )}
 
       {activeTab === 'addons' && (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {addOnsData.map((addon) => {
-            const deps = getAddOnDependencies(addon.id);
-            const isActive = addon.lifecycle === 'active';
-            return (
-              <motion.div
-                key={addon.id}
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                className={`bg-white/80 backdrop-blur-xl p-6 rounded-[2.5rem] border shadow-sm hover:shadow-md transition-all ${
-                  addon.lifecycle === 'archived' ? 'border-slate-300 opacity-60' : addon.lifecycle === 'deprecated' ? 'border-red-200 opacity-75' : 'border-slate-200'
-                }`}
-              >
-                <div className="flex justify-between items-start mb-2">
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-lg font-black text-primary tracking-tight">{addon.name}</h3>
-                    {lifecycleBadge(addon.lifecycle)}
-                  </div>
-                  <span className="text-xl font-black text-primary">${addon.price}</span>
-                </div>
-                <p className="text-sm text-slate-500 mb-4 leading-relaxed">{addon.description}</p>
-
-                <div className="mb-3">
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Lifecycle</p>
-                  <select
-                    value={addon.lifecycle}
-                    onChange={e => changeAddOnLifecycle(addon.id, e.target.value as AddOnLifecycle)}
-                    className="text-[9px] font-black uppercase tracking-widest bg-transparent border border-slate-200 rounded-lg px-2 py-1.5 cursor-pointer focus:outline-none focus:ring-1 focus:ring-primary/20 w-full"
+        <>
+          <div className="flex items-center justify-between gap-4 flex-wrap">
+            <div className="flex gap-2 items-center text-[10px] font-black uppercase tracking-widest">
+              <span className="text-slate-400">Governance:</span>
+              <span className="px-2 py-0.5 rounded-md border bg-lime-400/10 text-lime-700 border-lime-400/20">Active {addOnsData.filter(a => a.governanceStatus === 'active').length}</span>
+              <span className="px-2 py-0.5 rounded-md border bg-amber-400/10 text-amber-700 border-amber-400/20">Disabled {addOnsData.filter(a => a.governanceStatus === 'disabled').length}</span>
+              <span className="px-2 py-0.5 rounded-md border bg-slate-400/10 text-slate-500 border-slate-200">Archived {addOnsData.filter(a => a.governanceStatus === 'archived').length}</span>
+            </div>
+            <div className="flex gap-2 items-center">
+              <label className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500 cursor-pointer">
+                <input type="checkbox" checked={showArchivedAddOns} onChange={e => setShowArchivedAddOns(e.target.checked)} className="accent-primary" />
+                Show archived
+              </label>
+              <button onClick={() => setShowCommercialAudit(true)} className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all flex items-center gap-1">
+                <span className="material-symbols-outlined text-sm">receipt_long</span>
+                Audit log
+              </button>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {addOnsData
+              .filter(a => showArchivedAddOns || a.governanceStatus !== 'archived')
+              .map((addon) => {
+                const govStyles: Record<AddOnGovernanceStatus, string> = {
+                  active: 'bg-lime-400/10 text-lime-700 border-lime-400/20',
+                  disabled: 'bg-amber-400/10 text-amber-700 border-amber-400/20',
+                  archived: 'bg-slate-400/10 text-slate-500 border-slate-200',
+                };
+                const govLabel: Record<AddOnGovernanceStatus, string> = {
+                  active: 'Active',
+                  disabled: 'Disabled',
+                  archived: 'Archived',
+                };
+                const linkedFeatureName = addon.linkedFeatureId ? (featuresData.find(f => f.id === addon.linkedFeatureId)?.name || addon.linkedFeatureId) : null;
+                const isOfferable = addon.governanceStatus === 'active';
+                return (
+                  <motion.div
+                    key={addon.id}
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className={`bg-white/80 backdrop-blur-xl p-6 rounded-[2.5rem] border shadow-sm hover:shadow-md transition-all ${
+                      addon.governanceStatus === 'archived' ? 'border-slate-300 opacity-60' :
+                      addon.governanceStatus === 'disabled' ? 'border-amber-200 opacity-75' :
+                      'border-slate-200'
+                    }`}
                   >
-                    {ADDON_LIFECYCLE_ORDER.map(lc => (
-                      <option key={lc} value={lc}>{lc === 'in_development' ? 'In Development' : lc.charAt(0).toUpperCase() + lc.slice(1).replace('_', ' ')}</option>
-                    ))}
-                  </select>
-                  {!isActive && addon.lifecycle !== 'archived' && (
-                    <p className="text-[10px] text-amber-600 font-bold mt-1.5">Only &quot;Active&quot; add-ons can be assigned to plans.</p>
-                  )}
-                </div>
+                    <div className="flex justify-between items-start mb-2 gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h3 className="text-lg font-black text-primary tracking-tight">{addon.name}</h3>
+                        <span className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md border ${govStyles[addon.governanceStatus]}`}>
+                          {govLabel[addon.governanceStatus]}
+                        </span>
+                        {lifecycleBadge(addon.lifecycle)}
+                      </div>
+                      <span className="text-xl font-black text-primary whitespace-nowrap">${addon.price}<span className="text-[10px] text-slate-400">/{addon.billingCadence === 'one_time' ? 'once' : addon.billingCadence === 'annual' ? 'yr' : 'mo'}</span></span>
+                    </div>
+                    <p className="text-sm text-slate-500 mb-4 leading-relaxed">{addon.description}</p>
 
-                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Compatible Plans</p>
-                <div className="flex gap-2 flex-wrap mb-4">
-                  {isActive && addon.compatiblePlans.length > 0 ? addon.compatiblePlans.map((planId, i) => {
-                    const planObj = plansData.find(p => p.id === planId);
-                    return (
-                      <span key={i} className="px-3 py-1 bg-slate-100 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-lg">
-                        {planObj?.name || planId}
-                      </span>
-                    );
-                  }) : (
-                    <span className="text-[10px] text-slate-300 font-bold">{isActive ? 'No plans assigned' : 'N/A — not active'}</span>
-                  )}
-                </div>
-                <div className="flex gap-2">
-                  <button onClick={() => openEditAddOn(addon)} className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
-                    Edit
-                  </button>
-                  {addon.lifecycle === 'archived' ? (
-                    <button onClick={() => restoreAddOn(addon.id)} className="flex-1 py-3 bg-lime-100 hover:bg-lime-200 text-lime-700 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
-                      Restore
-                    </button>
-                  ) : (
-                    <button onClick={() => setShowAddOnArchive(addon.id)} className="flex-1 py-3 bg-primary/10 hover:bg-primary/20 text-primary font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
-                      Archive
-                    </button>
-                  )}
-                  <button onClick={() => setShowAddOnDelete(addon.id)} className="py-3 px-4 bg-red-50 hover:bg-red-100 text-red-500 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
-                    <span className="material-symbols-outlined text-sm">delete</span>
-                  </button>
-                </div>
-              </motion.div>
-            );
-          })}
-        </div>
+                    <div className="grid grid-cols-2 gap-2 mb-4">
+                      <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-100">
+                        <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Linked feature</p>
+                        <p className="text-xs font-bold text-slate-700 truncate">{linkedFeatureName || '—'}</p>
+                      </div>
+                      <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-100">
+                        <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Cadence</p>
+                        <p className="text-xs font-bold text-slate-700 capitalize">{addon.billingCadence.replace('_', ' ')}</p>
+                      </div>
+                    </div>
+
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Compatible Plans</p>
+                    <div className="flex gap-2 flex-wrap mb-3">
+                      {addon.compatiblePlans.length > 0 ? addon.compatiblePlans.map((planId, i) => {
+                        const planObj = plansData.find(p => p.id === planId);
+                        return (
+                          <span key={i} className="px-3 py-1 bg-slate-100 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-lg">
+                            {planObj?.name || planId}
+                          </span>
+                        );
+                      }) : (
+                        <span className="text-[10px] text-slate-300 font-bold">No plans assigned</span>
+                      )}
+                    </div>
+
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Governance</p>
+                    <div className="flex gap-1.5 mb-3">
+                      <button
+                        onClick={() => setAddOnGovernance(addon.id, 'active')}
+                        disabled={addon.governanceStatus === 'active'}
+                        className={`flex-1 py-2 text-[9px] font-black uppercase tracking-widest rounded-xl transition-all ${
+                          addon.governanceStatus === 'active'
+                            ? 'bg-lime-500 text-white shadow-sm cursor-default'
+                            : 'bg-lime-100 hover:bg-lime-200 text-lime-700'
+                        }`}
+                      >Active</button>
+                      <button
+                        onClick={() => addon.governanceStatus === 'disabled' ? undefined : setShowAddOnDisableConfirm(addon.id)}
+                        disabled={addon.governanceStatus === 'disabled'}
+                        className={`flex-1 py-2 text-[9px] font-black uppercase tracking-widest rounded-xl transition-all ${
+                          addon.governanceStatus === 'disabled'
+                            ? 'bg-amber-500 text-white shadow-sm cursor-default'
+                            : 'bg-amber-100 hover:bg-amber-200 text-amber-700'
+                        }`}
+                      >Disabled</button>
+                      <button
+                        onClick={() => addon.governanceStatus === 'archived' ? undefined : setShowAddOnArchive(addon.id)}
+                        disabled={addon.governanceStatus === 'archived'}
+                        className={`flex-1 py-2 text-[9px] font-black uppercase tracking-widest rounded-xl transition-all ${
+                          addon.governanceStatus === 'archived'
+                            ? 'bg-slate-500 text-white shadow-sm cursor-default'
+                            : 'bg-slate-100 hover:bg-slate-200 text-slate-600'
+                        }`}
+                      >Archived</button>
+                    </div>
+                    {!isOfferable && (
+                      <p className="text-[10px] text-amber-700 font-bold bg-amber-50 px-2 py-1.5 rounded-lg border border-amber-100 mb-3">
+                        Not offerable. Existing tenant overrides for the linked feature are inactive until reactivated.
+                      </p>
+                    )}
+
+                    <div className="border-t border-slate-100 pt-3 mb-3 grid grid-cols-2 gap-2 text-[9px] font-bold text-slate-400 uppercase tracking-widest">
+                      <span>Created {addon.createdAt} · {addon.createdBy}</span>
+                      <span className="text-right">Updated {addon.updatedAt}{addon.updatedBy ? ` · ${addon.updatedBy}` : ''}</span>
+                    </div>
+
+                    <div className="flex gap-2">
+                      <button onClick={() => openEditAddOn(addon)} className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
+                        Edit
+                      </button>
+                      <button onClick={() => setShowAddOnDelete(addon.id)} className="py-3 px-4 bg-red-50 hover:bg-red-100 text-red-500 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
+                        <span className="material-symbols-outlined text-sm">delete</span>
+                      </button>
+                    </div>
+                  </motion.div>
+                );
+              })}
+          </div>
+        </>
       )}
 
       <AnimatePresence>
@@ -772,16 +931,43 @@ const PlansPage: React.FC = () => {
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">Add-on Name</label>
                   <input value={addOnForm.name} onChange={e => setAddOnForm(p => ({ ...p, name: e.target.value }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary" placeholder="e.g., Premium Support" />
                 </div>
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-3 gap-4">
                   <div>
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">Price (USD/mo)</label>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">Default Price (USD)</label>
                     <input type="number" value={addOnForm.price} onChange={e => setAddOnForm(p => ({ ...p, price: e.target.value }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary" placeholder="25" />
                   </div>
                   <div>
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">Lifecycle Status</label>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">Billing Cadence</label>
+                    <select value={addOnForm.billingCadence} onChange={e => setAddOnForm(p => ({ ...p, billingCadence: e.target.value as 'monthly' | 'annual' | 'one_time' }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary">
+                      <option value="monthly">Monthly</option>
+                      <option value="annual">Annual</option>
+                      <option value="one_time">One-time</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">Lifecycle (PM)</label>
                     <select value={addOnForm.lifecycle} onChange={e => setAddOnForm(p => ({ ...p, lifecycle: e.target.value as AddOnLifecycle }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary">
                       {ADDON_LIFECYCLE_ORDER.map(lc => (
                         <option key={lc} value={lc}>{lc === 'in_development' ? 'In Development' : lc.charAt(0).toUpperCase() + lc.slice(1).replace('_', ' ')}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">Governance Status</label>
+                    <select value={addOnForm.governanceStatus} onChange={e => setAddOnForm(p => ({ ...p, governanceStatus: e.target.value as AddOnGovernanceStatus }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary">
+                      <option value="active">Active — offerable</option>
+                      <option value="disabled">Disabled — paused</option>
+                      <option value="archived">Archived — hidden</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">Linked Feature (optional)</label>
+                    <select value={addOnForm.linkedFeatureId} onChange={e => setAddOnForm(p => ({ ...p, linkedFeatureId: e.target.value }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary">
+                      <option value="">— none —</option>
+                      {featuresData.filter(f => f.lifecycle === 'implemented').map(f => (
+                        <option key={f.id} value={f.id}>{f.name}</option>
                       ))}
                     </select>
                   </div>
@@ -831,15 +1017,91 @@ const PlansPage: React.FC = () => {
               className="bg-white rounded-[3rem] shadow-2xl w-full max-w-sm overflow-hidden"
             >
               <div className="p-8 text-center">
-                <div className="w-14 h-14 bg-amber-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
-                  <span className="material-symbols-outlined text-amber-600 text-2xl">archive</span>
+                <div className="w-14 h-14 bg-slate-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                  <span className="material-symbols-outlined text-slate-600 text-2xl">archive</span>
                 </div>
                 <h3 className="text-lg font-black text-primary tracking-tight mb-2">Archive Add-on?</h3>
-                <p className="text-sm text-slate-500">This add-on will be removed from availability. Existing subscribers will keep access until their next billing cycle.</p>
+                <p className="text-sm text-slate-500">The add-on will be hidden from the catalog and no longer offerable. Existing tenant overrides for the linked feature stop enabling it. The record stays for audit history and can be reactivated.</p>
               </div>
               <div className="p-8 pt-0 flex gap-3">
                 <button onClick={() => setShowAddOnArchive(null)} className="flex-1 py-3.5 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-xs rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
-                <button onClick={() => archiveAddOn(showAddOnArchive)} className="flex-1 py-3.5 bg-amber-500 text-white font-black text-xs rounded-2xl uppercase tracking-widest hover:bg-amber-600 transition-all shadow-lg shadow-amber-500/20">Archive</button>
+                <button onClick={() => archiveAddOn(showAddOnArchive)} className="flex-1 py-3.5 bg-slate-700 text-white font-black text-xs rounded-2xl uppercase tracking-widest hover:bg-slate-800 transition-all shadow-lg shadow-slate-500/20">Archive</button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showAddOnDisableConfirm && (
+          <div className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setShowAddOnDisableConfirm(null)}>
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              onClick={e => e.stopPropagation()}
+              className="bg-white rounded-[3rem] shadow-2xl w-full max-w-sm overflow-hidden"
+            >
+              <div className="p-8 text-center">
+                <div className="w-14 h-14 bg-amber-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                  <span className="material-symbols-outlined text-amber-600 text-2xl">pause_circle</span>
+                </div>
+                <h3 className="text-lg font-black text-primary tracking-tight mb-2">Disable Add-on?</h3>
+                <p className="text-sm text-slate-500">The add-on stays in the catalog but is paused. Tenants cannot start a new trial or paid override; existing overrides for the linked feature stop enabling it until you reactivate.</p>
+              </div>
+              <div className="p-8 pt-0 flex gap-3">
+                <button onClick={() => setShowAddOnDisableConfirm(null)} className="flex-1 py-3.5 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-xs rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
+                <button onClick={() => setAddOnGovernance(showAddOnDisableConfirm, 'disabled')} className="flex-1 py-3.5 bg-amber-500 text-white font-black text-xs rounded-2xl uppercase tracking-widest hover:bg-amber-600 transition-all shadow-lg shadow-amber-500/20">Disable</button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showCommercialAudit && (
+          <div className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setShowCommercialAudit(false)}>
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              onClick={e => e.stopPropagation()}
+              className="bg-white rounded-[3rem] shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col"
+              style={{ maxHeight: '85vh' }}
+            >
+              <div className="p-6 border-b border-slate-100 flex justify-between items-center">
+                <div>
+                  <h3 className="text-lg font-black text-primary tracking-tight">Commercial Audit Log</h3>
+                  <p className="text-xs text-slate-500 mt-0.5">Most recent governance and override events. Mirrored into the platform audit feed.</p>
+                </div>
+                <button onClick={() => setShowCommercialAudit(false)} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-all">
+                  <span className="material-symbols-outlined text-lg">close</span>
+                </button>
+              </div>
+              <div className="overflow-y-auto p-4 flex-1">
+                {recentAudit.length === 0 ? (
+                  <p className="text-sm text-slate-400 text-center py-8">No commercial events yet.</p>
+                ) : (
+                  <ul className="space-y-2">
+                    {recentAudit.map(e => (
+                      <li key={e.id} className="bg-slate-50 rounded-xl p-3 border border-slate-100">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-[10px] font-black uppercase tracking-widest text-primary">{e.action.replace(/_/g, ' ')}</span>
+                          <span className="text-[10px] font-bold text-slate-400">{e.timestamp.slice(0, 19).replace('T', ' ')}</span>
+                        </div>
+                        <div className="text-xs text-slate-600 font-bold mt-1 flex flex-wrap gap-x-3 gap-y-1">
+                          <span>by {e.actor}</span>
+                          {e.addOnId && <span>add-on: {e.addOnId}</span>}
+                          {e.tenantId && <span>tenant: {e.tenantId}</span>}
+                          {e.featureId && <span>feature: {e.featureId}</span>}
+                          {(e.oldValue !== null && e.oldValue !== undefined) && <span>{String(e.oldValue)} → {String(e.newValue ?? '')}</span>}
+                          {(e.oldValue === null || e.oldValue === undefined) && (e.newValue !== null && e.newValue !== undefined) && <span>{String(e.newValue)}</span>}
+                        </div>
+                        {e.note && <p className="text-[11px] text-slate-500 italic mt-1">{e.note}</p>}
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
             </motion.div>
           </div>

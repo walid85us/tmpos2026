@@ -332,16 +332,66 @@ export function isPlanFeatureLiveFor(plan: Plan | string | undefined | null, fea
   return (planFeatures[plan as Plan] || []).includes(featureId);
 }
 
+// Tenant-aware variant of `isPlanFeatureLiveFor`. The feature is "live" for
+// the tenant when EITHER:
+//   1. The base plan (or System Owner override of plan-feature availability)
+//      already includes it (delegates to `isPlanFeatureLiveFor`), OR
+//   2. The tenant has a non-revoked, non-expired commercial override
+//      (`trial`, `paid_override`, `overridden`, or `addon`) AND — if the
+//      override is linked to an add-on — that add-on's catalog
+//      `governanceStatus` is `'active'`. Disabled / archived catalog rows
+//      revoke the override regardless of its row state.
+// Backward-compatible: when no `tenant_overrides_data` exists in
+// sessionStorage, this returns the same as `isPlanFeatureLiveFor`.
+export function isPlanFeatureLiveForTenant(tenantId: string | undefined | null, plan: Plan | string | undefined | null, featureId: string): boolean {
+  if (isPlanFeatureLiveFor(plan, featureId)) return true;
+  if (!tenantId) return false;
+  try {
+    if (typeof window === 'undefined' || !window.sessionStorage) return false;
+    const ovRaw = window.sessionStorage.getItem('tenant_overrides_data');
+    if (!ovRaw) return false;
+    const overrides = JSON.parse(ovRaw) as Array<{ tenantId: string; featureId: string; type: string; trialEnd?: string; revokedDate?: string; addOnId?: string | null }>;
+    const ov = overrides.find(o => o.tenantId === tenantId && o.featureId === featureId);
+    if (!ov) return false;
+    if (ov.revokedDate) return false;
+    // Only types that grant access count.
+    const grantingTypes = ['trial', 'paid_override', 'overridden', 'addon'];
+    if (!grantingTypes.includes(ov.type)) return false;
+    // Trial expiry — pinned reference date matches TenantDetailPage (2026-03-26).
+    if (ov.type === 'trial' && ov.trialEnd) {
+      const nowMs = Date.parse('2026-03-26');
+      const endMs = Date.parse(ov.trialEnd);
+      if (Number.isFinite(endMs) && endMs < nowMs) return false;
+    }
+    // Add-on governance gate.
+    if (ov.addOnId) {
+      const addonsRaw = window.sessionStorage.getItem('addons_data');
+      if (addonsRaw) {
+        const addons = JSON.parse(addonsRaw) as Array<{ id: string; governanceStatus?: string }>;
+        const addon = addons.find(a => a.id === ov.addOnId);
+        if (addon && addon.governanceStatus && addon.governanceStatus !== 'active') return false;
+      }
+    }
+    return true;
+  } catch { /* fall through */ }
+  return false;
+}
+
 // Returns true if the sub-permission is plan-eligible for the given tenant
 // plan: BOTH (a) the sub-permission's parent domain must be in the plan AND
 // (b) every feature gate from FEATURE_PERMISSION_DEPENDENCIES must be live.
 // Returns false when EITHER condition fails — i.e. the sub-permission is
 // plan-locked and must not be assignable in the matrix.
-export function isSubPermissionPlanAvailable(sub: SubPermissionDef, plan: Plan | string | undefined | null): boolean {
+//
+// `tenantId` is optional; when supplied, gating uses the add-on-aware
+// `isPlanFeatureLiveForTenant` so commercial overrides surface their
+// linked sub-permissions in the matrix. Without it, base-plan rules apply.
+export function isSubPermissionPlanAvailable(sub: SubPermissionDef, plan: Plan | string | undefined | null, tenantId?: string | null): boolean {
   if (!plan) return false;
   const planFeats = planFeatures[plan as Plan] || [];
   if (!planFeats.includes(sub.parentDomain)) return false;
   const gates = getFeatureGatesForSubPermission(sub.id);
+  if (tenantId) return gates.every(f => isPlanFeatureLiveForTenant(tenantId, plan, f));
   return gates.every(f => isPlanFeatureLiveFor(plan, f));
 }
 

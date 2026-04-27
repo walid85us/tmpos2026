@@ -220,7 +220,11 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     // an enabled feature; role can never resurrect a plan-disabled feature.
     // System Owner (platform role) is also subject to this for tenant-scoped
     // sub-permissions because they operate within the tenant's plan envelope.
-    if (tenant && !isSubPermissionPlanAvailable(actionDef, tenant.plan)) return false;
+    // Tenant id is passed so sub-permissions linked to commercially overridden
+    // features (active trials / paid overrides whose linked add-on is active
+    // in the catalog) become assignable in the matrix; disabled or archived
+    // catalog rows revoke them automatically.
+    if (tenant && !isSubPermissionPlanAvailable(actionDef, tenant.plan, tenant.id)) return false;
 
     if (effectiveRole === 'system_owner' || effectiveRole === 'store_owner') return true;
 

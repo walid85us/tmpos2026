@@ -6,8 +6,10 @@ import {
   invoiceHistory, creditNotes, auditLogs, addOns, tenantFeatureOverrides,
   tenantSupportNotes, tenantDomainHistory, planHistory,
 } from './mockData';
-import type { SupportNoteCategory, FeatureOverrideType, ActivationStatus } from './mockData';
+import type { SupportNoteCategory, FeatureOverrideType, ActivationStatus, AddOn, TenantFeatureOverride } from './mockData';
 import { tenantUsers } from './accessMockData';
+import { resolveTenantFeature, REASON_LABEL, REASON_EXPLAINER, type EntitlementReason } from './entitlements';
+import { pushCommercialAudit } from './commercialAudit';
 
 type Tab = 'Overview' | 'Owner & Users' | 'Subscription' | 'Features' | 'Billing' | 'Domains' | 'Usage' | 'Activity / Audit' | 'Support Notes';
 
@@ -37,7 +39,32 @@ const TenantDetailPage: React.FC = () => {
   const [domainInput, setDomainInput] = useState('');
 
   const [currentPlan, setCurrentPlan] = useState(tenant?.plan || 'essential');
-  const [localOverrides, setLocalOverrides] = useState(tenantFeatureOverrides.filter(o => o.tenantId === id));
+  const [localOverrides, setLocalOverrides] = useState<TenantFeatureOverride[]>(() => {
+    try {
+      if (typeof window !== 'undefined' && window.sessionStorage) {
+        const raw = window.sessionStorage.getItem('tenant_overrides_data');
+        if (raw) {
+          const all = JSON.parse(raw) as TenantFeatureOverride[];
+          return all.filter(o => o.tenantId === id);
+        }
+      }
+    } catch { /* fall back */ }
+    return tenantFeatureOverrides.filter(o => o.tenantId === id);
+  });
+
+  // Persist overrides for this tenant into a global sessionStorage map so
+  // AccessContext / Permissions Matrix can read them without prop-drilling.
+  useEffect(() => {
+    try {
+      if (typeof window === 'undefined' || !window.sessionStorage) return;
+      const raw = window.sessionStorage.getItem('tenant_overrides_data');
+      const others: TenantFeatureOverride[] = raw
+        ? (JSON.parse(raw) as TenantFeatureOverride[]).filter(o => o.tenantId !== id)
+        : tenantFeatureOverrides.filter(o => o.tenantId !== id);
+      window.sessionStorage.setItem('tenant_overrides_data', JSON.stringify([...others, ...localOverrides]));
+      window.dispatchEvent(new Event('tenant_overrides_data:changed'));
+    } catch { /* noop */ }
+  }, [localOverrides, id]);
   const [invoiceDetailId, setInvoiceDetailId] = useState<string | null>(null);
   const [auditDetailId, setAuditDetailId] = useState<string | null>(null);
   const [customDomainLocal, setCustomDomainLocal] = useState<string | null>(tenant?.customDomain || null);
@@ -222,6 +249,45 @@ const TenantDetailPage: React.FC = () => {
     setTimeout(() => setCopiedDns(null), 2000);
   };
 
+  // Pinned reference date used throughout this page for trial / refund math.
+  const NOW_MS = Date.parse('2026-03-26');
+
+  // Live add-on catalog from sessionStorage when the System Owner has edited
+  // it on the Plans page; falls back to the seed `addOns`. We re-read on each
+  // render so disabling an add-on in the catalog tab is reflected here.
+  const liveAddOns = useMemo<AddOn[]>(() => {
+    try {
+      if (typeof window !== 'undefined' && window.sessionStorage) {
+        const raw = window.sessionStorage.getItem('addons_data');
+        if (raw) return JSON.parse(raw) as AddOn[];
+      }
+    } catch { /* fall back */ }
+    return addOns;
+  }, []);
+
+  const liveFeatureMatrix = useMemo(() => {
+    try {
+      if (typeof window !== 'undefined' && window.sessionStorage) {
+        const raw = window.sessionStorage.getItem('features_data');
+        if (raw) return JSON.parse(raw) as typeof featureMatrix;
+      }
+    } catch { /* fall back */ }
+    return featureMatrix;
+  }, []);
+
+  const resolveFeature = useCallback((featureId: string) => {
+    return resolveTenantFeature(featureId, {
+      tenantPlan: currentPlan,
+      featureMatrix: liveFeatureMatrix,
+      addOns: liveAddOns,
+      overrides: localOverrides as TenantFeatureOverride[],
+      nowMs: NOW_MS,
+    });
+  }, [currentPlan, liveFeatureMatrix, liveAddOns, localOverrides]);
+
+  // Legacy adapter — preserves the existing `state.type` / `state.trialEnd`
+  // shape consumed by other surfaces in this page. Callers that need the
+  // canonical reason should use `resolveFeature` directly.
   const getFeatureState = (featureId: string): { type: FeatureOverrideType; trialEnd?: string } => {
     const override = localOverrides.find(o => o.featureId === featureId);
     if (override) return { type: override.type, trialEnd: override.trialEnd };
@@ -244,9 +310,19 @@ const TenantDetailPage: React.FC = () => {
     const trialEnd = new Date('2026-03-26');
     trialEnd.setDate(trialEnd.getDate() + days);
     const endStr = trialEnd.toISOString().split('T')[0];
+    const linkedAddOn = liveAddOns.find(a => a.linkedFeatureId === featureId) || liveAddOns.find(a => a.id === featureId);
     setLocalOverrides(prev => {
       const filtered = prev.filter(o => o.featureId !== featureId);
-      return [...filtered, { tenantId: tenant.id, featureId, type: 'trial' as FeatureOverrideType, trialEnd: endStr, addedBy: 'You', addedDate: '2026-03-26' }];
+      return [...filtered, { tenantId: tenant.id, featureId, type: 'trial' as FeatureOverrideType, trialEnd: endStr, addedBy: 'You', addedDate: '2026-03-26', addOnId: linkedAddOn?.id ?? null }];
+    });
+    pushCommercialAudit({
+      actor: 'System Owner',
+      action: 'tenant_trial_granted',
+      tenantId: tenant.id,
+      featureId,
+      addOnId: linkedAddOn?.id ?? null,
+      newValue: endStr,
+      note: `${days}-day trial`,
     });
     setFeatureTrialModal(null);
     setFeatureTrialDays('14');
@@ -255,9 +331,20 @@ const TenantDetailPage: React.FC = () => {
 
   const handleEnablePaidOverride = (featureId: string) => {
     const price = parseFloat(paidOverridePrice) || 0;
+    const linkedAddOn = liveAddOns.find(a => a.linkedFeatureId === featureId) || liveAddOns.find(a => a.id === featureId);
     setLocalOverrides(prev => {
       const filtered = prev.filter(o => o.featureId !== featureId);
-      return [...filtered, { tenantId: tenant.id, featureId, type: 'pending_payment' as FeatureOverrideType, addedBy: 'You', addedDate: '2026-03-26', pricingModel: paidOverrideModel, price, pricingNotes: paidOverrideNotes || undefined }];
+      return [...filtered, { tenantId: tenant.id, featureId, type: 'pending_payment' as FeatureOverrideType, addedBy: 'You', addedDate: '2026-03-26', pricingModel: paidOverrideModel, price, pricingNotes: paidOverrideNotes || undefined, addOnId: linkedAddOn?.id ?? null }];
+    });
+    pushCommercialAudit({
+      actor: 'System Owner',
+      action: 'tenant_paid_override_granted',
+      tenantId: tenant.id,
+      featureId,
+      addOnId: linkedAddOn?.id ?? null,
+      oldValue: linkedAddOn?.price ?? null,
+      newValue: price,
+      note: paidOverrideNotes || (linkedAddOn && price !== linkedAddOn.price ? 'Custom price' : 'Catalog price'),
     });
     setFeaturePaidModal(null);
     setPaidOverridePrice('');
@@ -269,6 +356,15 @@ const TenantDetailPage: React.FC = () => {
 
   const handleApprovePayment = (featureId: string) => {
     setLocalOverrides(prev => prev.map(o => o.featureId === featureId ? { ...o, type: 'paid_override' as FeatureOverrideType } : o));
+    const ov = localOverrides.find(o => o.featureId === featureId);
+    pushCommercialAudit({
+      actor: 'System Owner',
+      action: 'tenant_pending_payment_approved',
+      tenantId: tenant.id,
+      featureId,
+      addOnId: ov?.addOnId ?? null,
+      newValue: ov?.price ?? null,
+    });
     showToast(`Payment approved — ${featureMatrix.find(f => f.id === featureId)?.name || featureId} is now active`);
   };
 
@@ -277,13 +373,32 @@ const TenantDetailPage: React.FC = () => {
     if (override && override.type === 'paid_override' && override.price && override.price > 0) {
       setRevokeModal(featureId);
     } else {
-      setLocalOverrides(prev => prev.filter(o => o.featureId !== featureId));
+      // Mark as revoked (kept for history) when not a billed paid override.
+      const today = new Date().toISOString().slice(0, 10);
+      setLocalOverrides(prev => prev.map(o => o.featureId === featureId ? { ...o, revokedDate: today, revokedBy: 'System Owner', revokeReason: 'Revoked by System Owner' } : o));
+      pushCommercialAudit({
+        actor: 'System Owner',
+        action: override?.type === 'pending_payment' ? 'tenant_pending_payment_cancelled' : (override?.type === 'trial' ? 'tenant_trial_revoked' : 'tenant_override_revoked'),
+        tenantId: tenant.id,
+        featureId,
+        addOnId: override?.addOnId ?? null,
+      });
       showToast(`Override revoked for ${featureMatrix.find(f => f.id === featureId)?.name || featureId}`);
     }
   };
 
   const handleConfirmRevoke = (featureId: string, issueRefund: boolean) => {
-    setLocalOverrides(prev => prev.filter(o => o.featureId !== featureId));
+    const today = new Date().toISOString().slice(0, 10);
+    const ov = localOverrides.find(o => o.featureId === featureId);
+    setLocalOverrides(prev => prev.map(o => o.featureId === featureId ? { ...o, revokedDate: today, revokedBy: 'System Owner', revokeReason: issueRefund ? 'Revoked + refund' : 'Revoked' } : o));
+    pushCommercialAudit({
+      actor: 'System Owner',
+      action: 'tenant_override_revoked',
+      tenantId: tenant.id,
+      featureId,
+      addOnId: ov?.addOnId ?? null,
+      note: issueRefund ? 'Refund issued' : 'No refund',
+    });
     setRevokeModal(null);
     const name = featureMatrix.find(f => f.id === featureId)?.name || featureId;
     showToast(issueRefund ? `${name} revoked — refund issued` : `${name} revoked — no refund (past refund window)`);
@@ -1218,49 +1333,126 @@ const TenantDetailPage: React.FC = () => {
               </div>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {featureMatrix.filter(f => f.lifecycle !== 'draft').map(feature => {
-                const state = getFeatureState(feature.id);
-                const enabled = state.type !== 'disabled' && state.type !== 'pending_payment';
+              {liveFeatureMatrix.filter(f => f.lifecycle !== 'draft').map(feature => {
+                const r = resolveFeature(feature.id);
+                const enabled = r.enabled;
+                const reason: EntitlementReason = r.reason;
+                const ov = r.override;
+                const ovAny = ov as (typeof ov & { price?: number; pricingModel?: string }) | undefined;
+                const isPendingPayment = ov?.type === 'pending_payment' && !ov.revokedDate;
+                const isTrialActive = reason === 'enabled_by_trial_addon';
+                const isPaidActive = reason === 'enabled_by_paid_addon' || reason === 'enabled_by_paid_override';
+                const isExpired = reason === 'trial_expired';
+                const isRevoked = reason === 'override_revoked';
+                const isAddOnDisabled = reason === 'addon_disabled' || reason === 'addon_archived';
+                const eligibleAddOn = r.addOn && r.addOn.governanceStatus === 'active';
+                // Action buttons appear when feature is implemented AND
+                // either currently included by plan / has a granted override
+                // OR the catalog has an active linked add-on we can grant.
+                const canOfferGrant = feature.lifecycle === 'implemented' && !enabled && !isPendingPayment && eligibleAddOn;
+                const cardBg = isPendingPayment
+                  ? 'bg-amber-50/50 border-amber-100'
+                  : isExpired
+                    ? 'bg-orange-50/50 border-orange-100'
+                    : isRevoked
+                      ? 'bg-red-50/40 border-red-100'
+                      : enabled
+                        ? 'bg-slate-50 border-slate-100'
+                        : 'bg-slate-50/50 border-slate-100/50';
+                const iconColor = isPendingPayment
+                  ? 'text-amber-500'
+                  : isExpired
+                    ? 'text-orange-500'
+                    : isRevoked
+                      ? 'text-red-500'
+                      : enabled
+                        ? 'text-lime-600'
+                        : 'text-slate-300';
+                const iconName = isPendingPayment
+                  ? 'hourglass_top'
+                  : isExpired
+                    ? 'history_toggle_off'
+                    : isRevoked
+                      ? 'block'
+                      : enabled
+                        ? 'check_circle'
+                        : 'remove_circle_outline';
+                const titleColor = enabled
+                  ? 'text-slate-900'
+                  : isPendingPayment
+                    ? 'text-amber-800'
+                    : isExpired
+                      ? 'text-orange-800'
+                      : isRevoked
+                        ? 'text-red-800'
+                        : 'text-slate-400';
+                const reasonBadgeClass = enabled
+                  ? 'bg-lime-50 text-lime-700 border-lime-100'
+                  : isPendingPayment
+                    ? 'bg-amber-50 text-amber-700 border-amber-100'
+                    : isExpired
+                      ? 'bg-orange-50 text-orange-700 border-orange-100'
+                      : isRevoked
+                        ? 'bg-red-50 text-red-700 border-red-100'
+                        : isAddOnDisabled
+                          ? 'bg-slate-100 text-slate-600 border-slate-200'
+                          : 'bg-slate-50 text-slate-500 border-slate-100';
                 return (
-                  <div key={feature.id} className={`p-4 rounded-xl border ${state.type === 'pending_payment' ? 'bg-amber-50/50 border-amber-100' : enabled ? 'bg-slate-50 border-slate-100' : 'bg-slate-50/50 border-slate-100/50'}`}>
-                    <div className="flex justify-between items-start">
-                      <div className="flex items-center gap-3">
-                        <span className={`material-symbols-outlined text-sm ${state.type === 'pending_payment' ? 'text-amber-500' : enabled ? 'text-lime-600' : 'text-slate-300'}`}>{state.type === 'pending_payment' ? 'hourglass_top' : enabled ? 'check_circle' : 'remove_circle_outline'}</span>
-                        <div>
-                          <span className={`font-bold ${enabled ? 'text-slate-900' : state.type === 'pending_payment' ? 'text-amber-800' : 'text-slate-400'}`}>{feature.name}</span>
-                          {feature.lifecycle !== 'implemented' && (
-                            <span className="ml-2 text-[8px] font-black text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded uppercase tracking-widest">{feature.lifecycle}</span>
+                  <div key={feature.id} className={`p-4 rounded-xl border ${cardBg}`}>
+                    <div className="flex justify-between items-start gap-3">
+                      <div className="flex items-start gap-3 min-w-0">
+                        <span className={`material-symbols-outlined text-sm mt-0.5 ${iconColor}`}>{iconName}</span>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className={`font-bold ${titleColor}`}>{feature.name}</span>
+                            {feature.lifecycle !== 'implemented' && (
+                              <span className="text-[8px] font-black text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded uppercase tracking-widest">{feature.lifecycle}</span>
+                            )}
+                          </div>
+                          <p className="text-[10px] text-slate-500 mt-1">{REASON_EXPLAINER[reason]}</p>
+                          {isTrialActive && ov?.trialEnd && <p className="text-[10px] text-indigo-500 font-bold mt-0.5">Trial until {ov.trialEnd}</p>}
+                          {(isPaidActive || isPendingPayment) && ovAny?.price !== undefined && ovAny.price > 0 && (
+                            <p className={`text-[10px] font-bold mt-0.5 ${isPendingPayment ? 'text-amber-600' : 'text-emerald-600'}`}>
+                              ${ovAny.price}/{ovAny.pricingModel === 'monthly' ? 'mo' : ovAny.pricingModel === 'annual' ? 'yr' : 'once'}
+                              {r.addOn && r.addOn.price !== ovAny.price && (
+                                <span className="ml-1.5 text-[9px] font-black text-violet-600 bg-violet-50 px-1.5 py-0.5 rounded uppercase tracking-widest">Custom Price</span>
+                              )}
+                              {isPendingPayment ? ' · Awaiting payment' : ''}
+                            </p>
                           )}
-                          {state.trialEnd && <p className="text-[10px] text-indigo-500 font-bold">Trial until {state.trialEnd}</p>}
-                          {(state.type === 'paid_override' || state.type === 'pending_payment') && (() => {
-                            const ov = localOverrides.find(o => o.featureId === feature.id) as (typeof localOverrides[0] & { price?: number; pricingModel?: string }) | undefined;
-                            return ov?.price ? <p className={`text-[10px] font-bold ${state.type === 'pending_payment' ? 'text-amber-600' : 'text-emerald-600'}`}>${ov.price}/{ov.pricingModel === 'monthly' ? 'mo' : ov.pricingModel === 'annual' ? 'yr' : 'once'}{state.type === 'pending_payment' ? ' · Awaiting payment' : ''}</p> : null;
-                          })()}
                         </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        {statusBadge(state.type)}
-                        {state.type === 'disabled' && feature.lifecycle === 'implemented' && (
-                          <div className="flex gap-1">
-                            <button onClick={() => setFeatureTrialModal(feature.id)} className="text-[8px] font-black text-indigo-600 bg-indigo-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-indigo-100 transition-colors">Trial</button>
-                            <button onClick={() => setFeaturePaidModal(feature.id)} className="text-[8px] font-black text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-emerald-100 transition-colors">Paid Override</button>
-                          </div>
-                        )}
-                        {state.type === 'pending_payment' && (
-                          <div className="flex gap-1">
-                            <button onClick={() => handleApprovePayment(feature.id)} className="text-[8px] font-black text-lime-600 bg-lime-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-lime-100 transition-colors">Approve</button>
-                            <button onClick={() => handleRevokeFeature(feature.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">Cancel</button>
-                          </div>
-                        )}
-                        {state.type === 'trial' && (
-                          <button onClick={() => handleRevokeFeature(feature.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">End Trial</button>
-                        )}
-                        {(state.type === 'overridden' || state.type === 'paid_override') && (
-                          <button onClick={() => handleRevokeFeature(feature.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">Revoke</button>
-                        )}
-                        {state.type === 'addon' && (
-                          <button onClick={() => handleRevokeFeature(feature.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">Remove</button>
-                        )}
+                      <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
+                        <span className={`text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest whitespace-nowrap ${reasonBadgeClass}`}>{REASON_LABEL[reason]}</span>
+                        <div className="flex items-center gap-1 flex-wrap justify-end">
+                          {canOfferGrant && (
+                            <>
+                              <button onClick={() => setFeatureTrialModal(feature.id)} className="text-[8px] font-black text-indigo-600 bg-indigo-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-indigo-100 transition-colors">Trial</button>
+                              <button onClick={() => { setPaidOverridePrice(r.addOn?.price ? String(r.addOn.price) : ''); setPaidOverrideModel(r.addOn?.billingCadence === 'annual' ? 'annual' : r.addOn?.billingCadence === 'one_time' ? 'one_time' : 'monthly'); setFeaturePaidModal(feature.id); }} className="text-[8px] font-black text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-emerald-100 transition-colors">Paid Override</button>
+                            </>
+                          )}
+                          {isAddOnDisabled && feature.lifecycle === 'implemented' && (
+                            <span className="text-[8px] font-black text-slate-500 bg-slate-100 px-2 py-1 rounded-lg uppercase tracking-widest">Catalog {reason === 'addon_archived' ? 'archived' : 'disabled'}</span>
+                          )}
+                          {isPendingPayment && (
+                            <>
+                              <button onClick={() => handleApprovePayment(feature.id)} className="text-[8px] font-black text-lime-600 bg-lime-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-lime-100 transition-colors">Approve</button>
+                              <button onClick={() => handleRevokeFeature(feature.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">Cancel</button>
+                            </>
+                          )}
+                          {isTrialActive && (
+                            <button onClick={() => handleRevokeFeature(feature.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">End Trial</button>
+                          )}
+                          {isPaidActive && (
+                            <button onClick={() => handleRevokeFeature(feature.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">Revoke</button>
+                          )}
+                          {(isExpired || isRevoked) && eligibleAddOn && (
+                            <>
+                              <button onClick={() => setFeatureTrialModal(feature.id)} className="text-[8px] font-black text-indigo-600 bg-indigo-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-indigo-100 transition-colors">Re-trial</button>
+                              <button onClick={() => { setPaidOverridePrice(r.addOn?.price ? String(r.addOn.price) : ''); setPaidOverrideModel(r.addOn?.billingCadence === 'annual' ? 'annual' : r.addOn?.billingCadence === 'one_time' ? 'one_time' : 'monthly'); setFeaturePaidModal(feature.id); }} className="text-[8px] font-black text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-emerald-100 transition-colors">Re-grant Paid</button>
+                            </>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -1272,18 +1464,26 @@ const TenantDetailPage: React.FC = () => {
                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3 mt-4">Override History</p>
                 <div className="space-y-2">
                   {localOverrides.map((o, i) => {
-                    const f = featureMatrix.find(ft => ft.id === o.featureId);
+                    const f = liveFeatureMatrix.find(ft => ft.id === o.featureId);
                     const ov = o as typeof o & { price?: number; pricingModel?: string; pricingNotes?: string };
+                    const wasRevoked = !!o.revokedDate;
                     return (
-                      <div key={i} className="flex justify-between items-center p-3 bg-slate-50 rounded-xl border border-slate-100">
+                      <div key={i} className={`flex justify-between items-center p-3 rounded-xl border ${wasRevoked ? 'bg-red-50/40 border-red-100' : 'bg-slate-50 border-slate-100'}`}>
                         <div>
-                          <p className="font-bold text-slate-900 text-sm">{f?.name || o.featureId}</p>
+                          <p className={`font-bold text-sm ${wasRevoked ? 'text-red-800' : 'text-slate-900'}`}>{f?.name || o.featureId}</p>
                           <p className="text-[10px] text-slate-400">{o.addedBy} · {o.addedDate}{o.trialEnd ? ` · Trial until ${o.trialEnd}` : ''}</p>
                           {ov.price !== undefined && ov.price > 0 && (
-                            <p className="text-[10px] font-bold text-emerald-600">${ov.price}/{ov.pricingModel === 'monthly' ? 'mo' : ov.pricingModel === 'annual' ? 'yr' : 'once'}{ov.pricingNotes ? ` · ${ov.pricingNotes}` : ''}</p>
+                            <p className={`text-[10px] font-bold ${wasRevoked ? 'text-slate-500 line-through' : 'text-emerald-600'}`}>${ov.price}/{ov.pricingModel === 'monthly' ? 'mo' : ov.pricingModel === 'annual' ? 'yr' : 'once'}{ov.pricingNotes ? ` · ${ov.pricingNotes}` : ''}</p>
+                          )}
+                          {wasRevoked && (
+                            <p className="text-[10px] font-bold text-red-600">Revoked {o.revokedDate} by {o.revokedBy}{o.revokeReason ? ` · ${o.revokeReason}` : ''}</p>
                           )}
                         </div>
-                        {statusBadge(o.type)}
+                        {wasRevoked ? (
+                          <span className="text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest bg-red-50 text-red-700 border-red-100">Revoked</span>
+                        ) : (
+                          statusBadge(o.type)
+                        )}
                       </div>
                     );
                   })}

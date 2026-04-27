@@ -1,0 +1,458 @@
+System Owner Commercial Controls + Add-on Governance
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated implementation pass.
+Do not redesign the app.
+Do not broaden scope beyond System Owner commercial controls, add-on governance, tenant feature visibility, and entitlement consistency.
+Do not reopen the Shipping Module.
+Do not change accepted Shipping Phase 1 / 2 / 3 logic.
+Do not implement external billing, payment collection, Stripe subscriptions, invoices, or accounting automation in this pass unless already safely present.
+Do not implement unrelated RepairDesk feature gaps in this pass.
+
+Implement the next active workstream:
+System Owner Commercial Controls + Add-on Governance
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Firebase/Firestore multi-tenant architect
+- Senior SaaS monetization / entitlement systems architect
+- Senior RBAC / plan-gating architect
+- Senior product operations architect
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Important:
+Do not make a shallow UI patch.
+Think through the commercial entitlement model correctly.
+The system owner must be able to manage plan features, add-ons, tenant-level trials, paid overrides, and visibility cleanly without creating confusing tenant states.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- replit.md
+
+Use it as the current source-of-truth document.
+
+Important:
+Shipping Module / Shipping Center is closed and accepted.
+Preserve all final shipping lifecycle, automation, SLA, scorecard, plan-gating, and permission rules exactly.
+
+==================================================
+PRESERVE WITHOUT BREAKING
+==================================================
+
+Preserve:
+- current design baseline unless explicitly changed here
+- auth behavior
+- preview-mode safety
+- System Owner plan gating
+- tenant/store feature gating
+- Store Permissions Matrix behavior
+- linked permission disappearance rule
+- dynamic sub-permission counts
+- role permissions cannot resurrect plan-disabled features
+- owner/admin/employee access model
+- existing tenant management and provisioning behavior
+- completed Shipping Module closure state
+- all accepted Shipping Center behavior
+
+==================================================
+WORKSTREAM GOAL
+==================================================
+
+Build a clean commercial-governance layer for:
+
+1) Add-on lifecycle control
+2) Add-on visibility control
+3) Add-on pricing control
+4) Tenant-specific trial and paid override control
+5) Clear distinction between:
+   - core plan features
+   - add-on features
+   - trial add-ons
+   - paid override add-ons
+   - disabled / archived add-ons
+6) Coherent tenant feature visibility
+7) Coherent Store Permissions Matrix behavior
+
+This should improve the System Owner’s ability to commercially control what tenants can see and use.
+
+==================================================
+PART A — ADD-ON CATALOG GOVERNANCE
+==================================================
+
+Required:
+Create or refine an Add-on Catalog model under System Owner controls.
+
+At minimum, each add-on should support:
+
+- addOnId
+- name
+- description
+- linkedFeatureId or capability key
+- default monthly price or default price
+- billing cadence label if already supported
+- status:
+  - active
+  - disabled
+  - archived
+- createdAt / updatedAt
+- createdBy / updatedBy
+- audit/history entries where appropriate
+
+Required behavior:
+- active add-ons can be offered to tenants
+- disabled add-ons should not appear as available tenant add-ons
+- archived add-ons should not appear in tenant feature/add-on selection surfaces
+- archived/disabled add-ons should remain in System Owner catalog/history for audit, unless current app pattern permanently removes records
+- do not delete historical tenant assignment/audit evidence silently
+
+Important:
+Archived or disabled add-ons must not appear under tenant Features tab as available selectable items.
+
+==================================================
+PART B — CORE FEATURE VS ADD-ON FEATURE DISTINCTION
+==================================================
+
+Required:
+The UI must clearly distinguish between:
+
+1) Plan/Core Feature
+A feature included by the tenant’s plan.
+
+2) Add-on Feature
+A separately sellable feature controlled by the add-on catalog.
+
+3) Trial Add-on
+An add-on temporarily granted to a tenant.
+
+4) Paid Override Add-on
+An add-on granted to a tenant as a paid exception/override.
+
+Required:
+When a tenant feature is add-on based, the tenant feature surface must clearly indicate:
+- Add-on
+- Trial
+- Paid Override
+- Included by Plan, if applicable
+- Not available, if plan/add-on status prevents it
+
+Avoid vague or misleading labels.
+
+==================================================
+PART C — TENANT ADD-ON OVERRIDES
+==================================================
+
+Required:
+Add or refine tenant-specific add-on override controls.
+
+At minimum support:
+- grant trial add-on
+- grant paid override add-on
+- revoke add-on override
+- trial start date
+- trial end date
+- paid override price
+- override status:
+  - trial_active
+  - trial_expired
+  - paid_active
+  - revoked
+  - inactive
+- notes / reason
+- audit history
+
+Required behavior:
+- when granting paid override, default price should come from the Add-on Catalog default price
+- System Owner must be able to edit tenant-specific paid override price
+- edited override price must be persisted clearly
+- tenant-specific price should not mutate the global add-on default price
+- trial override should clearly show trial state and dates
+- expired trial should not continue enabling the feature unless separately converted to paid override or included in plan
+
+Do not fake billing collection.
+This pass controls entitlement and commercial metadata only.
+
+==================================================
+PART D — TENANT FEATURES TAB VISIBILITY
+==================================================
+
+Required:
+Fix tenant Features tab visibility behavior.
+
+Rules:
+1) If an add-on is archived, it should not appear under tenant Features tab as an available feature/add-on.
+2) If an add-on is disabled, it should not appear under tenant Features tab as an available feature/add-on.
+3) If a tenant already had an archived/disabled add-on assigned historically:
+   - show it only where needed as historical/revoked/inactive evidence, not as an active available feature
+   - do not let it continue enabling functionality
+4) Active add-ons may appear as available for trial or paid override.
+5) Tenant feature rows must clearly show whether the feature is:
+   - Plan Feature
+   - Add-on
+   - Trial
+   - Paid Override
+   - Disabled / Not Available
+   - Revoked / Expired if historical view exists
+
+Important:
+Tenant-facing/store-owner surfaces should not show unavailable add-ons as usable capabilities.
+
+==================================================
+PART E — ENTITLEMENT RESOLUTION MODEL
+==================================================
+
+Required:
+Implement or refine a single entitlement resolution model.
+
+A tenant feature should be enabled only if one of the following is true:
+1) included by the tenant’s active plan
+2) enabled by an active trial add-on override
+3) enabled by an active paid add-on override
+
+A tenant feature should be unavailable if:
+- feature is disabled at plan level
+- add-on is disabled or archived
+- tenant override is expired/revoked/inactive
+- plan/add-on relationship does not include it
+
+Required:
+The resolver should return a clear reason:
+- included_by_plan
+- enabled_by_trial_addon
+- enabled_by_paid_addon
+- disabled_by_plan
+- addon_disabled
+- addon_archived
+- trial_expired
+- override_revoked
+- not_available
+
+Use this reason to drive UI copy and permission filtering.
+
+==================================================
+PART F — STORE PERMISSIONS MATRIX INTEGRITY
+==================================================
+
+Required:
+Store Permissions Matrix must continue to follow the accepted rule:
+
+- plan/add-on entitlement decides whether capability exists
+- role decides who can use it
+- role cannot resurrect unavailable capabilities
+- linked permissions disappear when the parent feature/capability is unavailable
+- sub-permission counts reflect actual visible permissions
+
+Apply this to add-on-driven features.
+
+Examples:
+- If an add-on feature is not included by plan and no active tenant trial/paid override exists, its permissions should not appear as normal assignable permissions.
+- If an add-on is granted as active trial or paid override, linked permissions should appear normally, subject to role control.
+- If an add-on is archived/disabled, linked permissions should disappear even if old tenant assignment exists.
+
+==================================================
+PART G — SYSTEM OWNER PLAN / ADD-ON MATRIX ALIGNMENT
+==================================================
+
+Required:
+System Owner should have a coherent view of:
+- plan features
+- add-on catalog
+- which plans include which features by default
+- which features are available only as add-ons
+- which add-ons are active/disabled/archived
+- tenant-specific overrides
+
+Do not let the same capability be shown inconsistently across:
+- Plans & Features matrix
+- Add-on Catalog
+- Tenant Features tab
+- Store Permissions Matrix
+
+Required:
+If a capability exists as an add-on, the System Owner should be able to identify that clearly.
+
+==================================================
+PART H — PRICE DISPLAY AND EDITING
+==================================================
+
+Required:
+For paid overrides:
+- default price = add-on catalog price
+- System Owner can edit override price for that tenant
+- edited tenant price is stored separately
+- UI should show:
+  - default add-on price
+  - tenant override price
+  - whether price was customized
+- if add-on catalog default price later changes, do not silently overwrite an already customized tenant override price unless explicitly designed
+
+For trial overrides:
+- price should not be shown as active paid amount
+- trial state and dates should be clear
+
+Do not implement payment charging or subscription billing in this pass.
+
+==================================================
+PART I — AUDITABILITY
+==================================================
+
+Required:
+Audit major commercial control actions:
+- add-on created
+- add-on disabled
+- add-on archived
+- add-on reactivated if supported
+- default add-on price changed
+- tenant trial granted
+- tenant trial expired / revoked
+- tenant paid override granted
+- tenant override price edited
+- tenant override revoked
+- entitlement reason changed where practical
+
+Audit entries should include:
+- actor
+- timestamp
+- old value / new value where relevant
+- tenantId where relevant
+- addOnId / featureId
+- note/reason where available
+
+==================================================
+PART J — UI / UX CLARITY
+==================================================
+
+Required:
+Keep UI clean and consistent with current System Owner and Tenant Management design.
+
+Use clear labels:
+- Plan Feature
+- Add-on
+- Trial
+- Paid Override
+- Custom Price
+- Archived
+- Disabled
+- Revoked
+- Expired
+
+Avoid confusing terms like:
+- override without explaining type
+- active when feature is commercially inactive
+- plan locked when the feature is actually disabled because add-on is archived
+
+==================================================
+PART K — NON-REGRESSION
+==================================================
+
+Required:
+Do not regress:
+- tenant provisioning
+- owner access / store owner creation
+- plan switching
+- existing feature toggles
+- Store Permissions Matrix
+- linked permission disappearance
+- shipping plan/permission behavior
+- dynamic sub-permission counts
+- preview-mode write safety
+
+==================================================
+PART L — DOCUMENTATION
+==================================================
+
+Update replit.md with:
+- Add-on Catalog model
+- add-on lifecycle states
+- tenant trial override behavior
+- tenant paid override behavior
+- pricing behavior
+- entitlement resolution reasons
+- tenant Features tab visibility rules
+- Store Permissions Matrix treatment for add-on-driven features
+- audit behavior
+- what is out of scope:
+  - external billing collection
+  - Stripe/subscription automation
+  - accounting invoices
+  - tax/billing automation
+  - RepairDesk feature gap implementation
+
+==================================================
+OUT OF SCOPE
+==================================================
+
+Do NOT implement:
+- Stripe or payment processor integration
+- automatic subscription billing
+- customer invoicing for SaaS fees
+- accounting exports
+- tax calculation for SaaS subscriptions
+- public pricing website
+- RepairDesk KB gap implementation
+- new operational modules unrelated to commercial controls
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Add-on Catalog supports active / disabled / archived states
+2) Disabled/archived add-ons do not appear as available tenant features
+3) Add-on features are clearly labeled as Add-on
+4) Tenant trial overrides are clear and date-based
+5) Tenant paid overrides default to catalog price but allow tenant-specific edited price
+6) Tenant-specific override price does not mutate global add-on price
+7) Entitlement resolution distinguishes plan, trial, paid override, disabled, archived, revoked, expired
+8) Store Permissions Matrix respects add-on entitlement and does not expose unavailable permissions
+9) Dynamic sub-permission counts remain correct
+10) Audit trail records commercial control changes
+11) Existing tenant/plan/shipping behavior remains intact
+12) Out-of-scope billing/payment features are not implemented
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Audit existing plan/add-on/feature data structures
+2) Define or refine Add-on Catalog model
+3) Define tenant add-on override model
+4) Implement entitlement resolution logic
+5) Fix Tenant Features tab visibility and labels
+6) Add paid override price default/edit behavior
+7) Wire Store Permissions Matrix entitlement filtering
+8) Add audit history for commercial controls
+9) Re-test plan/permission/shipping non-regression
+10) Update replit.md
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Add-on Catalog + Lifecycle Model
+3. Tenant Trial / Paid Override Model
+4. Pricing + Tenant Override Behavior
+5. Entitlement Resolution + Tenant Feature Visibility
+6. Store Permissions Matrix Alignment
+7. Auditability Updates
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes
