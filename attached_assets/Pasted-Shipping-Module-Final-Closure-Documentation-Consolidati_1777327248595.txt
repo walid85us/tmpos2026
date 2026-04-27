@@ -1,0 +1,321 @@
+Shipping Module — Final Closure + Documentation Consolidation
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict final closure and documentation consolidation pass.
+Do not redesign the app.
+Do not implement new shipping features.
+Do not reopen closed shipping workstreams unless a real regression is found during verification.
+Do not implement Customs Docs.
+Do not implement Insurance Rules.
+Do not implement carrier manifests, barcode WMS, carrier claims, predictive optimization, scheduled backfill, historical-event replay, or external benchmarking in this pass.
+
+This pass is for:
+1) consolidating the completed Shipping Module record,
+2) confirming Phase 1 / Phase 2 / Phase 3 are marked completed,
+3) documenting final accepted lifecycle rules,
+4) recording deferred future improvements clearly,
+5) protecting the project from future Replit confusion or accidental reopening.
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior shipping systems architect
+- Senior product documentation architect
+- Senior QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Important:
+This is not a feature-building pass.
+This is a closure, verification, and documentation-hardening pass.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- Ref.txt
+- replit.md
+
+Use them as continuity and source-of-truth documents.
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Finalize the Shipping Module / Shipping Center record so the project clearly reflects that:
+
+- Shipping Phase 1 is completed
+- Shipping Phase 2 is completed
+- Shipping Phase 3 is completed
+- Customs Docs and Insurance Rules are deferred future improvements
+- remaining advanced shipping ideas are future roadmap items
+- accepted lifecycle, plan-gating, permission, provider, packing, SLA, automation, analytics, and scorecard rules are documented clearly
+
+==================================================
+PART A — SHIPPING PHASE COMPLETION RECORD
+==================================================
+
+Required:
+Update replit.md to clearly mark the following as completed and accepted:
+
+Shipping Phase 1:
+- core shipping architecture
+- provider adapter foundation
+- address validation
+- rates
+- labels
+- tracking
+- invoice / repair / transfer / RMA linkage
+- print label readiness
+- provider/manual split
+- auditability and truthful provider state
+
+Shipping Phase 2:
+- returns portal / reverse logistics
+- service points / carrier locators
+- pickup requests
+- pickup forecast
+- pickup fee transparency
+- exact pickup-rate selection
+- two-stage address readiness
+- pickup cancellation / orphan recovery / truthful provider-state handling
+- Carrier Analytics foundation
+- plan-to-permission propagation
+- Shipping Provider hard-disable and configuration clearing
+- Settings tab vs subsection scoping
+- dynamic sub-permission counts
+
+Shipping Phase 3:
+- Automation Rules + Batch Labels foundation
+- purpose-driven rule builder
+- approval/review/guardrail workflow
+- pre-action guardrails for label purchase, pickup request, dispatch, and batch label purchase
+- SLA Optimization foundation
+- SLA Automation Linkage
+- SLA Automation Backfill
+- General Automation Backfill Framework
+- Packing Workflows + Rate Gating
+- Dispatch eligibility after label purchase / valid manual handoff
+- Carrier Scorecards foundation
+
+==================================================
+PART B — FINAL ACCEPTED SHIPPING LIFECYCLE RULES
+==================================================
+
+Document these final accepted rules clearly:
+
+1) Packing before rates:
+- provider-backed Get Rates requires packing completed / Packed or packing Not Required
+- package weight and dimensions must be complete where required
+- package verification must be current
+
+2) Packed status:
+- completing packing marks shipment status as Packed
+- Packed means rate/label readiness, not dispatch readiness
+- packing may be reopened before label purchase
+- reopening packing clears or invalidates selected rate where applicable
+
+3) Label purchase:
+- label purchase requires valid provider readiness, selected rate, package readiness, and guardrail clearance where applicable
+- after label purchase, packing and package details are locked
+
+4) Dispatch:
+- provider shipment cannot be marked Dispatched before label purchase
+- manual shipment dispatch requires valid manual handoff requirements
+- Dispatched remains distinct from In Transit
+
+5) Tracking:
+- In Transit and Delivered must be based on truthful tracking/provider/lifecycle data
+- Dispatched must not be counted as In Transit
+
+6) Pickup:
+- provider-confirmed pickup must remain distinct from local-only pickup intent
+- confirmed pickup dependency must prevent inconsistent shipment cancellation
+- pickup orphan / local-dismiss recovery behavior remains accepted
+
+7) Returns:
+- reverse logistics flow remains part of Shipping Center
+- return shipments must preserve truthful lifecycle and provider-state logic
+
+==================================================
+PART C — FINAL ACCEPTED PLAN / PERMISSION RULES
+==================================================
+
+Document these final accepted entitlement rules:
+
+- plan determines whether a capability exists
+- role determines who can use it
+- role permissions cannot resurrect a plan-disabled feature
+- linked permissions disappear from Store Permissions Matrix when parent feature is plan-disabled
+- dynamic sub-permission counts must reflect actual visible permissions
+- Shipping Provider Configuration is scoped to its subsection, not the entire Settings tab
+- disabling Shipping Provider at plan level deactivates provider-backed operations and clears/deactivates configuration as accepted
+- action buttons remain permission-gated even when status visibility is allowed
+
+Ensure documentation lists distinct shipping sub-features where implemented:
+- Shipping Center
+- Shipping Provider Configuration
+- Carrier Locators / Service Points
+- Pickup Requests / Pickup Analytics where applicable
+- Carrier Analytics
+- Automation Rules
+- Batch Labels
+- Packing Workflows
+- SLA Optimization
+- Carrier Scorecards
+
+==================================================
+PART D — FINAL ACCEPTED AUTOMATION RULES
+==================================================
+
+Document final accepted automation behavior:
+
+- purpose-driven builder:
+  - Flag / Note
+  - Queue for Batch
+  - Require Review
+  - Require Approval
+  - Block Action
+
+- Queue for Batch includes Packing Completed
+- Require Approval and Block Action use real pre-action triggers only:
+  - carrier label about to be purchased
+  - pickup about to be requested
+  - shipment about to be dispatched
+  - batch label purchase about to run
+
+- pre-action hooks must stop the risky action before completion
+- Choose Another Rate applies only to label-purchase guardrails
+- requester sees Pending Review / Pending Approval
+- approver sees Review Request / Approval Request / Review Approval where appropriate
+- duplicate approval requests are blocked
+- approval clears loop for approved context
+- requester note is visible to approver
+- dismiss/cancel request requires Request Note
+- execution history remains truthful and clickable
+- automation outcomes and normal packing history must remain separate
+
+==================================================
+PART E — FINAL ACCEPTED BACKFILL RULES
+==================================================
+
+Document final accepted backfill behavior:
+
+- default automation is future-only
+- no silent retroactive automation
+- SLA backfill is explicit and manual
+- General Automation Backfill Framework is accepted
+- permission label is Run Automation Backfill
+- backfill requires in-app confirmation
+- results are itemized
+- duplicate/re-run safety is enforced
+- audit/history records are preserved
+- resolved backfill outcomes remain in Execution History
+- event-only triggers are not backfillable
+- pre-action triggers are not backfillable
+- current-state non-SLA backfill framework may remain future scaffolding if not actively used
+
+==================================================
+PART F — FINAL ACCEPTED SLA / SCORECARD RULES
+==================================================
+
+Document final accepted SLA and Carrier Scorecard behavior:
+
+SLA:
+- SLA status uses real lifecycle timestamps
+- missing timestamp data shows unknown / insufficient-data
+- Pack By aligns with packing completion
+- Label By aligns with label purchase
+- Dispatch By aligns with Dispatch status
+- Deliver By does not fake delivery data
+- delay reasons, pause/resume, and resolution are auditable
+- SLA automation linkage and backfill are accepted
+
+Carrier Scorecards:
+- scorecards use recorded shipment/SLA/provider/pickup/tracking data only
+- SLA scorecard metrics reuse accepted SLA foundation
+- manual vs provider-backed shipments are not silently conflated
+- local-only pickups are not provider-confirmed pickups
+- data-quality / coverage states are clearly surfaced
+- sample-size handling is required
+- no fake AI optimization, external benchmarking, or carrier claims/refund logic
+
+==================================================
+PART G — DEFERRED FUTURE SHIPPING ROADMAP
+==================================================
+
+Create a clearly labelled section in replit.md:
+
+Deferred Future Shipping Improvements
+
+Include at minimum:
+1) Customs Docs foundation
+2) Insurance Rules foundation
+3) Carrier manifests / end-of-day closeout
+4) Barcode scanning / warehouse-style packing verification
+5) Carrier claims / refund workflow
+6) Automatic carrier switching / recommendation engine
+7) Predictive delivery or predictive SLA optimization
+8) External carrier benchmarking
+9) Scheduled recurring automation backfill
+10) Historical-event replay backfill
+11) Carrier Scorecards export / configurable weighting
+12) More advanced current-state non-SLA backfill triggers if desired later
+
+Important:
+These are roadmap items only.
+Do not implement them in this pass.
+
+==================================================
+PART H — FINAL NON-REGRESSION VERIFICATION
+==================================================
+
+Perform a light code/documentation review to confirm:
+- no new shipping feature was accidentally started
+- no previously accepted behavior was undone
+- replit.md does not contradict current implementation
+- deferred items are clearly marked future, not active
+- next recommended non-shipping workstream is System Owner Commercial Controls + Add-on Governance
+
+Do not change behavior unless a clear documentation inconsistency or regression is discovered.
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Shipping Module completion status
+- Phase 1 / 2 / 3 accepted summary
+- final lifecycle rules
+- final entitlement rules
+- final automation rules
+- final backfill rules
+- final SLA and Carrier Scorecards rules
+- deferred future roadmap
+- next recommended workstream:
+  System Owner Commercial Controls + Add-on Governance
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Shipping Phase Completion Record
+3. Final Lifecycle Rules Documented
+4. Final Plan / Permission Rules Documented
+5. Final Automation / Backfill Rules Documented
+6. Final SLA / Carrier Scorecards Rules Documented
+7. Deferred Future Shipping Roadmap
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes
