@@ -102,6 +102,16 @@ export const SUB_PERMISSIONS: SubPermissionDef[] = [
   { id: 'request_carrier_pickup', label: 'Request Carrier Pickup', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'edit', description: 'Schedule a carrier pickup for a shipment where supported' },
   { id: 'cancel_carrier_pickup', label: 'Cancel Carrier Pickup', parentDomain: 'shipping', minModuleLevel: 'edit', defaultLevel: 'manage', description: 'Cancel a previously requested carrier pickup' },
   { id: 'view_carrier_analytics', label: 'View Carrier Analytics', parentDomain: 'shipping', minModuleLevel: 'view', defaultLevel: 'manage', description: 'View Shipping Center carrier analytics — shipment counts, status buckets (Dispatched separate from In Transit), carrier/service distribution, and lifecycle timing derived from real shipment, pickup, and event data. Default-grants only at manage-level on Shipping (admin/manager); other roles must be explicitly opted in. Cost-related metrics also require View Shipping Costs. Pickup analytics blocks additionally require the View Pickup Analytics sub-permission and the Pickup Requests plan feature.' },
+  // Phase 3 — Carrier Scorecards Foundation. The Scorecards surface
+  // groups shipments by carrier + service + provider and renders a
+  // truthful per-card metric panel (usage / cost / SLA / transit /
+  // pickup / exceptions) with explicit data-quality coverage strips
+  // and a "limited data" badge below MIN_SAMPLE_SIZE. It does NOT
+  // produce a combined numeric grade. Cost rows additionally require
+  // View Shipping Costs and SLA rows require the SLA Optimization
+  // plan feature; both are checked inside the surface so a partial
+  // permission shape still renders truthfully.
+  { id: 'view_carrier_scorecards', label: 'View Carrier Scorecards', parentDomain: 'shipping', minModuleLevel: 'view', defaultLevel: 'view', description: 'View the Shipping Center Carrier Scorecards surface — per-carrier / service / provider scorecards comparing usage, cost, SLA, transit timings, pickup execution, and exceptions, derived deterministically from recorded shipment, event, pickup and SLA data. Sample-size aware (cards below the minimum are marked "Limited data"). No combined numeric grade is produced in this foundation. Cost metrics inside the cards additionally require View Shipping Costs; SLA metrics additionally require View Shipping SLA and the SLA Optimization plan feature.' },
   { id: 'view_pickup_analytics', label: 'View Pickup Analytics', parentDomain: 'shipping', minModuleLevel: 'view', defaultLevel: 'manage', description: 'View pickup-analytics surfaces inside Carrier Analytics — counts of requested / provider-confirmed / local-only / cancelled / failed pickups. Independently gated from operational pickup permissions so analytics visibility can be granted (or withheld) without giving the operator the ability to schedule or cancel pickups. Also requires the Pickup Requests plan feature.' },
   { id: 'manage_carrier_locator_settings', label: 'Manage Carrier Locator Settings', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Configure per-store carrier-locator adapters (USPS / FedEx / UPS / DHL / GLS) used for live service-point lookup. Independent of Manage Shipping Settings (which controls aggregator-level provider configuration like EasyPost / Shippo / ShipStation). Requires the Service Points plan feature.' },
   { id: 'manage_shipping_automation_rules', label: 'Manage Shipping Automation Rules', parentDomain: 'shipping', minModuleLevel: 'manage', defaultLevel: 'manage', description: 'Create, edit, enable / disable and delete Shipping Center Automation Rules. Rules are operator-trustworthy: they can only flag shipments, add internal notes, mark review-needed, queue ready-for-batch, and set priority — they cannot purchase labels, change status, or perform irreversible carrier operations. Requires the Shipping Automation Rules plan feature.' },
@@ -267,6 +277,13 @@ export const FEATURE_PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   carrier_analytics: [
     'view_carrier_analytics',
   ],
+  // Phase 3 — Carrier Scorecards Foundation. Without the plan feature
+  // there is no Scorecards tab and no surface, so the view-permission is
+  // meaningless. The cohort still relies on shipment / event / pickup /
+  // SLA data already collected by the existing flows.
+  carrier_scorecards: [
+    'view_carrier_scorecards',
+  ],
   // Phase 3 Pass #15 — SLA Optimization. Without the plan feature there is
   // no SLA card, no SLA filters, no SLA badges, no policy editor, no pause /
   // resume / resolve workflow. Underlying lifecycle timestamps continue to
@@ -411,6 +428,7 @@ export const tenantRoles: EmployeeRole[] = [
       cancel_shipment: true,
       view_shipping_costs: true,
       view_carrier_analytics: true,
+      view_carrier_scorecards: true,
       view_pickup_analytics: true,
       manage_shipping_settings: true,
       configure_shipping_provider: true,
@@ -510,6 +528,7 @@ export const tenantRoles: EmployeeRole[] = [
       cancel_shipment: false,
       view_shipping_costs: false,
       view_carrier_analytics: false,
+      view_carrier_scorecards: false,
       view_pickup_analytics: false,
       manage_shipping_settings: false,
       configure_shipping_provider: false,
@@ -609,6 +628,7 @@ export const tenantRoles: EmployeeRole[] = [
       cancel_shipment: false,
       view_shipping_costs: false,
       view_carrier_analytics: false,
+      view_carrier_scorecards: false,
       view_pickup_analytics: false,
       manage_shipping_settings: false,
       configure_shipping_provider: false,
@@ -653,8 +673,8 @@ export const roles = [...platformRoles, ...tenantRoles];
 
 export const planFeatures: Record<Plan, string[]> = {
   starter: ['dashboard', 'sales', 'customers', 'invoices', 'support'],
-  growth: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'employees', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests', 'shipping_providers', 'carrier_analytics', 'shipping_automation_rules', 'batch_labels', 'packing_workflows', 'shipping_sla_optimization'],
-  advanced: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'employees', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests', 'shipping_providers', 'carrier_analytics', 'shipping_automation_rules', 'batch_labels', 'packing_workflows', 'shipping_sla_optimization'],
+  growth: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'employees', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests', 'shipping_providers', 'carrier_analytics', 'shipping_automation_rules', 'batch_labels', 'packing_workflows', 'shipping_sla_optimization', 'carrier_scorecards'],
+  advanced: ['dashboard', 'sales', 'customers', 'repairs', 'inventory', 'employees', 'invoices', 'services', 'supply-chain', 'settings', 'support', 'reports', 'integrations', 'widgets', 'prospects', 'marketing', 'warranties', 'suggestive_sales', 'refunds', 'loyalty_management', 'shipping', 'returns', 'service_points', 'pickup_requests', 'shipping_providers', 'carrier_analytics', 'shipping_automation_rules', 'batch_labels', 'packing_workflows', 'shipping_sla_optimization', 'carrier_scorecards'],
 };
 
 export const permissions = PERMISSION_DOMAINS;

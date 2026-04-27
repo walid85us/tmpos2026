@@ -185,6 +185,12 @@ export const featureMatrix = [
   { id: 'batch_labels', name: 'Batch Labels', planAvailability: { essential: false, growth: true, advanced: true } as Record<string, boolean>, source: 'inherited' as const, lifecycle: 'implemented' as FeatureLifecycle },
   { id: 'packing_workflows', name: 'Packing Workflows', planAvailability: { essential: false, growth: true, advanced: true } as Record<string, boolean>, source: 'inherited' as const, lifecycle: 'implemented' as FeatureLifecycle },
   { id: 'shipping_sla_optimization', name: 'SLA Optimization', planAvailability: { essential: false, growth: true, advanced: true } as Record<string, boolean>, source: 'inherited' as const, lifecycle: 'implemented' as FeatureLifecycle },
+  // Phase 3 — Carrier Scorecards Foundation. Truthful per-carrier/service
+  // performance comparison surface inside Shipping Center built on top of
+  // Carrier Analytics + SLA Optimization data. Provided on the same plans
+  // that have Carrier Analytics so a tenant with analytics also gets the
+  // scorecards comparison view.
+  { id: 'carrier_scorecards', name: 'Carrier Scorecards', planAvailability: { essential: false, growth: true, advanced: true } as Record<string, boolean>, source: 'inherited' as const, lifecycle: 'implemented' as FeatureLifecycle },
 ];
 
 export type FeatureOverrideType = 'inherited' | 'overridden' | 'paid_override' | 'pending_payment' | 'trial' | 'disabled' | 'addon';

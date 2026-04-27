@@ -1,0 +1,493 @@
+Shipping Phase 3 — Carrier Scorecards Foundation
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated implementation pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not reopen closed shipping workstreams unless a real regression is found.
+Do not implement Customs Docs or Insurance Rules in this pass.
+Do not implement predictive AI optimization in this pass.
+Do not implement automatic carrier ranking that pretends to be statistically complete if data coverage is partial.
+
+Implement the final planned Shipping Phase 3 workstream:
+1) Carrier Scorecards foundation
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior shipping operations architect
+- Senior logistics analytics / carrier performance architect
+- Senior SLA / fulfillment performance architect
+- Senior RBAC / entitlement systems architect
+- Senior QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Think deeply before coding.
+Do not create a shallow dashboard with fake scores.
+Build a truthful, auditable, data-quality-aware Carrier Scorecards foundation that builds on the completed Carrier Analytics, SLA Optimization, Packing, Batch Labels, Dispatch, Automation, and provider-state foundations.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- Ref.txt
+- replit.md
+
+Use them as continuity and source-of-truth documents.
+
+==================================================
+PRESERVE WITHOUT BREAKING
+==================================================
+
+Preserve exactly unless this workstream explicitly requires touching carrier scorecard-related analytics:
+- current design baseline
+- auth behavior
+- preview-mode safety
+- live System Owner plan gating
+- store permission gating
+- provider/manual mode split
+- shipping lifecycle integrity
+- existing shipping core flow
+- reverse-logistics flow
+- Carrier Analytics foundation
+- Automation Rules foundation
+- Automation approval/review/guardrail workflow
+- Automation Purpose-Trigger Matrix
+- SLA Optimization foundation
+- SLA Automation Linkage
+- SLA Backfill and General Automation Backfill
+- Batch Labels foundation
+- Packing Workflows + Rate Gating foundation
+- package verification and stale re-verification
+- Packed status lifecycle alignment
+- dispatch only after label purchase / valid manual handoff
+- post-label packing/package lock
+- entitlement propagation
+- Shipping Provider permission/hard-disable behavior
+- dynamic sub-permission counts
+- enabled-state non-regression
+
+==================================================
+WORKSTREAM GOAL
+==================================================
+
+Add a solid Carrier Scorecards foundation inside Shipping Center.
+
+The goal is to help store operators compare carrier/service performance using real recorded data only.
+
+Carrier Scorecards should support:
+- carrier/service performance summaries
+- SLA performance by carrier/service where data exists
+- cost and usage summaries
+- delivery/transit reliability where timestamps exist
+- pickup performance where pickup records exist
+- exception/failure visibility
+- data-quality and coverage indicators
+- truthful scorecard calculations that do not overclaim precision
+
+This is a foundation.
+Do NOT fake complete carrier intelligence.
+Do NOT pretend all carriers/providers have equal data coverage.
+Do NOT pretend manual shipments have the same provider-event detail as provider-backed shipments.
+
+==================================================
+PART A — CARRIER SCORECARDS SURFACE
+==================================================
+
+Required:
+Add a Carrier Scorecards surface inside Shipping Center in a native way.
+
+Possible placement:
+- a Scorecards tab
+- a Carrier Analytics sub-section
+- a dedicated scorecard panel inside Shipping Center
+
+Required:
+- must feel native to current Shipping Center IA
+- must not create a disconnected mini-app
+- must not redesign unrelated Shipping Center screens
+- should support filtering by:
+  - date range
+  - carrier
+  - provider
+  - service level
+  - store/location if available
+  - outbound vs return
+  - provider-backed vs manual
+  - shipment type/source where available
+
+==================================================
+PART B — SCORECARD DATA MODEL / DERIVATION FOUNDATION
+==================================================
+
+Required:
+Build scorecards from existing recorded shipment data.
+
+Use current available data sources such as:
+- shipment records
+- provider/mode fields
+- carrier/service fields
+- selected rate / cost fields
+- label purchase timestamps
+- dispatch timestamps
+- tracking timestamps/states where available
+- delivery timestamps where available
+- pickup request/confirmed/cancelled/failed/local-only states
+- SLA targets and SLA outcomes
+- packing and dispatch lifecycle timestamps
+- automation outcomes only where relevant and clearly labelled
+
+Required:
+Define deterministic derivation rules for every scorecard metric.
+No magic calculations.
+No invented carrier data.
+
+==================================================
+PART C — CORE SCORECARD METRICS
+==================================================
+
+At minimum support truthful metrics where data exists:
+
+1) Usage / Volume
+- total shipments
+- provider-backed shipments
+- manual shipments
+- outbound shipments
+- return shipments
+- label purchased count
+- delivered count
+- cancelled count
+
+2) Cost
+- total shipping spend where stored cost exists
+- average shipping cost where stored cost exists
+- min / max shipping cost if useful
+- cost coverage indicator if some shipments lack stored cost
+
+3) SLA Performance
+- SLA met count
+- SLA missed count
+- SLA at-risk count
+- SLA overdue count
+- SLA paused count
+- SLA unknown / insufficient-data count
+- SLA performance rate only where denominator is valid and documented
+
+4) Transit / Delivery Performance
+- average label-to-dispatch time where timestamps exist
+- average dispatch-to-delivery time where timestamps exist
+- average label-to-delivery time where timestamps exist
+- delivered vs open/in-transit/exception counts where tracking data exists
+- unknown/insufficient-data state where timestamps are missing
+
+5) Pickup Performance
+- pickup requested count
+- pickup confirmed count
+- pickup cancelled count
+- pickup failed count
+- local-only pickup count
+- provider-confirmed pickup coverage
+- pickup performance should preserve provider-state truthfulness
+
+6) Exception / Reliability
+- failed provider operation count where recorded
+- tracking exception count where available
+- automation review/approval/guardrail outcomes if relevant and clearly scoped
+- cancelled shipment count
+- unresolved SLA/packing/shipping exceptions where available
+
+==================================================
+PART D — SCORE / RATING LOGIC
+==================================================
+
+Required:
+If scorecards include a numeric score or grade, it must be transparent and data-quality-aware.
+
+Preferred:
+Start with metric scorecards before introducing one combined score.
+
+If implementing a combined score, it must:
+- show exact components
+- show weights
+- show coverage
+- exclude metrics with insufficient data instead of pretending they exist
+- show “insufficient data” when minimum sample size is not met
+- not rank carriers unfairly based on tiny samples
+
+Required:
+Add minimum sample-size handling.
+Example:
+- if carrier has fewer than N completed shipments in the selected period, show “limited data”
+- do not overstate performance
+
+Recommended foundation:
+- Volume
+- Cost
+- SLA
+- Delivery/Transit
+- Pickup
+- Exceptions
+- Overall score only if enough data exists
+
+==================================================
+PART E — DATA QUALITY / COVERAGE STATES
+==================================================
+
+Required:
+Carrier Scorecards must clearly show data quality.
+
+At minimum distinguish:
+- full provider-backed coverage
+- partial provider coverage
+- manual shipment data
+- insufficient timestamp coverage
+- insufficient SLA coverage
+- insufficient sample size
+- cost data unavailable
+- delivery data unavailable
+- pickup data local-only vs provider-confirmed
+
+Required:
+Do not silently mix:
+- manual shipments with provider-backed shipments
+- local-only pickup intents with provider-confirmed pickups
+- dispatched shipments with in-transit shipments
+- delivered shipments with assumed delivery
+
+Use truthful labels such as:
+- “Based on recorded shipment data”
+- “Partial provider coverage”
+- “Insufficient delivery timestamps”
+- “Manual shipment coverage only”
+- “Limited sample size”
+
+==================================================
+PART F — CARRIER / SERVICE COMPARISON
+==================================================
+
+Required:
+Allow operator to compare carriers/services where data exists.
+
+At minimum:
+- carrier distribution
+- service-level distribution
+- cost comparison by carrier/service
+- SLA comparison by carrier/service
+- delivery/transit comparison by carrier/service where data exists
+- pickup comparison by carrier/provider where pickup data exists
+
+Required:
+Comparison must not hide data-quality limitations.
+If one carrier has more provider data than another, show that.
+
+==================================================
+PART G — RELATIONSHIP TO SLA OPTIMIZATION
+==================================================
+
+Required:
+Carrier Scorecards must build on SLA Optimization foundation.
+
+Use SLA data for:
+- SLA met/missed/overdue rates
+- SLA target type breakdown
+- delay reasons
+- paused SLA exclusions/handling
+- SLA unknown/insufficient-data counts
+
+Required:
+- do not change accepted SLA calculations unless absolutely required
+- do not duplicate SLA business logic inconsistently
+- scorecard should read/use SLA outcomes, not invent a separate SLA model
+
+==================================================
+PART H — RELATIONSHIP TO CARRIER ANALYTICS
+==================================================
+
+Required:
+Carrier Scorecards should build on Carrier Analytics but not duplicate it blindly.
+
+Carrier Analytics = operational metrics and visibility.
+Carrier Scorecards = carrier/service performance evaluation and comparison.
+
+Required:
+- avoid redundant UI if possible
+- reuse metric derivation helpers where practical
+- do not regress Carrier Analytics filters or metrics
+- if scorecards share data with analytics, keep definitions consistent
+
+==================================================
+PART I — RELATIONSHIP TO AUTOMATION
+==================================================
+
+Required:
+Carrier Scorecards may use automation outcomes only as operational signal, not as proof of carrier failure unless directly related.
+
+Allowed examples:
+- count carrier-related automation review outcomes
+- count SLA automation outcomes by carrier/service if relevant
+- show unresolved shipping exceptions by carrier/service
+
+Not allowed:
+- blame carrier for internal packing delay
+- blame carrier for store-created SLA pause
+- treat every automation review as carrier fault
+
+Required:
+Where delay reason exists, use it to avoid misattribution.
+
+==================================================
+PART J — PLAN / PERMISSION / GATING
+==================================================
+
+Required:
+Add Carrier Scorecards as a distinct shipping sub-feature if surfaced in System Owner Plans & Features.
+
+Required:
+- add coherent Store Permissions Matrix treatment
+- permissions should be explicit and practical, such as:
+  - view_carrier_scorecards
+  - manage_carrier_scorecard_settings if settings exist
+  - export_carrier_scorecards if export exists
+- follow current entitlement rules:
+  - plan decides whether feature exists
+  - role decides who can use it
+  - linked permissions disappear when feature is plan-disabled
+  - role permissions must not resurrect plan-disabled features
+
+If no settings/export are implemented, do not create fake permissions for non-existent actions.
+At minimum, implement view permission if scorecards are permissioned.
+
+==================================================
+PART K — AUDITABILITY / DEFINITIONS
+==================================================
+
+Required:
+Scorecard definitions must be documented and stable.
+
+If settings are editable:
+- changes must be auditable
+- weights/minimum sample size changes must be recorded
+
+If no editable settings are added:
+- document fixed calculation definitions in replit.md
+
+Required:
+- show metric definition helper text or accessible definitions where practical
+- avoid black-box scorecards
+
+==================================================
+PART L — DO NOT FAKE WHAT IS NOT BUILT
+==================================================
+
+Required:
+Do not pretend to support:
+- AI carrier optimization
+- predictive carrier ranking
+- guaranteed delivery prediction
+- carrier refunds/claims
+- automatic carrier switching
+- live external carrier performance feed
+- complete provider event parity across carriers
+- customs/insurance scoring
+
+Show truthful foundation-only language where appropriate:
+- based on recorded shipment data
+- scorecard foundation
+- limited data
+- future provider enrichment
+
+==================================================
+PART M — OUT OF SCOPE
+==================================================
+
+Do NOT implement:
+- Customs Docs
+- Insurance Rules
+- AI route optimization
+- automatic carrier switching
+- automatic carrier claims
+- external carrier benchmarking data
+- broad non-shipping analytics redesign
+- unrelated add-on governance
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Carrier Scorecards surface exists inside Shipping Center
+2) Scorecards are based on recorded shipment/SLA/provider/pickup/tracking data only
+3) Core carrier/service metrics are visible and deterministic
+4) Data-quality and coverage states are clearly surfaced
+5) Manual vs provider-backed shipments are not silently conflated
+6) Local-only pickups are not misrepresented as provider-confirmed
+7) Dispatched remains distinct from In Transit
+8) SLA performance uses accepted SLA foundation
+9) Score/rating logic, if present, is transparent and sample-size aware
+10) Carrier Analytics, SLA, Automation, Packing, Batch Labels, Dispatch, and reverse logistics are not regressed
+11) Plan/permission gating is coherent
+12) Future/non-built items remain out of scope
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this exact order:
+
+1) Define scorecard metric derivation rules
+2) Implement Carrier Scorecards surface
+3) Add filters and carrier/service comparison
+4) Add cost / SLA / transit / pickup / exception metrics
+5) Add data-quality and sample-size handling
+6) Wire plan/permission/gating treatment
+7) Confirm Carrier Analytics and SLA definitions stay consistent
+8) Re-test Automation, Packing, Batch Labels, Dispatch, Reverse Logistics
+9) Update documentation
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Carrier Scorecards scope
+- metric derivation rules
+- data-quality / coverage-state logic
+- sample-size rules
+- score/rating logic if implemented
+- relationship to Carrier Analytics
+- relationship to SLA Optimization
+- relationship to Automation outcomes
+- plan/permission/gating treatment
+- what remains future/out-of-scope:
+  - Customs Docs
+  - Insurance Rules
+  - predictive AI optimization
+  - automatic carrier switching
+  - carrier claims/refunds
+  - external benchmarking
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Scorecard Metrics + Derivation Rules
+3. Carrier Scorecards Surface + Filters
+4. Cost / SLA / Transit / Pickup / Exception Metrics
+5. Data Quality / Coverage Handling
+6. Plan / Permission / Gating Updates
+7. Files Changed
+8. Documentation Updated
+9. Non-Regression Notes

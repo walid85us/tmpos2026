@@ -22,6 +22,7 @@ import PageShell from './PageShell';
 import { TrackingNumber } from './shared/TrackingNumber';
 import ShippingProvidersPage from './ShippingProvidersPage';
 import { CarrierAnalytics } from './shipping/CarrierAnalytics';
+import CarrierScorecards from './shipping/CarrierScorecards';
 import AutomationRules from './shipping/AutomationRules';
 import BatchLabels, { type BatchEligibility } from './shipping/BatchLabels';
 import {
@@ -594,6 +595,11 @@ export default function ShippingCenter() {
   // direct deep-link cannot bypass either gate.
   const planAllowsCarrierAnalytics = isPlanFeatureLive('carrier_analytics');
   const canViewCarrierAnalytics = checkSubPermission('view_carrier_analytics');
+  // Phase 3 — Carrier Scorecards Foundation. Independently gated from
+  // Carrier Analytics so a tenant can have analytics without the
+  // scorecards comparison surface (or vice versa) without code changes.
+  const planAllowsCarrierScorecards = isPlanFeatureLive('carrier_scorecards');
+  const canViewCarrierScorecards = checkSubPermission('view_carrier_scorecards');
   // Phase 2 correction — Pickup analytics is gated independently from the
   // operational pickup permissions so an operator can be granted (or denied)
   // visibility of pickup metrics without being granted the ability to schedule
@@ -668,7 +674,7 @@ export default function ShippingCenter() {
   const planAllowsSlaOptimization = isPlanFeatureLive('shipping_sla_optimization');
   const slaFeatureEnabled = planAllowsSlaOptimization && canViewSla;
 
-  const [activeTab, setActiveTab] = useState<'shipments' | 'analytics' | 'automation' | 'batch' | 'settings'>('shipments');
+  const [activeTab, setActiveTab] = useState<'shipments' | 'analytics' | 'scorecards' | 'automation' | 'batch' | 'settings'>('shipments');
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<ShipmentStatus | 'all'>('all');
   const [sourceFilter, setSourceFilter] = useState<ShipmentSourceType | 'all'>('all');
@@ -5926,6 +5932,22 @@ export default function ShippingCenter() {
               <span className="flex items-center gap-1"><span className="material-symbols-outlined text-sm">analytics</span>Analytics</span>
             </button>
           )}
+          {/* Phase 3 Carrier Scorecards Foundation — independently gated
+              from Carrier Analytics. Both the plan feature
+              (`carrier_scorecards`) and the operator sub-permission
+              (`view_carrier_scorecards`) must pass for the tab to render.
+              The CarrierScorecards surface revalidates both gates internally
+              so a stale activeTab cannot show scorecards after a
+              downgrade or permission change. */}
+          {planAllowsCarrierScorecards && canViewCarrierScorecards && (
+            <button
+              onClick={() => setActiveTab('scorecards')}
+              data-testid="tab-scorecards"
+              className={`px-4 py-2.5 text-[10px] font-black uppercase tracking-widest border-b-2 transition-all ${activeTab === 'scorecards' ? 'text-primary border-primary' : 'text-slate-400 hover:text-slate-600 border-transparent hover:border-slate-300'}`}
+            >
+              <span className="flex items-center gap-1"><span className="material-symbols-outlined text-sm">leaderboard</span>Scorecards</span>
+            </button>
+          )}
           {/* Phase 2 Final Settings Scoping correction — the Settings tab is a
               CONTAINER for multiple independent subsections (Shipping Provider
               configuration, Carrier Locators, general shipping settings).
@@ -5970,6 +5992,16 @@ export default function ShippingCenter() {
             planAllowsPickupRequests={planAllowsPickupRequests}
             canViewPickupAnalytics={canViewPickupAnalytics}
             activeProviderId={activeProviderId}
+          />
+        ) : activeTab === 'scorecards' ? (
+          <CarrierScorecards
+            shipments={shipments}
+            slaPolicy={slaPolicy}
+            planAllowsCarrierScorecards={planAllowsCarrierScorecards}
+            hasViewPermission={canViewCarrierScorecards}
+            canViewCosts={canViewCosts}
+            slaFeatureEnabled={slaFeatureEnabled}
+            canViewSla={canViewSla}
           />
         ) : activeTab === 'automation' ? (
           planAllowsAutomationRules ? (
