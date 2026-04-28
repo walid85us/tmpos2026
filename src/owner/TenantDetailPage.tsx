@@ -1648,17 +1648,46 @@ const TenantDetailPage: React.FC = () => {
                       <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
                         <div className="flex items-center gap-1.5 flex-wrap justify-end">
                           <span className={`text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest whitespace-nowrap ${reasonBadgeClass}`}>{REASON_LABEL[reason]}</span>
-                          {reason === 'disabled_by_plan' && eligibleAddOn && (
-                            <span className="text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest whitespace-nowrap bg-emerald-50 text-emerald-700 border-emerald-100">Add-on available</span>
+                          {/* Not-in-Plan rows: surface the emerald
+                              "Add-on available" pill whenever the
+                              feature is linked to an Active catalog
+                              add-on. Plan-compatibility is intentionally
+                              NOT required for visibility — the label is
+                              an information disclosure that an add-on
+                              exists for this feature. Disabled / archived
+                              catalog add-ons are filtered out by the
+                              governanceStatus === 'active' guard so
+                              they never resurface as "Add-on available".
+                              The optional tail "(plan upgrade required)"
+                              is appended when the catalog item exists
+                              but is not compatible with the tenant's
+                              current plan, so the operator can tell the
+                              difference at a glance. */}
+                          {reason === 'disabled_by_plan' && r.addOn && r.addOn.governanceStatus === 'active' && (
+                            <span className="text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest whitespace-nowrap bg-emerald-50 text-emerald-700 border-emerald-100">
+                              Add-on available{!eligibleAddOn ? ' · Plan upgrade required' : ''}
+                            </span>
                           )}
-                          {/* Part E: when the active paid override is linked
-                              to an Active Add-on Catalog item, surface an
-                              "Add-on" pill alongside Paid Override. The
-                              Custom Price pill (rendered separately below
-                              the price) only appears when tenant price
-                              differs from catalog price. Non-catalog paid
-                              overrides do NOT show this pill. */}
-                          {isPaidActive && reason === 'enabled_by_paid_override' && r.addOn && r.addOn.governanceStatus === 'active' && (
+                          {/* Add-on label visibility (consolidated rule):
+                              The violet "Add-on" pill appears alongside the
+                              primary state pill whenever the row is gated by
+                              an Active Add-on Catalog item. That covers two
+                              entitlement states:
+                                - Paid Override active and linked to an
+                                  active catalog add-on
+                                - Pending Payment for a paid override that
+                                  is linked to an active catalog add-on
+                              For Not-in-Plan rows the analogous pill is the
+                              emerald "Add-on available" rendered above.
+                              Disabled / archived catalog add-ons are
+                              filtered out by the governanceStatus === 'active'
+                              guard so they never resurface as Add-on /
+                              Add-on Available. Non-catalog overrides do
+                              NOT render this pill. The Custom Price pill
+                              is rendered separately below the price line
+                              and only when tenant price differs from
+                              catalog price. */}
+                          {(isPaidActive || isPendingPayment) && r.addOn && r.addOn.governanceStatus === 'active' && reason !== 'enabled_by_paid_addon' && (
                             <span className="text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest whitespace-nowrap bg-violet-50 text-violet-700 border-violet-100">Add-on</span>
                           )}
                           {/* Spec L: surface "Invoice Open / Overdue" alongside Paid Override

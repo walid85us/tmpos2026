@@ -1,0 +1,113 @@
+System Owner Commercial Controls — Add-on Label Visibility Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict isolated correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not touch the completed Shipping Module.
+Do not reintroduce Permissions Impact blocks.
+Do not change billing, invoice, payment, or Store Permissions Matrix behavior.
+
+Fix only the Add-on label visibility logic in Tenant Features tab.
+
+==================================================
+CURRENT ISSUE
+==================================================
+
+Tenant Features Tab Simplification passed, but this QA item failed:
+
+6) Add-on label appears only when applicable — FAIL
+
+Expected:
+- If a feature is linked to an active Add-on Catalog item, show an Add-on or Add-on Available label.
+- If a feature is not linked to an active Add-on Catalog item, do not show Add-on.
+- Disabled or archived add-ons must not show as active Add-on Available.
+- Trial / Paid Override buttons should remain visible for eligible Not in Plan features regardless of add-on linkage.
+
+==================================================
+REQUIRED BEHAVIOR
+==================================================
+
+1) Active linked add-on + feature not in plan:
+Show:
+- Not in Plan
+- Add-on or Add-on Available
+- Trial
+- Paid Override
+
+2) Active linked add-on + paid override active:
+Show:
+- Paid Override
+- Add-on
+- Custom Price if tenant price differs from catalog price
+- View Invoice / Revoke / Edit Price where applicable
+
+3) Active linked add-on + pending payment:
+Show:
+- Pending Payment
+- Add-on
+- View Invoice / Mark Paid / Cancel Invoice where applicable
+
+4) No active linked add-on:
+Do not show Add-on label.
+Still show Trial / Paid Override if feature is eligible and implemented.
+
+5) Disabled or archived linked add-on:
+Do not show Add-on Available as an active option.
+If historical state exists, show only the appropriate inactive/historical state.
+
+==================================================
+NON-REGRESSION REQUIREMENTS
+==================================================
+
+Preserve:
+- Permissions Impact removal
+- simple Tenant Features tab layout
+- Included by Plan / Not in Plan logic
+- Trial / Paid Override actions
+- Pending Payment actions
+- Paid Override invoice workflow
+- Revoked action cleanup
+- Store Permissions Matrix behavior
+- Disabled by Owner cleanup
+- Shipping Module closure
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+1) Active catalog-linked Not in Plan feature shows Add-on / Add-on Available label.
+2) Non-catalog feature does not show Add-on label.
+3) Disabled/archived catalog add-on does not show Add-on Available as active.
+4) Paid Override linked to active add-on shows Add-on label.
+5) Pending Payment linked to active add-on shows Add-on label.
+6) Trial / Paid Override buttons remain visible where eligible.
+7) Permissions Impact blocks do not return.
+8) Existing billing and permission behavior remains intact.
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Add-on label visibility rule
+- active linked add-on behavior
+- disabled/archived add-on behavior
+- non-catalog feature behavior
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Add-on Label Visibility Rule
+3. Active / Disabled / Archived Add-on Handling
+4. Non-Catalog Feature Handling
+5. Files Changed
+6. Documentation Updated
+7. Non-Regression Notes
