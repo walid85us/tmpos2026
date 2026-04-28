@@ -140,7 +140,7 @@ const TenantDetailPage: React.FC = () => {
   const tenantInv = invoiceHistory.filter(i => i.tenantId === tenant.id);
   const tenantCredits = creditNotes.filter(c => c.tenantId === tenant.id);
   const tenantLogs = auditLogs.filter(l => l.tenantId === tenant.id);
-  const tenantAddOns = addOns.filter(a => a.lifecycle === 'active' && a.compatiblePlans.includes(currentPlan));
+  const tenantAddOns = addOns.filter(a => a.governanceStatus === 'active' && a.compatiblePlans.includes(currentPlan));
   const supportNotes = [...tenantSupportNotes.filter(n => n.tenantId === tenant.id), ...localNotes];
   const domainHistory = tenantDomainHistory.filter(d => d.tenantId === tenant.id);
   const tenantPlanHistory = planHistory.filter(ph => ph.tenantId === tenant.id);
@@ -291,7 +291,17 @@ const TenantDetailPage: React.FC = () => {
     try {
       if (typeof window !== 'undefined' && window.sessionStorage) {
         const raw = window.sessionStorage.getItem('addons_data');
-        if (raw) return JSON.parse(raw) as AddOn[];
+        if (raw) {
+          // Legacy normalization: coerce any stale `governanceStatus:
+          // 'draft'` from a previous build to 'disabled'. See replit.md
+          // → "Add-on Governance & Archive Protection Rule".
+          const parsed = JSON.parse(raw) as AddOn[];
+          return parsed.map(a => (
+            (a.governanceStatus as string) === 'draft'
+              ? { ...a, governanceStatus: 'disabled' }
+              : a
+          ));
+        }
       }
     } catch { /* fall back */ }
     return addOns;
@@ -1597,15 +1607,6 @@ const TenantDetailPage: React.FC = () => {
                 const linkedAddOn =
                   liveAddOns.find(a => a.linkedFeatureId === f.id) ||
                   liveAddOns.find(a => a.id === f.id);
-                // Draft add-on guard. A linked add-on still in
-                // `draft` is internal-only — hide the row from the
-                // tenant Features tab regardless of plan baseline.
-                // The matrix may have the column toggled on to
-                // scaffold the future inclusion, but tenants must
-                // not see it until the add-on is activated. See
-                // replit.md → "Add-on Lifecycle & Archive
-                // Protection Rule".
-                if (linkedAddOn && linkedAddOn.governanceStatus === 'draft') return false;
                 if (inPlanBaseline) return true;
                 if (!linkedAddOn) return true;
                 const addOnEligible =

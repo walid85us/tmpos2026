@@ -61,7 +61,22 @@ const PlansPage: React.FC = () => {
     try { const saved = sessionStorage.getItem('features_data'); return saved ? JSON.parse(saved) : [...initialFeatures]; } catch { return [...initialFeatures]; }
   });
   const [addOnsData, setAddOnsData] = useState(() => {
-    try { const saved = sessionStorage.getItem('addons_data'); return saved ? JSON.parse(saved) : [...initialAddOns]; } catch { return [...initialAddOns]; }
+    try {
+      const saved = sessionStorage.getItem('addons_data');
+      if (!saved) return [...initialAddOns];
+      // Legacy normalization: a previous build briefly persisted
+      // `governanceStatus: 'draft'`. The current model is
+      // active/disabled/archived only — coerce any stale 'draft'
+      // value to 'disabled' so the UI's gov style/label maps don't
+      // hit an undefined key. See replit.md → "Add-on Governance &
+      // Archive Protection Rule".
+      const parsed = JSON.parse(saved) as AddOnData[];
+      return parsed.map(a => (
+        (a.governanceStatus as string) === 'draft'
+          ? { ...a, governanceStatus: 'disabled' as AddOnGovernanceStatus }
+          : a
+      ));
+    } catch { return [...initialAddOns]; }
   });
 
   useEffect(() => { try { sessionStorage.setItem('plans_data', JSON.stringify(plansData)); } catch {} }, [plansData]);
@@ -91,14 +106,14 @@ const PlansPage: React.FC = () => {
     price: '',
     description: '',
     compatiblePlans: [] as string[],
-    lifecycle: 'draft' as AddOnLifecycle,
-    governanceStatus: 'draft' as AddOnGovernanceStatus,
+    lifecycle: 'active' as AddOnLifecycle,
+    governanceStatus: 'active' as AddOnGovernanceStatus,
     billingCadence: 'monthly' as 'monthly' | 'annual' | 'one_time',
     linkedFeatureId: '' as string,
   });
   // Inline "Register new feature" mode for the Add-on modal. New
   // add-ons must be linked to a feature in the Plans & Features
-  // Matrix (Add-on Lifecycle & Archive Protection Rule, part B).
+  // Matrix (Add-on Governance & Archive Protection Rule).
   // The modal lets the System Owner either pick an existing
   // implemented feature or scaffold a new one inline (which adds a
   // row to `featuresData` with `source: 'custom'`,
@@ -233,11 +248,13 @@ const PlansPage: React.FC = () => {
       price: '',
       description: '',
       compatiblePlans: [],
-      // New add-ons default to Draft (commercial governance) so they
-      // are NOT exposed to tenants until the System Owner explicitly
-      // promotes them to Active. The PM `lifecycle` is mirrored.
-      lifecycle: 'draft',
-      governanceStatus: 'draft',
+      // New add-ons default to Active commercial governance.
+      // Governance Status is one of Active / Disabled / Archived
+      // (no Draft — see "Add-on Governance & Archive Protection Rule"
+      // in replit.md). Lifecycle (PM) is a separate concept and may
+      // be edited independently in the form.
+      lifecycle: 'active',
+      governanceStatus: 'active',
       billingCadence: 'monthly',
       linkedFeatureId: '',
     });
@@ -299,8 +316,8 @@ const PlansPage: React.FC = () => {
   };
 
   // Compute Archive blockers for an add-on. Archive is blocked while
-  // ANY of the following are true (Add-on Lifecycle & Archive
-  // Protection Rule, part D):
+  // ANY of the following are true (Add-on Governance & Archive
+  // Protection Rule):
   //   1. The linked feature is included in any plan in the Plans &
   //      Features Matrix.
   //   2. The add-on has any Compatible Plans selected.
@@ -405,12 +422,48 @@ const PlansPage: React.FC = () => {
         return;
       }
     }
-    // Force-include locked plans (plans where the linked feature is
-    // included by plan in Plans & Features Matrix). The Plans &
-    // Features Matrix is the source of truth for included-by-plan
-    // access, so the Add-on Catalog cannot opt out of those plans.
-    const linkedFeature = addOnForm.linkedFeatureId
-      ? featuresData.find(f => f.id === addOnForm.linkedFeatureId)
+    // Standalone-capability registration. When the user saves with
+    // Linked Feature = None (and the existing record didn't already
+    // have a generated capability key linked), auto-register a
+    // capability row in the Plans & Features Matrix so the System
+    // Owner can include the standalone add-on capability in plans
+    // from the matrix. The capability key is stable per add-on
+    // (`cap_<addonId>`) so re-saving / editing the same add-on
+    // never duplicates the row. See replit.md → "Add-on Governance
+    // & Archive Protection Rule" → Standalone capability
+    // registration.
+    let effectiveLinkedFeatureId: string | null =
+      addOnForm.linkedFeatureId ? addOnForm.linkedFeatureId : null;
+    if (!effectiveLinkedFeatureId) {
+      const capKey = `cap_${id}`;
+      effectiveLinkedFeatureId = capKey;
+      const exists = featuresData.some(f => f.id === capKey);
+      if (!exists) {
+        const defaultAvailability: Record<string, boolean> = {};
+        plansData.forEach(p => { defaultAvailability[p.id] = false; });
+        setFeaturesData(prev => [...prev, {
+          id: capKey,
+          name: addOnForm.name,
+          planAvailability: defaultAvailability,
+          source: 'custom' as const,
+          lifecycle: 'implemented' as FeatureLifecycle,
+        }]);
+        pushCommercialAudit({
+          actor: 'System Owner',
+          action: 'feature_registered_for_addon',
+          featureId: capKey,
+          addOnId: id,
+          note: `Registered standalone capability "${addOnForm.name}" in Plans & Features Matrix`,
+        });
+      }
+    }
+    // Force-include locked plans (plans where the effective linked
+    // feature/capability is included by plan in Plans & Features
+    // Matrix). The Plans & Features Matrix is the source of truth
+    // for included-by-plan access, so the Add-on Catalog cannot opt
+    // out of those plans.
+    const linkedFeature = effectiveLinkedFeatureId
+      ? featuresData.find(f => f.id === effectiveLinkedFeatureId)
       : undefined;
     const lockedPlanIds = linkedFeature
       ? plansData
@@ -430,18 +483,14 @@ const PlansPage: React.FC = () => {
       price: Number(addOnForm.price),
       description: addOnForm.description,
       // Persist compatible plans whenever the add-on is commercially
-      // offerable (governanceStatus === 'active'). Gating on PM
-      // `lifecycle === 'active'` would silently drop compatiblePlans
-      // when an editor flips governance to Active while leaving
-      // lifecycle in Draft / Beta, breaking offerability + downstream
-      // Trial / Paid Override flows. Locked plans from the linked
-      // feature in the matrix are still merged in.
+      // offerable (governanceStatus === 'active'). Locked plans from
+      // the linked feature in the matrix are still merged in.
       compatiblePlans: addOnForm.governanceStatus === 'active' ? mergedCompatiblePlans : [],
       status: addOnForm.governanceStatus === 'archived' ? 'archived' : 'active',
       lifecycle: addOnForm.lifecycle,
       governanceStatus: addOnForm.governanceStatus,
       billingCadence: addOnForm.billingCadence,
-      linkedFeatureId: addOnForm.linkedFeatureId || null,
+      linkedFeatureId: effectiveLinkedFeatureId,
       createdAt: editingAddOn?.createdAt || todayIso,
       createdBy: editingAddOn?.createdBy || 'System Owner',
       updatedAt: todayIso,
@@ -453,13 +502,9 @@ const PlansPage: React.FC = () => {
       setAddOnsData(prev => [...prev, newAddOn]);
     }
     if (isCreate) {
-      // `addon_created_draft` distinguishes the new default Draft
-      // path from any (rare) explicit Active-on-create. Both also
-      // emit a `feature_registered_for_addon` audit when the linked
-      // feature row was scaffolded inline by the modal.
       pushCommercialAudit({
         actor: 'System Owner',
-        action: newAddOn.governanceStatus === 'draft' ? 'addon_created_draft' : 'addon_created',
+        action: 'addon_created',
         addOnId: id,
         featureId: newAddOn.linkedFeatureId,
         newValue: newAddOn.price,
@@ -483,16 +528,6 @@ const PlansPage: React.FC = () => {
           oldValue: oldAddOn.governanceStatus,
           newValue: newAddOn.governanceStatus,
         });
-        if (oldAddOn.governanceStatus === 'draft' && newAddOn.governanceStatus === 'active') {
-          pushCommercialAudit({
-            actor: 'System Owner',
-            action: 'addon_activated',
-            addOnId: id,
-            oldValue: 'draft',
-            newValue: 'active',
-            note: 'Add-on promoted to commercially available via edit modal',
-          });
-        }
       }
       pushCommercialAudit({
         actor: 'System Owner',
@@ -534,12 +569,10 @@ const PlansPage: React.FC = () => {
       }
     }
     const todayIso = new Date().toISOString().slice(0, 10);
-    let activated = false;
     setAddOnsData(prev => prev.map(a => {
       if (a.id !== addonId) return a;
       const oldStatus = a.governanceStatus;
       if (oldStatus === next) return a;
-      activated = oldStatus === 'draft' && next === 'active';
       pushCommercialAudit({
         actor: 'System Owner',
         action: 'addon_status_changed',
@@ -552,28 +585,16 @@ const PlansPage: React.FC = () => {
         governanceStatus: next,
         // Mirror legacy `status` so existing UI that reads it stays consistent.
         status: next === 'archived' ? 'archived' : 'active',
-        // Mirror legacy `lifecycle` so the rest of the page stays in sync.
-        // `draft` governance maps to PM `lifecycle: 'draft'`; flipping
-        // to `active` graduates the lifecycle out of draft as well.
+        // Mirror legacy PM `lifecycle` so the rest of the page stays in
+        // sync when the add-on is archived/restored. PM lifecycle is
+        // otherwise an independent concept and is edited via the form.
         lifecycle: next === 'archived'
           ? 'archived'
-          : next === 'draft'
-            ? 'draft'
-            : (a.lifecycle === 'archived' || a.lifecycle === 'draft' ? 'active' : a.lifecycle),
+          : (a.lifecycle === 'archived' ? 'active' : a.lifecycle),
         updatedAt: todayIso,
         updatedBy: 'System Owner',
       };
     }));
-    if (activated) {
-      pushCommercialAudit({
-        actor: 'System Owner',
-        action: 'addon_activated',
-        addOnId: addonId,
-        oldValue: 'draft',
-        newValue: 'active',
-        note: 'Add-on promoted to commercially available',
-      });
-    }
     setShowAddOnArchive(null);
     setShowAddOnDisableConfirm(null);
     setAddOnArchiveBlockers(null);
@@ -809,7 +830,6 @@ const PlansPage: React.FC = () => {
           <div className="flex items-center justify-between gap-4 flex-wrap">
             <div className="flex gap-2 items-center text-[10px] font-black uppercase tracking-widest">
               <span className="text-slate-400">Governance:</span>
-              <span className="px-2 py-0.5 rounded-md border bg-indigo-400/10 text-indigo-700 border-indigo-400/20">Draft {addOnsData.filter(a => a.governanceStatus === 'draft').length}</span>
               <span className="px-2 py-0.5 rounded-md border bg-lime-400/10 text-lime-700 border-lime-400/20">Active {addOnsData.filter(a => a.governanceStatus === 'active').length}</span>
               <span className="px-2 py-0.5 rounded-md border bg-amber-400/10 text-amber-700 border-amber-400/20">Disabled {addOnsData.filter(a => a.governanceStatus === 'disabled').length}</span>
               <span className="px-2 py-0.5 rounded-md border bg-slate-400/10 text-slate-500 border-slate-200">Archived {addOnsData.filter(a => a.governanceStatus === 'archived').length}</span>
@@ -830,20 +850,19 @@ const PlansPage: React.FC = () => {
               .filter(a => showArchivedAddOns || a.governanceStatus !== 'archived')
               .map((addon) => {
                 const govStyles: Record<AddOnGovernanceStatus, string> = {
-                  draft: 'bg-indigo-400/10 text-indigo-700 border-indigo-400/20',
                   active: 'bg-lime-400/10 text-lime-700 border-lime-400/20',
                   disabled: 'bg-amber-400/10 text-amber-700 border-amber-400/20',
                   archived: 'bg-slate-400/10 text-slate-500 border-slate-200',
                 };
                 const govLabel: Record<AddOnGovernanceStatus, string> = {
-                  draft: 'Draft',
                   active: 'Active',
                   disabled: 'Disabled',
                   archived: 'Archived',
                 };
-                const linkedFeatureName = addon.linkedFeatureId ? (featuresData.find(f => f.id === addon.linkedFeatureId)?.name || addon.linkedFeatureId) : null;
+                const linkedFeatureName = addon.linkedFeatureId
+                  ? (featuresData.find(f => f.id === addon.linkedFeatureId)?.name || addon.linkedFeatureId)
+                  : null;
                 const isOfferable = addon.governanceStatus === 'active';
-                const isDraft = addon.governanceStatus === 'draft';
                 return (
                   <motion.div
                     key={addon.id}
@@ -852,7 +871,6 @@ const PlansPage: React.FC = () => {
                     className={`bg-white/80 backdrop-blur-xl p-6 rounded-[2.5rem] border shadow-sm hover:shadow-md transition-all ${
                       addon.governanceStatus === 'archived' ? 'border-slate-300 opacity-60' :
                       addon.governanceStatus === 'disabled' ? 'border-amber-200 opacity-75' :
-                      addon.governanceStatus === 'draft' ? 'border-indigo-200' :
                       'border-slate-200'
                     }`}
                   >
@@ -922,12 +940,7 @@ const PlansPage: React.FC = () => {
                         }`}
                       >Archived</button>
                     </div>
-                    {isDraft && (
-                      <p className="text-[10px] text-indigo-700 font-bold bg-indigo-50 px-2 py-1.5 rounded-lg border border-indigo-100 mb-3">
-                        Internal-only Draft. Not visible to tenants and not grantable as Trial / Paid Override. Promote to Active to publish.
-                      </p>
-                    )}
-                    {!isOfferable && !isDraft && (
+                    {!isOfferable && (
                       <p className="text-[10px] text-amber-700 font-bold bg-amber-50 px-2 py-1.5 rounded-lg border border-amber-100 mb-3">
                         Not offerable. Existing tenant overrides for the linked feature are inactive until reactivated.
                       </p>
@@ -1228,18 +1241,14 @@ const PlansPage: React.FC = () => {
                   <div>
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">Governance Status</label>
                     <select value={addOnForm.governanceStatus} onChange={e => setAddOnForm(p => ({ ...p, governanceStatus: e.target.value as AddOnGovernanceStatus }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary">
-                      <option value="draft">Draft — internal only</option>
                       <option value="active">Active — offerable</option>
                       <option value="disabled">Disabled — paused</option>
                       <option value="archived">Archived — hidden</option>
                     </select>
-                    {!editingAddOn && addOnForm.governanceStatus === 'draft' && (
-                      <p className="text-[9px] text-indigo-700 font-medium mt-1.5 leading-snug">New add-ons start as Draft. Hidden from tenants and ungrantable until promoted.</p>
-                    )}
                   </div>
                   <div>
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">
-                      Linked Feature {!editingAddOn && <span className="text-red-500">*</span>}
+                      Linked Feature <span className="text-slate-400 font-medium normal-case tracking-normal">(optional)</span>
                     </label>
                     {showInlineNewFeature ? (
                       <div className="flex gap-2">
@@ -1265,7 +1274,7 @@ const PlansPage: React.FC = () => {
                     ) : (
                       <div className="flex gap-2">
                         <select value={addOnForm.linkedFeatureId} onChange={e => setAddOnForm(p => ({ ...p, linkedFeatureId: e.target.value }))} className="flex-1 px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary">
-                          <option value="">{editingAddOn ? '— none —' : '— select feature —'}</option>
+                          <option value="">— none (standalone capability) —</option>
                           {featuresData.filter(f => f.lifecycle === 'implemented').map(f => (
                             <option key={f.id} value={f.id}>{f.name}</option>
                           ))}
@@ -1278,8 +1287,8 @@ const PlansPage: React.FC = () => {
                         >+ New</button>
                       </div>
                     )}
-                    {!editingAddOn && !addOnForm.linkedFeatureId && !showInlineNewFeature && (
-                      <p className="text-[9px] text-red-600 font-medium mt-1.5 leading-snug">Required. Pick an existing feature or register a new row in the Plans &amp; Features Matrix.</p>
+                    {!addOnForm.linkedFeatureId && !showInlineNewFeature && (
+                      <p className="text-[9px] text-slate-500 font-medium mt-1.5 leading-snug">Optional. If left blank, a standalone capability row will be auto-registered in the Plans &amp; Features Matrix when you save.</p>
                     )}
                   </div>
                 </div>
@@ -1330,10 +1339,9 @@ const PlansPage: React.FC = () => {
                 <button onClick={() => setShowAddOnModal(false)} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
                 <button
                   onClick={saveAddOn}
-                  disabled={!addOnForm.name || !addOnForm.price || (!editingAddOn && !addOnForm.linkedFeatureId)}
-                  title={(!editingAddOn && !addOnForm.linkedFeatureId) ? 'Pick or register a linked feature first' : undefined}
+                  disabled={!addOnForm.name || !addOnForm.price}
                   className="flex-1 py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-                >{editingAddOn ? 'Save Changes' : (addOnForm.governanceStatus === 'draft' ? 'Create Draft Add-on' : 'Create Add-on')}</button>
+                >{editingAddOn ? 'Save Changes' : 'Create Add-on'}</button>
               </div>
             </motion.div>
           </div>

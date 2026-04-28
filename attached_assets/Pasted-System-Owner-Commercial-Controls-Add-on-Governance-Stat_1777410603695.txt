@@ -1,0 +1,366 @@
+System Owner Commercial Controls — Add-on Governance Status + Linked Feature None Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not touch the completed Shipping Module.
+Do not change billing, invoice, Store Permissions Matrix, or paid override state machine except where directly required by add-on source-of-truth correction.
+
+Fix only:
+1) Add-on Governance Status model
+2) Linked Feature selector behavior
+3) creation of new standalone add-ons in Plans & Features Matrix
+4) tenant feature visibility for linked vs standalone add-ons
+5) archive protection preservation
+
+==================================================
+CURRENT ISSUE
+==================================================
+
+The previous pass misunderstood the add-on lifecycle concept.
+
+Governance Status should NOT include Draft.
+
+Governance Status should only be:
+- Active
+- Disabled
+- Archived
+
+The existing Lifecycle (PM) field should remain in the Create/Edit Add-on form for product-management purposes.
+
+The Linked Feature selector should allow:
+- None
+- Existing feature/capability options
+
+Existing add-ons already support None, but the new add-on flow currently requires a linked feature. This is wrong.
+
+Also, if a new add-on is linked to an existing Feature, it should show in a tenant’s Features tab as Add-on only when:
+- the linked feature is already included by the tenant’s plan, or
+- the tenant’s current plan is selected in the add-on’s Compatible Plans.
+
+If the tenant’s plan is not compatible and the feature is not included by plan, that linked add-on must not show in Tenant Features as Add-on.
+
+==================================================
+CORRECT MODEL
+==================================================
+
+There are two separate concepts:
+
+1) Governance Status
+Commercial availability status:
+- Active
+- Disabled
+- Archived
+
+2) Lifecycle (PM)
+Product-management lifecycle:
+- keep the existing Lifecycle (PM) field
+- this is not the same as Governance Status
+- do not use Lifecycle (PM) to decide tenant commercial availability unless existing app already does so explicitly
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Firebase/Firestore multi-tenant architect
+- Senior SaaS commercial-entitlement architect
+- Senior RBAC / plan-gating architect
+- Senior product operations architect
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Do not make a shallow label patch.
+Fix the governance-status model, linked-feature model, and tenant visibility rules correctly.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- replit.md
+
+Preserve:
+- Plans & Features Matrix as source of truth for included-by-plan access
+- Add-on Compatible Plans controlling optional add-on availability only when not included by plan
+- Tenant Features tab simplification
+- Permissions Impact removal
+- paid override invoice workflow
+- activation mode behavior
+- Store Permissions Matrix entitlement behavior
+- completed Shipping Module behavior
+
+==================================================
+PART A — GOVERNANCE STATUS CORRECTION
+==================================================
+
+Required:
+Remove Draft from Governance Status.
+
+Governance Status options must be only:
+- Active
+- Disabled
+- Archived
+
+Required:
+If any newly introduced Draft governance state exists:
+- remove it from Governance Status choices
+- migrate or map existing draft governance records safely
+- do not break existing add-ons
+
+Recommended mapping:
+- if a record has governanceStatus = draft, convert it to Disabled or Active based on safest current system behavior
+- prefer Disabled if there is any risk of exposing it unintentionally
+- document the mapping in replit.md
+
+Important:
+Keep Lifecycle (PM) in Create/Edit Add-on form.
+
+==================================================
+PART B — LIFECYCLE (PM) PRESERVATION
+==================================================
+
+Required:
+Keep Lifecycle (PM) visible and editable in the Create/Edit Add-on form.
+
+Lifecycle (PM):
+- is for product-management / roadmap lifecycle
+- is separate from Governance Status
+- should not create a Draft governance status
+- should not replace Active / Disabled / Archived governance behavior
+
+Do not remove Lifecycle (PM).
+
+==================================================
+PART C — LINKED FEATURE SELECTOR MUST ALLOW NONE
+==================================================
+
+Required:
+The Create Add-on and Edit Add-on forms must allow Linked Feature = None.
+
+Behavior:
+- Linked Feature = existing feature means the add-on is tied to that existing capability.
+- Linked Feature = None means this is a standalone add-on capability.
+
+Do not force the user to choose an existing feature.
+
+==================================================
+PART D — NEW ADD-ON REGISTRATION IN PLANS & FEATURES MATRIX
+==================================================
+
+Required:
+Every new add-on must appear in the System Owner Plans & Features Matrix.
+
+There are two cases:
+
+Case 1 — Add-on linked to existing feature:
+- use the existing feature/capability ID
+- do not create a duplicate row
+- Plans & Features Matrix controls whether that existing feature is included in a plan
+
+Case 2 — Add-on Linked Feature = None:
+- create/register a new standalone add-on capability row in Plans & Features Matrix
+- use a stable feature/capability ID derived from the add-on, such as addOnId or a generated capability key
+- do not duplicate rows if the add-on is edited later
+- this row represents the standalone add-on capability
+- System Owner can enable it directly for Essential / Growth / Advanced from Plans & Features Matrix
+
+Required:
+The same capability key must be used consistently across:
+- Add-on Catalog
+- Plans & Features Matrix
+- Tenant Features tab
+- Store Permissions Matrix, if permissions exist for that add-on/capability
+
+==================================================
+PART E — TENANT FEATURES VISIBILITY RULES
+==================================================
+
+For add-ons linked to an existing feature:
+
+IMPORTANT LINKED-FEATURE ADD-ON RULE:
+If a new add-on is linked to any existing Feature, it should show in a tenant’s Features tab as Add-on only when the tenant’s current plan is added to that add-on’s Compatible Plans, unless the feature is already included by the tenant’s plan.
+
+1) Tenant plan includes the linked feature in Plans & Features Matrix:
+Show:
+- Included by Plan
+- Add-on
+
+Do not show:
+- Trial
+- Paid Override
+
+Reason:
+The feature is already included by the tenant’s plan.
+
+2) Tenant plan does not include the linked feature, but tenant’s current plan is in Add-on Compatible Plans:
+Show:
+- Not in Plan
+- Add-on
+- Trial
+- Paid Override
+
+3) Tenant plan does not include the linked feature, and tenant’s current plan is NOT in Add-on Compatible Plans:
+Do not show that linked add-on in Tenant Features.
+
+Do not show:
+- Add-on
+- Add-on Available
+- Plan Upgrade Required
+- Trial / Paid Override for that add-on
+
+For standalone add-ons where Linked Feature = None:
+
+1) If the standalone add-on capability is included in the tenant’s plan from Plans & Features Matrix:
+Show:
+- Included by Plan
+- Add-on
+
+Do not show:
+- Trial
+- Paid Override
+
+2) If the standalone add-on capability is not included in plan, but tenant’s current plan is in Add-on Compatible Plans:
+Show:
+- Not in Plan
+- Add-on
+- Trial
+- Paid Override
+
+3) If the standalone add-on capability is not included in plan and tenant’s current plan is not compatible:
+Do not show the standalone add-on in Tenant Features.
+
+==================================================
+PART F — COMPATIBLE PLANS LOGIC
+==================================================
+
+Compatible Plans means:
+- plans where the add-on may be offered as optional add-on when not already included by plan.
+
+If a plan includes the add-on-linked capability in Plans & Features Matrix:
+- that plan should be locked/read-only in the Add-on Compatible Plans editor
+- System Owner must remove included-by-plan access from Plans & Features Matrix, not Add-on Catalog
+
+If a plan does not include the capability:
+- System Owner may select or unselect it as add-on compatible
+
+This applies to:
+- add-ons linked to an existing feature
+- standalone add-ons where Linked Feature = None and the generated capability appears in Plans & Features Matrix
+
+==================================================
+PART G — GOVERNANCE STATUS VISIBILITY
+==================================================
+
+Active:
+- can appear in Tenant Features only if plan inclusion or compatible-plan rules allow it
+
+Disabled:
+- should not appear as available tenant add-on
+- preserve history/audit/billing records
+
+Archived:
+- should not appear as available tenant add-on
+- archive protection rules should remain in place where dependencies exist
+
+Lifecycle (PM):
+- keep visible in Add-on form
+- do not replace Governance Status
+- do not create Draft governance state
+
+==================================================
+PART H — ARCHIVE PROTECTION NON-REGRESSION
+==================================================
+
+Preserve archive protection:
+- cannot archive while linked capability is included in any plan
+- cannot archive while Compatible Plans are selected
+- cannot archive while active trial / paid override / pending payment exists
+- archive blocked message explains dependencies
+
+But Governance Status must remain:
+- Active
+- Disabled
+- Archived
+
+No Draft governance state.
+
+==================================================
+PART I — BILLING / PERMISSION NON-REGRESSION
+==================================================
+
+Preserve:
+- Paid Override invoice workflow
+- activation mode selector
+- monthly/annual billing behavior
+- Mark Paid activation
+- Cancel Invoice behavior
+- tenant-specific price behavior
+- Store Permissions Matrix entitlement behavior
+- Tenant Features tab simplification
+- Permissions Impact removal
+- completed Shipping Module behavior
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Governance Status options are only Active / Disabled / Archived.
+2) Draft is not a Governance Status option.
+3) Lifecycle (PM) remains available in Create/Edit Add-on form.
+4) Linked Feature selector includes None.
+5) Creating add-on with Linked Feature = None succeeds.
+6) New standalone add-on appears in Plans & Features Matrix.
+7) New standalone add-on does not create duplicate feature rows on edit/save.
+8) Add-on linked to existing feature uses existing feature row and does not duplicate it.
+9) Linked-feature add-on appears in Tenant Features as Add-on only when tenant plan includes the feature or tenant plan is in Add-on Compatible Plans.
+10) Tenant Features shows Included by Plan + Add-on when the linked feature/add-on capability is included in the tenant plan.
+11) Tenant Features shows Not in Plan + Add-on + Trial + Paid Override when the add-on is compatible but not included.
+12) Tenant Features hides the linked-feature add-on when not included and not compatible.
+13) Standalone add-on follows the same visibility logic using its generated Plans & Features Matrix capability row.
+14) Disabled/Archived add-ons do not show as available tenant add-ons.
+15) Archive protection remains intact.
+16) Existing billing, permissions, and shipping behavior remain intact.
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Governance Status options: Active / Disabled / Archived only
+- Lifecycle (PM) is separate from Governance Status
+- Linked Feature can be None
+- standalone add-ons register their own capability row in Plans & Features Matrix
+- linked add-ons use existing feature/capability row
+- Tenant Features visibility rules for linked and standalone add-ons
+- explicit linked-feature add-on rule:
+  - show Add-on only when included by plan or compatible with tenant plan
+  - hide when not included and not compatible
+- Compatible Plans meaning and locking behavior
+- archive protection remains intact
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Governance Status Correction
+3. Lifecycle (PM) Preservation
+4. Linked Feature None Behavior
+5. Plans & Features Matrix Registration
+6. Tenant Features Visibility Rules
+7. Archive Protection Preservation
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes
