@@ -201,15 +201,26 @@ export function resolveTenantFeature(
     ? (deriveInvoiceUi ? deriveInvoiceUi(invoice, nowMs) : invoice.status)
     : undefined;
 
-  // (1) Owner-disabled trumps everything except plan inclusion of an
-  // intrinsic feature; matches existing behavior.
+  // (1) Owner-disabled override. Only meaningful when the feature would
+  // otherwise be entitled (i.e. the plan includes it). If the feature
+  // is not in the plan to begin with, the disabled flag is dormant —
+  // surfacing "Disabled by Owner" would mislead the operator into
+  // thinking there is a re-enable that matters. In that case fall
+  // through and let the plan/lifecycle resolution below produce the
+  // truthful state (Not in Plan / Not Available).
   if (override && override.type === 'disabled') {
-    return {
-      enabled: false,
-      reason: 'feature_disabled_by_owner',
-      source: 'none',
-      override,
-    };
+    const featureInMatrix = featureMatrix.find(f => f.id === featureId);
+    const planIncludesFeature = !!(featureInMatrix && featureInMatrix.planAvailability[planKey]);
+    if (planIncludesFeature) {
+      return {
+        enabled: false,
+        reason: 'feature_disabled_by_owner',
+        source: 'none',
+        override,
+      };
+    }
+    // Plan does not include this feature; skip the disabled branch and
+    // let the standard plan/availability resolution take over.
   }
 
   // (2) Active override → respect catalog governance gate.

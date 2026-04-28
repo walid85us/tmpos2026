@@ -1,0 +1,355 @@
+System Owner Commercial Controls — Billing Visibility + Revoked Actions + Disabled Feature Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict isolated correction pass.
+Do not redesign the app.
+Do not touch the completed Shipping Module.
+Do not implement Stripe, external payment processing, tax calculation, accounting exports, or customer storefront payment.
+Fix only the paid override billing visibility, monthly billing clarity, revoked-action logic, tenant billing visibility, permission-testability, and incorrect Disabled by Owner state.
+
+==================================================
+CURRENT QA ISSUES
+==================================================
+
+The Paid Override Billing Invoice Workflow with Activation Mode mostly works, but QA found remaining issues:
+
+1) Monthly billing behavior is unclear.
+QA result:
+- Monthly plan billing behavior is PASS partially.
+- User does not see where the monthly billing flow is represented.
+
+Expected:
+- If a tenant is monthly, the invoice or billing record must clearly show it is monthly.
+- It should be visible whether the override is:
+  - added to next monthly invoice,
+  - created as an open monthly invoice,
+  - or recorded as a monthly recurring billing item.
+- The UI must not leave the operator guessing.
+
+2) Tenant / Store Owner Billing cannot be tested.
+QA result:
+- Invoice appears in System Owner Tenant Billing.
+- But invoice visibility in tenant/store owner billing cannot be tested because there is no clear tenant-linked path from tenant list/store owner view.
+
+Expected:
+- There must be a clear way to view the invoice from tenant/store owner billing if that surface exists.
+- If full tenant billing navigation is not implemented, add a clear read-only tenant-facing billing preview in System Owner Tenant Detail Billing or a safe “View as Tenant Billing” surface.
+- Do not claim tenant billing visibility exists if there is no accessible surface.
+
+3) Revoked paid override row shows too many buttons.
+QA result:
+- After active paid entitlement is revoked, row shows:
+  - Trial
+  - Paid Override
+  - Re-trial
+  - Re-grant Paid
+
+This is confusing.
+
+Expected:
+- If a feature has real revoked history, show:
+  - Revoked
+  - Re-trial, if trial is allowed
+  - Re-grant Paid
+- Do not also show fresh Trial / Paid Override buttons at the same time.
+- Fresh Trial / Paid Override buttons are for normal Not in Plan rows with no prior revoked/expired history.
+
+4) Store Permissions Matrix testing is blocked.
+QA result:
+- User cannot test it because there is no tenant linked from tenant list / no clear access path.
+
+Expected:
+- Add or expose a clear path to the relevant Store Permissions Matrix for the tenant from tenant detail, or ensure the existing permission matrix can be opened for that tenant.
+- The test must be possible from the UI.
+
+5) Tenant-specific custom price label should also show add-on context.
+QA result:
+- Custom Price label appears.
+- User wants an Add-on label as well when the paid override is catalog-linked.
+
+Expected:
+- If paid override is linked to an active add-on catalog item, show:
+  - Paid Override
+  - Add-on
+  - Custom Price, if tenant price differs from catalog price
+- Do not show Add-on for non-catalog paid overrides.
+
+6) Disabled by Owner still appears incorrectly.
+QA issue:
+- Reports & Analytics still shows Disabled by Owner.
+- If there is no explicit tenant-level disable/re-enable control, this state should not appear.
+
+Expected:
+- If feature is not included in plan, show Not in Plan.
+- If feature is not implemented, show Not Available or In Development.
+- Only show Disabled by Owner if there is an explicit System Owner disable action and a clear Re-enable action/path.
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Firebase/Firestore multi-tenant architect
+- Senior SaaS billing workflow architect
+- Senior entitlement and commercial-controls architect
+- Senior RBAC / plan-gating architect
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Do not make a shallow label patch.
+Fix the state machine and testability gaps.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- replit.md
+
+Preserve:
+- completed Shipping Module behavior
+- existing plan/permission behavior
+- Store Permissions Matrix logic
+- preview-mode write safety
+- add-on catalog governance
+- tenant feature trial / paid override logic
+- paid override invoice workflow
+- activation mode behavior
+
+==================================================
+PART A — MONTHLY BILLING VISIBILITY
+==================================================
+
+Required:
+For monthly tenants, paid override invoice/billing records must clearly show:
+
+- monthly cadence
+- whether it is an open invoice, next monthly invoice item, or recurring monthly billing item
+- linked feature/add-on
+- amount
+- due date or next billing date
+- activation mode
+- payment status
+
+Required UI copy examples:
+- “Monthly billing item”
+- “Added to monthly invoice”
+- “Due on next monthly billing date”
+- “Active now, invoice open”
+- “Pending payment, activates after invoice is paid”
+
+Do not leave the monthly flow hidden or ambiguous.
+
+==================================================
+PART B — TENANT / STORE OWNER BILLING VISIBILITY
+==================================================
+
+Required:
+Make tenant/store-owner invoice visibility testable.
+
+If a tenant/store owner Billing area exists:
+- the paid override invoice must appear there.
+- provide a clear navigation path or link.
+
+If a full tenant billing area does not exist:
+- add a safe read-only “Tenant Billing Preview” or “Store Owner Billing View” within System Owner Tenant Detail Billing.
+- clearly label it as what the tenant/store owner would see.
+- do not claim full tenant billing exists if it does not.
+
+Required:
+The same invoice must be visible from:
+1) System Owner Tenant Detail Billing
+2) Tenant-facing billing surface or preview
+
+==================================================
+PART C — STORE PERMISSIONS MATRIX ACCESSIBILITY
+==================================================
+
+Required:
+Make permission impact testable.
+
+From Tenant Detail or Features tab, provide a clear path to:
+- Store Permissions Matrix for that tenant/store
+or
+- a visible linked-permissions preview showing whether the feature’s permissions are currently exposed
+
+Required:
+After:
+- Pending Payment with activate-after-payment
+- Mark Paid
+- Immediate Activation
+- Cancel
+- Revoke
+
+the user should be able to verify permission visibility/state.
+
+Do not change the accepted permission model.
+Make the test path clear.
+
+==================================================
+PART D — REVOKED ROW ACTION CLEANUP
+==================================================
+
+Required:
+Fix button visibility for revoked paid override rows.
+
+For real Paid Override Revoked:
+Show:
+- Revoked
+- Re-grant Paid
+- Re-trial, only if trial is allowed
+
+Do NOT show:
+- fresh Trial
+- fresh Paid Override
+
+For normal Not in Plan with no prior grant history:
+Show:
+- Trial
+- Paid Override
+
+Do NOT show:
+- Re-trial
+- Re-grant Paid
+
+For Trial Expired:
+Show:
+- Trial Expired
+- Re-trial
+- Re-grant Paid, if paid override is eligible
+
+Do not show duplicate action families together.
+
+==================================================
+PART E — ADD-ON LABEL FOR CATALOG-LINKED PAID OVERRIDE
+==================================================
+
+Required:
+If a paid override is linked to an active Add-on Catalog item:
+- show Add-on label
+- show Paid Override label
+- show Custom Price label if tenant price differs from catalog price
+
+If paid override is not catalog-linked:
+- show Paid Override
+- show Custom Price if applicable
+- do not show Add-on
+
+==================================================
+PART F — DISABLED BY OWNER CORRECTION
+==================================================
+
+Required:
+Audit where disabled_by_owner / feature_disabled_by_owner is coming from.
+
+If there is an explicit tenant-level disable action:
+- keep Disabled by Owner
+- show clear Re-enable action/path
+- document where it is controlled
+
+If there is no explicit disable/re-enable action:
+- do not show Disabled by Owner
+- map the feature to the correct state:
+  - Included by Plan
+  - Not in Plan
+  - Not Available
+  - In Development
+
+Specific required check:
+- Reports & Analytics should not show Disabled by Owner unless there is an explicit disable/re-enable control.
+- If Reports & Analytics is simply not part of the Essential plan, show Not in Plan.
+
+==================================================
+PART G — NO FAKE EXTERNAL PAYMENT PROCESSOR
+==================================================
+
+Required:
+Keep external payment processing out of scope.
+
+The UI may show:
+- invoice
+- manual payment confirmation
+- mark paid
+- cancel invoice
+
+The UI must not show:
+- fake Stripe checkout
+- fake payment link
+- fake card processing
+- automatic payment claim
+
+If any placeholder exists, clearly label it as manual/internal only.
+
+==================================================
+PART H — NON-REGRESSION
+==================================================
+
+Preserve:
+- paid override invoice creation
+- activation mode selector
+- activate after payment
+- activate immediately and add to invoice
+- mark paid activation
+- cancel pending invoice returns to Not in Plan/Add-on Available
+- revoked only after active entitlement revoked
+- tenant-specific price does not mutate catalog price
+- add-on catalog single status chip
+- trial and paid override grant actions
+- Store Permissions Matrix entitlement rules
+- preview-mode write safety
+- completed Shipping Module behavior
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Monthly paid override billing is clearly visible as monthly invoice/item/flow.
+2) Tenant/store-owner billing visibility is testable through a real surface or clear preview.
+3) Store Permissions Matrix impact is testable from tenant detail or linked path.
+4) Revoked row does not show Trial + Paid Override + Re-trial + Re-grant Paid all together.
+5) Not in Plan row shows Trial / Paid Override only when no prior expired/revoked state applies.
+6) Catalog-linked paid override shows Add-on label.
+7) Non-catalog paid override does not show Add-on label.
+8) Disabled by Owner appears only with explicit disable/re-enable control.
+9) Reports & Analytics shows correct state.
+10) No fake external payment processor is shown.
+11) Existing tenant/plan/shipping behavior remains intact.
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- monthly paid override billing visibility rule
+- tenant/store-owner billing visibility or preview rule
+- Store Permissions Matrix test/navigation path
+- revoked action visibility rule
+- Add-on label rule for catalog-linked paid override
+- Disabled by Owner rule
+- manual/internal payment limitation
+- external payment processor out of scope
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Monthly Billing Visibility
+3. Tenant / Store Owner Billing Visibility
+4. Store Permissions Matrix Testability
+5. Revoked Action Cleanup
+6. Add-on Label + Custom Price Behavior
+7. Disabled by Owner Correction
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes

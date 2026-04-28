@@ -20,6 +20,7 @@ import {
   cancelInvoice,
 } from './commercialInvoices';
 import type { CommercialInvoice } from './mockData';
+import { SUB_PERMISSIONS, getFeatureGatesForSubPermission } from '../context/accessConfig';
 
 type Tab = 'Overview' | 'Owner & Users' | 'Subscription' | 'Features' | 'Billing' | 'Domains' | 'Usage' | 'Activity / Audit' | 'Support Notes';
 
@@ -308,6 +309,22 @@ const TenantDetailPage: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentPlan, liveFeatureMatrix, liveAddOns, localOverrides, invoiceVersion]);
 
+  // Part C: precompute, per featureId, the list of sub-permissions
+  // that are gated by it. Used to render the inline "Permissions
+  // Impact" panel beneath each Features row so the operator can see
+  // which sub-permissions an entitlement transition will affect.
+  const gatedSubPermsByFeature = useMemo<Record<string, typeof SUB_PERMISSIONS>>(() => {
+    const map: Record<string, typeof SUB_PERMISSIONS> = {};
+    for (const sp of SUB_PERMISSIONS) {
+      const gates = getFeatureGatesForSubPermission(sp.id);
+      for (const fid of gates) {
+        if (!map[fid]) map[fid] = [];
+        map[fid].push(sp);
+      }
+    }
+    return map;
+  }, []);
+
   // Tenant-scoped invoice list, re-derived whenever an invoice mutates.
   const tenantInvoices = useMemo<CommercialInvoice[]>(() => {
     return getInvoicesForTenant(tenant.id).slice().sort((a, b) => {
@@ -571,6 +588,26 @@ const TenantDetailPage: React.FC = () => {
       });
       showToast(`Override revoked for ${featureMatrix.find(f => f.id === featureId)?.name || featureId}`);
     }
+  };
+
+  // Part F: Re-enable handler for rows whose state is currently
+  // `feature_disabled_by_owner`. Removes the disabled override row so
+  // the resolver returns to the natural plan/lifecycle state. We do
+  // not delete history rows — only the dormant disabled flag for this
+  // feature — and we audit it as `tenant_override_revoked` because
+  // the disabled override is itself a kind of override.
+  const handleReenableFeature = (featureId: string) => {
+    const ov = localOverrides.find(o => o.featureId === featureId);
+    setLocalOverrides(prev => prev.filter(o => !(o.featureId === featureId && o.type === 'disabled')));
+    pushCommercialAudit({
+      actor: 'System Owner',
+      action: 'tenant_override_revoked',
+      tenantId: tenant.id,
+      featureId,
+      addOnId: ov?.addOnId ?? null,
+      note: 'Disabled-by-Owner cleared (feature re-enabled)',
+    });
+    showToast(`${featureMatrix.find(f => f.id === featureId)?.name || featureId} re-enabled`);
   };
 
   const handleConfirmRevoke = (featureId: string, issueRefund: boolean) => {
@@ -1541,19 +1578,17 @@ const TenantDetailPage: React.FC = () => {
                   r.addOn &&
                   r.addOn.governanceStatus === 'active' &&
                   r.addOn.compatiblePlans.includes(currentPlan);
-                const hasActiveOverride = !!ov && !ov.revokedDate;
-                // Trial / Paid Override are tenant-level entitlement
-                // overrides — they do NOT require an active linked
-                // add-on. They appear for any implemented feature that
-                // is currently not entitled and does not already have
-                // an active override row. The linked add-on (when active)
-                // contributes a default price and an "Add-on Available"
-                // hint, but does not gate visibility of the buttons.
+                // Trial / Paid Override (fresh grant) buttons are only
+                // for rows with NO prior override history at all. If a
+                // revoked or expired override row exists, the row
+                // surfaces Re-trial / Re-grant Paid instead — never
+                // both action families together. This prevents the
+                // confusing 4-button cluster on revoked rows
+                // (Trial / Paid Override / Re-trial / Re-grant Paid).
                 const canOfferGrant =
                   feature.lifecycle === 'implemented' &&
                   !enabled &&
-                  !isPendingPayment &&
-                  !hasActiveOverride &&
+                  !ov &&
                   reason !== 'feature_disabled_by_owner';
                 const cardBg = isPendingPayment
                   ? 'bg-amber-50/50 border-amber-100'
@@ -1633,6 +1668,16 @@ const TenantDetailPage: React.FC = () => {
                           {reason === 'disabled_by_plan' && eligibleAddOn && (
                             <span className="text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest whitespace-nowrap bg-emerald-50 text-emerald-700 border-emerald-100">Add-on available</span>
                           )}
+                          {/* Part E: when the active paid override is linked
+                              to an Active Add-on Catalog item, surface an
+                              "Add-on" pill alongside Paid Override. The
+                              Custom Price pill (rendered separately below
+                              the price) only appears when tenant price
+                              differs from catalog price. Non-catalog paid
+                              overrides do NOT show this pill. */}
+                          {isPaidActive && reason === 'enabled_by_paid_override' && r.addOn && r.addOn.governanceStatus === 'active' && (
+                            <span className="text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest whitespace-nowrap bg-violet-50 text-violet-700 border-violet-100">Add-on</span>
+                          )}
                           {/* Spec L: surface "Invoice Open / Overdue" alongside Paid Override
                               when the linked SaaS invoice is still open. */}
                           {isPaidActive && (r.invoiceUiStatus === 'open' || r.invoiceUiStatus === 'overdue') && (
@@ -1685,9 +1730,48 @@ const TenantDetailPage: React.FC = () => {
                               <button onClick={() => { setPaidOverridePrice(eligibleAddOn && r.addOn?.price ? String(r.addOn.price) : ''); setPaidOverrideModel(eligibleAddOn && r.addOn?.billingCadence === 'annual' ? 'annual' : eligibleAddOn && r.addOn?.billingCadence === 'one_time' ? 'one_time' : 'monthly'); setPaidOverrideActivation('after_payment'); setPaidOverrideDueDate((() => { const d = new Date('2026-03-26'); d.setDate(d.getDate() + 30); return d.toISOString().slice(0, 10); })()); setFeaturePaidModal(feature.id); }} className="text-[8px] font-black text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-emerald-100 transition-colors">Re-grant Paid</button>
                             </>
                           )}
+                          {/* Part F: Disabled by Owner only renders when there
+                              is a real disabled override AND the plan would
+                              otherwise include the feature (resolver guarded).
+                              Surface a clear Re-enable action so the state
+                              is reversible. */}
+                          {reason === 'feature_disabled_by_owner' && (
+                            <button onClick={() => handleReenableFeature(feature.id)} className="text-[8px] font-black text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-emerald-100 transition-colors">Re-enable</button>
+                          )}
                         </div>
                       </div>
                     </div>
+                    {/* Part C: Permissions Impact — inline preview of which
+                        sub-permissions this feature gates. Granted state is
+                        derived directly from the row's resolver `enabled`
+                        signal so that overrides (Trial / Paid / Pending)
+                        are reflected truthfully. Using the row's enabled
+                        flag also avoids the pre-existing
+                        `isSubPermissionPlanAvailable` plan-key gap on the
+                        `essential` plan, which would otherwise show every
+                        pill as locked even when the plan does include the
+                        feature. */}
+                    {gatedSubPermsByFeature[feature.id] && gatedSubPermsByFeature[feature.id].length > 0 && (
+                      <div className="mt-3 pt-3 border-t border-slate-200/60">
+                        <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Permissions Impact</p>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          {gatedSubPermsByFeature[feature.id].map(sp => {
+                            const granted = enabled;
+                            return (
+                              <span key={sp.id} className={`text-[8px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest ${granted ? 'bg-lime-50 text-lime-700 border-lime-100' : 'bg-slate-100 text-slate-500 border-slate-200'}`}>
+                                <span className="material-symbols-outlined text-[10px] align-middle mr-0.5">{granted ? 'check' : 'lock'}</span>
+                                {sp.label}
+                              </span>
+                            );
+                          })}
+                        </div>
+                        <p className="text-[9px] text-slate-400 italic mt-1.5">
+                          {enabled
+                            ? 'Granted at the matrix level — assignable via Roles & Permissions.'
+                            : 'Locked because this feature is not currently entitled for this tenant.'}
+                        </p>
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -1941,6 +2025,17 @@ const TenantDetailPage: React.FC = () => {
                           ? 'bg-red-50 text-red-700 border-red-100'
                           : 'bg-amber-50 text-amber-700 border-amber-100';
                     const cadenceLabel = inv.cadence === 'monthly' ? '/mo' : inv.cadence === 'annual' ? '/yr' : ' one-time';
+                    // Part A: monthly + annual subscriptions are
+                    // recurring; one-time grants are not. Surface
+                    // truthful copy so the operator (and tenant
+                    // mirror in Settings) can tell at a glance
+                    // whether settling this invoice ends the bill or
+                    // just covers the current cycle.
+                    const recurrenceCopy = inv.cadence === 'monthly'
+                      ? 'Recurring monthly — a new invoice is issued each cycle until the override is revoked.'
+                      : inv.cadence === 'annual'
+                        ? 'Recurring annually — a new invoice is issued each year until the override is revoked.'
+                        : 'One-time charge — settles in full when paid; no future invoices.';
                     return (
                       <div key={inv.invoiceId} className="p-3 bg-slate-50 rounded-xl border border-slate-100">
                         <div className="flex justify-between items-start gap-3 flex-wrap">
@@ -1954,6 +2049,11 @@ const TenantDetailPage: React.FC = () => {
                               </div>
                               <p className="text-[10px] text-slate-500 mt-1">{inv.lineItems[0]?.description || '—'}</p>
                               <p className="text-[10px] text-slate-400">Feature: <span className="font-bold text-slate-600">{fname}</span> · Issued {inv.issuedDate} · Due {inv.dueDate}{inv.paidDate ? ` · Paid ${inv.paidDate}` : ''}{inv.cancelledDate ? ` · Cancelled ${inv.cancelledDate}` : ''}</p>
+                              {/* Part A: per-row recurrence callout. Avoids
+                                  the user having to infer "is this monthly
+                                  bill going to keep coming?" from a tiny
+                                  /mo suffix. */}
+                              <p className={`text-[10px] mt-1 italic ${inv.cadence === 'one_time' ? 'text-slate-400' : 'text-violet-600 font-semibold'}`}>{recurrenceCopy}</p>
                             </div>
                           </div>
                           <div className="flex flex-col items-end gap-1.5">
@@ -1977,6 +2077,70 @@ const TenantDetailPage: React.FC = () => {
                   })}
                 </div>
               )}
+            </div>
+
+            {/* Part B: Tenant Billing View Preview — embeds the exact
+                read-only invoice list the tenant sees inside their
+                own Settings → Plan & Add-on Billing panel. Lets the
+                System Owner verify, without role-switching, that the
+                tenant view is truthful, matches mark-paid/cancel
+                state, and never exposes payment buttons. */}
+            <div>
+              <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Tenant Billing View Preview</p>
+                <span className="text-[9px] font-black text-indigo-600 bg-indigo-50 border border-indigo-100 px-2 py-1 rounded-lg uppercase tracking-widest">What the tenant sees</span>
+              </div>
+              <div className="p-4 bg-indigo-50/30 rounded-xl border border-indigo-100/60">
+                <p className="text-[10px] text-slate-500 font-medium mb-3 leading-relaxed">
+                  These are internal SaaS subscription invoices for paid feature overrides and add-ons applied by your account manager. Payment is confirmed manually by the System Owner — there is no in-app payment button. Contact support to settle an open invoice.
+                </p>
+                {tenantInvoices.length === 0 ? (
+                  <p className="text-sm font-bold text-slate-500 text-center py-3">No subscription invoices on file.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {tenantInvoices.map(inv => {
+                      // Use the same default time reference (Date.now())
+                      // as the tenant Settings panel calls
+                      // `deriveInvoiceUiStatus(inv)` with no nowMs — this
+                      // guarantees the preview's open/overdue badge
+                      // matches exactly what the tenant sees in their own
+                      // Settings → Plan & Add-on Billing view.
+                      const ui = deriveInvoiceUiStatus(inv);
+                      const fname = inv.featureId ? (liveFeatureMatrix.find(f => f.id === inv.featureId)?.name || inv.featureId) : '—';
+                      const cadenceLabel = inv.cadence === 'monthly' ? '/mo' : inv.cadence === 'annual' ? '/yr' : ' one-time';
+                      const recur = inv.cadence === 'monthly'
+                        ? 'Recurring monthly'
+                        : inv.cadence === 'annual'
+                          ? 'Recurring annually'
+                          : 'One-time';
+                      const tStatus = ui === 'paid'
+                        ? 'bg-lime-50 text-lime-700 border-lime-100'
+                        : ui === 'cancelled'
+                          ? 'bg-slate-100 text-slate-500 border-slate-200'
+                          : ui === 'overdue'
+                            ? 'bg-red-50 text-red-700 border-red-100'
+                            : 'bg-amber-50 text-amber-700 border-amber-100';
+                      return (
+                        <div key={'preview-' + inv.invoiceId} className="p-3 bg-white rounded-lg border border-indigo-100/60">
+                          <div className="flex justify-between items-start gap-3 flex-wrap">
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <p className="font-bold text-slate-900 text-sm">{inv.invoiceId}</p>
+                                <span className={`text-[9px] font-black px-2 py-0.5 rounded border uppercase tracking-widest ${tStatus}`}>{ui}</span>
+                                <span className="text-[9px] font-black bg-violet-50 text-violet-700 border border-violet-100 px-2 py-0.5 rounded uppercase tracking-widest">{recur}</span>
+                              </div>
+                              <p className="text-[10px] text-slate-500 mt-1">{inv.lineItems[0]?.description || '—'} · {fname}</p>
+                              <p className="text-[10px] text-slate-400">Issued {inv.issuedDate} · Due {inv.dueDate}{inv.paidDate ? ` · Paid ${inv.paidDate}` : ''}</p>
+                            </div>
+                            <span className="font-black text-primary text-sm whitespace-nowrap">${inv.amount.toFixed(2)}<span className="text-[10px] font-bold text-slate-400">{cadenceLabel}</span></span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                <p className="text-[10px] text-slate-400 italic mt-3">No payment buttons appear in the tenant view — settlement is confirmed manually by the System Owner above.</p>
+              </div>
             </div>
 
             <div>
@@ -2125,6 +2289,13 @@ const TenantDetailPage: React.FC = () => {
                           <div>
                             <p className={labelClass}>Cadence</p>
                             <p className="font-bold text-slate-900 capitalize">{inv.cadence.replace('_', ' ')}</p>
+                            <p className={`text-[10px] mt-0.5 italic ${inv.cadence === 'one_time' ? 'text-slate-400' : 'text-violet-600 font-semibold'}`}>
+                              {inv.cadence === 'monthly'
+                                ? 'Recurring monthly until override revoked'
+                                : inv.cadence === 'annual'
+                                  ? 'Recurring annually until override revoked'
+                                  : 'One-time charge'}
+                            </p>
                           </div>
                           <div>
                             <p className={labelClass}>Linked Feature</p>

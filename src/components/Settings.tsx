@@ -418,6 +418,20 @@ export default function Settings() {
                       ? 'bg-red-50 text-red-700 border-red-100'
                       : 'bg-amber-50 text-amber-700 border-amber-100';
                 const isImmediate = inv.activationMode === 'immediate';
+                // Part A: explicit recurrence pill + plain-language
+                // explainer so the merchant knows whether settling
+                // this invoice is the end of the bill or just one
+                // cycle of a recurring charge.
+                const recurLabel = inv.cadence === 'monthly'
+                  ? 'Recurring monthly'
+                  : inv.cadence === 'annual'
+                    ? 'Recurring annually'
+                    : 'One-time';
+                const recurExplainer = inv.cadence === 'monthly'
+                  ? 'A new invoice will be issued each month for this feature until your account manager removes it.'
+                  : inv.cadence === 'annual'
+                    ? 'A new invoice will be issued each year for this feature until your account manager removes it.'
+                    : 'This is a one-time charge — there will be no future invoices for it.';
                 return (
                   <div key={inv.invoiceId} className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
                     <div className="flex justify-between items-start gap-3 flex-wrap">
@@ -425,10 +439,12 @@ export default function Settings() {
                         <div className="flex items-center gap-2 flex-wrap">
                           <p className="font-black text-slate-900 text-sm">{inv.invoiceId}</p>
                           <span className={`text-[9px] font-black px-2 py-0.5 rounded border uppercase tracking-widest ${statusClass}`}>{ui}</span>
+                          <span className="text-[9px] font-black bg-violet-50 text-violet-700 border border-violet-100 px-2 py-0.5 rounded uppercase tracking-widest">{recurLabel}</span>
                           <span className={`text-[9px] font-black px-2 py-0.5 rounded border uppercase tracking-widest ${isImmediate ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-emerald-50 text-emerald-700 border-emerald-100'}`}>{isImmediate ? 'Immediate' : 'After payment'}</span>
                         </div>
                         <p className="text-[11px] text-slate-600 font-bold mt-1">{inv.lineItems[0]?.description || '—'}</p>
                         <p className="text-[10px] text-slate-400 mt-0.5">Issued {inv.issuedDate} · Due {inv.dueDate}{inv.paidDate ? ` · Paid ${inv.paidDate}` : ''}{inv.cancelledDate ? ` · Cancelled ${inv.cancelledDate}` : ''}</p>
+                        <p className={`text-[10px] mt-1 italic ${inv.cadence === 'one_time' ? 'text-slate-500' : 'text-violet-600 font-semibold'}`}>{recurExplainer}</p>
                       </div>
                       <div className="text-right">
                         <p className="font-black text-primary text-base">${inv.amount.toFixed(2)}<span className="text-[10px] font-bold text-slate-400">{cadenceLabel}</span></p>
