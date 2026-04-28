@@ -1,0 +1,340 @@
+System Owner Commercial Controls — Add-on Label + Tenant Feature Override Logic Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not change the completed Shipping Module.
+Do not implement billing, Stripe, payment collection, SaaS invoicing, or accounting.
+Fix only the add-on catalog labeling and tenant feature entitlement / override UI logic.
+
+==================================================
+CURRENT QA-BLOCKING ISSUE
+==================================================
+
+The new Add-on Governance implementation introduced confusing UI behavior.
+
+Issue 1:
+In the Add-on Catalog card, the add-on is showing duplicate status labels, for example:
+- ACTIVE
+- ACTIVE
+
+This is wrong.
+
+The Add-on Catalog card should show only one lifecycle status:
+- Active
+- Disabled
+- Archived
+
+Do not duplicate the same state in multiple chips.
+
+Issue 2:
+The Tenant Features tab logic was altered/confused.
+
+Previous intended logic:
+Under each tenant/customer plan and feature, if a feature is not included in the plan, System Owner should be able to grant access through:
+- Trial
+- Override / Paid Override
+- Add-on, if the feature is linked to an active add-on catalog item
+
+This must be restored and made clear.
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior multi-tenant entitlement architect
+- Senior SaaS commercial-controls architect
+- Senior RBAC / plan-gating architect
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Do not make a shallow label patch.
+Fix the distinction between:
+1) Add-on Catalog lifecycle state
+2) Tenant feature entitlement state
+3) Tenant override actions
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- replit.md
+
+Preserve completed Shipping Module closure state and all accepted plan/permission behavior.
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Restore and clarify the commercial entitlement model:
+
+A) Add-on Catalog shows clean lifecycle status only once.
+B) Tenant Features tab shows feature availability and grant options correctly.
+C) Trial / Override / Add-on controls appear in the correct cases.
+D) Add-on catalog lifecycle and tenant feature entitlement labels are not conflated.
+
+==================================================
+PART A — ADD-ON CATALOG CARD LABEL CLEANUP
+==================================================
+
+Required:
+Fix Add-on Catalog cards so each add-on shows only one lifecycle status chip.
+
+Allowed lifecycle status chips:
+- Active
+- Disabled
+- Archived
+
+Required:
+- Do not render duplicate Active chips.
+- Do not render both a generic status chip and a governance status chip if they say the same thing.
+- If both sources exist internally, consolidate them into one display chip.
+- Keep governance action buttons or segmented controls if needed, but do not duplicate the visual status.
+
+Expected result:
+For SMS Credits active add-on, card should show one clear:
+- Active
+
+Not:
+- Active Active
+
+==================================================
+PART B — RESTORE TENANT FEATURES TAB LOGIC
+==================================================
+
+Required:
+Tenant Features tab must use this entitlement display logic:
+
+1) Feature included by active plan
+Display:
+- Included by Plan
+Actions:
+- no trial/add-on grant needed unless explicitly supporting override/disable behavior
+
+2) Feature not included in plan, but linked to an active add-on catalog item
+Display:
+- Not in Plan
+- Add-on available
+Actions:
+- Grant Trial
+- Grant Paid Override / Add-on
+- If paid add-on is granted, default price comes from Add-on Catalog
+
+3) Feature not included in plan and not linked to active add-on
+Display:
+- Not in Plan
+Actions:
+- Trial / Override only if the system allows non-add-on overrides
+- Do not label it Add-on if no active add-on catalog item exists
+
+4) Feature currently granted as trial
+Display:
+- Trial
+- trial end date
+Actions:
+- End Trial
+- Convert to Paid Override / Add-on if applicable
+
+5) Feature currently granted as paid override
+Display:
+- Paid Override or Overridden
+- tenant-specific override price if applicable
+Actions:
+- Edit Price
+- Revoke Override
+
+6) Feature disabled by System Owner for that tenant
+Display:
+- Disabled by Owner
+Actions:
+- Re-enable if permitted
+
+7) Feature linked to disabled or archived add-on
+Display:
+- do not show as available add-on
+- do not allow new trial/paid add-on grant from inactive catalog item
+- if historical assignment exists, show only as inactive/revoked/historical if such view exists
+
+==================================================
+PART C — ACTION BUTTONS / CHIPS MUST BE SEPARATED
+==================================================
+
+Required:
+Do not confuse status chips with action buttons.
+
+Status chips describe current state:
+- Included by Plan
+- Not in Plan
+- Trial
+- Paid Override / Overridden
+- Add-on
+- Disabled by Owner
+- Expired
+- Revoked
+
+Action buttons perform changes:
+- Grant Trial
+- Grant Paid Override
+- Grant Add-on
+- End Trial
+- Convert to Paid
+- Edit Price
+- Revoke Override
+- Re-enable
+
+Required:
+The top legend/filter chips such as Inherited / Overridden / Trial / Addon / Disabled should remain filters or legends only if they existed before.
+They must not replace per-feature action buttons.
+
+==================================================
+PART D — ADD-ON AVAILABILITY RULE
+==================================================
+
+Required:
+A feature should be considered “Add-on available” only when:
+- it has linkedFeatureId / capability key matching an add-on catalog item
+- add-on catalog item is Active
+- tenant plan does not already include it, or it is commercially offered separately as an add-on by design
+
+If add-on is Disabled or Archived:
+- no Add-on grant button
+- no Add-on available label as active option
+- linked Store Permissions Matrix permissions should not appear through that add-on entitlement
+
+==================================================
+PART E — PAID OVERRIDE PRICE BEHAVIOR
+==================================================
+
+Required:
+When granting paid override/add-on:
+- default price comes from Add-on Catalog default price
+- System Owner can edit tenant-specific override price
+- tenant-specific override price does not mutate global catalog price
+- UI must clearly indicate:
+  - catalog default price
+  - tenant override price
+  - custom price if changed
+
+Do not implement actual billing collection.
+
+==================================================
+PART F — ENTITLEMENT RESOLUTION MUST REMAIN CLEAR
+==================================================
+
+Required:
+Entitlement resolver should return clear reasons:
+- included_by_plan
+- not_in_plan
+- addon_available
+- enabled_by_trial_addon
+- enabled_by_paid_addon
+- enabled_by_paid_override
+- disabled_by_owner
+- addon_disabled
+- addon_archived
+- trial_expired
+- override_revoked
+
+Use these reasons consistently in:
+- Tenant Features tab
+- Store Permissions Matrix filtering
+- feature badges/actions
+
+==================================================
+PART G — STORE PERMISSIONS MATRIX NON-REGRESSION
+==================================================
+
+Required:
+Do not regress the accepted permission model:
+- plan/add-on entitlement decides whether capability exists
+- role decides who can use it
+- role cannot resurrect unavailable capability
+- linked permissions disappear when unavailable
+- dynamic sub-permission counts reflect visible permissions
+
+Specifically:
+- active trial or paid override/add-on should restore linked permissions
+- disabled/archived add-on should not expose linked permissions
+- revoked/expired override should not expose linked permissions
+
+==================================================
+PART H — AUDITABILITY
+==================================================
+
+Required:
+Keep commercial actions auditable:
+- grant trial
+- end trial
+- grant paid override/add-on
+- edit tenant override price
+- revoke override
+- disable/archive/reactivate add-on
+
+Do not create duplicate audit events for a single UI action.
+
+==================================================
+PART I — NON-REGRESSION
+==================================================
+
+Preserve:
+- existing tenant provisioning
+- plan feature toggles
+- Store Permissions Matrix
+- dynamic sub-permission counts
+- preview-mode write safety
+- completed Shipping Module plan/permission behavior
+- all accepted System Owner plan/feature behavior
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Add-on Catalog no longer shows duplicate status chips such as Active Active
+2) Add-on Catalog shows one lifecycle state only
+3) Tenant Features tab preserves previous logic: Trial / Override / Add-on options are available when feature is not in plan and eligible
+4) Add-on label appears only when the feature is linked to an active add-on catalog item
+5) Disabled/archived add-ons are not shown as available tenant add-ons
+6) Paid override/add-on defaults to catalog price and can be tenant-edited
+7) Tenant-specific price does not mutate global catalog price
+8) Entitlement reason labels are clear and not conflated
+9) Store Permissions Matrix follows entitlement correctly
+10) Existing plan/shipping behavior remains intact
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Add-on Catalog lifecycle label rule
+- Tenant Features tab entitlement/action logic
+- Add-on availability rule
+- Trial / Override / Add-on distinction
+- paid override price behavior
+- permission matrix behavior
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Add-on Catalog Label Cleanup
+3. Tenant Features Tab Logic Restoration
+4. Trial / Override / Add-on Action Behavior
+5. Entitlement Resolution + Permission Matrix Alignment
+6. Pricing Behavior
+7. Files Changed
+8. Documentation Updated
+9. Non-Regression Notes

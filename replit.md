@@ -52,6 +52,11 @@ The frontend is built using React 19, TypeScript, Vite 6, and Tailwind CSS v4.
 -   **Server-Side Shipping API**: An Express server handles all shipping provider operations with secure credential storage.
 -   **Configuration**: Uses `firebase-applet-config.json` for Firebase project configuration and `firebase-blueprint.json` for Firestore schema definition.
 -   **Commercial Controls**: Implements a system for managing add-ons and feature entitlements with commercial governance, tenant overrides, pricing rules, and a detailed audit trail.
+    -   **Add-on Catalog Lifecycle Label**: Each catalog card shows exactly one lifecycle status chip — `Active`, `Disabled`, or `Archived` — sourced from `governanceStatus`. The internal product `lifecycle` field is not rendered on the card to avoid duplicate chips.
+    -   **Tenant Features Tab**: Per-feature row shows a single status chip (`Included by Plan`, `Not in Plan`, `Trial`, `Paid Override`, `Add-on`, `Disabled by Owner`, `Trial Expired`, `Revoked`, `Add-on Disabled`, `Add-on Archived`, `Pending Payment`, `Not Available`) plus a secondary `Add-on Available` pill when the feature is not in plan AND the linked add-on catalog entry is `Active`. Action buttons (`Trial`, `Paid Override`, `End Trial`, `Revoke`, `Re-trial`, `Re-grant Paid`, `Approve`, `Cancel`) are separate from status chips and are only shown when the entitlement state allows them.
+    -   **Add-on Availability Rule**: An add-on is offerable to a tenant only when `governanceStatus === 'active'` AND its `compatiblePlans` include the tenant's plan AND the linked feature is not already included in plan.
+    -   **Trial / Override / Add-on Distinction**: `Trial` is a time-bound grant with `trialEnd`; `Paid Override` is a tenant-specific paid grant whose price defaults from the catalog but may be customized; `Add-on` denotes the linked catalog item. The Custom Price pill renders only when the override price differs from the catalog default.
+    -   **Permissions Matrix**: Add-on-driven sub-permissions only appear when the linked feature is currently entitled (plan inclusion OR a non-revoked, non-expired override) AND the linked add-on is `governanceStatus === 'active'`.
 
 # External Dependencies
 

@@ -1423,7 +1423,12 @@ const TenantDetailPage: React.FC = () => {
                         </div>
                       </div>
                       <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
-                        <span className={`text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest whitespace-nowrap ${reasonBadgeClass}`}>{REASON_LABEL[reason]}</span>
+                        <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                          <span className={`text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest whitespace-nowrap ${reasonBadgeClass}`}>{REASON_LABEL[reason]}</span>
+                          {reason === 'disabled_by_plan' && eligibleAddOn && (
+                            <span className="text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest whitespace-nowrap bg-emerald-50 text-emerald-700 border-emerald-100">Add-on available</span>
+                          )}
+                        </div>
                         <div className="flex items-center gap-1 flex-wrap justify-end">
                           {canOfferGrant && (
                             <>

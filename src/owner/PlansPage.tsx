@@ -595,7 +595,6 @@ const PlansPage: React.FC = () => {
                         <span className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md border ${govStyles[addon.governanceStatus]}`}>
                           {govLabel[addon.governanceStatus]}
                         </span>
-                        {lifecycleBadge(addon.lifecycle)}
                       </div>
                       <span className="text-xl font-black text-primary whitespace-nowrap">${addon.price}<span className="text-[10px] text-slate-400">/{addon.billingCadence === 'one_time' ? 'once' : addon.billingCadence === 'annual' ? 'yr' : 'mo'}</span></span>
                     </div>
