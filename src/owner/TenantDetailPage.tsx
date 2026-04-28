@@ -20,7 +20,6 @@ import {
   cancelInvoice,
 } from './commercialInvoices';
 import type { CommercialInvoice } from './mockData';
-import { SUB_PERMISSIONS, getFeatureGatesForSubPermission } from '../context/accessConfig';
 
 type Tab = 'Overview' | 'Owner & Users' | 'Subscription' | 'Features' | 'Billing' | 'Domains' | 'Usage' | 'Activity / Audit' | 'Support Notes';
 
@@ -308,22 +307,6 @@ const TenantDetailPage: React.FC = () => {
     // override.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentPlan, liveFeatureMatrix, liveAddOns, localOverrides, invoiceVersion]);
-
-  // Part C: precompute, per featureId, the list of sub-permissions
-  // that are gated by it. Used to render the inline "Permissions
-  // Impact" panel beneath each Features row so the operator can see
-  // which sub-permissions an entitlement transition will affect.
-  const gatedSubPermsByFeature = useMemo<Record<string, typeof SUB_PERMISSIONS>>(() => {
-    const map: Record<string, typeof SUB_PERMISSIONS> = {};
-    for (const sp of SUB_PERMISSIONS) {
-      const gates = getFeatureGatesForSubPermission(sp.id);
-      for (const fid of gates) {
-        if (!map[fid]) map[fid] = [];
-        map[fid].push(sp);
-      }
-    }
-    return map;
-  }, []);
 
   // Tenant-scoped invoice list, re-derived whenever an invoice mutates.
   const tenantInvoices = useMemo<CommercialInvoice[]>(() => {
@@ -1741,40 +1724,17 @@ const TenantDetailPage: React.FC = () => {
                         </div>
                       </div>
                     </div>
-                    {/* Part C: Permissions Impact — inline preview of which
-                        sub-permissions this feature gates. Granted state is
-                        derived directly from the row's resolver `enabled`
-                        signal so that overrides (Trial / Paid / Pending)
-                        are reflected truthfully. Using the row's enabled
-                        flag also avoids the pre-existing
-                        `isSubPermissionPlanAvailable` plan-key gap on the
-                        `essential` plan, which would otherwise show every
-                        pill as locked even when the plan does include the
-                        feature. */}
-                    {gatedSubPermsByFeature[feature.id] && gatedSubPermsByFeature[feature.id].length > 0 && (
-                      <div className="mt-3 pt-3 border-t border-slate-200/60">
-                        <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Permissions Impact</p>
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          {gatedSubPermsByFeature[feature.id].map(sp => {
-                            const granted = enabled;
-                            return (
-                              <span key={sp.id} className={`text-[8px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest ${granted ? 'bg-lime-50 text-lime-700 border-lime-100' : 'bg-slate-100 text-slate-500 border-slate-200'}`}>
-                                <span className="material-symbols-outlined text-[10px] align-middle mr-0.5">{granted ? 'check' : 'lock'}</span>
-                                {sp.label}
-                              </span>
-                            );
-                          })}
-                        </div>
-                        <p className="text-[9px] text-slate-400 italic mt-1.5">
-                          {enabled
-                            ? 'Granted at the matrix level — assignable via Roles & Permissions.'
-                            : 'Locked because this feature is not currently entitled for this tenant.'}
-                        </p>
-                      </div>
-                    )}
                   </div>
                 );
               })}
+              {/* Per the QA correction pass: the Tenant Features tab is a
+                  commercial entitlement surface only — it must not duplicate
+                  permission detail. Role-level sub-permissions are managed
+                  in the Store Permissions Matrix. A single lightweight
+                  link is provided here as a wayfinder. */}
+              <p className="text-[10px] text-slate-400 italic mt-2 px-1">
+                Manage role permissions in the Store Permissions Matrix.
+              </p>
             </div>
             {localOverrides.length > 0 && (
               <div>

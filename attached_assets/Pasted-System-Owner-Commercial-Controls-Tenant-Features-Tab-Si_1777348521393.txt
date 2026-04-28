@@ -1,0 +1,298 @@
+System Owner Commercial Controls — Tenant Features Tab Simplification + Remove Permissions Impact
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict isolated correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not touch the completed Shipping Module.
+Do not implement new billing/payment features.
+Fix only the Tenant Features tab UI simplification and remove incorrect Permissions Impact blocks.
+
+==================================================
+CURRENT QA-BLOCKING ISSUE
+==================================================
+
+The Tenant Features tab has become too complicated.
+
+It now shows “Permissions Impact” sections under some feature cards, listing locked permissions directly inside the Tenant Features tab.
+
+This is not acceptable.
+
+The Tenant Features tab should show commercial entitlement only:
+- Included by Plan
+- Not in Plan
+- Trial
+- Paid Override
+- Pending Payment
+- Revoked / Expired only when historically appropriate
+
+The Tenant Features tab should not show detailed permission chips or permission impact blocks.
+
+Permissions belong in:
+- Store Permissions Matrix
+
+Do not duplicate the Store Permissions Matrix inside the Tenant Features tab.
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior multi-tenant entitlement architect
+- Senior SaaS commercial-controls architect
+- Senior RBAC / permission systems architect
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Do not patch only CSS.
+Fix the Tenant Features tab information architecture.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- replit.md
+
+Preserve:
+- completed Shipping Module closure state
+- existing plan/permission behavior
+- Store Permissions Matrix behavior
+- dynamic sub-permission counts
+- linked permission disappearance rule
+- paid override invoice workflow
+- activation mode behavior
+- add-on catalog governance
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Restore the Tenant Features tab to a clean commercial feature-entitlement surface.
+
+It should answer only:
+1) Is this feature included by the tenant plan?
+2) If not, can System Owner grant Trial?
+3) Can System Owner grant Paid Override?
+4) Is it currently Trial / Paid Override / Pending Payment?
+5) Is it expired or revoked only when historically appropriate?
+
+It should NOT show permission-level detail.
+
+==================================================
+PART A — REMOVE PERMISSIONS IMPACT FROM TENANT FEATURES TAB
+==================================================
+
+Required:
+Remove the “Permissions Impact” section from feature cards in the Tenant Features tab.
+
+Remove:
+- “Permissions Impact” heading
+- locked permission chips
+- per-permission lock badges
+- “Locked because this feature is not currently entitled...” text
+
+Do not replace it with another large permission block.
+
+If a lightweight link is useful, use only a small text link such as:
+- “Manage role permissions in Store Permissions Matrix”
+But do not show permission details here.
+
+==================================================
+PART B — RESTORE SIMPLE FEATURE CARD STATES
+==================================================
+
+Required:
+Each feature card should show only the feature commercial entitlement state.
+
+Allowed primary states:
+- Included by Plan
+- Not in Plan
+- Trial
+- Paid Override
+- Pending Payment
+- Revoked
+- Trial Expired
+- Not Available
+- In Development
+
+Do not show permission chips inside the feature card.
+
+==================================================
+PART C — PLAN FEATURE LOGIC
+==================================================
+
+Required:
+If the feature is enabled in the tenant’s active plan from System Owner Plans & Features:
+- show Included by Plan
+- do not show Trial / Paid Override as the primary action
+
+If feature is not enabled in the tenant’s plan:
+- show Not in Plan
+- show Trial
+- show Paid Override
+
+This is the original intended logic and must be restored.
+
+==================================================
+PART D — TRIAL / PAID OVERRIDE ACTIONS
+==================================================
+
+Required:
+For eligible implemented features not included in plan:
+- show Trial
+- show Paid Override
+
+Do not require the feature to have an Add-on Catalog link just to show Trial / Paid Override.
+
+If the feature is catalog-linked to an active add-on:
+- optional small Add-on label may appear
+- Trial / Paid Override should still be clearly visible
+
+If no add-on link exists:
+- Trial / Paid Override should still be visible where feature is eligible
+
+==================================================
+PART E — PENDING PAYMENT / ACTIVE PAID OVERRIDE STATES
+==================================================
+
+Required:
+If Activate After Payment was selected:
+- show Pending Payment
+- show only logical actions:
+  - View Invoice
+  - Mark Paid if authorized
+  - Cancel Invoice
+
+If Activate Immediately was selected:
+- show Paid Override
+- show Invoice Open / Payment Due if invoice remains open
+- show View Invoice / Revoke / Edit Price if supported
+
+Do not show Trial / Paid Override / Re-trial / Re-grant Paid at the same time as Pending Payment.
+
+==================================================
+PART F — REVOKED / EXPIRED STATE ACTIONS
+==================================================
+
+Required:
+For real revoked paid override:
+- show Revoked
+- show Re-grant Paid
+- show Re-trial only if trial is eligible
+
+Do not show fresh Trial and Paid Override buttons at the same time as Re-trial / Re-grant Paid.
+
+For normal Not in Plan with no prior revoked/expired history:
+- show Trial
+- show Paid Override
+- do not show Re-trial / Re-grant Paid
+
+==================================================
+PART G — DISABLED BY OWNER CLEANUP
+==================================================
+
+Required:
+Do not show Disabled by Owner unless there is an explicit tenant-level disable/re-enable control.
+
+If there is no explicit disable/re-enable control:
+- map the feature to correct state:
+  - Included by Plan
+  - Not in Plan
+  - Not Available
+  - In Development
+
+Specific:
+- Reports & Analytics should not show Disabled by Owner unless there is a clear Re-enable action/path.
+- If Reports & Analytics is simply not in the tenant’s plan, show Not in Plan.
+
+==================================================
+PART H — PERMISSION MATRIX MUST REMAIN THE SOURCE OF PERMISSION DETAIL
+==================================================
+
+Required:
+Store Permissions Matrix remains the place where role permissions are shown and managed.
+
+Preserve accepted rules:
+- plan/add-on entitlement decides whether capability exists
+- role decides who can use it
+- role cannot resurrect unavailable capability
+- linked permissions disappear when unavailable
+- dynamic sub-permission counts reflect visible permissions
+
+Tenant Features tab should not duplicate this detail.
+
+Optional:
+Add a small link:
+- “View permissions in Store Permissions Matrix”
+Only if it is not visually heavy.
+
+==================================================
+PART I — NON-REGRESSION
+==================================================
+
+Preserve:
+- paid override invoice creation
+- activation mode selector
+- activate after payment
+- activate immediately and add to invoice
+- tenant billing visibility
+- Store Permissions Matrix entitlement behavior
+- add-on catalog single status chip
+- tenant-specific price behavior
+- preview-mode write safety
+- existing plan feature toggles
+- completed Shipping Module behavior
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Tenant Features tab no longer shows Permissions Impact sections.
+2) Tenant Features tab no longer shows locked permission chips inside feature cards.
+3) Included plan features show Included by Plan.
+4) Features not included in plan show Not in Plan with Trial and Paid Override actions.
+5) Trial / Paid Override actions are not dependent on Add-on Catalog linkage.
+6) Pending Payment rows show only invoice/payment actions.
+7) Paid Override rows show only active paid override actions.
+8) Revoked rows do not show duplicate fresh grant and re-grant action sets together.
+9) Disabled by Owner is removed unless explicit disable/re-enable exists.
+10) Store Permissions Matrix remains the source for permission details.
+11) Existing billing, plan, permission, and shipping behavior remains intact.
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Tenant Features tab is a commercial entitlement surface only
+- Permissions Impact blocks are not shown in Tenant Features tab
+- Store Permissions Matrix remains the permission-detail surface
+- Included by Plan / Not in Plan / Trial / Paid Override display rules
+- Disabled by Owner rule
+- Pending Payment and Paid Override action rules
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Tenant Features Tab Simplification
+3. Permissions Impact Removal
+4. Included by Plan / Not in Plan Logic
+5. Trial / Paid Override Action Logic
+6. Pending Payment / Paid Override State Logic
+7. Disabled by Owner Cleanup
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes
