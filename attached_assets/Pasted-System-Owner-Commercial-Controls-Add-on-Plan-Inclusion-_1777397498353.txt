@@ -1,0 +1,448 @@
+System Owner Commercial Controls — Add-on Plan Inclusion Source-of-Truth Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not touch the completed Shipping Module.
+Do not change billing, invoice, Store Permissions Matrix, or paid override state machine except where directly required by add-on entitlement/source-of-truth alignment.
+
+Fix only the relationship between:
+1) System Owner Plans & Features Matrix
+2) Add-on Catalog
+3) Add-on Compatible Plans
+4) Tenant Features tab
+5) Store Permissions Matrix entitlement visibility
+
+==================================================
+CURRENT QA-BLOCKING ISSUE
+==================================================
+
+The Add-on Catalog, Plans & Features Matrix, and Tenant Features tab are not fully aligned.
+
+Example:
+- Add-on Catalog: Loyalty Program
+- Linked feature: Loyalty Management
+- Add-on Compatible Plans may show only Advanced
+- But a Growth tenant may show Loyalty Management as Included by Plan
+
+This is confusing unless the app clearly treats Plans & Features Matrix as the source of truth for included-by-plan access.
+
+The correct architecture is:
+
+Plans & Features Matrix = source of truth for included-by-plan access.
+Add-on Catalog = source of truth for optional commercial add-ons.
+Add-on Compatible Plans = controls optional add-on availability only when the feature is NOT already included in the plan.
+Tenant Features tab = resolved tenant-facing commercial entitlement result.
+Store Permissions Matrix = role permission control after entitlement exists.
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Firebase/Firestore multi-tenant architect
+- Senior SaaS commercial-entitlement architect
+- Senior RBAC / plan-gating architect
+- Senior product operations architect
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Do not make a shallow label patch.
+Fix the source-of-truth model properly.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- replit.md
+
+Preserve:
+- completed Shipping Module closure state
+- accepted Store Permissions Matrix rules
+- dynamic sub-permission counts
+- linked permission disappearance rule
+- paid override invoice workflow
+- activation mode behavior
+- add-on catalog governance
+- preview-mode write safety
+- tenant provisioning and plan switching behavior
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Make all add-ons consistent with the Plans & Features Matrix.
+
+Every Add-on Catalog item must be represented in the Plans & Features Matrix through its linked feature/capability ID.
+
+System Owner must be able to enable that capability directly for any plan from Plans & Features Matrix.
+
+If enabled in a plan:
+- tenants on that plan receive the feature as Included by Plan
+- Tenant Features tab should show Included by Plan + Add-on
+- no Trial / Paid Override action is needed for that tenant because the feature is already included
+
+If not enabled in a plan:
+- Add-on Compatible Plans controls whether that add-on may be offered to tenants on that plan
+- if compatible, Tenant Features tab should show Not in Plan + Add-on + Trial + Paid Override
+- if not compatible, the add-on-derived row should not appear as an add-on at all
+
+==================================================
+CRITICAL SOURCE-OF-TRUTH RULE — ADD-ONS MUST EXIST IN PLANS & FEATURES MATRIX
+==================================================
+
+All add-ons must be represented in the System Owner Plans & Features Matrix using their linked feature/capability ID.
+
+The Plans & Features Matrix is the source of truth for whether an add-on-linked capability is included in a plan.
+
+This means:
+- every Add-on Catalog item must be linked to a feature/capability
+- that linked feature/capability must exist in the Plans & Features Matrix
+- System Owner can enable that feature directly for Essential / Growth / Advanced from the Plans & Features Matrix
+- if enabled in a plan, tenants on that plan receive it as Included by Plan
+- if not enabled in a plan, the Add-on Compatible Plans setting controls whether it may be offered as an optional add-on to tenants on that plan
+
+If an add-on is created and its linked feature/capability does not exist in Plans & Features Matrix:
+- create or register the feature/capability there
+- do not create duplicate feature rows
+- preserve the same feature/capability key across Plans & Features, Add-on Catalog, Tenant Features, and Store Permissions Matrix
+
+Tenant Features behavior:
+1) Plan includes the add-on-linked feature:
+   - show Included by Plan
+   - show Add-on
+   - do not show Trial / Paid Override for that same entitlement
+
+2) Plan does not include the add-on-linked feature, but tenant’s plan is in Add-on Compatible Plans:
+   - show Not in Plan
+   - show Add-on
+   - show Trial
+   - show Paid Override
+
+3) Plan does not include the add-on-linked feature, and tenant’s plan is not in Add-on Compatible Plans:
+   - do not show the add-on-derived row as an add-on
+   - do not show Add-on
+   - do not show Add-on Available
+   - do not show Plan Upgrade Required
+
+Compatible Plans editor rule:
+- plans where the feature is enabled in Plans & Features Matrix must be locked/read-only in the Add-on Catalog Compatible Plans editor
+- System Owner must change included-by-plan access from Plans & Features Matrix, not from Add-on Catalog
+- only plans where the feature is not included can be toggled as optional add-on compatible plans
+
+==================================================
+PART A — PLANS & FEATURES MATRIX ALIGNMENT
+==================================================
+
+Required:
+All Add-on Catalog items must appear in the Plans & Features Matrix through their linked feature/capability.
+
+Purpose:
+- System Owner decides whether the feature is included directly in Essential / Growth / Advanced
+- if included by plan, tenant receives the feature as Included by Plan
+- if not included by plan, add-on compatibility decides whether the feature can be offered as optional add-on
+
+Required:
+If Add-on Catalog item is linked to a feature/capability that is missing from Plans & Features Matrix:
+- register it in the matrix
+- use the existing feature/capability ID
+- do not duplicate the same capability under a new ID
+- preserve plan-gating and permission dependencies
+
+Required:
+All new add-ons created in the future must follow the same rule:
+- they must be linked to a feature/capability
+- that feature/capability must exist in Plans & Features Matrix
+- the same feature/capability key must be used across Plans & Features, Add-on Catalog, Tenant Features, and Store Permissions Matrix
+
+==================================================
+PART B — ADD-ON COMPATIBLE PLANS LOCKING RULE
+==================================================
+
+Inside Add-on Catalog Compatible Plans editor:
+
+If linked feature is included in a plan through Plans & Features Matrix:
+- show that plan as locked/read-only
+- do not allow unchecking it from Add-on Catalog
+- display helper text:
+  “This plan includes the linked feature in Plans & Features. Change plan inclusion from the Plans & Features Matrix.”
+
+If linked feature is NOT included in a plan:
+- allow System Owner to check/uncheck that plan as optional add-on compatible
+
+Reason:
+Add-on Catalog must not contradict Plans & Features Matrix.
+
+==================================================
+PART C — TENANT FEATURES TAB LABEL RULES
+==================================================
+
+For add-on-linked features:
+
+1) Tenant plan includes the linked feature in Plans & Features Matrix
+
+Tenant Features tab should show:
+- Included by Plan
+- Add-on
+
+Actions:
+- do not show Trial
+- do not show Paid Override
+
+Reason:
+The feature is already included by the tenant’s plan.
+
+2) Tenant plan does NOT include the linked feature, but tenant’s plan is selected in Add-on Compatible Plans
+
+Tenant Features tab should show:
+- Not in Plan
+- Add-on
+
+Actions:
+- Trial
+- Paid Override
+
+3) Tenant plan does NOT include the linked feature, and tenant’s plan is NOT selected in Add-on Compatible Plans
+
+Tenant Features tab should NOT show the add-on-derived row as an add-on.
+
+Do not show:
+- Add-on
+- Add-on Available
+- Plan Upgrade Required
+- Trial / Paid Override for that add-on-derived row
+
+4) Normal non-add-on feature
+
+Normal platform/core features not linked to Add-on Catalog should preserve existing behavior:
+- Included by Plan when enabled in plan
+- Not in Plan with Trial / Paid Override if eligible and implemented
+- no Add-on label
+
+==================================================
+PART D — COMPATIBLE PLANS EDITING BEHAVIOR
+==================================================
+
+When System Owner edits Compatible Plans for an add-on:
+
+1) Included-by-plan plans:
+- remain locked/read-only
+- cannot be unchecked from Add-on Catalog
+- must be changed from Plans & Features Matrix
+
+2) Non-included plans:
+- can be checked/unchecked as optional add-on-compatible plans
+
+3) When tenant’s plan is added to Compatible Plans:
+- add-on-derived row appears in Tenant Features tab
+- row shows Not in Plan + Add-on
+- row shows Trial + Paid Override actions
+
+4) When tenant’s plan is removed from Compatible Plans:
+- add-on-derived row disappears as an add-on from Tenant Features tab
+- no Add-on label remains
+- no Add-on Available label remains
+- no Plan Upgrade Required message appears
+
+This must work consistently across Essential, Growth, and Advanced.
+
+==================================================
+PART E — ADD-ON STATUS BEHAVIOR
+==================================================
+
+If Add-on Catalog item is Active:
+- apply the rules above
+
+If Add-on Catalog item is Disabled:
+- do not show it as available add-on
+- do not show Add-on label for optional availability
+- preserve historical billing/audit records
+
+If Add-on Catalog item is Archived:
+- do not show it as available add-on
+- do not show Add-on label for optional availability
+- preserve historical billing/audit records
+
+If feature is included by plan but add-on catalog item is disabled/archived:
+Recommended:
+- show Included by Plan only
+- do not show active Add-on label
+- do not show add-on grant actions
+
+==================================================
+PART F — HISTORICAL / EXISTING OVERRIDE HANDLING
+==================================================
+
+If tenant previously had:
+- trial
+- pending payment
+- paid override
+- revoked paid override
+- invoice
+for an add-on that later becomes incompatible with the tenant’s current plan:
+
+Preferred behavior:
+- hide it from the active Tenant Features list as an available add-on
+- preserve records in Billing and Audit
+- do not show it as currently available add-on capability
+
+Do not let old state make an incompatible add-on appear as available.
+
+==================================================
+PART G — BILLING / PRICING NON-REGRESSION
+==================================================
+
+Preserve:
+- Paid Override invoice creation
+- activation mode selector:
+  - Activate after payment
+  - Activate immediately and add to invoice
+- monthly billing visibility
+- annual / one-time invoice behavior
+- Mark Paid activation
+- Cancel Invoice behavior
+- tenant-specific price behavior
+- Custom Price label behavior
+- tenant-specific price does not mutate catalog default price
+
+Do not change invoice/payment behavior in this pass.
+
+When paid override is for plan-compatible active add-on:
+- default price may come from Add-on Catalog
+
+When paid override is for non-add-on normal feature:
+- preserve manual/default paid override price behavior
+
+==================================================
+PART H — STORE PERMISSIONS MATRIX NON-REGRESSION
+==================================================
+
+Store Permissions Matrix must follow resolved entitlement:
+
+- Included by Plan exposes linked permissions
+- active trial exposes linked permissions
+- paid active / immediate activation exposes linked permissions
+- pending payment with activate-after-payment does not expose linked permissions
+- incompatible add-on does not expose add-on-specific permissions
+- disabled/archived add-on does not expose add-on-specific entitlement
+- revoked/expired entitlement removes linked permissions
+- role permissions cannot resurrect unavailable capabilities
+- dynamic sub-permission counts remain accurate
+
+Do not duplicate permission details back into Tenant Features tab.
+
+==================================================
+PART I — UI / UX RULES
+==================================================
+
+Tenant Features tab must remain simple.
+
+Do not reintroduce:
+- Permissions Impact blocks
+- locked permission chips
+- Add-on Available label
+- Add-on Available · Plan Upgrade Required
+- Plan Upgrade Required label
+
+Allowed labels:
+- Included by Plan
+- Add-on
+- Not in Plan
+- Trial
+- Paid Override
+- Pending Payment
+- Revoked
+- Trial Expired
+- Not Available
+- In Development
+- Custom Price where applicable
+
+For compatible add-on not included in plan, the row should look conceptually like:
+- Not in Plan
+- Add-on
+- Trial
+- Paid Override
+
+For add-on included by plan, the row should look conceptually like:
+- Included by Plan
+- Add-on
+
+==================================================
+PART J — NON-REGRESSION
+==================================================
+
+Preserve:
+- Tenant Features tab simplification
+- Permissions Impact removal
+- Add-on Catalog single lifecycle chip
+- paid override invoice workflow
+- activation mode behavior
+- tenant billing visibility
+- Store Permissions Matrix entitlement behavior
+- preview-mode write safety
+- plan feature toggles
+- completed Shipping Module behavior
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Every Add-on Catalog item is represented in Plans & Features Matrix using its linked feature/capability ID.
+2) No duplicate feature/capability rows are created.
+3) Plans & Features Matrix is the source of truth for included-by-plan access.
+4) If linked feature is included in a plan, that plan is locked/read-only in Add-on Compatible Plans.
+5) Add-on Catalog cannot remove included-by-plan access.
+6) Tenant whose plan includes linked feature sees Included by Plan + Add-on.
+7) Tenant whose plan includes linked feature does not show Trial / Paid Override for that same feature.
+8) Tenant whose plan does not include linked feature but is add-on-compatible sees Not in Plan + Add-on + Trial + Paid Override.
+9) Tenant whose plan is not add-on-compatible does not see the add-on-derived row as an add-on.
+10) Removing tenant plan from Compatible Plans hides the add-on-derived row for that tenant.
+11) Adding tenant plan to Compatible Plans shows the add-on-derived row for that tenant.
+12) Disabled add-ons do not show as available add-ons.
+13) Archived add-ons do not show as available add-ons.
+14) Normal non-add-on core features still behave normally.
+15) Existing billing, permissions, and shipping behavior remain intact.
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Plans & Features Matrix is source of truth for included-by-plan
+- all add-ons must be represented in Plans & Features Matrix
+- Add-on Catalog Compatible Plans controls optional add-on availability only for plans where the feature is not included
+- included plans are locked/read-only in Add-on Compatible Plans
+- Tenant Features tab label rules:
+  - Included by Plan + Add-on
+  - Not in Plan + Add-on + Trial/Paid Override
+  - incompatible add-on hidden
+- Add-on Available / Plan Upgrade Required labels are not used
+- historical add-on records remain in Billing/Audit, not as active available feature rows
+- Store Permissions Matrix remains the permission-detail surface
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Plans & Features Matrix Source-of-Truth Alignment
+3. Add-on Compatible Plans Locking Rule
+4. Tenant Features Label / Visibility Rules
+5. Compatible Plans Edit Behavior
+6. Historical State Handling
+7. Billing / Permission Non-Regression
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes

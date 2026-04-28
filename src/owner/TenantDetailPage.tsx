@@ -1741,6 +1741,19 @@ const TenantDetailPage: React.FC = () => {
                           {reason === 'disabled_by_plan' && eligibleAddOn && (
                             <span className="text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest whitespace-nowrap bg-emerald-50 text-emerald-700 border-emerald-100">Add-on</span>
                           )}
+                          {/* Source-of-truth rule (Part C-1): when a feature
+                              is included by the tenant's plan AND a linked
+                              catalog Add-on exists and is active, surface
+                              "Included by Plan" + "Add-on" so the operator
+                              sees the entitlement comes from plan inclusion
+                              backed by an add-on capability. No Trial /
+                              Paid Override actions are offered for this
+                              row because the feature is already included.
+                              An archived/disabled linked add-on does NOT
+                              get an active "Add-on" badge here. */}
+                          {reason === 'included_by_plan' && r.addOn && r.addOn.governanceStatus === 'active' && (
+                            <span className="text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest whitespace-nowrap bg-emerald-50 text-emerald-700 border-emerald-100">Add-on</span>
+                          )}
                           {(isPaidActive || isPendingPayment) && eligibleAddOn && reason !== 'enabled_by_paid_addon' && (
                             <span className="text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest whitespace-nowrap bg-violet-50 text-violet-700 border-violet-100">Add-on</span>
                           )}

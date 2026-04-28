@@ -242,12 +242,31 @@ const PlansPage: React.FC = () => {
     const isCreate = !editingAddOn;
     const id = editingAddOn?.id || addOnForm.name.toLowerCase().replace(/\s+/g, '-');
     const oldAddOn = editingAddOn;
+    // Force-include locked plans (plans where the linked feature is
+    // included by plan in Plans & Features Matrix). The Plans &
+    // Features Matrix is the source of truth for included-by-plan
+    // access, so the Add-on Catalog cannot opt out of those plans.
+    const linkedFeature = addOnForm.linkedFeatureId
+      ? featuresData.find(f => f.id === addOnForm.linkedFeatureId)
+      : undefined;
+    const lockedPlanIds = linkedFeature
+      ? plansData
+          .filter(p => p.status === 'active')
+          .map(p => p.id)
+          .filter(planId => {
+            const planKey = planId === 'starter' ? 'essential' : planId;
+            return !!linkedFeature.planAvailability[planKey];
+          })
+      : [];
+    const mergedCompatiblePlans = Array.from(
+      new Set([...(addOnForm.compatiblePlans || []), ...lockedPlanIds]),
+    );
     const newAddOn: AddOnData = {
       id,
       name: addOnForm.name,
       price: Number(addOnForm.price),
       description: addOnForm.description,
-      compatiblePlans: addOnForm.lifecycle === 'active' ? addOnForm.compatiblePlans : [],
+      compatiblePlans: addOnForm.lifecycle === 'active' ? mergedCompatiblePlans : [],
       status: addOnForm.governanceStatus === 'archived' ? 'archived' : 'active',
       lifecycle: addOnForm.lifecycle,
       governanceStatus: addOnForm.governanceStatus,
@@ -336,7 +355,22 @@ const PlansPage: React.FC = () => {
   const archiveAddOn = (addonId: string) => setAddOnGovernance(addonId, 'archived');
   const restoreAddOn = (addonId: string) => setAddOnGovernance(addonId, 'active');
 
+  // Plans where the add-on's linked feature is included by plan are
+  // locked — they MUST be in compatiblePlans and cannot be unchecked
+  // from this editor. The Plans & Features Matrix is the source of
+  // truth for included-by-plan access; the Add-on Catalog cannot
+  // contradict it. See replit.md → "Add-on Plan Inclusion Source-
+  // of-Truth Rule".
+  const isPlanLockedForAddOn = (planId: string): boolean => {
+    if (!addOnForm.linkedFeatureId) return false;
+    const linkedFeature = featuresData.find(f => f.id === addOnForm.linkedFeatureId);
+    if (!linkedFeature) return false;
+    const planKey = planId === 'starter' ? 'essential' : planId;
+    return !!linkedFeature.planAvailability[planKey];
+  };
+
   const toggleAddOnPlan = (plan: string) => {
+    if (isPlanLockedForAddOn(plan)) return;
     setAddOnForm(prev => ({
       ...prev,
       compatiblePlans: prev.compatiblePlans.includes(plan)
@@ -978,19 +1012,37 @@ const PlansPage: React.FC = () => {
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">Compatible Plans</label>
                   {addOnForm.lifecycle === 'active' ? (
-                    <div className="flex gap-2 flex-wrap">
-                      {plansData.filter(p => p.status === 'active').map(plan => (
-                        <button
-                          key={plan.id}
-                          onClick={() => toggleAddOnPlan(plan.id)}
-                          className={`px-4 py-2 text-[10px] font-black uppercase tracking-widest rounded-xl border transition-all ${
-                            addOnForm.compatiblePlans.includes(plan.id)
-                              ? 'bg-primary text-white border-primary'
-                              : 'bg-slate-50 text-slate-500 border-slate-200 hover:bg-slate-100'
-                          }`}
-                        >{plan.name}</button>
-                      ))}
-                    </div>
+                    <>
+                      <div className="flex gap-2 flex-wrap">
+                        {plansData.filter(p => p.status === 'active').map(plan => {
+                          const locked = isPlanLockedForAddOn(plan.id);
+                          const checked = locked || addOnForm.compatiblePlans.includes(plan.id);
+                          return (
+                            <button
+                              key={plan.id}
+                              onClick={() => toggleAddOnPlan(plan.id)}
+                              disabled={locked}
+                              title={locked ? 'Included by plan in the Plans & Features Matrix' : undefined}
+                              className={`px-4 py-2 text-[10px] font-black uppercase tracking-widest rounded-xl border transition-all flex items-center gap-1.5 ${
+                                locked
+                                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200 cursor-not-allowed'
+                                  : checked
+                                    ? 'bg-primary text-white border-primary'
+                                    : 'bg-slate-50 text-slate-500 border-slate-200 hover:bg-slate-100'
+                              }`}
+                            >
+                              {locked && <span className="material-symbols-outlined text-[12px] leading-none">lock</span>}
+                              {plan.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {addOnForm.linkedFeatureId && plansData.filter(p => p.status === 'active' && isPlanLockedForAddOn(p.id)).length > 0 && (
+                        <p className="text-[10px] text-emerald-700 font-medium mt-2 leading-snug">
+                          <span className="font-black uppercase tracking-widest">Locked plans</span> include the linked feature in the Plans &amp; Features Matrix. To change inclusion for those plans, edit the Plans &amp; Features Matrix.
+                        </p>
+                      )}
+                    </>
                   ) : (
                     <p className="text-[10px] text-amber-600 font-bold bg-amber-50 p-3 rounded-xl border border-amber-100">Only &quot;Active&quot; add-ons can be assigned to plans. Change lifecycle to Active first.</p>
                   )}
