@@ -1,0 +1,198 @@
+System Owner Commercial Controls — Add-on Feature Row Visibility Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict isolated correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not touch the completed Shipping Module.
+Do not change billing, invoice, Store Permissions Matrix, or paid override state machine.
+
+Fix only Tenant Features tab visibility for add-on-derived features.
+
+==================================================
+CURRENT QA-BLOCKING ISSUE
+==================================================
+
+The Tenant Features tab is still showing add-on-linked feature rows even when the tenant’s current plan is not selected in the add-on’s Compatible Plans.
+
+This is wrong.
+
+The Add-on Compatible Plans setting must control whether the add-on appears in the Tenant Features tab at all.
+
+==================================================
+CORRECT BUSINESS RULE
+==================================================
+
+For add-on-derived features:
+
+An add-on-derived feature row should appear in Tenant Features only when ALL are true:
+
+1) The feature is linked to an Add-on Catalog item
+2) The Add-on Catalog item is Active
+3) The tenant’s current plan is selected in the add-on’s Compatible Plans
+
+If any condition is false:
+- hide the add-on-derived feature row from Tenant Features
+- do not show Not in Plan
+- do not show Add-on
+- do not show Add-on Available
+- do not show Trial
+- do not show Paid Override
+- do not show Plan Upgrade Required
+
+==================================================
+EXPECTED UI BEHAVIOR
+==================================================
+
+Case A — Add-on is active and compatible with tenant current plan:
+Tenant Features tab should show the row.
+
+Display:
+- Not in Plan
+- Add-on
+
+Actions:
+- Trial
+- Paid Override
+
+Case B — Add-on is active but NOT compatible with tenant current plan:
+Tenant Features tab should NOT show the add-on-derived row at all.
+
+Do not show:
+- Not in Plan
+- Add-on
+- Add-on Available
+- Plan Upgrade Required
+- Trial
+- Paid Override
+
+Case C — Add-on is disabled:
+Tenant Features tab should NOT show the add-on-derived row as available.
+
+Case D — Add-on is archived:
+Tenant Features tab should NOT show the add-on-derived row as available.
+
+Case E — Normal core/platform feature not driven by add-on catalog:
+Keep existing normal feature behavior.
+
+Important:
+Do not hide normal plan/core features just because they are not add-ons.
+This correction applies to add-on-derived feature rows.
+
+==================================================
+COMPATIBLE PLANS EDITING REQUIREMENT
+==================================================
+
+When System Owner edits an add-on’s Compatible Plans:
+
+1) Remove tenant’s current plan from Compatible Plans:
+- the add-on-derived feature row disappears from that tenant’s Features tab
+
+2) Add tenant’s current plan to Compatible Plans:
+- the add-on-derived feature row appears in that tenant’s Features tab
+- row shows:
+  - Not in Plan
+  - Add-on
+  - Trial
+  - Paid Override
+
+This must apply across Essential, Growth, and Advanced tenants.
+
+==================================================
+LABEL REQUIREMENT
+==================================================
+
+When visible, the label should be:
+
+- Not in Plan
+- Add-on
+
+Do not use:
+- Add-on Available
+- Plan Upgrade Required
+- Add-on Available · Plan Upgrade Required
+
+==================================================
+TRIAL / PAID OVERRIDE REQUIREMENT
+==================================================
+
+Trial and Paid Override buttons for add-on-derived features should appear only when:
+- add-on is active
+- tenant’s current plan is compatible
+- feature is not already included by plan
+- feature is otherwise eligible
+
+If the add-on is not compatible with the tenant’s plan, do not show Trial / Paid Override for that add-on row because the row itself should be hidden.
+
+==================================================
+HISTORICAL / EXISTING OVERRIDE HANDLING
+==================================================
+
+If a tenant already had a historical trial, pending payment, paid override, or revoked state for an add-on and then the add-on becomes incompatible with the tenant plan:
+
+Preferred behavior:
+- hide it from the normal active Tenant Features list
+- keep historical/commercial records only in Billing, Audit, or a future historical view if needed
+- do not show it as an available add-on capability
+
+Do not let old state make an incompatible add-on appear as available.
+
+==================================================
+DO NOT CHANGE
+==================================================
+
+Do not change:
+- Permissions Impact removal
+- simple Tenant Features layout
+- paid override invoice workflow
+- activation mode behavior
+- Store Permissions Matrix behavior
+- Add-on Catalog single status chip
+- completed Shipping Module behavior
+- normal core feature rows not driven by add-on catalog
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Add-on-derived feature row is hidden when tenant plan is not in Compatible Plans.
+2) Add-on-derived feature row appears when tenant plan is added to Compatible Plans.
+3) Visible add-on row shows “Not in Plan” and “Add-on”.
+4) Visible compatible add-on row shows Trial and Paid Override.
+5) “Add-on Available” no longer appears for this row.
+6) “Plan Upgrade Required” no longer appears.
+7) Disabled add-ons do not show as available rows.
+8) Archived add-ons do not show as available rows.
+9) Normal core/plan features still behave normally.
+10) Existing billing, permissions, and shipping behavior remain intact.
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Add-on Compatible Plans controls add-on-derived feature row visibility
+- incompatible add-ons are hidden from Tenant Features
+- compatible add-ons show Not in Plan + Add-on + Trial + Paid Override
+- Add-on Available / Plan Upgrade Required labels are not used in Tenant Features
+- historical records remain in Billing/Audit, not as active available feature rows
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Add-on-Derived Feature Row Visibility Rule
+3. Compatible Plans Edit Behavior
+4. Tenant Features Label / Action Correction
+5. Historical State Handling
+6. Files Changed
+7. Documentation Updated
+8. Non-Regression Notes

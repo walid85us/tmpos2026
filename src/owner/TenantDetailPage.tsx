@@ -269,9 +269,24 @@ const TenantDetailPage: React.FC = () => {
   // Pinned reference date used throughout this page for trial / refund math.
   const NOW_MS = Date.parse('2026-03-26');
 
-  // Live add-on catalog from sessionStorage when the System Owner has edited
-  // it on the Plans page; falls back to the seed `addOns`. We re-read on each
-  // render so disabling an add-on in the catalog tab is reflected here.
+  // Live add-on catalog / feature matrix from sessionStorage when the
+  // System Owner has edited them on the catalog pages; falls back to the
+  // seed values. `catalogVersion` bumps on window focus and on cross-tab
+  // `storage` events so edits made in another tab/window propagate to
+  // this view (Compatible Plans edits MUST take effect immediately on
+  // the Tenant Features tab — same-route mounts always re-read because
+  // the dependency includes `catalogVersion`).
+  const [catalogVersion, setCatalogVersion] = useState(0);
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const bump = () => setCatalogVersion(v => v + 1);
+    window.addEventListener('focus', bump);
+    window.addEventListener('storage', bump);
+    return () => {
+      window.removeEventListener('focus', bump);
+      window.removeEventListener('storage', bump);
+    };
+  }, []);
   const liveAddOns = useMemo<AddOn[]>(() => {
     try {
       if (typeof window !== 'undefined' && window.sessionStorage) {
@@ -280,7 +295,7 @@ const TenantDetailPage: React.FC = () => {
       }
     } catch { /* fall back */ }
     return addOns;
-  }, []);
+  }, [catalogVersion]);
 
   const liveFeatureMatrix = useMemo(() => {
     try {
@@ -290,7 +305,7 @@ const TenantDetailPage: React.FC = () => {
       }
     } catch { /* fall back */ }
     return featureMatrix;
-  }, []);
+  }, [catalogVersion]);
 
   const resolveFeature = useCallback((featureId: string) => {
     return resolveTenantFeature(featureId, {
@@ -1557,7 +1572,38 @@ const TenantDetailPage: React.FC = () => {
               </div>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {liveFeatureMatrix.filter(f => f.lifecycle !== 'draft').map(feature => {
+              {liveFeatureMatrix.filter(f => {
+                if (f.lifecycle === 'draft') return false;
+                // Add-on-derived row visibility rule (locked):
+                // when a feature is linked to a catalog Add-on, the
+                // row only appears in this tenant's Features tab if
+                // (a) the Add-on is `governanceStatus === 'active'`
+                // AND (b) the tenant's current plan is in the
+                // Add-on's `compatiblePlans`. If either is false the
+                // entire row is hidden — no "Not in Plan", no
+                // "Add-on", no Trial/Paid Override actions, no
+                // "Plan upgrade required". This applies even when a
+                // historical override (trial / pending payment /
+                // paid / revoked) exists on the feature; the
+                // historical record is preserved in Billing / Audit.
+                // Normal plan/core features that are not linked to
+                // any catalog Add-on are always shown.
+                // Features that ARE included in the tenant's plan
+                // baseline are also always shown — the visibility
+                // gate only applies to rows that would otherwise be
+                // available solely via the add-on path.
+                const planKey = currentPlan === 'starter' ? 'essential' : currentPlan;
+                const inPlanBaseline = !!f.planAvailability[planKey];
+                if (inPlanBaseline) return true;
+                const linkedAddOn =
+                  liveAddOns.find(a => a.linkedFeatureId === f.id) ||
+                  liveAddOns.find(a => a.id === f.id);
+                if (!linkedAddOn) return true;
+                const addOnEligible =
+                  linkedAddOn.governanceStatus === 'active' &&
+                  linkedAddOn.compatiblePlans.includes(currentPlan);
+                return addOnEligible;
+              }).map(feature => {
                 const r = resolveFeature(feature.id);
                 const enabled = r.enabled;
                 const reason: EntitlementReason = r.reason;
@@ -1693,7 +1739,7 @@ const TenantDetailPage: React.FC = () => {
                               only when tenant price diverges from catalog
                               price. */}
                           {reason === 'disabled_by_plan' && eligibleAddOn && (
-                            <span className="text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest whitespace-nowrap bg-emerald-50 text-emerald-700 border-emerald-100">Add-on available</span>
+                            <span className="text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest whitespace-nowrap bg-emerald-50 text-emerald-700 border-emerald-100">Add-on</span>
                           )}
                           {(isPaidActive || isPendingPayment) && eligibleAddOn && reason !== 'enabled_by_paid_addon' && (
                             <span className="text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest whitespace-nowrap bg-violet-50 text-violet-700 border-violet-100">Add-on</span>
@@ -1773,11 +1819,36 @@ const TenantDetailPage: React.FC = () => {
                 Manage role permissions in the Store Permissions Matrix.
               </p>
             </div>
-            {localOverrides.length > 0 && (
+            {(() => {
+              // Apply the same row-visibility gate to the Override
+              // History list: when an override is on a feature that
+              // would otherwise be hidden from the active grid (linked
+              // to an ineligible add-on AND not in the tenant's plan
+              // baseline), suppress it from this list too. The
+              // historical record itself is preserved in the SaaS
+              // Subscription Invoices section of the Billing tab and
+              // in the Commercial Audit log.
+              const planKey = currentPlan === 'starter' ? 'essential' : currentPlan;
+              const visibleOverrides = localOverrides.filter(o => {
+                const f = liveFeatureMatrix.find(ft => ft.id === o.featureId);
+                if (!f) return false;
+                if (f.lifecycle === 'draft') return false;
+                if (f.planAvailability[planKey]) return true;
+                const linkedAddOn =
+                  liveAddOns.find(a => a.linkedFeatureId === f.id) ||
+                  liveAddOns.find(a => a.id === f.id);
+                if (!linkedAddOn) return true;
+                return (
+                  linkedAddOn.governanceStatus === 'active' &&
+                  linkedAddOn.compatiblePlans.includes(currentPlan)
+                );
+              });
+              if (visibleOverrides.length === 0) return null;
+              return (
               <div>
                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3 mt-4">Override History</p>
                 <div className="space-y-2">
-                  {localOverrides.map((o, i) => {
+                  {visibleOverrides.map((o, i) => {
                     const f = liveFeatureMatrix.find(ft => ft.id === o.featureId);
                     const ov = o as typeof o & { price?: number; pricingModel?: string; pricingNotes?: string };
                     const wasRevoked = !!o.revokedDate;
@@ -1803,7 +1874,8 @@ const TenantDetailPage: React.FC = () => {
                   })}
                 </div>
               </div>
-            )}
+              );
+            })()}
 
             <AnimatePresence>
               {featureTrialModal && (
