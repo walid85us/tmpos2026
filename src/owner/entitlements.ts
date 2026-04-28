@@ -14,6 +14,8 @@ import type {
   AddOn,
   TenantFeatureOverride,
   AddOnGovernanceStatus,
+  CommercialInvoice,
+  CommercialInvoiceStatus,
 } from './mockData';
 
 // Distinct, machine-readable reasons for the entitlement decision. Each is
@@ -62,6 +64,14 @@ export interface EntitlementResult {
   customPrice?: number;
   // Trial end date (ISO yyyy-mm-dd) when relevant.
   trialEnd?: string;
+  // Linked SaaS invoice (when this row was granted via the internal
+  // billing workflow). The UI uses this to (a) show the
+  // "Invoice Open / Payment Due" secondary badge on rows that were
+  // immediately activated while the invoice is unpaid, and (b) show
+  // "View Invoice" / "Mark Paid" / "Cancel Invoice" actions on
+  // pending-payment rows.
+  invoice?: CommercialInvoice;
+  invoiceUiStatus?: CommercialInvoiceStatus;
 }
 
 export interface ResolverContext {
@@ -80,6 +90,18 @@ export interface ResolverContext {
   // Reference epoch for trial expiry checks. Tests pin this; runtime
   // callers pass `Date.now()` (or the project's pinned `2026-03-26`).
   nowMs: number;
+  // Optional invoice lookup for surfacing internal billing state on
+  // override-driven rows. Resolver stays pure — caller wires this to
+  // `getInvoiceById` or its Firestore equivalent. Returning `undefined`
+  // is fine; the resolver just won't attach invoice metadata.
+  lookupInvoice?: (invoiceId: string) => CommercialInvoice | undefined;
+  // Optional helper to derive the user-visible invoice status (open vs
+  // overdue is a function of `nowMs` vs dueDate). Default behavior:
+  // pass through `invoice.status`.
+  deriveInvoiceUi?: (
+    invoice: CommercialInvoice,
+    nowMs: number,
+  ) => CommercialInvoiceStatus;
 }
 
 const dateToMs = (iso: string | undefined): number | null => {
@@ -160,7 +182,7 @@ export function resolveTenantFeature(
   featureId: string,
   ctx: ResolverContext,
 ): EntitlementResult {
-  const { tenantPlan, featureMatrix, addOns, overrides, nowMs } = ctx;
+  const { tenantPlan, featureMatrix, addOns, overrides, nowMs, lookupInvoice, deriveInvoiceUi } = ctx;
   const planKey = tenantPlan === 'starter' ? 'essential' : tenantPlan;
 
   const override = overrides.find(o => o.featureId === featureId);
@@ -168,6 +190,16 @@ export function resolveTenantFeature(
   const overrideStatus = override
     ? deriveOverrideStatus(override, nowMs)
     : 'inactive';
+
+  // Resolve linked invoice (if any) once up front. The same payload
+  // is attached to every result branch that comes from an override.
+  const invoice =
+    override && override.invoiceId && lookupInvoice
+      ? lookupInvoice(override.invoiceId)
+      : undefined;
+  const invoiceUiStatus = invoice
+    ? (deriveInvoiceUi ? deriveInvoiceUi(invoice, nowMs) : invoice.status)
+    : undefined;
 
   // (1) Owner-disabled trumps everything except plan inclusion of an
   // intrinsic feature; matches existing behavior.
@@ -257,6 +289,8 @@ export function resolveTenantFeature(
         override,
         defaultPrice: addOn?.price,
         customPrice,
+        invoice,
+        invoiceUiStatus,
       };
     }
     if (overrideStatus === 'pending_payment') {
@@ -273,6 +307,8 @@ export function resolveTenantFeature(
           override.price !== addOn.price
             ? override.price
             : undefined,
+        invoice,
+        invoiceUiStatus,
       };
     }
   }

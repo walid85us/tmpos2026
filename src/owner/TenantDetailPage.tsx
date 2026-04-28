@@ -10,6 +10,16 @@ import type { SupportNoteCategory, FeatureOverrideType, ActivationStatus, AddOn,
 import { tenantUsers } from './accessMockData';
 import { resolveTenantFeature, REASON_LABEL, REASON_EXPLAINER, type EntitlementReason } from './entitlements';
 import { pushCommercialAudit } from './commercialAudit';
+import {
+  readInvoices,
+  getInvoiceById,
+  getInvoicesForTenant,
+  deriveInvoiceUiStatus,
+  createInvoiceForOverride,
+  markInvoicePaid,
+  cancelInvoice,
+} from './commercialInvoices';
+import type { CommercialInvoice } from './mockData';
 
 type Tab = 'Overview' | 'Owner & Users' | 'Subscription' | 'Features' | 'Billing' | 'Domains' | 'Usage' | 'Activity / Audit' | 'Support Notes';
 
@@ -79,6 +89,13 @@ const TenantDetailPage: React.FC = () => {
   const [paidOverridePrice, setPaidOverridePrice] = useState('');
   const [paidOverrideModel, setPaidOverrideModel] = useState<'monthly' | 'one_time' | 'annual'>('monthly');
   const [paidOverrideNotes, setPaidOverrideNotes] = useState('');
+  const [paidOverrideActivation, setPaidOverrideActivation] = useState<'after_payment' | 'immediate'>('after_payment');
+  const [paidOverrideDueDate, setPaidOverrideDueDate] = useState<string>('');
+  // Bumps any time invoices mutate, used to re-derive resolver state
+  // and the Billing tab without depending on storage events.
+  const [invoiceVersion, setInvoiceVersion] = useState(0);
+  const [commercialInvoiceDetailId, setCommercialInvoiceDetailId] = useState<string | null>(null);
+  const [cancelInvoiceConfirmId, setCancelInvoiceConfirmId] = useState<string | null>(null);
   const [localCreatedOwners, setLocalCreatedOwners] = useState<{ id: string; name: string; email: string; status: string; }[]>([]);
   const [creditDetailId, setCreditDetailId] = useState<string | null>(null);
   const [voidConfirmId, setVoidConfirmId] = useState<string | null>(null);
@@ -282,8 +299,26 @@ const TenantDetailPage: React.FC = () => {
       addOns: liveAddOns,
       overrides: localOverrides as TenantFeatureOverride[],
       nowMs: NOW_MS,
+      lookupInvoice: getInvoiceById,
+      deriveInvoiceUi: deriveInvoiceUiStatus,
     });
-  }, [currentPlan, liveFeatureMatrix, liveAddOns, localOverrides]);
+    // invoiceVersion intentionally included to re-resolve after invoice
+    // mutations (Mark Paid / Cancel) flip a row's badge or revoke the
+    // override.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentPlan, liveFeatureMatrix, liveAddOns, localOverrides, invoiceVersion]);
+
+  // Tenant-scoped invoice list, re-derived whenever an invoice mutates.
+  const tenantInvoices = useMemo<CommercialInvoice[]>(() => {
+    return getInvoicesForTenant(tenant.id).slice().sort((a, b) => {
+      // Newest first by issuedDate; tie-break by id.
+      const da = Date.parse(a.issuedDate);
+      const db = Date.parse(b.issuedDate);
+      if (da !== db) return db - da;
+      return a.invoiceId < b.invoiceId ? 1 : -1;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenant.id, invoiceVersion]);
 
   // Legacy adapter — preserves the existing `state.type` / `state.trialEnd`
   // shape consumed by other surfaces in this page. Callers that need the
@@ -332,9 +367,44 @@ const TenantDetailPage: React.FC = () => {
   const handleEnablePaidOverride = (featureId: string) => {
     const price = parseFloat(paidOverridePrice) || 0;
     const linkedAddOn = liveAddOns.find(a => a.linkedFeatureId === featureId) || liveAddOns.find(a => a.id === featureId);
+    const featureName = featureMatrix.find(f => f.id === featureId)?.name || featureId;
+    const activationMode = paidOverrideActivation;
+    const dueDate = paidOverrideDueDate || (() => {
+      const d = new Date('2026-03-26');
+      d.setDate(d.getDate() + (activationMode === 'after_payment' ? 30 : 7));
+      return d.toISOString().slice(0, 10);
+    })();
+    // Create the internal SaaS invoice first so we can link the
+    // override to it. Both activation modes generate an OPEN invoice.
+    const invoice = createInvoiceForOverride({
+      tenantId: tenant.id,
+      featureId,
+      featureName,
+      addOnId: linkedAddOn?.id ?? null,
+      amount: price,
+      cadence: paidOverrideModel,
+      dueDate,
+      activationMode,
+      createdBy: 'System Owner',
+      notes: paidOverrideNotes || undefined,
+    });
+    const overrideType: FeatureOverrideType = activationMode === 'immediate' ? 'paid_override' : 'pending_payment';
     setLocalOverrides(prev => {
       const filtered = prev.filter(o => o.featureId !== featureId);
-      return [...filtered, { tenantId: tenant.id, featureId, type: 'pending_payment' as FeatureOverrideType, addedBy: 'You', addedDate: '2026-03-26', pricingModel: paidOverrideModel, price, pricingNotes: paidOverrideNotes || undefined, addOnId: linkedAddOn?.id ?? null }];
+      return [...filtered, {
+        tenantId: tenant.id,
+        featureId,
+        type: overrideType,
+        addedBy: 'You',
+        addedDate: '2026-03-26',
+        pricingModel: paidOverrideModel,
+        price,
+        pricingNotes: paidOverrideNotes || undefined,
+        addOnId: linkedAddOn?.id ?? null,
+        activationMode,
+        invoiceId: invoice.invoiceId,
+        dueDate,
+      }];
     });
     pushCommercialAudit({
       actor: 'System Owner',
@@ -346,26 +416,142 @@ const TenantDetailPage: React.FC = () => {
       newValue: price,
       note: paidOverrideNotes || (linkedAddOn && price !== linkedAddOn.price ? 'Custom price' : 'Catalog price'),
     });
+    pushCommercialAudit({
+      actor: 'System Owner',
+      action: 'invoice_created',
+      tenantId: tenant.id,
+      featureId,
+      addOnId: linkedAddOn?.id ?? null,
+      newValue: invoice.invoiceId,
+      note: `Open invoice · ${activationMode === 'immediate' ? 'Immediate activation' : 'Activate after payment'} · Due ${dueDate}`,
+    });
+    if (activationMode === 'immediate') {
+      pushCommercialAudit({
+        actor: 'System Owner',
+        action: 'immediate_activation_granted',
+        tenantId: tenant.id,
+        featureId,
+        addOnId: linkedAddOn?.id ?? null,
+        newValue: invoice.invoiceId,
+        note: 'Feature active before payment',
+      });
+    }
+    setInvoiceVersion(v => v + 1);
     setFeaturePaidModal(null);
     setPaidOverridePrice('');
     setPaidOverrideModel('monthly');
     setPaidOverrideNotes('');
+    setPaidOverrideActivation('after_payment');
+    setPaidOverrideDueDate('');
     const modelLabel = paidOverrideModel === 'monthly' ? '/mo' : paidOverrideModel === 'annual' ? '/yr' : ' one-time';
-    showToast(`Paid override pending payment for ${featureMatrix.find(f => f.id === featureId)?.name || featureId} at $${price}${modelLabel}`);
+    const stateLabel = activationMode === 'immediate' ? 'active now (invoice open)' : 'pending payment';
+    showToast(`Paid override ${stateLabel} for ${featureName} at $${price}${modelLabel}`);
   };
 
-  const handleApprovePayment = (featureId: string) => {
-    setLocalOverrides(prev => prev.map(o => o.featureId === featureId ? { ...o, type: 'paid_override' as FeatureOverrideType } : o));
-    const ov = localOverrides.find(o => o.featureId === featureId);
+  const handleMarkInvoicePaid = (invoiceId: string) => {
+    const inv = getInvoiceById(invoiceId);
+    if (!inv) return;
+    markInvoicePaid(invoiceId);
+    // Find the linked override and flip pending_payment → paid_override.
+    let activatedFeatureId: string | null = null;
+    setLocalOverrides(prev => prev.map(o => {
+      if (o.invoiceId !== invoiceId) return o;
+      if (o.type === 'pending_payment') {
+        activatedFeatureId = o.featureId;
+        return { ...o, type: 'paid_override' as FeatureOverrideType };
+      }
+      return o;
+    }));
     pushCommercialAudit({
       actor: 'System Owner',
-      action: 'tenant_pending_payment_approved',
+      action: 'invoice_marked_paid',
       tenantId: tenant.id,
-      featureId,
-      addOnId: ov?.addOnId ?? null,
-      newValue: ov?.price ?? null,
+      featureId: inv.featureId ?? null,
+      addOnId: inv.addOnId ?? null,
+      newValue: inv.invoiceId,
+      note: 'Manual confirmation by System Owner',
     });
-    showToast(`Payment approved — ${featureMatrix.find(f => f.id === featureId)?.name || featureId} is now active`);
+    pushCommercialAudit({
+      actor: 'System Owner',
+      action: 'manual_payment_confirmation',
+      tenantId: tenant.id,
+      featureId: inv.featureId ?? null,
+      addOnId: inv.addOnId ?? null,
+      newValue: inv.amount,
+      note: `Invoice ${inv.invoiceId} marked paid`,
+    });
+    if (activatedFeatureId) {
+      pushCommercialAudit({
+        actor: 'System Owner',
+        action: 'feature_activated_after_payment',
+        tenantId: tenant.id,
+        featureId: activatedFeatureId,
+        addOnId: inv.addOnId ?? null,
+        newValue: inv.invoiceId,
+      });
+    }
+    setInvoiceVersion(v => v + 1);
+    const fname = inv.featureId ? (featureMatrix.find(f => f.id === inv.featureId)?.name || inv.featureId) : inv.invoiceId;
+    showToast(`Invoice ${inv.invoiceId} marked paid${activatedFeatureId ? ` — ${fname} is now active` : ''}`);
+  };
+
+  const handleCancelInvoiceClick = (invoiceId: string) => {
+    setCancelInvoiceConfirmId(invoiceId);
+  };
+
+  const handleConfirmCancelInvoice = (invoiceId: string) => {
+    const inv = getInvoiceById(invoiceId);
+    if (!inv) {
+      setCancelInvoiceConfirmId(null);
+      return;
+    }
+    cancelInvoice(invoiceId);
+    // Find linked override and decide the consequence.
+    const linked = localOverrides.find(o => o.invoiceId === invoiceId);
+    let revokedFeatureId: string | null = null;
+    if (linked) {
+      if (linked.type === 'pending_payment') {
+        // Activate-after-payment + cancelled → drop the override entirely
+        // so the row reverts to Not in Plan (no Revoked badge).
+        setLocalOverrides(prev => prev.filter(o => o.invoiceId !== invoiceId));
+      } else if (linked.type === 'paid_override' && linked.activationMode === 'immediate') {
+        // Immediate-active + cancel invoice → revoke the feature.
+        const today = new Date().toISOString().slice(0, 10);
+        setLocalOverrides(prev => prev.map(o => o.invoiceId === invoiceId
+          ? { ...o, revokedDate: today, revokedBy: 'System Owner', revokeReason: 'Invoice cancelled' }
+          : o));
+        revokedFeatureId = linked.featureId;
+      }
+    }
+    pushCommercialAudit({
+      actor: 'System Owner',
+      action: 'invoice_cancelled',
+      tenantId: tenant.id,
+      featureId: inv.featureId ?? null,
+      addOnId: inv.addOnId ?? null,
+      newValue: inv.invoiceId,
+      note: linked?.type === 'pending_payment' ? 'Reverted to Not in Plan' : (revokedFeatureId ? 'Feature revoked' : 'No override change'),
+    });
+    if (revokedFeatureId) {
+      pushCommercialAudit({
+        actor: 'System Owner',
+        action: 'paid_override_revoked_due_to_cancel',
+        tenantId: tenant.id,
+        featureId: revokedFeatureId,
+        addOnId: inv.addOnId ?? null,
+        newValue: inv.invoiceId,
+      });
+    }
+    setInvoiceVersion(v => v + 1);
+    setCancelInvoiceConfirmId(null);
+    const fname = inv.featureId ? (featureMatrix.find(f => f.id === inv.featureId)?.name || inv.featureId) : inv.invoiceId;
+    if (linked?.type === 'pending_payment') {
+      showToast(`Invoice ${inv.invoiceId} cancelled — ${fname} reverted to Not in Plan`);
+    } else if (revokedFeatureId) {
+      showToast(`Invoice ${inv.invoiceId} cancelled — ${fname} access revoked`);
+    } else {
+      showToast(`Invoice ${inv.invoiceId} cancelled`);
+    }
   };
 
   const handleRevokeFeature = (featureId: string) => {
@@ -1447,33 +1633,56 @@ const TenantDetailPage: React.FC = () => {
                           {reason === 'disabled_by_plan' && eligibleAddOn && (
                             <span className="text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest whitespace-nowrap bg-emerald-50 text-emerald-700 border-emerald-100">Add-on available</span>
                           )}
+                          {/* Spec L: surface "Invoice Open / Overdue" alongside Paid Override
+                              when the linked SaaS invoice is still open. */}
+                          {isPaidActive && (r.invoiceUiStatus === 'open' || r.invoiceUiStatus === 'overdue') && (
+                            <span className={`text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest whitespace-nowrap ${r.invoiceUiStatus === 'overdue' ? 'bg-red-50 text-red-700 border-red-100' : 'bg-amber-50 text-amber-700 border-amber-100'}`}>
+                              Invoice {r.invoiceUiStatus === 'overdue' ? 'Overdue' : 'Open'}
+                            </span>
+                          )}
                         </div>
                         <div className="flex items-center gap-1 flex-wrap justify-end">
-                          {canOfferGrant && (
+                          {/* Spec L: Pending payment rows show ONLY Mark Paid / Cancel
+                              Invoice / View Invoice — no Trial, no Paid Override, no Re-grant. */}
+                          {canOfferGrant && !isPendingPayment && (
                             <>
                               <button onClick={() => setFeatureTrialModal(feature.id)} className="text-[8px] font-black text-indigo-600 bg-indigo-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-indigo-100 transition-colors">Trial</button>
-                              <button onClick={() => { setPaidOverridePrice(eligibleAddOn && r.addOn?.price ? String(r.addOn.price) : ''); setPaidOverrideModel(eligibleAddOn && r.addOn?.billingCadence === 'annual' ? 'annual' : eligibleAddOn && r.addOn?.billingCadence === 'one_time' ? 'one_time' : 'monthly'); setFeaturePaidModal(feature.id); }} className="text-[8px] font-black text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-emerald-100 transition-colors">Paid Override</button>
+                              <button onClick={() => { setPaidOverridePrice(eligibleAddOn && r.addOn?.price ? String(r.addOn.price) : ''); setPaidOverrideModel(eligibleAddOn && r.addOn?.billingCadence === 'annual' ? 'annual' : eligibleAddOn && r.addOn?.billingCadence === 'one_time' ? 'one_time' : 'monthly'); setPaidOverrideActivation('after_payment'); setPaidOverrideDueDate((() => { const d = new Date('2026-03-26'); d.setDate(d.getDate() + 30); return d.toISOString().slice(0, 10); })()); setFeaturePaidModal(feature.id); }} className="text-[8px] font-black text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-emerald-100 transition-colors">Paid Override</button>
                             </>
                           )}
                           {isAddOnDisabled && feature.lifecycle === 'implemented' && (
                             <span className="text-[8px] font-black text-slate-500 bg-slate-100 px-2 py-1 rounded-lg uppercase tracking-widest">Catalog {reason === 'addon_archived' ? 'archived' : 'disabled'}</span>
                           )}
-                          {isPendingPayment && (
+                          {isPendingPayment && ov?.invoiceId && (
                             <>
-                              <button onClick={() => handleApprovePayment(feature.id)} className="text-[8px] font-black text-lime-600 bg-lime-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-lime-100 transition-colors">Approve</button>
-                              <button onClick={() => handleRevokeFeature(feature.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">Cancel</button>
+                              <button onClick={() => handleMarkInvoicePaid(ov.invoiceId!)} className="text-[8px] font-black text-lime-600 bg-lime-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-lime-100 transition-colors">Mark Paid</button>
+                              <button onClick={() => handleCancelInvoiceClick(ov.invoiceId!)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">Cancel Invoice</button>
+                              <button onClick={() => { setActiveTab('Billing'); setCommercialInvoiceDetailId(ov.invoiceId!); }} className="text-[8px] font-black text-slate-600 bg-slate-100 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-slate-200 transition-colors">View Invoice</button>
                             </>
+                          )}
+                          {/* Legacy pending-payment rows that pre-date invoices keep
+                              the original Approve/Cancel pair so they still resolve. */}
+                          {isPendingPayment && !ov?.invoiceId && (
+                            <button onClick={() => handleRevokeFeature(feature.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">Cancel</button>
                           )}
                           {isTrialActive && (
                             <button onClick={() => handleRevokeFeature(feature.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">End Trial</button>
                           )}
                           {isPaidActive && (
-                            <button onClick={() => handleRevokeFeature(feature.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">Revoke</button>
+                            <>
+                              <button onClick={() => handleRevokeFeature(feature.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">Revoke</button>
+                              {ov?.invoiceId && (r.invoiceUiStatus === 'open' || r.invoiceUiStatus === 'overdue') && (
+                                <>
+                                  <button onClick={() => handleMarkInvoicePaid(ov.invoiceId!)} className="text-[8px] font-black text-lime-600 bg-lime-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-lime-100 transition-colors">Mark Paid</button>
+                                  <button onClick={() => { setActiveTab('Billing'); setCommercialInvoiceDetailId(ov.invoiceId!); }} className="text-[8px] font-black text-slate-600 bg-slate-100 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-slate-200 transition-colors">View Invoice</button>
+                                </>
+                              )}
+                            </>
                           )}
                           {(isExpired || isRevoked) && feature.lifecycle === 'implemented' && (
                             <>
                               <button onClick={() => setFeatureTrialModal(feature.id)} className="text-[8px] font-black text-indigo-600 bg-indigo-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-indigo-100 transition-colors">Re-trial</button>
-                              <button onClick={() => { setPaidOverridePrice(eligibleAddOn && r.addOn?.price ? String(r.addOn.price) : ''); setPaidOverrideModel(eligibleAddOn && r.addOn?.billingCadence === 'annual' ? 'annual' : eligibleAddOn && r.addOn?.billingCadence === 'one_time' ? 'one_time' : 'monthly'); setFeaturePaidModal(feature.id); }} className="text-[8px] font-black text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-emerald-100 transition-colors">Re-grant Paid</button>
+                              <button onClick={() => { setPaidOverridePrice(eligibleAddOn && r.addOn?.price ? String(r.addOn.price) : ''); setPaidOverrideModel(eligibleAddOn && r.addOn?.billingCadence === 'annual' ? 'annual' : eligibleAddOn && r.addOn?.billingCadence === 'one_time' ? 'one_time' : 'monthly'); setPaidOverrideActivation('after_payment'); setPaidOverrideDueDate((() => { const d = new Date('2026-03-26'); d.setDate(d.getDate() + 30); return d.toISOString().slice(0, 10); })()); setFeaturePaidModal(feature.id); }} className="text-[8px] font-black text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-emerald-100 transition-colors">Re-grant Paid</button>
                             </>
                           )}
                         </div>
@@ -1548,7 +1757,7 @@ const TenantDetailPage: React.FC = () => {
 
             <AnimatePresence>
               {featurePaidModal && (
-                <div role="dialog" aria-modal="true" aria-label="Enable Paid Override" className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => { setFeaturePaidModal(null); setPaidOverridePrice(''); setPaidOverrideModel('monthly'); setPaidOverrideNotes(''); }} onKeyDown={e => { if (e.key === 'Escape') { setFeaturePaidModal(null); setPaidOverridePrice(''); setPaidOverrideModel('monthly'); setPaidOverrideNotes(''); } }}>
+                <div role="dialog" aria-modal="true" aria-label="Enable Paid Override" className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => { setFeaturePaidModal(null); setPaidOverridePrice(''); setPaidOverrideModel('monthly'); setPaidOverrideNotes(''); setPaidOverrideActivation('after_payment'); setPaidOverrideDueDate(''); }} onKeyDown={e => { if (e.key === 'Escape') { setFeaturePaidModal(null); setPaidOverridePrice(''); setPaidOverrideModel('monthly'); setPaidOverrideNotes(''); setPaidOverrideActivation('after_payment'); setPaidOverrideDueDate(''); } }}>
                   <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} onClick={e => e.stopPropagation()} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
                     <div className="p-8 border-b border-slate-100">
                       <h3 className="text-xl font-black text-primary tracking-tight">Enable Paid Override</h3>
@@ -1574,16 +1783,36 @@ const TenantDetailPage: React.FC = () => {
                         </p>
                       </div>
                       <div>
+                        <label className={labelClass}>Activation Mode</label>
+                        <div className="grid grid-cols-2 gap-2">
+                          <button type="button" onClick={() => setPaidOverrideActivation('after_payment')} className={`py-3 rounded-xl border text-[11px] font-black uppercase tracking-widest transition-colors ${paidOverrideActivation === 'after_payment' ? 'bg-emerald-500 text-white border-emerald-500' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}>Activate after payment</button>
+                          <button type="button" onClick={() => setPaidOverrideActivation('immediate')} className={`py-3 rounded-xl border text-[11px] font-black uppercase tracking-widest transition-colors ${paidOverrideActivation === 'immediate' ? 'bg-amber-500 text-white border-amber-500' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}>Activate immediately</button>
+                        </div>
+                        <p className="text-[10px] text-slate-400 mt-1">
+                          {paidOverrideActivation === 'after_payment'
+                            ? 'Feature stays disabled. Invoice opens; access turns on once you mark it paid.'
+                            : 'Feature turns on right now. Invoice stays open until you manually mark it paid.'}
+                        </p>
+                      </div>
+                      <div>
+                        <label htmlFor="paid-override-due" className={labelClass}>Invoice Due Date</label>
+                        <input id="paid-override-due" type="date" value={paidOverrideDueDate} onChange={e => setPaidOverrideDueDate(e.target.value)} className={inputClass} />
+                      </div>
+                      <div>
                         <label htmlFor="paid-override-notes" className={labelClass}>Internal Notes</label>
                         <input id="paid-override-notes" value={paidOverrideNotes} onChange={e => setPaidOverrideNotes(e.target.value)} className={inputClass} placeholder="e.g. Custom agreement, special pricing reason..." />
                       </div>
-                      <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-100">
-                        <p className="text-sm text-emerald-700 font-bold">This overrides plan-level feature availability. The tenant will be billed according to the pricing above. Override remains active until manually revoked.</p>
+                      <div className={`p-3 rounded-xl border ${paidOverrideActivation === 'immediate' ? 'bg-amber-50 border-amber-100' : 'bg-emerald-50 border-emerald-100'}`}>
+                        <p className={`text-sm font-bold ${paidOverrideActivation === 'immediate' ? 'text-amber-700' : 'text-emerald-700'}`}>
+                          {paidOverrideActivation === 'immediate'
+                            ? 'An open SaaS invoice will be created. Feature access starts immediately. Cancelling the invoice will revoke access; marking it paid clears the open badge.'
+                            : 'An open SaaS invoice will be created. Feature access starts only after you confirm payment manually. Cancelling the invoice reverts the row to Not in Plan with no Revoked badge.'}
+                        </p>
                       </div>
                     </div>
                     <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3">
-                      <button onClick={() => { setFeaturePaidModal(null); setPaidOverridePrice(''); setPaidOverrideModel('monthly'); setPaidOverrideNotes(''); }} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
-                      <button disabled={!paidOverridePrice || parseFloat(paidOverridePrice) <= 0} onClick={() => handleEnablePaidOverride(featurePaidModal)} className="flex-1 py-4 bg-emerald-500 text-white font-black text-sm rounded-2xl shadow-lg shadow-emerald-500/20 uppercase tracking-widest transition-all hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed">Enable @ ${paidOverridePrice || '0'}/{paidOverrideModel === 'monthly' ? 'mo' : paidOverrideModel === 'annual' ? 'yr' : 'once'}</button>
+                      <button onClick={() => { setFeaturePaidModal(null); setPaidOverridePrice(''); setPaidOverrideModel('monthly'); setPaidOverrideNotes(''); setPaidOverrideActivation('after_payment'); setPaidOverrideDueDate(''); }} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
+                      <button disabled={!paidOverridePrice || parseFloat(paidOverridePrice) <= 0} onClick={() => handleEnablePaidOverride(featurePaidModal)} className={`flex-1 py-4 text-white font-black text-sm rounded-2xl shadow-lg uppercase tracking-widest transition-all disabled:opacity-40 disabled:cursor-not-allowed ${paidOverrideActivation === 'immediate' ? 'bg-amber-500 shadow-amber-500/20 hover:bg-amber-600' : 'bg-emerald-500 shadow-emerald-500/20 hover:bg-emerald-600'}`}>{paidOverrideActivation === 'immediate' ? 'Activate' : 'Create Invoice'} @ ${paidOverridePrice || '0'}/{paidOverrideModel === 'monthly' ? 'mo' : paidOverrideModel === 'annual' ? 'yr' : 'once'}</button>
                     </div>
                   </motion.div>
                 </div>
@@ -1684,8 +1913,74 @@ const TenantDetailPage: React.FC = () => {
               </div>
             )}
 
+            {/* Spec K: SaaS Subscription Invoices — internal records for paid
+                overrides and paid add-on grants. NO Stripe / external processor.
+                System Owner manually confirms payment. */}
             <div>
-              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Invoices</p>
+              <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">SaaS Subscription Invoices</p>
+                <span className="text-[9px] font-black text-violet-600 bg-violet-50 border border-violet-100 px-2 py-1 rounded-lg uppercase tracking-widest">Internal · Manual confirmation</span>
+              </div>
+              {tenantInvoices.length === 0 ? (
+                <div className="p-4 bg-slate-50 rounded-xl border border-slate-100 text-center">
+                  <p className="text-sm text-slate-400 font-bold">No SaaS subscription invoices yet.</p>
+                  <p className="text-[10px] text-slate-400 mt-1">Granting a Paid Override or Paid Add-on creates an internal invoice.</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {tenantInvoices.map(inv => {
+                    const ui = deriveInvoiceUiStatus(inv, NOW_MS);
+                    const fname = inv.featureId ? (liveFeatureMatrix.find(f => f.id === inv.featureId)?.name || inv.featureId) : '—';
+                    const linkedOverride = localOverrides.find(o => o.invoiceId === inv.invoiceId);
+                    const isImmediate = inv.activationMode === 'immediate';
+                    const statusClass = ui === 'paid'
+                      ? 'bg-lime-50 text-lime-700 border-lime-100'
+                      : ui === 'cancelled'
+                        ? 'bg-slate-100 text-slate-500 border-slate-200'
+                        : ui === 'overdue'
+                          ? 'bg-red-50 text-red-700 border-red-100'
+                          : 'bg-amber-50 text-amber-700 border-amber-100';
+                    const cadenceLabel = inv.cadence === 'monthly' ? '/mo' : inv.cadence === 'annual' ? '/yr' : ' one-time';
+                    return (
+                      <div key={inv.invoiceId} className="p-3 bg-slate-50 rounded-xl border border-slate-100">
+                        <div className="flex justify-between items-start gap-3 flex-wrap">
+                          <div className="flex items-start gap-3 min-w-0">
+                            <span className="material-symbols-outlined text-sm text-slate-400 mt-0.5">receipt_long</span>
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <p className="font-bold text-slate-900 text-sm">{inv.invoiceId}</p>
+                                <span className={`text-[9px] font-black px-2 py-0.5 rounded border uppercase tracking-widest ${statusClass}`}>{ui}</span>
+                                <span className={`text-[9px] font-black px-2 py-0.5 rounded border uppercase tracking-widest ${isImmediate ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-emerald-50 text-emerald-700 border-emerald-100'}`}>{isImmediate ? 'Immediate' : 'After payment'}</span>
+                              </div>
+                              <p className="text-[10px] text-slate-500 mt-1">{inv.lineItems[0]?.description || '—'}</p>
+                              <p className="text-[10px] text-slate-400">Feature: <span className="font-bold text-slate-600">{fname}</span> · Issued {inv.issuedDate} · Due {inv.dueDate}{inv.paidDate ? ` · Paid ${inv.paidDate}` : ''}{inv.cancelledDate ? ` · Cancelled ${inv.cancelledDate}` : ''}</p>
+                            </div>
+                          </div>
+                          <div className="flex flex-col items-end gap-1.5">
+                            <span className="font-black text-primary text-sm">${inv.amount.toFixed(2)}<span className="text-[10px] font-bold text-slate-400">{cadenceLabel}</span></span>
+                            <div className="flex items-center gap-1 flex-wrap justify-end">
+                              {(ui === 'open' || ui === 'overdue') && (
+                                <>
+                                  <button onClick={() => handleMarkInvoicePaid(inv.invoiceId)} className="text-[8px] font-black text-lime-600 bg-lime-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-lime-100 transition-colors">Mark Paid</button>
+                                  <button onClick={() => handleCancelInvoiceClick(inv.invoiceId)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">Cancel Invoice</button>
+                                </>
+                              )}
+                              <button onClick={() => setCommercialInvoiceDetailId(inv.invoiceId)} className="text-[8px] font-black text-slate-600 bg-slate-100 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-slate-200 transition-colors">View</button>
+                            </div>
+                            {linkedOverride && !linkedOverride.revokedDate && (
+                              <p className="text-[9px] text-slate-400 italic">Linked to {fname} override</p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Plan Invoices</p>
               <div className="space-y-2">
                 {effectiveInvoices.map(inv => (
                   <button type="button" key={inv.id} onClick={() => setInvoiceDetailId(inv.id)} className="w-full flex justify-between items-center p-3 bg-slate-50 rounded-xl border border-slate-100 hover:bg-slate-100 transition-colors text-left cursor-pointer">
@@ -1750,6 +2045,155 @@ const TenantDetailPage: React.FC = () => {
             <button onClick={() => navigate('/owner/billing')} className="px-4 py-2.5 bg-primary text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-primary/90 transition-all active:scale-95 flex items-center gap-1.5">
               <span className="material-symbols-outlined text-sm">open_in_new</span> Open Platform Billing
             </button>
+
+            {/* SaaS Subscription Invoice — cancel confirmation. The body
+                explains the consequence based on the linked override. */}
+            <AnimatePresence>
+              {cancelInvoiceConfirmId && (() => {
+                const inv = getInvoiceById(cancelInvoiceConfirmId);
+                if (!inv) return null;
+                const linked = localOverrides.find(o => o.invoiceId === cancelInvoiceConfirmId);
+                const willRevoke = linked && linked.type === 'paid_override' && linked.activationMode === 'immediate' && !linked.revokedDate;
+                const willRevert = linked && linked.type === 'pending_payment';
+                const fname = inv.featureId ? (liveFeatureMatrix.find(f => f.id === inv.featureId)?.name || inv.featureId) : '—';
+                return (
+                  <div role="dialog" aria-modal="true" aria-label="Cancel SaaS Invoice" className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setCancelInvoiceConfirmId(null)} onKeyDown={e => { if (e.key === 'Escape') setCancelInvoiceConfirmId(null); }}>
+                    <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} onClick={e => e.stopPropagation()} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden">
+                      <div className="p-8 border-b border-slate-100">
+                        <h3 className="text-xl font-black text-red-600 tracking-tight">Cancel SaaS Invoice</h3>
+                        <p className="text-sm text-slate-500 mt-1">{inv.invoiceId} · ${inv.amount.toFixed(2)} · {fname}</p>
+                      </div>
+                      <div className="p-8 space-y-4">
+                        <div className={`p-4 rounded-xl border ${willRevoke ? 'bg-red-50 border-red-100' : willRevert ? 'bg-amber-50 border-amber-100' : 'bg-slate-50 border-slate-100'}`}>
+                          <p className={`text-sm font-bold ${willRevoke ? 'text-red-700' : willRevert ? 'text-amber-700' : 'text-slate-700'}`}>
+                            {willRevoke && `Cancelling this invoice will REVOKE feature access for ${fname}. The override row will show as Revoked.`}
+                            {willRevert && `Cancelling this invoice will revert ${fname} to Not in Plan. No Revoked badge will appear because the feature was never active.`}
+                            {!willRevoke && !willRevert && 'Cancelling this invoice will mark it as Cancelled. No tenant access change.'}
+                          </p>
+                        </div>
+                        <p className="text-[10px] text-slate-400">This action is recorded in the commercial audit log and cannot be undone. The invoice row remains visible for history.</p>
+                      </div>
+                      <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3">
+                        <button onClick={() => setCancelInvoiceConfirmId(null)} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">Keep Invoice</button>
+                        <button onClick={() => handleConfirmCancelInvoice(cancelInvoiceConfirmId)} className="flex-1 py-4 bg-red-500 text-white font-black text-sm rounded-2xl shadow-lg shadow-red-500/20 uppercase tracking-widest transition-all hover:bg-red-600">{willRevoke ? 'Cancel & Revoke' : 'Cancel Invoice'}</button>
+                      </div>
+                    </motion.div>
+                  </div>
+                );
+              })()}
+            </AnimatePresence>
+
+            {/* SaaS Subscription Invoice — read-only detail view. */}
+            <AnimatePresence>
+              {commercialInvoiceDetailId && (() => {
+                const inv = getInvoiceById(commercialInvoiceDetailId);
+                if (!inv) return null;
+                const ui = deriveInvoiceUiStatus(inv, NOW_MS);
+                const fname = inv.featureId ? (liveFeatureMatrix.find(f => f.id === inv.featureId)?.name || inv.featureId) : '—';
+                const statusClass = ui === 'paid'
+                  ? 'bg-lime-50 text-lime-700 border-lime-100'
+                  : ui === 'cancelled'
+                    ? 'bg-slate-100 text-slate-500 border-slate-200'
+                    : ui === 'overdue'
+                      ? 'bg-red-50 text-red-700 border-red-100'
+                      : 'bg-amber-50 text-amber-700 border-amber-100';
+                const cadenceLabel = inv.cadence === 'monthly' ? '/mo' : inv.cadence === 'annual' ? '/yr' : ' one-time';
+                return (
+                  <div role="dialog" aria-modal="true" aria-label="SaaS Invoice Detail" className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setCommercialInvoiceDetailId(null)} onKeyDown={e => { if (e.key === 'Escape') setCommercialInvoiceDetailId(null); }}>
+                    <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} onClick={e => e.stopPropagation()} className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg overflow-hidden">
+                      <div className="p-8 border-b border-slate-100 flex justify-between items-start">
+                        <div>
+                          <h3 className="text-xl font-black text-primary tracking-tight">{inv.invoiceId}</h3>
+                          <p className="text-sm text-slate-500 mt-1">{tenant.name} · Internal SaaS subscription</p>
+                        </div>
+                        <span className={`text-[9px] font-black px-2 py-1 rounded border uppercase tracking-widest ${statusClass}`}>{ui}</span>
+                      </div>
+                      <div className="p-8 space-y-5">
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <p className={labelClass}>Issued</p>
+                            <p className="font-bold text-slate-900">{inv.issuedDate}</p>
+                          </div>
+                          <div>
+                            <p className={labelClass}>Due</p>
+                            <p className="font-bold text-slate-900">{inv.dueDate}</p>
+                          </div>
+                          <div>
+                            <p className={labelClass}>Activation Mode</p>
+                            <p className="font-bold text-slate-900 capitalize">{inv.activationMode === 'immediate' ? 'Immediate' : 'After payment'}</p>
+                          </div>
+                          <div>
+                            <p className={labelClass}>Cadence</p>
+                            <p className="font-bold text-slate-900 capitalize">{inv.cadence.replace('_', ' ')}</p>
+                          </div>
+                          <div>
+                            <p className={labelClass}>Linked Feature</p>
+                            <p className="font-bold text-slate-900">{fname}</p>
+                          </div>
+                          <div>
+                            <p className={labelClass}>Created By</p>
+                            <p className="font-bold text-slate-900">{inv.createdBy}</p>
+                          </div>
+                          {inv.paidDate && (
+                            <div>
+                              <p className={labelClass}>Paid</p>
+                              <p className="font-bold text-lime-600">{inv.paidDate}</p>
+                            </div>
+                          )}
+                          {inv.cancelledDate && (
+                            <div>
+                              <p className={labelClass}>Cancelled</p>
+                              <p className="font-bold text-red-600">{inv.cancelledDate}</p>
+                            </div>
+                          )}
+                        </div>
+                        <div>
+                          <p className={labelClass}>Line Items</p>
+                          <div className="bg-slate-50 rounded-xl border border-slate-100 overflow-hidden">
+                            <table className="w-full">
+                              <thead>
+                                <tr className="border-b border-slate-100">
+                                  <th className="px-4 py-2 text-[10px] font-black text-slate-400 uppercase tracking-widest text-left">Description</th>
+                                  <th className="px-4 py-2 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Amount</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {inv.lineItems.map((li, idx) => (
+                                  <tr key={idx} className="border-b border-slate-100 last:border-0">
+                                    <td className="px-4 py-3 text-sm font-bold text-slate-700">{li.description}</td>
+                                    <td className="px-4 py-3 text-sm font-black text-slate-900 text-right">${li.amount.toFixed(2)}{cadenceLabel}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                        {inv.notes && (
+                          <div>
+                            <p className={labelClass}>Notes</p>
+                            <p className="text-sm text-slate-700 font-medium">{inv.notes}</p>
+                          </div>
+                        )}
+                        <div className="p-3 bg-violet-50 rounded-xl border border-violet-100">
+                          <p className="text-[10px] text-violet-700 font-bold">
+                            Internal SaaS subscription record. No external payment processor. Payment is confirmed manually by a System Owner.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3 flex-wrap">
+                        {(ui === 'open' || ui === 'overdue') && (
+                          <>
+                            <button onClick={() => { handleMarkInvoicePaid(inv.invoiceId); setCommercialInvoiceDetailId(null); }} className="px-4 py-2.5 bg-lime-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-lime-600 transition-all">Mark Paid</button>
+                            <button onClick={() => { setCommercialInvoiceDetailId(null); handleCancelInvoiceClick(inv.invoiceId); }} className="px-4 py-2.5 bg-red-500 text-white font-black text-[10px] rounded-xl uppercase tracking-widest hover:bg-red-600 transition-all">Cancel Invoice</button>
+                          </>
+                        )}
+                        <button onClick={() => setCommercialInvoiceDetailId(null)} className="px-4 py-2.5 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all ml-auto">Close</button>
+                      </div>
+                    </motion.div>
+                  </div>
+                );
+              })()}
+            </AnimatePresence>
 
             <AnimatePresence>
               {selectedInvoice && (

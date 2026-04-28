@@ -1,9 +1,16 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState } from '../context/StoreLocalState';
 import TemplateEditor from './TemplateEditor';
 import type { DocumentTemplate } from '../types';
 import { buildTemplateHtml, getDefaultEnabledTags } from '../utils/templateBuilder';
+import { getInvoicesForTenant, deriveInvoiceUiStatus } from '../owner/commercialInvoices';
+import type { CommercialInvoice } from '../owner/mockData';
+import { useAccess } from '../context/AccessContext';
+
+// Fallback tenant id used only when no AccessContext tenant is bound
+// (e.g. dev preview without a session). Mock seeds target 't1'.
+const FALLBACK_TENANT_ID = 't1';
 
 type SettingsTab = 'config' | 'hardware' | 'language';
 
@@ -11,6 +18,34 @@ export default function Settings() {
   const [activeTab, setActiveTab] = useState<SettingsTab>('config');
   const { documentTemplates, updateDocumentTemplate, resetDocumentTemplate, storeBranding, updateStoreBranding } = useStoreLocalState();
   const [editingTemplate, setEditingTemplate] = useState<DocumentTemplate | null>(null);
+  const { tenant } = useAccess();
+  // Bind to the actual signed-in tenant when available so a non-t1
+  // tenant cannot see another store's invoices. Falls back to the
+  // mock tenant id only in dev/preview where no session is bound.
+  const settingsTenantId = tenant?.id || FALLBACK_TENANT_ID;
+
+  // Re-read invoices whenever the System Owner mutates them in the
+  // Tenant Detail Billing tab. We use a poll-on-focus + storage event
+  // pattern so this read-only tenant view stays in sync without a
+  // bespoke event bus.
+  const [invoiceVersion, setInvoiceVersion] = useState(0);
+  useEffect(() => {
+    const bump = () => setInvoiceVersion(v => v + 1);
+    window.addEventListener('storage', bump);
+    window.addEventListener('focus', bump);
+    return () => {
+      window.removeEventListener('storage', bump);
+      window.removeEventListener('focus', bump);
+    };
+  }, []);
+  const tenantInvoices = useMemo<CommercialInvoice[]>(() => {
+    return getInvoicesForTenant(settingsTenantId).slice().sort((a, b) => {
+      const da = Date.parse(a.issuedDate);
+      const db = Date.parse(b.issuedDate);
+      if (da !== db) return db - da;
+      return a.invoiceId < b.invoiceId ? 1 : -1;
+    });
+  }, [invoiceVersion, settingsTenantId]);
 
   useEffect(() => {
     if (editingTemplate) {
@@ -347,6 +382,66 @@ export default function Settings() {
               </div>
             </div>
           </div>
+        </div>
+      </section>
+
+      {/* 7. Plan & Add-on Billing — read-only mirror of internal SaaS
+          subscription invoices created by the System Owner. Manual
+          payment confirmation only; no in-app pay button. */}
+      <section className="space-y-6">
+        <div className="flex items-center gap-3 mb-2">
+          <span className="material-symbols-outlined text-primary">request_quote</span>
+          <h3 className="text-xl font-black text-primary tracking-tight">Plan & Add-on Billing</h3>
+        </div>
+        <div className="bg-white/80 backdrop-blur-xl p-8 rounded-[2.5rem] border border-slate-200 shadow-sm space-y-4">
+          <div className="p-3 bg-violet-50 rounded-2xl border border-violet-100 flex items-start gap-2">
+            <span className="material-symbols-outlined text-violet-600 text-sm mt-0.5">info</span>
+            <p className="text-[11px] font-bold text-violet-700 leading-relaxed">
+              These are internal SaaS subscription invoices for paid feature overrides and add-ons applied by your account manager. Payment is confirmed manually by the System Owner — there is no in-app payment button. Contact support to settle an open invoice.
+            </p>
+          </div>
+          {tenantInvoices.length === 0 ? (
+            <div className="p-6 bg-slate-50 rounded-2xl border border-slate-100 text-center">
+              <p className="text-sm font-bold text-slate-500">No subscription invoices on file.</p>
+              <p className="text-[10px] text-slate-400 mt-1">When your account manager grants a paid feature, the invoice appears here.</p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {tenantInvoices.map(inv => {
+                const ui = deriveInvoiceUiStatus(inv);
+                const cadenceLabel = inv.cadence === 'monthly' ? '/mo' : inv.cadence === 'annual' ? '/yr' : ' one-time';
+                const statusClass = ui === 'paid'
+                  ? 'bg-lime-50 text-lime-700 border-lime-100'
+                  : ui === 'cancelled'
+                    ? 'bg-slate-100 text-slate-500 border-slate-200'
+                    : ui === 'overdue'
+                      ? 'bg-red-50 text-red-700 border-red-100'
+                      : 'bg-amber-50 text-amber-700 border-amber-100';
+                const isImmediate = inv.activationMode === 'immediate';
+                return (
+                  <div key={inv.invoiceId} className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                    <div className="flex justify-between items-start gap-3 flex-wrap">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <p className="font-black text-slate-900 text-sm">{inv.invoiceId}</p>
+                          <span className={`text-[9px] font-black px-2 py-0.5 rounded border uppercase tracking-widest ${statusClass}`}>{ui}</span>
+                          <span className={`text-[9px] font-black px-2 py-0.5 rounded border uppercase tracking-widest ${isImmediate ? 'bg-amber-50 text-amber-700 border-amber-100' : 'bg-emerald-50 text-emerald-700 border-emerald-100'}`}>{isImmediate ? 'Immediate' : 'After payment'}</span>
+                        </div>
+                        <p className="text-[11px] text-slate-600 font-bold mt-1">{inv.lineItems[0]?.description || '—'}</p>
+                        <p className="text-[10px] text-slate-400 mt-0.5">Issued {inv.issuedDate} · Due {inv.dueDate}{inv.paidDate ? ` · Paid ${inv.paidDate}` : ''}{inv.cancelledDate ? ` · Cancelled ${inv.cancelledDate}` : ''}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="font-black text-primary text-base">${inv.amount.toFixed(2)}<span className="text-[10px] font-bold text-slate-400">{cadenceLabel}</span></p>
+                        {(ui === 'open' || ui === 'overdue') && (
+                          <p className="text-[10px] text-slate-400 italic mt-1">Awaiting manual confirmation</p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       </section>
     </div>

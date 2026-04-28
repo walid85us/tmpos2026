@@ -237,6 +237,8 @@ export type ActivationStatus = 'invited' | 'pending_activation' | 'account_setup
 // back-compat with existing UI; the *derived* override status (used by the
 // resolver) is computed from `type` + `trialEnd` + `revokedDate` + `nowMs`
 // in `src/owner/entitlements.ts → deriveOverrideStatus`.
+export type ActivationMode = 'after_payment' | 'immediate';
+
 export interface TenantFeatureOverride {
   tenantId: string;
   featureId: string;
@@ -255,6 +257,16 @@ export interface TenantFeatureOverride {
   revokedDate?: string;
   revokedBy?: string;
   revokeReason?: string;
+  // Internal SaaS billing wiring. Paid overrides and paid add-on
+  // grants always create an internal `CommercialInvoice`; the System
+  // Owner picks an activation mode at grant time. `after_payment`
+  // keeps the override at type 'pending_payment' until the linked
+  // invoice is marked paid; `immediate` flips the override to
+  // 'paid_override' right away while the invoice stays open until
+  // it's marked paid manually.
+  activationMode?: ActivationMode;
+  invoiceId?: string;
+  dueDate?: string;
 }
 
 export const tenantFeatureOverrides: TenantFeatureOverride[] = [
@@ -281,7 +293,15 @@ export type CommercialAuditAction =
   | 'tenant_paid_override_price_edited'
   | 'tenant_override_revoked'
   | 'tenant_pending_payment_approved'
-  | 'tenant_pending_payment_cancelled';
+  | 'tenant_pending_payment_cancelled'
+  // Internal SaaS invoice / activation-mode lifecycle.
+  | 'invoice_created'
+  | 'invoice_marked_paid'
+  | 'invoice_cancelled'
+  | 'feature_activated_after_payment'
+  | 'immediate_activation_granted'
+  | 'paid_override_revoked_due_to_cancel'
+  | 'manual_payment_confirmation';
 
 export interface CommercialAuditEntry {
   id: string;
@@ -303,6 +323,86 @@ export const commercialAuditLogs: CommercialAuditEntry[] = [
   { id: 'ca4', timestamp: '2026-03-12', actor: 'System', action: 'tenant_paid_override_granted', tenantId: 't1', addOnId: 'reporting', featureId: 'reporting', newValue: 15 },
   { id: 'ca5', timestamp: '2026-03-15', actor: 'Admin Carol', action: 'addon_updated', addOnId: 'priority', note: 'Description refresh' },
   { id: 'ca6', timestamp: '2026-01-15', actor: 'Admin Alice', action: 'tenant_paid_override_granted', tenantId: 't1', addOnId: 'api', featureId: 'api', newValue: 25 },
+];
+
+// Internal SaaS invoice records for paid override / paid add-on grants.
+// These are tenant-facing subscription invoices, NOT retail customer
+// invoices. Stored in `sessionStorage('commercial_invoices_data')` at
+// runtime; this seed array is the bootstrap default loaded the first
+// time a System Owner opens the Tenant Detail Billing tab.
+export type CommercialInvoiceStatus = 'open' | 'paid' | 'cancelled' | 'overdue';
+export type CommercialInvoiceType = 'paid_override' | 'addon' | 'subscription_adjustment';
+
+export interface CommercialInvoiceLineItem {
+  description: string;
+  amount: number;
+  featureId?: string;
+  addOnId?: string;
+}
+
+export interface CommercialInvoice {
+  invoiceId: string;
+  tenantId: string;
+  status: CommercialInvoiceStatus;
+  invoiceType: CommercialInvoiceType;
+  amount: number;
+  currency: string;
+  cadence: 'monthly' | 'annual' | 'one_time';
+  dueDate: string;
+  issuedDate: string;
+  paidDate?: string;
+  cancelledDate?: string;
+  lineItems: CommercialInvoiceLineItem[];
+  notes?: string;
+  // Cross-references back to the entitlement that triggered the
+  // invoice. `overrideId` is a synthetic key of `${tenantId}:${featureId}`
+  // since `TenantFeatureOverride` is keyed by that pair (one row per
+  // tenant/feature). `featureId` and `addOnId` are duplicated for
+  // ease of filtering.
+  overrideId?: string;
+  featureId?: string;
+  addOnId?: string;
+  activationMode: ActivationMode;
+  createdBy: string;
+}
+
+export const commercialInvoices: CommercialInvoice[] = [
+  {
+    invoiceId: 'CINV-2026-0001',
+    tenantId: 't1',
+    status: 'paid',
+    invoiceType: 'addon',
+    amount: 25,
+    currency: 'USD',
+    cadence: 'monthly',
+    dueDate: '2026-01-25',
+    issuedDate: '2026-01-15',
+    paidDate: '2026-01-20',
+    lineItems: [{ description: 'API Access add-on (monthly)', amount: 25, featureId: 'api', addOnId: 'api' }],
+    overrideId: 't1:api',
+    featureId: 'api',
+    addOnId: 'api',
+    activationMode: 'after_payment',
+    createdBy: 'Admin Alice',
+  },
+  {
+    invoiceId: 'CINV-2026-0002',
+    tenantId: 't1',
+    status: 'paid',
+    invoiceType: 'addon',
+    amount: 15,
+    currency: 'USD',
+    cadence: 'monthly',
+    dueDate: '2026-03-22',
+    issuedDate: '2026-03-12',
+    paidDate: '2026-03-15',
+    lineItems: [{ description: 'Advanced Reporting add-on (monthly)', amount: 15, featureId: 'reporting', addOnId: 'reporting' }],
+    overrideId: 't1:reporting',
+    featureId: 'reporting',
+    addOnId: 'reporting',
+    activationMode: 'after_payment',
+    createdBy: 'System',
+  },
 ];
 
 export const auditLogs = [

@@ -1,0 +1,504 @@
+System Owner Commercial Controls — Paid Override Billing Invoice Workflow with Activation Mode
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict isolated implementation pass.
+Do not redesign the app.
+Do not touch the completed Shipping Module.
+Do not implement Stripe or external payment processor integration unless already safely present.
+Do not implement tax calculation, accounting exports, automated payment collection, or customer storefront payment flow.
+
+Implement an internal SaaS billing/invoice workflow for Paid Override / Paid Add-on grants with System Owner-controlled activation mode.
+
+==================================================
+CURRENT ISSUE
+==================================================
+
+Paid Override currently creates confusing states because payment workflow is incomplete.
+
+We need a real internal invoice/billing record whenever a paid override or paid add-on is granted.
+
+The tenant should review/pay from the tenant/store owner Billing area, not the retail customer storefront.
+
+System Owner must choose how activation works:
+
+1) Activate after payment
+- feature remains Pending Payment
+- invoice must be marked paid before feature is enabled
+
+2) Activate immediately and add to invoice
+- feature becomes active immediately
+- invoice remains open/due for billing collection/manual payment tracking
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Firebase/Firestore multi-tenant architect
+- Senior SaaS billing workflow architect
+- Senior entitlement and commercial-controls architect
+- Senior RBAC / plan-gating architect
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Do not fake external payment processing.
+Build a truthful internal invoice/payment-status foundation.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- replit.md
+
+Preserve:
+- completed Shipping Module behavior
+- existing plan/permission behavior
+- Store Permissions Matrix logic
+- preview-mode write safety
+- add-on catalog governance
+- tenant feature trial / paid override logic
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+When System Owner grants a Paid Override or paid add-on:
+
+1) create an internal SaaS invoice/billing record
+2) show it under System Owner Tenant Billing
+3) show it under Tenant / Store Owner Billing
+4) allow System Owner to choose activation mode:
+   - Activate after payment
+   - Activate immediately and add to invoice
+5) connect invoice/payment status to entitlement state
+6) prevent confusing Cancel / Revoked / Pending states
+
+==================================================
+PART A — BILLING LOCATION / PAYMENT SURFACE
+==================================================
+
+Required:
+Paid override invoices must appear in:
+
+1) System Owner:
+- Tenant Detail → Billing tab
+
+2) Store Owner / Tenant Admin:
+- Billing area / subscription billing view if already present
+
+Do NOT show SaaS add-on invoices in the retail customer storefront.
+The storefront is for the repair shop’s customers, not the SaaS tenant’s subscription billing.
+
+If tenant billing UI does not yet exist, create or extend a simple internal Billing section.
+
+==================================================
+PART B — PAID OVERRIDE GRANT MODAL / ACTIVATION MODE
+==================================================
+
+Required:
+When System Owner grants Paid Override / Paid Add-on, the modal must include:
+
+- price
+- cadence
+- billing period
+- due date if applicable
+- notes/reason if available
+- activation mode selector:
+  1) Activate after payment
+  2) Activate immediately and add to invoice
+
+Required copy:
+
+Option 1:
+“Activate after payment — the feature remains pending until the invoice is marked paid.”
+
+Option 2:
+“Activate immediately and add to invoice — the feature becomes available now while the invoice remains open.”
+
+Default:
+Use “Activate after payment” as the safer default unless existing app convention suggests otherwise.
+
+==================================================
+PART C — PAID OVERRIDE INVOICE CREATION
+==================================================
+
+Required:
+When System Owner confirms a Paid Override:
+
+Create invoice/billing record linked to:
+- tenantId
+- featureId
+- addOnId if applicable
+- overrideId
+- plan cadence
+- activation mode
+- price
+- billing period
+- createdBy
+- createdAt
+
+Invoice fields at minimum:
+- invoiceId
+- tenantId
+- status:
+  - open
+  - paid
+  - cancelled
+  - overdue
+- invoiceType:
+  - paid_override
+  - addon
+  - subscription_adjustment
+- amount
+- currency
+- cadence:
+  - monthly
+  - annual
+  - one_time
+- dueDate
+- lineItems
+- notes
+- audit/history
+
+No fake external payment links.
+No fake Stripe checkout.
+
+==================================================
+PART D — MONTHLY PLAN BILLING BEHAVIOR
+==================================================
+
+Required:
+If tenant subscription cadence is monthly:
+
+- create/add paid override as monthly billing item or monthly invoice line
+- invoice should be visible in Billing
+- if activation mode is Activate after payment:
+  - feature remains Pending Payment until invoice paid
+- if activation mode is Activate immediately:
+  - feature becomes Paid Override immediately
+  - invoice remains open/due
+
+Required UI copy:
+- “Added to monthly billing”
+- “Pending payment — activates after invoice is paid”
+or
+- “Active now — added to monthly invoice”
+
+==================================================
+PART E — ANNUAL PLAN BILLING BEHAVIOR
+==================================================
+
+Required:
+If tenant subscription cadence is annual/yearly:
+
+- create one-time invoice for the paid override/add-on
+- if subscription term dates exist, prorate to remaining annual term if practical
+- if not, use full annual amount
+
+If activation mode is Activate after payment:
+- feature remains Pending Payment until invoice paid
+
+If activation mode is Activate immediately:
+- feature becomes Paid Override immediately
+- invoice remains open/due
+
+Required UI copy:
+- “One-time annual add-on invoice created”
+- “Pending payment — activates after invoice is paid”
+or
+- “Active now — one-time invoice remains open”
+
+==================================================
+PART F — PAYMENT STATUS / ENTITLEMENT ACTIVATION
+==================================================
+
+Required states:
+
+1) Pending Payment
+Used only when:
+- invoice exists
+- activation mode = Activate after payment
+- invoice status = open/overdue
+- feature is not active yet
+
+Actions:
+- Mark Paid if System Owner authorized
+- Cancel Invoice
+- no duplicate Trial / Paid Override / Re-trial / Re-grant buttons
+
+2) Paid Override Active / Paid Add-on Active
+Used when:
+- invoice is paid, or
+- activation mode = Activate immediately
+
+Actions:
+- Edit Price if supported
+- Revoke
+- View Invoice
+
+3) Invoice Open + Active
+Used when:
+- activation mode = Activate immediately
+- invoice status = open/overdue
+- feature active
+- Billing tab still shows invoice as unpaid/open
+
+UI should clearly show:
+- Paid Override
+- Invoice Open / Payment Due
+- feature is active now
+
+4) Cancelled Invoice
+If invoice is cancelled before activation:
+- feature returns to Not in Plan / Add-on Available
+- do NOT show Revoked
+
+If invoice is cancelled after immediate activation:
+- either revoke entitlement or require explicit revoke decision
+- do not leave inconsistent active feature with cancelled invoice unless explicitly documented
+
+Recommended:
+- cancelling an open invoice for immediately activated feature should ask:
+  “Cancel invoice and revoke feature access?”
+- if confirmed, set entitlement revoked or inactive with audit
+
+5) Revoked
+Only after active paid entitlement is revoked.
+Do not use Revoked for cancelled modal or cancelled unpaid invoice before activation.
+
+==================================================
+PART G — PAYMENT METHOD FOUNDATION
+==================================================
+
+Required:
+Since external payment processing is out of scope, support internal/manual payment state:
+
+- System Owner can mark invoice Paid
+- System Owner can cancel invoice
+- overdue can be derived by due date or manually marked if already supported
+- Tenant can view invoice status
+
+Labels must be truthful:
+- “Manual payment confirmation”
+- “Mark Paid”
+- “External payment recorded manually”
+
+Do not claim automatic payment processing.
+
+==================================================
+PART H — PRICING BEHAVIOR
+==================================================
+
+Required:
+If linked active Add-on exists:
+- default price = add-on catalog price
+- monthly plan uses monthly price
+- annual plan uses annual price if available, or monthly × 12 if that is current pricing model
+- System Owner can edit tenant-specific override price before invoice creation
+- tenant-specific price does not mutate catalog price
+
+If no linked Add-on exists:
+- allow manual price entry
+- save as Paid Override, not Add-on
+
+Required:
+- show catalog default price
+- show tenant override price
+- show Custom Price when tenant price differs from catalog default
+
+==================================================
+PART I — BILLING TAB INVOICE VISIBILITY
+==================================================
+
+Required:
+Billing tab should show invoices clearly.
+
+For each invoice:
+- invoice number/id
+- status
+- amount
+- due date
+- line item description
+- linked feature/add-on
+- activation mode
+- created date
+- paid/cancelled date if applicable
+- action buttons based on role:
+  - Mark Paid
+  - Cancel Invoice
+  - View details
+
+Do not overbuild accounting.
+
+==================================================
+PART J — AUDITABILITY
+==================================================
+
+Required:
+Audit:
+- paid override invoice created
+- activation mode selected
+- invoice marked paid
+- feature activated after payment
+- immediate activation granted
+- invoice cancelled
+- entitlement revoked because invoice was cancelled after immediate activation
+- paid override revoked
+- price edited before invoice creation
+- manual payment confirmation
+
+Audit should record:
+- actor
+- timestamp
+- old/new status
+- tenantId
+- featureId/addOnId
+- invoiceId
+- notes/reason
+
+==================================================
+PART K — STORE PERMISSIONS MATRIX
+==================================================
+
+Required:
+Store Permissions Matrix must reflect entitlement state:
+
+- Pending Payment with activation-after-payment should not expose linked permissions
+- Paid Active after invoice paid exposes linked permissions
+- Immediate activation exposes linked permissions immediately even while invoice is open
+- Cancelled invoice before activation does not expose linked permissions
+- Cancelled invoice after immediate activation must revoke or resolve entitlement consistently
+- Revoked does not expose linked permissions
+- Trial still exposes linked permissions during active trial
+
+==================================================
+PART L — UI STATE CLEANUP
+==================================================
+
+Required:
+Fix confusing state/actions:
+
+1) Pending Payment:
+- show only:
+  - Mark Paid
+  - Cancel Invoice
+  - View Invoice
+- do not show Trial / Paid Override / Re-trial / Re-grant Paid at same time
+
+2) Active Immediately + Invoice Open:
+- show:
+  - Paid Override
+  - Invoice Open / Payment Due
+  - View Invoice
+  - Revoke
+- do not show duplicate grant buttons
+
+3) Cancelled pending invoice before activation:
+- return to Not in Plan / Add-on Available
+- do not show Revoked
+
+4) Revoked:
+- only after active paid entitlement was revoked
+- may show Re-grant Paid / Re-trial where eligible
+
+5) Paid Override active:
+- show Paid Override
+- show Revoke / Edit Price if supported
+- do not show duplicate Trial / Paid Override buttons
+
+==================================================
+PART M — PLAN / PERMISSION / GATING
+==================================================
+
+Required:
+Only System Owner / authorized platform admin should:
+- create paid override invoice
+- select activation mode
+- mark invoice paid
+- cancel invoice
+- revoke paid override
+- edit price
+
+Tenant/store owner may view invoice and status.
+Do not give tenant unauthorized ability to self-enable paid features.
+
+==================================================
+PART N — OUT OF SCOPE
+==================================================
+
+Do NOT implement:
+- Stripe
+- automated credit card collection
+- bank/payment gateway integration
+- accounting exports
+- tax calculation
+- SaaS invoice PDF generation unless already simple and safe
+- customer-facing storefront billing
+- refund/credit automation
+- subscription renewal automation beyond internal invoice visibility/status
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Paid Override creates an invoice/billing record.
+2) Grant modal includes activation mode:
+   - Activate after payment
+   - Activate immediately and add to invoice
+3) Invoice appears in System Owner Tenant Billing.
+4) Invoice appears in Tenant/Store Owner Billing if available.
+5) Monthly plan paid override is added to monthly billing / monthly invoice flow.
+6) Annual plan paid override creates one-time annual/prorated invoice.
+7) Pending Payment exists only when invoice exists and activation-after-payment is selected.
+8) Mark Paid activates the feature.
+9) Activate immediately makes feature active immediately while invoice remains open.
+10) Cancel pending invoice before activation returns feature to Not in Plan / Add-on Available, not Revoked.
+11) Revoked only appears after active paid entitlement is revoked.
+12) Pending Payment row does not show conflicting Trial/Re-trial/Re-grant buttons.
+13) Store Permissions Matrix follows payment/entitlement state.
+14) No fake external payment processor or storefront payment flow is created.
+15) Existing tenant/plan/shipping behavior remains intact.
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Paid Override invoice workflow
+- activation mode selector
+- monthly plan behavior
+- annual plan behavior
+- Pending Payment meaning
+- Activate immediately behavior
+- Mark Paid activation behavior
+- Cancel pending invoice vs Revoke active entitlement distinction
+- Billing tab invoice visibility
+- manual/internal payment limitation
+- external payment processor out of scope
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Paid Override Invoice Workflow
+3. Activation Mode Behavior
+4. Monthly vs Annual Billing Behavior
+5. Payment Status / Entitlement Activation
+6. Billing Tab Visibility
+7. UI State Cleanup
+8. Store Permissions Matrix Alignment
+9. Files Changed
+10. Documentation Updated
+11. Non-Regression Notes
