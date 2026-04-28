@@ -356,6 +356,19 @@ export function resolveTenantFeature(
   if (featureRow) {
     const inPlan = !!featureRow.planAvailability[planKey];
     if (inPlan) {
+      // Draft add-on guard. A feature whose linked add-on is still
+      // `draft` is internal-only — even if the System Owner toggled
+      // the column on in the Plans & Features Matrix to scaffold the
+      // future plan inclusion, tenants must NOT see it until the
+      // add-on is activated. Treat as if the plan didn't include it.
+      // See replit.md → "Add-on Lifecycle & Archive Protection Rule".
+      if (addOn && addOn.governanceStatus === 'draft') {
+        return {
+          enabled: false,
+          reason: 'disabled_by_plan',
+          source: 'none',
+        };
+      }
       return {
         enabled: true,
         reason: 'included_by_plan',

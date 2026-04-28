@@ -1594,10 +1594,19 @@ const TenantDetailPage: React.FC = () => {
                 // available solely via the add-on path.
                 const planKey = currentPlan === 'starter' ? 'essential' : currentPlan;
                 const inPlanBaseline = !!f.planAvailability[planKey];
-                if (inPlanBaseline) return true;
                 const linkedAddOn =
                   liveAddOns.find(a => a.linkedFeatureId === f.id) ||
                   liveAddOns.find(a => a.id === f.id);
+                // Draft add-on guard. A linked add-on still in
+                // `draft` is internal-only — hide the row from the
+                // tenant Features tab regardless of plan baseline.
+                // The matrix may have the column toggled on to
+                // scaffold the future inclusion, but tenants must
+                // not see it until the add-on is activated. See
+                // replit.md → "Add-on Lifecycle & Archive
+                // Protection Rule".
+                if (linkedAddOn && linkedAddOn.governanceStatus === 'draft') return false;
+                if (inPlanBaseline) return true;
                 if (!linkedAddOn) return true;
                 const addOnEligible =
                   linkedAddOn.governanceStatus === 'active' &&

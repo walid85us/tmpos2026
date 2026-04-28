@@ -148,6 +148,12 @@ export type AddOnLifecycle = 'draft' | 'planned' | 'in_development' | 'active' |
 // System Owner commercial governance state for an add-on. Decides whether
 // the add-on is offerable to tenants. Independent of `lifecycle` (which is
 // product/PM intent only) and of legacy `status` (kept for back-compat).
+//   - draft    → newly created, internal-only. Visible to System Owner in
+//                Add-on Catalog and Plans & Features Matrix (so the linked
+//                feature can be configured and toggled into plans) but
+//                NEVER surfaced in the tenant Features tab and not
+//                grantable as Trial / Paid Override. New add-ons default to
+//                this state; promote to `active` to publish commercially.
 //   - active   → may be granted as trial / paid override; visible in tenant
 //                Features tab as available; permissions for linked feature
 //                appear when an active grant exists.
@@ -156,7 +162,13 @@ export type AddOnLifecycle = 'draft' | 'planned' | 'in_development' | 'active' |
 //                stays in catalog so it can be reactivated.
 //   - archived → terminal hidden state; not offerable; existing grants stop
 //                enabling the feature; hidden from default catalog views.
-export type AddOnGovernanceStatus = 'active' | 'disabled' | 'archived';
+//                Archive is BLOCKED while the linked feature is included
+//                in any plan, while the add-on has compatiblePlans
+//                selected, or while any active trial / paid override /
+//                pending payment references the add-on or its linked
+//                feature. See replit.md → "Add-on Lifecycle & Archive
+//                Protection Rule".
+export type AddOnGovernanceStatus = 'draft' | 'active' | 'disabled' | 'archived';
 
 export interface AddOn {
   id: string;
@@ -284,6 +296,18 @@ export const tenantFeatureOverrides: TenantFeatureOverride[] = [
 // existing Audit / Activity surfaces continue to show them.
 export type CommercialAuditAction =
   | 'addon_created'
+  // Add-on lifecycle / archive protection (Add-on Lifecycle & Archive
+  // Protection Rule). `addon_created_draft` fires instead of
+  // `addon_created` when the new catalog entry defaults to Draft.
+  // `feature_registered_for_addon` fires when the create flow
+  // auto-registers a new feature row in the Plans & Features Matrix.
+  // `addon_activated` fires on the Draft → Active transition.
+  // `addon_archive_blocked` fires when an Archive attempt is refused
+  // because dependencies still reference the add-on.
+  | 'addon_created_draft'
+  | 'addon_activated'
+  | 'addon_archive_blocked'
+  | 'feature_registered_for_addon'
   | 'addon_updated'
   | 'addon_status_changed'
   | 'addon_default_price_changed'
