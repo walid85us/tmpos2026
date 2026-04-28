@@ -187,6 +187,18 @@ export function resolveTenantFeature(
 
   const override = overrides.find(o => o.featureId === featureId);
   const addOn = findAddOnForFeature(featureId, addOns);
+  // Compatible-plan gate. An add-on may only be SURFACED as an add-on
+  // (label, price anchor, "Add-on" primary pill) when the tenant's
+  // current plan is in `compatiblePlans`. If it isn't, we drop the
+  // add-on attribution from the resolver result entirely so neither
+  // the resolver outcome nor any downstream UI labels the row as an
+  // add-on. The `disabled` / `archived` governance branches below are
+  // intentionally NOT gated by plan-compat — those convey a catalog
+  // state that is meaningful regardless of plan, and the row never
+  // implies "Add-on Available" in that case.
+  const addOnPlanCompat = !!addOn && addOn.compatiblePlans.includes(planKey);
+  const surfaceAddOn = addOnPlanCompat ? addOn : undefined;
+  const surfaceDefaultPrice = addOnPlanCompat ? addOn?.price : undefined;
   const overrideStatus = override
     ? deriveOverrideStatus(override, nowMs)
     : 'inactive';
@@ -250,10 +262,10 @@ export function resolveTenantFeature(
         enabled: true,
         reason: 'enabled_by_trial_addon',
         source: 'trial',
-        addOn,
+        addOn: surfaceAddOn,
         override,
         trialEnd: override.trialEnd,
-        defaultPrice: addOn?.price,
+        defaultPrice: surfaceDefaultPrice,
       };
     }
     if (overrideStatus === 'trial_expired') {
@@ -287,18 +299,22 @@ export function resolveTenantFeature(
       }
       const customPrice =
         typeof override.price === 'number' &&
-        addOn &&
-        override.price !== addOn.price
+        surfaceAddOn &&
+        override.price !== surfaceAddOn.price
           ? override.price
           : undefined;
-      const isAddOnRow = override.type === 'addon';
+      // `type === 'addon'` rows downgrade to a normal paid override when
+      // the linked add-on is no longer plan-compat, so the row's primary
+      // pill stops reading "Add-on" on tenants whose plan was removed
+      // from the add-on's compatiblePlans.
+      const isAddOnRow = override.type === 'addon' && addOnPlanCompat;
       return {
         enabled: true,
         reason: isAddOnRow ? 'enabled_by_paid_addon' : 'enabled_by_paid_override',
         source: isAddOnRow ? 'addon' : 'paid_override',
-        addOn,
+        addOn: surfaceAddOn,
         override,
-        defaultPrice: addOn?.price,
+        defaultPrice: surfaceDefaultPrice,
         customPrice,
         invoice,
         invoiceUiStatus,
@@ -309,13 +325,13 @@ export function resolveTenantFeature(
         enabled: false,
         reason: 'pending_payment',
         source: 'none',
-        addOn,
+        addOn: surfaceAddOn,
         override,
-        defaultPrice: addOn?.price,
+        defaultPrice: surfaceDefaultPrice,
         customPrice:
           typeof override.price === 'number' &&
-          addOn &&
-          override.price !== addOn.price
+          surfaceAddOn &&
+          override.price !== surfaceAddOn.price
             ? override.price
             : undefined,
         invoice,
@@ -359,8 +375,8 @@ export function resolveTenantFeature(
       enabled: false,
       reason: 'disabled_by_plan',
       source: 'none',
-      addOn,
-      defaultPrice: addOn?.price,
+      addOn: surfaceAddOn,
+      defaultPrice: surfaceDefaultPrice,
     };
   }
 
@@ -399,7 +415,7 @@ export const REASON_LABEL: Record<EntitlementReason, string> = {
 export const REASON_EXPLAINER: Record<EntitlementReason, string> = {
   included_by_plan: 'This feature is included by the tenant\u2019s active plan.',
   enabled_by_trial_addon:
-    'Active trial granted by an add-on override. Reverts when the trial ends unless converted.',
+    'Active trial. Reverts when the trial ends unless converted to a paid override.',
   enabled_by_paid_addon:
     'Active paid add-on. Linked to the catalog entry; tenant can be billed at the catalog price.',
   enabled_by_paid_override:

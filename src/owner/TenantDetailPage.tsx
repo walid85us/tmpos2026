@@ -346,16 +346,25 @@ const TenantDetailPage: React.FC = () => {
     trialEnd.setDate(trialEnd.getDate() + days);
     const endStr = trialEnd.toISOString().split('T')[0];
     const linkedAddOn = liveAddOns.find(a => a.linkedFeatureId === featureId) || liveAddOns.find(a => a.id === featureId);
+    // Only carry the catalog add-on linkage when it is currently
+    // OFFERABLE to this tenant (active + plan-compat). If the add-on
+    // exists but is incompatible with the tenant's plan, the trial is
+    // recorded as a pure tenant-level override so it never resurfaces
+    // as add-on-driven entitlement / labeling.
+    const eligibleAddOnId =
+      linkedAddOn && linkedAddOn.governanceStatus === 'active' && linkedAddOn.compatiblePlans.includes(currentPlan)
+        ? linkedAddOn.id
+        : null;
     setLocalOverrides(prev => {
       const filtered = prev.filter(o => o.featureId !== featureId);
-      return [...filtered, { tenantId: tenant.id, featureId, type: 'trial' as FeatureOverrideType, trialEnd: endStr, addedBy: 'You', addedDate: '2026-03-26', addOnId: linkedAddOn?.id ?? null }];
+      return [...filtered, { tenantId: tenant.id, featureId, type: 'trial' as FeatureOverrideType, trialEnd: endStr, addedBy: 'You', addedDate: '2026-03-26', addOnId: eligibleAddOnId }];
     });
     pushCommercialAudit({
       actor: 'System Owner',
       action: 'tenant_trial_granted',
       tenantId: tenant.id,
       featureId,
-      addOnId: linkedAddOn?.id ?? null,
+      addOnId: eligibleAddOnId,
       newValue: endStr,
       note: `${days}-day trial`,
     });
@@ -367,6 +376,15 @@ const TenantDetailPage: React.FC = () => {
   const handleEnablePaidOverride = (featureId: string) => {
     const price = parseFloat(paidOverridePrice) || 0;
     const linkedAddOn = liveAddOns.find(a => a.linkedFeatureId === featureId) || liveAddOns.find(a => a.id === featureId);
+    // Only attribute the override to the catalog add-on when that
+    // add-on is currently OFFERABLE to this tenant (active + plan-
+    // compat). Otherwise the override is recorded as a pure tenant-
+    // level paid override with no add-on attribution, so it cannot be
+    // re-presented as add-on-driven entitlement / labeling.
+    const eligibleAddOnId =
+      linkedAddOn && linkedAddOn.governanceStatus === 'active' && linkedAddOn.compatiblePlans.includes(currentPlan)
+        ? linkedAddOn.id
+        : null;
     const featureName = featureMatrix.find(f => f.id === featureId)?.name || featureId;
     const activationMode = paidOverrideActivation;
     const dueDate = paidOverrideDueDate || (() => {
@@ -380,7 +398,7 @@ const TenantDetailPage: React.FC = () => {
       tenantId: tenant.id,
       featureId,
       featureName,
-      addOnId: linkedAddOn?.id ?? null,
+      addOnId: eligibleAddOnId,
       amount: price,
       cadence: paidOverrideModel,
       dueDate,
@@ -400,7 +418,7 @@ const TenantDetailPage: React.FC = () => {
         pricingModel: paidOverrideModel,
         price,
         pricingNotes: paidOverrideNotes || undefined,
-        addOnId: linkedAddOn?.id ?? null,
+        addOnId: eligibleAddOnId,
         activationMode,
         invoiceId: invoice.invoiceId,
         dueDate,
@@ -411,7 +429,7 @@ const TenantDetailPage: React.FC = () => {
       action: 'tenant_paid_override_granted',
       tenantId: tenant.id,
       featureId,
-      addOnId: linkedAddOn?.id ?? null,
+      addOnId: eligibleAddOnId,
       oldValue: linkedAddOn?.price ?? null,
       newValue: price,
       note: paidOverrideNotes || (linkedAddOn && price !== linkedAddOn.price ? 'Custom price' : 'Catalog price'),
@@ -421,7 +439,7 @@ const TenantDetailPage: React.FC = () => {
       action: 'invoice_created',
       tenantId: tenant.id,
       featureId,
-      addOnId: linkedAddOn?.id ?? null,
+      addOnId: eligibleAddOnId,
       newValue: invoice.invoiceId,
       note: `Open invoice · ${activationMode === 'immediate' ? 'Immediate activation' : 'Activate after payment'} · Due ${dueDate}`,
     });
@@ -431,7 +449,7 @@ const TenantDetailPage: React.FC = () => {
         action: 'immediate_activation_granted',
         tenantId: tenant.id,
         featureId,
-        addOnId: linkedAddOn?.id ?? null,
+        addOnId: eligibleAddOnId,
         newValue: invoice.invoiceId,
         note: 'Feature active before payment',
       });
@@ -1648,46 +1666,36 @@ const TenantDetailPage: React.FC = () => {
                       <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
                         <div className="flex items-center gap-1.5 flex-wrap justify-end">
                           <span className={`text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest whitespace-nowrap ${reasonBadgeClass}`}>{REASON_LABEL[reason]}</span>
-                          {/* Not-in-Plan rows: surface the emerald
-                              "Add-on available" pill whenever the
-                              feature is linked to an Active catalog
-                              add-on. Plan-compatibility is intentionally
-                              NOT required for visibility — the label is
-                              an information disclosure that an add-on
-                              exists for this feature. Disabled / archived
-                              catalog add-ons are filtered out by the
-                              governanceStatus === 'active' guard so
-                              they never resurface as "Add-on available".
-                              The optional tail "(plan upgrade required)"
-                              is appended when the catalog item exists
-                              but is not compatible with the tenant's
-                              current plan, so the operator can tell the
-                              difference at a glance. */}
-                          {reason === 'disabled_by_plan' && r.addOn && r.addOn.governanceStatus === 'active' && (
-                            <span className="text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest whitespace-nowrap bg-emerald-50 text-emerald-700 border-emerald-100">
-                              Add-on available{!eligibleAddOn ? ' · Plan upgrade required' : ''}
-                            </span>
+                          {/* Add-on visibility (locked rule): an add-on
+                              surfaces in a tenant's Features tab ONLY when
+                              all three are true:
+                                1) feature is linked to a catalog add-on
+                                2) catalog add-on governanceStatus === 'active'
+                                3) tenant's current plan is in compatiblePlans
+                              All three are captured by `eligibleAddOn`. If
+                              any is false, no add-on pill renders — the row
+                              shows only its normal feature state. There is
+                              NO "Plan upgrade required" tail; an
+                              incompatible add-on is simply not shown as an
+                              add-on at all.
+
+                              Emerald "Add-on available" appears next to a
+                              `Not in Plan` row when the add-on can actually
+                              be granted now. Violet "Add-on" appears next
+                              to `Paid Override` / `Pending Payment` rows
+                              that are linked to an active+compatible
+                              catalog add-on. The violet pill is suppressed
+                              when the row's primary reason is already
+                              `enabled_by_paid_addon` (whose own primary
+                              pill already reads "Add-on") so the badges
+                              don't double up. The Custom Price pill is
+                              rendered separately below the price line and
+                              only when tenant price diverges from catalog
+                              price. */}
+                          {reason === 'disabled_by_plan' && eligibleAddOn && (
+                            <span className="text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest whitespace-nowrap bg-emerald-50 text-emerald-700 border-emerald-100">Add-on available</span>
                           )}
-                          {/* Add-on label visibility (consolidated rule):
-                              The violet "Add-on" pill appears alongside the
-                              primary state pill whenever the row is gated by
-                              an Active Add-on Catalog item. That covers two
-                              entitlement states:
-                                - Paid Override active and linked to an
-                                  active catalog add-on
-                                - Pending Payment for a paid override that
-                                  is linked to an active catalog add-on
-                              For Not-in-Plan rows the analogous pill is the
-                              emerald "Add-on available" rendered above.
-                              Disabled / archived catalog add-ons are
-                              filtered out by the governanceStatus === 'active'
-                              guard so they never resurface as Add-on /
-                              Add-on Available. Non-catalog overrides do
-                              NOT render this pill. The Custom Price pill
-                              is rendered separately below the price line
-                              and only when tenant price differs from
-                              catalog price. */}
-                          {(isPaidActive || isPendingPayment) && r.addOn && r.addOn.governanceStatus === 'active' && reason !== 'enabled_by_paid_addon' && (
+                          {(isPaidActive || isPendingPayment) && eligibleAddOn && reason !== 'enabled_by_paid_addon' && (
                             <span className="text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest whitespace-nowrap bg-violet-50 text-violet-700 border-violet-100">Add-on</span>
                           )}
                           {/* Spec L: surface "Invoice Open / Overdue" alongside Paid Override

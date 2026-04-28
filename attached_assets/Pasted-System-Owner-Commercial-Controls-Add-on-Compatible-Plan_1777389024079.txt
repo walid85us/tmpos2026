@@ -1,0 +1,171 @@
+System Owner Commercial Controls — Add-on Compatible Plan Availability Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict isolated correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not touch the completed Shipping Module.
+Do not change billing, invoice, Store Permissions Matrix, or paid override state machine.
+
+Fix only Add-on availability in the Tenant Features tab based on Add-on Compatible Plans.
+
+==================================================
+CURRENT QA-BLOCKING ISSUE
+==================================================
+
+Tenant Features tab is showing add-on information for add-ons that are not compatible with the tenant’s current plan.
+
+This is wrong.
+
+If an add-on is not compatible with the tenant’s current plan, the add-on must not appear in that tenant’s Features tab as an add-on at all.
+
+Do not show:
+- Add-on
+- Add-on Available
+- Plan Upgrade Required
+- add-on-specific availability messaging
+- add-on-specific grant behavior
+
+==================================================
+REQUIRED BUSINESS RULE
+==================================================
+
+An add-on should appear in a tenant’s Features tab only when ALL are true:
+
+1) The feature is linked to an Add-on Catalog item
+2) The Add-on Catalog item is Active
+3) The tenant’s current plan is included in the add-on’s Compatible Plans
+
+If any condition is false:
+- suppress the add-on from that tenant’s Features tab
+- do not show add-on label or add-on availability
+- do not show plan upgrade messaging
+- do not show add-on-specific grant behavior
+
+==================================================
+EXPECTED TENANT FEATURES TAB BEHAVIOR
+==================================================
+
+Case A — Add-on is active and compatible with tenant current plan:
+Display:
+- Add-on
+- Trial
+- Paid Override
+
+If the feature is also not included in plan:
+- show Not in Plan as the base feature state if needed
+- show Add-on as commercial availability
+- show Trial and Paid Override actions
+
+Case B — Add-on is active but NOT compatible with tenant current plan:
+Display:
+- Do not show that add-on in Tenant Features tab
+- Do not show Add-on label
+- Do not show Add-on Available
+- Do not show Plan Upgrade Required
+
+If the underlying feature still exists as a normal feature:
+- show normal feature state only, such as Not in Plan
+- do not show add-on-specific labeling
+
+Case C — Add-on is disabled or archived:
+Display:
+- Do not show that add-on in Tenant Features tab
+- do not show Add-on
+- do not show Add-on Available
+
+Case D — No add-on catalog link:
+Display:
+- normal feature state only
+- do not show Add-on
+
+==================================================
+COMPATIBLE PLANS EDITING
+==================================================
+
+Required:
+When System Owner edits Compatible Plans for an add-on:
+
+1) If tenant’s current plan is removed from Compatible Plans:
+- the add-on disappears from that tenant’s Features tab as an add-on
+- Add-on label disappears
+- Add-on Available disappears
+- no Plan Upgrade Required message appears
+
+2) If tenant’s current plan is added to Compatible Plans:
+- the add-on appears in that tenant’s Features tab as Add-on
+- Trial and Paid Override actions are available where eligible
+
+This must apply consistently across Essential, Growth, and Advanced tenants.
+
+==================================================
+TRIAL / PAID OVERRIDE BEHAVIOR
+==================================================
+
+Required:
+For add-on-specific Trial / Paid Override:
+- show these actions only when the add-on is active and compatible with the tenant’s current plan
+
+For non-add-on tenant-level feature overrides:
+- preserve existing behavior only where the feature is a normal implemented feature and eligible for tenant-level override
+
+Important:
+Do not present an incompatible add-on as available through Trial or Paid Override.
+
+==================================================
+DO NOT CHANGE
+==================================================
+
+Do not change:
+- Permissions Impact removal
+- simple Tenant Features tab layout
+- paid override invoice workflow
+- activation mode behavior
+- Store Permissions Matrix behavior
+- Add-on Catalog single status chip
+- completed Shipping Module behavior
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Add-ons not compatible with tenant’s current plan do not appear as add-ons in Tenant Features.
+2) “Add-on Available · Plan Upgrade Required” no longer appears anywhere.
+3) Add-on label appears only when tenant’s current plan is included in Compatible Plans.
+4) When tenant’s plan is added to Compatible Plans, add-on appears with Trial and Paid Override actions.
+5) When tenant’s plan is removed from Compatible Plans, add-on disappears as an add-on.
+6) Disabled add-ons do not show as add-ons.
+7) Archived add-ons do not show as add-ons.
+8) Non-catalog features do not show Add-on label.
+9) Existing billing, permissions, and shipping behavior remain intact.
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Add-on Compatible Plans availability rule
+- incompatible add-ons do not appear in Tenant Features as add-ons
+- no Plan Upgrade Required message in Tenant Features add-on label
+- compatible add-ons show Add-on with Trial / Paid Override actions
+- Compatible Plans edits affect Tenant Features visibility
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Add-on Compatible Plan Availability Rule
+3. Tenant Features Tab Visibility Correction
+4. Compatible Plans Edit Behavior
+5. Trial / Paid Override Behavior
+6. Files Changed
+7. Documentation Updated
+8. Non-Regression Notes
