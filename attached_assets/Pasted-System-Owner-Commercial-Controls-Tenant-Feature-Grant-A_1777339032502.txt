@@ -1,0 +1,261 @@
+System Owner Commercial Controls — Tenant Feature Grant Actions Restoration
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict isolated correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not touch Shipping Module.
+Do not implement billing, Stripe, SaaS invoicing, accounting, or payment collection.
+
+Fix only the Tenant Features tab grant-action visibility logic.
+
+==================================================
+CURRENT QA-BLOCKING ISSUE
+==================================================
+
+The Add-on Catalog duplicate status chip issue appears fixed.
+
+However, the Tenant Features tab still does not restore the intended feature grant logic.
+
+Observed:
+- Several features show “Not in Plan”
+- Their helper text says: “Grant a trial or paid override to enable.”
+- But the actual Trial / Paid Override buttons are missing for most rows.
+- Only API Access shows Trial / Paid Override.
+
+This is inconsistent and incorrect.
+
+==================================================
+INTENDED BUSINESS LOGIC
+==================================================
+
+For each tenant feature row:
+
+1) Included by Plan
+Display:
+- Included by Plan
+Actions:
+- no Trial / Paid Override needed
+
+2) Not in Plan but implemented/available
+Display:
+- Not in Plan
+Actions:
+- Grant Trial
+- Grant Paid Override
+
+This must work even if the feature is not linked to an Add-on Catalog item.
+
+3) Not in Plan and linked to active add-on catalog item
+Display:
+- Not in Plan
+- Add-on Available or Add-on
+Actions:
+- Grant Trial
+- Grant Paid Override / Grant Add-on
+
+Paid override/add-on price should default from catalog price if linked to an active add-on.
+
+4) Not in Plan and not linked to add-on catalog item
+Display:
+- Not in Plan
+Actions:
+- Grant Trial
+- Grant Paid Override
+
+In this case, the paid override can use feature-level/default override pricing if available, or require manual price entry.
+Do not hide the action just because there is no add-on catalog link.
+
+5) Disabled by Owner
+Display:
+- Disabled by Owner
+Actions:
+- Re-enable if applicable
+- Do not show grant buttons until re-enabled, unless current design supports both
+
+6) In Development / Not Implemented
+Display:
+- In Development or Not Available
+Actions:
+- Do not allow Trial / Paid Override until implemented
+
+7) Trial Active
+Display:
+- Trial
+- trial end date
+Actions:
+- End Trial
+- Convert to Paid Override where applicable
+
+8) Paid Override Active
+Display:
+- Paid Override / Overridden
+- tenant-specific price if applicable
+Actions:
+- Edit Price
+- Revoke
+
+9) Trial Expired / Override Revoked
+Display:
+- Trial Expired or Revoked
+Actions:
+- Re-trial
+- Re-grant Paid Override if feature is still available
+
+==================================================
+REQUIRED FIX
+==================================================
+
+Restore Trial / Paid Override action buttons for all eligible Not in Plan features.
+
+Do not restrict Trial / Paid Override visibility only to features with active Add-on Catalog linkage.
+
+Separate these concepts:
+
+A) Trial / Paid Override
+- tenant-level entitlement override
+- available for eligible implemented features not in plan
+
+B) Add-on
+- catalog-backed commercial product
+- available only when linked active add-on exists
+
+C) Disabled / Archived Add-on
+- should suppress add-on-specific grants
+- should not necessarily suppress non-add-on trial/override if the underlying feature is still implemented and the business logic allows tenant-level override
+
+==================================================
+ROW ACTION REQUIREMENTS
+==================================================
+
+For every feature row, compute action visibility from entitlement reason and feature availability.
+
+Required action examples:
+
+- not_in_plan + implemented:
+  show Trial
+  show Paid Override
+
+- not_in_plan + implemented + active linked add-on:
+  show Trial
+  show Paid Override / Add-on
+  show Add-on Available label
+
+- disabled_by_owner:
+  show Re-enable if supported
+
+- enabled_by_trial:
+  show End Trial
+  show Convert to Paid Override if supported
+
+- enabled_by_paid_override:
+  show Edit Price
+  show Revoke
+
+- trial_expired:
+  show Re-trial
+  show Re-grant Paid Override
+
+- override_revoked:
+  show Re-grant Paid Override
+
+- in_development / not_implemented:
+  do not show Trial or Paid Override
+
+==================================================
+PRICING REQUIREMENTS
+==================================================
+
+When granting Paid Override:
+
+1) If linked active Add-on Catalog item exists:
+- default price = add-on catalog price
+- allow tenant-specific edit
+- do not mutate catalog price
+
+2) If no linked add-on exists:
+- still allow Paid Override if feature is implemented and eligible
+- require manual price entry or use existing feature/default override price if present
+- clearly label as Paid Override, not Add-on
+
+Do not implement actual billing collection.
+
+==================================================
+UI REQUIREMENTS
+==================================================
+
+Required:
+- The row text must match available actions.
+- Do not say “Grant a trial or paid override to enable” if no buttons are available.
+- Trial / Paid Override buttons should be visible on eligible rows, not hidden behind unclear hover-only behavior.
+- Add-on Available should be a status/availability indicator, not a replacement for Trial / Paid Override buttons.
+
+==================================================
+PERMISSION MATRIX REQUIREMENTS
+==================================================
+
+Preserve:
+- active trial or paid override restores linked Store Permissions Matrix permissions
+- revoked/expired override hides linked permissions
+- disabled by owner hides linked permissions
+- disabled/archived catalog add-on should not expose add-on-specific entitlement
+- role permissions cannot resurrect unavailable feature
+
+==================================================
+AUDIT REQUIREMENTS
+==================================================
+
+Preserve audit for:
+- trial grant
+- trial end
+- paid override grant
+- paid override price edit
+- paid override revoke
+- re-trial / re-grant paid override
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Eligible Not in Plan implemented features show Trial and Paid Override actions.
+2) Trial / Paid Override actions are not limited only to active linked add-ons.
+3) Features linked to active add-ons also show Add-on Available clearly.
+4) Disabled/archived add-ons do not appear as available add-ons.
+5) Row helper text matches actual available actions.
+6) In Development / Not Implemented features do not allow grants.
+7) Paid Override works with catalog default price when add-on exists.
+8) Paid Override still works for eligible non-add-on features using manual/default price.
+9) Store Permissions Matrix follows trial/paid override entitlement correctly.
+10) No Shipping Module or billing behavior is changed.
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Trial / Paid Override are tenant-level entitlement overrides
+- Add-on is catalog-backed commercial availability
+- Trial / Paid Override do not require add-on catalog linkage for eligible implemented features
+- Add-on Available only appears when active linked add-on exists
+- disabled/archived add-on behavior
+- paid override pricing behavior with and without catalog-linked add-on
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Tenant Feature Grant Action Restoration
+3. Trial / Paid Override vs Add-on Distinction
+4. Pricing Behavior
+5. Permission Matrix Alignment
+6. Files Changed
+7. Documentation Updated
+8. Non-Regression Notes

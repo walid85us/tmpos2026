@@ -300,27 +300,14 @@ export function resolveTenantFeature(
         addOn,
       };
     }
-    // Feature exists but plan excludes it → look at the candidate add-on
-    // (if any) before falling back to the generic plan-disabled reason.
-    // A disabled / archived catalog entry surfaces here as well so the
-    // tenant Features tab can show "Add-on disabled" and suppress the
-    // Trial / Paid Override grant buttons (no offerable catalog row).
-    if (addOn && addOn.governanceStatus === 'archived') {
-      return {
-        enabled: false,
-        reason: 'addon_archived',
-        source: 'none',
-        addOn,
-      };
-    }
-    if (addOn && addOn.governanceStatus === 'disabled') {
-      return {
-        enabled: false,
-        reason: 'addon_disabled',
-        source: 'none',
-        addOn,
-      };
-    }
+    // Feature exists but plan excludes it. The "Add-on Available" hint
+    // and modal price pre-fill are handled by the UI based on the
+    // resolver's `addOn` payload + governanceStatus. The reason itself
+    // is always `disabled_by_plan` so the tenant Features tab can offer
+    // a tenant-level Trial / Paid Override (which is independent of
+    // catalog availability — paid overrides do not require a linked
+    // active add-on; the linked add-on only contributes a default
+    // price and an "Add-on Available" badge when present + active).
     return {
       enabled: false,
       reason: 'disabled_by_plan',

@@ -1345,11 +1345,30 @@ const TenantDetailPage: React.FC = () => {
                 const isExpired = reason === 'trial_expired';
                 const isRevoked = reason === 'override_revoked';
                 const isAddOnDisabled = reason === 'addon_disabled' || reason === 'addon_archived';
-                const eligibleAddOn = r.addOn && r.addOn.governanceStatus === 'active';
-                // Action buttons appear when feature is implemented AND
-                // either currently included by plan / has a granted override
-                // OR the catalog has an active linked add-on we can grant.
-                const canOfferGrant = feature.lifecycle === 'implemented' && !enabled && !isPendingPayment && eligibleAddOn;
+                // An "available" linked add-on must be (a) active in the
+                // governance catalog AND (b) compatible with the
+                // tenant's current plan. Used by the secondary
+                // "Add-on Available" pill and by the Paid Override
+                // modal price/cadence pre-fill. Disabled / archived /
+                // plan-incompatible add-ons must NOT contribute either.
+                const eligibleAddOn =
+                  r.addOn &&
+                  r.addOn.governanceStatus === 'active' &&
+                  r.addOn.compatiblePlans.includes(currentPlan);
+                const hasActiveOverride = !!ov && !ov.revokedDate;
+                // Trial / Paid Override are tenant-level entitlement
+                // overrides — they do NOT require an active linked
+                // add-on. They appear for any implemented feature that
+                // is currently not entitled and does not already have
+                // an active override row. The linked add-on (when active)
+                // contributes a default price and an "Add-on Available"
+                // hint, but does not gate visibility of the buttons.
+                const canOfferGrant =
+                  feature.lifecycle === 'implemented' &&
+                  !enabled &&
+                  !isPendingPayment &&
+                  !hasActiveOverride &&
+                  reason !== 'feature_disabled_by_owner';
                 const cardBg = isPendingPayment
                   ? 'bg-amber-50/50 border-amber-100'
                   : isExpired
@@ -1433,7 +1452,7 @@ const TenantDetailPage: React.FC = () => {
                           {canOfferGrant && (
                             <>
                               <button onClick={() => setFeatureTrialModal(feature.id)} className="text-[8px] font-black text-indigo-600 bg-indigo-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-indigo-100 transition-colors">Trial</button>
-                              <button onClick={() => { setPaidOverridePrice(r.addOn?.price ? String(r.addOn.price) : ''); setPaidOverrideModel(r.addOn?.billingCadence === 'annual' ? 'annual' : r.addOn?.billingCadence === 'one_time' ? 'one_time' : 'monthly'); setFeaturePaidModal(feature.id); }} className="text-[8px] font-black text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-emerald-100 transition-colors">Paid Override</button>
+                              <button onClick={() => { setPaidOverridePrice(eligibleAddOn && r.addOn?.price ? String(r.addOn.price) : ''); setPaidOverrideModel(eligibleAddOn && r.addOn?.billingCadence === 'annual' ? 'annual' : eligibleAddOn && r.addOn?.billingCadence === 'one_time' ? 'one_time' : 'monthly'); setFeaturePaidModal(feature.id); }} className="text-[8px] font-black text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-emerald-100 transition-colors">Paid Override</button>
                             </>
                           )}
                           {isAddOnDisabled && feature.lifecycle === 'implemented' && (
@@ -1451,10 +1470,10 @@ const TenantDetailPage: React.FC = () => {
                           {isPaidActive && (
                             <button onClick={() => handleRevokeFeature(feature.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">Revoke</button>
                           )}
-                          {(isExpired || isRevoked) && eligibleAddOn && (
+                          {(isExpired || isRevoked) && feature.lifecycle === 'implemented' && (
                             <>
                               <button onClick={() => setFeatureTrialModal(feature.id)} className="text-[8px] font-black text-indigo-600 bg-indigo-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-indigo-100 transition-colors">Re-trial</button>
-                              <button onClick={() => { setPaidOverridePrice(r.addOn?.price ? String(r.addOn.price) : ''); setPaidOverrideModel(r.addOn?.billingCadence === 'annual' ? 'annual' : r.addOn?.billingCadence === 'one_time' ? 'one_time' : 'monthly'); setFeaturePaidModal(feature.id); }} className="text-[8px] font-black text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-emerald-100 transition-colors">Re-grant Paid</button>
+                              <button onClick={() => { setPaidOverridePrice(eligibleAddOn && r.addOn?.price ? String(r.addOn.price) : ''); setPaidOverrideModel(eligibleAddOn && r.addOn?.billingCadence === 'annual' ? 'annual' : eligibleAddOn && r.addOn?.billingCadence === 'one_time' ? 'one_time' : 'monthly'); setFeaturePaidModal(feature.id); }} className="text-[8px] font-black text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-emerald-100 transition-colors">Re-grant Paid</button>
                             </>
                           )}
                         </div>
