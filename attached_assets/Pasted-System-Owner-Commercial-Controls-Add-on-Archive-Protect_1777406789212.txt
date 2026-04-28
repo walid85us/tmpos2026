@@ -1,0 +1,319 @@
+System Owner Commercial Controls — Add-on Archive Protection + Draft Registration Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict isolated correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not touch the completed Shipping Module.
+Do not change billing, invoice, Store Permissions Matrix, or paid override state machine except where directly required by add-on lifecycle/source-of-truth protection.
+
+Fix only:
+1) Add-on archive protection
+2) Add-on creation default status
+3) Plans & Features Matrix registration for new add-ons
+4) Tenant Features visibility for draft/active/archived add-ons
+
+==================================================
+CURRENT QA-BLOCKING ISSUE
+==================================================
+
+Issue 1 — Archived add-on still conflicts with Plans & Features Matrix
+
+Observed:
+- An add-on can be archived while it is still linked to plan-level inclusion or compatible plan availability.
+- Archived add-on may still appear in Plans & Features Matrix or create confusing plan-feature state.
+
+This is not correct.
+
+Archive should behave similarly to Delete protection:
+- If an add-on is linked to any plan inclusion or compatible-plan offering, it should not be archivable until the System Owner removes/disables those plan relationships from the correct source.
+
+Issue 2 — New add-on creation lifecycle is unclear
+
+Required logic:
+- When a new add-on is created, it must be represented in Plans & Features Matrix using its linked feature/capability ID.
+- The new add-on should default to Draft.
+- Draft add-ons should be visible to System Owner in Add-on Catalog and Plans & Features Matrix.
+- Draft add-ons should NOT be available for tenant trial/paid override until activated/published.
+- Once the add-on is Active and compatible with a tenant’s current plan, it should appear in that tenant’s Features tab as Add-on.
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Firebase/Firestore multi-tenant architect
+- Senior SaaS commercial-entitlement architect
+- Senior RBAC / plan-gating architect
+- Senior product operations architect
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Do not make a shallow archive-button patch.
+Fix the lifecycle rules properly.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- replit.md
+
+Preserve:
+- Plans & Features Matrix as source of truth for included-by-plan access
+- Add-on Compatible Plans controlling optional add-on availability only when not included by plan
+- Tenant Features tab simplification
+- Permissions Impact removal
+- paid override invoice workflow
+- activation mode behavior
+- Store Permissions Matrix entitlement behavior
+- completed Shipping Module behavior
+
+==================================================
+PART A — ADD-ON LIFECYCLE STATES
+==================================================
+
+Required:
+Add-on Catalog lifecycle should support:
+
+- draft
+- active
+- disabled
+- archived
+
+Meaning:
+
+1) Draft
+- newly created but not yet commercially available
+- visible to System Owner in Add-on Catalog
+- represented in Plans & Features Matrix
+- not shown as available in tenant Features tab
+- cannot be granted as Trial or Paid Override
+
+2) Active
+- commercially available
+- may appear in Tenant Features tab only if compatible with tenant’s current plan and not included by plan
+- can be granted as Trial or Paid Override
+
+3) Disabled
+- temporarily unavailable
+- not shown as available tenant add-on
+- historical records preserved
+
+4) Archived
+- retired from active commercial offering
+- not shown as available tenant add-on
+- historical records preserved
+- should only be allowed when no active plan inclusion / compatible-plan dependencies remain
+
+==================================================
+PART B — NEW ADD-ON CREATION REGISTRATION
+==================================================
+
+Required:
+When System Owner creates a new add-on:
+
+1) It must be linked to a feature/capability ID.
+2) That linked feature/capability must be registered in Plans & Features Matrix.
+3) Do not create duplicate feature rows if the feature/capability already exists.
+4) Preserve the same feature/capability key across:
+   - Add-on Catalog
+   - Plans & Features Matrix
+   - Tenant Features tab
+   - Store Permissions Matrix
+5) Default add-on status must be Draft.
+6) Draft add-on should appear in System Owner Add-on Catalog and Plans & Features Matrix.
+7) Draft add-on should not appear as available Add-on in tenant Features tab.
+
+==================================================
+PART C — PLANS & FEATURES MATRIX DRAFT DISPLAY
+==================================================
+
+Required:
+Plans & Features Matrix should show newly created draft add-on-linked features so System Owner can configure plan inclusion.
+
+Recommended display:
+- Feature name
+- Add-on / Draft indicator
+- plan toggles for Essential / Growth / Advanced
+- clear note that Draft add-on is not tenant-grantable until Active
+
+Required:
+If feature is enabled in a plan while add-on is still Draft:
+- it may be recorded in the plan matrix
+- but tenant availability should follow current product decision:
+  Preferred: do not expose Draft add-on capability to tenants until add-on is Active
+  Alternative if implementation expects plan inclusion to expose it: show clear Draft/Internal state and do not allow tenant grant actions
+
+Recommended:
+- Draft means not commercially available, so do not expose it in tenant Features tab.
+
+==================================================
+PART D — ARCHIVE PROTECTION RULE
+==================================================
+
+Required:
+Add-on cannot be archived if any of the following are true:
+
+1) The linked feature is enabled in any plan in Plans & Features Matrix.
+2) The add-on has any Compatible Plans selected.
+3) There are active tenant trials linked to the add-on.
+4) There are active paid overrides linked to the add-on.
+5) There are pending payment invoices linked to the add-on.
+6) There are unresolved active tenant entitlements linked to the add-on.
+
+If any dependency exists:
+- block Archive
+- show in-app explanation
+- do not use browser-native confirm
+- list what must be cleared first
+
+Example message:
+“This add-on cannot be archived while it is included in Growth plan or offered to Advanced tenants. Remove plan inclusion / compatible plans and resolve active tenant grants before archiving.”
+
+==================================================
+PART E — HOW TO ARCHIVE PROPERLY
+==================================================
+
+Required:
+To archive an add-on, System Owner must first:
+
+1) Remove included-by-plan access from Plans & Features Matrix where applicable.
+2) Remove optional plan compatibility from Add-on Compatible Plans.
+3) Resolve or revoke active tenant grants.
+4) Cancel or resolve pending payment invoices.
+5) Then archive.
+
+Important:
+Plans included by Plans & Features Matrix are controlled only from Plans & Features Matrix.
+Compatible Plans editor should remain locked for included-by-plan plans.
+
+==================================================
+PART F — TENANT FEATURES VISIBILITY BY ADD-ON STATUS
+==================================================
+
+Required:
+Tenant Features tab must follow:
+
+Draft add-on:
+- do not show as available Add-on
+- do not show Trial / Paid Override for that add-on
+
+Active add-on:
+- if tenant plan is compatible and feature not included by plan:
+  show Not in Plan + Add-on + Trial + Paid Override
+- if feature included by plan:
+  show Included by Plan + Add-on
+
+Disabled add-on:
+- do not show as available add-on
+- preserve historical billing/audit records
+
+Archived add-on:
+- do not show as available add-on
+- preserve historical billing/audit records
+
+==================================================
+PART G — DELETE VS ARCHIVE CONSISTENCY
+==================================================
+
+Required:
+Archive should be protected like Delete.
+
+If delete currently blocks because the add-on is linked to plans/tenants:
+- archive must also block for the same dependency categories unless explicitly allowed by lifecycle rules
+
+Do not allow Archive to bypass dependency protection.
+
+==================================================
+PART H — AUDITABILITY
+==================================================
+
+Required:
+Audit:
+- add-on created as Draft
+- feature/capability registered in Plans & Features Matrix
+- add-on activated
+- add-on disabled
+- archive attempt blocked with reason
+- add-on archived
+- compatible plans changed
+- plan inclusion changed from Plans & Features Matrix
+
+Audit should include:
+- actor
+- timestamp
+- addOnId
+- featureId
+- old/new status
+- dependency reason if archive blocked
+
+==================================================
+PART I — NON-REGRESSION
+==================================================
+
+Preserve:
+- add-on plan inclusion source-of-truth correction
+- included plan locking in Compatible Plans
+- Tenant Features label rules
+- billing invoice workflow
+- activation mode behavior
+- Store Permissions Matrix entitlement filtering
+- Add-on Catalog single status chip
+- Permissions Impact removal
+- completed Shipping Module behavior
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Newly created add-on defaults to Draft.
+2) Newly created add-on is registered in Plans & Features Matrix.
+3) No duplicate feature/capability row is created.
+4) Draft add-on is not available in tenant Features tab for Trial/Paid Override.
+5) Active compatible add-on appears in tenant Features tab as Add-on.
+6) Archive is blocked when linked feature is enabled in any plan.
+7) Archive is blocked when Compatible Plans are selected.
+8) Archive is blocked when active tenant trial/paid/pending entitlements exist.
+9) Archive explains what dependency must be cleared.
+10) After dependencies are cleared, add-on can be archived.
+11) Archived add-on does not appear as available tenant add-on.
+12) Existing billing, permissions, and shipping behavior remain intact.
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- add-on lifecycle states: draft / active / disabled / archived
+- new add-on default status = draft
+- new add-on registration in Plans & Features Matrix
+- draft tenant visibility rule
+- archive protection rules
+- dependency clearing workflow before archive
+- archive vs delete consistency
+- audit behavior
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Add-on Lifecycle + Draft Registration
+3. Plans & Features Matrix Registration
+4. Archive Protection Rules
+5. Tenant Features Visibility Rules
+6. Auditability Updates
+7. Files Changed
+8. Documentation Updated
+9. Non-Regression Notes
