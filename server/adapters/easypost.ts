@@ -21,6 +21,7 @@ import type {
   ProviderFieldError,
 } from '../types';
 import { getCredentials } from '../credential-store';
+import { sanitizeError } from '../safe-log';
 
 // EasyPost API error responses look like:
 //   { error: { code: "PICKUP.INVALID", message: "...", errors: [{ field, message }] } }
@@ -74,8 +75,16 @@ function extractEasyPostError(
   }
   detailLines.push(`HTTP ${httpStatus} · stage=${stage}`);
 
-  console.warn(`[EasyPost ${stage}] HTTP ${httpStatus} providerCode=${providerCode || '(none)'} providerMessage=${JSON.stringify(providerMessage)} fieldErrors=${fieldErrors.length}`);
-  if (fieldErrors.length > 0) console.warn(`[EasyPost ${stage}] field errors:`, fieldErrors);
+  // PII REDACTION: providerMessage / fieldErrors may contain customer-supplied
+  // address fragments (street, name, phone segments) echoed back by EasyPost.
+  // Log only metadata (counts + provider error code). The full provider
+  // message still flows through the API response to the operator UI for
+  // operational triage; we just don't persist it to server stdout.
+  console.warn(`[EasyPost ${stage}] HTTP ${httpStatus} providerCode=${providerCode || '(none)'} fieldErrorCount=${fieldErrors.length}`);
+  if (fieldErrors.length > 0) {
+    const fieldNames = fieldErrors.map((fe) => fe.field || '(unnamed)').join(',');
+    console.warn(`[EasyPost ${stage}] field error fields=[${fieldNames}]`);
+  }
 
   return {
     code: providerCode || fallbackCode,
@@ -353,7 +362,10 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
     try {
       const fromAddr = mapAddressToEasyPost(params.originAddress);
       const toAddr = mapAddressToEasyPost(params.destinationAddress);
-      console.log(`[EasyPost] purchaseLabel from_address.phone=${JSON.stringify(fromAddr.phone)} to_address.phone=${JSON.stringify(toAddr.phone)} carrier=${params.carrier} service=${params.service}`);
+      // PII REDACTION: phone numbers are NEVER logged. Phone presence is
+      // captured as a boolean to preserve the original diagnostic intent
+      // (verifying that normalizePhone returned a usable value).
+      console.log(`[EasyPost] purchaseLabel fromPhonePresent=${!!fromAddr.phone} toPhonePresent=${!!toAddr.phone} carrier=${params.carrier} service=${params.service}`);
       const createResponse = await fetch('https://api.easypost.com/v2/shipments', {
         method: 'POST',
         headers: {
@@ -485,7 +497,7 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
           },
         };
       }
-      console.error(`[EasyPost ${stage}] NETWORK_ERROR after ${elapsedMs}ms carrier=${params.carrier}:`, err);
+      console.error(`[EasyPost ${stage}] NETWORK_ERROR after ${elapsedMs}ms carrier=${params.carrier}`, sanitizeError(err));
       return {
         success: false,
         error: {
@@ -655,7 +667,7 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
           },
         };
       }
-      console.error(`[EasyPost pickup_create] NETWORK_ERROR after ${elapsedMs}ms shipment=${shipmentId}:`, err);
+      console.error(`[EasyPost pickup_create] NETWORK_ERROR after ${elapsedMs}ms shipment=${shipmentId}`, sanitizeError(err));
       return { success: false, error: { code: 'NETWORK_ERROR', message: `Failed to connect to EasyPost: ${err instanceof Error ? err.message : 'Unknown error'}`, retryable: true, stage: 'pickup_create' } };
     } finally {
       clearTimeout(timer);
@@ -731,7 +743,7 @@ export class EasyPostAdapter implements ShippingProviderAdapter {
           },
         };
       }
-      console.error(`[EasyPost ${stage}] NETWORK_ERROR after ${elapsedMs}ms pickup=${params.providerPickupId}:`, err);
+      console.error(`[EasyPost ${stage}] NETWORK_ERROR after ${elapsedMs}ms pickup=${params.providerPickupId}`, sanitizeError(err));
       return { success: false, error: { code: 'NETWORK_ERROR', message: `Failed to connect to EasyPost: ${err instanceof Error ? err.message : 'Unknown error'}`, retryable: true, stage } };
     } finally {
       clearTimeout(timer);

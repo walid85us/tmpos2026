@@ -99,6 +99,55 @@ The frontend is built using React 19, TypeScript, Vite 6, and Tailwind CSS v4.
     -   **New audit actions.** `addon_readiness_changed`, `addon_runtime_checklist_updated` (per-checklist-item diff captured in the note), `addon_manual_presale_allowed`, `addon_implementation_brief_generated`, `addon_parent_link_acknowledged`, `addon_readiness_overridden` extend `CommercialAuditAction` and are emitted from `saveAddOn` whenever the corresponding field changes (diff-driven). New add-ons emit an initial `addon_readiness_changed` capturing the Day-0 readiness assumption.
     -   **Out of scope / non-regression.** Readiness governance is purely an authoring + gating layer — it does NOT generate real app functionality, does not call any AI service, does not touch Stripe / external payment processors / customer-facing storefront billing, does not change the Shipping module behavior, does not change the Plans & Features Matrix source-of-truth, does not change paid-override invoice flow, does not change archive/delete add-on rules, and does not change the Store Permissions Matrix. The Tenant Features tab continues to be a commercial entitlement surface only; readiness chips are compact and tooltip-driven, not verbose Permissions Impact blocks.
 
+## Production Logging & PII Redaction (locked)
+
+Server-side logs are governed by a single rule: **operational metadata only,
+never customer or credential data**. The rule is enforced by `server/safe-log.ts`
+and applied at every console call in `server/index.ts`, `server/adapters/easypost.ts`,
+`server/event-processor.ts`. Shippo, ShipStation, and the credential store have
+zero console calls and remain that way.
+
+-   **Allowed in logs.** Operation name (e.g. `[purchase-label]`,
+    `[pickup/create]`), provider id (`easypost`, `shippo`, `shipstation`),
+    shipment / pickup / rate id, HTTP status, error code, elapsed ms, batch
+    counts, webhook event type + tracking number tail. These are required for
+    operator triage and stay in production.
+-   **Never logged.** Customer / shipper / recipient names, phone numbers,
+    email addresses, street / city / postal code / full address objects, API
+    keys, bearer tokens, webhook secrets, OAuth credentials, full request
+    bodies, full provider response bodies, raw `Error` instances (which can
+    carry request URLs and payload fragments in their messages).
+-   **Phone diagnostic.** The legacy phone-presence diagnostic in
+    `purchase-label` and `EasyPost.purchaseLabel` is preserved as a boolean
+    (`phonePresent=true|false`) so the original "did normalizePhone return a
+    usable value" question can still be answered without persisting the
+    digits.
+-   **Caught errors.** Every server `catch (err)` that previously passed `err`
+    directly to `console.error` now passes `sanitizeError(err)` instead, which
+    returns `{ name, code, message, status }` with phone-shaped digit runs
+    and email patterns masked to `[REDACTED]` and the message capped at 200
+    chars. Stack traces and `cause` chains are dropped.
+-   **EasyPost field errors.** The provider error formatter logs only the
+    provider error code and the count + field-name list of any field-level
+    errors. The full provider message and field error text still flow back to
+    the operator UI in the API response (so triage is unchanged), but they are
+    no longer written to server stdout.
+-   **Provider request bodies.** `JSON.stringify(...)` calls in
+    `server/adapters/*.ts` are HTTPS request bodies going to EasyPost /
+    Shippo / ShipStation. They are never passed to any console method.
+-   **Webhook log API.** The existing redaction at `/api/shipping/webhook-log`
+    (which strips `rawPayload` from the response) is unchanged. This is the
+    boundary between the durable webhook store (which keeps the raw payload
+    for replay) and the operator-visible API surface.
+-   **Out of scope / non-regression.** This pass changes only what is written
+    to stdout/stderr. It does NOT change any HTTP API behavior, any provider
+    integration, any shipping status / tracking / pickup / label logic, the
+    webhook store, the event processor, the Plans & Features Matrix, paid
+    override invoice flow, the Add-on Catalog / Governance / Readiness
+    surfaces, the Store Permissions Matrix, or any UI. Operator-visible
+    error messages in the API response are byte-identical to what they were
+    before this pass.
+
 # External Dependencies
 
 -   **Firebase**: Firestore and Authentication.

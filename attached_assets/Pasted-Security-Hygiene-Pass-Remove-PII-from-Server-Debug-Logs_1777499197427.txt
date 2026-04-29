@@ -1,0 +1,287 @@
+Security Hygiene Pass — Remove PII from Server Debug Logs Before Production
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated security-hygiene pass.
+Do not redesign the app.
+Do not change user-facing behavior.
+Do not modify completed Shipping Module logic except where server logging must be scrubbed.
+Do not modify System Owner Commercial Controls + Add-on Governance logic.
+Do not touch business workflows unless required to remove unsafe logging.
+
+Goal:
+Remove or sanitize personally identifiable information (PII), sensitive credentials, tokens, shipping addresses, customer data, tenant data, and provider payloads from server-side debug logs before production.
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Senior backend security engineer
+- Senior TypeScript/Node engineer
+- SaaS privacy/security reviewer
+- Multi-tenant platform architect
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+This is not a feature pass.
+This is a production-readiness security cleanup.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- replit.md
+- server/index.ts
+- all server-side shipping/provider API files
+- any server logging helpers if present
+- any file that logs request bodies, provider responses, user/session data, tenant data, customer data, addresses, tokens, or credentials
+
+Preserve all accepted completed workstreams.
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Find and fix unsafe server-side logging.
+
+PII/sensitive data must not be logged in production or normal server debug output.
+
+Sensitive examples:
+- customer names
+- customer emails
+- phone numbers
+- shipping addresses
+- billing addresses
+- tenant owner names/emails
+- user IDs where avoidable
+- auth/session tokens
+- API keys
+- provider credentials
+- full request bodies
+- full provider responses
+- labels/tracking payloads if they contain addresses or customer data
+- payment/billing/invoice customer data
+- repair/customer details
+- supplier/customer phone numbers
+- raw errors that include payload bodies or credentials
+
+==================================================
+PART A — AUDIT SERVER LOGGING
+==================================================
+
+Search for:
+- console.log
+- console.warn
+- console.error
+- logger.info
+- logger.warn
+- logger.error
+- debug logs
+- request/response dumps
+- JSON.stringify on request/provider/customer/tenant objects
+- provider payload logs
+- shipping API payload logs
+- billing/add-on invoice logs if server-side
+
+Classify logs into:
+1) safe operational logs
+2) logs needing redaction
+3) logs needing removal
+4) logs that should only run in development
+5) logs that should be converted to metadata-only logs
+
+==================================================
+PART B — REDACTION / SAFE LOGGING APPROACH
+==================================================
+
+Implement or refine a safe logging helper.
+
+Recommended:
+- create a small redaction utility if one does not exist
+- redact common sensitive keys recursively
+- avoid logging full request bodies
+- log only metadata needed for operations/debugging
+
+Sensitive keys to redact:
+- password
+- token
+- accessToken
+- refreshToken
+- authorization
+- apiKey
+- secret
+- credential
+- email
+- phone
+- address
+- street
+- city if tied to address
+- postalCode
+- zip
+- name if customer/user/person name
+- customerName
+- customerEmail
+- customerPhone
+- ownerEmail
+- recipient
+- sender
+- labelUrl if sensitive
+- webhookSecret
+- providerKey
+
+Use placeholder:
+[REDACTED]
+
+==================================================
+PART C — LOGGING RULES
+==================================================
+
+Required:
+- Do not log full request bodies.
+- Do not log full provider request/response payloads.
+- Do not log raw credentials or tokens.
+- Do not log full customer/tenant/user objects.
+- Do not log complete address objects.
+- Keep useful metadata:
+  - operation name
+  - provider name
+  - tenantId if needed
+  - shipmentId/orderId/invoiceId if needed
+  - status/result
+  - error code
+  - sanitized error message
+  - timing if available
+
+For errors:
+- preserve error status/code/message
+- scrub payload details
+- do not expose provider secrets
+- do not expose request body
+
+==================================================
+PART D — ENVIRONMENT-AWARE DEBUGGING
+==================================================
+
+If verbose logs are needed:
+- allow only in development mode
+- still redact sensitive values
+- never log secrets even in development
+- production logs should be metadata-only
+
+Do not remove necessary operational observability entirely.
+Replace unsafe logs with safe, useful logs.
+
+==================================================
+PART E — SHIPPING PROVIDER LOGGING
+==================================================
+
+Pay special attention to:
+- EasyPost
+- Shippo
+- ShipStation
+- tracking sync
+- address validation
+- rate requests
+- label purchase
+- pickup request/cancel
+- reverse logistics
+- provider configuration/test connection
+
+These areas often contain:
+- names
+- addresses
+- phone numbers
+- emails
+- provider API responses
+- credentials
+
+Required:
+- sanitize provider errors
+- log only provider, operation, shipment id, status/error code
+- do not log raw provider payloads
+
+==================================================
+PART F — BILLING / ADD-ON COMMERCIAL LOGGING
+==================================================
+
+If server-side logs exist for:
+- paid override invoices
+- tenant billing
+- add-on grants
+- tenant owner data
+
+Scrub:
+- tenant owner emails/phone if logged
+- billing contact data
+- invoice customer details
+- full invoice payloads if sensitive
+
+Keep:
+- invoice id
+- tenant id
+- operation
+- status
+
+==================================================
+PART G — NON-REGRESSION
+==================================================
+
+Do not change:
+- API behavior
+- provider integrations
+- shipping status logic
+- add-on billing workflow
+- tenant entitlement logic
+- Store Permissions Matrix behavior
+- UI behavior
+
+Only logging/sanitization should change.
+
+==================================================
+PART H — DOCUMENTATION
+==================================================
+
+Update replit.md with a short production logging/security note:
+- server logs are PII-redacted
+- request/provider payloads are not logged raw
+- secrets/tokens/API keys are never logged
+- verbose logs are development-only and still redacted
+- operational logs are metadata-only
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Server code has been searched for unsafe logs.
+2) Full request bodies are no longer logged.
+3) Full provider payloads are no longer logged.
+4) Credentials, tokens, API keys, and secrets are redacted or never logged.
+5) Customer names/emails/phones/addresses are redacted or not logged.
+6) Shipping provider logs are metadata-only.
+7) Billing/add-on/tenant logs are metadata-only if present.
+8) Error logs remain useful but sanitized.
+9) Development-only debug logs are gated and redacted.
+10) No business behavior changes.
+11) replit.md documents the safe logging rule.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Server Logging Audit
+3. Redaction / Safe Logging Helper
+4. Shipping Provider Log Cleanup
+5. Billing / Tenant Log Cleanup
+6. Files Changed
+7. Documentation Updated
+8. Non-Regression Notes

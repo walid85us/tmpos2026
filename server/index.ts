@@ -26,6 +26,7 @@ import {
   mapProviderStatus,
   type WebhookEventRecord,
 } from './event-processor';
+import { sanitizeError } from './safe-log';
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -163,7 +164,9 @@ app.get('/api/shipping/label-proxy', async (req, res) => {
 app.post('/api/shipping/purchase-label', async (req, res) => {
   const { providerId, originAddress, destinationAddress, packages, selectedRateId, carrier, service, shipmentRef } = req.body;
   console.log(`[purchase-label] carrier=${carrier} service=${service} ref=${shipmentRef}`);
-  console.log(`[purchase-label] origin.phone=${JSON.stringify(originAddress?.phone)} dest.phone=${JSON.stringify(destinationAddress?.phone)}`);
+  // PII REDACTION: phone numbers from origin/destination addresses are NEVER
+  // logged. Phone presence/absence is captured as a boolean for diagnostics.
+  console.log(`[purchase-label] originPhonePresent=${!!originAddress?.phone} destPhonePresent=${!!destinationAddress?.phone}`);
   const provider = resolveProvider(providerId);
   if (!provider) {
     res.json({ success: false, error: { code: 'NO_PROVIDER', message: 'No active shipping provider. Configure a provider in Shipping Center.' } });
@@ -200,7 +203,7 @@ app.post('/api/shipping/pickup/create', async (req, res) => {
     console.log('[pickup/create] ←', { providerId: provider.providerId, success: result.success, providerPickupId: result.providerPickupId, rates: result.rates?.length, error: result.error?.code });
     res.json(result);
   } catch (err) {
-    console.error('[pickup/create] EXCEPTION', err);
+    console.error('[pickup/create] EXCEPTION', sanitizeError(err));
     res.json({ success: false, error: { code: 'ADAPTER_EXCEPTION', message: err instanceof Error ? err.message : 'Adapter threw an unexpected error.', retryable: true } });
   }
 });
@@ -222,7 +225,7 @@ app.post('/api/shipping/pickup/buy', async (req, res) => {
     console.log('[pickup/buy] ←', { success: result.success, confirmation: result.confirmationNumber, cost: result.cost, error: result.error?.code });
     res.json(result);
   } catch (err) {
-    console.error('[pickup/buy] EXCEPTION', err);
+    console.error('[pickup/buy] EXCEPTION', sanitizeError(err));
     res.json({ success: false, error: { code: 'ADAPTER_EXCEPTION', message: err instanceof Error ? err.message : 'Adapter threw an unexpected error.', retryable: true } });
   }
 });
@@ -244,7 +247,7 @@ app.post('/api/shipping/pickup/cancel', async (req, res) => {
     console.log('[pickup/cancel] ←', { success: result.success, status: result.status, error: result.error?.code });
     res.json(result);
   } catch (err) {
-    console.error('[pickup/cancel] EXCEPTION', err);
+    console.error('[pickup/cancel] EXCEPTION', sanitizeError(err));
     res.json({ success: false, error: { code: 'ADAPTER_EXCEPTION', message: err instanceof Error ? err.message : 'Adapter threw an unexpected error.', retryable: true } });
   }
 });
