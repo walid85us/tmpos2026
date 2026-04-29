@@ -10,6 +10,7 @@ import type { SupportNoteCategory, FeatureOverrideType, ActivationStatus, AddOn,
 import { tenantUsers } from './accessMockData';
 import { resolveTenantFeature, REASON_LABEL, REASON_EXPLAINER, type EntitlementReason } from './entitlements';
 import { pushCommercialAudit } from './commercialAudit';
+import { getAddOnGrantSafety } from './readiness';
 import {
   readInvoices,
   getInvoiceById,
@@ -1647,6 +1648,19 @@ const TenantDetailPage: React.FC = () => {
                   !enabled &&
                   !ov &&
                   reason !== 'feature_disabled_by_owner';
+                // Add-on Implementation Readiness — apply grant safety
+                // gating for any row whose linked add-on isn't fully
+                // runtime-backed. Block placeholders / implementation-
+                // required (unless allowManualPresaleGrant), and surface
+                // a compact reason chip + warning for partial / parent-
+                // feature linked. When no linked add-on exists, the row
+                // is a plain plan/feature row and grant safety is N/A.
+                // See replit.md → "Add-on Implementation Readiness".
+                const grantSafety = r.addOn ? getAddOnGrantSafety(r.addOn) : null;
+                const grantBlockedByReadiness = !!grantSafety && !grantSafety.allowed;
+                const grantWarningByReadiness = !!grantSafety && grantSafety.allowed && grantSafety.requiresWarning;
+                const finalCanOfferGrant = canOfferGrant && !grantBlockedByReadiness;
+                const finalCanReGrant = (isExpired || isRevoked) && feature.lifecycle === 'implemented' && !grantBlockedByReadiness;
                 const cardBg = isPendingPayment
                   ? 'bg-amber-50/50 border-amber-100'
                   : isExpired
@@ -1778,11 +1792,45 @@ const TenantDetailPage: React.FC = () => {
                         <div className="flex items-center gap-1 flex-wrap justify-end">
                           {/* Spec L: Pending payment rows show ONLY Mark Paid / Cancel
                               Invoice / View Invoice — no Trial, no Paid Override, no Re-grant. */}
-                          {canOfferGrant && !isPendingPayment && (
+                          {finalCanOfferGrant && !isPendingPayment && (
                             <>
-                              <button onClick={() => setFeatureTrialModal(feature.id)} className="text-[8px] font-black text-indigo-600 bg-indigo-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-indigo-100 transition-colors">Trial</button>
-                              <button onClick={() => { setPaidOverridePrice(eligibleAddOn && r.addOn?.price ? String(r.addOn.price) : ''); setPaidOverrideModel(eligibleAddOn && r.addOn?.billingCadence === 'annual' ? 'annual' : eligibleAddOn && r.addOn?.billingCadence === 'one_time' ? 'one_time' : 'monthly'); setPaidOverrideActivation('after_payment'); setPaidOverrideDueDate((() => { const d = new Date('2026-03-26'); d.setDate(d.getDate() + 30); return d.toISOString().slice(0, 10); })()); setFeaturePaidModal(feature.id); }} className="text-[8px] font-black text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-emerald-100 transition-colors">Paid Override</button>
+                              <button
+                                onClick={() => setFeatureTrialModal(feature.id)}
+                                title={grantWarningByReadiness ? grantSafety!.warningText : undefined}
+                                className={`text-[8px] font-black px-2 py-1 rounded-lg uppercase tracking-widest transition-colors ${
+                                  grantWarningByReadiness
+                                    ? 'text-amber-700 bg-amber-50 hover:bg-amber-100'
+                                    : 'text-indigo-600 bg-indigo-50 hover:bg-indigo-100'
+                                }`}
+                              >Trial</button>
+                              <button
+                                onClick={() => { setPaidOverridePrice(eligibleAddOn && r.addOn?.price ? String(r.addOn.price) : ''); setPaidOverrideModel(eligibleAddOn && r.addOn?.billingCadence === 'annual' ? 'annual' : eligibleAddOn && r.addOn?.billingCadence === 'one_time' ? 'one_time' : 'monthly'); setPaidOverrideActivation('after_payment'); setPaidOverrideDueDate((() => { const d = new Date('2026-03-26'); d.setDate(d.getDate() + 30); return d.toISOString().slice(0, 10); })()); setFeaturePaidModal(feature.id); }}
+                                title={grantWarningByReadiness ? grantSafety!.warningText : undefined}
+                                className={`text-[8px] font-black px-2 py-1 rounded-lg uppercase tracking-widest transition-colors ${
+                                  grantWarningByReadiness
+                                    ? 'text-amber-700 bg-amber-50 hover:bg-amber-100'
+                                    : 'text-emerald-600 bg-emerald-50 hover:bg-emerald-100'
+                                }`}
+                              >Paid Override</button>
                             </>
+                          )}
+                          {/* Add-on Implementation Readiness — compact reason
+                              chip when grant is blocked, or short warning
+                              badge when allowed-with-warning. Tooltip
+                              carries the longer explanation. The chip
+                              replaces the buttons when blocked so the
+                              operator sees why. */}
+                          {grantSafety && grantBlockedByReadiness && canOfferGrant && !isPendingPayment && (
+                            <span
+                              title={grantSafety.blockReason || ''}
+                              className="text-[8px] font-black text-rose-700 bg-rose-50 border border-rose-200 px-2 py-1 rounded-lg uppercase tracking-widest"
+                            >{grantSafety.shortBadge || 'Not Grantable'}</span>
+                          )}
+                          {grantSafety && grantWarningByReadiness && canOfferGrant && !isPendingPayment && grantSafety.shortBadge && (
+                            <span
+                              title={grantSafety.warningText}
+                              className="text-[8px] font-black text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 rounded-lg uppercase tracking-widest"
+                            >{grantSafety.shortBadge}</span>
                           )}
                           {isAddOnDisabled && feature.lifecycle === 'implemented' && (
                             <span className="text-[8px] font-black text-slate-500 bg-slate-100 px-2 py-1 rounded-lg uppercase tracking-widest">Catalog {reason === 'addon_archived' ? 'archived' : 'disabled'}</span>
@@ -1813,11 +1861,33 @@ const TenantDetailPage: React.FC = () => {
                               )}
                             </>
                           )}
-                          {(isExpired || isRevoked) && feature.lifecycle === 'implemented' && (
+                          {finalCanReGrant && (
                             <>
-                              <button onClick={() => setFeatureTrialModal(feature.id)} className="text-[8px] font-black text-indigo-600 bg-indigo-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-indigo-100 transition-colors">Re-trial</button>
-                              <button onClick={() => { setPaidOverridePrice(eligibleAddOn && r.addOn?.price ? String(r.addOn.price) : ''); setPaidOverrideModel(eligibleAddOn && r.addOn?.billingCadence === 'annual' ? 'annual' : eligibleAddOn && r.addOn?.billingCadence === 'one_time' ? 'one_time' : 'monthly'); setPaidOverrideActivation('after_payment'); setPaidOverrideDueDate((() => { const d = new Date('2026-03-26'); d.setDate(d.getDate() + 30); return d.toISOString().slice(0, 10); })()); setFeaturePaidModal(feature.id); }} className="text-[8px] font-black text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-emerald-100 transition-colors">Re-grant Paid</button>
+                              <button
+                                onClick={() => setFeatureTrialModal(feature.id)}
+                                title={grantWarningByReadiness ? grantSafety!.warningText : undefined}
+                                className={`text-[8px] font-black px-2 py-1 rounded-lg uppercase tracking-widest transition-colors ${
+                                  grantWarningByReadiness
+                                    ? 'text-amber-700 bg-amber-50 hover:bg-amber-100'
+                                    : 'text-indigo-600 bg-indigo-50 hover:bg-indigo-100'
+                                }`}
+                              >Re-trial</button>
+                              <button
+                                onClick={() => { setPaidOverridePrice(eligibleAddOn && r.addOn?.price ? String(r.addOn.price) : ''); setPaidOverrideModel(eligibleAddOn && r.addOn?.billingCadence === 'annual' ? 'annual' : eligibleAddOn && r.addOn?.billingCadence === 'one_time' ? 'one_time' : 'monthly'); setPaidOverrideActivation('after_payment'); setPaidOverrideDueDate((() => { const d = new Date('2026-03-26'); d.setDate(d.getDate() + 30); return d.toISOString().slice(0, 10); })()); setFeaturePaidModal(feature.id); }}
+                                title={grantWarningByReadiness ? grantSafety!.warningText : undefined}
+                                className={`text-[8px] font-black px-2 py-1 rounded-lg uppercase tracking-widest transition-colors ${
+                                  grantWarningByReadiness
+                                    ? 'text-amber-700 bg-amber-50 hover:bg-amber-100'
+                                    : 'text-emerald-600 bg-emerald-50 hover:bg-emerald-100'
+                                }`}
+                              >Re-grant Paid</button>
                             </>
+                          )}
+                          {(isExpired || isRevoked) && feature.lifecycle === 'implemented' && grantBlockedByReadiness && (
+                            <span
+                              title={grantSafety!.blockReason || ''}
+                              className="text-[8px] font-black text-rose-700 bg-rose-50 border border-rose-200 px-2 py-1 rounded-lg uppercase tracking-widest"
+                            >{grantSafety!.shortBadge || 'Not Grantable'}</span>
                           )}
                           {/* Part F: Disabled by Owner only renders when there
                               is a real disabled override AND the plan would

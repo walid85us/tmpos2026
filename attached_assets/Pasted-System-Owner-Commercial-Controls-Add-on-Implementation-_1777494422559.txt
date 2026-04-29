@@ -1,0 +1,568 @@
+System Owner Commercial Controls — Add-on Implementation Readiness + Runtime-Backing Governance
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a strict isolated enhancement pass.
+Do not redesign the app.
+Do not touch the completed Shipping Module behavior.
+Do not change billing, invoice, paid override activation mode, Store Permissions Matrix, or existing add-on source-of-truth rules unless directly required by Add-on Implementation Readiness.
+Do not implement any new business feature in this pass.
+Do not implement Stripe, external billing, SaaS invoice payment collection, tax, accounting, or customer storefront payment.
+
+Implement an internal Add-on Implementation Readiness concept so the System Owner can clearly know whether an add-on:
+1) is linked to real implemented functionality,
+2) is only a commercial placeholder,
+3) needs a development workstream before being sold,
+4) is linked too broadly to a parent feature,
+5) is safe to grant as Trial / Paid Override.
+
+==================================================
+IMPORTANT CURRENT CONTEXT
+==================================================
+
+The app already has:
+- System Owner Plans & Features Matrix
+- Add-on Catalog
+- Add-on Compatible Plans
+- Tenant Features tab
+- Trial / Paid Override
+- Paid Override invoice workflow with activation mode
+- Store Permissions Matrix
+- linked permission disappearance rules
+- source-of-truth rule where Plans & Features Matrix controls included-by-plan access
+- add-on catalog controls optional commercial availability when not included by plan
+
+Accepted add-on rules:
+- Governance Status = Active / Disabled / Archived only
+- Lifecycle (PM) remains separate from Governance Status
+- Linked Feature can be None
+- standalone add-ons create or use generated capability rows in Plans & Features Matrix
+- linked add-ons use existing feature rows
+- Compatible Plans controls optional add-on availability when not included by plan
+- included-by-plan access is controlled only by Plans & Features Matrix
+- archived standalone generated rows remain visible but locked/read-only in Plans & Features Matrix
+- deleting standalone add-on removes generated matrix row only when safe
+- deleting linked-feature add-on does not delete the existing feature row
+
+Do not break any of the above.
+
+==================================================
+BUSINESS PROBLEM TO SOLVE
+==================================================
+
+The System Owner can create an add-on, but creating an add-on does not automatically create app functionality.
+
+This creates a risk:
+- System Owner may create an add-on that looks commercially available
+- tenant may see Trial / Paid Override
+- but there may be no real UI, data model, permissions, or runtime feature connected to it
+
+We need the app to clearly distinguish:
+
+1) Runtime-backed add-on
+The add-on is linked to real implemented app functionality.
+
+2) Commercial placeholder
+The add-on exists in the catalog and matrix but does not yet unlock implemented functionality.
+
+3) Implementation required
+The add-on needs a development workstream before it can be safely sold/granted.
+
+4) Parent-feature linked
+The add-on is linked to a broad parent module and may unlock too much.
+
+5) Runtime partially backed
+The add-on is linked to a capability that exists, but not all runtime checks, permissions, or UI surfaces are fully connected.
+
+==================================================
+RESEARCH / ARCHITECTURE REQUIREMENT
+==================================================
+
+Before coding, perform a short architecture review.
+
+If Replit/browser access is available:
+- search public internet resources for similar SaaS patterns:
+  - SaaS feature flags
+  - entitlement management
+  - add-on catalog governance
+  - plan-based feature gating
+  - runtime-backed vs catalog-only add-ons
+  - commercial packaging vs implemented capability
+  - feature entitlement lifecycle
+- prefer credible public sources and documentation patterns
+- do not copy proprietary code
+- summarize useful patterns in replit.md
+
+If internet browsing is not available:
+- explicitly state that browsing was unavailable
+- proceed using SaaS entitlement best practices
+- document the reasoning in replit.md
+
+The goal is not to add external libraries.
+The goal is to implement a strong internal product governance model.
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Firebase/Firestore multi-tenant architect
+- Senior SaaS entitlement architect
+- Senior product operations architect
+- Senior RBAC / feature-gating architect
+- Senior commercial packaging architect
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Think deeply.
+Do not create a shallow badge-only solution.
+The readiness model must influence whether an add-on can be sold, trialed, or granted.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- replit.md
+
+Preserve:
+- Shipping Module closure
+- Plans & Features source-of-truth model
+- Add-on Compatible Plans locking
+- Tenant Features simplification
+- Paid Override invoice workflow
+- Store Permissions Matrix behavior
+- archive/delete add-on rules
+- dynamic sub-permission counts
+- preview-mode write safety
+
+==================================================
+PART A — ADD-ON IMPLEMENTATION READINESS MODEL
+==================================================
+
+Add a new readiness model for each add-on.
+
+Required readiness statuses:
+
+1) runtime_backed
+Label:
+- Runtime-backed
+
+Meaning:
+- linked to implemented functionality
+- safe to offer as Trial / Paid Override if compatible and active
+
+2) implementation_required
+Label:
+- Implementation Required
+
+Meaning:
+- commercial add-on exists, but real app functionality is not implemented or not connected
+- should not be tenant-grantable by default
+
+3) commercial_placeholder
+Label:
+- Commercial Placeholder
+
+Meaning:
+- intentionally listed for planning, roadmap, or future sale
+- not tenant-grantable unless System Owner explicitly enables manual/presale handling
+
+4) parent_feature_linked
+Label:
+- Parent Feature Linked
+
+Meaning:
+- linked to a broad parent feature/module
+- may unlock too much
+- needs warning and explicit confirmation
+
+5) partially_backed
+Label:
+- Partially Runtime-backed
+
+Meaning:
+- some runtime capability exists, but missing one or more:
+  - permission dependency
+  - UI surface
+  - plan gate
+  - tenant feature mapping
+  - audit behavior
+  - documentation
+
+Required:
+- Store readiness status on Add-on Catalog item or derive it consistently from metadata
+- Show readiness badge in Add-on Catalog
+- Show readiness detail in Add-on Create/Edit modal
+- Show readiness warning in Tenant Features only if needed, without cluttering the tenant feature cards
+
+==================================================
+PART B — RUNTIME BACKING CHECKLIST
+==================================================
+
+Each add-on should have an Implementation Readiness checklist.
+
+Required fields/checks:
+
+1) Capability key exists
+- linkedFeatureId or generated cap_<addonId> exists
+
+2) Plans & Features Matrix row exists
+- no duplicate row
+
+3) Runtime UI surface exists
+- route/tab/component/surface identified where the feature appears
+
+4) Entitlement check exists
+- app checks the feature/capability before showing or allowing use
+
+5) Permission dependency exists where needed
+- Store Permissions Matrix has linked permission/sub-permission if the feature needs role-level control
+
+6) Data model exists where needed
+- Firestore/local model or state model is defined if feature needs data
+
+7) Audit behavior exists where needed
+- important tenant/admin actions are auditable if feature changes business state
+
+8) Billing behavior exists if paid
+- paid override invoice flow can link to this add-on
+
+9) Documentation exists
+- replit.md has implementation notes
+
+Required:
+Show each checklist item as:
+- Complete
+- Missing
+- Not Required
+- Unknown
+
+Do not fake completion.
+If uncertain, mark Unknown.
+
+==================================================
+PART C — ADD-ON CREATE / EDIT FORM CHANGES
+==================================================
+
+In Add-on Create/Edit modal, add a section:
+
+Implementation Readiness
+
+It should show:
+- Readiness Status
+- Linked Capability
+- Runtime Surface
+- Permission Linkage
+- Entitlement Enforcement
+- Grant Safety
+- Developer Handoff availability
+
+Required behavior:
+
+If Linked Feature is an implemented known capability:
+- suggest Runtime-backed
+- show linked feature/capability key
+- show related permission dependencies if available
+
+If Linked Feature is None:
+- create/use generated standalone capability row
+- default readiness should be Implementation Required or Commercial Placeholder, not Runtime-backed
+- explain:
+  “This add-on has a commercial capability row, but no app functionality is automatically created.”
+
+If Linked Feature is a broad parent module:
+- show Parent Feature warning:
+  “This add-on is linked to a parent feature. It may control the whole module unless linked to a more specific sub-feature/capability.”
+
+Required:
+Do not block save simply because readiness is not runtime-backed.
+But block tenant grant unless readiness policy allows it.
+
+==================================================
+PART D — GRANT SAFETY RULES
+==================================================
+
+Tenant Trial / Paid Override availability must consider readiness.
+
+Required rules:
+
+1) Runtime-backed
+- Trial / Paid Override can be offered if:
+  - Governance Status = Active
+  - tenant plan is compatible or feature is included by plan logic applies
+  - billing/permission rules pass
+
+2) Partially Runtime-backed
+- Trial / Paid Override can be offered only with warning:
+  “This add-on may not be fully connected to runtime behavior.”
+- recommended to require System Owner confirmation
+
+3) Parent Feature Linked
+- Trial / Paid Override can be offered only with warning:
+  “This add-on may unlock a broad module. Consider linking a specific sub-feature.”
+
+4) Implementation Required
+- Trial / Paid Override should be disabled by default
+- show:
+  “Implementation required before tenant grant.”
+- provide Generate Implementation Brief action
+
+5) Commercial Placeholder
+- Trial / Paid Override disabled by default
+- optionally allow System Owner to mark:
+  “Allow manual/presale grant”
+- if allowed, show strong warning and audit it
+
+Required:
+No tenant should get access to a non-runtime-backed add-on by accident.
+
+==================================================
+PART E — ADD-ON IMPLEMENTATION BRIEF GENERATOR
+==================================================
+
+Add a button for non-runtime-backed add-ons:
+
+Generate Implementation Brief
+
+The generated brief should be copyable and include:
+
+- Add-on name
+- Add-on description
+- Intended tenant/user
+- Business goal
+- Linked feature/capability key
+- Current readiness status
+- Missing runtime checklist items
+- Proposed UI surfaces
+- Required data model
+- Required permissions
+- Required plan/entitlement gating
+- Required tenant visibility behavior
+- Required billing behavior
+- Required audit behavior
+- Manual QA checklist
+- Replit implementation prompt starter
+
+The brief should make it easy for System Owner to send a new prompt to Replit to build the real functionality.
+
+Required:
+This does not need to call an AI service.
+It can generate a structured text template using existing add-on metadata.
+
+==================================================
+PART F — KNOWN IMPLEMENTED CAPABILITY REGISTRY
+==================================================
+
+Create or refine a registry of known implemented capabilities.
+
+At minimum include currently implemented capabilities where known, such as:
+
+Shipping-related examples:
+- Shipping Center
+- Shipping Provider Configuration
+- Carrier Locators / Service Points
+- Pickup Requests
+- Carrier Analytics
+- Shipping Automation Rules
+- Batch Labels
+- Packing Workflows
+- SLA Optimization
+- Carrier Scorecards
+
+Other examples if already implemented:
+- Loyalty Management
+- Reports & Analytics
+- API Access
+- Multi-Store Management
+- White Label / Branding, if implemented
+- SMS Credits, if implemented
+
+For each capability, store or derive:
+- featureId/capability key
+- display name
+- parent module
+- isParentFeature
+- runtime surface exists yes/no/unknown
+- permission ids if any
+- plan matrix row exists yes/no
+- notes
+
+Required:
+Do not overclaim runtime backing.
+If uncertain, mark Unknown.
+
+==================================================
+PART G — PARENT FEATURE WARNING
+==================================================
+
+If selected Linked Feature is a parent module, show warning.
+
+Examples of parent/broad features:
+- Shipping Center
+- Inventory
+- POS
+- Repairs
+- Customers
+- Reports
+- Settings
+
+Warning:
+“This is a parent feature. Linking an add-on here may control the entire module. For commercial add-ons, prefer the smallest specific capability or sub-feature.”
+
+Required:
+This warning should appear in Create/Edit Add-on and readiness details.
+
+==================================================
+PART H — TENANT FEATURES TAB INTEGRATION
+==================================================
+
+Tenant Features tab should remain simple.
+
+Do not reintroduce:
+- Permissions Impact blocks
+- locked permission chips
+- implementation checklist cards inside every feature row
+
+Allowed:
+- If an add-on is not grantable due to readiness, suppress grant buttons or show a compact reason:
+  - Implementation Required
+  - Runtime Not Connected
+  - Parent Feature Warning
+
+For runtime-backed add-ons:
+- preserve accepted behavior:
+  - included by plan → Included by Plan + Add-on
+  - not included but compatible → Not in Plan + Add-on + Trial + Paid Override
+  - not included and not compatible → hidden
+
+For non-runtime-backed add-ons:
+- do not accidentally make them tenant-grantable
+
+==================================================
+PART I — PLANS & FEATURES MATRIX INTEGRATION
+==================================================
+
+Plans & Features Matrix remains the source of truth for included-by-plan access.
+
+Required:
+- readiness status may be visible in System Owner matrix as small indicator only
+- do not clutter matrix
+- standalone generated capability rows still appear
+- archived standalone rows remain locked/read-only
+- parent feature warning should not break plan toggles
+
+If a capability is Implementation Required:
+- System Owner may still see it in matrix
+- but tenant grant should be blocked unless manual/presale mode is intentionally allowed
+
+==================================================
+PART J — AUDITABILITY
+==================================================
+
+Audit:
+- readiness status changed
+- runtime checklist updated
+- manual/presale grant allowed
+- implementation brief generated
+- parent-feature link acknowledged if explicit confirmation is added
+- readiness override by System Owner
+
+Audit should include:
+- actor
+- timestamp
+- addOnId
+- old/new readiness status
+- notes/reason
+
+==================================================
+PART K — DOCUMENTATION
+==================================================
+
+Update replit.md with:
+- Add-on Implementation Readiness model
+- meaning of runtime-backed vs commercial placeholder
+- difference between add-on catalog and actual app functionality
+- implementation checklist
+- grant safety rules
+- parent feature warning
+- developer handoff/implementation brief process
+- known implemented capability registry
+- out-of-scope:
+  - automatically generating code
+  - building new feature functionality in this pass
+  - external billing/payment processing
+
+==================================================
+OUT OF SCOPE
+==================================================
+
+Do NOT implement:
+- new runtime business features
+- AI feature generation
+- automatic code generation
+- Stripe/payment integration
+- customer storefront billing
+- new Shipping behavior
+- broad redesign of Plans & Features
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Add-on Catalog shows implementation readiness status.
+2) Runtime-backed add-ons are clearly identified.
+3) Standalone add-ons default to Implementation Required or Commercial Placeholder unless explicitly runtime-backed.
+4) Linked Feature helper explains add-on does not create functionality automatically.
+5) Parent feature links show warning.
+6) Runtime backing checklist exists and does not fake completion.
+7) Trial / Paid Override is blocked or warned for non-runtime-backed add-ons.
+8) Runtime-backed add-ons remain grantable according to existing plan/compatible-plan rules.
+9) Generate Implementation Brief action exists for implementation-required add-ons.
+10) Generated brief is useful and copyable.
+11) Tenant Features tab remains simple.
+12) Plans & Features Matrix remains source of truth.
+13) Existing add-on source-of-truth, archive/delete, billing, permissions, and Shipping behavior remain intact.
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this order:
+
+1) Audit current Add-on Catalog and feature/capability structures
+2) Add readiness model
+3) Add runtime backing checklist
+4) Add known implemented capability registry
+5) Add Create/Edit Add-on readiness UI
+6) Add parent feature warning
+7) Add grant safety logic
+8) Add Generate Implementation Brief
+9) Add audit events
+10) Update documentation
+11) Verify non-regression
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Research / Architecture Notes
+3. Implementation Readiness Model
+4. Runtime Backing Checklist
+5. Add-on Create/Edit UI Updates
+6. Grant Safety Rules
+7. Implementation Brief Generator
+8. Capability Registry / Parent Feature Warning
+9. Files Changed
+10. Documentation Updated
+11. Non-Regression Notes

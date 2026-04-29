@@ -166,6 +166,67 @@ export type AddOnLifecycle = 'draft' | 'planned' | 'in_development' | 'active' |
 //                & Archive Protection Rule".
 export type AddOnGovernanceStatus = 'active' | 'disabled' | 'archived';
 
+// Add-on Implementation Readiness model. Distinct from Lifecycle (PM
+// roadmap state) and Governance Status (commercial gate). Readiness
+// answers: "is this add-on actually backed by implemented runtime
+// behavior?" and drives Tenant Trial / Paid Override grant safety.
+// See replit.md → "Add-on Implementation Readiness".
+//   runtime_backed:         linked to implemented capability; safe to grant
+//   partially_backed:       capability exists but missing checklist items
+//   parent_feature_linked:  linked to a broad parent module — may overgrant
+//   implementation_required: catalog placeholder, no app functionality yet
+//   commercial_placeholder: roadmap/listing only; not tenant-grantable by default
+export type AddOnReadinessStatus =
+  | 'runtime_backed'
+  | 'partially_backed'
+  | 'parent_feature_linked'
+  | 'implementation_required'
+  | 'commercial_placeholder';
+
+// Each runtime backing checklist item is graded with one of four states.
+// `unknown` is the safe default — never auto-promote to `complete`
+// without evidence. The Generate Implementation Brief surface lists
+// every `missing` and `unknown` item as work the dev workstream must
+// complete before the add-on can be marked Runtime-backed.
+export type RuntimeChecklistState = 'complete' | 'missing' | 'not_required' | 'unknown';
+
+export type RuntimeChecklistKey =
+  | 'capability_key'
+  | 'plan_matrix_row'
+  | 'runtime_ui_surface'
+  | 'entitlement_check'
+  | 'permission_dependency'
+  | 'data_model'
+  | 'audit_behavior'
+  | 'billing_behavior'
+  | 'documentation';
+
+export type RuntimeChecklist = Record<RuntimeChecklistKey, RuntimeChecklistState>;
+
+export const DEFAULT_RUNTIME_CHECKLIST: RuntimeChecklist = {
+  capability_key: 'unknown',
+  plan_matrix_row: 'unknown',
+  runtime_ui_surface: 'unknown',
+  entitlement_check: 'unknown',
+  permission_dependency: 'unknown',
+  data_model: 'unknown',
+  audit_behavior: 'unknown',
+  billing_behavior: 'unknown',
+  documentation: 'unknown',
+};
+
+export const RUNTIME_CHECKLIST_LABELS: Record<RuntimeChecklistKey, string> = {
+  capability_key: 'Capability Key Exists',
+  plan_matrix_row: 'Plans & Features Matrix Row',
+  runtime_ui_surface: 'Runtime UI Surface',
+  entitlement_check: 'Entitlement Check',
+  permission_dependency: 'Permission Dependency',
+  data_model: 'Data Model',
+  audit_behavior: 'Audit Behavior',
+  billing_behavior: 'Billing Behavior',
+  documentation: 'Documentation',
+};
+
 export interface AddOn {
   id: string;
   name: string;
@@ -183,20 +244,98 @@ export interface AddOn {
   // is the entitlement vehicle for that feature, and the resolver / matrix
   // use this to decide whether the linked feature appears for a tenant.
   linkedFeatureId?: string | null;
+  // Implementation Readiness — see AddOnReadinessStatus.
+  readinessStatus?: AddOnReadinessStatus;
+  // Per-item runtime backing checklist. Optional: rows without a stored
+  // checklist render against DEFAULT_RUNTIME_CHECKLIST (all 'unknown').
+  runtimeChecklist?: RuntimeChecklist;
+  // Free-form description of the runtime UI surface (route, tab, page)
+  // where this add-on's capability becomes visible to a tenant.
+  runtimeSurface?: string;
+  // Explicit System Owner opt-in to allow tenant grant for an add-on
+  // whose readiness is `commercial_placeholder` or `implementation_required`.
+  // Without this flag set, Tenant Trial / Paid Override is blocked.
+  // See replit.md → "Add-on Implementation Readiness" → Grant Safety.
+  allowManualPresaleGrant?: boolean;
+  // System Owner has acknowledged the parent-feature warning. When true
+  // the readiness derivation may keep `runtime_backed` instead of
+  // downgrading to `parent_feature_linked`.
+  parentLinkAcknowledged?: boolean;
   createdAt: string;
   createdBy: string;
   updatedAt: string;
   updatedBy?: string;
 }
 
+// Known implemented capability registry. Source-of-truth list of feature
+// ids that the platform actually has implemented runtime behavior for.
+// Used by `deriveSuggestedReadiness()` to suggest `runtime_backed` when
+// an add-on links to one of these. Keep ids in sync with `featureMatrix`.
+// See replit.md → "Add-on Implementation Readiness" → Capability Registry.
+export interface KnownCapabilityEntry {
+  featureId: string;
+  displayName: string;
+  parentModule: string;
+  isParentFeature: boolean;
+  runtimeSurfaceExists: 'yes' | 'no' | 'unknown';
+  permissionIds: string[];
+  planMatrixRowExists: 'yes' | 'no' | 'unknown';
+  notes?: string;
+}
+
+export const KNOWN_CAPABILITY_REGISTRY: KnownCapabilityEntry[] = [
+  // Shipping module — fully implemented (Phase 1-3 closures).
+  { featureId: 'shipping', displayName: 'Shipping Center', parentModule: 'shipping', isParentFeature: true, runtimeSurfaceExists: 'yes', permissionIds: ['shipping.view'], planMatrixRowExists: 'yes', notes: 'Parent module — link sub-features instead of this row.' },
+  { featureId: 'shipping_providers', displayName: 'Shipping Provider Configuration', parentModule: 'shipping', isParentFeature: false, runtimeSurfaceExists: 'yes', permissionIds: ['shipping.providers.manage'], planMatrixRowExists: 'yes' },
+  { featureId: 'returns', displayName: 'Returns Portal', parentModule: 'shipping', isParentFeature: false, runtimeSurfaceExists: 'yes', permissionIds: ['shipping.returns.manage'], planMatrixRowExists: 'yes' },
+  { featureId: 'service_points', displayName: 'Service Points (Carrier Locators)', parentModule: 'shipping', isParentFeature: false, runtimeSurfaceExists: 'yes', permissionIds: [], planMatrixRowExists: 'yes' },
+  { featureId: 'pickup_requests', displayName: 'Pickup Requests', parentModule: 'shipping', isParentFeature: false, runtimeSurfaceExists: 'yes', permissionIds: ['shipping.pickups.manage'], planMatrixRowExists: 'yes' },
+  { featureId: 'carrier_analytics', displayName: 'Carrier Analytics', parentModule: 'shipping', isParentFeature: false, runtimeSurfaceExists: 'yes', permissionIds: [], planMatrixRowExists: 'yes' },
+  { featureId: 'shipping_automation_rules', displayName: 'Shipping Automation Rules', parentModule: 'shipping', isParentFeature: false, runtimeSurfaceExists: 'yes', permissionIds: ['shipping.automation.manage'], planMatrixRowExists: 'yes' },
+  { featureId: 'batch_labels', displayName: 'Batch Labels', parentModule: 'shipping', isParentFeature: false, runtimeSurfaceExists: 'yes', permissionIds: [], planMatrixRowExists: 'yes' },
+  { featureId: 'packing_workflows', displayName: 'Packing Workflows', parentModule: 'shipping', isParentFeature: false, runtimeSurfaceExists: 'yes', permissionIds: [], planMatrixRowExists: 'yes' },
+  { featureId: 'shipping_sla_optimization', displayName: 'SLA Optimization', parentModule: 'shipping', isParentFeature: false, runtimeSurfaceExists: 'yes', permissionIds: [], planMatrixRowExists: 'yes' },
+  { featureId: 'carrier_scorecards', displayName: 'Carrier Scorecards', parentModule: 'shipping', isParentFeature: false, runtimeSurfaceExists: 'yes', permissionIds: [], planMatrixRowExists: 'yes' },
+  // Other implemented modules.
+  { featureId: 'sales', displayName: 'Sales Module', parentModule: 'sales', isParentFeature: true, runtimeSurfaceExists: 'yes', permissionIds: [], planMatrixRowExists: 'yes', notes: 'Parent module.' },
+  { featureId: 'repairs', displayName: 'Repair Tickets', parentModule: 'repairs', isParentFeature: true, runtimeSurfaceExists: 'yes', permissionIds: [], planMatrixRowExists: 'yes', notes: 'Parent module.' },
+  { featureId: 'inventory', displayName: 'Inventory Management', parentModule: 'inventory', isParentFeature: true, runtimeSurfaceExists: 'yes', permissionIds: [], planMatrixRowExists: 'yes', notes: 'Parent module.' },
+  { featureId: 'customers', displayName: 'Customer CRM', parentModule: 'customers', isParentFeature: true, runtimeSurfaceExists: 'yes', permissionIds: [], planMatrixRowExists: 'yes', notes: 'Parent module.' },
+  { featureId: 'reports', displayName: 'Reports & Analytics', parentModule: 'reports', isParentFeature: true, runtimeSurfaceExists: 'yes', permissionIds: [], planMatrixRowExists: 'yes' },
+  { featureId: 'employees', displayName: 'Employee Management', parentModule: 'employees', isParentFeature: true, runtimeSurfaceExists: 'yes', permissionIds: [], planMatrixRowExists: 'yes' },
+  { featureId: 'integrations', displayName: 'Integrations', parentModule: 'integrations', isParentFeature: true, runtimeSurfaceExists: 'yes', permissionIds: [], planMatrixRowExists: 'yes' },
+  { featureId: 'api', displayName: 'API Access', parentModule: 'integrations', isParentFeature: false, runtimeSurfaceExists: 'yes', permissionIds: [], planMatrixRowExists: 'yes' },
+  { featureId: 'loyalty_management', displayName: 'Loyalty Management', parentModule: 'customers', isParentFeature: false, runtimeSurfaceExists: 'unknown', permissionIds: [], planMatrixRowExists: 'yes', notes: 'Capability row exists; runtime surface needs verification.' },
+  { featureId: 'marketing', displayName: 'Marketing Automation', parentModule: 'marketing', isParentFeature: true, runtimeSurfaceExists: 'unknown', permissionIds: [], planMatrixRowExists: 'yes' },
+  { featureId: 'supply_chain', displayName: 'Supply Chain', parentModule: 'supply_chain', isParentFeature: true, runtimeSurfaceExists: 'unknown', permissionIds: [], planMatrixRowExists: 'yes' },
+  { featureId: 'widgets', displayName: 'Customer Widgets', parentModule: 'customers', isParentFeature: false, runtimeSurfaceExists: 'unknown', permissionIds: [], planMatrixRowExists: 'yes' },
+  { featureId: 'domains', displayName: 'Custom Domains', parentModule: 'integrations', isParentFeature: false, runtimeSurfaceExists: 'unknown', permissionIds: [], planMatrixRowExists: 'yes' },
+  { featureId: 'whitelabel', displayName: 'White-Label Branding', parentModule: 'integrations', isParentFeature: false, runtimeSurfaceExists: 'no', permissionIds: [], planMatrixRowExists: 'yes', notes: 'Lifecycle: deprecated.' },
+  { featureId: 'prospects', displayName: 'Prospects & Leads', parentModule: 'customers', isParentFeature: false, runtimeSurfaceExists: 'no', permissionIds: [], planMatrixRowExists: 'yes', notes: 'Lifecycle: in_development.' },
+  { featureId: 'ai_diagnostics', displayName: 'AI Diagnostics', parentModule: 'repairs', isParentFeature: false, runtimeSurfaceExists: 'no', permissionIds: [], planMatrixRowExists: 'yes', notes: 'Lifecycle: planned.' },
+  { featureId: 'voice_assistant', displayName: 'Voice Assistant', parentModule: 'repairs', isParentFeature: false, runtimeSurfaceExists: 'no', permissionIds: [], planMatrixRowExists: 'yes', notes: 'Lifecycle: draft.' },
+];
+
+export const isKnownImplementedCapability = (featureId: string | null | undefined): boolean => {
+  if (!featureId) return false;
+  const entry = KNOWN_CAPABILITY_REGISTRY.find(e => e.featureId === featureId);
+  return !!entry && entry.runtimeSurfaceExists === 'yes' && !entry.isParentFeature;
+};
+
+export const isParentFeatureCapability = (featureId: string | null | undefined): boolean => {
+  if (!featureId) return false;
+  const entry = KNOWN_CAPABILITY_REGISTRY.find(e => e.featureId === featureId);
+  return !!entry && entry.isParentFeature;
+};
+
 export const addOns: AddOn[] = [
-  { id: 'sms', name: 'SMS Credits', price: 10, compatiblePlans: ['growth', 'advanced'], status: 'active', lifecycle: 'active', governanceStatus: 'active', billingCadence: 'monthly', linkedFeatureId: null, description: 'Bulk SMS credits for customer notifications, marketing campaigns, and ticket updates.', createdAt: '2025-08-01', createdBy: 'System', updatedAt: '2025-08-01' },
-  { id: 'loyalty', name: 'Loyalty Program', price: 20, compatiblePlans: ['growth', 'advanced'], status: 'active', lifecycle: 'active', governanceStatus: 'active', billingCadence: 'monthly', linkedFeatureId: 'loyalty_management', description: 'Customer loyalty points, rewards tiers, and automated engagement campaigns.', createdAt: '2025-08-01', createdBy: 'System', updatedAt: '2025-08-01' },
-  { id: 'reporting', name: 'Advanced Reporting', price: 15, compatiblePlans: ['growth', 'advanced'], status: 'active', lifecycle: 'active', governanceStatus: 'active', billingCadence: 'monthly', linkedFeatureId: 'reports', description: 'Custom report builder, scheduled reports, and advanced analytics dashboards.', createdAt: '2025-08-01', createdBy: 'System', updatedAt: '2025-08-01' },
-  { id: 'multistore', name: 'Multi-Store Pack', price: 30, compatiblePlans: ['growth', 'advanced'], status: 'active', lifecycle: 'active', governanceStatus: 'active', billingCadence: 'monthly', linkedFeatureId: null, description: 'Extra store locations, inter-store inventory transfers, and consolidated reporting.', createdAt: '2025-08-01', createdBy: 'System', updatedAt: '2025-08-01' },
-  { id: 'api', name: 'API Access', price: 25, compatiblePlans: ['advanced'], status: 'active', lifecycle: 'active', governanceStatus: 'active', billingCadence: 'monthly', linkedFeatureId: 'api', description: 'REST API access for custom integrations, webhooks, and third-party app connectivity.', createdAt: '2025-08-01', createdBy: 'System', updatedAt: '2025-08-01' },
-  { id: 'whitelabel', name: 'White-Label', price: 50, compatiblePlans: ['advanced'], status: 'active', lifecycle: 'deprecated', governanceStatus: 'disabled', billingCadence: 'monthly', linkedFeatureId: 'whitelabel', description: 'Remove platform branding, custom domain, and branded customer-facing portal.', createdAt: '2025-08-01', createdBy: 'System', updatedAt: '2026-02-10', updatedBy: 'Admin Carol' },
-  { id: 'priority', name: 'Priority Support', price: 35, compatiblePlans: ['growth', 'advanced'], status: 'active', lifecycle: 'active', governanceStatus: 'active', billingCadence: 'monthly', linkedFeatureId: null, description: 'Dedicated support agent, 1-hour response SLA, and priority issue resolution.', createdAt: '2025-08-01', createdBy: 'Admin Carol', updatedAt: '2026-03-15', updatedBy: 'Admin Carol' },
+  { id: 'sms', name: 'SMS Credits', price: 10, compatiblePlans: ['growth', 'advanced'], status: 'active', lifecycle: 'active', governanceStatus: 'active', billingCadence: 'monthly', linkedFeatureId: null, description: 'Bulk SMS credits for customer notifications, marketing campaigns, and ticket updates.', createdAt: '2025-08-01', createdBy: 'System', updatedAt: '2025-08-01', readinessStatus: 'commercial_placeholder', runtimeSurface: '', runtimeChecklist: { ...DEFAULT_RUNTIME_CHECKLIST, capability_key: 'complete', plan_matrix_row: 'complete', runtime_ui_surface: 'missing', entitlement_check: 'missing', data_model: 'missing', billing_behavior: 'not_required' } },
+  { id: 'loyalty', name: 'Loyalty Program', price: 20, compatiblePlans: ['growth', 'advanced'], status: 'active', lifecycle: 'active', governanceStatus: 'active', billingCadence: 'monthly', linkedFeatureId: 'loyalty_management', description: 'Customer loyalty points, rewards tiers, and automated engagement campaigns.', createdAt: '2025-08-01', createdBy: 'System', updatedAt: '2025-08-01', readinessStatus: 'partially_backed', runtimeSurface: 'Tenant → Customers → Loyalty (TBD)', runtimeChecklist: { ...DEFAULT_RUNTIME_CHECKLIST, capability_key: 'complete', plan_matrix_row: 'complete', runtime_ui_surface: 'unknown', entitlement_check: 'unknown', billing_behavior: 'complete', documentation: 'missing' } },
+  { id: 'reporting', name: 'Advanced Reporting', price: 15, compatiblePlans: ['growth', 'advanced'], status: 'active', lifecycle: 'active', governanceStatus: 'active', billingCadence: 'monthly', linkedFeatureId: 'reports', description: 'Custom report builder, scheduled reports, and advanced analytics dashboards.', createdAt: '2025-08-01', createdBy: 'System', updatedAt: '2025-08-01', readinessStatus: 'parent_feature_linked', runtimeSurface: 'Tenant → Reports', runtimeChecklist: { ...DEFAULT_RUNTIME_CHECKLIST, capability_key: 'complete', plan_matrix_row: 'complete', runtime_ui_surface: 'complete', entitlement_check: 'complete', billing_behavior: 'complete', documentation: 'complete' } },
+  { id: 'multistore', name: 'Multi-Store Pack', price: 30, compatiblePlans: ['growth', 'advanced'], status: 'active', lifecycle: 'active', governanceStatus: 'active', billingCadence: 'monthly', linkedFeatureId: null, description: 'Extra store locations, inter-store inventory transfers, and consolidated reporting.', createdAt: '2025-08-01', createdBy: 'System', updatedAt: '2025-08-01', readinessStatus: 'implementation_required', runtimeSurface: '', runtimeChecklist: { ...DEFAULT_RUNTIME_CHECKLIST, capability_key: 'complete', plan_matrix_row: 'complete', runtime_ui_surface: 'missing', entitlement_check: 'missing', permission_dependency: 'missing', data_model: 'missing' } },
+  { id: 'api', name: 'API Access', price: 25, compatiblePlans: ['advanced'], status: 'active', lifecycle: 'active', governanceStatus: 'active', billingCadence: 'monthly', linkedFeatureId: 'api', description: 'REST API access for custom integrations, webhooks, and third-party app connectivity.', createdAt: '2025-08-01', createdBy: 'System', updatedAt: '2025-08-01', readinessStatus: 'runtime_backed', runtimeSurface: 'Tenant → Integrations → API', runtimeChecklist: { ...DEFAULT_RUNTIME_CHECKLIST, capability_key: 'complete', plan_matrix_row: 'complete', runtime_ui_surface: 'complete', entitlement_check: 'complete', permission_dependency: 'complete', data_model: 'complete', audit_behavior: 'complete', billing_behavior: 'complete', documentation: 'complete' } },
+  { id: 'whitelabel', name: 'White-Label', price: 50, compatiblePlans: ['advanced'], status: 'active', lifecycle: 'deprecated', governanceStatus: 'disabled', billingCadence: 'monthly', linkedFeatureId: 'whitelabel', description: 'Remove platform branding, custom domain, and branded customer-facing portal.', createdAt: '2025-08-01', createdBy: 'System', updatedAt: '2026-02-10', updatedBy: 'Admin Carol', readinessStatus: 'implementation_required', runtimeSurface: '', runtimeChecklist: { ...DEFAULT_RUNTIME_CHECKLIST, capability_key: 'complete', plan_matrix_row: 'complete', runtime_ui_surface: 'missing', entitlement_check: 'missing' } },
+  { id: 'priority', name: 'Priority Support', price: 35, compatiblePlans: ['growth', 'advanced'], status: 'active', lifecycle: 'active', governanceStatus: 'active', billingCadence: 'monthly', linkedFeatureId: null, description: 'Dedicated support agent, 1-hour response SLA, and priority issue resolution.', createdAt: '2025-08-01', createdBy: 'Admin Carol', updatedAt: '2026-03-15', updatedBy: 'Admin Carol', readinessStatus: 'commercial_placeholder', runtimeSurface: 'Operations playbook (no in-app surface)', runtimeChecklist: { ...DEFAULT_RUNTIME_CHECKLIST, capability_key: 'complete', plan_matrix_row: 'complete', runtime_ui_surface: 'not_required', entitlement_check: 'not_required', billing_behavior: 'complete', documentation: 'complete' } },
 ];
 
 export type FeatureLifecycle = 'draft' | 'planned' | 'in_development' | 'implemented' | 'deprecated' | 'archived';
@@ -337,7 +476,23 @@ export type CommercialAuditAction =
   | 'feature_activated_after_payment'
   | 'immediate_activation_granted'
   | 'paid_override_revoked_due_to_cancel'
-  | 'manual_payment_confirmation';
+  | 'manual_payment_confirmation'
+  // Add-on Implementation Readiness audit actions. See replit.md →
+  // "Add-on Implementation Readiness" → Audit.
+  //   addon_readiness_changed:        readinessStatus transitioned
+  //   addon_runtime_checklist_updated: any checklist item changed
+  //   addon_manual_presale_allowed:   System Owner toggled the
+  //                                    Allow Manual/Presale Grant flag
+  //   addon_implementation_brief_generated: brief copied/exported
+  //   addon_parent_link_acknowledged: System Owner accepted parent-feature warning
+  //   addon_readiness_overridden:     readinessStatus set against the
+  //                                    derived suggestion (manual override)
+  | 'addon_readiness_changed'
+  | 'addon_runtime_checklist_updated'
+  | 'addon_manual_presale_allowed'
+  | 'addon_implementation_brief_generated'
+  | 'addon_parent_link_acknowledged'
+  | 'addon_readiness_overridden';
 
 export interface CommercialAuditEntry {
   id: string;

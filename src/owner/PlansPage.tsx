@@ -1,10 +1,18 @@
 import React, { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
-import { plans as initialPlans, featureMatrix as initialFeatures, addOns as initialAddOns } from './mockData';
-import type { FeatureLifecycle, AddOnLifecycle, AddOn, AddOnGovernanceStatus } from './mockData';
+import { plans as initialPlans, featureMatrix as initialFeatures, addOns as initialAddOns, DEFAULT_RUNTIME_CHECKLIST, RUNTIME_CHECKLIST_LABELS } from './mockData';
+import type { FeatureLifecycle, AddOnLifecycle, AddOn, AddOnGovernanceStatus, AddOnReadinessStatus, RuntimeChecklist, RuntimeChecklistKey, RuntimeChecklistState } from './mockData';
 import { pushCommercialAudit, getCommercialAuditLog } from './commercialAudit';
 import { readInvoices } from './commercialInvoices';
+import {
+  READINESS_LABELS,
+  READINESS_DESCRIPTIONS,
+  READINESS_BADGE_STYLES,
+  deriveSuggestedReadiness,
+  getReadinessStatus,
+  generateImplementationBrief,
+} from './readiness';
 
 type PlanData = Omit<typeof initialPlans[0], 'status'> & { status: 'active' | 'archived' };
 type FeatureData = { id: string; name: string; planAvailability: Record<string, boolean>; source: 'inherited' | 'custom'; lifecycle: FeatureLifecycle };
@@ -158,7 +166,19 @@ const PlansPage: React.FC = () => {
     governanceStatus: 'active' as AddOnGovernanceStatus,
     billingCadence: 'monthly' as 'monthly' | 'annual' | 'one_time',
     linkedFeatureId: '' as string,
+    // Add-on Implementation Readiness fields. Stored separately on the
+    // form so the modal can edit them without touching legacy fields.
+    // See replit.md → "Add-on Implementation Readiness".
+    readinessStatus: 'commercial_placeholder' as AddOnReadinessStatus,
+    runtimeChecklist: { ...DEFAULT_RUNTIME_CHECKLIST } as RuntimeChecklist,
+    runtimeSurface: '' as string,
+    allowManualPresaleGrant: false,
+    parentLinkAcknowledged: false,
   });
+  // Implementation Brief modal — when non-null shows the generated brief
+  // for the addon id; the user can copy it to the clipboard.
+  const [briefModalAddOnId, setBriefModalAddOnId] = useState<string | null>(null);
+  const [briefCopyToast, setBriefCopyToast] = useState(false);
   // Inline "Register new feature" mode for the Add-on modal. New
   // add-ons must be linked to a feature in the Plans & Features
   // Matrix (Add-on Governance & Archive Protection Rule).
@@ -534,6 +554,14 @@ const PlansPage: React.FC = () => {
       governanceStatus: 'active',
       billingCadence: 'monthly',
       linkedFeatureId: '',
+      // Readiness defaults: standalone-no-link → commercial_placeholder.
+      // The Readiness section in the modal will derive a suggestion
+      // when the user picks a Linked Feature.
+      readinessStatus: 'commercial_placeholder',
+      runtimeChecklist: { ...DEFAULT_RUNTIME_CHECKLIST },
+      runtimeSurface: '',
+      allowManualPresaleGrant: false,
+      parentLinkAcknowledged: false,
     });
     setShowInlineNewFeature(false);
     setInlineNewFeatureName('');
@@ -551,11 +579,30 @@ const PlansPage: React.FC = () => {
       governanceStatus: addon.governanceStatus,
       billingCadence: addon.billingCadence,
       linkedFeatureId: addon.linkedFeatureId || '',
+      readinessStatus: addon.readinessStatus || deriveSuggestedReadiness(addon),
+      runtimeChecklist: addon.runtimeChecklist
+        ? { ...addon.runtimeChecklist }
+        : { ...DEFAULT_RUNTIME_CHECKLIST },
+      runtimeSurface: addon.runtimeSurface || '',
+      allowManualPresaleGrant: !!addon.allowManualPresaleGrant,
+      parentLinkAcknowledged: !!addon.parentLinkAcknowledged,
     });
     setShowInlineNewFeature(false);
     setInlineNewFeatureName('');
     setEditingAddOn(addon);
     setShowAddOnModal(true);
+  };
+
+  // Derive checklist diff between old and new add-ons, returning the
+  // ordered list of changed keys for audit purposes.
+  const diffRuntimeChecklist = (
+    oldCl: RuntimeChecklist | undefined,
+    newCl: RuntimeChecklist,
+  ): RuntimeChecklistKey[] => {
+    const base = oldCl || DEFAULT_RUNTIME_CHECKLIST;
+    return (Object.keys(newCl) as RuntimeChecklistKey[]).filter(
+      k => base[k] !== newCl[k],
+    );
   };
 
   // Inline new-feature registration for the Add-on modal. Adds a row
@@ -779,6 +826,15 @@ const PlansPage: React.FC = () => {
       governanceStatus: addOnForm.governanceStatus,
       billingCadence: addOnForm.billingCadence,
       linkedFeatureId: effectiveLinkedFeatureId,
+      // Implementation Readiness fields. These are persisted as-is from
+      // the modal so the System Owner has explicit control over the
+      // readiness status, runtime checklist, runtime surface, manual
+      // presale flag, and parent-feature acknowledgement.
+      readinessStatus: addOnForm.readinessStatus,
+      runtimeChecklist: { ...addOnForm.runtimeChecklist },
+      runtimeSurface: addOnForm.runtimeSurface || undefined,
+      allowManualPresaleGrant: addOnForm.allowManualPresaleGrant,
+      parentLinkAcknowledged: addOnForm.parentLinkAcknowledged,
       createdAt: editingAddOn?.createdAt || todayIso,
       createdBy: editingAddOn?.createdBy || 'System Owner',
       updatedAt: todayIso,
@@ -797,6 +853,16 @@ const PlansPage: React.FC = () => {
         featureId: newAddOn.linkedFeatureId,
         newValue: newAddOn.price,
         note: `${newAddOn.name} (${newAddOn.governanceStatus}, ${newAddOn.billingCadence})`,
+      });
+      // Initial readiness state on create — capture so the audit
+      // trail records the Day-0 readiness assumption.
+      pushCommercialAudit({
+        actor: 'System Owner',
+        action: 'addon_readiness_changed',
+        addOnId: id,
+        oldValue: '(none)',
+        newValue: newAddOn.readinessStatus || 'commercial_placeholder',
+        note: 'Initial readiness on create',
       });
     } else if (oldAddOn) {
       if (oldAddOn.price !== newAddOn.price) {
@@ -854,6 +920,58 @@ const PlansPage: React.FC = () => {
           newValue: newLinked || '(standalone)',
         });
       }
+      // Implementation Readiness diffs. Each readiness-related field
+      // gets its own audit entry so the trail captures exactly what
+      // the System Owner changed (status, checklist items, manual
+      // presale flag, parent-feature acknowledgement).
+      const oldReadiness = oldAddOn.readinessStatus || deriveSuggestedReadiness(oldAddOn);
+      if (oldReadiness !== newAddOn.readinessStatus) {
+        const suggested = deriveSuggestedReadiness(newAddOn);
+        const isOverride = newAddOn.readinessStatus !== suggested;
+        pushCommercialAudit({
+          actor: 'System Owner',
+          action: isOverride ? 'addon_readiness_overridden' : 'addon_readiness_changed',
+          addOnId: id,
+          oldValue: oldReadiness,
+          newValue: newAddOn.readinessStatus || 'commercial_placeholder',
+          note: isOverride ? `Manual override (suggested was ${suggested})` : undefined,
+        });
+      }
+      const changedChecklistKeys = diffRuntimeChecklist(oldAddOn.runtimeChecklist, newAddOn.runtimeChecklist!);
+      if (changedChecklistKeys.length > 0) {
+        const noteParts = changedChecklistKeys.map(k => {
+          const oldVal = (oldAddOn.runtimeChecklist || DEFAULT_RUNTIME_CHECKLIST)[k];
+          const newVal = newAddOn.runtimeChecklist![k];
+          return `${RUNTIME_CHECKLIST_LABELS[k]}: ${oldVal} → ${newVal}`;
+        });
+        pushCommercialAudit({
+          actor: 'System Owner',
+          action: 'addon_runtime_checklist_updated',
+          addOnId: id,
+          note: noteParts.join(' | '),
+        });
+      }
+      if (!!oldAddOn.allowManualPresaleGrant !== !!newAddOn.allowManualPresaleGrant) {
+        pushCommercialAudit({
+          actor: 'System Owner',
+          action: 'addon_manual_presale_allowed',
+          addOnId: id,
+          oldValue: oldAddOn.allowManualPresaleGrant ? 'true' : 'false',
+          newValue: newAddOn.allowManualPresaleGrant ? 'true' : 'false',
+          note: newAddOn.allowManualPresaleGrant
+            ? 'Manual / presale tenant grant explicitly enabled'
+            : 'Manual / presale tenant grant disabled',
+        });
+      }
+      if (!!oldAddOn.parentLinkAcknowledged !== !!newAddOn.parentLinkAcknowledged) {
+        pushCommercialAudit({
+          actor: 'System Owner',
+          action: 'addon_parent_link_acknowledged',
+          addOnId: id,
+          oldValue: oldAddOn.parentLinkAcknowledged ? 'true' : 'false',
+          newValue: newAddOn.parentLinkAcknowledged ? 'true' : 'false',
+        });
+      }
       pushCommercialAudit({
         actor: 'System Owner',
         action: 'addon_updated',
@@ -864,6 +982,34 @@ const PlansPage: React.FC = () => {
     setAuditTick(t => t + 1);
     setShowAddOnModal(false);
     setEditingAddOn(null);
+  };
+
+  // Generate Implementation Brief — opens the brief modal for the
+  // selected add-on. The Copy action emits
+  // `addon_implementation_brief_generated` so the trail captures the
+  // export. See replit.md → "Add-on Implementation Readiness" →
+  // Implementation Brief.
+  const openBriefModal = (addonId: string) => {
+    setBriefModalAddOnId(addonId);
+    setBriefCopyToast(false);
+  };
+  const copyBriefToClipboard = async (addon: AddOnData, briefText: string) => {
+    try {
+      await navigator.clipboard.writeText(briefText);
+      setBriefCopyToast(true);
+      pushCommercialAudit({
+        actor: 'System Owner',
+        action: 'addon_implementation_brief_generated',
+        addOnId: addon.id,
+        note: `Copied implementation brief (${briefText.length} chars)`,
+      });
+      setAuditTick(t => t + 1);
+      window.setTimeout(() => setBriefCopyToast(false), 1800);
+    } catch {
+      // Clipboard may be unavailable in restricted browser contexts;
+      // the user can still select-all the textarea and copy manually.
+      setBriefCopyToast(false);
+    }
   };
 
   const setAddOnGovernance = (addonId: string, next: AddOnGovernanceStatus) => {
@@ -1293,6 +1439,17 @@ const PlansPage: React.FC = () => {
                         <span className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md border ${govStyles[addon.governanceStatus]}`}>
                           {govLabel[addon.governanceStatus]}
                         </span>
+                        {(() => {
+                          const r = getReadinessStatus(addon);
+                          return (
+                            <span
+                              className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md border ${READINESS_BADGE_STYLES[r]}`}
+                              title={READINESS_DESCRIPTIONS[r]}
+                            >
+                              {READINESS_LABELS[r]}
+                            </span>
+                          );
+                        })()}
                       </div>
                       <span className="text-xl font-black text-primary whitespace-nowrap">${addon.price}<span className="text-[10px] text-slate-400">/{addon.billingCadence === 'one_time' ? 'once' : addon.billingCadence === 'annual' ? 'yr' : 'mo'}</span></span>
                     </div>
@@ -1685,18 +1842,18 @@ const PlansPage: React.FC = () => {
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 20 }}
               onClick={e => e.stopPropagation()}
-              className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg overflow-hidden"
+              className="bg-white rounded-[3rem] shadow-2xl w-full max-w-3xl max-h-[92vh] flex flex-col overflow-hidden"
             >
-              <div className="p-8 border-b border-slate-100 flex justify-between items-center">
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center shrink-0">
                 <div>
                   <h3 className="text-xl font-black text-primary tracking-tight">{editingAddOn ? 'Edit Add-on' : 'Create Add-on'}</h3>
-                  <p className="text-sm text-slate-500 mt-1">Define add-on details, lifecycle, and plan compatibility.</p>
+                  <p className="text-sm text-slate-500 mt-1">Define add-on details, lifecycle, plan compatibility, and runtime readiness.</p>
                 </div>
                 <button onClick={() => setShowAddOnModal(false)} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-all">
                   <span className="material-symbols-outlined text-lg">close</span>
                 </button>
               </div>
-              <div className="p-8 space-y-5">
+              <div className="p-8 space-y-5 overflow-y-auto">
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">Add-on Name</label>
                   <input value={addOnForm.name} onChange={e => setAddOnForm(p => ({ ...p, name: e.target.value }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary" placeholder="e.g., Premium Support" />
@@ -1836,6 +1993,176 @@ const PlansPage: React.FC = () => {
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">Description</label>
                   <textarea value={addOnForm.description} onChange={e => setAddOnForm(p => ({ ...p, description: e.target.value }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary resize-none" rows={3} placeholder="What this add-on provides..." />
                 </div>
+                {/* Implementation Readiness section. Lets the System Owner
+                    declare whether this add-on is wired into runtime
+                    behavior, edit the runtime backing checklist, set the
+                    runtime UI surface, optionally allow manual / presale
+                    tenant grants for placeholders, acknowledge a parent
+                    feature link, and generate a copyable Implementation
+                    Brief for non-runtime-backed add-ons. See replit.md
+                    → "Add-on Implementation Readiness". */}
+                {(() => {
+                  const previewAddon: AddOnData = {
+                    id: editingAddOn?.id || 'preview',
+                    name: addOnForm.name || 'New add-on',
+                    price: Number(addOnForm.price) || 0,
+                    description: addOnForm.description,
+                    compatiblePlans: addOnForm.compatiblePlans,
+                    status: addOnForm.governanceStatus === 'archived' ? 'archived' : 'active',
+                    lifecycle: addOnForm.lifecycle,
+                    governanceStatus: addOnForm.governanceStatus,
+                    billingCadence: addOnForm.billingCadence,
+                    linkedFeatureId: addOnForm.linkedFeatureId || undefined,
+                    readinessStatus: addOnForm.readinessStatus,
+                    runtimeChecklist: addOnForm.runtimeChecklist,
+                    runtimeSurface: addOnForm.runtimeSurface || undefined,
+                    allowManualPresaleGrant: addOnForm.allowManualPresaleGrant,
+                    parentLinkAcknowledged: addOnForm.parentLinkAcknowledged,
+                    createdAt: editingAddOn?.createdAt || '',
+                    createdBy: editingAddOn?.createdBy || '',
+                    updatedAt: editingAddOn?.updatedAt || '',
+                  };
+                  const suggested = deriveSuggestedReadiness(previewAddon);
+                  const current = addOnForm.readinessStatus;
+                  const isParentLink = !!addOnForm.linkedFeatureId && PARENT_FEATURE_IDS.has(addOnForm.linkedFeatureId);
+                  const linkedFeatureName = addOnForm.linkedFeatureId
+                    ? (featuresData.find(f => f.id === addOnForm.linkedFeatureId)?.name || null)
+                    : null;
+                  return (
+                    <div className="rounded-2xl border border-indigo-200 bg-indigo-50/40 p-5 space-y-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <h4 className="text-[11px] font-black text-indigo-700 uppercase tracking-widest flex items-center gap-1.5">
+                            <span className="material-symbols-outlined text-sm">verified</span>
+                            Implementation Readiness
+                          </h4>
+                          <p className="text-[10px] text-slate-500 font-medium mt-1 leading-snug">Declare whether this add-on is connected to real runtime behavior. Used to gate tenant Trial / Paid Override grants.</p>
+                        </div>
+                        <span className={`shrink-0 px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md border ${READINESS_BADGE_STYLES[current]}`}>
+                          {READINESS_LABELS[current]}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">Readiness Status</label>
+                          <select
+                            value={current}
+                            onChange={e => setAddOnForm(p => ({ ...p, readinessStatus: e.target.value as AddOnReadinessStatus }))}
+                            className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary"
+                          >
+                            {(['runtime_backed','partially_backed','parent_feature_linked','implementation_required','commercial_placeholder'] as AddOnReadinessStatus[]).map(s => (
+                              <option key={s} value={s}>{READINESS_LABELS[s]}</option>
+                            ))}
+                          </select>
+                          <p className="text-[9px] text-slate-500 font-medium mt-1.5 leading-snug">{READINESS_DESCRIPTIONS[current]}</p>
+                          {suggested !== current && (
+                            <button
+                              type="button"
+                              onClick={() => setAddOnForm(p => ({ ...p, readinessStatus: suggested }))}
+                              className="mt-2 px-2.5 py-1 bg-indigo-100 hover:bg-indigo-200 text-indigo-700 font-black text-[9px] rounded-lg uppercase tracking-widest transition-all inline-flex items-center gap-1"
+                              title={`Suggested: ${READINESS_LABELS[suggested]}`}
+                            >
+                              <span className="material-symbols-outlined text-[12px] leading-none">auto_awesome</span>
+                              Use suggested: {READINESS_LABELS[suggested]}
+                            </button>
+                          )}
+                        </div>
+                        <div>
+                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">Runtime Surface <span className="text-slate-400 font-medium normal-case tracking-normal">(route or tab)</span></label>
+                          <input
+                            value={addOnForm.runtimeSurface}
+                            onChange={e => setAddOnForm(p => ({ ...p, runtimeSurface: e.target.value }))}
+                            placeholder="e.g., /tenant/inventory/labels"
+                            className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary"
+                          />
+                          <p className="text-[9px] text-slate-500 font-medium mt-1.5 leading-snug">Where the capability becomes visible to a tenant. Used in the Implementation Brief.</p>
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">Runtime Backing Checklist</label>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                          {(Object.keys(addOnForm.runtimeChecklist) as RuntimeChecklistKey[]).map(k => (
+                            <div key={k} className="flex items-center gap-2 bg-white rounded-xl border border-slate-200 px-3 py-2">
+                              <span className="flex-1 text-[10px] font-bold text-slate-600 leading-snug">{RUNTIME_CHECKLIST_LABELS[k]}</span>
+                              <select
+                                value={addOnForm.runtimeChecklist[k]}
+                                onChange={e => setAddOnForm(p => ({
+                                  ...p,
+                                  runtimeChecklist: { ...p.runtimeChecklist, [k]: e.target.value as RuntimeChecklistState },
+                                }))}
+                                className={`text-[10px] font-black uppercase tracking-widest rounded-lg px-2 py-1 border focus:outline-none focus:ring-2 focus:ring-primary/20 ${
+                                  addOnForm.runtimeChecklist[k] === 'complete' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
+                                  addOnForm.runtimeChecklist[k] === 'missing' ? 'bg-rose-50 text-rose-700 border-rose-200' :
+                                  addOnForm.runtimeChecklist[k] === 'not_required' ? 'bg-slate-50 text-slate-500 border-slate-200' :
+                                  'bg-amber-50 text-amber-700 border-amber-200'
+                                }`}
+                              >
+                                <option value="complete">Complete</option>
+                                <option value="missing">Missing</option>
+                                <option value="not_required">N/A</option>
+                                <option value="unknown">Unknown</option>
+                              </select>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {(current === 'implementation_required' || current === 'commercial_placeholder') && (
+                        <label className="flex items-start gap-2 bg-white rounded-xl border border-amber-200 p-3 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={addOnForm.allowManualPresaleGrant}
+                            onChange={e => setAddOnForm(p => ({ ...p, allowManualPresaleGrant: e.target.checked }))}
+                            className="mt-0.5 w-4 h-4 accent-amber-500"
+                          />
+                          <div>
+                            <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest">Allow manual / presale tenant grant</p>
+                            <p className="text-[9px] text-slate-500 font-medium mt-0.5 leading-snug">By default, placeholders block tenant Trial / Paid Override. Tick this to allow manual grants for early-access or pre-sale customers (audit-tracked).</p>
+                          </div>
+                        </label>
+                      )}
+
+                      {isParentLink && (
+                        <label className="flex items-start gap-2 bg-white rounded-xl border border-orange-200 p-3 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={addOnForm.parentLinkAcknowledged}
+                            onChange={e => setAddOnForm(p => ({ ...p, parentLinkAcknowledged: e.target.checked }))}
+                            className="mt-0.5 w-4 h-4 accent-orange-500"
+                          />
+                          <div>
+                            <p className="text-[10px] font-black text-orange-700 uppercase tracking-widest">Acknowledge parent feature link</p>
+                            <p className="text-[9px] text-slate-500 font-medium mt-0.5 leading-snug">Confirm the broad-module link is intentional. The catalog will still warn other System Owners on Tenant grant screens.</p>
+                          </div>
+                        </label>
+                      )}
+
+                      {(current === 'implementation_required' || current === 'commercial_placeholder' || current === 'partially_backed' || current === 'parent_feature_linked') && (
+                        <div className="flex flex-wrap items-center justify-between gap-2 bg-white rounded-xl border border-slate-200 p-3">
+                          <div className="flex-1 min-w-[200px]">
+                            <p className="text-[10px] font-black text-slate-600 uppercase tracking-widest">Implementation Brief</p>
+                            <p className="text-[9px] text-slate-500 font-medium mt-0.5 leading-snug">Generates a copyable spec for what's needed to make this add-on runtime-backed. Paste into your build prompt.</p>
+                          </div>
+                          <button
+                            type="button"
+                            disabled={!editingAddOn}
+                            onClick={() => editingAddOn && openBriefModal(editingAddOn.id)}
+                            title={editingAddOn ? 'Generate brief' : 'Save the add-on first to generate a brief'}
+                            className="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-black text-[10px] rounded-xl uppercase tracking-widest transition-all inline-flex items-center gap-1.5"
+                          >
+                            <span className="material-symbols-outlined text-[14px] leading-none">description</span>
+                            Generate Brief
+                          </button>
+                        </div>
+                      )}
+                      {linkedFeatureName && (
+                        <p className="text-[9px] text-slate-400 font-medium leading-snug">Linked capability: <span className="font-black text-slate-600">{linkedFeatureName}</span> ({addOnForm.linkedFeatureId})</p>
+                      )}
+                    </div>
+                  );
+                })()}
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">Compatible Plans</label>
                   {addOnForm.governanceStatus === 'active' ? (
@@ -1875,7 +2202,7 @@ const PlansPage: React.FC = () => {
                   )}
                 </div>
               </div>
-              <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3">
+              <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-3 shrink-0">
                 <button onClick={() => setShowAddOnModal(false)} className="flex-1 py-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-sm rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
                 <button
                   onClick={saveAddOn}
@@ -1983,6 +2310,66 @@ const PlansPage: React.FC = () => {
             </motion.div>
           </div>
         )}
+      </AnimatePresence>
+
+      {/* Implementation Brief Modal — shows the generated brief for the
+          currently-edited add-on. Read-only textarea + Copy button. The
+          brief generator is a pure function in src/owner/readiness.ts. */}
+      <AnimatePresence>
+        {briefModalAddOnId && (() => {
+          const briefAddon = addOnsData.find(a => a.id === briefModalAddOnId);
+          if (!briefAddon) return null;
+          const linkedFeatureName = briefAddon.linkedFeatureId
+            ? (featuresData.find(f => f.id === briefAddon.linkedFeatureId)?.name || null)
+            : null;
+          const briefText = generateImplementationBrief(briefAddon, linkedFeatureName);
+          return (
+            <div className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setBriefModalAddOnId(null)}>
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 20 }}
+                onClick={e => e.stopPropagation()}
+                className="bg-white rounded-[3rem] shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col overflow-hidden"
+              >
+                <div className="p-6 border-b border-slate-100 flex justify-between items-center shrink-0">
+                  <div>
+                    <h3 className="text-lg font-black text-primary tracking-tight">Implementation Brief — {briefAddon.name}</h3>
+                    <p className="text-xs text-slate-500 mt-0.5">Copy this brief and paste it into a build prompt to implement the missing runtime behavior.</p>
+                  </div>
+                  <button onClick={() => setBriefModalAddOnId(null)} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-all">
+                    <span className="material-symbols-outlined text-lg">close</span>
+                  </button>
+                </div>
+                <div className="p-6 flex-1 overflow-y-auto">
+                  <textarea
+                    readOnly
+                    value={briefText}
+                    onFocus={e => e.currentTarget.select()}
+                    className="w-full h-[55vh] px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl font-mono text-[11px] text-slate-700 leading-relaxed focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary resize-none"
+                  />
+                </div>
+                <div className="p-6 border-t border-slate-100 bg-slate-50/50 flex items-center gap-3 shrink-0">
+                  {briefCopyToast && (
+                    <span className="text-[10px] font-black uppercase tracking-widest text-emerald-600 flex items-center gap-1">
+                      <span className="material-symbols-outlined text-sm">check_circle</span>
+                      Copied to clipboard
+                    </span>
+                  )}
+                  <div className="flex-1" />
+                  <button onClick={() => setBriefModalAddOnId(null)} className="px-5 py-3 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-xs rounded-2xl uppercase tracking-widest transition-all">Close</button>
+                  <button
+                    onClick={() => copyBriefToClipboard(briefAddon, briefText)}
+                    className="px-5 py-3 bg-primary text-white font-black text-xs rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 transition-all flex items-center gap-1.5"
+                  >
+                    <span className="material-symbols-outlined text-sm">content_copy</span>
+                    Copy Brief
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          );
+        })()}
       </AnimatePresence>
 
       <AnimatePresence>
