@@ -1,0 +1,153 @@
+System Owner Commercial Controls — Archived Standalone Add-on Matrix Lock Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict isolated correction pass.
+Do not redesign the app.
+Do not broaden scope.
+Do not touch the completed Shipping Module.
+Do not change billing, invoice, tenant feature visibility, Store Permissions Matrix, delete behavior, or archive dependency protection except where directly required to lock archived standalone add-on matrix rows.
+
+Fix only:
+- Archived standalone add-on representation in Plans & Features Matrix
+- Matrix plan toggle locking for archived standalone add-on capability rows
+- Archived badge/label visibility
+
+==================================================
+CURRENT QA-BLOCKING ISSUE
+==================================================
+
+Manual QA failed this item:
+
+3) Archived standalone add-on is marked archived/locked in Plans & Features — FAIL
+
+Observed:
+- After archiving a standalone add-on, its generated cap_<addonId> row still appears in Plans & Features Matrix
+- The row is not clearly marked Archived
+- The plan toggles remain editable
+
+This is incorrect.
+
+Expected:
+- Archived standalone add-on generated matrix row remains visible for System Owner source-of-truth/audit clarity
+- Row is clearly marked:
+  - Add-on Archived
+  or
+  - Archived
+- All plan toggles for that row are locked/read-only
+- Lifecycle dropdown or editable controls for that generated row are locked/read-only
+- System Owner cannot enable/disable the archived standalone add-on from Plans & Features Matrix
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior SaaS entitlement architect
+- Senior RBAC / plan-gating architect
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Do not make a shallow visual-only patch.
+Ensure matrix edit handlers also block changes to archived standalone add-on rows.
+
+==================================================
+REQUIRED BEHAVIOR
+==================================================
+
+For a standalone add-on where:
+- Linked Feature = None originally
+- generated capability row id follows cap_<addonId>
+- add-on governanceStatus = archived
+
+Plans & Features Matrix must:
+
+1) keep the generated row visible
+2) show Archived / Add-on Archived badge
+3) lock all plan toggles
+4) lock lifecycle/status controls for that row
+5) block any handler path that tries to change planAvailability or lifecycle for the archived generated row
+6) optionally show helper text:
+   “This add-on is archived. Its generated capability row is read-only.”
+7) preserve Billing/Audit history
+8) not expose tenant availability
+9) not expose Store Permissions Matrix capability as available
+
+==================================================
+HANDLER-LEVEL PROTECTION
+==================================================
+
+Required:
+Do not rely only on disabled UI.
+
+Update underlying update/toggle handlers so archived standalone add-on generated rows cannot be modified through:
+- plan toggle clicks
+- bulk matrix edits, if any
+- lifecycle dropdown changes
+- stale UI state
+- any direct local handler path used by Plans & Features Matrix
+
+If the handler receives a request to update an archived standalone add-on row:
+- ignore it safely
+or
+- return a clear blocked state
+- do not mutate the feature matrix
+
+==================================================
+ARCHIVED LINKED-FEATURE ADD-ON NON-REGRESSION
+==================================================
+
+Do not apply this lock to normal existing feature rows just because an add-on linked to them was archived.
+
+If add-on is linked to an existing feature:
+- existing feature row remains normal
+- do not delete it
+- do not lock it unless there is another valid reason
+- remove/suppress active Add-on label as already accepted
+
+This lock applies only to generated standalone add-on rows such as cap_<addonId>.
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Archived standalone add-on generated row shows Archived / Add-on Archived badge in Plans & Features Matrix.
+2) Archived standalone add-on generated row plan toggles are disabled/read-only.
+3) Archived standalone add-on generated row lifecycle/status controls are disabled/read-only.
+4) Attempting to toggle a plan for archived standalone add-on generated row does not mutate the matrix.
+5) Archived standalone add-on remains unavailable in Tenant Features.
+6) Archived standalone add-on does not expose permissions in Store Permissions Matrix.
+7) Archived linked-feature add-on does not lock the existing feature row.
+8) Existing delete behavior remains intact.
+9) Existing billing, permissions, tenant visibility, and shipping behavior remain intact.
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- archived standalone add-on generated matrix rows remain visible
+- archived standalone generated rows are read-only/locked
+- archived linked-feature add-ons do not lock/delete existing feature rows
+- handler-level protection prevents stale UI edits
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Archived Standalone Matrix Row Locking
+3. Handler-Level Protection
+4. Linked-Feature Add-on Non-Regression
+5. Files Changed
+6. Documentation Updated
+7. Non-Regression Notes

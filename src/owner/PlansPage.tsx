@@ -258,13 +258,38 @@ const PlansPage: React.FC = () => {
 
   const activePlans = plansData.filter(p => p.status === 'active');
 
+  // Handler-level protection for archived standalone add-on
+  // capability rows. A row is locked iff its id is `cap_<addonId>`
+  // for an add-on whose `governanceStatus === 'archived'`. Once
+  // locked, the matrix MUST refuse plan-toggle, lifecycle, and
+  // delete mutations regardless of UI state — defense in depth
+  // beyond the disabled controls. Linked-feature add-ons (where
+  // the add-on points at a pre-existing feature row) do NOT lock
+  // the underlying feature row; the row is shared and other plans/
+  // permissions still own it. See replit.md → "Add-on Runtime
+  // Linkage & Delete/Archive Matrix Behavior" → Archived
+  // standalone capability rows.
+  const isArchivedStandaloneCapRow = (featureId: string): boolean => {
+    if (!featureId.startsWith('cap_')) return false;
+    const owner = addOnsData.find(a => `cap_${a.id}` === featureId);
+    return !!(owner && owner.governanceStatus === 'archived');
+  };
+
   const toggleFeature = (featureId: string, planId: string) => {
     const feature = featuresData.find(f => f.id === featureId);
     if (!feature || feature.lifecycle !== 'implemented') return;
+    // Archived standalone add-on cap rows are read-only at the
+    // handler level. Stale UI / bulk paths must not be able to
+    // mutate planAvailability for these rows.
+    if (isArchivedStandaloneCapRow(featureId)) return;
     setFeaturesData(prev => prev.map(f => f.id === featureId ? { ...f, planAvailability: { ...f.planAvailability, [planId]: !f.planAvailability[planId] } } : f));
   };
 
   const changeLifecycle = (featureId: string, newLifecycle: FeatureLifecycle) => {
+    // Archived standalone add-on cap rows are read-only at the
+    // handler level. Lifecycle is owned by the add-on governance
+    // transition; the matrix cannot drift from it.
+    if (isArchivedStandaloneCapRow(featureId)) return;
     setFeaturesData(prev => prev.map(f => {
       if (f.id !== featureId) return f;
       if (newLifecycle !== 'implemented') {
@@ -294,6 +319,15 @@ const PlansPage: React.FC = () => {
   };
 
   const removeFeature = (featureId: string) => {
+    // Archived standalone add-on cap rows are read-only at the
+    // handler level. They cannot be deleted directly from the
+    // Plans & Features Matrix — they are owned by the add-on
+    // catalog record and only `removeAddOn` (after passing all
+    // dependency blockers) may remove them.
+    if (isArchivedStandaloneCapRow(featureId)) {
+      setShowDeleteConfirm(null);
+      return;
+    }
     setFeaturesData(prev => prev.filter(f => f.id !== featureId));
     setShowDeleteConfirm(null);
   };
@@ -1087,22 +1121,25 @@ const PlansPage: React.FC = () => {
               </thead>
               <tbody>
                 {featuresData
-                  // Archived/deprecated rows are filtered out by default;
-                  // toggle "Show archived/deprecated" to surface them.
-                  // Standalone capability rows (`cap_<addonId>`) whose
-                  // owning add-on has been archived/deleted always
-                  // count as archived for visibility purposes — even
-                  // if the row's own lifecycle is still `implemented`
-                  // — because the toggles are locked. See replit.md →
+                  // Archived/deprecated feature rows are filtered out
+                  // by default; toggle "Show archived/deprecated" to
+                  // surface them. Archived STANDALONE add-on cap rows
+                  // (`cap_<addonId>` for an add-on whose
+                  // governanceStatus === 'archived') are ALWAYS
+                  // visible regardless of the toggle — they remain in
+                  // the matrix as the System Owner's source-of-truth
+                  // record (read-only with an "Add-on Archived"
+                  // badge) so audit reviewers can always see what the
+                  // archived add-on was wired to. See replit.md →
                   // "Add-on Runtime Linkage & Delete/Archive Matrix
                   // Behavior" → Archived standalone capability rows.
                   .filter(f => {
                     if (showArchivedFeatures) return true;
-                    if (f.lifecycle === 'archived' || f.lifecycle === 'deprecated') return false;
                     if (f.id.startsWith('cap_')) {
                       const owner = addOnsData.find(a => `cap_${a.id}` === f.id);
-                      if (owner && owner.governanceStatus === 'archived') return false;
+                      if (owner && owner.governanceStatus === 'archived') return true;
                     }
+                    if (f.lifecycle === 'archived' || f.lifecycle === 'deprecated') return false;
                     return true;
                   })
                   .map((feature) => {
@@ -1127,12 +1164,17 @@ const PlansPage: React.FC = () => {
                             : 'bg-violet-400/10 text-violet-600 border-violet-400/20'
                         }`}>{feature.source}</span>
                         {isArchivedCapRow && (
-                          <span
-                            className="ml-2 px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md border bg-amber-400/10 text-amber-700 border-amber-400/30"
-                            title={`Owning add-on "${capOwner?.name}" is archived. Restore the add-on to re-enable editing.`}
-                          >
-                            Add-on Archived
-                          </span>
+                          <>
+                            <span
+                              className="ml-2 px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md border bg-amber-400/10 text-amber-700 border-amber-400/30"
+                              title={`Owning add-on "${capOwner?.name}" is archived. Restore the add-on to re-enable editing.`}
+                            >
+                              Add-on Archived
+                            </span>
+                            <p className="mt-1 text-[10px] text-amber-700 font-medium leading-snug">
+                              This add-on is archived. Its generated capability row is read-only — restore the add-on from the Add-on Catalog to re-enable editing.
+                            </p>
+                          </>
                         )}
                       </td>
                       <td className="px-4 py-4">
