@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { plans as initialPlans, featureMatrix as initialFeatures, addOns as initialAddOns } from './mockData';
 import type { FeatureLifecycle, AddOnLifecycle, AddOn, AddOnGovernanceStatus } from './mockData';
 import { pushCommercialAudit, getCommercialAuditLog } from './commercialAudit';
+import { readInvoices } from './commercialInvoices';
 
 type PlanData = Omit<typeof initialPlans[0], 'status'> & { status: 'active' | 'archived' };
 type FeatureData = { id: string; name: string; planAvailability: Record<string, boolean>; source: 'inherited' | 'custom'; lifecycle: FeatureLifecycle };
@@ -11,6 +12,53 @@ type AddOnData = AddOn;
 
 const LIFECYCLE_ORDER: FeatureLifecycle[] = ['draft', 'planned', 'in_development', 'implemented', 'deprecated', 'archived'];
 const ADDON_LIFECYCLE_ORDER: AddOnLifecycle[] = ['draft', 'planned', 'in_development', 'active', 'deprecated', 'archived'];
+
+// Add-on Runtime Linkage — known broad parent / module-level features.
+// Linking an add-on to one of these surfaces a warning in the Add-on
+// modal because the add-on will then control entitlement for the entire
+// parent feature surface. The preferred linkage is a specific implemented
+// sub-feature/capability listed in `SUB_FEATURE_HINTS`. See replit.md →
+// "Add-on Runtime Linkage & Delete/Archive Matrix Behavior".
+const PARENT_FEATURE_IDS: ReadonlySet<string> = new Set([
+  'shipping',
+  'sales',
+  'repairs',
+  'inventory',
+  'customers',
+  'marketing',
+  'reports',
+  'employees',
+  'integrations',
+  'supply_chain',
+]);
+
+// Suggested specific sub-feature/capability ids per parent. Rendered in
+// the Add-on modal warning so the System Owner can pick the smallest
+// real capability the add-on should control. Keep ids in sync with
+// `featureMatrix` in mockData.ts; missing ids are skipped at render time.
+const SUB_FEATURE_HINTS: Readonly<Record<string, readonly string[]>> = {
+  shipping: [
+    'shipping_providers',
+    'shipping_automation_rules',
+    'shipping_sla_optimization',
+    'batch_labels',
+    'packing_workflows',
+    'carrier_analytics',
+    'carrier_scorecards',
+    'service_points',
+    'pickup_requests',
+    'returns',
+  ],
+  sales: [],
+  repairs: [],
+  inventory: [],
+  customers: ['loyalty_management'],
+  marketing: [],
+  reports: [],
+  employees: [],
+  integrations: ['api', 'domains', 'whitelabel'],
+  supply_chain: [],
+};
 
 const lifecycleBadge = (lifecycle: FeatureLifecycle | AddOnLifecycle) => {
   const styles: Record<string, string> = {
@@ -132,6 +180,25 @@ const PlansPage: React.FC = () => {
     pendingPayments: number;
   } | null>(null);
   const [showArchivedAddOns, setShowArchivedAddOns] = useState(false);
+  // Features tab "Show archived/deprecated" filter. Default false so the
+  // matrix surfaces only live rows; archived/deprecated rows (including
+  // standalone-cap rows belonging to archived add-ons) are visible when
+  // toggled on. See replit.md → "Add-on Runtime Linkage & Delete/Archive
+  // Matrix Behavior" → Archived standalone capability rows.
+  const [showArchivedFeatures, setShowArchivedFeatures] = useState(false);
+  // Delete blocker reason set for the currently-targeted add-on. When
+  // non-null the Delete modal renders the BLOCKED variant (read-only
+  // dependency list) instead of the confirm variant. See replit.md →
+  // "Add-on Runtime Linkage & Delete/Archive Matrix Behavior" →
+  // Delete vs Archive policy.
+  const [addOnDeleteBlockers, setAddOnDeleteBlockers] = useState<{
+    inPlanFeatureNames: string[];
+    compatiblePlanNames: string[];
+    activeTrials: number;
+    activePaidOverrides: number;
+    pendingPayments: number;
+    openInvoiceIds: string[];
+  } | null>(null);
   const [showAddOnDisableConfirm, setShowAddOnDisableConfirm] = useState<string | null>(null);
   const [showCommercialAudit, setShowCommercialAudit] = useState(false);
   const [auditTick, setAuditTick] = useState(0);
@@ -231,15 +298,191 @@ const PlansPage: React.FC = () => {
     setShowDeleteConfirm(null);
   };
 
-  const getAddOnDependencies = (addonId: string) => {
+  // Add-on Runtime Linkage — Delete Policy.
+  // A delete is BLOCKED while any of the following reference the add-on
+  // or its linked capability key:
+  //   1. The linked feature/capability is included in any active plan
+  //      in the Plans & Features Matrix.
+  //   2. The add-on has any Compatible Plans selected.
+  //   3. There is an active tenant trial linked to the add-on or its
+  //      linked feature/capability.
+  //   4. There is an active paid override linked to the add-on or its
+  //      linked feature/capability.
+  //   5. There is a pending payment linked to the add-on or its linked
+  //      feature/capability.
+  //   6. There is an open / overdue / pending internal SaaS invoice
+  //      tied to the add-on or its linked feature/capability.
+  // Returns null when no blockers are present (Delete may proceed).
+  const getAddOnDeleteBlockers = (addonId: string) => {
     const addon = addOnsData.find(a => a.id === addonId);
-    if (!addon) return [];
-    return activePlans.filter(p => addon.compatiblePlans.includes(p.id));
+    if (!addon) return null;
+    const inPlanFeatureNames: string[] = [];
+    if (addon.linkedFeatureId) {
+      const linkedFeature = featuresData.find(f => f.id === addon.linkedFeatureId);
+      if (linkedFeature) {
+        plansData.filter(p => p.status === 'active').forEach(p => {
+          const planKey = p.id === 'starter' ? 'essential' : p.id;
+          if (linkedFeature.planAvailability[planKey]) {
+            inPlanFeatureNames.push(`${linkedFeature.name} included in ${p.name} plan`);
+          }
+        });
+      }
+    }
+    const compatiblePlanNames: string[] = addon.compatiblePlans
+      .map(pid => plansData.find(p => p.id === pid)?.name || pid);
+    let activeTrials = 0;
+    let activePaidOverrides = 0;
+    let pendingPayments = 0;
+    let openInvoiceIds: string[] = [];
+    try {
+      if (typeof window !== 'undefined') {
+        const raw = window.sessionStorage.getItem('tenant_overrides_data');
+        if (raw) {
+          const all = JSON.parse(raw) as Array<{
+            featureId: string;
+            type: string;
+            revokedDate?: string;
+            addOnId?: string | null;
+            invoiceId?: string;
+          }>;
+          for (const o of all) {
+            if (o.revokedDate) continue;
+            const matchesAddon = o.addOnId === addonId;
+            const matchesFeature =
+              !!addon.linkedFeatureId && o.featureId === addon.linkedFeatureId;
+            if (!matchesAddon && !matchesFeature) continue;
+            if (o.type === 'trial') activeTrials++;
+            else if (o.type === 'overridden' || o.type === 'addon' || o.type === 'paid_override') activePaidOverrides++;
+            else if (o.type === 'pending_payment') pendingPayments++;
+            if (o.invoiceId) openInvoiceIds.push(o.invoiceId);
+          }
+        }
+        // Cross-check the commercial invoice store for open/overdue
+        // invoices that reference this add-on (always) or its linked
+        // feature/cap (when present). Add-ons without a linkedFeatureId
+        // — including legacy seed entries — must still gate delete on
+        // any open `inv.addOnId === addonId` row. We read through the
+        // canonical helper `readInvoices()` (sessionStorage key
+        // `commercial_invoices_data`) so a hand-rolled key here can
+        // never drift from the real billing store.
+        for (const inv of readInvoices()) {
+          if (inv.status !== 'open' && inv.status !== 'overdue') continue;
+          const matchesAddon = inv.addOnId === addonId;
+          const matchesFeature = !!addon.linkedFeatureId && inv.featureId === addon.linkedFeatureId;
+          if ((matchesAddon || matchesFeature) && !openInvoiceIds.includes(inv.invoiceId)) {
+            openInvoiceIds.push(inv.invoiceId);
+          }
+        }
+      }
+    } catch {}
+    const hasAny =
+      inPlanFeatureNames.length > 0 ||
+      compatiblePlanNames.length > 0 ||
+      activeTrials > 0 ||
+      activePaidOverrides > 0 ||
+      pendingPayments > 0 ||
+      openInvoiceIds.length > 0;
+    if (!hasAny) return null;
+    return {
+      inPlanFeatureNames,
+      compatiblePlanNames,
+      activeTrials,
+      activePaidOverrides,
+      pendingPayments,
+      openInvoiceIds,
+    };
   };
 
+  // Classify the linked feature row for the delete modal copy and for
+  // the standalone-cap cleanup. A row is treated as a standalone
+  // capability row created by this add-on iff ALL of the following:
+  //   1. The linked id matches the stable key `cap_<addonId>`.
+  //   2. No OTHER add-on currently references the same id (defensive
+  //      check — saveAddOn never shares cap_ ids across add-ons but
+  //      stale data could).
+  //   3. The matrix row exists with `source: 'custom'` AND
+  //      `lifecycle: 'implemented'` — the same shape `saveAddOn`
+  //      auto-registers. Inherited rows or rows that were promoted/
+  //      demoted to a different lifecycle are NEVER auto-deleted as a
+  //      side effect of removing the add-on; the System Owner must
+  //      manage them explicitly via the Plans & Features Matrix.
+  const classifyLinkedFeatureForAddOn = (addonId: string) => {
+    const addon = addOnsData.find(a => a.id === addonId);
+    if (!addon || !addon.linkedFeatureId) {
+      return { isStandaloneCap: false, linkedFeatureName: null as string | null };
+    }
+    const linkedFeature = featuresData.find(f => f.id === addon.linkedFeatureId);
+    const linkedFeatureName = linkedFeature?.name || addon.linkedFeatureId;
+    const expectedCapKey = `cap_${addonId}`;
+    const idMatches = addon.linkedFeatureId === expectedCapKey;
+    const noOtherAddonRefs = !addOnsData.some(a => a.id !== addonId && a.linkedFeatureId === expectedCapKey);
+    const rowShapeMatches = !!linkedFeature
+      && linkedFeature.source === 'custom'
+      && linkedFeature.lifecycle === 'implemented';
+    const isStandaloneCap = idMatches && noOtherAddonRefs && rowShapeMatches;
+    return { isStandaloneCap, linkedFeatureName };
+  };
+
+  // Add-on Runtime Linkage — perform a delete.
+  // Re-checks the dependency gate (defense in depth — the modal also
+  // disables the button when blockers are present) and emits
+  // `addon_delete_blocked` if anything is found. On success:
+  //   - Always remove the Add-on Catalog record.
+  //   - If the add-on is standalone (linked to its own `cap_<addonId>`
+  //     row that no other add-on references), remove the matrix row
+  //     and emit `standalone_capability_row_deleted`.
+  //   - If linked to an existing feature row, the feature row is
+  //     PRESERVED — only the Add-on Catalog association is removed.
+  //   - Emit `addon_deleted` summarizing what was removed/preserved.
   const removeAddOn = (addonId: string) => {
+    const addon = addOnsData.find(a => a.id === addonId);
+    if (!addon) return;
+    const blockers = getAddOnDeleteBlockers(addonId);
+    if (blockers) {
+      const reasonParts: string[] = [];
+      if (blockers.inPlanFeatureNames.length > 0) reasonParts.push(`included-by-plan: ${blockers.inPlanFeatureNames.join('; ')}`);
+      if (blockers.compatiblePlanNames.length > 0) reasonParts.push(`compatiblePlans: ${blockers.compatiblePlanNames.join(', ')}`);
+      if (blockers.activeTrials > 0) reasonParts.push(`activeTrials=${blockers.activeTrials}`);
+      if (blockers.activePaidOverrides > 0) reasonParts.push(`activePaidOverrides=${blockers.activePaidOverrides}`);
+      if (blockers.pendingPayments > 0) reasonParts.push(`pendingPayments=${blockers.pendingPayments}`);
+      if (blockers.openInvoiceIds.length > 0) reasonParts.push(`openInvoices=${blockers.openInvoiceIds.join(',')}`);
+      pushCommercialAudit({
+        actor: 'System Owner',
+        action: 'addon_delete_blocked',
+        addOnId: addonId,
+        note: reasonParts.join(' | ') || 'Dependencies present',
+      });
+      setAddOnDeleteBlockers(blockers);
+      setAuditTick(t => t + 1);
+      return;
+    }
+    const { isStandaloneCap, linkedFeatureName } = classifyLinkedFeatureForAddOn(addonId);
     setAddOnsData(prev => prev.filter(a => a.id !== addonId));
+    if (isStandaloneCap && addon.linkedFeatureId) {
+      const capId = addon.linkedFeatureId;
+      setFeaturesData(prev => prev.filter(f => f.id !== capId));
+      pushCommercialAudit({
+        actor: 'System Owner',
+        action: 'standalone_capability_row_deleted',
+        addOnId: addonId,
+        featureId: capId,
+        note: `Removed generated capability row "${linkedFeatureName || capId}" from Plans & Features Matrix`,
+      });
+    }
+    pushCommercialAudit({
+      actor: 'System Owner',
+      action: 'addon_deleted',
+      addOnId: addonId,
+      featureId: addon.linkedFeatureId || null,
+      note: isStandaloneCap
+        ? `Catalog record removed; standalone capability row "${linkedFeatureName}" removed`
+        : addon.linkedFeatureId
+          ? `Catalog record removed; linked feature row "${linkedFeatureName}" preserved`
+          : 'Catalog record removed',
+    });
+    setAuditTick(t => t + 1);
     setShowAddOnDelete(null);
+    setAddOnDeleteBlockers(null);
   };
 
   const openCreateAddOn = () => {
@@ -390,6 +633,17 @@ const PlansPage: React.FC = () => {
     setShowAddOnArchive(addonId);
   };
 
+  // Add-on Runtime Linkage — open the Delete modal with the BLOCKED
+  // variant pre-rendered when dependencies exist, or the confirm
+  // variant when the delete may proceed. Either way the modal is
+  // opened from the same code path so the UI never has to recompute
+  // blockers itself.
+  const requestDeleteAddOn = (addonId: string) => {
+    const blockers = getAddOnDeleteBlockers(addonId);
+    setAddOnDeleteBlockers(blockers);
+    setShowAddOnDelete(addonId);
+  };
+
   const saveAddOn = () => {
     const todayIso = new Date().toISOString().slice(0, 10);
     const isCreate = !editingAddOn;
@@ -528,6 +782,43 @@ const PlansPage: React.FC = () => {
           oldValue: oldAddOn.governanceStatus,
           newValue: newAddOn.governanceStatus,
         });
+        // Mirror setAddOnGovernance: when the modal Governance Status
+        // dropdown transitions an add-on to `archived` and a
+        // `cap_<addonId>` row exists in the matrix, that row's plan
+        // toggles get locked read-only. Emit the lock audit exactly
+        // once at the moment of transition so both code paths
+        // (governance buttons + modal save) produce the same trail.
+        if (newAddOn.governanceStatus === 'archived') {
+          const capRowId = `cap_${id}`;
+          const capRowExists = featuresData.some(f => f.id === capRowId)
+            || (effectiveLinkedFeatureId === capRowId);
+          if (capRowExists) {
+            pushCommercialAudit({
+              actor: 'System Owner',
+              action: 'standalone_capability_row_archive_locked',
+              addOnId: id,
+              featureId: capRowId,
+              note: 'Plan toggles locked because owning add-on is archived',
+            });
+          }
+        }
+      }
+      // Add-on Runtime Linkage — record any change to linkedFeatureId
+      // so the audit trail captures the new capability the add-on
+      // controls. Both `null` (standalone) and a feature id are valid
+      // values; the comparison normalizes undefined to the empty
+      // string so the seed catalog (where linkedFeatureId may be
+      // omitted) doesn't generate spurious change events.
+      const oldLinked = oldAddOn.linkedFeatureId || '';
+      const newLinked = newAddOn.linkedFeatureId || '';
+      if (oldLinked !== newLinked) {
+        pushCommercialAudit({
+          actor: 'System Owner',
+          action: 'addon_linked_feature_changed',
+          addOnId: id,
+          oldValue: oldLinked || '(standalone)',
+          newValue: newLinked || '(standalone)',
+        });
       }
       pushCommercialAudit({
         actor: 'System Owner',
@@ -569,6 +860,28 @@ const PlansPage: React.FC = () => {
       }
     }
     const todayIso = new Date().toISOString().slice(0, 10);
+    // Standalone-cap archive lock audit. When an add-on transitions
+    // to `archived` and a `cap_<addonId>` row exists in the Plans &
+    // Features Matrix, that row's plan toggles are locked read-only
+    // (rendered with an "Add-on Archived" badge). We emit the audit
+    // exactly once at the moment of transition; downstream renders
+    // do not re-emit. See replit.md → "Add-on Runtime Linkage &
+    // Delete/Archive Matrix Behavior" → Archived standalone
+    // capability rows.
+    if (next === 'archived') {
+      const prevAddon = addOnsData.find(a => a.id === addonId);
+      const capRowId = `cap_${addonId}`;
+      const capRowExists = featuresData.some(f => f.id === capRowId);
+      if (prevAddon && prevAddon.governanceStatus !== 'archived' && capRowExists) {
+        pushCommercialAudit({
+          actor: 'System Owner',
+          action: 'standalone_capability_row_archive_locked',
+          addOnId: addonId,
+          featureId: capRowId,
+          note: 'Plan toggles locked because owning add-on is archived',
+        });
+      }
+    }
     setAddOnsData(prev => prev.map(a => {
       if (a.id !== addonId) return a;
       const oldStatus = a.governanceStatus;
@@ -745,6 +1058,21 @@ const PlansPage: React.FC = () => {
 
       {activeTab === 'features' && (
         <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
+          <div className="px-8 py-4 border-b border-slate-100 flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-2 text-[10px] font-black text-slate-400 uppercase tracking-widest">
+              <span className="material-symbols-outlined text-sm">filter_list</span>
+              <span>Filters</span>
+            </div>
+            <label className="flex items-center gap-2 text-[10px] font-black text-slate-600 uppercase tracking-widest cursor-pointer">
+              <input
+                type="checkbox"
+                checked={showArchivedFeatures}
+                onChange={e => setShowArchivedFeatures(e.target.checked)}
+                className="accent-primary"
+              />
+              Show archived / deprecated
+            </label>
+          </div>
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse">
               <thead>
@@ -758,10 +1086,39 @@ const PlansPage: React.FC = () => {
                 </tr>
               </thead>
               <tbody>
-                {featuresData.map((feature) => {
-                  const isAssignable = feature.lifecycle === 'implemented';
+                {featuresData
+                  // Archived/deprecated rows are filtered out by default;
+                  // toggle "Show archived/deprecated" to surface them.
+                  // Standalone capability rows (`cap_<addonId>`) whose
+                  // owning add-on has been archived/deleted always
+                  // count as archived for visibility purposes — even
+                  // if the row's own lifecycle is still `implemented`
+                  // — because the toggles are locked. See replit.md →
+                  // "Add-on Runtime Linkage & Delete/Archive Matrix
+                  // Behavior" → Archived standalone capability rows.
+                  .filter(f => {
+                    if (showArchivedFeatures) return true;
+                    if (f.lifecycle === 'archived' || f.lifecycle === 'deprecated') return false;
+                    if (f.id.startsWith('cap_')) {
+                      const owner = addOnsData.find(a => `cap_${a.id}` === f.id);
+                      if (owner && owner.governanceStatus === 'archived') return false;
+                    }
+                    return true;
+                  })
+                  .map((feature) => {
+                  // Detect a standalone-cap row whose owning add-on is
+                  // archived. When true the row is locked read-only:
+                  // toggles render as a lock icon and the row carries
+                  // an "Add-on Archived" badge. The owning add-on can
+                  // be Restored from the Add-on Catalog to re-enable
+                  // editing.
+                  const capOwner = feature.id.startsWith('cap_')
+                    ? addOnsData.find(a => `cap_${a.id}` === feature.id)
+                    : undefined;
+                  const isArchivedCapRow = !!(capOwner && capOwner.governanceStatus === 'archived');
+                  const isAssignable = feature.lifecycle === 'implemented' && !isArchivedCapRow;
                   return (
-                    <tr key={feature.id} className={`hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0 ${feature.lifecycle === 'archived' || feature.lifecycle === 'deprecated' ? 'opacity-60' : ''}`}>
+                    <tr key={feature.id} className={`hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0 ${feature.lifecycle === 'archived' || feature.lifecycle === 'deprecated' || isArchivedCapRow ? 'opacity-60' : ''}`}>
                       <td className="px-8 py-4">
                         <span className="font-bold text-slate-900">{feature.name}</span>
                         <span className={`ml-2 px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md border ${
@@ -769,12 +1126,21 @@ const PlansPage: React.FC = () => {
                             ? 'bg-blue-400/10 text-blue-600 border-blue-400/20'
                             : 'bg-violet-400/10 text-violet-600 border-violet-400/20'
                         }`}>{feature.source}</span>
+                        {isArchivedCapRow && (
+                          <span
+                            className="ml-2 px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-md border bg-amber-400/10 text-amber-700 border-amber-400/30"
+                            title={`Owning add-on "${capOwner?.name}" is archived. Restore the add-on to re-enable editing.`}
+                          >
+                            Add-on Archived
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-4">
                         <select
                           value={feature.lifecycle}
                           onChange={e => changeLifecycle(feature.id, e.target.value as FeatureLifecycle)}
-                          className="text-[9px] font-black uppercase tracking-widest bg-transparent border border-slate-200 rounded-lg px-2 py-1.5 cursor-pointer focus:outline-none focus:ring-1 focus:ring-primary/20"
+                          disabled={isArchivedCapRow}
+                          className="text-[9px] font-black uppercase tracking-widest bg-transparent border border-slate-200 rounded-lg px-2 py-1.5 cursor-pointer focus:outline-none focus:ring-1 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           {LIFECYCLE_ORDER.map(lc => (
                             <option key={lc} value={lc}>{lc === 'in_development' ? 'In Dev' : lc.charAt(0).toUpperCase() + lc.slice(1)}</option>
@@ -794,13 +1160,18 @@ const PlansPage: React.FC = () => {
                                 <span className="material-symbols-outlined text-slate-300">toggle_off</span>
                               )}
                             </button>
+                          ) : isArchivedCapRow ? (
+                            <span
+                              className="material-symbols-outlined text-amber-400 text-sm"
+                              title="Locked — owning add-on is archived"
+                            >lock</span>
                           ) : (
                             <span className="material-symbols-outlined text-slate-200 text-sm" title="Only implemented features can be assigned">lock</span>
                           )}
                         </td>
                       ))}
                       <td className="px-8 py-4 text-center">
-                        {feature.source === 'custom' ? (
+                        {feature.source === 'custom' && !isArchivedCapRow ? (
                           <button onClick={() => setShowDeleteConfirm(feature.id)} className="text-slate-400 hover:text-red-500 transition-colors">
                             <span className="material-symbols-outlined text-sm">delete</span>
                           </button>
@@ -955,7 +1326,7 @@ const PlansPage: React.FC = () => {
                       <button onClick={() => openEditAddOn(addon)} className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
                         Edit
                       </button>
-                      <button onClick={() => setShowAddOnDelete(addon.id)} className="py-3 px-4 bg-red-50 hover:bg-red-100 text-red-500 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
+                      <button onClick={() => requestDeleteAddOn(addon.id)} className="py-3 px-4 bg-red-50 hover:bg-red-100 text-red-500 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
                         <span className="material-symbols-outlined text-sm">delete</span>
                       </button>
                     </div>
@@ -1146,45 +1517,118 @@ const PlansPage: React.FC = () => {
       <AnimatePresence>
         {showAddOnDelete && (() => {
           const addon = addOnsData.find(a => a.id === showAddOnDelete);
-          const deps = addon ? getAddOnDependencies(showAddOnDelete) : [];
+          const blockers = addOnDeleteBlockers;
+          const cls = addon ? classifyLinkedFeatureForAddOn(showAddOnDelete) : { isStandaloneCap: false, linkedFeatureName: null as string | null };
+          const closeAndReset = () => {
+            setShowAddOnDelete(null);
+            setAddOnDeleteBlockers(null);
+          };
           return (
-            <div className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setShowAddOnDelete(null)}>
+            <div className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={closeAndReset}>
               <motion.div
                 initial={{ opacity: 0, scale: 0.95, y: 20 }}
                 animate={{ opacity: 1, scale: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.95, y: 20 }}
                 onClick={e => e.stopPropagation()}
-                className="bg-white rounded-[3rem] shadow-2xl w-full max-w-sm overflow-hidden"
+                className="bg-white rounded-[3rem] shadow-2xl w-full max-w-md overflow-hidden"
               >
-                <div className="p-8 text-center">
-                  <div className="w-14 h-14 bg-red-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
-                    <span className="material-symbols-outlined text-red-600 text-2xl">delete_forever</span>
-                  </div>
-                  <h3 className="text-lg font-black text-primary tracking-tight mb-2">Delete Add-on?</h3>
-                  <p className="text-sm text-slate-500 mb-3">
-                    Permanently remove &quot;{addon?.name}&quot;. This action cannot be undone.
-                  </p>
-                  {deps.length > 0 && (
-                    <div className="bg-amber-50 rounded-xl border border-amber-200 p-3 text-left">
-                      <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest mb-2 flex items-center gap-1">
-                        <span className="material-symbols-outlined text-xs">warning</span>
-                        Used by {deps.length} plan{deps.length !== 1 ? 's' : ''}
-                      </p>
-                      <div className="flex gap-1.5 flex-wrap">
-                        {deps.map(p => (
-                          <span key={p.id} className="px-2 py-0.5 bg-amber-100 text-amber-800 text-[9px] font-black uppercase tracking-widest rounded-md">{p.name}</span>
-                        ))}
+                {blockers ? (
+                  /* BLOCKED VARIANT — dependencies still reference the
+                     add-on or its linked capability. The footer offers
+                     "Got it" only; the user must clear the listed
+                     dependencies (or use Archive) before deleting. */
+                  <>
+                    <div className="p-8 text-center">
+                      <div className="w-14 h-14 bg-red-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                        <span className="material-symbols-outlined text-red-600 text-2xl">block</span>
                       </div>
-                      <p className="text-[10px] text-amber-600 font-bold mt-2">Remove this add-on from all plans before deleting.</p>
+                      <h3 className="text-lg font-black text-red-600 tracking-tight mb-2">Delete Blocked</h3>
+                      <p className="text-sm text-slate-500 mb-4">
+                        &quot;{addon?.name}&quot; cannot be deleted while these dependencies exist. Clear them in the Plans &amp; Features Matrix and tenant overrides — or Archive the add-on instead to preserve history.
+                      </p>
+                      <div className="text-left bg-red-50 border border-red-100 rounded-2xl p-4 space-y-2.5">
+                        {blockers.inPlanFeatureNames.length > 0 && (
+                          <div>
+                            <p className="text-[10px] font-black text-red-700 uppercase tracking-widest mb-1">Linked feature included by plan</p>
+                            <ul className="text-xs text-slate-700 font-bold space-y-0.5 list-disc list-inside">
+                              {blockers.inPlanFeatureNames.map((n, i) => (<li key={i}>{n}</li>))}
+                            </ul>
+                          </div>
+                        )}
+                        {blockers.compatiblePlanNames.length > 0 && (
+                          <div>
+                            <p className="text-[10px] font-black text-red-700 uppercase tracking-widest mb-1">Compatible plans assigned</p>
+                            <p className="text-xs text-slate-700 font-bold">{blockers.compatiblePlanNames.join(', ')}</p>
+                          </div>
+                        )}
+                        {(blockers.activeTrials > 0 || blockers.activePaidOverrides > 0 || blockers.pendingPayments > 0) && (
+                          <div>
+                            <p className="text-[10px] font-black text-red-700 uppercase tracking-widest mb-1">Tenant entitlements active</p>
+                            <ul className="text-xs text-slate-700 font-bold space-y-0.5 list-disc list-inside">
+                              {blockers.activeTrials > 0 && <li>{blockers.activeTrials} active trial{blockers.activeTrials === 1 ? '' : 's'}</li>}
+                              {blockers.activePaidOverrides > 0 && <li>{blockers.activePaidOverrides} active paid override{blockers.activePaidOverrides === 1 ? '' : 's'}</li>}
+                              {blockers.pendingPayments > 0 && <li>{blockers.pendingPayments} pending payment{blockers.pendingPayments === 1 ? '' : 's'}</li>}
+                            </ul>
+                          </div>
+                        )}
+                        {blockers.openInvoiceIds.length > 0 && (
+                          <div>
+                            <p className="text-[10px] font-black text-red-700 uppercase tracking-widest mb-1">Open / overdue invoices</p>
+                            <p className="text-xs text-slate-700 font-bold">{blockers.openInvoiceIds.join(', ')}</p>
+                          </div>
+                        )}
+                      </div>
                     </div>
-                  )}
-                </div>
-                <div className="p-8 pt-0 flex gap-3">
-                  <button onClick={() => setShowAddOnDelete(null)} className="flex-1 py-3.5 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-xs rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
-                  <button onClick={() => removeAddOn(showAddOnDelete)} disabled={deps.length > 0} className="flex-1 py-3.5 bg-red-500 text-white font-black text-xs rounded-2xl uppercase tracking-widest hover:bg-red-600 transition-all shadow-lg shadow-red-500/20 disabled:opacity-40 disabled:cursor-not-allowed">
-                    {deps.length > 0 ? 'Remove from Plans First' : 'Delete'}
-                  </button>
-                </div>
+                    <div className="p-8 pt-0">
+                      <button onClick={closeAndReset} className="w-full py-3.5 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-xs rounded-2xl uppercase tracking-widest transition-all">Got it</button>
+                    </div>
+                  </>
+                ) : (
+                  /* CONFIRM VARIANT — no dependencies. Modal explains
+                     what will be removed and what will be preserved
+                     based on whether the add-on owns its own
+                     standalone capability row (`cap_<addonId>`) or
+                     is linked to a pre-existing feature row. */
+                  <>
+                    <div className="p-8 text-center">
+                      <div className="w-14 h-14 bg-red-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                        <span className="material-symbols-outlined text-red-600 text-2xl">delete_forever</span>
+                      </div>
+                      <h3 className="text-lg font-black text-primary tracking-tight mb-2">Delete Add-on?</h3>
+                      <p className="text-sm text-slate-500 mb-4">
+                        Permanently remove &quot;{addon?.name}&quot;. This action cannot be undone.
+                      </p>
+                      <div className="text-left bg-slate-50 border border-slate-100 rounded-2xl p-4 space-y-3">
+                        <div>
+                          <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Will be removed</p>
+                          <ul className="text-xs text-slate-700 font-bold space-y-0.5 list-disc list-inside">
+                            <li>Add-on Catalog record</li>
+                            {cls.isStandaloneCap && cls.linkedFeatureName && (
+                              <li>Generated capability row &quot;{cls.linkedFeatureName}&quot; in Plans &amp; Features Matrix</li>
+                            )}
+                          </ul>
+                        </div>
+                        {!cls.isStandaloneCap && cls.linkedFeatureName && (
+                          <div>
+                            <p className="text-[10px] font-black text-emerald-700 uppercase tracking-widest mb-1">Will be preserved</p>
+                            <ul className="text-xs text-slate-700 font-bold space-y-0.5 list-disc list-inside">
+                              <li>Linked feature row &quot;{cls.linkedFeatureName}&quot; (independent feature, may be used by plans/permissions)</li>
+                            </ul>
+                          </div>
+                        )}
+                        <p className="text-[10px] text-slate-500 font-medium leading-snug">
+                          To preserve history (billing/audit) instead of deleting, use Archive in the catalog card menu.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="p-8 pt-0 flex gap-3">
+                      <button onClick={closeAndReset} className="flex-1 py-3.5 bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-xs rounded-2xl uppercase tracking-widest transition-all">Cancel</button>
+                      <button onClick={() => removeAddOn(showAddOnDelete)} className="flex-1 py-3.5 bg-red-500 text-white font-black text-xs rounded-2xl uppercase tracking-widest hover:bg-red-600 transition-all shadow-lg shadow-red-500/20">
+                        Delete
+                      </button>
+                    </div>
+                  </>
+                )}
               </motion.div>
             </div>
           );
@@ -1290,6 +1734,60 @@ const PlansPage: React.FC = () => {
                     {!addOnForm.linkedFeatureId && !showInlineNewFeature && (
                       <p className="text-[9px] text-slate-500 font-medium mt-1.5 leading-snug">Optional. If left blank, a standalone capability row will be auto-registered in the Plans &amp; Features Matrix when you save.</p>
                     )}
+                    {/* Add-on Runtime Linkage helper. Linked Feature is the
+                        capability key the add-on controls entitlement for.
+                        It does not create new app functionality on its own
+                        — runtime behavior only kicks in if the linked
+                        capability is wired into plan gating, permission
+                        gating, or UI visibility. See replit.md →
+                        "Add-on Runtime Linkage & Delete/Archive Matrix
+                        Behavior". */}
+                    {!showInlineNewFeature && (
+                      <p className="text-[9px] text-slate-400 font-medium mt-1.5 leading-snug">
+                        Linked Feature controls which capability this add-on grants. It does not create new app functionality by itself. Link to the smallest specific capability or sub-feature this add-on should control.
+                      </p>
+                    )}
+                    {/* Parent-feature warning. When the System Owner picks a
+                        broad / module-level feature (PARENT_FEATURE_IDS),
+                        warn that the add-on will gate the whole module and
+                        suggest specific sub-feature ids from
+                        SUB_FEATURE_HINTS that exist in featuresData. The
+                        warning is informational only — it does not block
+                        the save. */}
+                    {!showInlineNewFeature && addOnForm.linkedFeatureId && PARENT_FEATURE_IDS.has(addOnForm.linkedFeatureId) && (() => {
+                      const subIds = (SUB_FEATURE_HINTS[addOnForm.linkedFeatureId] || [])
+                        .filter(sid => featuresData.some(f => f.id === sid && f.lifecycle === 'implemented'));
+                      return (
+                        <div className="mt-2 rounded-xl border border-amber-200 bg-amber-50 p-2.5">
+                          <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest mb-1 flex items-center gap-1">
+                            <span className="material-symbols-outlined text-xs">warning</span>
+                            Parent feature selected
+                          </p>
+                          <p className="text-[10px] text-amber-700 font-medium leading-snug">
+                            This is a parent feature. The add-on may control the entire feature unless a more specific sub-feature/capability is selected.
+                          </p>
+                          {subIds.length > 0 && (
+                            <div className="mt-2">
+                              <p className="text-[9px] font-black text-amber-600 uppercase tracking-widest mb-1">Suggested sub-features</p>
+                              <div className="flex gap-1 flex-wrap">
+                                {subIds.map(sid => {
+                                  const f = featuresData.find(x => x.id === sid);
+                                  if (!f) return null;
+                                  return (
+                                    <button
+                                      key={sid}
+                                      type="button"
+                                      onClick={() => setAddOnForm(p => ({ ...p, linkedFeatureId: sid }))}
+                                      className="px-2 py-1 bg-white hover:bg-amber-100 text-amber-700 text-[9px] font-black uppercase tracking-widest rounded-lg border border-amber-200 transition-colors"
+                                    >{f.name}</button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
                 <div>

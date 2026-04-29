@@ -1,0 +1,387 @@
+System Owner Commercial Controls — Add-on Runtime Linkage + Archive/Delete Matrix Behavior Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict isolated correction pass.
+Do not redesign the app.
+Do not touch the completed Shipping Module.
+Do not change billing, invoice, paid override state machine, or Store Permissions Matrix behavior except where directly required by add-on archive/delete/source-of-truth behavior.
+
+Fix only:
+1) add-on linked-feature runtime meaning
+2) archive behavior in Plans & Features Matrix
+3) delete behavior for standalone vs linked add-ons
+4) Plans & Features Matrix cleanup/marking rules
+5) documentation of how add-ons function when linked to features
+
+==================================================
+CURRENT ISSUE
+==================================================
+
+The latest Add-on Governance correction passed most QA, but the final acceptance is blocked by unresolved add-on architecture questions:
+
+1) When an add-on is linked to an existing feature, it is unclear how/where that add-on functions.
+Example:
+- if add-on is linked to Shipping Center, does it control the whole Shipping Center or a specific shipping sub-feature?
+
+2) When an add-on is archived, it still appears in Plans & Features Matrix without clear archived state.
+
+3) When an add-on is deleted, it still appears in Plans & Features Matrix.
+
+These behaviors need to be corrected and documented clearly.
+
+
+Important clarification before implementation:
+
+We agree that an add-on should be linked to the smallest real capability it controls.
+
+Good add-on links are specific implemented capabilities/sub-features, for example:
+- Carrier Scorecards
+- Batch Labels
+- SLA Optimization
+- Shipping Automation Rules
+- Carrier Analytics
+- Shipping Provider Configuration
+
+These already exist in the system and may currently appear as inherited/plan-controlled features in Plans & Features. That is okay. They can still be enabled or disabled from the plan level through Plans & Features.
+
+Risky / too broad example:
+- Shipping Center parent feature
+
+If a System Owner links an add-on to a broad parent feature such as Shipping Center, show a warning:
+“This add-on is linked to a parent feature. It will control entitlement for the whole feature unless linked to a more specific sub-feature/capability.”
+
+The add-on functions through the linked feature/capability key. It does not create new app functionality by itself. It only controls entitlement for the capability already implemented and connected to plan gating, permission gating, or UI visibility.
+
+Archived add-ons should remain visible in System Owner Plans & Features, but marked as Archived and read-only/locked. They should not disappear silently because history, billing, audit, and old configuration may depend on them.
+
+Delete behavior:
+- If the add-on is standalone and created its own generated capability row, deleting the clean/unused add-on should remove that generated Plans & Features Matrix row.
+- If the add-on is linked to an existing feature/capability row, deleting the add-on must NOT delete the existing feature row.
+- Delete should be blocked when dependencies exist.
+- Archive should be used for retired add-ons that have history or dependencies that should be preserved.
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS application architect
+- Senior React/TypeScript engineer
+- Senior Firebase/Firestore multi-tenant architect
+- Senior SaaS entitlement architect
+- Senior RBAC / plan-gating architect
+- Senior product operations architect
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Do not make a shallow UI-only patch.
+Clarify and enforce the add-on capability model.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- replit.md
+
+Preserve:
+- Governance Status = Active / Disabled / Archived only
+- Lifecycle (PM) separate from Governance Status
+- Linked Feature can be None
+- standalone add-ons create capability rows in Plans & Features Matrix
+- linked add-ons use existing feature rows
+- Tenant Features visibility rules already accepted
+- archive protection rules already accepted
+- paid override invoice workflow
+- activation mode behavior
+- completed Shipping Module behavior
+
+==================================================
+PART A — ADD-ON RUNTIME LINKAGE MEANING
+==================================================
+
+Required:
+Document and enforce the meaning of Linked Feature.
+
+Linked Feature means:
+- the add-on controls entitlement for that linked feature/capability key
+- it does not automatically create new UI or functionality inside that feature
+- it only affects functionality if that feature/capability key is used by plan gating, permission gating, or UI visibility
+
+Required:
+Add helper text in Create/Edit Add-on:
+
+“Linked Feature controls which capability this add-on grants. It does not create new app functionality by itself. Link to the smallest specific capability or sub-feature this add-on should control.”
+
+Required:
+If user links an add-on to a broad parent feature, such as Shipping Center, show a warning:
+
+“This is a parent feature. The add-on may control the entire feature unless a more specific sub-feature/capability is selected.”
+
+Required:
+If Linked Feature = None:
+- the add-on is treated as a standalone capability
+- the system creates/uses a generated capability row in Plans & Features Matrix
+- it is entitlement-backed, but runtime functionality exists only if app surfaces/permissions are later connected to that capability
+
+Required:
+Add clear documentation to replit.md:
+- Add-on Catalog controls commercial entitlement
+- actual runtime behavior requires the linked capability to be implemented and used by the app
+- linking an add-on to a feature does not automatically create new UI inside that feature
+
+==================================================
+PART B — LINKED FEATURE BEST PRACTICE / SUB-FEATURE TARGETING
+==================================================
+
+Required:
+Where the app has known sub-features/capabilities, prefer linking add-ons to the specific capability rather than broad parent modules.
+
+Examples:
+Better:
+- Carrier Scorecards
+- Shipping Automation Rules
+- Batch Labels
+- SLA Optimization
+- Carrier Analytics
+- Shipping Provider Configuration
+
+Risky / broad:
+- Shipping Center parent feature
+
+Required:
+If the selected feature has known child features/sub-features, show a warning or suggestion:
+“Consider linking this add-on to a specific sub-feature instead of the parent module.”
+
+Do not break existing parent-feature links, but make the meaning clear.
+
+==================================================
+PART C — ARCHIVED ADD-ON BEHAVIOR IN PLANS & FEATURES MATRIX
+==================================================
+
+Required:
+Archived add-ons should not appear as active/available tenant features.
+
+However, they should remain visible to System Owner for audit/source-of-truth clarity.
+
+Correct behavior:
+
+1) Add-on Catalog:
+- show Archived status
+
+2) Plans & Features Matrix:
+- if the add-on created a standalone capability row:
+  - keep the row visible but mark it Archived / Add-on Archived
+  - lock plan toggles
+  - do not allow enabling it in any plan
+  - optionally move it to archived section or hide behind Show Archived filter if such filtering exists
+
+- if the add-on was linked to an existing feature row:
+  - do not archive the existing feature row
+  - remove/suppress active Add-on indication for that add-on
+  - existing feature row remains normal if it is also a core/platform feature
+
+3) Tenant Features:
+- archived add-on is not shown as available add-on
+- no Trial / Paid Override for archived add-on
+
+4) Store Permissions Matrix:
+- archived standalone add-on capability should not expose assignable permissions
+- linked existing feature permissions follow normal feature entitlement if independent of the archived add-on
+
+Required:
+Archived add-on must be visually distinct in Plans & Features Matrix if still present.
+
+==================================================
+PART D — DELETE BEHAVIOR FOR STANDALONE ADD-ONS
+==================================================
+
+Required:
+If an add-on was created with Linked Feature = None and generated its own capability row:
+
+When deleting the add-on:
+- remove the Add-on Catalog record
+- remove the generated Plans & Features Matrix row
+- remove or clean related non-historical configuration references
+- only allow delete if there are no dependencies
+
+Dependencies that should block delete:
+- enabled in any plan
+- Compatible Plans selected
+- active trial
+- active paid override
+- pending payment
+- open invoice
+- audit/billing dependency if the app policy requires archival instead of deletion
+
+If dependencies exist:
+- block Delete
+- recommend Archive instead, or explain what must be cleared first
+
+==================================================
+PART E — DELETE BEHAVIOR FOR ADD-ONS LINKED TO EXISTING FEATURES
+==================================================
+
+Required:
+If an add-on is linked to an existing feature/capability row:
+
+When deleting the add-on:
+- do NOT delete the existing Plans & Features Matrix row
+- remove only the Add-on Catalog association
+- remove Add-on labels/availability from Tenant Features
+- preserve the existing feature as normal plan feature
+
+Reason:
+The feature existed independently and may still be used by plans, permissions, or app logic.
+
+Delete should be blocked if:
+- add-on has active tenant trial/paid/pending entitlements
+- add-on has compatible plans selected
+- add-on has invoices or records requiring archive instead
+
+==================================================
+PART F — DELETE VS ARCHIVE POLICY
+==================================================
+
+Required:
+Implement clear policy:
+
+Delete:
+- for clean, unused add-ons
+- removes standalone generated matrix row if the row was created only for that add-on
+- does not delete existing linked feature rows
+
+Archive:
+- for retired add-ons with history or dependencies already cleared
+- preserves records
+- marks standalone matrix row as Archived/locked
+- removes tenant availability
+
+Required:
+Use in-app modal, not browser confirm.
+
+Modal should explain:
+- what will be deleted or archived
+- what dependencies block action
+- for linked existing features, that deleting the add-on will not delete the feature itself
+
+==================================================
+PART G — TENANT FEATURES NON-REGRESSION
+==================================================
+
+Preserve accepted tenant visibility rules:
+
+1) Linked feature included in tenant plan:
+- Included by Plan
+- Add-on
+- no Trial / Paid Override
+
+2) Linked feature not included, tenant plan compatible:
+- Not in Plan
+- Add-on
+- Trial
+- Paid Override
+
+3) Linked feature not included, tenant plan not compatible:
+- hidden as add-on
+- no Add-on
+- no Trial / Paid Override
+- no Plan Upgrade Required
+
+4) Standalone add-on:
+- same logic using generated capability row
+
+5) Disabled/Archived add-ons:
+- not tenant-available
+
+==================================================
+PART H — STORE PERMISSIONS MATRIX NON-REGRESSION
+==================================================
+
+Preserve:
+- Included by Plan exposes linked permissions
+- active trial exposes linked permissions
+- paid active/immediate activation exposes linked permissions
+- pending payment without activation does not expose linked permissions
+- incompatible add-on does not expose permissions
+- archived/deleted standalone add-on does not expose permissions
+- role permissions cannot resurrect unavailable features
+- dynamic sub-permission counts remain accurate
+
+==================================================
+PART I — AUDITABILITY
+==================================================
+
+Audit:
+- add-on linked feature changed
+- add-on archived
+- archived standalone capability row locked/marked archived
+- add-on delete blocked with reason
+- add-on deleted
+- generated standalone matrix row deleted
+- linked existing feature preserved on add-on delete
+
+Audit should include:
+- actor
+- timestamp
+- addOnId
+- featureId/capabilityId
+- old/new values
+- dependency reasons if blocked
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Create/Edit Add-on explains what Linked Feature means.
+2) Parent/broad feature links show a warning or guidance.
+3) Archived standalone add-on remains in Plans & Features as Archived/locked or hidden behind archived filter, not active.
+4) Archived linked-feature add-on does not archive/delete the existing feature row.
+5) Archived add-on is not tenant-available.
+6) Deleting standalone add-on removes its generated Plans & Features Matrix row when safe.
+7) Deleting linked-feature add-on does not delete the existing feature row.
+8) Delete is blocked when dependencies exist.
+9) Archive is blocked when dependencies require clearing.
+10) Delete/archive modals explain dependencies and effects.
+11) Tenant Features visibility rules remain intact.
+12) Store Permissions Matrix behavior remains intact.
+13) Billing and invoice behavior remains intact.
+14) Shipping Module remains untouched.
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md with:
+- Linked Feature runtime meaning
+- parent feature warning / sub-feature best practice
+- standalone add-on behavior
+- archived add-on behavior in Plans & Features Matrix
+- delete behavior for standalone add-ons
+- delete behavior for linked-feature add-ons
+- delete vs archive policy
+- tenant visibility non-regression rules
+- permission matrix behavior
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Linked Feature Runtime Meaning
+3. Archive Behavior in Plans & Features Matrix
+4. Delete Behavior for Standalone Add-ons
+5. Delete Behavior for Linked-Feature Add-ons
+6. Delete / Archive Dependency Protection
+7. Tenant Features / Permission Non-Regression
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes

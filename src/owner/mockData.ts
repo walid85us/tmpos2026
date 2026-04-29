@@ -301,6 +301,25 @@ export type CommercialAuditAction =
   // reference the add-on or its linked capability.
   | 'addon_archive_blocked'
   | 'feature_registered_for_addon'
+  // Add-on Runtime Linkage / Delete Policy (see replit.md →
+  // "Add-on Runtime Linkage & Delete/Archive Matrix Behavior").
+  // `addon_linked_feature_changed` records a linkedFeatureId edit
+  // (oldValue/newValue carry the feature ids). `addon_deleted` is
+  // emitted once a successful delete is performed and the note
+  // describes what was removed (catalog record + optionally the
+  // standalone capability row) and what was preserved (linked
+  // existing feature rows). `addon_delete_blocked` mirrors
+  // `addon_archive_blocked` and is emitted when delete is refused
+  // because dependencies still reference the add-on. The two
+  // standalone_capability_row_* actions cover the side effects on
+  // the Plans & Features Matrix when an add-on with Linked Feature
+  // = None is archived (row is locked / marked Archived) or
+  // deleted (row is removed).
+  | 'addon_deleted'
+  | 'addon_delete_blocked'
+  | 'addon_linked_feature_changed'
+  | 'standalone_capability_row_deleted'
+  | 'standalone_capability_row_archive_locked'
   | 'addon_updated'
   | 'addon_status_changed'
   | 'addon_default_price_changed'
