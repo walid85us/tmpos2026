@@ -702,3 +702,159 @@ export const tenantDomainHistory: { id: string; tenantId: string; action: string
   { id: 'dh7', tenantId: 't4', action: 'Custom Domain Added', domain: 'quickfixelec.com', date: '2025-09-06', actor: 'Admin Bob' },
   { id: 'dh8', tenantId: 't4', action: 'DNS Verified', domain: 'quickfixelec.com', date: '2025-09-07', actor: 'System' },
 ];
+
+// ===========================================================================
+// PLATFORM OPERATIONS & SECURITY (System Owner)
+// New collections supporting the Platform Operations workstream surfaces:
+//   - tenantDomains:        domain records, decoupled from tenant rows
+//   - supportCases:         platform-side cases with internal notes timeline
+//   - platformTeamMembers:  System Owner directory (auth NOT enforced — UI
+//                            governance only; see replit.md)
+//   - platformDefaults:     extended defaults consumed by PlatformSettingsPage
+// All four are seed defaults; runtime state mirrors into sessionStorage /
+// localStorage so cross-cutting Audit & Security continues to surface
+// changes via `audit_logs:changed` (see `platformOpsAudit.ts`).
+// ===========================================================================
+
+export type PlatformAuditSeverity = 'info' | 'notice' | 'warning' | 'critical';
+
+export type DomainStatus = 'pending' | 'verifying' | 'verified' | 'failed' | 'disabled';
+export type DomainSslStatus = 'none' | 'pending' | 'active' | 'failed';
+export type DomainKind = 'subdomain' | 'custom';
+
+export interface TenantDomainRecord {
+  id: string;
+  tenantId: string;
+  hostname: string;
+  kind: DomainKind;
+  status: DomainStatus;
+  ssl: DomainSslStatus;
+  createdAt: string;
+  verifiedAt: string | null;
+  lastCheckedAt: string | null;
+  notes: string;
+}
+
+export const tenantDomains: TenantDomainRecord[] = [
+  { id: 'dom1', tenantId: 't1', hostname: 'techrepair.repairplatform.com', kind: 'subdomain', status: 'verified', ssl: 'active', createdAt: '2025-11-10', verifiedAt: '2025-11-10', lastCheckedAt: '2026-04-25', notes: 'Auto-provisioned subdomain.' },
+  { id: 'dom2', tenantId: 't1', hostname: 'techrepair.pro', kind: 'custom', status: 'verified', ssl: 'active', createdAt: '2025-11-12', verifiedAt: '2025-11-12', lastCheckedAt: '2026-04-26', notes: 'Manually verified by Admin Alice.' },
+  { id: 'dom3', tenantId: 't2', hostname: 'gadgetfixers.repairplatform.com', kind: 'subdomain', status: 'verified', ssl: 'active', createdAt: '2026-02-18', verifiedAt: '2026-02-18', lastCheckedAt: '2026-04-20', notes: '' },
+  { id: 'dom4', tenantId: 't3', hostname: 'mobilefixhub.repairplatform.com', kind: 'subdomain', status: 'verified', ssl: 'pending', createdAt: '2026-03-14', verifiedAt: '2026-03-14', lastCheckedAt: '2026-04-22', notes: 'Trial tenant — SSL still pending manual issue.' },
+  { id: 'dom5', tenantId: 't4', hostname: 'quickfix.repairplatform.com', kind: 'subdomain', status: 'verified', ssl: 'active', createdAt: '2025-09-05', verifiedAt: '2025-09-05', lastCheckedAt: '2026-04-25', notes: '' },
+  { id: 'dom6', tenantId: 't4', hostname: 'quickfixelec.com', kind: 'custom', status: 'verified', ssl: 'active', createdAt: '2025-09-06', verifiedAt: '2025-09-07', lastCheckedAt: '2026-04-26', notes: 'Verified after CNAME confirmed.' },
+  { id: 'dom7', tenantId: 't5', hostname: 'oldparts.repairplatform.com', kind: 'subdomain', status: 'disabled', ssl: 'none', createdAt: '2025-06-20', verifiedAt: '2025-06-20', lastCheckedAt: '2026-02-15', notes: 'Disabled when tenant suspended for non-payment.' },
+];
+
+export type SupportCaseStatus = 'open' | 'in_progress' | 'waiting_customer' | 'resolved' | 'closed';
+export type SupportCaseSeverity = 'low' | 'normal' | 'high' | 'urgent';
+
+export interface SupportCaseNote {
+  id: string;
+  author: string;
+  body: string;
+  createdAt: string;
+  // 'note' = internal note, 'status_change' = audit-style status transition
+  kind: 'note' | 'status_change';
+}
+
+export interface SupportCaseRecord {
+  id: string;
+  tenantId: string;
+  subject: string;
+  description: string;
+  status: SupportCaseStatus;
+  severity: SupportCaseSeverity;
+  assignee: string | null;
+  openedAt: string;
+  updatedAt: string;
+  notes: SupportCaseNote[];
+}
+
+export const supportCases: SupportCaseRecord[] = [
+  {
+    id: 'case_001', tenantId: 't1', subject: 'Inventory sync failing during peak hours',
+    description: 'Tech Repair Pro reports sync errors twice daily. Suspect rate limiting on inventory worker.',
+    status: 'in_progress', severity: 'high', assignee: 'Admin Alice',
+    openedAt: '2026-03-10', updatedAt: '2026-03-22',
+    notes: [
+      { id: 'cn_001a', author: 'Admin Alice', body: 'Reproduced on staging — opened internal ticket SHIP-441.', createdAt: '2026-03-12', kind: 'note' },
+      { id: 'cn_001b', author: 'Admin Alice', body: 'Status: open → in_progress', createdAt: '2026-03-12', kind: 'status_change' },
+      { id: 'cn_001c', author: 'Admin Bob', body: 'Customer confirmed last sync error 2026-03-22 14:02 UTC.', createdAt: '2026-03-22', kind: 'note' },
+    ],
+  },
+  {
+    id: 'case_002', tenantId: 't4', subject: 'Card on file expired — payment retries failing',
+    description: 'Auto-renewal failed three times. Owner notified by email but card not updated.',
+    status: 'waiting_customer', severity: 'urgent', assignee: 'Admin Alice',
+    openedAt: '2026-03-18', updatedAt: '2026-03-25',
+    notes: [
+      { id: 'cn_002a', author: 'Admin Alice', body: 'Reached out to greg@quickfixelec.com and left voicemail.', createdAt: '2026-03-19', kind: 'note' },
+      { id: 'cn_002b', author: 'Admin Alice', body: 'Status: open → waiting_customer', createdAt: '2026-03-25', kind: 'status_change' },
+    ],
+  },
+  {
+    id: 'case_003', tenantId: 't3', subject: 'Trial extension request — Mobile Fix Hub',
+    description: 'Tenant evaluating Advanced plan, asked for a 14-day trial extension.',
+    status: 'open', severity: 'normal', assignee: null,
+    openedAt: '2026-03-26', updatedAt: '2026-03-26',
+    notes: [],
+  },
+  {
+    id: 'case_004', tenantId: 't2', subject: 'Onboarding follow-up — initial setup call',
+    description: 'New tenant — schedule onboarding call and walk through Sales/Repairs/Inventory.',
+    status: 'resolved', severity: 'low', assignee: 'Admin Carol',
+    openedAt: '2026-02-22', updatedAt: '2026-03-03',
+    notes: [
+      { id: 'cn_004a', author: 'Admin Carol', body: 'Setup call completed 2026-03-03. Tenant comfortable with workflows.', createdAt: '2026-03-03', kind: 'note' },
+      { id: 'cn_004b', author: 'Admin Carol', body: 'Status: in_progress → resolved', createdAt: '2026-03-03', kind: 'status_change' },
+    ],
+  },
+];
+
+export type PlatformTeamStatus = 'invited' | 'active' | 'suspended' | 'disabled';
+
+export interface PlatformTeamMember {
+  id: string;
+  name: string;
+  email: string;
+  role: string; // role label, e.g. "System Owner", "Support Admin"
+  status: PlatformTeamStatus;
+  invitedAt: string;
+  lastActiveAt: string | null;
+}
+
+export const platformTeamMembers: PlatformTeamMember[] = [
+  { id: 'pt1', name: 'Admin User', email: 'admin@platform.com', role: 'System Owner', status: 'active', invitedAt: '2025-06-01', lastActiveAt: '2026-04-29' },
+  { id: 'pt2', name: 'Support Rep', email: 'support@platform.com', role: 'Support Admin', status: 'active', invitedAt: '2025-07-12', lastActiveAt: '2026-04-28' },
+  { id: 'pt3', name: 'Billing Admin', email: 'billing@platform.com', role: 'Billing Admin', status: 'active', invitedAt: '2025-08-04', lastActiveAt: '2026-04-26' },
+  { id: 'pt4', name: 'Onboarding Specialist', email: 'onboarding@platform.com', role: 'Support Admin', status: 'invited', invitedAt: '2026-04-20', lastActiveAt: null },
+];
+
+// Extended platform defaults consumed by PlatformSettingsPage. Back-compat:
+// `platformSettings` (above) is preserved for callers reading `branding`/
+// `maintenance`. New surfaces should prefer `platformDefaults`.
+export const platformDefaults = {
+  branding: {
+    name: 'RepairPlatform',
+    supportEmail: 'support@repairplatform.com',
+    logoUrl: '/logo.png',
+  },
+  maintenance: {
+    enabled: false,
+    message: '',
+    scheduledStart: '' as string,
+    scheduledEnd: '' as string,
+  },
+  security: {
+    // Documentation only — not enforced by the app today.
+    sessionTimeoutMinutes: 60,
+    requireMfaForPlatformAdmins: false,
+  },
+  support: {
+    supportEmail: 'support@repairplatform.com',
+    onCallPhone: '',
+    statusPageUrl: 'https://status.repairplatform.com',
+  },
+};
+
+export type PlatformDefaults = typeof platformDefaults;

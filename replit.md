@@ -148,6 +148,52 @@ zero console calls and remain that way.
     error messages in the API response are byte-identical to what they were
     before this pass.
 
+## Platform Operations & Security (locked)
+
+-   **Scope**: Five System Owner surfaces — Audit & Security, Support
+    Tools, Platform Settings, Domains, and Team Management — were
+    deepened from light scaffolds into governance-quality screens. Routes
+    and `AccessGuard` wiring (`src/App.tsx` lines 127–132) were not
+    changed; navigation remains the existing flat owner sidebar.
+-   **Mock data additions** (`src/owner/mockData.ts`): `tenantDomains`,
+    `supportCases` (with internal `notes` timeline), `platformTeamMembers`,
+    and `platformDefaults` (extended branding/maintenance/security/support
+    groups). The pre-existing `platformSettings` export is preserved for
+    back-compat with any callers reading `branding`/`maintenance`. A
+    `PlatformAuditSeverity` type expands the audit severity scale to
+    `info | notice | warning | critical`.
+-   **Audit helper** (`src/owner/platformOpsAudit.ts`):
+    `pushPlatformAudit({actor, action, target, severity, category, …})`
+    mirrors a single row into `sessionStorage('audit_logs')` with the same
+    row contract as the existing `commercialAudit.ts` helper, then
+    dispatches `audit_logs:changed` so the Audit & Security page refreshes
+    live. Categories: `security | support | configuration | domains | team`.
+    Actions are an enumerated union (`domain_*`, `support_case_*`,
+    `platform_setting_updated`, `platform_team_member_*`,
+    `platform_role_created`, `platform_permission_changed`,
+    `security_note_*`).
+-   **Truth labels (mandatory, must remain visible)**:
+    - Domains page header — *"Manual verification only — no real DNS
+      lookup or SSL automation."*
+    - Platform Settings → Security Defaults — every toggle/value labeled
+      *"Documentation only — not enforced"*. Maintenance flag labeled
+      *"Banner only — not enforced"*.
+    - Team Management top-of-page banner — *"Authentication & SSO not
+      enforced — this directory governs the in-app role display only."*
+    - Support Tools — Impersonate button labeled *"Impersonate (stub)"*
+      and clarified as a dev-only stub.
+-   **Persistence boundaries**: Support cases (`support_cases_v1`),
+    domains (`tenant_domains_v1`), and security notes
+    (`platform_security_notes`) persist in `sessionStorage`. Platform
+    settings (`platform_settings_v1`) persist in `localStorage` so they
+    survive tab close. None of this is wired to Firestore — these are
+    System Owner workspace mocks only.
+-   **What is NOT done (intentionally out of scope)**: real DNS
+    resolution / verification, real SSL provisioning or renewal, real
+    SSO/MFA enforcement, real session-timeout enforcement, tenant
+    impersonation sessions, tenant employee permission redesign, Stripe /
+    billing flows, retail storefront, or any Shipping behavior change.
+
 # External Dependencies
 
 -   **Firebase**: Firestore and Authentication.

@@ -2,6 +2,17 @@ import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import PageShell from '../components/PageShell';
 import { useAccess } from '../context/AccessContext';
+import { platformTeamMembers, type PlatformTeamStatus } from './mockData';
+import { pushPlatformAudit } from './platformOpsAudit';
+
+type TeamMember = { id: string; name: string; email: string; role: string; status: PlatformTeamStatus };
+
+const STATUS_BADGE_STYLES: Record<PlatformTeamStatus, string> = {
+  invited: 'bg-amber-400/10 text-amber-700 border-amber-400/20',
+  active: 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20',
+  suspended: 'bg-orange-400/10 text-orange-700 border-orange-400/20',
+  disabled: 'bg-slate-200 text-slate-600 border-slate-300',
+};
 
 export default function TeamManagementPage() {
   const { session, platformRolesState = [], addPlatformRole, updatePlatformRole } = useAccess();
@@ -9,14 +20,13 @@ export default function TeamManagementPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
   const [showCreateRoleModal, setShowCreateRoleModal] = useState(false);
-  const [editingMember, setEditingMember] = useState<{ id: string, name: string, email: string, role: string } | null>(null);
+  const [editingMember, setEditingMember] = useState<TeamMember | null>(null);
 
   const [newRole, setNewRole] = useState({ name: '', description: '', status: 'active' as string, permissions: [] as string[] });
 
-  const [team, setTeam] = useState([
-    { id: 'u1', name: 'Admin User', email: 'admin@platform.com', role: 'System Owner', status: 'Active' },
-    { id: 'u2', name: 'Support Rep', email: 'support@platform.com', role: 'Support Admin', status: 'Active' },
-  ]);
+  const [team, setTeam] = useState<TeamMember[]>(() =>
+    platformTeamMembers.map(m => ({ id: m.id, name: m.name, email: m.email, role: m.role, status: m.status }))
+  );
 
   const [activityLogs, setActivityLogs] = useState([
     { id: 'a1', user: 'Admin User', action: 'Created Role', details: 'Added new Billing Admin role', time: '2024-03-20 10:00' },
@@ -55,6 +65,14 @@ export default function TeamManagementPage() {
       description: newRole.description || 'Custom platform role'
     });
     logActivity('Created Role', `Created new platform role: ${newRole.name} with permissions: ${newRole.permissions.length > 0 ? newRole.permissions.join(', ') : 'none assigned'}`);
+    pushPlatformAudit({
+      actor: session?.user?.name || 'System Owner',
+      action: 'platform_role_created',
+      target: newRole.name,
+      category: 'team',
+      severity: 'notice',
+      note: newRole.permissions.length > 0 ? `Permissions: ${newRole.permissions.join(', ')}` : 'No permissions assigned',
+    });
     setNewRole({ name: '', description: '', status: 'active', permissions: [] });
     setShowCreateRoleModal(false);
   };
@@ -116,7 +134,7 @@ export default function TeamManagementPage() {
                   </span>
                 </td>
                 <td className="px-8 py-6">
-                  <span className="px-3 py-1 bg-emerald-500/10 text-emerald-600 border border-emerald-500/20 text-[10px] font-black uppercase tracking-widest rounded-lg">
+                  <span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${STATUS_BADGE_STYLES[user.status] || STATUS_BADGE_STYLES.active}`}>
                     {user.status}
                   </span>
                 </td>
@@ -235,6 +253,15 @@ export default function TeamManagementPage() {
                             : { ...role.permissions, [feature.id]: newLevel };
                           updatePlatformRole(role.id, newPermissions as any);
                           logActivity('Updated Permissions', `Set ${feature.name} to ${newLevel} for ${role.name}`);
+                          pushPlatformAudit({
+                            actor: session?.user?.name || 'System Owner',
+                            action: 'platform_permission_changed',
+                            target: `${role.name} · ${feature.name}`,
+                            category: 'team',
+                            oldValue: currentLevel,
+                            newValue: newLevel,
+                            severity: 'warning',
+                          });
                         }}
                         className="text-xs font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 focus:ring-2 focus:ring-primary/20 focus:outline-none disabled:opacity-50"
                       >
@@ -289,6 +316,14 @@ export default function TeamManagementPage() {
   return (
     <PageShell title="Team Management">
       <div className="space-y-8">
+        <div className="bg-amber-400/10 border border-amber-400/30 rounded-2xl p-4 flex items-start gap-3">
+          <span className="material-symbols-outlined text-amber-700 text-lg mt-0.5">verified_user</span>
+          <div>
+            <p className="text-xs font-black text-amber-900 uppercase tracking-widest">Authentication & SSO not enforced</p>
+            <p className="text-xs font-medium text-amber-800 mt-1">This directory governs the in-app role display only. The application does not currently enforce SSO, MFA, or session policies for platform team members.</p>
+          </div>
+        </div>
+
         <div className="flex items-center gap-2 bg-white/80 backdrop-blur-xl p-1.5 rounded-2xl border border-slate-200 shadow-sm w-fit">
           {[
             { id: 'team', label: 'Team', icon: 'group' },
@@ -358,21 +393,64 @@ export default function TeamManagementPage() {
                     const name = formData.get('name') as string;
                     const email = formData.get('email') as string;
                     const role = formData.get('role') as string;
-                    
+                    const status = (formData.get('status') as PlatformTeamStatus) || 'invited';
+
                     if (name && email && role) {
+                      const actor = session?.user?.name || 'System Owner';
                       if (editingMember) {
-                        setTeam(prev => prev.map(u => u.id === editingMember.id ? { ...u, name, email, role } : u));
-                        logActivity('Edited Member', `Updated ${name} (${email}) to ${role}`);
+                        const prev = editingMember;
+                        setTeam(list => list.map(u => u.id === prev.id ? { ...u, name, email, role, status } : u));
+                        logActivity('Edited Member', `Updated ${name} (${email}) to ${role} [${status}]`);
+                        if (prev.role !== role) {
+                          pushPlatformAudit({
+                            actor,
+                            action: 'platform_team_member_role_changed',
+                            target: `${name} (${email})`,
+                            category: 'team',
+                            oldValue: prev.role,
+                            newValue: role,
+                            severity: 'warning',
+                          });
+                        }
+                        if (prev.status !== status) {
+                          pushPlatformAudit({
+                            actor,
+                            action: 'platform_team_member_status_changed',
+                            target: `${name} (${email})`,
+                            category: 'team',
+                            oldValue: prev.status,
+                            newValue: status,
+                            severity: status === 'suspended' || status === 'disabled' ? 'warning' : 'notice',
+                          });
+                        }
+                        if (prev.role === role && prev.status === status && (prev.name !== name || prev.email !== email)) {
+                          pushPlatformAudit({
+                            actor,
+                            action: 'platform_team_member_updated',
+                            target: `${name} (${email})`,
+                            category: 'team',
+                            severity: 'info',
+                            note: 'Profile updated',
+                          });
+                        }
                         setEditingMember(null);
                       } else {
-                        setTeam(prev => [...prev, {
-                          id: `u${Date.now()}`,
+                        setTeam(list => [...list, {
+                          id: `u${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
                           name,
                           email,
                           role,
-                          status: 'Active'
+                          status,
                         }]);
-                        logActivity('Added Member', `Invited ${name} (${email}) as ${role}`);
+                        logActivity('Added Member', `Invited ${name} (${email}) as ${role} [${status}]`);
+                        pushPlatformAudit({
+                          actor,
+                          action: 'platform_team_member_invited',
+                          target: `${name} (${email})`,
+                          category: 'team',
+                          severity: 'notice',
+                          note: `Role: ${role}; Initial status: ${status}`,
+                        });
                         setShowAddModal(false);
                       }
                     }
@@ -390,6 +468,15 @@ export default function TeamManagementPage() {
                         <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Role</label>
                         <select name="role" defaultValue={editingMember?.role} required className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700">
                           {platformRolesState.map(r => <option key={r.id} value={r.name}>{r.name}</option>)}
+                        </select>
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Status</label>
+                        <select name="status" defaultValue={editingMember?.status || 'invited'} className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700">
+                          <option value="invited">Invited</option>
+                          <option value="active">Active</option>
+                          <option value="suspended">Suspended</option>
+                          <option value="disabled">Disabled</option>
                         </select>
                       </div>
                     </div>

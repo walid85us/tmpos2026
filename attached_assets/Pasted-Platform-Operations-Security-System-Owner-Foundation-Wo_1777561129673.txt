@@ -1,0 +1,668 @@
+Platform Operations & Security — System Owner Foundation Workstream
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a new major workstream.
+Build the Platform Operations & Security foundation for the System Owner side.
+
+Do not redesign the app.
+Do not touch completed tenant-side business modules unless strictly necessary for read-only references.
+Do not reopen completed workstreams.
+Do not change completed Shipping Module behavior.
+Do not change System Owner Commercial Controls + Add-on Governance behavior.
+Do not change billing, add-on entitlement, Store Permissions Matrix, tenant feature resolution, or shipping provider logic.
+
+This workstream should be additive and isolated.
+
+==================================================
+CURRENT PROJECT STATE
+==================================================
+
+Completed and locked:
+- Tenant Management & Provisioning
+- Store Dashboard & POS Refinement
+- Repairs Module Deep Refinement
+- Inventory & Supply Chain Improvements
+- Customers, Invoices & Services Improvements
+- Shipping Module / Shipping Center Phase 1, Phase 2, Phase 3, and Final Closure
+- System Owner Commercial Controls + Add-on Governance
+- Add-on Implementation Readiness + Runtime-Backing Governance
+- Server PII Log Scrubbing
+
+Do not reopen or rebuild any of the above.
+
+==================================================
+WORKSTREAM GOAL
+==================================================
+
+Create a System Owner-facing Platform Operations & Security area that gives the platform owner operational control, security visibility, support tracking, platform settings, domain governance, and internal team-management tools.
+
+This is not a tenant POS/repair feature.
+This is not a customer-facing feature.
+This is not a shipping feature.
+This is a platform-owner operational foundation.
+
+The new area should help the System Owner answer:
+
+1) What is happening across the platform?
+2) Which tenants need support?
+3) What security/audit events matter?
+4) What platform-level settings exist?
+5) Which tenant domains are pending, verified, or active?
+6) Which internal platform users/team members have access?
+
+==================================================
+ROLE
+==================================================
+
+Act as:
+- Principal SaaS platform architect
+- Senior React/TypeScript engineer
+- Senior Firebase/Firestore multi-tenant architect
+- Senior platform operations architect
+- Senior security/audit architect
+- Senior RBAC and governance architect
+- Senior UX systems designer
+- QA gatekeeper
+- Systems thinker
+- Side auditor
+
+Think deeply.
+Avoid shallow UI-only cards.
+Build a coherent platform-operations foundation with clear states, truthful data, permission-aware actions, and auditability.
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- replit.md
+- src/owner routes/components
+- src/owner/TenantsPage.tsx
+- src/owner/TenantDetailPage.tsx
+- src/owner/PlansPage.tsx
+- src/owner/ProvisioningPage.tsx
+- src/owner/readiness.ts
+- src/owner/entitlements.ts
+- existing audit/commercial audit structures
+- existing mock data / owner data files
+- existing layout/navigation files for System Owner
+
+Preserve all locked rules in replit.md.
+
+==================================================
+PRIMARY DELIVERABLE
+==================================================
+
+Add a new System Owner area or refine the existing System Owner navigation for:
+
+Platform Operations & Security
+
+It should include five native surfaces:
+
+1) Audit & Security
+2) Support Tools
+3) Platform Settings
+4) Domains
+5) Platform Team Management
+
+These may be tabs inside one page or separate System Owner pages if the existing architecture prefers that.
+
+Recommended top-level location:
+System Owner / Platform Operations & Security
+
+The UI should be clean, native to the existing owner-side design, and consistent with current cards/tabs/badges.
+
+==================================================
+PART A — AUDIT & SECURITY SURFACE
+==================================================
+
+Build a platform-wide Audit & Security surface.
+
+Required sections:
+
+1) Security Posture Cards
+Show truthful status cards such as:
+- Production log redaction: Enabled
+- Add-on archive/delete protection: Enabled
+- Tenant feature entitlement source of truth: Plans & Features Matrix
+- Store Permissions Matrix protection: Enabled
+- Shipping credential safety: Configured / Not configured / Unknown
+- Pending high-risk items: count
+- Failed/blocked actions: count
+- Recent security-relevant events: count
+
+Important:
+Do not fake security controls.
+If a control is not actually implemented, show:
+- Not Implemented
+- Unknown
+- Manual Review Required
+instead of pretending it exists.
+
+2) Platform Audit Viewer
+Create a filterable audit/event viewer using existing audit sources where available.
+
+Fields should include:
+- timestamp
+- actor
+- tenant
+- action
+- entity type
+- entity id/name
+- severity
+- category
+- result/status
+- note/reason
+
+Filters:
+- date range
+- tenant
+- actor
+- category
+- severity
+- action text search
+- entity type
+
+Categories should support at minimum:
+- Commercial Controls
+- Add-on Governance
+- Billing / Invoice
+- Tenant Management
+- Security / Access
+- Shipping
+- Support
+- Domain
+- Platform Settings
+- Team Management
+
+If some categories do not yet have events, show empty state truthfully.
+
+3) Audit Detail Drawer / Modal
+Clicking an audit row should open a detail view with:
+- full safe metadata
+- old/new value summary if available
+- related tenant link
+- related invoice/add-on/feature/support/domain link if available
+- no PII beyond what is already allowed by current app context
+
+4) Event Severity
+Support severity labels:
+- info
+- notice
+- warning
+- critical
+
+Do not invent critical events if none exist.
+
+5) Security Notes
+Allow System Owner to add an internal security note to an audit event if the data model supports it.
+If not practical, keep notes at the Support/Security issue level.
+
+==================================================
+PART B — SUPPORT TOOLS SURFACE
+==================================================
+
+Build System Owner Support Tools.
+
+Required capabilities:
+
+1) Tenant Search / Lookup
+Support search by:
+- tenant name
+- tenant id
+- owner email if available
+- plan
+- status
+- domain if available
+
+Click tenant result should open Tenant Detail.
+
+2) Support Case List
+Create a support-case foundation with fields:
+- case id
+- tenant
+- title
+- category
+- severity
+- status
+- assigned platform user
+- created date
+- last updated
+- internal notes count
+
+Statuses:
+- Open
+- Waiting on Tenant
+- Waiting on Internal Team
+- Resolved
+- Closed
+
+Severity:
+- Low
+- Medium
+- High
+- Critical
+
+Categories:
+- Billing
+- Access
+- Shipping
+- POS
+- Repairs
+- Inventory
+- Add-ons
+- Domains
+- Security
+- Other
+
+3) Create Support Case
+System Owner can create a support case linked to a tenant.
+
+Required fields:
+- tenant
+- title
+- category
+- severity
+- description/internal note
+
+4) Support Case Detail
+Show:
+- case summary
+- tenant link
+- status
+- severity
+- assigned user
+- internal notes timeline
+- related audit events if practical
+- action history
+
+5) Internal Notes
+Allow adding internal support notes.
+Do not expose these to tenant/customer UI.
+
+6) Audit
+Audit:
+- case created
+- case status changed
+- severity changed
+- assigned user changed
+- note added
+- case closed/reopened
+
+==================================================
+PART C — PLATFORM SETTINGS SURFACE
+==================================================
+
+Build platform-level settings foundation.
+
+Required setting groups:
+
+1) Branding / Platform Identity
+Fields:
+- platform name
+- support email
+- support phone optional
+- default system sender name if used
+- internal platform note
+
+Do not implement actual email sending unless already exists.
+
+2) Security Defaults
+Fields / controls:
+- production log redaction status display
+- session/security policy placeholder if not implemented
+- audit retention setting placeholder or configurable value
+- require support note for critical actions, if practical
+
+If a setting is not connected to runtime behavior yet, label it:
+- Planned
+- Documentation only
+- Not enforced yet
+
+Do not pretend unenforced settings are enforced.
+
+3) Billing Defaults
+Fields:
+- default currency
+- default invoice due days
+- default monthly billing note
+- default annual billing note
+
+Do not implement Stripe or external processor.
+
+4) Communication Defaults
+Fields:
+- default support reply template
+- default tenant notification template placeholder
+- SMS/email provider status if applicable
+
+No external communication sending in this pass unless existing.
+
+5) Save / Audit
+Saving platform settings should:
+- persist in the existing data approach
+- audit old/new values where practical
+- show success/error state
+- respect preview/write-block mode if applicable
+
+==================================================
+PART D — DOMAINS SURFACE
+==================================================
+
+Build tenant domain governance foundation.
+
+This is not real DNS/SSL automation unless already implemented.
+It should be a truthful manual/domain-status tracking surface.
+
+Required fields for domain records:
+- domain id
+- tenant id
+- domain
+- type:
+  - primary
+  - secondary
+  - storefront
+  - admin
+  - custom
+- status:
+  - requested
+  - verification_pending
+  - verified
+  - active
+  - failed
+  - disabled
+- verification method:
+  - CNAME
+  - TXT
+  - Manual
+- expected DNS value
+- last checked date
+- verified date
+- notes
+
+Required UI:
+- domain list
+- filters by tenant/status/type
+- create domain record
+- edit domain record
+- mark verified
+- mark active
+- mark failed
+- disable domain
+- copy DNS instruction/value
+
+Important:
+Do not claim actual DNS verification if it is not implemented.
+If verification is manual, label it manual.
+
+Audit:
+- domain created
+- status changed
+- DNS value copied optional if tracked
+- domain disabled
+- domain note added
+
+==================================================
+PART E — PLATFORM TEAM MANAGEMENT SURFACE
+==================================================
+
+Build platform internal team-management foundation.
+
+This is for System Owner/platform staff, not tenant employees.
+
+Required fields:
+- team member id
+- name
+- email
+- role
+- status:
+  - active
+  - invited
+  - suspended
+  - disabled
+- last active placeholder if available
+- created date
+- notes
+
+Roles:
+- Platform Owner
+- Platform Admin
+- Support Manager
+- Support Agent
+- Security Reviewer
+- Billing Admin
+- Read Only
+
+Required UI:
+- team member list
+- filter by role/status
+- create/invite placeholder
+- edit role
+- change status
+- internal notes
+- view activity/audit trail
+
+Permission model:
+If actual platform auth/RBAC exists, integrate carefully.
+If not, implement as governance foundation with honest labels:
+- “Platform team governance record”
+- “Auth enforcement not implemented here”
+Do not fake real auth enforcement if it does not exist.
+
+Audit:
+- team member created/invited
+- role changed
+- status changed
+- note added
+
+==================================================
+PART F — NAVIGATION / INFORMATION ARCHITECTURE
+==================================================
+
+Add or update System Owner navigation cleanly.
+
+Recommended:
+System Owner sidebar/top nav item:
+- Platform Operations & Security
+
+Inside:
+- Overview
+- Audit & Security
+- Support Tools
+- Platform Settings
+- Domains
+- Team Management
+
+If the app already has a suitable System Owner settings/support area, integrate there instead of duplicating.
+
+Do not clutter Tenant Detail or Add-on Governance.
+
+==================================================
+PART G — DATA MODEL / MOCK DATA / FIRESTORE-READY STRUCTURE
+==================================================
+
+Use the project’s current data pattern.
+
+If currently using mock/local data:
+- create realistic mock records
+- keep structure Firestore-ready
+- use stable IDs
+- keep tenantId links consistent
+
+Suggested collections/models:
+- platformAuditEvents
+- supportCases
+- supportNotes
+- platformSettings
+- tenantDomains
+- platformTeamMembers
+
+Do not overbuild backend endpoints if current owner side is client/mock/Firestore-driven.
+
+==================================================
+PART H — PLAN / PERMISSION / GATING
+==================================================
+
+This is System Owner-only.
+
+Required:
+- Do not expose Platform Operations & Security to tenant/store users.
+- Preserve tenant-side routes.
+- Preserve Store Permissions Matrix.
+- Do not add these as tenant plan features unless intentionally needed.
+- Do not confuse platform team roles with tenant employee roles.
+
+If there is an owner/admin access guard, use it.
+If not, keep it in owner-side navigation only and document that auth enforcement is future/backing concern.
+
+==================================================
+PART I — AUDITABILITY
+==================================================
+
+All meaningful operations in this workstream should create audit events where practical.
+
+Audit actions should include:
+- platform_setting_updated
+- support_case_created
+- support_case_status_changed
+- support_case_note_added
+- domain_created
+- domain_status_changed
+- domain_disabled
+- platform_team_member_created
+- platform_team_role_changed
+- platform_team_status_changed
+- security_note_added
+
+Do not log PII to server logs.
+Client-side audit records may include operational metadata as appropriate for System Owner UI.
+
+==================================================
+PART J — SECURITY / PRIVACY
+==================================================
+
+Preserve the Server PII Log Scrubbing rules:
+- no raw request bodies in server logs
+- no provider payload logs
+- no secrets/tokens/API keys in logs
+- no customer PII in server logs
+
+Do not introduce server logging that violates the locked production logging rule.
+
+==================================================
+PART K — NON-REGRESSION
+==================================================
+
+Do not change:
+- Shipping Center behavior
+- Shipping provider adapters
+- Shipping status transitions
+- Add-on Governance
+- Add-on Implementation Readiness
+- Plans & Features Matrix source-of-truth rules
+- Tenant Features tab rules
+- Store Permissions Matrix behavior
+- Paid Override invoice workflow
+- POS / Repairs / Inventory / Customers / Invoices / Services
+- Tenant provisioning
+
+==================================================
+PART L — DOCUMENTATION
+==================================================
+
+Update replit.md with:
+- Platform Operations & Security overview
+- surfaces implemented
+- data models
+- audit actions
+- manual DNS/domain limitations
+- platform team governance limitations if auth is not enforced
+- security logging non-regression
+- out-of-scope items
+
+==================================================
+OUT OF SCOPE
+==================================================
+
+Do NOT implement:
+- Stripe
+- external payment processor
+- real DNS provider API
+- real SSL provisioning automation
+- real email/SMS sending unless existing
+- production auth provider changes
+- tenant employee permissions redesign
+- shipping behavior changes
+- customer-facing support portal
+- AI support bot
+- advanced SIEM integration
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Platform Operations & Security area appears in System Owner side.
+2) Audit & Security surface exists with posture cards and filterable audit viewer.
+3) Audit detail view works.
+4) Audit/security states are truthful, not fake.
+5) Support Tools surface exists.
+6) Tenant search works inside Support Tools.
+7) Support case create/list/detail/status/notes work.
+8) Platform Settings surface exists with grouped settings.
+9) Platform Settings save and audit behavior works.
+10) Domains surface exists.
+11) Domain records support manual verification/status workflow.
+12) Domains do not fake DNS/SSL automation.
+13) Platform Team Management surface exists.
+14) Platform team roles/statuses can be managed as governance records.
+15) Platform team UI does not pretend auth enforcement exists if it does not.
+16) All meaningful actions are audited.
+17) System Owner-only navigation is preserved.
+18) Tenant/store users do not see Platform Operations & Security.
+19) Existing Add-on Governance remains intact.
+20) Existing Shipping Module remains intact.
+21) Existing Store Permissions Matrix remains intact.
+22) Server PII logging rules are not regressed.
+23) replit.md is updated.
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this order:
+
+1) Inspect current owner navigation/data patterns
+2) Add data types/mock data helpers
+3) Add Platform Operations & Security shell
+4) Add Audit & Security
+5) Add Support Tools
+6) Add Platform Settings
+7) Add Domains
+8) Add Platform Team Management
+9) Wire audit events
+10) Update documentation
+11) Run typecheck/smoke tests
+12) Provide final implementation report
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Platform Operations & Security Navigation
+3. Audit & Security Surface
+4. Support Tools Surface
+5. Platform Settings Surface
+6. Domains Surface
+7. Platform Team Management Surface
+8. Auditability
+9. Files Changed
+10. Documentation Updated
+11. Non-Regression Notes
