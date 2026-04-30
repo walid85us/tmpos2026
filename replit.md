@@ -194,6 +194,188 @@ zero console calls and remain that way.
     impersonation sessions, tenant employee permission redesign, Stripe /
     billing flows, retail storefront, or any Shipping behavior change.
 
+## Platform Operations & Security Master Roadmap (locked planning)
+
+This is a **planning document only**. Nothing in this section ships UI or
+behavior. It defines the multi-session direction for Platform Operations &
+Security so future work proceeds in disciplined phases.
+
+### 1. Long-Term Vision
+
+Platform Operations & Security is the System Owner's operational command
+center. Over the next 5–10 years it must mature into a serious SaaS
+control surface covering: audit and security visibility, tenant support
+operations, platform settings and policy governance, tenant domain
+lifecycle, platform team governance, incident and risk management,
+operational alerts, compliance evidence, and (eventually) real
+integrations such as SSO, SCIM, DNS checks, SSL monitoring, and
+notification providers.
+
+The platform must remain truthful at every step:
+- Do not claim automation where only manual tracking exists.
+- Do not fake DNS or SSL checks.
+- Do not fake SSO/MFA enforcement.
+- Do not fake external billing or payment-processor integration.
+- Do not expose tenant or customer PII in server logs.
+- Do not make non-runtime-backed features appear implemented.
+
+### 2. Phase Roadmap
+
+**Phase 1.1 — Command Center + Workflow Maturity** *(next implementation
+phase, highest priority)*
+- *Platform Operations Command Center*: platform health overview, tenant
+  risk summary, open critical support cases, domain issue summary,
+  elevated audit/security events, pending platform team actions, add-on
+  readiness warnings, billing/add-on pending payment summary (only if
+  safe), a clear "Needs Attention" queue.
+- *Audit & Security upgrade*: saved audit filters, CSV export, related
+  event timeline, actor profile drawer, high-risk event flags, "create
+  security issue / support case from audit event", security notes linked
+  to audit events, improved severity taxonomy.
+- *Support Tools upgrade*: SLA timers, saved support views,
+  macros/templates, case escalation, related entities panel, tenant
+  health panel, case timeline improvements, "create case from
+  audit/security event".
+- *Out of scope for 1.1*: Domains deep automation, Platform Settings
+  registry overhaul, Team access review, SSO/SCIM, real DNS/SSL checks,
+  external notification providers, AI support bot.
+
+**Phase 1.2 — Domains + Platform Settings Maturity**
+- *Domains*: domain lifecycle timeline, expected DNS records,
+  verification checklist, status history, duplicate/conflict detection,
+  primary-domain rules, manual verification evidence, DNS check
+  placeholder architecture, SSL status placeholder architecture.
+- *Platform Settings*: settings registry, enforcement status per
+  setting, risk level per setting, environment scope, change diff before
+  save, reason required for critical settings, scheduled / rollback-ready
+  settings architecture, policy center foundation.
+- *Out of scope*: real DNS provider API, real SSL certificate
+  provisioning, real email/SMS sending.
+
+**Phase 1.3 — Platform Team Governance**
+- Platform role permission matrix, custom platform roles, temporary
+  elevated access, access expiry, privileged-action reason, access
+  review checklist, dormant user review, role change history,
+  break-glass admin placeholder. Directory-only honesty preserved unless
+  a real auth integration exists.
+- *Out of scope*: production SSO, SCIM, MFA enforcement, real session
+  revocation.
+
+**Phase 1.4 — Automation + Alerts**
+- Auto-create support case from critical audit/security event,
+  auto-create support case from failed domain verification, alert on
+  overdue support case, alert on privileged platform role change, alert
+  on domain stuck in pending, alert on add-on readiness issue,
+  notification center foundation, alert assignment and resolution
+  lifecycle.
+- *Out of scope*: external email/SMS delivery (unless already safely
+  implemented), Slack/Teams integration, SIEM integration.
+
+**Phase 2 — Real Integrations**
+- SAML SSO, SCIM directory sync, real DNS checks, SSL certificate
+  status checks, email provider, SMS provider, webhook alerts,
+  status-page provider, external ticketing integration if needed.
+- Rules: integration must be honest; credential handling must follow
+  safe logging rules; secrets must never be logged; preview/dev mode
+  must not fake production success.
+
+**Phase 3 — Compliance + Evidence Center**
+- SOC 2-style controls checklist, access review evidence, audit export
+  packets, change-management evidence, incident response records, policy
+  registry, vendor/security review evidence, data retention policy
+  tracking, privacy-request tracking, exportable compliance packet.
+
+**Phase 4 — Predictive / AI Operations**
+- Tenant risk scoring, support case summarization, audit event
+  explanation, anomaly detection, tenant health prediction, suggested
+  remediation, operational recommendations.
+- Rules: AI must not make irreversible decisions; AI suggestions must be
+  reviewable; no sensitive data leakage; no unsupported claims.
+
+### 3. Future Session Rules
+
+1. Always work one phase at a time.
+2. Do not mix phases unless explicitly instructed.
+3. Do not reopen accepted workstreams.
+4. Preserve truthful labels for manual / not-enforced features.
+5. Preserve server PII log-scrubbing rules.
+6. Preserve Add-on Governance and Plans & Features source-of-truth
+   rules.
+7. Preserve Store Permissions Matrix as the tenant role-permission
+   source of truth.
+8. Preserve Shipping Module behavior.
+9. Every new operational action should be auditable where practical.
+10. Every future prompt should include a focused Manual QA block.
+11. Future external integrations must include credential safety and no
+    fake-success behavior.
+12. System Owner operations must remain separate from tenant / store
+    user operations.
+
+### 4. Do-Not-Touch / Locked Modules
+
+Future Platform Operations work must not modify the following. Any
+interaction with these areas must be read-only unless explicitly scoped:
+
+- Shipping Module / Shipping Center behavior
+- Add-on Governance and Implementation Readiness rules
+- Plans & Features Matrix source-of-truth behavior
+- Tenant Features commercial-entitlement rules
+- Store Permissions Matrix entitlement behavior
+- POS, Repairs, Inventory, Customers, Invoices, Services
+- Tenant provisioning
+- Paid override invoice workflow
+- Server PII log-scrubbing behavior
+
+### 5. Implementation Sequence
+
+1. Phase 1.1 — Command Center + Audit/Security & Support Tools upgrade.
+2. Phase 1.2 — Domains + Platform Settings maturity.
+3. Phase 1.3 — Platform Team governance.
+4. Phase 1.4 — Automation & alerts.
+5. Phase 2 — Real integrations (SSO, SCIM, DNS, SSL, notifications).
+6. Phase 3 — Compliance & evidence center.
+7. Phase 4 — Predictive / AI operations layer.
+
+Each phase must complete and be accepted before the next phase begins.
+
+### 6. Acceptance Philosophy
+
+- Platform Operations must feel like a real SaaS control center.
+- It must be truthful, auditable, and operationally useful.
+- It must not fake enterprise integrations.
+- It must add depth through workflow maturity, not cosmetic cards.
+- Each phase must improve decision-making for the System Owner.
+- Each phase must preserve every previously completed module.
+
+### 7. Dependencies & Out-of-Scope (roadmap-wide)
+
+*Dependencies (foundations the roadmap relies on, already in place):*
+- Existing five System Owner surfaces (Audit & Security, Support Tools,
+  Platform Settings, Domains, Team Management).
+- `pushPlatformAudit` helper and the shared
+  `sessionStorage('audit_logs')` mirror.
+- Mock collections in `src/owner/mockData.ts` (`tenantDomains`,
+  `supportCases`, `platformTeamMembers`, `platformDefaults`).
+- `AccessGuard` + System Owner role gating in `src/App.tsx`.
+- Server PII log-scrubbing behavior.
+
+*Out of scope across the entire roadmap until an explicit phase opens
+them up:*
+- Stripe or any external payment processor.
+- Retail storefront.
+- Any change to Shipping Module behavior.
+- Real DNS / SSL automation (until Phase 2).
+- Real SSO / SCIM / MFA enforcement (until Phase 2).
+- Tenant-facing support portal.
+- Tenant employee permission redesign.
+
+### 8. Next Recommended Implementation
+
+**Platform Operations & Security — Phase 1.1: Command Center + Workflow
+Maturity.** Scope: Command Center, Audit & Security upgrade, Support
+Tools upgrade. Reason: biggest visible improvement for the System Owner
+without risking regressions in Domains, Settings, or Team Management.
+
 # External Dependencies
 
 -   **Firebase**: Firestore and Authentication.
