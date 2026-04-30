@@ -768,7 +768,70 @@ export interface SupportCaseRecord {
   openedAt: string;
   updatedAt: string;
   notes: SupportCaseNote[];
+
+  // Phase 1.1 — optional SLA / governance fields. All optional to keep
+  // the existing seeds and the storage shape backwards-compatible. SLA
+  // dates are seed values only; no real time-based enforcement happens.
+  firstResponseDueAt?: string | null;
+  resolutionDueAt?: string | null;
+  firstRespondedAt?: string | null;
+  resolvedAt?: string | null;
+  // Escalation governance (manual; tracked + audited, not delivered).
+  escalated?: boolean;
+  escalationReason?: string | null;
+  escalatedAt?: string | null;
+  escalatedBy?: string | null;
+  // Cross-surface link: the audit event that originated this case (when
+  // created via "Create Support Case from Event").
+  sourceAuditEventId?: string | null;
 }
+
+// Phase 1.1 — internal support response macros / templates. Inserted
+// into the in-app note draft only. No external email or SMS is sent.
+export interface SupportMacro {
+  id: string;
+  label: string;
+  category: 'general' | 'billing' | 'domain' | 'shipping' | 'security';
+  body: string;
+}
+
+export const supportMacros: SupportMacro[] = [
+  {
+    id: 'macro_more_info',
+    label: 'Ask tenant for more information',
+    category: 'general',
+    body:
+      'Hi — to help us reproduce this we need a few additional details: timestamp of the most recent occurrence (with timezone), the affected user / store, and any error message visible on screen. Replying here works best so we keep the case history together.',
+  },
+  {
+    id: 'macro_domain_dns',
+    label: 'Domain verification instructions',
+    category: 'domain',
+    body:
+      'To complete domain verification, please add the CNAME and TXT records shown in your Domains screen at your DNS provider. Propagation can take up to a few hours. Once the records are live, ping us here and we will mark the domain verified.',
+  },
+  {
+    id: 'macro_billing_followup',
+    label: 'Billing follow-up',
+    category: 'billing',
+    body:
+      'A quick follow-up on the recent payment issue. Please confirm the card on file is up to date in your billing screen. If the retry succeeds the account returns to active automatically.',
+  },
+  {
+    id: 'macro_shipping_creds',
+    label: 'Shipping provider credential issue',
+    category: 'shipping',
+    body:
+      'It looks like the shipping provider credentials on file may have expired or been rotated. Please re-enter the API key from your shipping provider portal in your Shipping settings and try again.',
+  },
+  {
+    id: 'macro_security_ack',
+    label: 'Security review acknowledgment',
+    category: 'security',
+    body:
+      'Acknowledged — your report has been received and routed to the platform security review queue. We will follow up here once the review is complete. No further action is needed from you right now.',
+  },
+];
 
 export const supportCases: SupportCaseRecord[] = [
   {
@@ -776,6 +839,14 @@ export const supportCases: SupportCaseRecord[] = [
     description: 'Tech Repair Pro reports sync errors twice daily. Suspect rate limiting on inventory worker.',
     status: 'in_progress', severity: 'high', assignee: 'Admin Alice',
     openedAt: '2026-03-10', updatedAt: '2026-03-22',
+    firstResponseDueAt: '2026-03-11T17:00:00Z',
+    resolutionDueAt: '2026-03-20T17:00:00Z',
+    firstRespondedAt: '2026-03-10T19:30:00Z',
+    resolvedAt: null,
+    escalated: true,
+    escalationReason: 'Repeat occurrence — flagged for senior review.',
+    escalatedAt: '2026-03-22T14:00:00Z',
+    escalatedBy: 'Admin Bob',
     notes: [
       { id: 'cn_001a', author: 'Admin Alice', body: 'Reproduced on staging — opened internal ticket SHIP-441.', createdAt: '2026-03-12', kind: 'note' },
       { id: 'cn_001b', author: 'Admin Alice', body: 'Status: open → in_progress', createdAt: '2026-03-12', kind: 'status_change' },
@@ -787,6 +858,10 @@ export const supportCases: SupportCaseRecord[] = [
     description: 'Auto-renewal failed three times. Owner notified by email but card not updated.',
     status: 'waiting_customer', severity: 'urgent', assignee: 'Admin Alice',
     openedAt: '2026-03-18', updatedAt: '2026-03-25',
+    firstResponseDueAt: '2026-03-18T22:00:00Z',
+    resolutionDueAt: '2026-03-26T22:00:00Z',
+    firstRespondedAt: '2026-03-18T20:00:00Z',
+    resolvedAt: null,
     notes: [
       { id: 'cn_002a', author: 'Admin Alice', body: 'Reached out to greg@quickfixelec.com and left voicemail.', createdAt: '2026-03-19', kind: 'note' },
       { id: 'cn_002b', author: 'Admin Alice', body: 'Status: open → waiting_customer', createdAt: '2026-03-25', kind: 'status_change' },
@@ -797,6 +872,10 @@ export const supportCases: SupportCaseRecord[] = [
     description: 'Tenant evaluating Advanced plan, asked for a 14-day trial extension.',
     status: 'open', severity: 'normal', assignee: null,
     openedAt: '2026-03-26', updatedAt: '2026-03-26',
+    firstResponseDueAt: '2026-03-27T17:00:00Z',
+    resolutionDueAt: '2026-04-02T17:00:00Z',
+    firstRespondedAt: null,
+    resolvedAt: null,
     notes: [],
   },
   {
@@ -804,6 +883,10 @@ export const supportCases: SupportCaseRecord[] = [
     description: 'New tenant — schedule onboarding call and walk through Sales/Repairs/Inventory.',
     status: 'resolved', severity: 'low', assignee: 'Admin Carol',
     openedAt: '2026-02-22', updatedAt: '2026-03-03',
+    firstResponseDueAt: '2026-02-23T17:00:00Z',
+    resolutionDueAt: '2026-03-04T17:00:00Z',
+    firstRespondedAt: '2026-02-22T18:00:00Z',
+    resolvedAt: '2026-03-03T15:30:00Z',
     notes: [
       { id: 'cn_004a', author: 'Admin Carol', body: 'Setup call completed 2026-03-03. Tenant comfortable with workflows.', createdAt: '2026-03-03', kind: 'note' },
       { id: 'cn_004b', author: 'Admin Carol', body: 'Status: in_progress → resolved', createdAt: '2026-03-03', kind: 'status_change' },

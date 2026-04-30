@@ -5,6 +5,7 @@ import { useAccess } from '../context/AccessContext';
 
 const navItems = [
   { label: 'Overview', path: '/owner', feature: 'dashboard' },
+  { label: 'Command Center', path: '/owner/command-center', feature: 'command_center' },
   { label: 'Tenants', path: '/owner/tenants', feature: 'tenants' },
   { label: 'Team Management', path: '/owner/team-management', feature: 'team_management' },
   { label: 'Plans & Features', path: '/owner/plans', feature: 'plans' },

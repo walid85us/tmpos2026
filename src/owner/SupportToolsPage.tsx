@@ -2,15 +2,30 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   tenants,
+  tenantDomains as tenantDomainsSeed,
   supportCases as supportCasesSeed,
+  supportMacros,
   type SupportCaseRecord,
   type SupportCaseStatus,
   type SupportCaseSeverity,
   type SupportCaseNote,
+  type SupportMacro,
 } from './mockData';
 import { pushPlatformAudit } from './platformOpsAudit';
+import {
+  deriveSlaStatus,
+  deriveTenantRisk,
+  predefinedSupportViews,
+  SLA_STATUS_LABEL,
+  SLA_STATUS_STYLES,
+  RISK_STATUS_LABEL,
+  RISK_STATUS_STYLES,
+  type AuditEventLike,
+  type SupportViewFilters,
+} from './platformOpsDerive';
 
 const CASES_KEY = 'support_cases_v1';
+const DOMAINS_KEY = 'tenant_domains_v1';
 
 const STATUS_LABELS: Record<SupportCaseStatus, string> = {
   open: 'Open',
@@ -69,6 +84,49 @@ const SupportToolsPage: React.FC = () => {
   const [showCreate, setShowCreate] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [impersonating, setImpersonating] = useState<string | null>(null);
+  const [activeView, setActiveView] = useState<string>('all');
+  const [slaFilter, setSlaFilter] = useState<'any' | 'overdue' | 'at_risk'>('any');
+  const [severityViewFilter, setSeverityViewFilter] = useState<'all' | SupportCaseSeverity>('all');
+  const [sortMode, setSortMode] = useState<'opened_desc' | 'updated_desc'>('opened_desc');
+  const [escalateOpen, setEscalateOpen] = useState(false);
+  const [escalateReason, setEscalateReason] = useState('');
+
+  // Live audit + domain mirrors so we can derive related entities + tenant risk.
+  const [audits, setAudits] = useState<AuditEventLike[]>([]);
+  const [domains, setDomains] = useState(tenantDomainsSeed);
+  useEffect(() => {
+    const read = () => {
+      try {
+        const rawA = window.sessionStorage?.getItem('audit_logs');
+        setAudits(rawA ? (JSON.parse(rawA) as AuditEventLike[]) : []);
+        const rawD = window.sessionStorage?.getItem(DOMAINS_KEY);
+        setDomains(rawD ? JSON.parse(rawD) : tenantDomainsSeed);
+      } catch {
+        /* noop */
+      }
+    };
+    read();
+    window.addEventListener('audit_logs:changed', read);
+    window.addEventListener('storage', read);
+    return () => {
+      window.removeEventListener('audit_logs:changed', read);
+      window.removeEventListener('storage', read);
+    };
+  }, []);
+
+  const applyView = (id: string) => {
+    setActiveView(id);
+    const v = predefinedSupportViews.find(x => x.id === id);
+    if (!v) return;
+    const f: SupportViewFilters = v.filters;
+    if (f.status === 'open_group') setStatusFilter('all');
+    else if (f.status === 'resolved_group') setStatusFilter('resolved');
+    else if (f.status) setStatusFilter(f.status as SupportCaseStatus | 'all');
+    else setStatusFilter('all');
+    setSlaFilter(f.sla === 'overdue' ? 'overdue' : f.sla === 'at_risk' ? 'at_risk' : 'any');
+    setSeverityViewFilter(f.severity && f.severity !== 'all' ? (f.severity as SupportCaseSeverity) : 'all');
+    setSortMode(f.sort === 'updated_desc' ? 'updated_desc' : 'opened_desc');
+  };
 
   const [draft, setDraft] = useState({
     tenantId: '',
@@ -86,8 +144,14 @@ const SupportToolsPage: React.FC = () => {
   }, []);
 
   const filteredCases = useMemo(() => {
-    return cases.filter(c => {
+    const filtered = cases.filter(c => {
       if (statusFilter !== 'all' && c.status !== statusFilter) return false;
+      if (severityViewFilter !== 'all' && c.severity !== severityViewFilter) return false;
+      if (slaFilter !== 'any') {
+        const sla = deriveSlaStatus(c);
+        if (slaFilter === 'overdue' && sla.status !== 'overdue') return false;
+        if (slaFilter === 'at_risk' && sla.status !== 'at_risk') return false;
+      }
       if (search.trim()) {
         const tenantName = tenantById.get(c.tenantId) || '';
         const hay = `${c.subject} ${c.description} ${tenantName} ${c.id}`.toLowerCase();
@@ -95,7 +159,12 @@ const SupportToolsPage: React.FC = () => {
       }
       return true;
     });
-  }, [cases, statusFilter, search, tenantById]);
+    return filtered.sort((a, b) => {
+      const aKey = sortMode === 'updated_desc' ? a.updatedAt : a.openedAt;
+      const bKey = sortMode === 'updated_desc' ? b.updatedAt : b.openedAt;
+      return aKey < bKey ? 1 : -1;
+    });
+  }, [cases, statusFilter, severityViewFilter, slaFilter, search, tenantById, sortMode]);
 
   const tenantSearchHits = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -232,6 +301,137 @@ const SupportToolsPage: React.FC = () => {
 
   const flaggedTenants = tenants.filter(t => t.flags.length > 0);
 
+  // Phase 1.1 — escalation, macro insertion, close/reopen.
+  const escalateCase = (c: SupportCaseRecord, reason: string) => {
+    const now = new Date();
+    const transitionNote: SupportCaseNote = {
+      id: `cn_${now.getTime()}_${Math.random().toString(36).slice(2, 5)}`,
+      author: 'System Owner',
+      body: `Escalated: ${reason || '(no reason)'}`,
+      createdAt: now.toISOString(),
+      kind: 'status_change',
+    };
+    updateCase(c.id, {
+      escalated: true,
+      escalationReason: reason || null,
+      escalatedAt: now.toISOString(),
+      escalatedBy: 'System Owner',
+      notes: [...c.notes, transitionNote],
+    });
+    pushPlatformAudit({
+      actor: 'System Owner',
+      action: 'support_case_escalated',
+      target: `${tenantById.get(c.tenantId) || c.tenantId} · ${c.subject}`,
+      category: 'support',
+      tenantId: c.tenantId,
+      severity: 'warning',
+      note: reason || undefined,
+    });
+  };
+
+  const deescalateCase = (c: SupportCaseRecord) => {
+    const now = new Date();
+    const transitionNote: SupportCaseNote = {
+      id: `cn_${now.getTime()}_${Math.random().toString(36).slice(2, 5)}`,
+      author: 'System Owner',
+      body: 'De-escalated',
+      createdAt: now.toISOString(),
+      kind: 'status_change',
+    };
+    updateCase(c.id, {
+      escalated: false,
+      escalationReason: null,
+      notes: [...c.notes, transitionNote],
+    });
+    pushPlatformAudit({
+      actor: 'System Owner',
+      action: 'support_case_deescalated',
+      target: `${tenantById.get(c.tenantId) || c.tenantId} · ${c.subject}`,
+      category: 'support',
+      tenantId: c.tenantId,
+      severity: 'notice',
+    });
+  };
+
+  const insertMacro = (id: string, macro: SupportMacro, currentDraft: string, setNoteDraft: (s: string) => void) => {
+    const c = cases.find(x => x.id === id);
+    setNoteDraft(currentDraft ? `${currentDraft}\n\n${macro.body}` : macro.body);
+    pushPlatformAudit({
+      actor: 'System Owner',
+      action: 'support_case_macro_inserted',
+      target: `${c ? tenantById.get(c.tenantId) || c.tenantId : '—'} · ${id}`,
+      category: 'support',
+      tenantId: c?.tenantId,
+      severity: 'info',
+      note: `Template: ${macro.label}`,
+    });
+  };
+
+  const closeCase = (c: SupportCaseRecord) => {
+    if (c.status === 'closed') return;
+    const now = new Date();
+    const transitionNote: SupportCaseNote = {
+      id: `cn_${now.getTime()}_${Math.random().toString(36).slice(2, 5)}`,
+      author: 'System Owner',
+      body: `Status: ${c.status} → closed`,
+      createdAt: now.toISOString(),
+      kind: 'status_change',
+    };
+    updateCase(c.id, {
+      status: 'closed',
+      resolvedAt: c.resolvedAt || now.toISOString(),
+      notes: [...c.notes, transitionNote],
+    });
+    pushPlatformAudit({
+      actor: 'System Owner',
+      action: 'support_case_closed',
+      target: `${tenantById.get(c.tenantId) || c.tenantId} · ${c.subject}`,
+      category: 'support',
+      tenantId: c.tenantId,
+      severity: 'info',
+    });
+  };
+
+  const reopenCase = (c: SupportCaseRecord) => {
+    const now = new Date();
+    const transitionNote: SupportCaseNote = {
+      id: `cn_${now.getTime()}_${Math.random().toString(36).slice(2, 5)}`,
+      author: 'System Owner',
+      body: `Status: ${c.status} → open (reopened)`,
+      createdAt: now.toISOString(),
+      kind: 'status_change',
+    };
+    updateCase(c.id, {
+      status: 'open',
+      resolvedAt: null,
+      notes: [...c.notes, transitionNote],
+    });
+    pushPlatformAudit({
+      actor: 'System Owner',
+      action: 'support_case_reopened',
+      target: `${tenantById.get(c.tenantId) || c.tenantId} · ${c.subject}`,
+      category: 'support',
+      tenantId: c.tenantId,
+      severity: 'notice',
+    });
+  };
+
+  // Related entities for the open case (tenant audits + tenant domains).
+  const relatedForSelected = useMemo(() => {
+    if (!selected) return { audits: [] as AuditEventLike[], domains: [] as typeof tenantDomainsSeed, sourceEvent: null as AuditEventLike | null };
+    const sourceEvent = selected.sourceAuditEventId
+      ? audits.find(a => a.id === selected.sourceAuditEventId) || null
+      : null;
+    const tenantAudits = audits.filter(a => a.tenantId === selected.tenantId).slice(0, 8);
+    const tenantDom = domains.filter(d => d.tenantId === selected.tenantId);
+    return { audits: tenantAudits, domains: tenantDom, sourceEvent };
+  }, [selected, audits, domains]);
+
+  const tenantRiskForSelected = useMemo(() => {
+    if (!selected) return null;
+    return deriveTenantRisk(selected.tenantId, { audits, cases, domains });
+  }, [selected, audits, cases, domains]);
+
   return (
     <div className="space-y-8">
       <div className="flex items-end justify-between flex-wrap gap-4">
@@ -279,13 +479,30 @@ const SupportToolsPage: React.FC = () => {
             {(['all', 'open', 'in_progress', 'waiting_customer', 'resolved', 'closed'] as const).map(s => (
               <button
                 key={s}
-                onClick={() => setStatusFilter(s)}
+                onClick={() => { setStatusFilter(s); setActiveView('custom'); }}
                 className={`px-3 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${statusFilter === s ? 'bg-primary text-white' : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-50'}`}
               >
                 {s === 'all' ? 'All' : STATUS_LABELS[s]}
               </button>
             ))}
           </div>
+        </div>
+        <div className="px-8 py-3 border-b border-slate-100 bg-slate-50/40 flex items-center gap-2 flex-wrap">
+          <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 mr-1">Saved views:</span>
+          {predefinedSupportViews.map(v => (
+            <button
+              key={v.id}
+              onClick={() => applyView(v.id)}
+              className={`px-3 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${activeView === v.id ? 'bg-primary text-white' : 'bg-white text-slate-500 border border-slate-200 hover:bg-white'}`}
+            >
+              {v.label}
+            </button>
+          ))}
+          {activeView === 'custom' && (
+            <span className="px-3 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest bg-amber-400/10 text-amber-700 border border-amber-400/20">
+              Custom filters
+            </span>
+          )}
         </div>
         <table className="w-full text-left border-collapse">
           <thead>
@@ -294,26 +511,40 @@ const SupportToolsPage: React.FC = () => {
               <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Tenant</th>
               <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Status</th>
               <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Severity</th>
+              <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">SLA</th>
               <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Assignee</th>
               <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Updated</th>
             </tr>
           </thead>
           <tbody>
-            {filteredCases.map(c => (
-              <tr key={c.id} onClick={() => setSelectedId(c.id)} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/70 transition-colors cursor-pointer">
-                <td className="px-6 py-3.5">
-                  <p className="text-sm font-bold text-slate-900 truncate max-w-[260px]">{c.subject}</p>
-                  <p className="text-[10px] text-slate-400 font-mono">{c.id}</p>
-                </td>
-                <td className="px-6 py-3.5 text-sm font-bold text-slate-700">{tenantById.get(c.tenantId) || c.tenantId}</td>
-                <td className="px-6 py-3.5"><span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${STATUS_STYLES[c.status]}`}>{STATUS_LABELS[c.status]}</span></td>
-                <td className="px-6 py-3.5"><span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${SEVERITY_STYLES[c.severity]}`}>{c.severity}</span></td>
-                <td className="px-6 py-3.5 text-sm font-bold text-slate-600">{c.assignee || '—'}</td>
-                <td className="px-6 py-3.5 text-sm font-bold text-slate-500 whitespace-nowrap">{c.updatedAt}</td>
-              </tr>
-            ))}
+            {filteredCases.map(c => {
+              const sla = deriveSlaStatus(c);
+              return (
+                <tr key={c.id} onClick={() => setSelectedId(c.id)} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/70 transition-colors cursor-pointer">
+                  <td className="px-6 py-3.5">
+                    <p className="text-sm font-bold text-slate-900 truncate max-w-[260px]">
+                      {c.subject}
+                      {c.escalated && <span className="ml-2 px-1.5 py-0.5 text-[9px] font-black uppercase tracking-widest rounded bg-red-500/10 text-red-700 border border-red-500/20">escalated</span>}
+                      {c.sourceAuditEventId && <span className="ml-2 px-1.5 py-0.5 text-[9px] font-black uppercase tracking-widest rounded bg-blue-400/10 text-blue-700 border border-blue-400/20">from audit</span>}
+                    </p>
+                    <p className="text-[10px] text-slate-400 font-mono">{c.id}</p>
+                  </td>
+                  <td className="px-6 py-3.5 text-sm font-bold text-slate-700">{tenantById.get(c.tenantId) || c.tenantId}</td>
+                  <td className="px-6 py-3.5"><span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${STATUS_STYLES[c.status]}`}>{STATUS_LABELS[c.status]}</span></td>
+                  <td className="px-6 py-3.5"><span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${SEVERITY_STYLES[c.severity]}`}>{c.severity}</span></td>
+                  <td className="px-6 py-3.5">
+                    <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${SLA_STATUS_STYLES[sla.status]}`} title={sla.label}>
+                      {SLA_STATUS_LABEL[sla.status]}
+                    </span>
+                    <p className="text-[9px] text-slate-400 font-bold mt-0.5">{sla.label}</p>
+                  </td>
+                  <td className="px-6 py-3.5 text-sm font-bold text-slate-600">{c.assignee || '—'}</td>
+                  <td className="px-6 py-3.5 text-sm font-bold text-slate-500 whitespace-nowrap">{c.updatedAt}</td>
+                </tr>
+              );
+            })}
             {filteredCases.length === 0 && (
-              <tr><td colSpan={6} className="px-8 py-12 text-center text-slate-400 text-sm font-bold">No support cases match these filters.</td></tr>
+              <tr><td colSpan={7} className="px-8 py-12 text-center text-slate-400 text-sm font-bold">No support cases match these filters.</td></tr>
             )}
           </tbody>
         </table>
@@ -413,6 +644,26 @@ const SupportToolsPage: React.FC = () => {
                   <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">{selected.id}</p>
                   <h3 className="text-lg font-black text-primary mt-1">{selected.subject}</h3>
                   <p className="text-xs text-slate-500 font-bold mt-1">{tenantById.get(selected.tenantId) || selected.tenantId}</p>
+                  <div className="flex flex-wrap gap-2 mt-2">
+                    {(() => {
+                      const sla = deriveSlaStatus(selected);
+                      return (
+                        <span className={`px-2 py-0.5 text-[10px] font-black uppercase tracking-widest rounded border ${SLA_STATUS_STYLES[sla.status]}`} title={sla.label}>
+                          SLA · {SLA_STATUS_LABEL[sla.status]}
+                        </span>
+                      );
+                    })()}
+                    {selected.escalated && (
+                      <span className="px-2 py-0.5 text-[10px] font-black uppercase tracking-widest rounded bg-red-500/10 text-red-700 border border-red-500/20">
+                        Escalated
+                      </span>
+                    )}
+                    {selected.sourceAuditEventId && (
+                      <span className="px-2 py-0.5 text-[10px] font-black uppercase tracking-widest rounded bg-blue-400/10 text-blue-700 border border-blue-400/20">
+                        From audit · {selected.sourceAuditEventId}
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <button onClick={() => setSelectedId(null)} className="w-9 h-9 rounded-full hover:bg-slate-100 flex items-center justify-center text-slate-400">
                   <span className="material-symbols-outlined text-base">close</span>
@@ -454,17 +705,138 @@ const SupportToolsPage: React.FC = () => {
                   </div>
                 )}
 
+                {/* Escalation row */}
+                <div className="p-4 rounded-2xl border border-slate-100 bg-slate-50/40">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Escalation</p>
+                      {selected.escalated ? (
+                        <>
+                          <p className="text-sm font-bold text-red-700 mt-1">Escalated</p>
+                          {selected.escalationReason && (
+                            <p className="text-xs text-slate-600 mt-0.5">Reason: {selected.escalationReason}</p>
+                          )}
+                          {selected.escalatedAt && (
+                            <p className="text-[10px] text-slate-400 mt-0.5">at {new Date(selected.escalatedAt).toLocaleString()} by {selected.escalatedBy || '—'}</p>
+                          )}
+                        </>
+                      ) : (
+                        <p className="text-sm font-bold text-slate-600 mt-1">Not escalated</p>
+                      )}
+                    </div>
+                    {selected.escalated ? (
+                      <button onClick={() => deescalateCase(selected)} className="px-3 py-2 text-[10px] font-black uppercase tracking-widest text-slate-600 bg-white border border-slate-200 rounded-xl hover:bg-slate-50">De-escalate</button>
+                    ) : (
+                      <button onClick={() => { setEscalateReason(''); setEscalateOpen(true); }} className="px-3 py-2 text-[10px] font-black uppercase tracking-widest text-white bg-red-500/90 rounded-xl hover:bg-red-500">Escalate</button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Tenant Health mini-card */}
+                {tenantRiskForSelected && (
+                  <div className="p-4 rounded-2xl border border-slate-100 bg-white">
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Tenant Health</p>
+                      <span className={`px-2 py-0.5 text-[10px] font-black uppercase tracking-widest rounded border ${RISK_STATUS_STYLES[tenantRiskForSelected.status]}`}>
+                        {RISK_STATUS_LABEL[tenantRiskForSelected.status]} · score {tenantRiskForSelected.score}
+                      </span>
+                    </div>
+                    <ul className="text-xs text-slate-600 list-disc pl-5 space-y-0.5">
+                      {tenantRiskForSelected.reasons.length === 0 && <li>No active risk signals.</li>}
+                      {tenantRiskForSelected.reasons.map(r => <li key={r}>{r}</li>)}
+                    </ul>
+                    <p className="text-[9px] text-slate-400 mt-2 italic">Risk derived from support/audit/domain signals available in this system.</p>
+                  </div>
+                )}
+
+                {/* Related entities */}
+                <div className="p-4 rounded-2xl border border-slate-100 bg-white">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Related Entities</p>
+                  {relatedForSelected.sourceEvent && (
+                    <div className="mb-3 p-3 rounded-xl bg-blue-400/5 border border-blue-400/20">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-blue-700">Source audit event</p>
+                      <p className="text-xs font-bold text-slate-700 mt-1">{relatedForSelected.sourceEvent.action}</p>
+                      <p className="text-[10px] text-slate-500 mt-0.5">{relatedForSelected.sourceEvent.target} · {relatedForSelected.sourceEvent.date}</p>
+                    </div>
+                  )}
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mt-2 mb-1">Recent tenant audits ({relatedForSelected.audits.length})</p>
+                  {relatedForSelected.audits.length === 0 ? (
+                    <p className="text-[11px] text-slate-400 font-bold py-2">No recent audits for this tenant.</p>
+                  ) : (
+                    <ul className="space-y-1">
+                      {relatedForSelected.audits.map(a => (
+                        <li key={a.id} className="text-xs text-slate-600">
+                          <span className="font-bold">{a.action}</span> · {a.target} <span className="text-slate-400">({a.date})</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mt-3 mb-1">Tenant domains ({relatedForSelected.domains.length})</p>
+                  {relatedForSelected.domains.length === 0 ? (
+                    <p className="text-[11px] text-slate-400 font-bold py-2">No domains configured for this tenant.</p>
+                  ) : (
+                    <ul className="space-y-1">
+                      {relatedForSelected.domains.map(d => (
+                        <li key={d.id} className="text-xs text-slate-600">
+                          <span className="font-bold">{d.host}</span> · DNS {d.dnsStatus} · SSL {d.sslStatus}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+
                 <div>
                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Timeline ({selected.notes.length})</p>
                   <NotesTimeline notes={selected.notes} />
                 </div>
 
-                <AddNoteRow onAdd={body => addNote(selected.id, body)} />
+                <NoteComposer
+                  caseId={selected.id}
+                  macros={supportMacros}
+                  onAdd={body => addNote(selected.id, body)}
+                  onInsertMacro={(macro, currentDraft, setDraft) => insertMacro(selected.id, macro, currentDraft, setDraft)}
+                />
+
+                {/* Close / Reopen */}
+                <div className="flex gap-2 pt-3 border-t border-slate-100">
+                  {selected.status !== 'closed' ? (
+                    <button onClick={() => closeCase(selected)} className="px-4 py-2 text-[10px] font-black uppercase tracking-widest text-slate-700 bg-white border border-slate-200 rounded-xl hover:bg-slate-50">Close case</button>
+                  ) : (
+                    <button onClick={() => reopenCase(selected)} className="px-4 py-2 text-[10px] font-black uppercase tracking-widest text-white bg-primary rounded-xl hover:bg-primary/90">Reopen case</button>
+                  )}
+                </div>
 
                 <div className="text-[10px] text-slate-400 pt-4 border-t border-slate-100 grid grid-cols-2 gap-2">
                   <div>Opened: <span className="font-bold text-slate-600">{selected.openedAt}</span></div>
                   <div>Updated: <span className="font-bold text-slate-600">{selected.updatedAt}</span></div>
+                  {selected.firstResponseDueAt && <div>First response due: <span className="font-bold text-slate-600">{selected.firstResponseDueAt.slice(0, 10)}</span></div>}
+                  {selected.resolutionDueAt && <div>Resolution due: <span className="font-bold text-slate-600">{selected.resolutionDueAt.slice(0, 10)}</span></div>}
+                  {selected.firstRespondedAt && <div>First responded: <span className="font-bold text-slate-600">{selected.firstRespondedAt.slice(0, 10)}</span></div>}
+                  {selected.resolvedAt && <div>Resolved: <span className="font-bold text-slate-600">{selected.resolvedAt.slice(0, 10)}</span></div>}
                 </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Escalate modal */}
+      <AnimatePresence>
+        {escalateOpen && selected && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setEscalateOpen(false)} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="relative w-full max-w-md bg-white rounded-[2rem] shadow-2xl overflow-hidden">
+              <div className="p-7 border-b border-slate-100">
+                <h3 className="text-lg font-black text-primary tracking-tight">Escalate Case</h3>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mt-1">{selected.id} · {selected.subject}</p>
+              </div>
+              <div className="p-7">
+                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Reason</label>
+                <textarea value={escalateReason} onChange={e => setEscalateReason(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm text-slate-700 h-28 resize-none" placeholder="Why is this being escalated?" />
+              </div>
+              <div className="p-7 border-t border-slate-100 bg-slate-50/40 flex justify-end gap-2">
+                <button onClick={() => setEscalateOpen(false)} className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-white">Cancel</button>
+                <button onClick={() => { escalateCase(selected, escalateReason.trim()); setEscalateOpen(false); }} className="px-6 py-2.5 bg-red-500/90 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-red-500">Escalate</button>
               </div>
             </motion.div>
           </div>
@@ -488,18 +860,53 @@ const NotesTimeline: React.FC<{ notes: SupportCaseNote[] }> = ({ notes }) => {
   );
 };
 
-const AddNoteRow: React.FC<{ onAdd: (body: string) => void }> = ({ onAdd }) => {
+interface NoteComposerProps {
+  caseId: string;
+  macros: SupportMacro[];
+  onAdd: (body: string) => void;
+  onInsertMacro: (macro: SupportMacro, currentDraft: string, setDraft: (s: string) => void) => void;
+}
+const NoteComposer: React.FC<NoteComposerProps> = ({ caseId, macros, onAdd, onInsertMacro }) => {
   const [body, setBody] = useState('');
+  const [macroId, setMacroId] = useState('');
+  // Reset draft when switching to a different case.
+  useEffect(() => { setBody(''); setMacroId(''); }, [caseId]);
   return (
-    <div className="flex gap-2">
-      <input
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Templates</span>
+        <select
+          value={macroId}
+          onChange={e => {
+            const id = e.target.value;
+            setMacroId(id);
+            const m = macros.find(x => x.id === id);
+            if (m) onInsertMacro(m, body, setBody);
+          }}
+          className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700"
+        >
+          <option value="">Insert template…</option>
+          {macros.map(m => (
+            <option key={m.id} value={m.id}>{m.label}</option>
+          ))}
+        </select>
+        <span className="text-[10px] text-slate-400 italic">Internal template only — no external message sent.</span>
+      </div>
+      <textarea
         value={body}
         onChange={e => setBody(e.target.value)}
-        onKeyDown={e => { if (e.key === 'Enter') { onAdd(body); setBody(''); } }}
         placeholder="Add internal note…"
-        className="flex-1 px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-700"
+        className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700 h-24 resize-none"
       />
-      <button onClick={() => { onAdd(body); setBody(''); }} disabled={!body.trim()} className="px-4 py-2.5 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 disabled:opacity-40 transition-all">Add</button>
+      <div className="flex justify-end">
+        <button
+          onClick={() => { onAdd(body); setBody(''); setMacroId(''); }}
+          disabled={!body.trim()}
+          className="px-4 py-2.5 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 disabled:opacity-40 transition-all"
+        >
+          Add Note
+        </button>
+      </div>
     </div>
   );
 };

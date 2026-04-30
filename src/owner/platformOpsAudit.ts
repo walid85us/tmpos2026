@@ -42,7 +42,17 @@ export type PlatformAuditAction =
   | 'platform_role_created'
   | 'platform_permission_changed'
   | 'security_note_added'
-  | 'security_note_deleted';
+  | 'security_note_deleted'
+  // Phase 1.1 — additional governance actions for Command Center,
+  // Audit & Security upgrade, and Support Tools upgrade.
+  | 'audit_view_exported'
+  | 'support_case_created_from_audit'
+  | 'support_case_macro_inserted'
+  | 'support_case_escalated'
+  | 'support_case_deescalated'
+  | 'support_case_closed'
+  | 'support_case_reopened'
+  | 'command_center_quick_action_used';
 
 export interface PushPlatformAuditInput {
   actor: string;
@@ -110,6 +120,15 @@ const DEFAULT_SEVERITY_BY_ACTION: Partial<Record<PlatformAuditAction, PlatformAu
   platform_permission_changed: 'warning',
   security_note_added: 'notice',
   security_note_deleted: 'notice',
+  // Phase 1.1
+  audit_view_exported: 'info',
+  support_case_created_from_audit: 'notice',
+  support_case_macro_inserted: 'info',
+  support_case_escalated: 'warning',
+  support_case_deescalated: 'notice',
+  support_case_closed: 'info',
+  support_case_reopened: 'notice',
+  command_center_quick_action_used: 'info',
 };
 
 export function pushPlatformAudit(input: PushPlatformAuditInput): MirrorRow {

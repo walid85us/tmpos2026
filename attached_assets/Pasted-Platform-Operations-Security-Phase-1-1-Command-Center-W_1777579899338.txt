@@ -1,0 +1,714 @@
+Platform Operations & Security — Phase 1.1 Command Center + Workflow Maturity
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is Phase 1.1 of the Platform Operations & Security Master Roadmap.
+
+Implement only:
+1) Platform Operations Command Center
+2) Audit & Security upgrade
+3) Support Tools upgrade
+
+Do not implement Phase 1.2, Phase 1.3, Phase 1.4, Phase 2, Phase 3, or Phase 4 items yet.
+Do not touch Domains deeply.
+Do not touch Platform Settings deeply.
+Do not touch Platform Team Management deeply.
+Do not implement real SSO/SCIM, real DNS/SSL checks, external notification providers, compliance evidence center, or AI operations in this pass.
+
+This must be additive and isolated.
+
+==================================================
+ROLE STACK — ADD TO PROJECT KNOWLEDGE / SKILLS
+==================================================
+
+Before implementing, add this workstream role model to project knowledge / skills and act on it in all implementation decisions.
+
+Do not treat these roles as decorative text.
+Use them to guide architecture, data model, UI, auditability, safety, QA, and non-regression decisions.
+
+For this Phase 1.1 workstream, act as:
+
+Primary roles:
+- Senior Platform Operations Architect
+- Senior Audit & Security Engineer and Architect
+- Senior Support Tools Engineer
+- Senior SaaS Command Center Architect
+- Senior Multi-Tenant Operations Engineer
+- Senior RBAC / Security-by-Default Architect
+- Senior UX Systems Designer for operational dashboards
+- QA Gatekeeper
+- Systems Thinker
+- Side Auditor
+
+Awareness roles for future phases:
+- Senior Platform Settings Architect
+- Senior Domains Engineer
+- Senior Platform Team Governance Leader
+- Senior Automation + Alerts / IaC Architect
+- Senior Real Integrations Architect for SSO, SCIM, DNS, SSL, and notification systems
+- Senior Compliance & Evidence Architect
+- Senior Predictive / AI Operations Architect
+
+Core responsibilities to preserve for this roadmap:
+- Command Center & Maturity:
+  Act as the beating heart of IT operations by centralizing visibility into system security alerts, workflow health, domain lifecycles, support risk, tenant health, and operational workload.
+
+- Platform Team Governance:
+  Preserve future readiness for platform role matrix, temporary access, PIM/PAM, and access reviews.
+
+- Automation + Alerts:
+  Preserve future readiness for self-service IaC-style operational pipelines, automatic support-case triggers, overdue escalations, and security warnings.
+
+- Real Integrations:
+  Preserve future readiness for SSO/SCIM identity, DNS/SSL monitoring, and notification systems.
+
+- Compliance & Evidence:
+  Preserve future readiness for SOC 2-style evidence collection, audit logs, policy registration, and CMMC-like readiness.
+
+- Predictive / AI Operations:
+  Preserve future readiness for AI/ML risk scoring, anomaly detection, tenant health prediction, and suggested remediation.
+
+Value goals:
+- Reduced Cognitive Load:
+  System Owner should see what needs attention without hunting across pages.
+
+- Increased Velocity:
+  Standardized operational patterns should make future platform work faster and safer.
+
+- Continuous Compliance:
+  Audit and operational records should naturally support future evidence collection.
+
+- Security by Default:
+  High-risk actions and sensitive data must remain controlled and truthful.
+
+- Proactive Operations:
+  The platform should move toward predicting and preventing issues before downtime or tenant escalation.
+
+==================================================
+CURRENT ACCEPTED FOUNDATION
+==================================================
+
+The current Platform Operations & Security Foundation is accepted and includes:
+
+- Audit & Security surface
+- Support Tools surface
+- Platform Settings surface
+- Domains surface
+- Platform Team Management surface
+- audit mirror helper
+- truth labels for manual/non-enforced features
+- System Owner-only navigation
+- no real DNS/SSL automation
+- no real SSO/MFA enforcement
+- no Stripe or external payment processor
+- no tenant-facing support portal
+
+The Platform Operations & Security Master Roadmap is accepted and locked.
+
+Phase 1.1 is the next implementation phase.
+
+==================================================
+LOCKED / DO-NOT-TOUCH WORKSTREAMS
+==================================================
+
+Do not modify or regress:
+
+- Shipping Module / Shipping Center behavior
+- Add-on Governance and Implementation Readiness rules
+- Plans & Features Matrix source-of-truth behavior
+- Tenant Features commercial-entitlement rules
+- Store Permissions Matrix entitlement behavior
+- POS
+- Repairs
+- Inventory
+- Customers
+- Invoices
+- Services
+- Tenant provisioning
+- Paid Override invoice workflow
+- Server PII log-scrubbing behavior
+- Existing Domains manual verification truth labels
+- Existing Platform Settings truth labels
+- Existing Platform Team Management directory-only truth labels
+
+Any interaction with these areas must be read-only unless explicitly required by this prompt.
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Upgrade the accepted Platform Operations & Security foundation so it feels like a real System Owner operational command center.
+
+Focus only on the highest-value three areas:
+
+1) Platform Operations Command Center
+2) Audit & Security upgrade
+3) Support Tools upgrade
+
+The System Owner should be able to quickly answer:
+
+- What needs attention right now?
+- Which tenants are at risk?
+- Which support cases are overdue or critical?
+- Which audit/security events are high-risk?
+- Which domains or operational items are stuck?
+- Which platform actions were recently taken?
+- What should I click next?
+
+==================================================
+PART A — PLATFORM OPERATIONS COMMAND CENTER
+==================================================
+
+Create a new Command Center view inside Platform Operations & Security.
+
+Recommended location:
+- Platform Operations & Security → Overview
+or
+- Platform Operations & Security → Command Center
+
+This should become the “beating heart” of System Owner operations.
+
+Required sections:
+
+1) Platform Health Overview
+
+Show cards such as:
+- Open critical support cases
+- Overdue support cases
+- Elevated audit/security events
+- Tenants needing attention
+- Domain issues summary
+- Pending platform actions
+- Add-on readiness warnings
+- Billing/add-on pending payment summary if safe
+- Recent operational activity
+
+Important:
+Do not fake data.
+Use existing mock/session/local data sources where available.
+If data is not available, show truthful empty state or “No active issues”.
+
+2) Needs Attention Queue
+
+Create a prioritized queue of items that need System Owner attention.
+
+Item types may include:
+- critical support case
+- overdue support case
+- high-risk audit event
+- failed domain verification
+- pending domain verification
+- platform security note
+- add-on readiness warning
+- pending invoice/payment if already available
+- team governance warning if data exists
+
+Each item should show:
+- priority
+- type
+- tenant if applicable
+- title
+- short reason
+- age / due indicator if applicable
+- action button / link
+
+Priority levels:
+- critical
+- high
+- medium
+- low
+
+3) Tenant Risk Summary
+
+Create a tenant risk table or card group.
+
+Risk signals may include:
+- open support cases
+- critical/high support cases
+- recent warning/critical audit events
+- failed/pending domains
+- pending billing/add-on payment if safe
+- add-on readiness issues if applicable
+- recent platform notes
+
+Risk status:
+- Healthy
+- Watch
+- At Risk
+- Critical
+
+Do not invent risk.
+Use transparent derived scoring from available data.
+
+Show a small explanation:
+“Risk is derived from support, audit, domain, and operational signals available in this system.”
+
+4) Workflow Health Summary
+
+Show operational workflow health:
+- support case workload
+- audit/security workload
+- domain workload
+- recent settings/team/domain/support changes
+- unresolved security notes
+
+This is not real infrastructure monitoring.
+Label clearly:
+“Operational workflow health — not infrastructure uptime monitoring.”
+
+5) Quick Actions
+
+Add quick actions:
+- Create Support Case
+- Open Audit & Security
+- Open Support Tools
+- Open Domains
+- Open Platform Settings
+- Open Team Management
+
+No destructive actions directly from Command Center in this pass.
+
+==================================================
+PART B — AUDIT & SECURITY UPGRADE
+==================================================
+
+Enhance the existing Audit & Security surface.
+
+Do not replace it with a superficial dashboard.
+Make it operational.
+
+Required additions:
+
+1) Saved Audit Views
+
+Add saved views such as:
+- Critical / Warning Events
+- Add-on Governance
+- Billing / Invoice
+- Support Activity
+- Domain Activity
+- Team Management
+- Platform Settings
+- Security Notes
+
+Saved views may be predefined in this pass.
+Custom saved views can be future scope unless easy and safe.
+
+2) CSV Export
+
+Add export CSV action for the currently filtered audit view.
+
+Export should include safe fields:
+- timestamp
+- severity
+- category
+- action
+- actor
+- tenant
+- target
+- status/result
+- note/summary
+
+Do not include secrets, API keys, raw payloads, or sensitive server data.
+
+3) Related Event Timeline
+
+When opening an audit event detail drawer, show related events when possible:
+- same tenant
+- same target/entity
+- same actor
+- same support case/domain/add-on/invoice if known
+
+If no related events:
+- show “No related events found.”
+
+4) Actor Profile Drawer / Panel
+
+From an audit row, allow opening actor context if available.
+
+Show:
+- actor name/email if available
+- actor role if available
+- recent actions
+- severity breakdown
+- categories touched
+- last activity
+
+Do not overclaim auth/session information.
+If unavailable, show Unknown / Not tracked.
+
+5) High-Risk Event Flags
+
+Add high-risk flags to audit events derived from:
+- critical severity
+- security category
+- team role/status changes
+- archive/delete blocked events
+- billing/payment activation changes
+- domain failed/disabled
+- support critical escalations
+
+Flag label:
+- High Risk
+- Needs Review
+- Critical
+
+Use clear, deterministic rules.
+
+6) Create Support Case from Audit Event
+
+Allow System Owner to create a support case from an audit/security event.
+
+Required:
+- prefill tenant if available
+- prefill title from audit action
+- prefill category based on audit category
+- prefill severity based on audit severity
+- attach reference to audit event
+- audit that the support case was created from an audit event
+
+If support case already exists for the same event, prevent duplicates or show a warning.
+
+7) Security Notes Upgrade
+
+Existing security notes should remain.
+Enhance if needed:
+- associate note with audit event if created from event detail
+- show note timeline
+- audit note add/delete
+
+==================================================
+PART C — SUPPORT TOOLS UPGRADE
+==================================================
+
+Enhance Support Tools into a more mature internal support operations surface.
+
+Required additions:
+
+1) SLA Timers
+
+Add support case SLA metadata.
+
+SLA fields:
+- firstResponseDueAt
+- resolutionDueAt
+- firstRespondedAt
+- resolvedAt
+- slaStatus:
+  - on_track
+  - at_risk
+  - overdue
+  - met
+  - missed
+  - paused
+  - unknown
+
+Derived behavior:
+- if case is open and due time is near, show At Risk
+- if due time has passed, show Overdue
+- if resolved before due time, show Met
+- if resolved after due time, show Missed
+- if due fields unavailable, show Unknown
+
+Do not fake time data.
+Use seeded/mock due dates where practical.
+
+2) Saved Support Views
+
+Add views:
+- All Open
+- Critical
+- Overdue
+- Waiting on Tenant
+- Waiting on Internal Team
+- Recently Updated
+- Resolved / Closed
+- My Assigned Cases if assigned user data exists
+
+3) Macros / Response Templates
+
+Add internal support macros/templates.
+
+Examples:
+- Ask tenant for more information
+- Domain verification instructions
+- Billing follow-up
+- Shipping provider credential issue
+- Security review acknowledgment
+
+This pass should not send emails.
+Macros should insert text into internal note or response draft area only.
+
+Label clearly:
+“Internal template only — no external message sent.”
+
+4) Case Escalation
+
+Add escalation action:
+- Escalate case
+- De-escalate case
+- escalationReason
+- escalatedAt
+- escalatedBy
+
+Escalated cases should appear in Needs Attention queue.
+
+5) Related Entities Panel
+
+In support case detail, show related records where available:
+- tenant
+- audit events
+- domain records
+- invoices/pending payments if available
+- add-ons/features if referenced
+- shipping/provider issues if referenced
+- security notes if linked
+
+If unavailable:
+- show empty state truthfully.
+
+6) Tenant Health Panel
+
+Add tenant health panel inside Support Tools or support case detail.
+
+Show:
+- open cases count
+- critical/high cases
+- recent audit warnings
+- failed/pending domains
+- pending payments if available
+- recent add-on readiness warnings if available
+
+Use same risk logic as Command Center where possible.
+
+7) Case Timeline Improvements
+
+Case detail should show a timeline containing:
+- case created
+- status changes
+- severity changes
+- assignment changes
+- notes
+- escalations
+- audit-linked events
+- resolution/closure
+
+8) Create Case from Command Center / Audit
+
+Support case creation should work from:
+- Support Tools directly
+- Audit event detail
+- Command Center Needs Attention item if applicable
+
+==================================================
+PART D — CROSS-SURFACE CONSISTENCY
+==================================================
+
+Command Center, Audit & Security, and Support Tools must use consistent data and terminology.
+
+Required:
+- same severity labels
+- same tenant names/links
+- same support case IDs
+- same audit event IDs
+- same risk statuses
+- same category labels
+- same truth labels
+
+Avoid creating separate inconsistent mock models.
+
+==================================================
+PART E — AUDITABILITY
+==================================================
+
+Add or preserve audit events for:
+
+Command Center:
+- no audit needed for viewing
+- audit if quick action creates support case or note
+
+Audit & Security:
+- audit view exported
+- support case created from audit event
+- security note added/deleted
+- saved view used if currently tracked, optional
+
+Support Tools:
+- support case created
+- status changed
+- severity changed
+- assignment changed
+- note added
+- macro inserted
+- case escalated
+- case de-escalated
+- case closed/reopened
+- SLA status updated if user-driven
+
+Do not log PII to server logs.
+This is client/owner audit, not server debug logging.
+
+==================================================
+PART F — UX / DESIGN EXPECTATIONS
+==================================================
+
+The UI should look more mature than the basic foundation.
+
+Use:
+- strong operational hierarchy
+- clear “Needs Attention” queue
+- concise risk cards
+- filterable tables
+- drawers for detail
+- timelines
+- badges
+- empty states
+- truthful limitation labels
+- compact but professional styling
+
+Do not clutter pages with giant walls of text.
+Do not reintroduce Permissions Impact blocks.
+Do not overload Tenant Features tab.
+
+==================================================
+PART G — SYSTEM OWNER ONLY
+==================================================
+
+This remains System Owner-only.
+
+Required:
+- Tenant/store users must not see Command Center, Audit & Security, or Support Tools.
+- Do not add tenant plan features for Platform Operations.
+- Do not add Store Permissions Matrix permissions for Platform Operations.
+- Do not confuse platform team roles with tenant employee roles.
+
+==================================================
+PART H — NON-REGRESSION
+==================================================
+
+Do not change:
+- Domains behavior beyond read-only summary signals used by Command Center / Support
+- Platform Settings behavior beyond read-only summary signals used by Command Center / Support
+- Team Management behavior beyond read-only summary signals used by Command Center / Support
+- Shipping behavior
+- Add-on Governance
+- Plans & Features Matrix
+- Tenant Features
+- Store Permissions Matrix
+- Paid Override invoice flow
+- POS / Repairs / Inventory / Customers / Invoices / Services
+- Tenant provisioning
+- Server PII log-scrubbing behavior
+
+==================================================
+PART I — DOCUMENTATION
+==================================================
+
+Update replit.md with:
+
+- Platform Operations & Security Phase 1.1 section
+- Command Center features
+- Audit & Security upgrades
+- Support Tools upgrades
+- risk scoring logic
+- SLA timer logic
+- high-risk audit flag logic
+- create-case-from-audit workflow
+- truth labels / limitations
+- out-of-scope items
+- non-regression commitments
+
+Do not overwrite the Master Roadmap.
+Add this as implementation detail under the existing Platform Operations & Security locked sections.
+
+==================================================
+OUT OF SCOPE
+==================================================
+
+Do NOT implement:
+- Domains Phase 1.2 deep lifecycle work
+- Platform Settings Phase 1.2 registry/change-control
+- Team Governance Phase 1.3
+- Automation + Alerts Phase 1.4
+- SSO/SCIM
+- real DNS checks
+- real SSL checks
+- external email/SMS notifications
+- Slack/Teams/SIEM
+- compliance evidence center
+- AI/predictive operations
+- tenant-facing support portal
+- infrastructure uptime monitoring
+- Stripe/payment processor
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Command Center exists and feels like the operational home.
+2) Command Center shows Platform Health Overview.
+3) Command Center shows Needs Attention queue.
+4) Command Center shows Tenant Risk Summary.
+5) Command Center shows Workflow Health Summary.
+6) Command Center quick actions work.
+7) Audit & Security saved views exist.
+8) Audit CSV export works.
+9) Audit detail shows related event timeline.
+10) Actor profile/context works.
+11) High-risk event flags are visible and deterministic.
+12) Support case can be created from an audit event.
+13) Security notes remain functional and auditable.
+14) Support Tools includes SLA timers.
+15) Support Tools includes saved views.
+16) Support Tools includes macros/templates.
+17) Support Tools supports escalation/de-escalation.
+18) Support case detail includes related entities panel.
+19) Tenant health panel exists.
+20) Case timeline is improved.
+21) Command Center, Audit, and Support use consistent terminology/data.
+22) All meaningful actions are audited.
+23) Tenant/store users do not see these System Owner surfaces.
+24) Existing Add-on Governance remains intact.
+25) Existing Shipping Module remains intact.
+26) Existing Store Permissions Matrix remains intact.
+27) Existing tenant provisioning remains intact.
+28) Server PII logging rules are not regressed.
+29) replit.md is updated.
+30) Future phases remain out of scope.
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this order:
+
+1) Inspect current Platform Operations files and data structures.
+2) Add shared risk/SLA/high-risk derivation helpers.
+3) Upgrade Command Center.
+4) Upgrade Audit & Security.
+5) Upgrade Support Tools.
+6) Wire cross-surface actions.
+7) Wire audit events.
+8) Update documentation.
+9) Run typecheck/smoke tests.
+10) Provide final implementation report.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Command Center
+3. Audit & Security Upgrades
+4. Support Tools Upgrades
+5. Cross-Surface Workflows
+6. Auditability
+7. Files Changed
+8. Documentation Updated
+9. Non-Regression Notes

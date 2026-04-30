@@ -30,6 +30,7 @@ import TenantsPage from './owner/TenantsPage';
 import TenantDetailPage from './owner/TenantDetailPage';
 import DomainsPage from './owner/DomainsPage';
 import SupportToolsPage from './owner/SupportToolsPage';
+import CommandCenterPage from './owner/CommandCenterPage';
 import PlatformSettingsPage from './owner/PlatformSettingsPage';
 import AuditSecurityPage from './owner/AuditSecurityPage';
 import RolesPage from './owner/RolesPage';
@@ -116,6 +117,7 @@ const router = createBrowserRouter([
     errorElement: <ErrorBoundary />,
     children: [
       { path: '/owner', element: <DashboardPage /> },
+      { path: '/owner/command-center', element: <AccessGuard feature="command_center"><CommandCenterPage /></AccessGuard> },
       { path: '/owner/tenants', element: <AccessGuard feature="tenants"><TenantsPage /></AccessGuard> },
       { path: '/owner/tenants/:id', element: <AccessGuard feature="tenants"><TenantDetailPage /></AccessGuard> },
       { path: '/owner/plans', element: <AccessGuard feature="plans"><PlansPage /></AccessGuard> },

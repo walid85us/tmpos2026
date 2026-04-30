@@ -194,6 +194,189 @@ zero console calls and remain that way.
     impersonation sessions, tenant employee permission redesign, Stripe /
     billing flows, retail storefront, or any Shipping behavior change.
 
+### Phase 1.1 Implementation (locked)
+
+Phase 1.1 ships **Command Center**, an upgraded **Audit & Security**, and an
+upgraded **Support Tools**. The work is strictly additive on top of the
+locked Platform Operations & Security base above; routes/AccessGuard wiring
+for the existing surfaces, all Domains/Settings/Team behavior, and the
+existing audit row contract are unchanged.
+
+-   **Shared derivation module** (`src/owner/platformOpsDerive.ts`): single
+    source of truth for cross-surface derivations — `deriveHighRiskFlag`,
+    `deriveTenantRisk`, `deriveSlaStatus`, `predefinedAuditViews`,
+    `predefinedSupportViews`, `AUDIT_CSV_COLUMNS`, `toCsv`/`downloadCsv`,
+    plus shared label/style maps (`SLA_STATUS_LABEL/STYLES`,
+    `RISK_STATUS_LABEL/STYLES`, `HIGH_RISK_FLAG_LABEL/STYLES`). Imported by
+    Command Center, Audit & Security, and Support Tools so badges and
+    chips stay visually consistent across surfaces.
+-   **Mock data extensions** (`src/owner/mockData.ts`): `SupportCaseRecord`
+    gained optional SLA fields (`firstResponseDueAt`, `resolutionDueAt`,
+    `firstRespondedAt`, `resolvedAt`), escalation fields (`escalated`,
+    `escalationReason`, `escalatedAt`, `escalatedBy`), and
+    `sourceAuditEventId` for audit-linked cases. Existing seed cases
+    were given SLA dates so the SLA badge demonstrates the four states
+    (overdue / at-risk / paused / met) on first load. New
+    `supportMacros` collection (`internal_ack`, `internal_diag_started`,
+    `internal_waiting_customer`, `internal_internal_handoff`,
+    `internal_resolution_summary`) is exported for the drawer template
+    inserter. Pre-existing exports are preserved.
+-   **Audit action union extension** (`src/owner/platformOpsAudit.ts`):
+    appended `audit_view_exported`,
+    `support_case_created_from_audit`, `support_case_macro_inserted`,
+    `support_case_escalated`, `support_case_deescalated`,
+    `support_case_closed`, `support_case_reopened`, and
+    `command_center_quick_action_used`, plus severity defaults. Existing
+    `support_case_status_changed`, `support_case_severity_changed`,
+    `support_case_assignee_changed`, and `support_case_note_added` were
+    already in the union and are unchanged.
+-   **Command Center** (`src/owner/CommandCenterPage.tsx`, route
+    `/owner/command-center`, gated by `feature="command_center"`,
+    `system_owner` receives access via `'all'`): four sections plus a
+    Quick Actions row.
+    -   *Quick Actions*: Create Support Case (navigates to Support Tools
+        with `?new=1`, audited as `command_center_quick_action_used`),
+        Open Audit View, Open Domains, Open Team Management.
+    -   *Platform Health Overview*: counts of open cases, overdue SLA
+        cases, escalated cases, high-risk audit events (last 7 days),
+        SSL coverage, and pending domain verifications. All values
+        derived live from `sessionStorage('audit_logs')`,
+        `support_cases_v1`, `tenant_domains_v1`, and
+        `platform_security_notes` with `mockData` fallback.
+    -   *Needs Attention queue*: prioritised list of overdue SLA cases,
+        escalated cases, and high-risk audit events.
+    -   *Tenant Risk Summary*: per-tenant risk score from
+        `deriveTenantRisk`, sorted descending.
+    -   *Workflow Health Summary*: counts of cases by status and SLA
+        bucket, labelled "Operational workflow health — not
+        infrastructure uptime monitoring."
+    -   Listens to `audit_logs:changed`, `support_cases:changed`,
+        `tenant_domains:changed`, and `platform_security_notes:changed`
+        for live updates.
+-   **Audit & Security upgrade** (`src/owner/AuditSecurityPage.tsx`):
+    -   Saved Views chip row (predefined: All, High Risk, Domains,
+        Security, Support, Team, Configuration, Last 7 days) that swap
+        the active filter set; "Custom" chip lights up if filters are
+        manually edited.
+    -   CSV Export button writes the filtered view to
+        `audit_export.csv` and emits `audit_view_exported`.
+    -   New "Flag" column powered by `deriveHighRiskFlag` — high
+        severity, sensitive category, repeat-actor / repeat-target
+        bursts, etc., each with a tooltip-quality reason list in the
+        drawer.
+    -   "Linked case" badge on the row when any open support case has
+        `sourceAuditEventId` matching the row id.
+    -   Detail drawer expanded with three tabs: **Detail** (existing
+        fields plus high-risk reasons + actions), **Related Events**
+        (same tenant / target / actor, click to navigate), **Actor
+        Profile** (severity breakdown, top categories, recent actions).
+    -   "Create Support Case from this Event" opens a modal seeded with
+        tenant, severity (mapped from event severity), and a
+        prefilled description; on submit it persists into
+        `support_cases_v1` with `sourceAuditEventId` set and emits
+        `support_case_created_from_audit`.
+    -   Security Notes panel can optionally link a note to the open
+        event id (`linkedEventId`); the link badge surfaces inline on
+        the note.
+-   **Support Tools upgrade** (`src/owner/SupportToolsPage.tsx`):
+    -   New SLA column with derived status badge ("Overdue", "At Risk",
+        "Paused", "Met") and a "due in / overdue by" microcopy line.
+    -   Saved Views chip row (predefined: All Open, Overdue SLA,
+        At-Risk SLA, Escalated, Waiting on Customer, Resolved/Closed,
+        Recently Updated). Switching presets sets status + SLA +
+        severity + sort. Manual filter edits flip to a "Custom"
+        indicator.
+    -   "Escalated" and "From audit" badges on the case row when
+        applicable.
+    -   Drawer additions:
+        - SLA / Escalated / From-audit badges in the header.
+        - Escalation card with Escalate (modal w/ reason) /
+          De-escalate buttons; both write a `status_change` timeline
+          note and emit `support_case_escalated` /
+          `support_case_deescalated`.
+        - Tenant Health mini-card driven by `deriveTenantRisk`.
+        - Related Entities panel: source audit event (when present),
+          recent tenant audits, tenant domains.
+        - Note composer with macro inserter dropdown — every macro
+          insert is audited as `support_case_macro_inserted` and
+          carries the visible label *"Internal template only — no
+          external message sent."*
+        - Close / Reopen buttons audited as `support_case_closed` /
+          `support_case_reopened`.
+    -   All existing case mutations (create, status change, severity
+        change, assignment, note added) keep their pre-existing audit
+        emissions — Phase 1.1 only **adds** event types, never renames
+        or removes.
+-   **Risk scoring logic (`deriveTenantRisk`)**: per-tenant score
+    derived only from data this system already owns —
+    `+30` for each open critical-severity audit in the last 7 days,
+    `+25` for each escalated open case, `+15` for each overdue SLA
+    case, `+10` for each at-risk SLA case, `+10` for each domain in
+    `pending` or `failed` verification, `+5` for each warning-severity
+    audit in the last 7 days, capped to thresholds:
+    `>=60` → `critical`, `>=30` → `elevated`, `>=10` → `watch`,
+    otherwise `healthy`. Rendered with the truth label *"Risk derived
+    from support/audit/domain signals available in this system."*
+-   **SLA timer logic (`deriveSlaStatus`)**: pure function over the
+    case record (`firstResponseDueAt`, `resolutionDueAt`,
+    `firstRespondedAt`, `resolvedAt`, `status`) and an injectable
+    `now` (defaults to `new Date()`). Returns
+    `{ status: 'overdue' | 'at_risk' | 'paused' | 'met', label }`.
+    `paused` is returned when status is `waiting_customer` or
+    `closed` so the SLA clock visibly stops; `met` when
+    `resolvedAt` is set on or before `resolutionDueAt`; `at_risk`
+    when remaining time on the active deadline is ≤ 25%; `overdue`
+    when the deadline has passed.
+-   **High-risk audit flag logic (`deriveHighRiskFlag`)**: returns
+    `{ flag, reasons[] }` where `flag` is one of `critical`,
+    `sensitive`, `burst`, or `null`. Sensitive triggers include
+    security-category events, role/permission changes,
+    impersonation events, and SSO/security-defaults edits. Burst is
+    triggered when the same actor or same target produced ≥ 3
+    warning+critical events in the audit window provided.
+-   **Create-case-from-audit workflow**: opening an audit event →
+    drawer Detail tab → "Create Support Case from this Event" →
+    modal seeds tenant/severity/description → submit persists into
+    `support_cases_v1` with `sourceAuditEventId = <event.id>` and
+    emits `support_case_created_from_audit`. The originating audit
+    row then renders a "Linked case" badge in the Audit & Security
+    table (and inside the drawer header) so the round-trip is
+    visible. Opening the case in Support Tools shows a "From audit"
+    badge plus the source event in the Related Entities panel.
+-   **Truth labels (mandatory, must remain visible)** — Phase 1.1
+    additions:
+    -   Command Center Workflow Health Summary: *"Operational
+        workflow health — not infrastructure uptime monitoring."*
+    -   Support Tools template inserter: *"Internal template only —
+        no external message sent."*
+    -   Tenant Risk cards (Command Center + Support Tools): *"Risk
+        derived from support/audit/domain signals available in this
+        system."*
+    All previously-locked truth labels (Domains manual verification,
+    Platform Settings documentation-only, Team auth/SSO disclaimer,
+    Support Tools impersonation stub) remain unchanged.
+-   **Out of scope (intentionally NOT done in Phase 1.1)**: real DNS
+    resolution / SSL automation / SSO enforcement / session-timeout
+    enforcement / live impersonation sessions, tenant employee
+    permission redesign, real notifications/email/SMS, real uptime
+    monitoring, Stripe or billing flows, retail storefront, and any
+    Shipping behavior change. Phase 1.1 does not modify the existing
+    Platform Operations & Security base section, the Master Roadmap
+    section below, or any Domains/Settings/Team UI beyond consuming
+    their data for read-only summaries.
+-   **Non-regression commitments**:
+    -   No existing route, AccessGuard rule, or `feature` key was
+        renamed or removed; `command_center` is added to the registry
+        only.
+    -   No existing audit action id was renamed or removed; the union
+        was extended with the eight new ids listed above.
+    -   No existing field on `SupportCaseRecord` was changed in type
+        or removed; new fields are all optional and additive.
+    -   `tenantDomains`, `platformSettings`, `platformTeamMembers`,
+        and the audit helper retain their public shape.
+    -   Domains, Platform Settings, and Team Management pages were not
+        edited as part of Phase 1.1.
+
 ## Platform Operations & Security Master Roadmap (locked planning)
 
 This is a **planning document only**. Nothing in this section ships UI or

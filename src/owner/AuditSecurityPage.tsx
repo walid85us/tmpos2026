@@ -1,7 +1,23 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { auditLogs, tenants, tenantDomains, supportCases } from './mockData';
+import {
+  auditLogs,
+  tenants,
+  tenantDomains,
+  supportCases as supportCasesSeed,
+  type SupportCaseRecord,
+  type SupportCaseSeverity,
+} from './mockData';
 import { pushPlatformAudit } from './platformOpsAudit';
+import {
+  deriveHighRiskFlag,
+  HIGH_RISK_FLAG_LABEL,
+  HIGH_RISK_FLAG_STYLES,
+  predefinedAuditViews,
+  AUDIT_CSV_COLUMNS,
+  toCsv,
+  downloadCsv,
+} from './platformOpsDerive';
 
 type Severity = 'info' | 'notice' | 'warning' | 'critical';
 
@@ -24,9 +40,18 @@ type SecurityNote = {
   body: string;
   author: string;
   createdAt: string;
+  linkedEventId?: string | null;
 };
 
 const NOTES_KEY = 'platform_security_notes';
+const CASES_KEY = 'support_cases_v1';
+
+const SEVERITY_TO_AUDIT_CASE: Record<SupportCaseSeverity, Severity> = {
+  low: 'info',
+  normal: 'info',
+  high: 'warning',
+  urgent: 'critical',
+};
 
 const SEVERITY_STYLES: Record<Severity, string> = {
   info: 'bg-blue-400/10 text-blue-700 border-blue-400/20',
@@ -82,6 +107,50 @@ const AuditSecurityPage: React.FC = () => {
   const [searchText, setSearchText] = useState('');
   const [selected, setSelected] = useState<AuditRow | null>(null);
   const [newNoteBody, setNewNoteBody] = useState('');
+  const [activeView, setActiveView] = useState<string>('all');
+  const [highRiskOnly, setHighRiskOnly] = useState(false);
+  const [drawerTab, setDrawerTab] = useState<'detail' | 'related' | 'actor'>('detail');
+  const [showCreateCase, setShowCreateCase] = useState(false);
+  const [linkedNoteEventId, setLinkedNoteEventId] = useState<string | null>(null);
+
+  // Persisted support cases (so we can show "linked support case" badges
+  // when an event has been used as the source of a case).
+  const [cases, setCases] = useState<SupportCaseRecord[]>([]);
+  useEffect(() => {
+    const read = () => {
+      try {
+        if (typeof window === 'undefined' || !window.sessionStorage) {
+          setCases(supportCasesSeed);
+          return;
+        }
+        const raw = window.sessionStorage.getItem(CASES_KEY);
+        setCases(raw ? (JSON.parse(raw) as SupportCaseRecord[]) : supportCasesSeed);
+      } catch {
+        setCases(supportCasesSeed);
+      }
+    };
+    read();
+    window.addEventListener('storage', read);
+    return () => window.removeEventListener('storage', read);
+  }, []);
+
+  const linkedCaseByEvent = useMemo(() => {
+    const m = new Map<string, SupportCaseRecord>();
+    cases.forEach(c => { if (c.sourceAuditEventId) m.set(c.sourceAuditEventId, c); });
+    return m;
+  }, [cases]);
+
+  const applyView = (id: string) => {
+    setActiveView(id);
+    const v = predefinedAuditViews.find(x => x.id === id);
+    if (!v) return;
+    const f = v.filters;
+    setHighRiskOnly(!!f.highRiskOnly);
+    if (f.severity && f.severity !== 'all') setSeverityFilter(f.severity as Severity);
+    else setSeverityFilter('all');
+    if (f.category && f.category !== 'all') setCategoryFilter(f.category as typeof categoryFilter);
+    else setCategoryFilter('all');
+  };
 
   const allRows = useMemo<AuditRow[]>(() => {
     const seedIds = new Set(auditLogs.map(l => l.id));
@@ -89,7 +158,9 @@ const AuditSecurityPage: React.FC = () => {
       ...mirrored.filter(m => !seedIds.has(m.id)),
       ...auditLogs.map(l => ({ ...l })),
     ];
-    return merged.sort((a, b) => (a.date < b.date ? 1 : -1));
+    return merged.sort((a, b) =>
+      a.date === b.date ? b.id.localeCompare(a.id) : a.date < b.date ? 1 : -1
+    );
   }, [mirrored]);
 
   const visibleRows = useMemo(() => {
@@ -103,13 +174,137 @@ const AuditSecurityPage: React.FC = () => {
       }
       if (severityFilter !== 'all' && normalizeSeverity(r.severity) !== severityFilter) return false;
       if (tenantFilter !== 'all' && (r.tenantId || '') !== tenantFilter) return false;
+      if (highRiskOnly) {
+        const { flag } = deriveHighRiskFlag(r);
+        if (flag !== 'critical' && flag !== 'high_risk') return false;
+      }
       if (searchText.trim()) {
         const hay = `${r.action} ${r.target} ${r.actor} ${r.note || ''}`.toLowerCase();
         if (!hay.includes(searchText.trim().toLowerCase())) return false;
       }
       return true;
     });
-  }, [allRows, categoryFilter, severityFilter, tenantFilter, searchText]);
+  }, [allRows, categoryFilter, severityFilter, tenantFilter, searchText, highRiskOnly]);
+
+  const tenantNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    tenants.forEach(t => m.set(t.id, t.name));
+    return m;
+  }, []);
+
+  // CSV export — whitelisted, safe-fields only.
+  const exportCsv = () => {
+    const rows = visibleRows.map(r => {
+      const { flag } = deriveHighRiskFlag(r);
+      return {
+        timestamp: r.date,
+        severity: normalizeSeverity(r.severity),
+        category: r.category || '',
+        action: r.action,
+        actor: r.actor,
+        tenant: r.tenantId ? tenantNameById.get(r.tenantId) || r.tenantId : '',
+        target: r.target,
+        flag: flag || '',
+        note: r.note || '',
+      };
+    });
+    const csv = toCsv(rows, AUDIT_CSV_COLUMNS as unknown as string[]);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    downloadCsv(`platform-audit-${stamp}.csv`, csv);
+    pushPlatformAudit({
+      actor: 'System Owner',
+      action: 'audit_view_exported',
+      target: `${rows.length} row${rows.length !== 1 ? 's' : ''}${activeView !== 'all' ? ` · view=${activeView}` : ''}`,
+      category: 'configuration',
+    });
+  };
+
+  // Related events for the open drawer (same tenant + same target + same actor).
+  const relatedEvents = useMemo<AuditRow[]>(() => {
+    if (!selected) return [];
+    return allRows
+      .filter(r => r.id !== selected.id)
+      .filter(r =>
+        (selected.tenantId && r.tenantId === selected.tenantId) ||
+        (selected.target && r.target === selected.target) ||
+        (selected.actor && r.actor === selected.actor)
+      )
+      .slice(0, 12);
+  }, [allRows, selected]);
+
+  // Actor profile — derived from currently mirrored + seed events.
+  const actorProfile = useMemo(() => {
+    if (!selected) return null;
+    const own = allRows.filter(r => r.actor === selected.actor);
+    const sevBreakdown: Record<Severity, number> = { info: 0, notice: 0, warning: 0, critical: 0 };
+    const catBreakdown = new Map<string, number>();
+    own.forEach(r => {
+      sevBreakdown[normalizeSeverity(r.severity)]++;
+      const c = r.category || 'other';
+      catBreakdown.set(c, (catBreakdown.get(c) || 0) + 1);
+    });
+    return {
+      total: own.length,
+      sevBreakdown,
+      cats: Array.from(catBreakdown.entries()).sort((a, b) => b[1] - a[1]).slice(0, 6),
+      recent: own.slice(0, 6),
+    };
+  }, [allRows, selected]);
+
+  // Create-from-event modal draft state.
+  const [caseDraft, setCaseDraft] = useState({
+    tenantId: '',
+    subject: '',
+    description: '',
+    severity: 'normal' as SupportCaseSeverity,
+  });
+  useEffect(() => {
+    if (!selected || !showCreateCase) return;
+    setCaseDraft({
+      tenantId: selected.tenantId || '',
+      subject: `[Audit] ${selected.action} — ${selected.target}`,
+      description: `Auto-prefilled from audit event ${selected.id} on ${selected.date}.\nActor: ${selected.actor}\nSeverity: ${normalizeSeverity(selected.severity)}\nCategory: ${selected.category || '—'}${selected.note ? `\nNote: ${selected.note}` : ''}`,
+      severity:
+        normalizeSeverity(selected.severity) === 'critical' ? 'urgent'
+        : normalizeSeverity(selected.severity) === 'warning' ? 'high'
+        : 'normal',
+    });
+  }, [selected, showCreateCase]);
+
+  const persistCases = (next: SupportCaseRecord[]) => {
+    setCases(next);
+    try { window.sessionStorage.setItem(CASES_KEY, JSON.stringify(next)); } catch { /* noop */ }
+  };
+
+  const createCaseFromEvent = () => {
+    if (!selected) return;
+    if (!caseDraft.tenantId || !caseDraft.subject.trim()) return;
+    const now = new Date();
+    const newCase: SupportCaseRecord = {
+      id: `case_${now.getTime()}_${Math.random().toString(36).slice(2, 7)}`,
+      tenantId: caseDraft.tenantId,
+      subject: caseDraft.subject.trim(),
+      description: caseDraft.description.trim(),
+      status: 'open',
+      severity: caseDraft.severity,
+      assignee: null,
+      openedAt: now.toISOString().slice(0, 10),
+      updatedAt: now.toISOString().slice(0, 10),
+      notes: [],
+      sourceAuditEventId: selected.id,
+    };
+    persistCases([newCase, ...cases]);
+    pushPlatformAudit({
+      actor: 'System Owner',
+      action: 'support_case_created_from_audit',
+      target: `${tenantNameById.get(caseDraft.tenantId) || caseDraft.tenantId} · ${newCase.subject}`,
+      category: 'support',
+      tenantId: caseDraft.tenantId,
+      severity: SEVERITY_TO_AUDIT_CASE[caseDraft.severity],
+      note: `From event ${selected.id}`,
+    });
+    setShowCreateCase(false);
+  };
 
   const sslCoverage = useMemo(() => {
     const total = tenantDomains.length;
@@ -118,8 +313,8 @@ const AuditSecurityPage: React.FC = () => {
   }, []);
 
   const openCases = useMemo(
-    () => supportCases.filter(c => c.status !== 'closed' && c.status !== 'resolved').length,
-    []
+    () => cases.filter(c => c.status !== 'closed' && c.status !== 'resolved').length,
+    [cases]
   );
 
   const recentCritical = useMemo(
@@ -127,7 +322,7 @@ const AuditSecurityPage: React.FC = () => {
     [allRows]
   );
 
-  const addNote = () => {
+  const addNote = (linkedEventIdOverride?: string | null) => {
     const body = newNoteBody.trim();
     if (!body) return;
     const note: SecurityNote = {
@@ -135,6 +330,7 @@ const AuditSecurityPage: React.FC = () => {
       body,
       author: 'System Owner',
       createdAt: new Date().toISOString(),
+      linkedEventId: linkedEventIdOverride ?? linkedNoteEventId ?? null,
     };
     persistNotes([note, ...notes]);
     pushPlatformAudit({
@@ -143,8 +339,10 @@ const AuditSecurityPage: React.FC = () => {
       target: body.length > 60 ? `${body.slice(0, 60)}…` : body,
       category: 'security',
       severity: 'notice',
+      note: note.linkedEventId ? `Linked event: ${note.linkedEventId}` : undefined,
     });
     setNewNoteBody('');
+    setLinkedNoteEventId(null);
   };
 
   const deleteNote = (id: string) => {
@@ -193,6 +391,18 @@ const AuditSecurityPage: React.FC = () => {
 
       {/* Filters */}
       <div className="bg-white/80 backdrop-blur-xl p-6 rounded-[2rem] border border-slate-200 shadow-sm space-y-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 mr-1">Saved views:</span>
+          {predefinedAuditViews.map(v => (
+            <button
+              key={v.id}
+              onClick={() => applyView(v.id)}
+              className={`px-3.5 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${activeView === v.id ? 'bg-primary text-white' : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-50'}`}
+            >
+              {v.label}
+            </button>
+          ))}
+        </div>
         <div className="flex flex-wrap gap-3 items-center">
           <input
             value={searchText}
@@ -200,7 +410,7 @@ const AuditSecurityPage: React.FC = () => {
             placeholder="Search action, target, actor…"
             className="flex-1 min-w-[200px] px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 text-sm font-bold text-slate-700"
           />
-          <select value={severityFilter} onChange={e => setSeverityFilter(e.target.value as any)} className="px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-black uppercase tracking-widest text-slate-600">
+          <select value={severityFilter} onChange={e => { setSeverityFilter(e.target.value as any); setActiveView('custom'); }} className="px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-black uppercase tracking-widest text-slate-600">
             <option value="all">All severities</option>
             <option value="info">Info</option>
             <option value="notice">Notice</option>
@@ -211,12 +421,19 @@ const AuditSecurityPage: React.FC = () => {
             <option value="all">All tenants</option>
             {tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
           </select>
+          <label className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-600 px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl cursor-pointer">
+            <input type="checkbox" checked={highRiskOnly} onChange={e => { setHighRiskOnly(e.target.checked); setActiveView('custom'); }} />
+            High-risk only
+          </label>
+          <button onClick={exportCsv} className="px-4 py-2.5 bg-white border border-slate-200 text-slate-700 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/5 hover:text-primary transition-colors">
+            Export CSV ({visibleRows.length})
+          </button>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {(['all', 'commercial', 'security', 'support', 'configuration', 'domains', 'team', 'other'] as const).map(c => (
             <button
               key={c}
-              onClick={() => setCategoryFilter(c)}
+              onClick={() => { setCategoryFilter(c); setActiveView('custom'); }}
               className={`px-3.5 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${categoryFilter === c ? 'bg-primary text-white' : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-50'}`}
             >
               {c}
@@ -236,16 +453,24 @@ const AuditSecurityPage: React.FC = () => {
               <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Target</th>
               <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Category</th>
               <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Severity</th>
+              <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Flag</th>
             </tr>
           </thead>
           <tbody>
             {visibleRows.map(log => {
               const sev = normalizeSeverity(log.severity);
+              const { flag } = deriveHighRiskFlag(log);
+              const linkedCase = linkedCaseByEvent.get(log.id);
               return (
-                <tr key={log.id} onClick={() => setSelected(log)} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/70 transition-colors cursor-pointer">
+                <tr key={log.id} onClick={() => { setSelected(log); setDrawerTab('detail'); }} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/70 transition-colors cursor-pointer">
                   <td className="px-6 py-3.5 text-sm font-bold text-slate-600 whitespace-nowrap">{log.date}</td>
                   <td className="px-6 py-3.5 text-sm font-bold text-slate-900">{log.actor}</td>
-                  <td className="px-6 py-3.5 text-sm text-slate-600">{log.action}</td>
+                  <td className="px-6 py-3.5 text-sm text-slate-600">
+                    {log.action}
+                    {linkedCase && (
+                      <span className="ml-2 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded bg-blue-400/10 text-blue-700 border border-blue-400/20">linked case</span>
+                    )}
+                  </td>
                   <td className="px-6 py-3.5 text-sm font-bold text-slate-900">{log.target}</td>
                   <td className="px-6 py-3.5">
                     {log.category ? (
@@ -257,11 +482,18 @@ const AuditSecurityPage: React.FC = () => {
                   <td className="px-6 py-3.5">
                     <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${SEVERITY_STYLES[sev]}`}>{sev}</span>
                   </td>
+                  <td className="px-6 py-3.5">
+                    {flag ? (
+                      <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${HIGH_RISK_FLAG_STYLES[flag]}`}>{HIGH_RISK_FLAG_LABEL[flag]}</span>
+                    ) : (
+                      <span className="text-[10px] text-slate-400">—</span>
+                    )}
+                  </td>
                 </tr>
               );
             })}
             {visibleRows.length === 0 && (
-              <tr><td colSpan={6} className="px-8 py-12 text-center text-slate-400 text-sm font-bold">No audit entries match these filters.</td></tr>
+              <tr><td colSpan={7} className="px-8 py-12 text-center text-slate-400 text-sm font-bold">No audit entries match these filters.</td></tr>
             )}
           </tbody>
         </table>
@@ -280,10 +512,13 @@ const AuditSecurityPage: React.FC = () => {
             value={newNoteBody}
             onChange={e => setNewNoteBody(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') addNote(); }}
-            placeholder="Add a security note…"
+            placeholder={linkedNoteEventId ? `Add a security note linked to event ${linkedNoteEventId}…` : 'Add a security note…'}
             className="flex-1 px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 text-sm font-bold text-slate-700"
           />
-          <button onClick={addNote} disabled={!newNoteBody.trim()} className="px-5 py-3 bg-primary text-white font-black text-xs rounded-2xl uppercase tracking-widest disabled:opacity-40 hover:bg-primary/90 transition-all">Add Note</button>
+          {linkedNoteEventId && (
+            <button onClick={() => setLinkedNoteEventId(null)} className="px-3 py-3 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-2xl hover:bg-slate-50">Unlink</button>
+          )}
+          <button onClick={() => addNote()} disabled={!newNoteBody.trim()} className="px-5 py-3 bg-primary text-white font-black text-xs rounded-2xl uppercase tracking-widest disabled:opacity-40 hover:bg-primary/90 transition-all">Add Note</button>
         </div>
         <div className="space-y-2">
           {notes.length === 0 && <p className="text-xs text-slate-400 font-bold py-4 text-center">No security notes yet.</p>}
@@ -291,7 +526,12 @@ const AuditSecurityPage: React.FC = () => {
             <div key={n.id} className="flex items-start justify-between gap-4 p-4 bg-slate-50 rounded-2xl">
               <div className="flex-1">
                 <p className="text-sm text-slate-700 font-medium">{n.body}</p>
-                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-1">{n.author} · {new Date(n.createdAt).toLocaleString()}</p>
+                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-1">
+                  {n.author} · {new Date(n.createdAt).toLocaleString()}
+                  {n.linkedEventId && (
+                    <span className="ml-2 px-1.5 py-0.5 rounded bg-blue-400/10 text-blue-700 border border-blue-400/20">linked event {n.linkedEventId}</span>
+                  )}
+                </p>
               </div>
               <button onClick={() => deleteNote(n.id)} className="text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-red-600 transition-colors">Delete</button>
             </div>
@@ -304,34 +544,218 @@ const AuditSecurityPage: React.FC = () => {
         {selected && (
           <div className="fixed inset-0 z-50 flex justify-end">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setSelected(null)} className="absolute inset-0 bg-slate-900/30 backdrop-blur-sm" />
-            <motion.div initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }} transition={{ type: 'spring', damping: 28, stiffness: 280 }} className="relative w-full max-w-md h-full bg-white shadow-2xl border-l border-slate-200 overflow-y-auto">
-              <div className="p-8 border-b border-slate-100 flex justify-between items-start">
-                <div>
+            <motion.div initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }} transition={{ type: 'spring', damping: 28, stiffness: 280 }} className="relative w-full max-w-lg h-full bg-white shadow-2xl border-l border-slate-200 overflow-y-auto">
+              <div className="p-7 border-b border-slate-100 flex justify-between items-start">
+                <div className="flex-1 pr-4">
                   <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Audit Event</p>
-                  <h3 className="text-xl font-black text-primary mt-1">{selected.action}</h3>
+                  <h3 className="text-lg font-black text-primary mt-1">{selected.action}</h3>
+                  <div className="flex flex-wrap items-center gap-2 mt-2">
+                    <span className={`px-2 py-0.5 text-[10px] font-black uppercase tracking-widest rounded border ${SEVERITY_STYLES[normalizeSeverity(selected.severity)]}`}>
+                      {normalizeSeverity(selected.severity)}
+                    </span>
+                    {(() => {
+                      const { flag } = deriveHighRiskFlag(selected);
+                      return flag ? (
+                        <span className={`px-2 py-0.5 text-[10px] font-black uppercase tracking-widest rounded border ${HIGH_RISK_FLAG_STYLES[flag]}`}>
+                          {HIGH_RISK_FLAG_LABEL[flag]}
+                        </span>
+                      ) : null;
+                    })()}
+                    {linkedCaseByEvent.get(selected.id) && (
+                      <span className="px-2 py-0.5 text-[10px] font-black uppercase tracking-widest rounded bg-blue-400/10 text-blue-700 border border-blue-400/20">
+                        Linked case · {linkedCaseByEvent.get(selected.id)!.id}
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <button onClick={() => setSelected(null)} className="w-9 h-9 rounded-full hover:bg-slate-100 flex items-center justify-center text-slate-400">
                   <span className="material-symbols-outlined text-base">close</span>
                 </button>
               </div>
-              <div className="p-8 space-y-4">
-                <Row label="Date" value={selected.date} />
-                <Row label="Actor" value={selected.actor} />
-                <Row label="Target" value={selected.target} />
-                <Row label="Category" value={selected.category || '—'} />
-                <Row label="Severity">
-                  <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${SEVERITY_STYLES[normalizeSeverity(selected.severity)]}`}>{normalizeSeverity(selected.severity)}</span>
-                </Row>
-                {selected.tenantId && <Row label="Tenant" value={selected.tenantId} />}
-                {selected.oldValue != null && <Row label="From" value={String(selected.oldValue)} />}
-                {selected.newValue != null && <Row label="To" value={String(selected.newValue)} />}
-                {selected.note && (
-                  <div>
-                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Note</p>
-                    <p className="text-sm text-slate-700 bg-slate-50 p-4 rounded-2xl">{selected.note}</p>
+
+              {/* Tabs */}
+              <div className="px-7 pt-4 flex gap-2 border-b border-slate-100">
+                {(['detail', 'related', 'actor'] as const).map(t => (
+                  <button
+                    key={t}
+                    onClick={() => setDrawerTab(t)}
+                    className={`px-3 pb-3 text-[10px] font-black uppercase tracking-widest border-b-2 ${drawerTab === t ? 'border-primary text-primary' : 'border-transparent text-slate-400 hover:text-slate-600'}`}
+                  >
+                    {t === 'detail' ? 'Detail' : t === 'related' ? `Related (${relatedEvents.length})` : 'Actor profile'}
+                  </button>
+                ))}
+              </div>
+
+              {drawerTab === 'detail' && (
+                <div className="p-7 space-y-4">
+                  <Row label="Date" value={selected.date} />
+                  <Row label="Actor" value={selected.actor} />
+                  <Row label="Target" value={selected.target} />
+                  <Row label="Category" value={selected.category || '—'} />
+                  {selected.tenantId && <Row label="Tenant" value={tenantNameById.get(selected.tenantId) || selected.tenantId} />}
+                  {selected.oldValue != null && <Row label="From" value={String(selected.oldValue)} />}
+                  {selected.newValue != null && <Row label="To" value={String(selected.newValue)} />}
+                  {selected.note && (
+                    <div>
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Note</p>
+                      <p className="text-sm text-slate-700 bg-slate-50 p-4 rounded-2xl">{selected.note}</p>
+                    </div>
+                  )}
+                  {(() => {
+                    const { reasons } = deriveHighRiskFlag(selected);
+                    if (!reasons.length) return null;
+                    return (
+                      <div>
+                        <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Why flagged</p>
+                        <ul className="text-xs text-slate-600 list-disc pl-5 space-y-0.5">
+                          {reasons.map(r => <li key={r}>{r}</li>)}
+                        </ul>
+                      </div>
+                    );
+                  })()}
+                  <div className="flex flex-wrap gap-2 pt-3 border-t border-slate-100">
+                    {!linkedCaseByEvent.get(selected.id) && (
+                      <button onClick={() => setShowCreateCase(true)} className="px-4 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 transition-colors">
+                        Create Support Case from this Event
+                      </button>
+                    )}
+                    <button onClick={() => { setLinkedNoteEventId(selected.id); window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }); }} className="px-4 py-2 bg-white text-slate-700 border border-slate-200 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-slate-50 transition-colors">
+                      Save as Security Note
+                    </button>
+                    <button onClick={() => setDrawerTab('related')} className="px-4 py-2 bg-white text-slate-700 border border-slate-200 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-slate-50 transition-colors">
+                      View Related ({relatedEvents.length})
+                    </button>
                   </div>
-                )}
-                <div className="text-[10px] text-slate-400 font-mono pt-4 border-t border-slate-100">id: {selected.id}</div>
+                  <div className="text-[10px] text-slate-400 font-mono pt-4 border-t border-slate-100">id: {selected.id}</div>
+                </div>
+              )}
+
+              {drawerTab === 'related' && (
+                <div className="p-7 space-y-2">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                    Related events (same tenant / target / actor)
+                  </p>
+                  {relatedEvents.length === 0 ? (
+                    <p className="text-xs text-slate-400 font-bold py-6 text-center bg-slate-50 rounded-2xl">No related events.</p>
+                  ) : (
+                    relatedEvents.map(r => {
+                      const { flag } = deriveHighRiskFlag(r);
+                      return (
+                        <button
+                          key={r.id}
+                          onClick={() => { setSelected(r); setDrawerTab('detail'); }}
+                          className="w-full text-left p-3 bg-slate-50 hover:bg-slate-100 rounded-xl border border-slate-100 transition-colors"
+                        >
+                          <div className="flex justify-between items-start gap-2">
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-bold text-slate-700 truncate">{r.action}</p>
+                              <p className="text-[10px] text-slate-500 font-bold mt-0.5 truncate">{r.target}</p>
+                            </div>
+                            <div className="flex flex-col items-end gap-1">
+                              <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border ${SEVERITY_STYLES[normalizeSeverity(r.severity)]}`}>
+                                {normalizeSeverity(r.severity)}
+                              </span>
+                              {flag && (
+                                <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border ${HIGH_RISK_FLAG_STYLES[flag]}`}>
+                                  {HIGH_RISK_FLAG_LABEL[flag]}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <p className="text-[10px] text-slate-400 mt-1">{r.actor} · {r.date}</p>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              )}
+
+              {drawerTab === 'actor' && actorProfile && (
+                <div className="p-7 space-y-4">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Actor profile · {selected.actor}</p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <ProfileStat label="Total events" value={actorProfile.total} />
+                    <ProfileStat label="Critical" value={actorProfile.sevBreakdown.critical} />
+                    <ProfileStat label="Warning" value={actorProfile.sevBreakdown.warning} />
+                    <ProfileStat label="Notice" value={actorProfile.sevBreakdown.notice} />
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Top categories</p>
+                    <div className="flex flex-wrap gap-2">
+                      {actorProfile.cats.length === 0 && <span className="text-xs text-slate-400">—</span>}
+                      {actorProfile.cats.map(([c, n]) => (
+                        <span key={c} className="px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg bg-slate-100 text-slate-600 border border-slate-200">
+                          {c} · {n}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Recent activity</p>
+                    <div className="space-y-2">
+                      {actorProfile.recent.map(r => (
+                        <button
+                          key={r.id}
+                          onClick={() => { setSelected(r); setDrawerTab('detail'); }}
+                          className="w-full text-left p-2.5 bg-slate-50 hover:bg-slate-100 rounded-xl border border-slate-100 transition-colors"
+                        >
+                          <p className="text-xs font-bold text-slate-700">{r.action}</p>
+                          <p className="text-[10px] text-slate-500 mt-0.5">{r.target} · {r.date}</p>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Create case from event modal */}
+      <AnimatePresence>
+        {showCreateCase && selected && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowCreateCase(false)} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="relative w-full max-w-lg bg-white rounded-[2rem] shadow-2xl overflow-hidden">
+              <div className="p-7 border-b border-slate-100 flex justify-between items-center">
+                <div>
+                  <h3 className="text-lg font-black text-primary tracking-tight">Create Support Case from Event</h3>
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mt-1">Source event {selected.id}</p>
+                </div>
+                <button onClick={() => setShowCreateCase(false)} className="w-9 h-9 rounded-full hover:bg-slate-100 flex items-center justify-center text-slate-400">
+                  <span className="material-symbols-outlined text-base">close</span>
+                </button>
+              </div>
+              <div className="p-7 space-y-4">
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Tenant</label>
+                  <select value={caseDraft.tenantId} onChange={e => setCaseDraft(d => ({ ...d, tenantId: e.target.value }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700">
+                    <option value="">Select tenant…</option>
+                    {tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Subject</label>
+                  <input value={caseDraft.subject} onChange={e => setCaseDraft(d => ({ ...d, subject: e.target.value }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700" />
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Severity</label>
+                  <select value={caseDraft.severity} onChange={e => setCaseDraft(d => ({ ...d, severity: e.target.value as SupportCaseSeverity }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700">
+                    <option value="low">Low</option>
+                    <option value="normal">Normal</option>
+                    <option value="high">High</option>
+                    <option value="urgent">Urgent</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Description (auto-prefilled)</label>
+                  <textarea value={caseDraft.description} onChange={e => setCaseDraft(d => ({ ...d, description: e.target.value }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm text-slate-700 h-32 resize-none" />
+                </div>
+              </div>
+              <div className="p-7 border-t border-slate-100 bg-slate-50/40 flex justify-end gap-2">
+                <button onClick={() => setShowCreateCase(false)} className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-white">Cancel</button>
+                <button onClick={createCaseFromEvent} disabled={!caseDraft.tenantId || !caseDraft.subject.trim()} className="px-6 py-2.5 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 disabled:opacity-40">Create Case</button>
               </div>
             </motion.div>
           </div>
@@ -340,6 +764,13 @@ const AuditSecurityPage: React.FC = () => {
     </div>
   );
 };
+
+const ProfileStat: React.FC<{ label: string; value: number }> = ({ label, value }) => (
+  <div className="p-3 bg-slate-50 rounded-2xl border border-slate-100">
+    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">{label}</p>
+    <p className="text-xl font-black text-primary mt-0.5">{value}</p>
+  </div>
+);
 
 const Row: React.FC<{ label: string; value?: string; children?: React.ReactNode }> = ({ label, value, children }) => (
   <div className="flex justify-between items-start gap-4">
