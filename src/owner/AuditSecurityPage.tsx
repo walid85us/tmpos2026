@@ -324,6 +324,17 @@ const AuditSecurityPage: React.FC = () => {
     [allRows]
   );
 
+  // Phase 1.1.1 — severity summary strip (visual polish, no filter change).
+  const severitySummary = useMemo(() => {
+    const counts = { info: 0, notice: 0, warning: 0, critical: 0 };
+    allRows.forEach(r => {
+      const s = normalizeSeverity(r.severity);
+      if (s in counts) counts[s as keyof typeof counts]++;
+    });
+    const total = counts.info + counts.notice + counts.warning + counts.critical;
+    return { counts, total };
+  }, [allRows]);
+
   const addNote = (linkedEventIdOverride?: string | null) => {
     const body = newNoteBody.trim();
     if (!body) return;
@@ -403,6 +414,40 @@ const AuditSecurityPage: React.FC = () => {
         </div>
       </div>
 
+      {/* Phase 1.1.1 — Severity Summary Strip (visual; informational only) */}
+      <div className="bg-white/80 backdrop-blur-xl p-5 rounded-[2rem] border border-slate-200 shadow-sm" data-testid="audit-severity-summary">
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Audit Severity Summary</p>
+            <p className="text-[11px] text-slate-500 mt-0.5">Distribution across the full audit stream — informational, does not change current filters.</p>
+          </div>
+          <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">{severitySummary.total} events</span>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {(['info', 'notice', 'warning', 'critical'] as const).map(sev => {
+            const v = severitySummary.counts[sev];
+            const pct = severitySummary.total ? Math.round((v / severitySummary.total) * 100) : 0;
+            const tone =
+              sev === 'critical' ? 'text-red-700 bg-red-500'
+              : sev === 'warning' ? 'text-amber-700 bg-amber-500'
+              : sev === 'notice' ? 'text-blue-700 bg-blue-500'
+              : 'text-slate-700 bg-slate-400';
+            const [textTone, barTone] = tone.split(' ');
+            return (
+              <div key={sev} data-testid={`audit-severity-strip-${sev}`}>
+                <div className="flex items-baseline justify-between mb-1">
+                  <span className={`text-[10px] font-black uppercase tracking-widest ${textTone}`}>{sev}</span>
+                  <span className="text-sm font-black text-slate-900">{v} <span className="text-xs text-slate-400 font-medium">· {pct}%</span></span>
+                </div>
+                <div className="h-1.5 rounded-full bg-slate-100 overflow-hidden">
+                  <div className={`h-full ${barTone} rounded-full transition-all`} style={{ width: `${pct}%` }} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
       {/* Filters */}
       <div className="bg-white/80 backdrop-blur-xl p-6 rounded-[2rem] border border-slate-200 shadow-sm space-y-4">
         <div className="flex flex-wrap items-center gap-2" data-testid="audit-saved-views">
@@ -413,7 +458,7 @@ const AuditSecurityPage: React.FC = () => {
               data-testid={`audit-saved-view-${v.id}`}
               data-active={activeView === v.id ? 'true' : 'false'}
               onClick={() => applyView(v.id)}
-              className={`px-3.5 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${activeView === v.id ? 'bg-primary text-white' : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-50'}`}
+              className={`px-3.5 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${activeView === v.id ? 'bg-primary text-white shadow-md ring-2 ring-primary/20' : 'bg-white text-slate-600 border border-slate-200 hover:bg-primary/5 hover:text-primary hover:border-primary/30'}`}
             >
               {v.label}
             </button>

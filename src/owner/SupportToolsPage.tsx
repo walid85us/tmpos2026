@@ -545,7 +545,7 @@ const SupportToolsPage: React.FC = () => {
               data-testid={`support-saved-view-${v.id}`}
               data-active={activeView === v.id ? 'true' : 'false'}
               onClick={() => applyView(v.id)}
-              className={`px-3 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${activeView === v.id ? 'bg-primary text-white' : 'bg-white text-slate-500 border border-slate-200 hover:bg-white'}`}
+              className={`px-3 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${activeView === v.id ? 'bg-primary text-white shadow-md ring-2 ring-primary/20' : 'bg-white text-slate-600 border border-slate-200 hover:bg-primary/5 hover:text-primary hover:border-primary/30'}`}
             >
               {v.label}
             </button>
@@ -709,6 +709,18 @@ const SupportToolsPage: React.FC = () => {
           <div className="fixed inset-0 z-50 flex justify-end" data-testid="support-case-detail">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={closeDrawer} className="absolute inset-0 bg-slate-900/30 backdrop-blur-sm" />
             <motion.div initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }} transition={{ type: 'spring', damping: 28, stiffness: 280 }} className="relative w-full max-w-lg h-full bg-white shadow-2xl border-l border-slate-200 overflow-y-auto">
+              {/* Phase 1.1.1 — top-of-drawer escalation banner. */}
+              {selected.escalated && (
+                <div className="px-7 py-3 bg-red-500 text-white flex items-center gap-2" data-testid="support-case-escalation-banner">
+                  <span className="material-symbols-outlined text-base">priority_high</span>
+                  <div className="flex-1">
+                    <p className="text-[10px] font-black uppercase tracking-widest">Escalated</p>
+                    {selected.escalationReason && (
+                      <p className="text-xs font-bold mt-0.5 truncate">{selected.escalationReason}</p>
+                    )}
+                  </div>
+                </div>
+              )}
               <div className="p-7 border-b border-slate-100 flex justify-between items-start">
                 <div className="flex-1 pr-4">
                   <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">{selected.id}</p>
@@ -957,10 +969,10 @@ const NoteComposer: React.FC<NoteComposerProps> = ({ caseId, macros, onAdd, onIn
         >
           <option value="">Insert template…</option>
           {macros.map(m => (
-            <option key={m.id} value={m.id}>{m.label}</option>
+            <option key={m.id} value={m.id} title={m.body.length > 220 ? `${m.body.slice(0, 220)}…` : m.body}>{m.label}</option>
           ))}
         </select>
-        <span className="text-[10px] text-slate-400 italic">Internal template only — no external message sent.</span>
+        <span className="text-[10px] text-slate-400 italic">Internal template only — no external message sent. Hover a template to preview.</span>
       </div>
       <textarea
         value={body}

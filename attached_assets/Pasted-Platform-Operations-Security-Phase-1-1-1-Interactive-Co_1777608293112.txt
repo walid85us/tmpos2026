@@ -1,0 +1,651 @@
+Platform Operations & Security — Phase 1.1.1 Interactive Command Center UX + Operational Intelligence Polish
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is Phase 1.1.1 of the Platform Operations & Security Master Roadmap.
+
+This is an enhancement/polish phase after the accepted Phase 1.1 Command Center + Workflow Maturity workstream.
+
+Implement only:
+1) More interactive and dynamic Command Center experience
+2) Modern operational widgets
+3) Time-range and focus-mode controls
+4) Tenant 360 drawer
+5) Next Best Actions panel
+6) Visual maturity upgrades for Command Center, Audit & Security, and Support Tools
+7) Rule-based operational intelligence, not AI
+
+Do not implement Phase 1.2, Phase 1.3, Phase 1.4, Phase 2, Phase 3, or Phase 4 items yet.
+Do not implement real DNS/SSL checks.
+Do not implement real SSO/SCIM.
+Do not implement external notifications.
+Do not implement compliance evidence center.
+Do not implement AI/ML prediction in this pass.
+Do not implement real infrastructure uptime monitoring.
+
+This phase should make the existing Phase 1.1 surfaces feel like a modern SaaS operations command center without changing locked business behavior.
+
+==================================================
+ROLE STACK — ADD TO PROJECT KNOWLEDGE / SKILLS
+==================================================
+
+Before implementation, add this workstream role model to project knowledge / skills and act on it.
+
+Do not treat these roles as decorative text.
+Use them to guide architecture, interaction design, data derivation, visual hierarchy, safety, auditability, QA, and non-regression decisions.
+
+For Phase 1.1.1, act as:
+
+Primary roles:
+- Senior Platform Operations Architect
+- Senior SaaS Command Center Architect
+- Senior Audit & Security Engineer and Architect
+- Senior Support Tools Engineer
+- Senior Operations UX / Dashboard Systems Designer
+- Senior Multi-Tenant Risk Visualization Architect
+- Senior React/TypeScript Interaction Engineer
+- Senior Security-by-Default Architect
+- QA Gatekeeper
+- Systems Thinker
+- Side Auditor
+
+Awareness roles for future phases:
+- Senior Platform Settings Architect
+- Senior Domains Engineer
+- Senior Platform Team Governance Leader
+- Senior Automation + Alerts / IaC Architect
+- Senior Real Integrations Architect for SSO, SCIM, DNS, SSL, and notification systems
+- Senior Compliance & Evidence Architect
+- Senior Predictive / AI Operations Architect
+
+Core responsibilities:
+- Command Center should act as the beating heart of IT/platform operations.
+- Reduce cognitive load by showing what needs attention first.
+- Increase velocity through reusable operational widgets and shared derivation helpers.
+- Preserve continuous-compliance readiness through auditable actions.
+- Preserve security-by-default and truthful limitations.
+- Move toward proactive operations without pretending to have AI or real infrastructure monitoring yet.
+
+==================================================
+RESEARCH / BENCHMARKING REQUIREMENT
+==================================================
+
+Before coding, perform a short architecture and UX benchmark review.
+
+If browsing/web search is available in Replit:
+Research public documentation/patterns from best-in-class platforms, including but not limited to:
+- Datadog dashboards/widgets
+- PagerDuty incident/operations workflows
+- Zendesk support SLAs, views, and macros
+- Atlassian audit logs/admin security views
+- Vercel/enterprise platform dashboards if useful
+- modern SaaS admin command center patterns
+
+Focus on patterns, not copying code.
+
+Look for:
+- operational dashboard widgets
+- event streams
+- issue/incident queues
+- SLA visibility
+- risk summaries
+- drill-down drawers
+- saved views
+- timeline experiences
+- export and filter patterns
+- clear truth labels for manual/not-enforced states
+
+If browsing is not available:
+- state that browsing was unavailable
+- proceed using accepted SaaS operations best practices
+- document the reasoning in replit.md
+
+Document a short “Benchmark Patterns Considered” note in replit.md.
+
+==================================================
+CURRENT ACCEPTED STATE
+==================================================
+
+Accepted and closed:
+- Server PII Log Scrubbing
+- Platform Operations & Security Foundation
+- Platform Operations & Security Master Roadmap
+- Platform Operations & Security Phase 1.1 Command Center + Workflow Maturity
+- Phase 1.1 Support Case Detail + Linked Case Correction
+- Phase 1.1 Escalated Case Needs Attention Correction
+
+Phase 1.1 currently includes:
+- Command Center
+- Platform Health Overview
+- Needs Attention queue
+- Tenant Risk Summary
+- Workflow Health Summary
+- Audit saved views
+- CSV export
+- audit detail related timeline
+- actor context
+- high-risk audit flags
+- create support case from audit event
+- support SLA timers
+- support saved views
+- macros/templates
+- escalation/de-escalation
+- related entities panel
+- tenant health panel
+- case timeline
+- linked case navigation
+- security note delete confirmation
+- escalated cases appearing in Needs Attention
+
+This Phase 1.1.1 pass must enhance, not replace, the accepted Phase 1.1 work.
+
+==================================================
+LOCKED / DO-NOT-TOUCH WORKSTREAMS
+==================================================
+
+Do not modify or regress:
+
+- Shipping Module / Shipping Center behavior
+- Add-on Governance and Implementation Readiness rules
+- Plans & Features Matrix source-of-truth behavior
+- Tenant Features commercial-entitlement rules
+- Store Permissions Matrix entitlement behavior
+- POS
+- Repairs
+- Inventory
+- Customers
+- Invoices
+- Services
+- Tenant provisioning
+- Paid Override invoice workflow
+- Server PII log-scrubbing behavior
+- Domains manual verification truth labels
+- Platform Settings truth labels
+- Platform Team Management directory-only truth labels
+
+Any interaction with these areas must be read-only unless explicitly scoped.
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Make Platform Operations & Security Phase 1.1 feel more interactive, dynamic, modern, and executive-grade.
+
+The Command Center should feel like Mission Control.
+
+The System Owner should immediately understand:
+
+- What is healthy?
+- What is risky?
+- What changed recently?
+- What is overdue?
+- What needs action now?
+- Which tenant should I look at first?
+- Which support case is most urgent?
+- Which audit/security event needs review?
+- What is the next best operational action?
+
+This should be accomplished using deterministic, transparent, rule-based operational intelligence.
+
+Do not implement AI in this pass.
+
+==================================================
+PART A — COMMAND CENTER “MISSION CONTROL” LAYOUT
+==================================================
+
+Upgrade Command Center visual hierarchy.
+
+Required sections:
+
+1) Mission Control Header
+
+Add a strong top header with:
+- current overall platform state
+- last refreshed timestamp
+- refresh button
+- selected time range
+- selected focus mode
+- short operational summary
+
+Overall platform state can be derived as:
+- Healthy
+- Watch
+- At Risk
+- Critical
+
+Use deterministic rules from support cases, SLA status, high-risk audit events, domain issues, and escalated cases.
+
+Example:
+- Critical if any critical support case is overdue or any critical high-risk audit exists.
+- At Risk if overdue support cases or failed domains exist.
+- Watch if at-risk SLA or warning audit events exist.
+- Healthy if no active risk signals exist.
+
+Do not fake infrastructure uptime.
+
+Display truth label:
+“Operational state is derived from support, audit, domain, and platform workflow signals — not infrastructure uptime monitoring.”
+
+2) Time Range Control
+
+Add time range filter:
+- Today
+- 7 days
+- 30 days
+- All
+
+This should affect:
+- audit counts
+- high-risk event stream
+- recent activity
+- tenant risk if practical
+- workload charts if practical
+
+If some widgets are all-time only, label clearly.
+
+3) Focus Mode Control
+
+Add operations focus modes:
+- Normal
+- Watch
+- Incident Review
+
+Behavior:
+- Normal: show all operational signals
+- Watch: prioritize medium/high/at-risk items
+- Incident Review: show critical, overdue, escalated, failed, high-risk only
+
+This is a UI filter/state only.
+Do not create real incident records in this pass.
+
+4) Operational Pulse Strip
+
+Add a compact row of interactive pulse metrics:
+- Open Cases
+- Overdue SLA
+- Escalated Cases
+- High-Risk Audits
+- Domain Issues
+- Tenants At Risk
+- Pending Actions
+
+Each metric should:
+- show count
+- show trend if derivable, otherwise omit trend
+- be clickable or filter the Command Center when practical
+- show tooltip/microcopy explaining derivation
+
+==================================================
+PART B — INTERACTIVE OPERATIONAL WIDGETS
+==================================================
+
+Add a modern widget grid.
+
+Widgets should be responsive and visually polished.
+
+Required widgets:
+
+1) Support Cases by Severity
+- compact chart or distribution bar
+- low / medium / high / critical
+- click severity to filter Support Tools or Needs Attention
+
+2) SLA Pressure
+- distribution of on track / at risk / overdue / met / missed / unknown
+- show overdue and at-risk prominently
+- click through to saved support view
+
+3) Tenant Risk Distribution
+- Healthy / Watch / At Risk / Critical
+- click risk bucket to filter Tenant Risk Summary
+
+4) Audit Events by Severity
+- info / notice / warning / critical
+- affected by time range
+- click severity to open Audit & Security saved/filter view if practical
+
+5) Domain Status Snapshot
+- pending / verified / active / failed / disabled
+- read-only summary only
+- no Phase 1.2 domain workflow changes
+
+6) Recent High-Risk Event Stream
+- event list with severity, category, tenant, actor, time
+- click opens audit detail
+
+7) Escalated Cases
+- list of active escalated cases
+- click opens support case detail
+
+8) Add-on Readiness / Commercial Attention
+- if data is available, summarize implementation-required add-ons, pending payments, or readiness blockers
+- read-only only
+- do not change Add-on Governance
+- if no data, show truthful empty state
+
+Widget requirements:
+- each widget has title
+- small explanation tooltip or helper text
+- empty state
+- click-through where safe
+- consistent styling
+- no fake data claims
+
+==================================================
+PART C — NEXT BEST ACTIONS PANEL
+==================================================
+
+Add a deterministic “Next Best Actions” panel.
+
+This is NOT AI.
+This is rule-based prioritization.
+
+Examples:
+- Review overdue support case
+- Investigate critical audit event
+- Escalate high-priority support case nearing SLA breach
+- Verify failed/pending domain
+- Review tenant at risk
+- Check add-on readiness blocker
+- Review unresolved security note
+
+Each action should show:
+- priority
+- reason
+- related tenant/entity
+- recommended next step
+- button/link
+
+Rules:
+- Critical overdue support cases come first
+- Escalated cases come next
+- Critical/high-risk audit events next
+- Failed domains next
+- At-risk SLAs next
+- Tenant risk watch items next
+- Add-on readiness blockers next
+
+Do not create automated actions.
+The panel recommends navigation/actions only.
+
+==================================================
+PART D — TENANT 360 MINI-DRAWER
+==================================================
+
+Add Tenant 360 drawer accessible from:
+- Tenant Risk Summary
+- tenant names in Needs Attention
+- tenant names in widgets where practical
+
+Tenant 360 should show:
+- tenant name
+- plan
+- status
+- risk status
+- risk reasons/signals
+- open support cases
+- overdue/at-risk SLA cases
+- recent audit events
+- domain issues
+- add-on/commercial warnings if safely available
+- quick links:
+  - Tenant Detail
+  - Support Cases
+  - Audit Events
+  - Domains
+
+Truthful empty states:
+- no open support cases
+- no recent audit events
+- no domain issues
+- no commercial warnings
+
+Do not modify tenant detail pages.
+
+==================================================
+PART E — COMMAND CENTER INTERACTION POLISH
+==================================================
+
+Improve UX:
+
+Required:
+- sticky or persistent command filters where appropriate
+- consistent badge styling
+- modern card spacing and hierarchy
+- skeleton/empty states where needed
+- hover states for clickable cards
+- clear active state for time range and focus mode
+- last refreshed indicator
+- manual refresh button
+- no heavy/cluttered UI
+- no giant text walls
+
+Recommended:
+- mini trend indicators if derivable
+- compact horizontal bars instead of bulky charts if chart library is not already present
+- use existing component/style conventions
+- no new heavy dependency unless already available
+
+==================================================
+PART F — AUDIT & SECURITY VISUAL POLISH
+==================================================
+
+Enhance Audit & Security without changing underlying behavior.
+
+Required:
+- make saved views visually stronger
+- high-risk flags more prominent but not alarming
+- event stream feel modern and scannable
+- create-case-from-event action easier to find
+- linked case badge clearer
+- actor drawer/context visually clearer
+- related events timeline easier to scan
+- CSV export remains working
+
+Add optional:
+- small severity summary strip above audit table
+- time range alignment with Command Center if safe
+- compact event stream mode if practical
+
+Do not remove existing filters.
+
+==================================================
+PART G — SUPPORT TOOLS VISUAL POLISH
+==================================================
+
+Enhance Support Tools without changing accepted behavior.
+
+Required:
+- SLA countdown/pressure badges are clearer
+- escalated banner is more visible in case detail
+- macro/template preview before insert if practical
+- related entities panel is easier to scan
+- tenant health panel matches Command Center risk style
+- saved support views look like operational queues
+- case timeline visually improved
+
+Macro rule remains:
+“Internal template only — no external message sent.”
+
+Do not introduce tenant-facing support portal.
+
+==================================================
+PART H — SHARED DERIVATION / CONSISTENCY
+==================================================
+
+Use or extend the existing shared module:
+- src/owner/platformOpsDerive.ts
+
+Add shared deterministic helpers if needed:
+- deriveOverallPlatformState
+- deriveNextBestActions
+- deriveOperationalPulse
+- deriveWidgetDistributions
+- deriveTenant360
+- filterByTimeRange
+- filterByFocusMode
+
+Do not duplicate logic across pages.
+Command Center, Audit & Security, and Support Tools should use the same label maps and severity/risk language.
+
+==================================================
+PART I — AUDITABILITY
+==================================================
+
+Audit only meaningful user actions, not passive viewing.
+
+Audit:
+- Command Center quick action used
+- Next Best Action clicked, if practical
+- Tenant 360 opened, optional
+- CSV export still audited
+- support actions still audited
+- create case from audit event still audited
+- security note actions still audited
+
+Do not create noisy audit spam for every hover/filter click unless already accepted.
+
+==================================================
+PART J — SYSTEM OWNER ONLY
+==================================================
+
+This remains System Owner-only.
+
+Required:
+- Tenant/store users must not see Command Center, Audit & Security, or Support Tools.
+- Do not add tenant plan features for Platform Operations.
+- Do not add Store Permissions Matrix permissions for Platform Operations.
+- Do not confuse platform team roles with tenant employee roles.
+
+==================================================
+PART K — NON-REGRESSION
+==================================================
+
+Do not change:
+- Domains behavior beyond read-only summary widgets
+- Platform Settings behavior beyond read-only summary widgets
+- Team Management behavior beyond read-only summary widgets
+- Shipping behavior
+- Add-on Governance
+- Plans & Features Matrix
+- Tenant Features
+- Store Permissions Matrix
+- Paid Override invoice flow
+- POS / Repairs / Inventory / Customers / Invoices / Services
+- Tenant provisioning
+- Server PII log-scrubbing behavior
+
+==================================================
+PART L — DOCUMENTATION
+==================================================
+
+Update replit.md with:
+
+- Platform Operations & Security Phase 1.1.1 section
+- Mission Control layout
+- time range and focus mode controls
+- operational widgets
+- Next Best Actions rule-based logic
+- Tenant 360 drawer
+- truth labels / limitations
+- benchmark patterns considered
+- out-of-scope items
+- non-regression commitments
+
+Do not overwrite:
+- Platform Operations & Security Foundation section
+- Platform Operations & Security Master Roadmap
+- Phase 1.1 implementation notes
+
+Add this as a new additive locked section.
+
+==================================================
+OUT OF SCOPE
+==================================================
+
+Do NOT implement:
+- real infrastructure uptime monitoring
+- real DNS checks
+- real SSL checks
+- domain lifecycle deep work from Phase 1.2
+- Platform Settings registry/change-control from Phase 1.2
+- Team Governance/PIM/PAM from Phase 1.3
+- Automation + Alerts from Phase 1.4
+- external notifications
+- SSO/SCIM
+- compliance evidence center
+- AI/ML prediction
+- tenant-facing support portal
+- Stripe/payment processor
+- customer storefront billing
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Command Center has modern Mission Control header.
+2) Overall platform state is derived and truthful.
+3) Time range control works.
+4) Focus mode control works.
+5) Operational pulse strip exists and is useful.
+6) Widget grid exists with support, SLA, tenant risk, audit, domain, escalated case, and add-on/commercial attention widgets where data is available.
+7) Widgets have useful empty states and explanations.
+8) Widgets support safe click-through/filter behavior where practical.
+9) Next Best Actions panel exists and is rule-based.
+10) Next Best Actions link to relevant details/actions.
+11) Tenant 360 drawer exists.
+12) Tenant 360 drawer shows risk, support, audit, domain, and commercial context where available.
+13) Audit & Security visual polish improves saved views, high-risk flags, actor context, related timeline, and linked-case UX.
+14) Support Tools visual polish improves SLA badges, macros, escalation, related entities, tenant health, and timeline.
+15) Shared derivation helpers are reused; no duplicated inconsistent risk/SLA logic.
+16) System Owner-only access remains correct.
+17) Existing Add-on Governance remains intact.
+18) Existing Shipping Module remains intact.
+19) Existing Store Permissions Matrix remains intact.
+20) Existing tenant provisioning remains intact.
+21) Server PII logging rules are not regressed.
+22) Future roadmap phases remain out of scope.
+23) replit.md is updated.
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this order:
+
+1) Benchmark / architecture note
+2) Inspect existing Phase 1.1 files and platformOpsDerive helpers
+3) Add shared derivation helpers
+4) Upgrade Command Center layout and interactions
+5) Add operational widgets
+6) Add Next Best Actions
+7) Add Tenant 360 drawer
+8) Polish Audit & Security
+9) Polish Support Tools
+10) Wire safe click-through behavior
+11) Add targeted audit events where meaningful
+12) Update documentation
+13) Run typecheck and smoke tests
+14) Provide final implementation report
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Benchmark / Architecture Notes
+3. Mission Control Command Center
+4. Interactive Widgets + Operational Pulse
+5. Next Best Actions
+6. Tenant 360 Drawer
+7. Audit & Security Polish
+8. Support Tools Polish
+9. Files Changed
+10. Documentation Updated
+11. Non-Regression Notes

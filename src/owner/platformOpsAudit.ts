@@ -52,7 +52,12 @@ export type PlatformAuditAction =
   | 'support_case_deescalated'
   | 'support_case_closed'
   | 'support_case_reopened'
-  | 'command_center_quick_action_used';
+  | 'command_center_quick_action_used'
+  // Phase 1.1.1 — Mission Control / Command Center interactive controls.
+  | 'command_center_refreshed'
+  | 'command_center_time_range_changed'
+  | 'command_center_focus_mode_changed'
+  | 'command_center_tenant360_opened';
 
 export interface PushPlatformAuditInput {
   actor: string;
@@ -129,6 +134,11 @@ const DEFAULT_SEVERITY_BY_ACTION: Partial<Record<PlatformAuditAction, PlatformAu
   support_case_closed: 'info',
   support_case_reopened: 'notice',
   command_center_quick_action_used: 'info',
+  // Phase 1.1.1
+  command_center_refreshed: 'info',
+  command_center_time_range_changed: 'info',
+  command_center_focus_mode_changed: 'info',
+  command_center_tenant360_opened: 'info',
 };
 
 export function pushPlatformAudit(input: PushPlatformAuditInput): MirrorRow {
