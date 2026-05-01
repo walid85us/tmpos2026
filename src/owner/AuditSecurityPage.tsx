@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   auditLogs,
@@ -112,6 +113,7 @@ const AuditSecurityPage: React.FC = () => {
   const [drawerTab, setDrawerTab] = useState<'detail' | 'related' | 'actor'>('detail');
   const [showCreateCase, setShowCreateCase] = useState(false);
   const [linkedNoteEventId, setLinkedNoteEventId] = useState<string | null>(null);
+  const [pendingDeleteNoteId, setPendingDeleteNoteId] = useState<string | null>(null);
 
   // Persisted support cases (so we can show "linked support case" badges
   // when an event has been used as the source of a case).
@@ -345,7 +347,13 @@ const AuditSecurityPage: React.FC = () => {
     setLinkedNoteEventId(null);
   };
 
-  const deleteNote = (id: string) => {
+  const requestDeleteNote = (id: string) => setPendingDeleteNoteId(id);
+
+  const cancelDeleteNote = () => setPendingDeleteNoteId(null);
+
+  const confirmDeleteNote = () => {
+    const id = pendingDeleteNoteId;
+    if (!id) return;
     const target = notes.find(n => n.id === id);
     persistNotes(notes.filter(n => n.id !== id));
     if (target) {
@@ -356,7 +364,13 @@ const AuditSecurityPage: React.FC = () => {
         category: 'security',
       });
     }
+    setPendingDeleteNoteId(null);
   };
+
+  const pendingDeleteNote = useMemo(
+    () => (pendingDeleteNoteId ? notes.find(n => n.id === pendingDeleteNoteId) || null : null),
+    [pendingDeleteNoteId, notes]
+  );
 
   return (
     <div className="space-y-8">
@@ -391,11 +405,13 @@ const AuditSecurityPage: React.FC = () => {
 
       {/* Filters */}
       <div className="bg-white/80 backdrop-blur-xl p-6 rounded-[2rem] border border-slate-200 shadow-sm space-y-4">
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2" data-testid="audit-saved-views">
           <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 mr-1">Saved views:</span>
           {predefinedAuditViews.map(v => (
             <button
               key={v.id}
+              data-testid={`audit-saved-view-${v.id}`}
+              data-active={activeView === v.id ? 'true' : 'false'}
               onClick={() => applyView(v.id)}
               className={`px-3.5 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${activeView === v.id ? 'bg-primary text-white' : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-50'}`}
             >
@@ -468,7 +484,15 @@ const AuditSecurityPage: React.FC = () => {
                   <td className="px-6 py-3.5 text-sm text-slate-600">
                     {log.action}
                     {linkedCase && (
-                      <span className="ml-2 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded bg-blue-400/10 text-blue-700 border border-blue-400/20">linked case</span>
+                      <Link
+                        to={`/owner/support-tools?caseId=${encodeURIComponent(linkedCase.id)}`}
+                        onClick={e => e.stopPropagation()}
+                        data-testid={`audit-linked-case-${log.id}`}
+                        title={`Open linked support case ${linkedCase.id}`}
+                        className="ml-2 inline-flex px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded bg-blue-400/10 text-blue-700 border border-blue-400/20 hover:bg-blue-400/20"
+                      >
+                        linked case
+                      </Link>
                     )}
                   </td>
                   <td className="px-6 py-3.5 text-sm font-bold text-slate-900">{log.target}</td>
@@ -533,7 +557,7 @@ const AuditSecurityPage: React.FC = () => {
                   )}
                 </p>
               </div>
-              <button onClick={() => deleteNote(n.id)} className="text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-red-600 transition-colors">Delete</button>
+              <button data-testid={`security-note-delete-${n.id}`} onClick={() => requestDeleteNote(n.id)} className="text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-red-600 transition-colors">Delete</button>
             </div>
           ))}
         </div>
@@ -562,9 +586,13 @@ const AuditSecurityPage: React.FC = () => {
                       ) : null;
                     })()}
                     {linkedCaseByEvent.get(selected.id) && (
-                      <span className="px-2 py-0.5 text-[10px] font-black uppercase tracking-widest rounded bg-blue-400/10 text-blue-700 border border-blue-400/20">
+                      <Link
+                        to={`/owner/support-tools?caseId=${encodeURIComponent(linkedCaseByEvent.get(selected.id)!.id)}`}
+                        data-testid="audit-drawer-linked-case"
+                        className="px-2 py-0.5 text-[10px] font-black uppercase tracking-widest rounded bg-blue-400/10 text-blue-700 border border-blue-400/20 hover:bg-blue-400/20"
+                      >
                         Linked case · {linkedCaseByEvent.get(selected.id)!.id}
-                      </span>
+                      </Link>
                     )}
                   </div>
                 </div>
@@ -756,6 +784,29 @@ const AuditSecurityPage: React.FC = () => {
               <div className="p-7 border-t border-slate-100 bg-slate-50/40 flex justify-end gap-2">
                 <button onClick={() => setShowCreateCase(false)} className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-white">Cancel</button>
                 <button onClick={createCaseFromEvent} disabled={!caseDraft.tenantId || !caseDraft.subject.trim()} className="px-6 py-2.5 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 disabled:opacity-40">Create Case</button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Security note delete confirmation */}
+      <AnimatePresence>
+        {pendingDeleteNote && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" data-testid="confirm-delete-note">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={cancelDeleteNote} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="relative w-full max-w-md bg-white rounded-[2rem] shadow-2xl overflow-hidden">
+              <div className="p-7 border-b border-slate-100">
+                <h3 className="text-lg font-black text-primary tracking-tight">Delete security note?</h3>
+                <p className="text-xs text-slate-500 font-medium mt-1">This will permanently remove the note from this browser session and write a `security_note_deleted` audit entry.</p>
+              </div>
+              <div className="p-7">
+                <p className="text-sm text-slate-700 bg-slate-50 p-4 rounded-2xl whitespace-pre-wrap">{pendingDeleteNote.body}</p>
+                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-2">{pendingDeleteNote.author} · {new Date(pendingDeleteNote.createdAt).toLocaleString()}</p>
+              </div>
+              <div className="p-7 border-t border-slate-100 bg-slate-50/40 flex justify-end gap-2">
+                <button onClick={cancelDeleteNote} data-testid="confirm-delete-note-cancel" className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-white">Cancel</button>
+                <button onClick={confirmDeleteNote} data-testid="confirm-delete-note-confirm" className="px-6 py-2.5 bg-red-500/90 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-red-500">Delete note</button>
               </div>
             </motion.div>
           </div>

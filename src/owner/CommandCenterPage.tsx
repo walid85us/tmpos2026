@@ -133,7 +133,7 @@ const CommandCenterPage: React.FC = () => {
       title: c.subject,
       reason: 'Severity = urgent',
       age: c.openedAt,
-      href: '/owner/support-tools',
+      href: `/owner/support-tools?caseId=${encodeURIComponent(c.id)}`,
     });
   });
   overdueCases.forEach(c => {
@@ -145,7 +145,7 @@ const CommandCenterPage: React.FC = () => {
       title: c.subject,
       reason: deriveSlaStatus(c).label,
       age: c.openedAt,
-      href: '/owner/support-tools',
+      href: `/owner/support-tools?caseId=${encodeURIComponent(c.id)}`,
     });
   });
   audits.slice(0, 50).forEach(a => {
@@ -305,7 +305,7 @@ const CommandCenterPage: React.FC = () => {
             </thead>
             <tbody>
               {attention.slice(0, 20).map(item => (
-                <tr key={item.id} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/70 transition-colors">
+                <tr key={item.id} data-testid={`needs-attention-row-${item.id}`} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/70 transition-colors">
                   <td className="px-6 py-3.5">
                     <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${PRIORITY_STYLES[item.priority]}`}>
                       {item.priority}

@@ -1,0 +1,306 @@
+Platform Operations & Security Phase 1.1 — Support Case Detail Crash + Linked Case Workflow Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict isolated correction pass.
+Do not redesign the app.
+Do not broaden Phase 1.1.
+Do not touch Domains, Platform Settings, Team Management, Shipping, Add-on Governance, Store Permissions Matrix, Tenant Features, billing, or tenant provisioning.
+
+Fix only:
+1) Support case detail crash
+2) Linked support case navigation from Command Center and Audit & Security
+3) Support saved views testability if blocked by the case detail crash
+4) Security note delete confirmation
+5) Auditing testability for support case actions
+
+==================================================
+CURRENT QA-BLOCKING ISSUES
+==================================================
+
+Manual QA failed because Support case detail is crashing.
+
+Observed:
+- In Command Center → Needs Attention, clicking a support case routes to Support Tools.
+- Then clicking a support case shows:
+
+“Something went wrong
+An unexpected error occurred. Please try again later.”
+
+This blocks or prevents testing:
+- Support saved views
+- Support macros/templates
+- Macro insert behavior
+- Escalation/de-escalation
+- Related entities panel
+- Case timeline
+- Platform Operations actions auditability
+- Linked case workflow from Audit event
+
+Additional issue:
+- Security note delete works, but should require an in-app confirmation before deletion.
+
+==================================================
+ROLE STACK — ACT UPON IT
+==================================================
+
+Act as:
+- Senior Platform Operations Architect
+- Senior Support Tools Engineer
+- Senior Audit & Security Engineer
+- Senior React/TypeScript Debugging Engineer
+- Senior QA Gatekeeper
+- Systems Thinker
+- Side Auditor
+
+Add this correction role context to project knowledge / skills for this workstream.
+Use it to guide debugging, state handling, route handling, non-regression, and QA.
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Fix the Support Tools case-detail workflow so support cases reliably open from:
+
+1) Support Tools case table/list
+2) Command Center Needs Attention queue
+3) Audit & Security linked case badge
+4) Audit event detail after creating a support case from event
+
+The case detail must open without runtime errors and show:
+- case summary
+- tenant link/context
+- status
+- severity
+- assigned user
+- SLA badges/timers
+- escalation card
+- related entities panel
+- tenant health panel
+- notes timeline
+- macro/template inserter
+- case timeline / action history
+
+==================================================
+PART A — ROOT-CAUSE THE SUPPORT CASE CRASH
+==================================================
+
+Required:
+Investigate why clicking a support case throws the “Something went wrong” error.
+
+Check:
+- SupportToolsPage.tsx
+- case detail drawer/modal state
+- route/query param handling
+- case id lookup
+- selectedCase null/undefined handling
+- support_cases_v1 sessionStorage hydration
+- newly created support cases from audit event
+- sourceAuditEventId handling
+- optional SLA fields
+- optional escalation fields
+- optional notes/timeline arrays
+- related entities panel assumptions
+- tenant lookup assumptions
+- assigned user lookup assumptions
+- macro/template data assumptions
+
+Fix defensively:
+- no undefined/null crash
+- missing optional fields show truthful empty state
+- missing tenant shows “Tenant unavailable”
+- missing actor/assignee shows “Unassigned” or “Unknown”
+- missing timeline/notes shows empty timeline
+- missing sourceAuditEventId does not crash
+- malformed old sessionStorage case does not crash
+
+==================================================
+PART B — LINKED CASE NAVIGATION
+==================================================
+
+Required:
+From Command Center Needs Attention:
+- clicking a support case item should open the matching support case detail directly
+- not just navigate to Support Tools generally
+
+From Audit & Security:
+- if an audit event has a linked case badge / linked case number, clicking it should open that case detail directly
+- after creating a support case from an audit event, the UI should provide a clear “Open linked case” path
+- the linked case number should be clickable if displayed
+
+Implementation options:
+- use query param such as /owner/support-tools?caseId=case_123
+- or shared navigation state
+- or safe internal selection after route opens
+
+Acceptance requires:
+- case detail opens directly
+- no error screen
+- missing/deleted case shows a graceful “Case not found” state, not app crash
+
+==================================================
+PART C — SUPPORT SAVED VIEWS TESTABILITY
+==================================================
+
+Required:
+Support saved views should filter the case list without requiring case detail to open.
+
+Views:
+- All Open
+- Critical
+- Overdue SLA
+- At-Risk SLA
+- Escalated
+- Waiting on Tenant
+- Waiting on Internal Team
+- Recently Updated
+- Resolved/Closed
+
+Fix any issue where saved views depend on broken selected-case state.
+
+==================================================
+PART D — MACROS / ESCALATION / RELATED PANEL / TIMELINE
+==================================================
+
+Once case detail opens, confirm these work:
+
+1) Macros/templates:
+- templates visible
+- selecting a macro inserts into internal note/draft area
+- no external email/message is sent
+- label remains “Internal template only — no external message sent.”
+
+2) Escalation:
+- escalate requires reason
+- escalated badge appears
+- de-escalate works
+- actions write timeline entries
+- actions emit audit rows
+
+3) Related entities panel:
+- source audit event if available
+- recent tenant audits
+- tenant domains if available
+- invoices/add-ons/shipping references only if safely available
+- truthful empty states if unavailable
+
+4) Case timeline:
+- created
+- status changes
+- severity changes
+- assignment changes
+- notes
+- macro inserted
+- escalations/de-escalations
+- close/reopen
+
+No runtime errors if any timeline source is missing.
+
+==================================================
+PART E — SECURITY NOTE DELETE CONFIRMATION
+==================================================
+
+Required:
+Security note deletion must use an in-app confirmation.
+
+Do not use browser-native confirm if the app pattern uses modals.
+
+Expected:
+- click delete/remove note
+- confirmation modal/drawer appears
+- user can Cancel
+- user can Confirm Delete
+- deletion is audited
+- note disappears only after confirmation
+
+==================================================
+PART F — AUDITABILITY
+==================================================
+
+Ensure the following actions emit audit rows and are visible in Audit & Security:
+
+- support case opened from audit event if currently tracked optional
+- support case created from audit event
+- support case status changed
+- support case severity changed
+- support case assignment changed
+- support case note added
+- support macro inserted
+- support case escalated
+- support case de-escalated
+- support case closed
+- support case reopened
+- security note deleted after confirmation
+
+Do not duplicate audit rows for one user action.
+
+==================================================
+PART G — NON-REGRESSION
+==================================================
+
+Do not change:
+- Command Center data model except linked case navigation fix
+- Audit saved views / CSV export except linked case navigation fix
+- Domains
+- Platform Settings
+- Team Management
+- Shipping
+- Add-on Governance
+- Store Permissions Matrix
+- Tenant Features
+- paid override invoice workflow
+- server PII logging rules
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Clicking a support case from Support Tools opens detail without error.
+2) Clicking a support case from Command Center Needs Attention opens detail directly.
+3) Clicking linked case from Audit & Security opens the support case detail directly.
+4) Newly created support case from audit event can be opened immediately.
+5) Missing or malformed case data does not crash the app.
+6) Support saved views filter correctly.
+7) Macros/templates are visible and insert into internal note/draft only.
+8) Escalation and de-escalation work.
+9) Escalated cases appear in Needs Attention.
+10) Related entities panel works or shows truthful empty state.
+11) Tenant health panel still works.
+12) Case timeline works.
+13) Support actions are audited.
+14) Security note deletion requires in-app confirmation.
+15) Existing Add-on Governance remains intact.
+16) Existing Shipping Module remains intact.
+17) Existing Store Permissions Matrix remains intact.
+18) Server PII logging rules are not regressed.
+
+==================================================
+DOCUMENTATION
+==================================================
+
+Update replit.md only if needed to document:
+- linked case navigation behavior
+- security note delete confirmation
+- support case detail defensive empty-state behavior
+
+Do not rewrite the Phase 1.1 roadmap.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Support Case Detail Crash Root Cause
+3. Linked Case Navigation Fix
+4. Support Tools Detail Workflow Fixes
+5. Security Note Delete Confirmation
+6. Auditability
+7. Files Changed
+8. Documentation Updated
+9. Non-Regression Notes

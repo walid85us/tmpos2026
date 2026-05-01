@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   tenants,
@@ -78,11 +79,13 @@ const saveCases = (cases: SupportCaseRecord[]) => {
 };
 
 const SupportToolsPage: React.FC = () => {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [cases, setCases] = useState<SupportCaseRecord[]>(() => loadCases());
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | SupportCaseStatus>('all');
   const [showCreate, setShowCreate] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [missingCaseId, setMissingCaseId] = useState<string | null>(null);
   const [impersonating, setImpersonating] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<string>('all');
   const [slaFilter, setSlaFilter] = useState<'any' | 'overdue' | 'at_risk'>('any');
@@ -136,6 +139,49 @@ const SupportToolsPage: React.FC = () => {
   });
 
   useEffect(() => { saveCases(cases); }, [cases]);
+
+  // Linked-case deep-link: ?caseId=… opens the drawer; ?new=1 opens the create modal.
+  useEffect(() => {
+    const wantsNew = searchParams.get('new');
+    if (wantsNew === '1') {
+      setShowCreate(true);
+      const next = new URLSearchParams(searchParams);
+      next.delete('new');
+      setSearchParams(next, { replace: true });
+      return;
+    }
+    const cid = searchParams.get('caseId');
+    if (!cid) {
+      if (missingCaseId) setMissingCaseId(null);
+      return;
+    }
+    const found = cases.find(c => c.id === cid);
+    if (found) {
+      setSelectedId(cid);
+      setMissingCaseId(null);
+    } else {
+      setSelectedId(null);
+      setMissingCaseId(cid);
+    }
+  }, [searchParams, cases, setSearchParams, missingCaseId]);
+
+  const closeDrawer = () => {
+    setSelectedId(null);
+    if (searchParams.get('caseId')) {
+      const next = new URLSearchParams(searchParams);
+      next.delete('caseId');
+      setSearchParams(next, { replace: true });
+    }
+  };
+
+  const dismissMissingCase = () => {
+    setMissingCaseId(null);
+    if (searchParams.get('caseId')) {
+      const next = new URLSearchParams(searchParams);
+      next.delete('caseId');
+      setSearchParams(next, { replace: true });
+    }
+  };
 
   const tenantById = useMemo(() => {
     const m = new Map<string, string>();
@@ -255,7 +301,7 @@ const SupportToolsPage: React.FC = () => {
       createdAt: new Date().toISOString(),
       kind: 'status_change',
     };
-    updateCase(c.id, { status: next, notes: [...c.notes, transitionNote] });
+    updateCase(c.id, { status: next, notes: [...(c.notes || []), transitionNote] });
     pushPlatformAudit({
       actor: 'System Owner',
       action: 'support_case_status_changed',
@@ -316,7 +362,7 @@ const SupportToolsPage: React.FC = () => {
       escalationReason: reason || null,
       escalatedAt: now.toISOString(),
       escalatedBy: 'System Owner',
-      notes: [...c.notes, transitionNote],
+      notes: [...(c.notes || []), transitionNote],
     });
     pushPlatformAudit({
       actor: 'System Owner',
@@ -341,7 +387,7 @@ const SupportToolsPage: React.FC = () => {
     updateCase(c.id, {
       escalated: false,
       escalationReason: null,
-      notes: [...c.notes, transitionNote],
+      notes: [...(c.notes || []), transitionNote],
     });
     pushPlatformAudit({
       actor: 'System Owner',
@@ -380,7 +426,7 @@ const SupportToolsPage: React.FC = () => {
     updateCase(c.id, {
       status: 'closed',
       resolvedAt: c.resolvedAt || now.toISOString(),
-      notes: [...c.notes, transitionNote],
+      notes: [...(c.notes || []), transitionNote],
     });
     pushPlatformAudit({
       actor: 'System Owner',
@@ -404,7 +450,7 @@ const SupportToolsPage: React.FC = () => {
     updateCase(c.id, {
       status: 'open',
       resolvedAt: null,
-      notes: [...c.notes, transitionNote],
+      notes: [...(c.notes || []), transitionNote],
     });
     pushPlatformAudit({
       actor: 'System Owner',
@@ -487,11 +533,13 @@ const SupportToolsPage: React.FC = () => {
             ))}
           </div>
         </div>
-        <div className="px-8 py-3 border-b border-slate-100 bg-slate-50/40 flex items-center gap-2 flex-wrap">
+        <div className="px-8 py-3 border-b border-slate-100 bg-slate-50/40 flex items-center gap-2 flex-wrap" data-testid="support-saved-views">
           <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 mr-1">Saved views:</span>
           {predefinedSupportViews.map(v => (
             <button
               key={v.id}
+              data-testid={`support-saved-view-${v.id}`}
+              data-active={activeView === v.id ? 'true' : 'false'}
               onClick={() => applyView(v.id)}
               className={`px-3 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${activeView === v.id ? 'bg-primary text-white' : 'bg-white text-slate-500 border border-slate-200 hover:bg-white'}`}
             >
@@ -520,7 +568,7 @@ const SupportToolsPage: React.FC = () => {
             {filteredCases.map(c => {
               const sla = deriveSlaStatus(c);
               return (
-                <tr key={c.id} onClick={() => setSelectedId(c.id)} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/70 transition-colors cursor-pointer">
+                <tr key={c.id} data-testid={`support-case-row-${c.id}`} onClick={() => setSelectedId(c.id)} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/70 transition-colors cursor-pointer">
                   <td className="px-6 py-3.5">
                     <p className="text-sm font-bold text-slate-900 truncate max-w-[260px]">
                       {c.subject}
@@ -633,11 +681,29 @@ const SupportToolsPage: React.FC = () => {
         )}
       </AnimatePresence>
 
+      {/* Case-not-found empty state (deep-link to a stale id) */}
+      <AnimatePresence>
+        {missingCaseId && (
+          <div className="fixed inset-0 z-[55] flex items-center justify-center p-4" data-testid="case-not-found">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={dismissMissingCase} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="relative w-full max-w-md bg-white rounded-[2rem] shadow-2xl overflow-hidden">
+              <div className="p-7 border-b border-slate-100">
+                <h3 className="text-lg font-black text-primary tracking-tight">Case not found</h3>
+                <p className="text-xs text-slate-500 font-medium mt-1">No support case matches <span className="font-mono">{missingCaseId}</span> in this browser session. It may have been closed or pruned.</p>
+              </div>
+              <div className="p-7 border-t border-slate-100 bg-slate-50/40 flex justify-end">
+                <button onClick={dismissMissingCase} className="px-6 py-2.5 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90">Close</button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Detail drawer */}
       <AnimatePresence>
         {selected && (
-          <div className="fixed inset-0 z-50 flex justify-end">
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setSelectedId(null)} className="absolute inset-0 bg-slate-900/30 backdrop-blur-sm" />
+          <div className="fixed inset-0 z-50 flex justify-end" data-testid="support-case-detail">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={closeDrawer} className="absolute inset-0 bg-slate-900/30 backdrop-blur-sm" />
             <motion.div initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }} transition={{ type: 'spring', damping: 28, stiffness: 280 }} className="relative w-full max-w-lg h-full bg-white shadow-2xl border-l border-slate-200 overflow-y-auto">
               <div className="p-7 border-b border-slate-100 flex justify-between items-start">
                 <div className="flex-1 pr-4">
@@ -665,7 +731,7 @@ const SupportToolsPage: React.FC = () => {
                     )}
                   </div>
                 </div>
-                <button onClick={() => setSelectedId(null)} className="w-9 h-9 rounded-full hover:bg-slate-100 flex items-center justify-center text-slate-400">
+                <button onClick={closeDrawer} className="w-9 h-9 rounded-full hover:bg-slate-100 flex items-center justify-center text-slate-400">
                   <span className="material-symbols-outlined text-base">close</span>
                 </button>
               </div>
@@ -742,8 +808,8 @@ const SupportToolsPage: React.FC = () => {
                       </span>
                     </div>
                     <ul className="text-xs text-slate-600 list-disc pl-5 space-y-0.5">
-                      {tenantRiskForSelected.reasons.length === 0 && <li>No active risk signals.</li>}
-                      {tenantRiskForSelected.reasons.map(r => <li key={r}>{r}</li>)}
+                      {(tenantRiskForSelected.signals || []).length === 0 && <li>No active risk signals.</li>}
+                      {(tenantRiskForSelected.signals || []).map(r => <li key={r}>{r}</li>)}
                     </ul>
                     <p className="text-[9px] text-slate-400 mt-2 italic">Risk derived from support/audit/domain signals available in this system.</p>
                   </div>
@@ -778,7 +844,7 @@ const SupportToolsPage: React.FC = () => {
                     <ul className="space-y-1">
                       {relatedForSelected.domains.map(d => (
                         <li key={d.id} className="text-xs text-slate-600">
-                          <span className="font-bold">{d.host}</span> · DNS {d.dnsStatus} · SSL {d.sslStatus}
+                          <span className="font-bold">{d.hostname}</span> · {d.kind} · status {d.status} · SSL {d.ssl}
                         </li>
                       ))}
                     </ul>
@@ -786,8 +852,8 @@ const SupportToolsPage: React.FC = () => {
                 </div>
 
                 <div>
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Timeline ({selected.notes.length})</p>
-                  <NotesTimeline notes={selected.notes} />
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Timeline ({(selected.notes || []).length})</p>
+                  <NotesTimeline notes={selected.notes || []} />
                 </div>
 
                 <NoteComposer
