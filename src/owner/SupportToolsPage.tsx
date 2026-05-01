@@ -74,6 +74,10 @@ const saveCases = (cases: SupportCaseRecord[]) => {
   try {
     if (typeof window !== 'undefined' && window.sessionStorage) {
       window.sessionStorage.setItem(CASES_KEY, JSON.stringify(cases));
+      // Notify any mounted listener (e.g. Command Center) that the canonical
+      // support-cases store has changed. The native 'storage' event does not
+      // fire in the same tab, so a custom event is needed for live sync.
+      window.dispatchEvent(new Event('support_cases:changed'));
     }
   } catch { /* noop */ }
 };

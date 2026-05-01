@@ -1,0 +1,171 @@
+Platform Operations & Security Phase 1.1 — Escalated Case Needs Attention Queue Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict isolated correction pass.
+Do not redesign the app.
+Do not broaden Phase 1.1.
+Do not touch Domains, Platform Settings, Team Management, Shipping, Add-on Governance, Store Permissions Matrix, Tenant Features, billing, tenant provisioning, or server logging.
+
+Fix only:
+- Escalated support cases not appearing in Command Center → Needs Attention queue after escalation.
+
+==================================================
+CURRENT QA-BLOCKING ISSUE
+==================================================
+
+Manual QA failed:
+
+11) Escalated case appears in Needs Attention — FAIL
+
+Observed:
+- In Support Tools, I escalated one support case.
+- Escalation itself works.
+- Audit works.
+- Case detail works.
+- But after returning to Command Center, the escalated case does not appear in the Needs Attention queue.
+
+Expected:
+- Any active escalated support case should appear in Command Center → Needs Attention.
+- It should appear without requiring a full app reload if possible.
+- It should link directly to the support case detail using the accepted ?caseId=<id> deep-link behavior.
+
+==================================================
+ROLE STACK — ACT UPON IT
+==================================================
+
+Act as:
+- Senior Platform Operations Architect
+- Senior Support Tools Engineer
+- Senior Audit & Security Engineer
+- Senior React/TypeScript Debugging Engineer
+- Senior QA Gatekeeper
+- Systems Thinker
+- Side Auditor
+
+Use this role context to guide the correction, state synchronization, non-regression, and QA.
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Ensure escalated support cases are included in Command Center Needs Attention.
+
+A support case should appear in Needs Attention when:
+- case.escalated === true
+- and case status is not Resolved / Closed
+- or equivalent active-status logic used by the Support Tools data model
+
+The item should show:
+- priority: high or critical, depending on severity
+- type: Support Case / Escalated Case
+- tenant if available
+- case title/subject
+- escalation reason if available
+- case id
+- action link to /owner/support-tools?caseId=<id>
+
+==================================================
+PART A — ROOT CAUSE
+==================================================
+
+Investigate why escalated support cases do not appear in Command Center Needs Attention.
+
+Check:
+- CommandCenterPage.tsx Needs Attention derivation
+- support_cases_v1 sessionStorage reading
+- support_cases:changed event listener
+- escalation mutation in SupportToolsPage.tsx
+- whether escalation persists escalated=true
+- whether Command Center reads the same storage key as Support Tools
+- whether Command Center filters out escalated cases due to status/severity/SLA logic
+- whether Needs Attention only includes overdue/high-risk audit items and not escalated support items
+
+==================================================
+PART B — REQUIRED FIX
+==================================================
+
+Update Command Center Needs Attention derivation so active escalated support cases are included.
+
+Required:
+- escalated active support cases appear in Needs Attention
+- resolved/closed escalated cases should not appear as active needs-attention items
+- item links directly to the support case detail using ?caseId=<id>
+- priority should be deterministic
+- empty/missing escalationReason should not crash
+- missing tenant should show Unknown Tenant or tenant unavailable, not crash
+
+==================================================
+PART C — LIVE UPDATE / REFRESH
+==================================================
+
+Required:
+After escalating a case in Support Tools:
+- Command Center should update when returning to it
+- ideally via existing support_cases:changed listener
+- if the app architecture requires navigation refresh, ensure Command Center reads latest sessionStorage/local state on mount
+
+Do not require manually restarting the app.
+
+==================================================
+PART D — NON-REGRESSION
+==================================================
+
+Do not change:
+- Support case detail drawer behavior
+- linked case ?caseId navigation
+- macros/templates
+- support saved views
+- escalation/de-escalation behavior except if needed to ensure persisted escalated state
+- Audit & Security behavior
+- CSV export
+- Shipping
+- Add-on Governance
+- Store Permissions Matrix
+- Tenant Features
+- billing
+- server PII logging
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Escalating a support case sets/persists escalated state correctly.
+2) Active escalated support case appears in Command Center Needs Attention.
+3) Resolved/closed escalated case does not appear as active Needs Attention item.
+4) Needs Attention escalated case item links directly to support case detail.
+5) Missing escalation reason or tenant data does not crash.
+6) Support case detail remains working.
+7) Audit rows for escalation/de-escalation remain working.
+8) Existing Add-on Governance remains intact.
+9) Existing Shipping Module remains intact.
+10) Existing Store Permissions Matrix remains intact.
+11) Server PII logging rules are not regressed.
+
+==================================================
+DOCUMENTATION
+==================================================
+
+Update replit.md only if needed with a short note:
+- active escalated support cases are included in Command Center Needs Attention
+- closed/resolved cases are excluded
+
+Do not rewrite the roadmap.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Root Cause
+3. Needs Attention Escalation Fix
+4. Live Update / Refresh Behavior
+5. Files Changed
+6. Documentation Updated
+7. Non-Regression Notes

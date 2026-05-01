@@ -82,11 +82,20 @@ const CommandCenterPage: React.FC = () => {
     reloadAll();
     const onAudit = () => reloadAll();
     const onStorage = () => reloadAll();
+    const onCases = () => reloadAll();
+    const onDomains = () => reloadAll();
+    const onNotes = () => reloadAll();
     window.addEventListener('audit_logs:changed', onAudit);
     window.addEventListener('storage', onStorage);
+    window.addEventListener('support_cases:changed', onCases);
+    window.addEventListener('tenant_domains:changed', onDomains);
+    window.addEventListener('platform_security_notes:changed', onNotes);
     return () => {
       window.removeEventListener('audit_logs:changed', onAudit);
       window.removeEventListener('storage', onStorage);
+      window.removeEventListener('support_cases:changed', onCases);
+      window.removeEventListener('tenant_domains:changed', onDomains);
+      window.removeEventListener('platform_security_notes:changed', onNotes);
     };
   }, []);
 
@@ -102,6 +111,7 @@ const CommandCenterPage: React.FC = () => {
   const overdueCases = openCases.filter(
     c => deriveSlaStatus(c).status === 'overdue'
   );
+  const escalatedCases = openCases.filter(c => c.escalated === true);
   const elevatedAuditCount = audits.filter(a => {
     const sev = (a.severity || '').toLowerCase();
     return sev === 'critical' || sev === 'warning';
@@ -144,6 +154,26 @@ const CommandCenterPage: React.FC = () => {
       tenant: tenantById.get(c.tenantId) || c.tenantId,
       title: c.subject,
       reason: deriveSlaStatus(c).label,
+      age: c.openedAt,
+      href: `/owner/support-tools?caseId=${encodeURIComponent(c.id)}`,
+    });
+  });
+  // Escalated active cases. Dedup against criticalCases / overdueCases so the
+  // same case never appears more than once for stacked reasons.
+  const alreadyQueuedCaseIds = new Set<string>([
+    ...criticalCases.map(c => c.id),
+    ...overdueCases.map(c => c.id),
+  ]);
+  escalatedCases.forEach(c => {
+    if (alreadyQueuedCaseIds.has(c.id)) return;
+    const reasonText = (c.escalationReason || '').trim();
+    attention.push({
+      id: `ec_${c.id}`,
+      priority: c.severity === 'urgent' ? 'critical' : 'high',
+      type: 'Escalated support case',
+      tenant: c.tenantId ? (tenantById.get(c.tenantId) || c.tenantId) : 'Unknown tenant',
+      title: c.subject,
+      reason: reasonText ? `Escalated: ${reasonText}` : 'Escalated (no reason provided)',
       age: c.openedAt,
       href: `/owner/support-tools?caseId=${encodeURIComponent(c.id)}`,
     });
@@ -218,6 +248,7 @@ const CommandCenterPage: React.FC = () => {
   const workflowHealth = [
     { label: 'Support cases — open', value: openCases.length },
     { label: 'Support cases — overdue', value: overdueCases.length },
+    { label: 'Support cases — escalated', value: escalatedCases.length },
     { label: 'Audit events — elevated', value: elevatedAuditCount },
     { label: 'Domains — pending verification', value: pendingDomains },
     { label: 'Domains — failed', value: failedDomains },
