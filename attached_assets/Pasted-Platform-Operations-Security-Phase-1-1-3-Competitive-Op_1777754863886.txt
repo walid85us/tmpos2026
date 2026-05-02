@@ -1,0 +1,363 @@
+Platform Operations & Security — Phase 1.1.3 Competitive Ops Console Future Vision + Operating Model Report
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Documentation / research / architecture report only.
+
+Do not implement UI.
+Do not change code.
+Do not modify app behavior.
+Do not change replit.md unless explicitly instructed after the report is accepted.
+Do not touch Shipping, Add-on Governance, Store Permissions Matrix, Tenant Features, billing, tenant provisioning, server logging, Domains, Platform Settings, or Team Management.
+
+Goal:
+Create a deep competitive architecture and future-vision report for Platform Operations & Security Phase 1.1.x before any further implementation.
+
+This report must cover the entire Phase 1.1.x operating experience, not escalation only:
+
+1) Mission Control / Command Center
+2) Operational pulse and widgets
+3) Focus modes
+4) Next Best Actions
+5) Tenant 360
+6) Audit & Security
+7) Support Tools
+8) SLA management
+9) Support views / queues
+10) Macros/templates
+11) Escalation workflow
+12) Case timeline
+13) Related entities
+14) Future intelligent operations
+
+==================================================
+ROLE STACK — ADD TO PROJECT KNOWLEDGE / SKILLS
+==================================================
+
+Add this workstream role model to project knowledge / skills and act on it.
+
+Do not treat these roles as decorative text.
+
+Act as:
+- Senior Platform Operations Architect
+- Senior SaaS Command Center Architect
+- Senior Audit & Security Engineer and Architect
+- Senior Support Tools Engineer
+- Senior Incident / Escalation Workflow Architect
+- Senior Operations UX / Dashboard Systems Designer
+- Senior Multi-Tenant Risk Visualization Architect
+- Senior Security-by-Default Architect
+- Senior Compliance & Evidence Architect
+- Senior Predictive / AI Operations Architect
+- Senior React/TypeScript Product Architect
+- QA Gatekeeper
+- Systems Thinker
+- Side Auditor
+
+Core responsibility:
+Think 10 years ahead. Design the operating model for a serious multi-tenant SaaS platform, not just a simple admin page.
+
+==================================================
+BENCHMARK / COMPETITOR RESEARCH REQUIREMENT
+==================================================
+
+Before writing the report, research public patterns from:
+
+1) Datadog
+Focus:
+- dashboards
+- widgets
+- event streams
+- incident management
+- operational visibility
+- SLO/list/table widgets
+
+2) PagerDuty
+Focus:
+- incident response
+- escalation policies
+- acknowledgement
+- ownership
+- responder routing
+- response lifecycle
+- post-incident learning
+
+3) Zendesk
+Focus:
+- SLA policies
+- ticket views
+- support queues
+- macros/templates
+- automations
+- internal notes
+- reporting
+
+4) Jira Service Management / Atlassian
+Focus:
+- escalation statuses
+- escalation queues
+- approvals
+- work item queues
+- audit logs
+- service management workflows
+
+5) ServiceNow
+Focus:
+- assignment groups
+- major incident management
+- escalation/assignment workflows
+- incident lifecycle
+- reporting
+
+6) Freshservice / Freshdesk
+Focus:
+- support operations
+- SLA escalation
+- ticket queues
+- automation
+- agent workflows
+
+7) Vercel / Shopify / enterprise SaaS admin platforms if useful
+Focus:
+- audit logs
+- team/admin visibility
+- domain/platform operations
+- account security controls
+
+Do not copy code.
+Extract product patterns, workflow logic, information architecture, and UX concepts.
+
+If browsing is unavailable:
+- say browsing was unavailable
+- proceed using known SaaS/ITSM best practices
+- clearly mark assumptions.
+
+==================================================
+REPORT REQUIREMENTS
+==================================================
+
+Write a structured report with the following sections:
+
+1. Executive Summary
+- What Phase 1.1.x should become
+- Why current Phase 1.1.2 is good but still not enough
+- What “world-class” means for this app
+
+2. Competitor / Benchmark Patterns
+For each competitor/platform:
+- what pattern is relevant
+- how it applies to our app
+- what should NOT be copied
+- what should be deferred to later phases
+
+3. Command Center Future Vision
+Cover:
+- Mission Control header
+- operational pulse
+- widgets
+- focus modes
+- incident-review mode
+- risk heatmap
+- tenant health map
+- next best actions
+- “what changed” digest
+- “what is getting worse” signal
+- drill-down drawers
+- action queue
+- operational confidence score
+- future AI-readiness
+
+4. Audit & Security Future Vision
+Cover:
+- audit command center
+- investigation workflows
+- saved views
+- actor profile
+- related event graph
+- audit trail integrity
+- security notes
+- evidence snapshots
+- risk classification
+- suspicious activity detection
+- future compliance mapping
+- future AI-assisted audit explanation
+
+5. Support Tools Future Vision
+Cover:
+- case queues
+- SLA policy model
+- response/resolution targets
+- agent/team ownership
+- assignment workflow
+- macros/template governance
+- internal notes
+- case timeline
+- related entities
+- tenant health
+- case aging
+- escalation maturity
+- support quality metrics
+- future support automation
+
+6. Escalation Operating Model
+This must answer clearly:
+
+- Who can escalate?
+- Who can see escalations?
+- Who can assign escalations?
+- Who can acknowledge escalations?
+- Who can resolve escalations?
+- To whom can escalation be assigned?
+- What is an escalation team?
+- What is an escalation owner?
+- What is an escalation level?
+- What happens if an escalation is not acknowledged?
+- What happens if an SLA is breached?
+- What is the difference between escalation, assignment, incident, and case closure?
+- How does the assigned person take action?
+- How does escalation appear in Command Center?
+- How does escalation appear in Support Tools?
+- How does escalation appear in Audit & Security?
+- What should be future Phase 1.4 automation versus current manual workflow?
+
+Propose a recommended internal model using:
+- roles
+- teams
+- permissions
+- lifecycle states
+- owner/team assignment
+- acknowledgement
+- review
+- de-escalation
+- resolution
+- audit history
+
+7. Data Model Recommendations
+Recommend future-safe fields for:
+- support case
+- escalation
+- SLA policy
+- macro/template
+- support queue
+- audit event
+- tenant health signal
+- next best action
+- command center widget config
+
+Do not implement. Report only.
+
+8. UX / Interaction Recommendations
+Recommend:
+- layouts
+- drawers
+- timelines
+- cards
+- heatmaps
+- widgets
+- queue views
+- badges
+- focus modes
+- filters
+- action modals
+- empty states
+- truth labels
+
+9. Permissions / Governance Recommendations
+Recommend:
+- platform operations permission model
+- support role model
+- who can escalate
+- who can assign
+- who can acknowledge
+- who can close
+- who can export audit
+- who can change macros
+- who can configure SLA policies
+- who can access sensitive audit details
+
+Do not implement full RBAC yet.
+Just propose the future model.
+
+10. Auditability Recommendations
+Recommend audit events for:
+- command center actions
+- saved view use/export
+- support case changes
+- SLA changes
+- macro use/change
+- escalation lifecycle
+- audit investigation
+- tenant risk review
+- security note lifecycle
+- future automation actions
+
+11. Future Intelligence / AI Vision
+Propose future Phase 4 ideas:
+- risk scoring
+- anomaly detection
+- tenant health prediction
+- support case summarization
+- audit event explanation
+- suggested remediation
+- escalation recommendation
+- SLA breach prediction
+- agent activity risk scoring
+
+Clearly label these as future, not current implementation.
+
+12. Recommended Phased Implementation Plan
+Split into practical future phases:
+
+- Phase 1.1.3A — Operating Model + Permission-Aware Escalation
+- Phase 1.1.3B — Advanced Command Center Intelligence
+- Phase 1.1.3C — Support Queue / SLA / Macro Maturity
+- Phase 1.1.3D — Audit Investigation Center
+- Phase 1.2 — Domains + Platform Settings Maturity
+- Phase 1.3 — Platform Team Governance
+- Phase 1.4 — Automation + Alerts
+- Phase 2 — Real Integrations
+- Phase 3 — Compliance + Evidence
+- Phase 4 — Predictive / AI Operations
+
+13. What to Implement Next
+Recommend the next safest implementation workstream after this report.
+
+14. Risks / Do-Not-Do
+List what not to implement yet:
+- fake notifications
+- fake AI
+- fake SSO
+- fake DNS/SSL automation
+- fake incident response
+- fake uptime monitoring
+- overcomplicated RBAC too early
+- breaking existing support case flow
+
+15. Final Recommendation
+Give a clear recommendation on whether to:
+- close Phase 1.1.2 as good enough for now
+- or implement a Phase 1.1.3A correction before moving to Phase 1.2
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Executive Summary
+2. Competitor / Benchmark Patterns
+3. Command Center Future Vision
+4. Audit & Security Future Vision
+5. Support Tools Future Vision
+6. Escalation Operating Model
+7. Data Model Recommendations
+8. UX / Interaction Recommendations
+9. Permissions / Governance Recommendations
+10. Auditability Recommendations
+11. Future Intelligence / AI Vision
+12. Recommended Phased Implementation Plan
+13. What to Implement Next
+14. Risks / Do-Not-Do
+15. Final Recommendation
