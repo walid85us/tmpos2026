@@ -731,6 +731,134 @@ export interface Tenant360Result {
   notesPreview: { id: string; body: string }[];
 }
 
+// --- FOCUS MODE — SOURCE-LEVEL FILTERS (Phase 1.1.1 UX Correction) ---------
+//
+// `filterByFocusMode` (above) only narrows the Needs Attention queue.
+// To make Focus Mode visibly affect widget distributions, the Pulse strip,
+// and child widgets, we also need to narrow the source slices that feed
+// those derivations. These helpers do so without mutating inputs and
+// remain pure / deterministic.
+
+export function applyFocusModeToCases(
+  cases: SupportCaseRecord[],
+  mode: FocusMode,
+  now: Date = new Date()
+): SupportCaseRecord[] {
+  if (mode === 'normal') return cases;
+  if (mode === 'watch') {
+    // Watch — only open / in-progress / waiting that have any signal.
+    return cases.filter(c => {
+      if (c.status === 'resolved' || c.status === 'closed') return false;
+      if (c.severity === 'low') return false;
+      return true;
+    });
+  }
+  // Incident Review — urgent OR overdue OR escalated, open only.
+  return cases.filter(c => {
+    if (c.status === 'resolved' || c.status === 'closed') return false;
+    if (c.severity === 'urgent') return true;
+    if (c.escalated === true) return true;
+    if (deriveSlaStatus(c, now).status === 'overdue') return true;
+    return false;
+  });
+}
+
+export function applyFocusModeToAudits(
+  audits: AuditEventLike[],
+  mode: FocusMode
+): AuditEventLike[] {
+  if (mode === 'normal') return audits;
+  if (mode === 'watch') {
+    return audits.filter(a => {
+      const sev = (a.severity || '').toLowerCase();
+      if (sev === 'warning' || sev === 'critical' || sev === 'notice') return true;
+      const flag = deriveHighRiskFlag(a).flag;
+      return flag === 'critical' || flag === 'high_risk' || flag === 'needs_review';
+    });
+  }
+  // Incident Review — critical + warning OR critical/high-risk flag only.
+  return audits.filter(a => {
+    const sev = (a.severity || '').toLowerCase();
+    if (sev === 'critical' || sev === 'warning') return true;
+    const flag = deriveHighRiskFlag(a).flag;
+    return flag === 'critical' || flag === 'high_risk';
+  });
+}
+
+export function applyFocusModeToDomains<
+  T extends { status: string; ssl?: string }
+>(domains: T[], mode: FocusMode): T[] {
+  if (mode === 'normal') return domains;
+  if (mode === 'watch') {
+    return domains.filter(d =>
+      d.status === 'failed' ||
+      d.status === 'pending' ||
+      d.status === 'verifying' ||
+      (d.status === 'verified' && d.ssl !== undefined && d.ssl !== 'active')
+    );
+  }
+  // Incident Review — failed only.
+  return domains.filter(d => d.status === 'failed');
+}
+
+// --- PULSE ROUTING (Phase 1.1.1 UX Correction) -----------------------------
+//
+// Each pulse metric maps to either a navigation target or an in-place
+// "filter Needs Attention" action. Mission Control consumes this map to
+// make pulse cards interactive without hard-coding routes inline.
+
+export type PulseFilterId = PulseMetric['id'];
+
+export interface PulseRouting {
+  // If non-empty, clicking the pulse navigates to this route.
+  navigateTo?: string;
+  // Short label shown in the active-filter chip when this pulse filters
+  // Needs Attention in place.
+  filterLabel: string;
+  // When provided, Mission Control filters the Needs Attention queue
+  // using this predicate instead of (or in addition to) navigating.
+  filtersAttention?: (item: {
+    type: string;
+    priority: 'critical' | 'high' | 'medium' | 'low';
+  }) => boolean;
+}
+
+export const PULSE_ROUTING: Record<PulseFilterId, PulseRouting> = {
+  open_cases: {
+    navigateTo: '/owner/support-tools',
+    filterLabel: 'Open cases',
+  },
+  overdue_sla: {
+    filterLabel: 'Overdue SLA',
+    filtersAttention: it => it.type === 'Overdue support case',
+  },
+  escalated: {
+    filterLabel: 'Escalated cases',
+    filtersAttention: it => it.type === 'Escalated support case',
+  },
+  high_risk_audits: {
+    navigateTo: '/owner/audit-security',
+    filterLabel: 'High-risk audits',
+    filtersAttention: it => it.type === 'High-risk audit event',
+  },
+  domain_issues: {
+    navigateTo: '/owner/domains',
+    filterLabel: 'Domain issues',
+    filtersAttention: it =>
+      it.type === 'Failed domain verification' ||
+      it.type === 'Pending domain verification',
+  },
+  tenants_at_risk: {
+    filterLabel: 'At-risk tenants',
+    filtersAttention: it =>
+      it.priority === 'critical' || it.priority === 'high',
+  },
+  pending_actions: {
+    filterLabel: 'All pending actions',
+    filtersAttention: () => true,
+  },
+};
+
 export function deriveTenant360(input: Tenant360Inputs): Tenant360Result {
   const now = input.now || new Date();
   const tenantCases = input.cases.filter(c => c.tenantId === input.tenantId);

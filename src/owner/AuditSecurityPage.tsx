@@ -66,6 +66,45 @@ const normalizeSeverity = (s: string): Severity => {
   return 'info';
 };
 
+// Phase 1.1.1 UX Correction — operational lens metadata for the saved-view
+// card grid. Pure presentational mapping; safe additive constant.
+const AUDIT_VIEW_META: Record<string, { icon: string; tone: string }> = {
+  all: { icon: 'list_alt', tone: 'slate' },
+  critical_warning: { icon: 'warning', tone: 'amber' },
+  high_risk: { icon: 'priority_high', tone: 'red' },
+  support: { icon: 'support_agent', tone: 'blue' },
+  domains: { icon: 'dns', tone: 'emerald' },
+  team: { icon: 'group', tone: 'violet' },
+  configuration: { icon: 'tune', tone: 'slate' },
+  security: { icon: 'shield', tone: 'red' },
+  billing: { icon: 'receipt_long', tone: 'amber' },
+  addon: { icon: 'extension', tone: 'blue' },
+};
+
+// Pure helper used to render the count badge on each operational lens card.
+// Applies only the view's own filters (severity / category / highRiskOnly)
+// against the full row set — independent of the user's currently-active
+// search / tenant / additional filters.
+function countForView(
+  view: { filters: { severity?: string; category?: string; highRiskOnly?: boolean } },
+  rows: AuditRow[]
+): number {
+  return rows.filter(r => {
+    const f = view.filters;
+    if (f.severity && normalizeSeverity(r.severity) !== (f.severity as Severity)) return false;
+    if (f.category && f.category !== 'all') {
+      if (f.category === 'other') {
+        if (['commercial', 'security', 'support', 'configuration', 'domains', 'team'].includes(r.category || '')) return false;
+      } else if (r.category !== f.category) return false;
+    }
+    if (f.highRiskOnly) {
+      const { flag } = deriveHighRiskFlag(r);
+      if (!flag) return false;
+    }
+    return true;
+  }).length;
+}
+
 const AuditSecurityPage: React.FC = () => {
   // Mirrored cross-cutting audit entries (commercial + platform ops).
   const [mirrored, setMirrored] = useState<AuditRow[]>([]);
@@ -450,19 +489,44 @@ const AuditSecurityPage: React.FC = () => {
 
       {/* Filters */}
       <div className="bg-white/80 backdrop-blur-xl p-6 rounded-[2rem] border border-slate-200 shadow-sm space-y-4">
-        <div className="flex flex-wrap items-center gap-2" data-testid="audit-saved-views">
-          <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 mr-1">Saved views:</span>
-          {predefinedAuditViews.map(v => (
-            <button
-              key={v.id}
-              data-testid={`audit-saved-view-${v.id}`}
-              data-active={activeView === v.id ? 'true' : 'false'}
-              onClick={() => applyView(v.id)}
-              className={`px-3.5 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${activeView === v.id ? 'bg-primary text-white shadow-md ring-2 ring-primary/20' : 'bg-white text-slate-600 border border-slate-200 hover:bg-primary/5 hover:text-primary hover:border-primary/30'}`}
-            >
-              {v.label}
-            </button>
-          ))}
+        {/* Phase 1.1.1 UX Correction — operational lens cards (replaces chip row). */}
+        <div className="space-y-2" data-testid="audit-saved-views">
+          <div className="flex items-baseline justify-between gap-2 flex-wrap">
+            <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Operational Lenses</p>
+            <p className="text-[10px] font-bold text-slate-400">Tap a card to switch lens · counts reflect that lens.</p>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+            {predefinedAuditViews.map(v => {
+              const count = countForView(v, allRows);
+              const meta = AUDIT_VIEW_META[v.id] || { icon: 'list_alt', tone: 'slate' };
+              const isActive = activeView === v.id;
+              return (
+                <button
+                  key={v.id}
+                  data-testid={`audit-saved-view-${v.id}`}
+                  data-active={isActive ? 'true' : 'false'}
+                  onClick={() => applyView(v.id)}
+                  className={`text-left p-3 rounded-2xl border transition-all hover:-translate-y-0.5 active:translate-y-0 focus:outline-none focus:ring-2 focus:ring-primary/30 ${
+                    isActive
+                      ? 'border-primary ring-2 ring-primary/30 bg-primary/5 shadow-md'
+                      : 'border-slate-200 bg-white hover:border-primary/30 hover:bg-primary/5'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2 mb-1.5">
+                    <span className={`material-symbols-outlined text-base ${isActive ? 'text-primary' : 'text-slate-500'}`}>
+                      {meta.icon}
+                    </span>
+                    <span className={`text-[10px] font-black px-1.5 py-0.5 rounded-md ${isActive ? 'bg-primary text-white' : 'bg-slate-100 text-slate-600'}`}>
+                      {count}
+                    </span>
+                  </div>
+                  <p className={`text-[11px] font-black uppercase tracking-widest leading-tight ${isActive ? 'text-primary' : 'text-slate-700'}`}>
+                    {v.label}
+                  </p>
+                </button>
+              );
+            })}
+          </div>
         </div>
         <div className="flex flex-wrap gap-3 items-center">
           <input
@@ -502,6 +566,87 @@ const AuditSecurityPage: React.FC = () => {
           ))}
         </div>
       </div>
+
+      {/* Phase 1.1.1 UX Correction — Audit Command Bar */}
+      {(() => {
+        const hasExtraFilters =
+          severityFilter !== 'all' ||
+          categoryFilter !== 'all' ||
+          tenantFilter !== 'all' ||
+          !!searchText.trim() ||
+          highRiskOnly;
+        const activeViewLabel = predefinedAuditViews.find(v => v.id === activeView)?.label || 'Custom';
+        return (
+          <div
+            data-testid="audit-command-bar"
+            className="bg-gradient-to-br from-primary/5 to-white p-5 rounded-[2rem] border border-primary/15 shadow-sm flex flex-wrap items-center gap-3"
+          >
+            <div className="flex items-center gap-3 pr-4 border-r border-slate-200">
+              <span className="material-symbols-outlined text-primary">monitoring</span>
+              <div>
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Visible</p>
+                <p className="text-lg font-black text-primary leading-none">
+                  {visibleRows.length}
+                  <span className="text-xs font-bold text-slate-500"> / {allRows.length}</span>
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Active:</span>
+              <span className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-[10px] font-black text-slate-700 uppercase tracking-widest">
+                Lens · {activeViewLabel}
+              </span>
+              {severityFilter !== 'all' && (
+                <span className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-[10px] font-black text-slate-700 uppercase tracking-widest">
+                  Severity · {severityFilter}
+                </span>
+              )}
+              {categoryFilter !== 'all' && (
+                <span className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-[10px] font-black text-slate-700 uppercase tracking-widest">
+                  Category · {categoryFilter}
+                </span>
+              )}
+              {tenantFilter !== 'all' && (
+                <span className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-[10px] font-black text-slate-700 uppercase tracking-widest">
+                  Tenant · {tenants.find(t => t.id === tenantFilter)?.name || tenantFilter}
+                </span>
+              )}
+              {searchText.trim() && (
+                <span className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-[10px] font-black text-slate-700 uppercase tracking-widest">
+                  Search · "{searchText.trim()}"
+                </span>
+              )}
+              {!hasExtraFilters && (
+                <span className="text-[10px] text-slate-400 italic">No additional filters</span>
+              )}
+            </div>
+            <div className="ml-auto flex items-center gap-2 flex-wrap">
+              <button
+                onClick={() => { setHighRiskOnly(!highRiskOnly); setActiveView('custom'); }}
+                data-testid="audit-command-highrisk-toggle"
+                data-active={highRiskOnly ? 'true' : 'false'}
+                className={`px-4 py-2 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all flex items-center gap-1 ${
+                  highRiskOnly
+                    ? 'bg-red-500 text-white shadow-md'
+                    : 'bg-white border border-slate-200 text-slate-700 hover:bg-red-500/5 hover:border-red-500/30'
+                }`}
+                title="Show only events flagged as high-risk."
+              >
+                <span className="material-symbols-outlined text-sm">priority_high</span>
+                High-Risk Only
+              </button>
+              <button
+                onClick={exportCsv}
+                data-testid="audit-command-export"
+                className="px-4 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 transition-colors flex items-center gap-1"
+              >
+                <span className="material-symbols-outlined text-sm">download</span>
+                Export CSV ({visibleRows.length})
+              </button>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Table */}
       <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">

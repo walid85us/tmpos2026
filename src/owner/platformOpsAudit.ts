@@ -57,7 +57,9 @@ export type PlatformAuditAction =
   | 'command_center_refreshed'
   | 'command_center_time_range_changed'
   | 'command_center_focus_mode_changed'
-  | 'command_center_tenant360_opened';
+  | 'command_center_tenant360_opened'
+  // Phase 1.1.1 UX Correction — interactive pulse filter
+  | 'command_center_pulse_filter_applied';
 
 export interface PushPlatformAuditInput {
   actor: string;

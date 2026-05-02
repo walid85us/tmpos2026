@@ -1,0 +1,304 @@
+Platform Operations & Security — Phase 1.1.1 UX Correction Pass: Mission Control Interactivity + Visual Maturity
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict focused correction pass.
+Do not broaden Phase 1.1.1.
+Do not touch Phase 1.2, 1.3, 1.4, Phase 2, Phase 3, or Phase 4.
+Do not touch Shipping, Add-on Governance, Store Permissions Matrix, Tenant Features, billing, tenant provisioning, or server logging.
+
+Fix only the QA notes from Phase 1.1.1:
+
+1) Mission Control header needs to feel stronger and more modern.
+2) Focus Mode appears to switch but does not visibly change the Command Center.
+3) Operational pulse items are not clickable.
+4) Audit & Security saved views still feel too basic.
+5) Support Tools polish did not visibly improve SLA, macro, or escalation UX enough.
+
+==================================================
+ROLE STACK — ACT UPON IT
+==================================================
+
+Act as:
+- Senior Platform Operations Architect
+- Senior SaaS Command Center Architect
+- Senior Audit & Security UX Architect
+- Senior Support Tools UX Engineer
+- Senior Operations Dashboard Designer
+- Senior React/TypeScript Interaction Engineer
+- Senior QA Gatekeeper
+- Systems Thinker
+- Side Auditor
+
+Use these roles actively. This is not a cosmetic-only pass. Improve interaction clarity, operational usefulness, and visual maturity while preserving behavior.
+
+==================================================
+CURRENT QA NOTES TO FIX
+==================================================
+
+Manual QA results:
+
+1) Mission Control header exists — PASS
+Notes: yes, but expected something stronger.
+
+4) Focus mode control works — PASS, partially
+Notes: switching focus mode does not show visible changes.
+
+6) Operational pulse items are useful/clickable where practical — FAIL
+Notes: pulse items are not clickable.
+
+23) Audit & Security saved views look improved — PASS, partially
+Notes: still looks basic; attached screenshot shows the Audit & Security page has plain saved-view chips and filters that could feel more modern.
+
+27) Support Tools SLA badges are clearer — PASS, partially
+Notes: appears unchanged from previous version.
+
+28) Support macro preview or insertion UX is improved — PASS, partially
+Notes: appears unchanged from previous version.
+
+29) Support escalation UX is clearer — PASS, partially
+Notes: appears unchanged from previous version.
+
+==================================================
+PART A — STRONGER MISSION CONTROL HEADER
+==================================================
+
+Upgrade the Command Center header so it feels like a modern operations “Mission Control” surface.
+
+Required:
+- larger, more visually prominent state panel
+- clear overall platform state:
+  - Healthy
+  - Watch
+  - At Risk
+  - Critical
+- state explanation text
+- last refreshed timestamp
+- manual refresh button
+- active time range
+- active focus mode
+- short operational summary sentence
+- compact “what changed / what needs action” indicator if data exists
+
+Design should feel premium and modern, not just another card row.
+
+Do not fake infrastructure uptime.
+Keep truth label:
+“Operational state is derived from support, audit, domain, and workflow signals — not infrastructure uptime monitoring.”
+
+==================================================
+PART B — FOCUS MODE MUST VISIBLY CHANGE THE UI
+==================================================
+
+Focus Mode must have visible effect.
+
+Modes:
+- Normal
+- Watch
+- Incident Review
+
+Required behavior:
+
+Normal:
+- show all widgets/items
+
+Watch:
+- prioritize or filter to:
+  - watch / at-risk tenants
+  - warning / critical audit events
+  - at-risk / overdue SLA cases
+  - escalated cases
+  - failed/pending domains
+- visually show “Watch Mode Active”
+
+Incident Review:
+- show only or strongly prioritize:
+  - critical support cases
+  - overdue SLA
+  - escalated cases
+  - critical/high-risk audit events
+  - failed domains
+- visually show “Incident Review Active”
+- hide low/noise items where practical
+
+Required:
+- Needs Attention queue must visibly change between modes if data supports it.
+- Widget counts/distributions should update or display filtered context.
+- If no items match a mode, show a clear empty state:
+  “No incident-level items for the selected time range.”
+
+Do not make focus mode decorative.
+
+==================================================
+PART C — OPERATIONAL PULSE ITEMS MUST BE CLICKABLE
+==================================================
+
+Make operational pulse items interactive.
+
+Required:
+Each pulse item should either:
+1) filter the Command Center, or
+2) navigate to the relevant page/view, or
+3) open a relevant drawer/list.
+
+Pulse examples:
+- Open Cases → Support Tools / All Open
+- Overdue SLA → Support Tools / Overdue SLA
+- Escalated Cases → Support Tools or filtered Command Center list
+- High-Risk Audits → Audit & Security / High-Risk Only
+- Domain Issues → Domains filtered to pending/failed if possible
+- Tenants At Risk → filter Tenant Risk Summary or open risk drawer
+- Pending Actions → filter Needs Attention
+
+Required UX:
+- hover state
+- clickable cursor
+- tooltip/helper text
+- active selected pulse filter if it filters the Command Center
+- clear reset/clear filter action if a pulse filter is applied
+
+==================================================
+PART D — AUDIT & SECURITY SAVED VIEWS MODERNIZATION
+==================================================
+
+Improve the Audit & Security page shown in the attached QA screenshot.
+
+Current issue:
+Saved views look like a simple chip row and filter panel. It works, but does not feel like a mature audit/security console.
+
+Required improvements:
+- convert saved views into stronger command-style tabs/cards with icons or count badges where practical
+- show count per saved view if derivable
+- highlight active saved view more clearly
+- add a compact “Audit Command Bar” above the table
+- make High-Risk Only more visually prominent
+- improve hierarchy between:
+  - posture cards
+  - severity summary
+  - saved views
+  - filters
+  - audit table
+- keep existing filters and CSV export
+- do not remove functionality
+
+Recommended:
+- Saved view cards/tabs:
+  - All Events
+  - Critical / Warning
+  - High-Risk Only
+  - Support Activity
+  - Domain Activity
+  - Team Management
+  - Platform Settings
+  - Security Notes
+  - Billing / Invoice
+  - Add-on Governance
+
+Each should feel like an operational lens, not just a pill.
+
+==================================================
+PART E — SUPPORT TOOLS VISUAL POLISH MUST BE VISIBLE
+==================================================
+
+Make Support Tools polish visibly noticeable.
+
+1) SLA badges:
+- show clearer color/status treatment
+- include small due/remaining/overdue microcopy where available
+- show “Unknown” honestly when due dates are missing
+- make overdue and at-risk more prominent
+
+2) Macro/template UX:
+- add macro preview before insertion if practical
+- show selected macro title + preview text
+- keep label:
+  “Internal template only — no external message sent.”
+- insertion should still go only into internal note/draft
+
+3) Escalation UX:
+- escalated case detail should show a stronger escalation banner/card
+- include escalation reason, escalated by, escalated at if available
+- de-escalate action should be clear
+- escalation should be visible in list row if practical
+
+4) Related entities and timeline:
+- improve scanability with grouped cards or timeline markers
+- do not change data behavior
+
+==================================================
+PART F — NON-REGRESSION
+==================================================
+
+Preserve:
+- Command Center existing functionality
+- Needs Attention links
+- Tenant 360
+- Next Best Actions
+- Audit CSV export
+- Create support case from audit event
+- Support case detail
+- Support saved views
+- macros/templates internal-only behavior
+- escalation/de-escalation behavior
+- security note delete confirmation
+- Add-on Governance
+- Shipping
+- Store Permissions Matrix
+- Tenant provisioning
+- Server PII logging rules
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Mission Control header is visually stronger and more modern.
+2) Focus Mode visibly changes Command Center content or prioritization.
+3) Watch mode clearly prioritizes at-risk/warning items.
+4) Incident Review clearly prioritizes critical/overdue/escalated/high-risk items.
+5) Operational pulse items are clickable or clearly interactive.
+6) Pulse clicks filter/navigate/open relevant detail.
+7) Pulse filter has active state and can be cleared if filtering is used.
+8) Audit saved views look materially improved from the previous basic chip layout.
+9) Audit saved views show stronger active state and counts where practical.
+10) Audit filters/CSV export still work.
+11) Support SLA badges look visibly improved.
+12) Support macro/template UX includes preview or clearer insertion flow.
+13) Support escalation UX is visibly clearer.
+14) Support related entities/timeline remain functional and easier to scan.
+15) Existing Add-on Governance remains intact.
+16) Existing Shipping Module remains intact.
+17) Existing Store Permissions Matrix remains intact.
+18) Server PII logging rules are not regressed.
+
+==================================================
+DOCUMENTATION
+==================================================
+
+Update replit.md with a concise Phase 1.1.1 UX Correction note:
+- Mission Control header strengthened
+- focus modes now visibly affect Command Center
+- pulse items are interactive
+- Audit saved views modernized
+- Support SLA/macro/escalation UX polished
+
+Do not rewrite the roadmap.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Mission Control Header Improvements
+3. Focus Mode Behavior
+4. Operational Pulse Interactivity
+5. Audit & Security Saved View Modernization
+6. Support Tools UX Polish
+7. Files Changed
+8. Documentation Updated
+9. Non-Regression Notes

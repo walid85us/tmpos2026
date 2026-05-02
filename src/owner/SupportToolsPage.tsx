@@ -585,10 +585,26 @@ const SupportToolsPage: React.FC = () => {
                   <td className="px-6 py-3.5"><span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${STATUS_STYLES[c.status]}`}>{STATUS_LABELS[c.status]}</span></td>
                   <td className="px-6 py-3.5"><span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${SEVERITY_STYLES[c.severity]}`}>{c.severity}</span></td>
                   <td className="px-6 py-3.5">
-                    <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${SLA_STATUS_STYLES[sla.status]}`} title={sla.label}>
-                      {SLA_STATUS_LABEL[sla.status]}
-                    </span>
-                    <p className="text-[9px] text-slate-400 font-bold mt-0.5">{sla.label}</p>
+                    {/* Phase 1.1.1 UX Correction — bigger SLA pill with state-colored bar + microcopy. */}
+                    <div className="flex items-center gap-2" data-testid={`support-sla-${c.id}`}>
+                      <div
+                        className={`w-1 h-9 rounded-full ${
+                          sla.status === 'overdue' ? 'bg-red-500'
+                          : sla.status === 'at_risk' ? 'bg-orange-400'
+                          : sla.status === 'on_track' ? 'bg-emerald-500'
+                          : 'bg-slate-300'
+                        }`}
+                      />
+                      <div className="min-w-0">
+                        <span
+                          className={`inline-block px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border-2 ${SLA_STATUS_STYLES[sla.status]}`}
+                          title={sla.label}
+                        >
+                          {SLA_STATUS_LABEL[sla.status]}
+                        </span>
+                        <p className="text-[10px] text-slate-500 font-bold mt-0.5 truncate">{sla.label}</p>
+                      </div>
+                    </div>
                   </td>
                   <td className="px-6 py-3.5 text-sm font-bold text-slate-600">{c.assignee || '—'}</td>
                   <td className="px-6 py-3.5 text-sm font-bold text-slate-500 whitespace-nowrap">{c.updatedAt}</td>
@@ -709,16 +725,33 @@ const SupportToolsPage: React.FC = () => {
           <div className="fixed inset-0 z-50 flex justify-end" data-testid="support-case-detail">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={closeDrawer} className="absolute inset-0 bg-slate-900/30 backdrop-blur-sm" />
             <motion.div initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }} transition={{ type: 'spring', damping: 28, stiffness: 280 }} className="relative w-full max-w-lg h-full bg-white shadow-2xl border-l border-slate-200 overflow-y-auto">
-              {/* Phase 1.1.1 — top-of-drawer escalation banner. */}
+              {/* Phase 1.1.1 UX Correction — widened escalation banner with reason, who/when, De-escalate. */}
               {selected.escalated && (
-                <div className="px-7 py-3 bg-red-500 text-white flex items-center gap-2" data-testid="support-case-escalation-banner">
-                  <span className="material-symbols-outlined text-base">priority_high</span>
-                  <div className="flex-1">
-                    <p className="text-[10px] font-black uppercase tracking-widest">Escalated</p>
+                <div
+                  className="px-7 py-4 bg-gradient-to-r from-red-600 to-red-500 text-white border-b-2 border-red-700 flex items-start gap-3"
+                  data-testid="support-case-escalation-banner"
+                >
+                  <span className="material-symbols-outlined text-2xl mt-0.5">priority_high</span>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="text-xs font-black uppercase tracking-widest">Incident Escalated</p>
+                      {selected.escalatedAt && (
+                        <span className="text-[10px] font-bold bg-white/15 px-2 py-0.5 rounded">
+                          {new Date(selected.escalatedAt).toLocaleString()} · by {selected.escalatedBy || '—'}
+                        </span>
+                      )}
+                    </div>
                     {selected.escalationReason && (
-                      <p className="text-xs font-bold mt-0.5 truncate">{selected.escalationReason}</p>
+                      <p className="text-xs font-bold mt-1.5 leading-snug">{selected.escalationReason}</p>
                     )}
                   </div>
+                  <button
+                    onClick={() => deescalateCase(selected)}
+                    className="px-3 py-1.5 bg-white/15 hover:bg-white/25 text-[10px] font-black uppercase tracking-widest rounded-lg backdrop-blur-sm transition-colors whitespace-nowrap"
+                    data-testid="support-case-deescalate-banner"
+                  >
+                    De-escalate
+                  </button>
                 </div>
               )}
               <div className="p-7 border-b border-slate-100 flex justify-between items-start">
@@ -831,40 +864,91 @@ const SupportToolsPage: React.FC = () => {
                   </div>
                 )}
 
-                {/* Related entities */}
-                <div className="p-4 rounded-2xl border border-slate-100 bg-white">
-                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Related Entities</p>
-                  {relatedForSelected.sourceEvent && (
-                    <div className="mb-3 p-3 rounded-xl bg-blue-400/5 border border-blue-400/20">
-                      <p className="text-[10px] font-black uppercase tracking-widest text-blue-700">Source audit event</p>
-                      <p className="text-xs font-bold text-slate-700 mt-1">{relatedForSelected.sourceEvent.action}</p>
-                      <p className="text-[10px] text-slate-500 mt-0.5">{relatedForSelected.sourceEvent.target} · {relatedForSelected.sourceEvent.date}</p>
+                {/* Phase 1.1.1 UX Correction — Related Entities grouped into 3 cards (Source / Audits / Domains). */}
+                <div className="space-y-3" data-testid="support-related-entities">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Related Entities</p>
+
+                  {/* Source audit event */}
+                  <div
+                    className="rounded-2xl border border-blue-400/20 bg-white overflow-hidden"
+                    data-testid="support-related-source-event"
+                  >
+                    <div className="px-4 py-2 bg-blue-400/10 border-b border-blue-400/20 flex items-center gap-2">
+                      <span className="material-symbols-outlined text-base text-blue-700">history</span>
+                      <p className="text-[10px] font-black uppercase tracking-widest text-blue-700">Source Audit Event</p>
                     </div>
-                  )}
-                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mt-2 mb-1">Recent tenant audits ({relatedForSelected.audits.length})</p>
-                  {relatedForSelected.audits.length === 0 ? (
-                    <p className="text-[11px] text-slate-400 font-bold py-2">No recent audits for this tenant.</p>
-                  ) : (
-                    <ul className="space-y-1">
-                      {relatedForSelected.audits.map(a => (
-                        <li key={a.id} className="text-xs text-slate-600">
-                          <span className="font-bold">{a.action}</span> · {a.target} <span className="text-slate-400">({a.date})</span>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mt-3 mb-1">Tenant domains ({relatedForSelected.domains.length})</p>
-                  {relatedForSelected.domains.length === 0 ? (
-                    <p className="text-[11px] text-slate-400 font-bold py-2">No domains configured for this tenant.</p>
-                  ) : (
-                    <ul className="space-y-1">
-                      {relatedForSelected.domains.map(d => (
-                        <li key={d.id} className="text-xs text-slate-600">
-                          <span className="font-bold">{d.hostname}</span> · {d.kind} · status {d.status} · SSL {d.ssl}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
+                    <div className="p-4">
+                      {relatedForSelected.sourceEvent ? (
+                        <>
+                          <p className="text-xs font-bold text-slate-700">{relatedForSelected.sourceEvent.action}</p>
+                          <p className="text-[10px] text-slate-500 mt-0.5">
+                            {relatedForSelected.sourceEvent.target} · {relatedForSelected.sourceEvent.date}
+                          </p>
+                        </>
+                      ) : (
+                        <p className="text-[11px] text-slate-400 font-bold">No source audit event linked.</p>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Recent tenant audits */}
+                  <div
+                    className="rounded-2xl border border-slate-200 bg-white overflow-hidden"
+                    data-testid="support-related-audits"
+                  >
+                    <div className="px-4 py-2 bg-slate-100 border-b border-slate-200 flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="material-symbols-outlined text-base text-slate-600">fact_check</span>
+                        <p className="text-[10px] font-black uppercase tracking-widest text-slate-600">Recent Tenant Audits</p>
+                      </div>
+                      <span className="text-[10px] font-black text-slate-500 bg-white px-1.5 py-0.5 rounded-md border border-slate-200">
+                        {relatedForSelected.audits.length}
+                      </span>
+                    </div>
+                    <div className="p-4">
+                      {relatedForSelected.audits.length === 0 ? (
+                        <p className="text-[11px] text-slate-400 font-bold">No recent audits for this tenant.</p>
+                      ) : (
+                        <ul className="space-y-1">
+                          {relatedForSelected.audits.map(a => (
+                            <li key={a.id} className="text-xs text-slate-600">
+                              <span className="font-bold">{a.action}</span> · {a.target}{' '}
+                              <span className="text-slate-400">({a.date})</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Tenant domains */}
+                  <div
+                    className="rounded-2xl border border-emerald-400/20 bg-white overflow-hidden"
+                    data-testid="support-related-domains"
+                  >
+                    <div className="px-4 py-2 bg-emerald-400/10 border-b border-emerald-400/20 flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="material-symbols-outlined text-base text-emerald-700">dns</span>
+                        <p className="text-[10px] font-black uppercase tracking-widest text-emerald-700">Tenant Domains</p>
+                      </div>
+                      <span className="text-[10px] font-black text-emerald-700/80 bg-white px-1.5 py-0.5 rounded-md border border-emerald-400/20">
+                        {relatedForSelected.domains.length}
+                      </span>
+                    </div>
+                    <div className="p-4">
+                      {relatedForSelected.domains.length === 0 ? (
+                        <p className="text-[11px] text-slate-400 font-bold">No domains configured for this tenant.</p>
+                      ) : (
+                        <ul className="space-y-1">
+                          {relatedForSelected.domains.map(d => (
+                            <li key={d.id} className="text-xs text-slate-600">
+                              <span className="font-bold">{d.hostname}</span> · {d.kind} · status {d.status} · SSL {d.ssl}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  </div>
                 </div>
 
                 <div>
@@ -953,27 +1037,53 @@ const NoteComposer: React.FC<NoteComposerProps> = ({ caseId, macros, onAdd, onIn
   const [macroId, setMacroId] = useState('');
   // Reset draft when switching to a different case.
   useEffect(() => { setBody(''); setMacroId(''); }, [caseId]);
+  // Phase 1.1.1 UX Correction — 2-step macro UX: pick → preview → Insert Template.
+  const previewMacro = macros.find(m => m.id === macroId);
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Templates</span>
         <select
           value={macroId}
-          onChange={e => {
-            const id = e.target.value;
-            setMacroId(id);
-            const m = macros.find(x => x.id === id);
-            if (m) onInsertMacro(m, body, setBody);
-          }}
+          onChange={e => setMacroId(e.target.value)}
+          data-testid="support-macro-picker"
           className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700"
         >
-          <option value="">Insert template…</option>
+          <option value="">Select template…</option>
           {macros.map(m => (
-            <option key={m.id} value={m.id} title={m.body.length > 220 ? `${m.body.slice(0, 220)}…` : m.body}>{m.label}</option>
+            <option key={m.id} value={m.id}>{m.label}</option>
           ))}
         </select>
-        <span className="text-[10px] text-slate-400 italic">Internal template only — no external message sent. Hover a template to preview.</span>
+        <span className="text-[10px] text-slate-400 italic">Internal template only — no external message sent.</span>
       </div>
+      {previewMacro && (
+        <div
+          className="p-3 rounded-xl border border-blue-400/20 bg-blue-400/5 space-y-2"
+          data-testid="support-macro-preview"
+        >
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <p className="text-[10px] font-black uppercase tracking-widest text-blue-700">
+              Preview · {previewMacro.label}
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setMacroId('')}
+                className="px-2.5 py-1 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-lg hover:bg-white"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => { onInsertMacro(previewMacro, body, setBody); setMacroId(''); }}
+                data-testid="support-macro-insert"
+                className="px-3 py-1.5 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-lg hover:bg-primary/90"
+              >
+                Insert Template
+              </button>
+            </div>
+          </div>
+          <p className="text-xs text-slate-700 whitespace-pre-wrap line-clamp-4">{previewMacro.body}</p>
+        </div>
+      )}
       <textarea
         value={body}
         onChange={e => setBody(e.target.value)}

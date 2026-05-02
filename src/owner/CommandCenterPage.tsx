@@ -39,6 +39,11 @@ import {
   deriveTenant360,
   filterByTimeRange,
   filterByFocusMode,
+  applyFocusModeToCases,
+  applyFocusModeToAudits,
+  applyFocusModeToDomains,
+  PULSE_ROUTING,
+  type PulseFilterId,
   RISK_STATUS_LABEL,
   RISK_STATUS_STYLES,
   SLA_STATUS_STYLES,
@@ -120,6 +125,34 @@ const TONE_TEXT: Record<DistributionBucket['tone'], string> = {
   muted: 'text-slate-500',
 };
 
+// Mission Control hero styling per state (Phase 1.1.1 UX Correction).
+// `deriveOverallPlatformState` returns one of 4 states — keep the maps in sync.
+// Backgrounds use very-soft tints so the rest of the page stays calm.
+type MissionState = 'healthy' | 'watch' | 'at_risk' | 'critical';
+const MISSION_HERO_STYLES: Record<MissionState, string> = {
+  healthy: 'bg-gradient-to-br from-emerald-50 via-white to-white border-emerald-200',
+  watch: 'bg-gradient-to-br from-amber-50 via-white to-white border-amber-200',
+  at_risk: 'bg-gradient-to-br from-orange-50 via-white to-white border-orange-300',
+  critical: 'bg-gradient-to-br from-red-50 via-white to-white border-red-300',
+};
+const MISSION_HERO_GLOW: Record<MissionState, string> = {
+  healthy: 'bg-emerald-200/40',
+  watch: 'bg-amber-200/40',
+  at_risk: 'bg-orange-300/40',
+  critical: 'bg-red-300/40',
+};
+const MISSION_HERO_ICON: Record<MissionState, string> = {
+  healthy: '🟢',
+  watch: '🟡',
+  at_risk: '🟠',
+  critical: '🔴',
+};
+const FOCUS_MODE_BANNER_STYLES: Record<FocusMode, string> = {
+  normal: 'bg-slate-50 text-slate-700 border-slate-200',
+  watch: 'bg-amber-50 text-amber-800 border-amber-300',
+  incident: 'bg-red-50 text-red-800 border-red-300',
+};
+
 function formatRelative(iso?: string | null): string {
   if (!iso) return '—';
   const t = new Date(iso).getTime();
@@ -146,6 +179,14 @@ const CommandCenterPage: React.FC = () => {
   const [focusMode, setFocusMode] = useState<FocusMode>('normal');
   const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
   const [drawerTenantId, setDrawerTenantId] = useState<string | null>(null);
+  // Phase 1.1.1 UX Correction — interactive pulse filter for Needs Attention.
+  const [activePulseFilter, setActivePulseFilter] = useState<PulseFilterId | null>(null);
+  // Tick to make the "Updated Xm ago" label feel live without a second state.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const i = window.setInterval(() => setTick(x => (x + 1) % 1000), 30_000);
+    return () => window.clearInterval(i);
+  }, []);
 
   // Live data load + change subscriptions ---------------------------------
   const reloadAll = useCallback(() => {
@@ -189,6 +230,22 @@ const CommandCenterPage: React.FC = () => {
     [cases, timeRange]
   );
 
+  // --- Focus-mode source slices (Phase 1.1.1 UX Correction) -------------
+  // These narrow widgets / pulse / NBA so Focus Mode visibly changes the
+  // entire Operational Pulse + widget grid + recommendations.
+  const focusedCases = useMemo(
+    () => applyFocusModeToCases(filteredCases, focusMode),
+    [filteredCases, focusMode]
+  );
+  const focusedAudits = useMemo(
+    () => applyFocusModeToAudits(filteredAudits, focusMode),
+    [filteredAudits, focusMode]
+  );
+  const focusedDomains = useMemo(
+    () => applyFocusModeToDomains(domains, focusMode),
+    [domains, focusMode]
+  );
+
   // --- Open / overdue / escalated --------------------------------------
   const openCases = filteredCases.filter(c => c.status !== 'resolved' && c.status !== 'closed');
   const criticalCases = openCases.filter(c => c.severity === 'urgent');
@@ -205,6 +262,10 @@ const CommandCenterPage: React.FC = () => {
   const sslMissing = domains.filter(d => d.ssl !== 'active' && d.status === 'verified').length;
 
   // --- Tenant risk -------------------------------------------------------
+  // Tenant risk uses the *unfocused* slices so the tenant-level risk band
+  // doesn't artificially flip green when an operator switches into Watch /
+  // Incident mode. Mode only changes what surfaces, not the underlying
+  // tenant truth.
   const tenantRisk = useMemo(
     () => tenants.map(t => ({
       tenant: t,
@@ -212,6 +273,14 @@ const CommandCenterPage: React.FC = () => {
     })),
     [filteredAudits, filteredCases, domains]
   );
+  // Focus-mode-aware tenant risk slice for widgets / pulse "tenants_at_risk".
+  const focusedTenantRisk = useMemo(() => {
+    if (focusMode === 'normal') return tenantRisk;
+    if (focusMode === 'watch') {
+      return tenantRisk.filter(r => r.risk.status !== 'healthy');
+    }
+    return tenantRisk.filter(r => r.risk.status === 'critical' || r.risk.status === 'at_risk');
+  }, [tenantRisk, focusMode]);
   const tenantsAtRisk = tenantRisk.filter(
     r => r.risk.status === 'at_risk' || r.risk.status === 'critical'
   );
@@ -301,6 +370,14 @@ const CommandCenterPage: React.FC = () => {
   });
   attention.sort((a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority]);
   const focusedAttention = filterByFocusMode(attention, focusMode) as AttentionItem[];
+  // Phase 1.1.1 UX Correction — apply the active pulse filter on top of
+  // focus-mode filtering so clicking a pulse visibly narrows the queue.
+  const pulseFilteredAttention = activePulseFilter
+    ? focusedAttention.filter(item => {
+        const pred = PULSE_ROUTING[activePulseFilter].filtersAttention;
+        return pred ? pred(item) : true;
+      })
+    : focusedAttention;
 
   // --- Workflow health (truthful labels) -------------------------------
   const workflowHealth = [
@@ -320,39 +397,48 @@ const CommandCenterPage: React.FC = () => {
   );
   const pulse: PulseMetric[] = useMemo(
     () => deriveOperationalPulse({
-      cases: filteredCases, audits: filteredAudits, domains,
-      tenantRisks: tenantRisk.map(t => ({ status: t.risk.status })),
-      attentionCount: attention.length,
+      cases: focusedCases, audits: focusedAudits, domains: focusedDomains,
+      tenantRisks: focusedTenantRisk.map(t => ({ status: t.risk.status })),
+      // Phase 1.1.1 UX Correction — keep pulse Pending Actions consistent with
+      // the focus-mode-narrowed Needs Attention queue so the strip and the
+      // queue cannot disagree.
+      attentionCount: focusedAttention.length,
     }),
-    [filteredCases, filteredAudits, domains, tenantRisk, attention.length]
+    [focusedCases, focusedAudits, focusedDomains, focusedTenantRisk, focusedAttention.length]
   );
   const widgets = useMemo(
     () => deriveWidgetDistributions({
-      cases: filteredCases, audits: filteredAudits, domains,
-      tenantRisks: tenantRisk.map(t => ({ status: t.risk.status })),
+      cases: focusedCases, audits: focusedAudits, domains: focusedDomains,
+      tenantRisks: focusedTenantRisk.map(t => ({ status: t.risk.status })),
     }),
-    [filteredCases, filteredAudits, domains, tenantRisk]
+    [focusedCases, focusedAudits, focusedDomains, focusedTenantRisk]
   );
   const nba: NextBestAction[] = useMemo(
     () => deriveNextBestActions({
-      cases: filteredCases, audits: filteredAudits, domains,
-      tenantRisks: tenantRisk.map(t => ({
+      cases: focusedCases, audits: focusedAudits, domains: focusedDomains,
+      tenantRisks: focusedTenantRisk.map(t => ({
         tenantId: t.tenant.id, tenantName: t.tenant.name,
         status: t.risk.status, signals: t.risk.signals,
       })),
       notes,
       tenantNameById: tenantById,
     }),
-    [filteredCases, filteredAudits, domains, tenantRisk, notes, tenantById]
+    [focusedCases, focusedAudits, focusedDomains, focusedTenantRisk, notes, tenantById]
   );
 
-  // High-risk audit stream + escalated cases for compact widgets
+  // High-risk audit stream + escalated cases for compact widgets — also
+  // narrow with the focus-mode audit slice so Watch / Incident visibly
+  // changes the stream.
   const highRiskStream = useMemo(
-    () => filteredAudits
+    () => focusedAudits
       .map(a => ({ a, flag: deriveHighRiskFlag(a).flag }))
       .filter(x => x.flag === 'critical' || x.flag === 'high_risk')
       .slice(0, 5),
-    [filteredAudits]
+    [focusedAudits]
+  );
+  const focusedEscalatedCases = useMemo(
+    () => focusedCases.filter(c => c.escalated === true).slice(0, 5),
+    [focusedCases]
   );
 
   // Add-on / Commercial attention: tenants whose activation is not 'active'
@@ -442,6 +528,32 @@ const CommandCenterPage: React.FC = () => {
   };
   const onCloseTenant360 = () => setDrawerTenantId(null);
 
+  // Phase 1.1.1 UX Correction — pulse click router.
+  const onPulseClick = (id: PulseFilterId, value: number) => {
+    if (value === 0) return;
+    const route = PULSE_ROUTING[id];
+    pushPlatformAudit({
+      actor: 'System Owner',
+      action: 'command_center_pulse_filter_applied',
+      target: route.filterLabel,
+      category: 'configuration',
+      severity: 'info',
+    });
+    if (route.filtersAttention) {
+      // Toggle: clicking the active pulse clears the filter.
+      setActivePulseFilter(curr => (curr === id ? null : id));
+      // Scroll Needs Attention into view so the filter effect is obvious.
+      requestAnimationFrame(() => {
+        document
+          .querySelector('[data-testid="needs-attention-section"]')
+          ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    } else if (route.navigateTo) {
+      navigate(route.navigateTo);
+    }
+  };
+  const onClearPulseFilter = () => setActivePulseFilter(null);
+
   const onQuickAction = (label: string, href: string) => {
     pushPlatformAudit({
       actor: 'System Owner',
@@ -468,76 +580,164 @@ const CommandCenterPage: React.FC = () => {
 
   return (
     <div className="space-y-8">
-      {/* ============== MISSION CONTROL HEADER ============== */}
-      <section className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 shadow-sm p-6 lg:p-8 space-y-5">
-        <div className="flex items-start justify-between flex-wrap gap-4">
-          <div className="flex items-start gap-4">
-            <div className={`px-4 py-2 rounded-2xl border ${PLATFORM_STATE_STYLES[overall.state]} text-xs font-black uppercase tracking-widest`} data-testid="mission-control-state">
-              {PLATFORM_STATE_LABEL[overall.state]}
+      {/* ============== MISSION CONTROL HEADER (Phase 1.1.1 UX Correction) ============== */}
+      <section
+        className={`relative overflow-hidden rounded-[2.5rem] border shadow-sm ${MISSION_HERO_STYLES[overall.state]}`}
+        data-testid="mission-control-hero"
+      >
+        {/* Decorative state-tinted glow */}
+        <div className="absolute inset-0 pointer-events-none opacity-60">
+          <div className={`absolute -top-24 -right-24 w-96 h-96 rounded-full blur-3xl ${MISSION_HERO_GLOW[overall.state]}`} />
+        </div>
+
+        <div className="relative p-6 lg:p-8 space-y-6">
+          {/* Top row: state pill + title + refresh column */}
+          <div className="flex items-start justify-between flex-wrap gap-6">
+            <div className="flex items-start gap-5 min-w-0">
+              {/* Big state hero block */}
+              <div
+                className={`shrink-0 w-20 h-20 rounded-3xl border-2 flex flex-col items-center justify-center shadow-md ${PLATFORM_STATE_STYLES[overall.state]}`}
+                aria-hidden="true"
+              >
+                <span className="text-3xl leading-none" role="img" aria-label={PLATFORM_STATE_LABEL[overall.state]}>
+                  {MISSION_HERO_ICON[overall.state]}
+                </span>
+              </div>
+              <div className="min-w-0">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Platform Operations</p>
+                <h2 className="text-3xl lg:text-4xl font-black text-primary tracking-tight mt-0.5">Mission Control</h2>
+                <div className="mt-2 flex items-center gap-2 flex-wrap">
+                  <span
+                    className={`px-3 py-1.5 rounded-xl border text-[11px] font-black uppercase tracking-widest ${PLATFORM_STATE_STYLES[overall.state]}`}
+                    data-testid="mission-control-state"
+                  >
+                    {PLATFORM_STATE_LABEL[overall.state]}
+                  </span>
+                  <span className="text-sm text-slate-700 font-bold">{overall.summary}</span>
+                </div>
+                {overall.signals.length > 0 && (
+                  <p className="text-xs text-slate-600 mt-2 max-w-2xl">
+                    <span className="font-black uppercase tracking-widest text-[10px] text-slate-400 mr-2">Active signals:</span>
+                    {overall.signals.join(' · ')}
+                  </p>
+                )}
+              </div>
             </div>
-            <div>
-              <h2 className="text-2xl font-black text-primary tracking-tight">Mission Control</h2>
-              <p className="text-sm text-slate-600 font-medium mt-0.5">{overall.summary}</p>
+
+            {/* Right column: refresh + range + mode (compact) */}
+            <div className="flex flex-col items-end gap-3">
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-500" data-testid="mission-control-updated">
+                  Updated {formatRelative(lastRefreshed.toISOString())}
+                </span>
+                <button
+                  onClick={onRefresh}
+                  data-testid="mission-control-refresh"
+                  className="px-3 py-1.5 text-[10px] font-black uppercase tracking-widest bg-primary text-white rounded-xl hover:bg-primary/90 transition-colors shadow-sm"
+                >
+                  Refresh
+                </button>
+              </div>
+              <div className="flex flex-wrap items-center gap-3 justify-end">
+                <ChipGroup
+                  testId="mission-control-time-range"
+                  label="Range"
+                  options={(['today', '7d', '30d', 'all'] as TimeRange[]).map(r => ({ value: r, label: TIME_RANGE_LABEL[r] }))}
+                  value={timeRange}
+                  onChange={v => onTimeRange(v as TimeRange)}
+                />
+                <ChipGroup
+                  testId="mission-control-focus-mode"
+                  label="Focus"
+                  options={(['normal', 'watch', 'incident'] as FocusMode[]).map(m => ({ value: m, label: FOCUS_MODE_LABEL[m] }))}
+                  value={focusMode}
+                  onChange={v => onFocus(v as FocusMode)}
+                />
+              </div>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">
-              Updated {formatRelative(lastRefreshed.toISOString())}
-            </span>
-            <button
-              onClick={onRefresh}
-              data-testid="mission-control-refresh"
-              className="px-3 py-1.5 text-[10px] font-black uppercase tracking-widest bg-primary text-white rounded-xl hover:bg-primary/90 transition-colors"
+
+          {/* Active focus-mode banner ribbon (only visible when not normal) */}
+          {focusMode !== 'normal' && (
+            <div
+              data-testid="focus-mode-banner"
+              className={`flex items-center gap-3 px-4 py-3 rounded-2xl border-2 ${FOCUS_MODE_BANNER_STYLES[focusMode]}`}
             >
-              Refresh
-            </button>
-          </div>
-        </div>
+              <span className="text-xl" aria-hidden="true">{focusMode === 'watch' ? '👁️' : '🚨'}</span>
+              <div className="min-w-0">
+                <p className="text-sm font-black uppercase tracking-widest">
+                  {focusMode === 'watch' ? 'Watch Mode Active' : 'Incident Review Active'}
+                </p>
+                <p className="text-[11px] font-medium opacity-80">
+                  {FOCUS_MODE_DESCRIPTION[focusMode]} · Pulse, widgets and recommendations narrowed accordingly.
+                </p>
+              </div>
+              <button
+                onClick={() => onFocus('normal')}
+                className="ml-auto shrink-0 px-3 py-1.5 text-[10px] font-black uppercase tracking-widest bg-white/70 hover:bg-white border border-current/30 rounded-xl transition-colors"
+              >
+                Exit
+              </button>
+            </div>
+          )}
 
-        {overall.signals.length > 0 && (
-          <div className="text-xs text-slate-600">
-            <span className="font-black uppercase tracking-widest text-[10px] text-slate-400 mr-2">Active signals:</span>
-            {overall.signals.join(' · ')}
-          </div>
-        )}
-
-        <div className="flex flex-wrap items-center gap-6">
-          <ChipGroup
-            testId="mission-control-time-range"
-            label="Time range"
-            options={(['today', '7d', '30d', 'all'] as TimeRange[]).map(r => ({ value: r, label: TIME_RANGE_LABEL[r] }))}
-            value={timeRange}
-            onChange={v => onTimeRange(v as TimeRange)}
-          />
-          <ChipGroup
-            testId="mission-control-focus-mode"
-            label="Focus mode"
-            options={(['normal', 'watch', 'incident'] as FocusMode[]).map(m => ({ value: m, label: FOCUS_MODE_LABEL[m] }))}
-            value={focusMode}
-            onChange={v => onFocus(v as FocusMode)}
-          />
+          <p className="text-[11px] font-medium text-slate-500">
+            {focusMode === 'normal' && (
+              <>
+                {FOCUS_MODE_DESCRIPTION[focusMode]}{' '}
+              </>
+            )}
+            <span className="text-slate-400">
+              All values are derived from in-session signals — no live infrastructure or AI.
+            </span>
+          </p>
         </div>
-        <p className="text-[11px] font-medium text-slate-500">
-          {FOCUS_MODE_DESCRIPTION[focusMode]}{' '}
-          <span className="text-slate-400">
-            All values are derived from in-session signals — no live infrastructure or AI.
-          </span>
-        </p>
       </section>
 
       {/* ============== OPERATIONAL PULSE STRIP ============== */}
       <section className="space-y-3">
-        <h3 className="text-sm font-black text-primary uppercase tracking-widest">Operational Pulse</h3>
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <h3 className="text-sm font-black text-primary uppercase tracking-widest">Operational Pulse</h3>
+          <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+            Click any pulse to filter Needs Attention or jump to its surface.
+          </p>
+        </div>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3" data-testid="operational-pulse">
-          {pulse.map(m => (
-            <PulseCard key={m.id} metric={m} />
-          ))}
+          {pulse.map(m => {
+            const route = PULSE_ROUTING[m.id as PulseFilterId];
+            const isActive = activePulseFilter === m.id;
+            return (
+              <PulseCard
+                key={m.id}
+                metric={m}
+                active={isActive}
+                onClick={() => onPulseClick(m.id as PulseFilterId, m.value)}
+                actionHint={
+                  m.value === 0
+                    ? 'No items'
+                    : route.filtersAttention
+                      ? isActive ? 'Click to clear filter' : `Filter: ${route.filterLabel}`
+                      : `Open ${route.filterLabel}`
+                }
+              />
+            );
+          })}
         </div>
       </section>
 
       {/* ============== WIDGET GRID (8 widgets) ============== */}
       <section className="space-y-3">
-        <h3 className="text-sm font-black text-primary uppercase tracking-widest">Operational Widgets</h3>
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <h3 className="text-sm font-black text-primary uppercase tracking-widest">Operational Widgets</h3>
+          {focusMode !== 'normal' && (
+            <span
+              data-testid="widgets-focus-ribbon"
+              className={`px-3 py-1 rounded-xl border text-[10px] font-black uppercase tracking-widest ${FOCUS_MODE_BANNER_STYLES[focusMode]}`}
+            >
+              {focusMode === 'watch' ? '👁️ Watch Mode — narrowed to actionable items' : '🚨 Incident Review — narrowed to severe items'}
+            </span>
+          )}
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
           <DistributionWidget title="Cases by Severity" hint="Open support cases grouped by severity." buckets={widgets.casesBySeverity} testId="widget-cases-by-severity" />
           <DistributionWidget title="SLA Pressure" hint="Derived from each case's resolution due time." buckets={widgets.slaPressure} testId="widget-sla-pressure" />
@@ -573,10 +773,10 @@ const CommandCenterPage: React.FC = () => {
           <ListWidget
             title="Escalated Cases"
             hint="Open cases manually escalated by an operator."
-            empty="No escalated cases."
+            empty={focusMode === 'normal' ? 'No escalated cases.' : 'No incident-level items in this mode.'}
             testId="widget-escalated-cases"
           >
-            {escalatedCases.slice(0, 5).map(c => (
+            {focusedEscalatedCases.map(c => (
               <li key={c.id} className="py-2 first:pt-0 last:pb-0 border-b border-slate-100 last:border-0 flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <Link to={`/owner/support-tools?caseId=${encodeURIComponent(c.id)}`} className="text-xs font-bold text-slate-800 hover:text-primary truncate block">{c.subject}</Link>
@@ -665,7 +865,10 @@ const CommandCenterPage: React.FC = () => {
       </div>
 
       {/* ============== NEEDS ATTENTION (preserved) ============== */}
-      <section className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
+      <section
+        data-testid="needs-attention-section"
+        className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm"
+      >
         <div className="px-8 py-5 border-b border-slate-100 flex items-center justify-between flex-wrap gap-2">
           <div>
             <h3 className="text-lg font-black text-primary tracking-tight">Needs Attention</h3>
@@ -677,11 +880,30 @@ const CommandCenterPage: React.FC = () => {
             </p>
           </div>
           <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">
-            {focusedAttention.length} of {attention.length} item{attention.length !== 1 ? 's' : ''}
+            {pulseFilteredAttention.length} of {attention.length} item{attention.length !== 1 ? 's' : ''}
           </span>
         </div>
-        {focusedAttention.length === 0 ? (
-          <div className="p-12 text-center text-slate-400 text-sm font-bold">No active issues.</div>
+        {activePulseFilter && PULSE_ROUTING[activePulseFilter].filtersAttention && (
+          <div
+            data-testid="needs-attention-pulse-filter"
+            className="px-8 py-3 bg-primary/5 border-b border-primary/10 flex items-center gap-3 flex-wrap"
+          >
+            <span className="text-[10px] font-black uppercase tracking-widest text-primary/70">Pulse filter active:</span>
+            <span className="px-3 py-1 rounded-xl bg-white border border-primary/30 text-[11px] font-black text-primary">
+              {PULSE_ROUTING[activePulseFilter].filterLabel}
+            </span>
+            <button
+              onClick={onClearPulseFilter}
+              className="ml-auto text-[10px] font-black uppercase tracking-widest text-slate-500 hover:text-primary transition-colors"
+            >
+              Clear filter ✕
+            </button>
+          </div>
+        )}
+        {pulseFilteredAttention.length === 0 ? (
+          <div className="p-12 text-center text-slate-400 text-sm font-bold">
+            {activePulseFilter ? 'No items match the active pulse filter.' : 'No active issues.'}
+          </div>
         ) : (
           <table className="w-full text-left border-collapse">
             <thead>
@@ -696,7 +918,7 @@ const CommandCenterPage: React.FC = () => {
               </tr>
             </thead>
             <tbody>
-              {focusedAttention.slice(0, 20).map(item => (
+              {pulseFilteredAttention.slice(0, 20).map(item => (
                 <tr key={item.id} data-testid={`needs-attention-row-${item.id}`} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/70 transition-colors">
                   <td className="px-6 py-3.5">
                     <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${PRIORITY_STYLES[item.priority]}`}>
@@ -885,7 +1107,12 @@ const ChipGroup: React.FC<{
   </div>
 );
 
-const PulseCard: React.FC<{ metric: PulseMetric }> = ({ metric }) => {
+const PulseCard: React.FC<{
+  metric: PulseMetric;
+  active?: boolean;
+  onClick?: () => void;
+  actionHint?: string;
+}> = ({ metric, active, onClick, actionHint }) => {
   const tone = metric.tone;
   const styles =
     tone === 'critical' ? 'border-red-500/30 bg-red-500/5'
@@ -897,12 +1124,40 @@ const PulseCard: React.FC<{ metric: PulseMetric }> = ({ metric }) => {
     : tone === 'warn' ? 'text-orange-700'
     : tone === 'info' ? 'text-blue-700'
     : 'text-primary';
+  const disabled = metric.value === 0;
+  const activeRing = active ? 'ring-2 ring-primary/60 ring-offset-1 ring-offset-white' : '';
+  const interactive = disabled
+    ? 'cursor-default opacity-70'
+    : 'cursor-pointer hover:shadow-md hover:-translate-y-0.5 active:translate-y-0 transition-all';
+  const titleAttr = `${metric.hint}${actionHint ? ` · ${actionHint}` : ''}`;
   return (
-    <div className={`p-4 rounded-2xl border shadow-sm ${styles}`} title={metric.hint} data-testid={`pulse-${metric.id}`}>
-      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">{metric.label}</p>
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={titleAttr}
+      aria-pressed={active}
+      data-testid={`pulse-${metric.id}`}
+      data-active={active ? 'true' : 'false'}
+      data-disabled={disabled ? 'true' : 'false'}
+      className={`text-left p-4 rounded-2xl border shadow-sm w-full focus:outline-none focus:ring-2 focus:ring-primary/30 ${styles} ${activeRing} ${interactive} disabled:cursor-not-allowed`}
+    >
+      <div className="flex items-start justify-between gap-1">
+        <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">{metric.label}</p>
+        {active && (
+          <span className="text-[9px] font-black uppercase tracking-widest text-primary bg-primary/10 px-1.5 py-0.5 rounded-md">
+            On
+          </span>
+        )}
+      </div>
       <p className={`text-2xl font-black ${numStyles} mt-1`}>{metric.value}</p>
-      <p className="text-[10px] text-slate-500 mt-1 leading-tight">{metric.hint}</p>
-    </div>
+      <p className="text-[10px] text-slate-500 mt-1 leading-tight line-clamp-2">{metric.hint}</p>
+      {actionHint && (
+        <p className={`mt-1.5 text-[9px] font-black uppercase tracking-widest ${disabled ? 'text-slate-300' : 'text-primary/70'}`}>
+          {actionHint} {!disabled && '→'}
+        </p>
+      )}
+    </button>
   );
 };
 
