@@ -17,6 +17,8 @@ import {
   deriveSlaStatus,
   deriveTenantRisk,
   predefinedSupportViews,
+  countCasesForSupportView,
+  PHASE_112_TRUTH_LABEL,
   SLA_STATUS_LABEL,
   SLA_STATUS_STYLES,
   RISK_STATUS_LABEL,
@@ -86,7 +88,10 @@ const SupportToolsPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const [cases, setCases] = useState<SupportCaseRecord[]>(() => loadCases());
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | SupportCaseStatus>('all');
+  // Phase 1.1.2 — extended to support saved-view group tokens so the visible
+  // list and the saved-view count badge always agree (e.g. "Resolved / Closed"
+  // saved view counts both statuses and the table shows both).
+  const [statusFilter, setStatusFilter] = useState<'all' | SupportCaseStatus | 'open_group' | 'resolved_group'>('all');
   const [showCreate, setShowCreate] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [missingCaseId, setMissingCaseId] = useState<string | null>(null);
@@ -126,8 +131,10 @@ const SupportToolsPage: React.FC = () => {
     const v = predefinedSupportViews.find(x => x.id === id);
     if (!v) return;
     const f: SupportViewFilters = v.filters;
-    if (f.status === 'open_group') setStatusFilter('all');
-    else if (f.status === 'resolved_group') setStatusFilter('resolved');
+    // Phase 1.1.2 — preserve group tokens so list filtering matches the
+    // count badge produced by `countCasesForSupportView`.
+    if (f.status === 'open_group') setStatusFilter('open_group');
+    else if (f.status === 'resolved_group') setStatusFilter('resolved_group');
     else if (f.status) setStatusFilter(f.status as SupportCaseStatus | 'all');
     else setStatusFilter('all');
     setSlaFilter(f.sla === 'overdue' ? 'overdue' : f.sla === 'at_risk' ? 'at_risk' : 'any');
@@ -195,7 +202,15 @@ const SupportToolsPage: React.FC = () => {
 
   const filteredCases = useMemo(() => {
     const filtered = cases.filter(c => {
-      if (statusFilter !== 'all' && c.status !== statusFilter) return false;
+      // Phase 1.1.2 — group tokens mirror the same predicates used by
+      // `countCasesForSupportView` so list and saved-view counts agree.
+      if (statusFilter === 'open_group') {
+        if (c.status === 'resolved' || c.status === 'closed') return false;
+      } else if (statusFilter === 'resolved_group') {
+        if (c.status !== 'resolved' && c.status !== 'closed') return false;
+      } else if (statusFilter !== 'all' && c.status !== statusFilter) {
+        return false;
+      }
       if (severityViewFilter !== 'all' && c.severity !== severityViewFilter) return false;
       if (slaFilter !== 'any') {
         const sla = deriveSlaStatus(c);
@@ -539,17 +554,28 @@ const SupportToolsPage: React.FC = () => {
         </div>
         <div className="px-8 py-3 border-b border-slate-100 bg-slate-50/40 flex items-center gap-2 flex-wrap" data-testid="support-saved-views">
           <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 mr-1">Saved views:</span>
-          {predefinedSupportViews.map(v => (
-            <button
-              key={v.id}
-              data-testid={`support-saved-view-${v.id}`}
-              data-active={activeView === v.id ? 'true' : 'false'}
-              onClick={() => applyView(v.id)}
-              className={`px-3 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${activeView === v.id ? 'bg-primary text-white shadow-md ring-2 ring-primary/20' : 'bg-white text-slate-600 border border-slate-200 hover:bg-primary/5 hover:text-primary hover:border-primary/30'}`}
-            >
-              {v.label}
-            </button>
-          ))}
+          {predefinedSupportViews.map(v => {
+            // Phase 1.1.2 — saved view "queue" count from shared helper.
+            const count = countCasesForSupportView(v, cases);
+            const active = activeView === v.id;
+            return (
+              <button
+                key={v.id}
+                data-testid={`support-saved-view-${v.id}`}
+                data-active={active ? 'true' : 'false'}
+                onClick={() => applyView(v.id)}
+                className={`px-3 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all inline-flex items-center gap-2 ${active ? 'bg-primary text-white shadow-md ring-2 ring-primary/20' : 'bg-white text-slate-600 border border-slate-200 hover:bg-primary/5 hover:text-primary hover:border-primary/30'}`}
+              >
+                <span>{v.label}</span>
+                <span
+                  data-testid={`support-saved-view-${v.id}-count`}
+                  className={`px-1.5 py-0.5 rounded-md text-[9px] font-black ${active ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-500'}`}
+                >
+                  {count}
+                </span>
+              </button>
+            );
+          })}
           {activeView === 'custom' && (
             <span className="px-3 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest bg-amber-400/10 text-amber-700 border border-amber-400/20">
               Custom filters
@@ -754,12 +780,14 @@ const SupportToolsPage: React.FC = () => {
                   </button>
                 </div>
               )}
-              <div className="p-7 border-b border-slate-100 flex justify-between items-start">
+              {/* Phase 1.1.2 — case detail header summary band: SLA + escalation
+                  + tenant-risk pills surfaced at-a-glance. */}
+              <div className="p-7 border-b border-slate-100 flex justify-between items-start" data-testid="support-case-header">
                 <div className="flex-1 pr-4">
                   <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">{selected.id}</p>
                   <h3 className="text-lg font-black text-primary mt-1">{selected.subject}</h3>
                   <p className="text-xs text-slate-500 font-bold mt-1">{tenantById.get(selected.tenantId) || selected.tenantId}</p>
-                  <div className="flex flex-wrap gap-2 mt-2">
+                  <div className="flex flex-wrap gap-2 mt-2" data-testid="support-case-header-pills">
                     {(() => {
                       const sla = deriveSlaStatus(selected);
                       return (
@@ -771,6 +799,15 @@ const SupportToolsPage: React.FC = () => {
                     {selected.escalated && (
                       <span className="px-2 py-0.5 text-[10px] font-black uppercase tracking-widest rounded bg-red-500/10 text-red-700 border border-red-500/20">
                         Escalated
+                      </span>
+                    )}
+                    {tenantRiskForSelected && (
+                      <span
+                        data-testid="support-case-header-risk"
+                        title={tenantRiskForSelected.signals.join(' · ') || 'No active risk signals'}
+                        className={`px-2 py-0.5 text-[10px] font-black uppercase tracking-widest rounded border ${RISK_STATUS_STYLES[tenantRiskForSelected.status]}`}
+                      >
+                        Risk · {RISK_STATUS_LABEL[tenantRiskForSelected.status]}
                       </span>
                     )}
                     {selected.sourceAuditEventId && (
@@ -1012,14 +1049,53 @@ const SupportToolsPage: React.FC = () => {
   );
 };
 
+// Phase 1.1.2 — Timeline maturity: group by date heading + small icon per kind.
+const NOTE_KIND_ICON: Record<string, string> = {
+  status_change: 'sync',
+  escalation: 'priority_high',
+  resolution: 'task_alt',
+  internal: 'sticky_note_2',
+  reply: 'reply',
+};
+const dateBucketLabel = (iso: string): string => {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return 'Unknown';
+  const today = new Date();
+  const yest = new Date(); yest.setDate(yest.getDate() - 1);
+  const sameDay = (a: Date, b: Date) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  if (sameDay(d, today)) return 'Today';
+  if (sameDay(d, yest)) return 'Yesterday';
+  return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+};
 const NotesTimeline: React.FC<{ notes: SupportCaseNote[] }> = ({ notes }) => {
   if (notes.length === 0) return <p className="text-xs text-slate-400 font-bold py-4 text-center bg-slate-50 rounded-2xl">No notes yet.</p>;
+  // Preserve original render order; just group sequential same-date entries.
+  const groups: Array<{ label: string; items: SupportCaseNote[] }> = [];
+  for (const n of notes) {
+    const label = dateBucketLabel(n.createdAt);
+    const last = groups[groups.length - 1];
+    if (last && last.label === label) last.items.push(n);
+    else groups.push({ label, items: [n] });
+  }
   return (
-    <div className="space-y-2">
-      {notes.map(n => (
-        <div key={n.id} className={`p-3 rounded-xl border ${n.kind === 'status_change' ? 'bg-blue-400/5 border-blue-400/20' : 'bg-slate-50 border-slate-100'}`}>
-          <p className="text-sm text-slate-700">{n.body}</p>
-          <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-1">{n.author} · {new Date(n.createdAt).toLocaleString()}</p>
+    <div className="space-y-3" data-testid="support-timeline">
+      {groups.map((g, gi) => (
+        <div key={`${g.label}-${gi}`} data-testid={`support-timeline-group-${g.label.toLowerCase().replace(/\s+/g, '-')}`}>
+          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 px-1">{g.label}</p>
+          <div className="space-y-2">
+            {g.items.map(n => {
+              const icon = NOTE_KIND_ICON[n.kind || 'internal'] || 'sticky_note_2';
+              return (
+                <div key={n.id} className={`p-3 rounded-xl border flex items-start gap-2.5 ${n.kind === 'status_change' ? 'bg-blue-400/5 border-blue-400/20' : 'bg-slate-50 border-slate-100'}`}>
+                  <span className={`material-symbols-outlined text-base mt-0.5 ${n.kind === 'status_change' ? 'text-blue-700' : 'text-slate-400'}`} title={n.kind || 'internal'}>{icon}</span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-slate-700">{n.body}</p>
+                    <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-1">{n.author} · {new Date(n.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       ))}
     </div>

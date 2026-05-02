@@ -890,3 +890,166 @@ export function deriveTenant360(input: Tenant360Inputs): Tenant360Result {
     notesPreview: input.notes.slice(0, 3),
   };
 }
+
+// ===========================================================================
+// Phase 1.1.2 — Competitive Ops Console Maturity helpers
+// ===========================================================================
+// Strictly additive on Phase 1.1.1. No signature changes to existing exports.
+// All helpers are pure, deterministic, rule-based — no AI, no live checks,
+// no external network call.
+
+// --- Truth label (shared across surfaces) ---------------------------------
+
+export const PHASE_112_TRUTH_LABEL =
+  'Operational state is derived from support, audit, domain, and workflow signals — not infrastructure uptime monitoring.';
+
+// --- Support saved-view counts (queue feel) -------------------------------
+//
+// Mirrors the predicate logic used by SupportToolsPage `applyView` so each
+// chip can render a count badge. We accept the raw view definition + the full
+// support-cases array; we do not consider tenant search or unrelated filters
+// because the chip count should reflect "how many cases match this lens",
+// not how many match the operator's current ad-hoc search.
+
+export function countCasesForSupportView(
+  view: SavedView<SupportViewFilters>,
+  cases: SupportCaseRecord[],
+  now: Date = new Date()
+): number {
+  const f = view.filters;
+  return cases.filter(c => {
+    if (f.status === 'open_group') {
+      if (c.status === 'resolved' || c.status === 'closed') return false;
+    } else if (f.status === 'resolved_group') {
+      if (c.status !== 'resolved' && c.status !== 'closed') return false;
+    } else if (f.status && f.status !== 'all') {
+      if (c.status !== f.status) return false;
+    }
+    if (f.severity && f.severity !== 'all') {
+      if (c.severity !== f.severity) return false;
+    }
+    if (f.sla === 'overdue' || f.sla === 'at_risk') {
+      const s = deriveSlaStatus(c, now).status;
+      if (s !== f.sla) return false;
+    }
+    return true;
+  }).length;
+}
+
+// --- Operational widget metadata (helper text, empty state, click-through) -
+
+export type WidgetId =
+  | 'cases-by-severity'
+  | 'sla-pressure'
+  | 'tenant-risk'
+  | 'audit-by-severity'
+  | 'domain-snapshot'
+  | 'high-risk-stream'
+  | 'escalated-cases'
+  | 'commercial-attention';
+
+export interface WidgetMeta {
+  title: string;
+  helper: string;
+  emptyMessage: string;
+  // Optional whole-widget deep-link (header chevron). Bucket-level deep-links
+  // are handled by `BUCKET_NAVIGATION` so cards can both link the title and
+  // each segment.
+  navigateTo?: string;
+}
+
+export const WIDGET_META: Record<WidgetId, WidgetMeta> = {
+  'cases-by-severity': {
+    title: 'Cases by Severity',
+    helper: 'Open support cases grouped by severity. Click a band to filter the queue.',
+    emptyMessage: 'No open cases in range.',
+    navigateTo: '/owner/support-tools',
+  },
+  'sla-pressure': {
+    title: 'SLA Pressure',
+    helper: 'Derived from each case\'s resolution due time. Click Overdue / At-risk to triage.',
+    emptyMessage: 'No SLA-tracked cases in range.',
+    navigateTo: '/owner/support-tools',
+  },
+  'tenant-risk': {
+    title: 'Tenant Risk Distribution',
+    helper: 'Tenants by derived risk band. Click a band to scan that cohort.',
+    emptyMessage: 'No tenants in this view.',
+  },
+  'audit-by-severity': {
+    title: 'Audit by Severity',
+    helper: 'Audit events grouped by severity. Click a band to open the audit lens.',
+    emptyMessage: 'No audit events in range.',
+    navigateTo: '/owner/audit-security',
+  },
+  'domain-snapshot': {
+    title: 'Domain Snapshot',
+    helper: 'Current domain status counts. Click Failed to investigate.',
+    emptyMessage: 'No domains configured.',
+    navigateTo: '/owner/domains',
+  },
+  'high-risk-stream': {
+    title: 'High-Risk Stream',
+    helper: 'Audit events flagged critical or high-risk in the active range.',
+    emptyMessage: 'No high-risk events in range.',
+    navigateTo: '/owner/audit-security',
+  },
+  'escalated-cases': {
+    title: 'Escalated Cases',
+    helper: 'Open cases manually escalated by an operator.',
+    emptyMessage: 'No escalated cases.',
+    navigateTo: '/owner/support-tools',
+  },
+  'commercial-attention': {
+    title: 'Add-on / Commercial Attention',
+    helper: 'Non-active activations + billing-related cases.',
+    emptyMessage: 'No commercial issues to review.',
+  },
+};
+
+// Distribution bucket → deep link. Keyed by `${widgetId}:${bucketKey}`.
+// Returning undefined means "not navigable" (e.g. healthy/met/info segments
+// where there is nothing to investigate).
+export function bucketNavigateTo(widget: WidgetId, bucketKey: string): string | undefined {
+  if (widget === 'cases-by-severity') {
+    if (bucketKey === 'urgent' || bucketKey === 'high' || bucketKey === 'normal' || bucketKey === 'low')
+      return `/owner/support-tools?severity=${encodeURIComponent(bucketKey)}`;
+  }
+  if (widget === 'sla-pressure') {
+    if (bucketKey === 'overdue' || bucketKey === 'at_risk')
+      return `/owner/support-tools?sla=${encodeURIComponent(bucketKey)}`;
+  }
+  if (widget === 'audit-by-severity') {
+    if (bucketKey === 'warning' || bucketKey === 'critical' || bucketKey === 'notice' || bucketKey === 'info')
+      return `/owner/audit-security?severity=${encodeURIComponent(bucketKey)}`;
+  }
+  if (widget === 'domain-snapshot') {
+    if (bucketKey === 'failed' || bucketKey === 'pending' || bucketKey === 'verifying')
+      return `/owner/domains?status=${encodeURIComponent(bucketKey)}`;
+  }
+  // tenant-risk segments do not have a single canonical filtered destination
+  // in this phase — operators use the Tenant 360 drawer instead.
+  return undefined;
+}
+
+// --- NBA deterministic tier --------------------------------------------------
+
+export type NbaTier = 'p1' | 'p2' | 'p3';
+
+export const NBA_TIER_LABEL: Record<NbaTier, string> = {
+  p1: 'P1',
+  p2: 'P2',
+  p3: 'P3',
+};
+
+export const NBA_TIER_STYLES: Record<NbaTier, string> = {
+  p1: 'bg-red-500/10 text-red-700 border-red-500/30',
+  p2: 'bg-orange-400/10 text-orange-700 border-orange-400/20',
+  p3: 'bg-amber-400/10 text-amber-700 border-amber-400/20',
+};
+
+export function tierForPriority(priority: NbaPriority): NbaTier {
+  if (priority === 'critical') return 'p1';
+  if (priority === 'high') return 'p2';
+  return 'p3';
+}

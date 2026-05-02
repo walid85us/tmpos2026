@@ -806,6 +806,35 @@ const AuditSecurityPage: React.FC = () => {
 
               {drawerTab === 'detail' && (
                 <div className="p-7 space-y-4">
+                  {/* Phase 1.1.2 — actor context block: avatar circle (initials),
+                      role hint, recent-actions count. Reads from the same
+                      derived `actorProfile` so it stays consistent with the
+                      Actor profile tab. */}
+                  {actorProfile && (
+                    <div
+                      data-testid="audit-drawer-actor-context"
+                      className="flex items-center gap-3 p-3 rounded-2xl bg-slate-50 border border-slate-100"
+                    >
+                      <span className="shrink-0 w-10 h-10 rounded-full bg-primary/10 text-primary flex items-center justify-center text-xs font-black uppercase tracking-widest">
+                        {selected.actor.split(/[\s@._-]+/).filter(Boolean).slice(0, 2).map(s => s[0]).join('').toUpperCase() || '?'}
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-bold text-slate-800 truncate">{selected.actor}</p>
+                        <p className="text-[10px] text-slate-500 font-bold mt-0.5">
+                          {actorProfile.total} recent action{actorProfile.total === 1 ? '' : 's'}
+                          {actorProfile.sevBreakdown.critical > 0 && <span className="text-red-700"> · {actorProfile.sevBreakdown.critical} critical</span>}
+                          {actorProfile.sevBreakdown.warning > 0 && <span className="text-amber-700"> · {actorProfile.sevBreakdown.warning} warning</span>}
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => setDrawerTab('actor')}
+                        data-testid="audit-drawer-actor-context-open"
+                        className="shrink-0 text-[10px] font-black uppercase tracking-widest text-primary hover:underline"
+                      >
+                        Profile →
+                      </button>
+                    </div>
+                  )}
                   <Row label="Date" value={selected.date} />
                   <Row label="Actor" value={selected.actor} />
                   <Row label="Target" value={selected.target} />
@@ -849,41 +878,67 @@ const AuditSecurityPage: React.FC = () => {
               )}
 
               {drawerTab === 'related' && (
-                <div className="p-7 space-y-2">
+                <div className="p-7 space-y-3">
                   <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">
                     Related events (same tenant / target / actor)
                   </p>
                   {relatedEvents.length === 0 ? (
                     <p className="text-xs text-slate-400 font-bold py-6 text-center bg-slate-50 rounded-2xl">No related events.</p>
                   ) : (
-                    relatedEvents.map(r => {
-                      const { flag } = deriveHighRiskFlag(r);
-                      return (
-                        <button
-                          key={r.id}
-                          onClick={() => { setSelected(r); setDrawerTab('detail'); }}
-                          className="w-full text-left p-3 bg-slate-50 hover:bg-slate-100 rounded-xl border border-slate-100 transition-colors"
-                        >
-                          <div className="flex justify-between items-start gap-2">
-                            <div className="flex-1 min-w-0">
-                              <p className="text-sm font-bold text-slate-700 truncate">{r.action}</p>
-                              <p className="text-[10px] text-slate-500 font-bold mt-0.5 truncate">{r.target}</p>
-                            </div>
-                            <div className="flex flex-col items-end gap-1">
-                              <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border ${SEVERITY_STYLES[normalizeSeverity(r.severity)]}`}>
-                                {normalizeSeverity(r.severity)}
-                              </span>
-                              {flag && (
-                                <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border ${HIGH_RISK_FLAG_STYLES[flag]}`}>
-                                  {HIGH_RISK_FLAG_LABEL[flag]}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                          <p className="text-[10px] text-slate-400 mt-1">{r.actor} · {r.date}</p>
-                        </button>
-                      );
-                    })
+                    // Phase 1.1.2 — group related events by Today / Yesterday /
+                    // Earlier headers so investigation reads chronologically.
+                    (() => {
+                      const groups: Array<{ label: string; items: typeof relatedEvents }> = [];
+                      const today = new Date();
+                      const yest = new Date(); yest.setDate(yest.getDate() - 1);
+                      const sameDay = (a: Date, b: Date) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+                      const labelFor = (iso: string): string => {
+                        const d = new Date(iso);
+                        if (Number.isNaN(d.getTime())) return 'Earlier';
+                        if (sameDay(d, today)) return 'Today';
+                        if (sameDay(d, yest)) return 'Yesterday';
+                        return 'Earlier';
+                      };
+                      for (const r of relatedEvents) {
+                        const label = labelFor(r.date);
+                        const last = groups[groups.length - 1];
+                        if (last && last.label === label) last.items.push(r);
+                        else groups.push({ label, items: [r] });
+                      }
+                      return groups.map((g, gi) => (
+                        <div key={`${g.label}-${gi}`} data-testid={`audit-related-group-${g.label.toLowerCase()}`} className="space-y-2">
+                          <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 px-1">{g.label} <span className="text-slate-400">· {g.items.length}</span></p>
+                          {g.items.map(r => {
+                            const { flag } = deriveHighRiskFlag(r);
+                            return (
+                              <button
+                                key={r.id}
+                                onClick={() => { setSelected(r); setDrawerTab('detail'); }}
+                                className="w-full text-left p-3 bg-slate-50 hover:bg-slate-100 rounded-xl border border-slate-100 transition-colors"
+                              >
+                                <div className="flex justify-between items-start gap-2">
+                                  <div className="flex-1 min-w-0">
+                                    <p className="text-sm font-bold text-slate-700 truncate">{r.action}</p>
+                                    <p className="text-[10px] text-slate-500 font-bold mt-0.5 truncate">{r.target}</p>
+                                  </div>
+                                  <div className="flex flex-col items-end gap-1">
+                                    <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border ${SEVERITY_STYLES[normalizeSeverity(r.severity)]}`}>
+                                      {normalizeSeverity(r.severity)}
+                                    </span>
+                                    {flag && (
+                                      <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border ${HIGH_RISK_FLAG_STYLES[flag]}`}>
+                                        {HIGH_RISK_FLAG_LABEL[flag]}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                                <p className="text-[10px] text-slate-400 mt-1">{r.actor} · {r.date}</p>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ));
+                    })()
                   )}
                 </div>
               )}

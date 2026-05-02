@@ -64,6 +64,14 @@ import {
   type DistributionBucket,
   type NextBestAction,
   type Tenant360Result,
+  // Phase 1.1.2 — competitive maturity helpers (additive).
+  WIDGET_META,
+  bucketNavigateTo,
+  tierForPriority,
+  NBA_TIER_LABEL,
+  NBA_TIER_STYLES,
+  PHASE_112_TRUTH_LABEL,
+  type WidgetId,
 } from './platformOpsDerive';
 import { pushPlatformAudit } from './platformOpsAudit';
 
@@ -621,6 +629,19 @@ const CommandCenterPage: React.FC = () => {
                     {overall.signals.join(' · ')}
                   </p>
                 )}
+                {/* Phase 1.1.2 — "what needs attention now" rollup.
+                    Pulled from focused* slices so it respects focus mode. */}
+                <div
+                  data-testid="mission-control-rollup"
+                  className="mt-3 flex items-center gap-3 flex-wrap text-[11px] font-bold text-slate-600"
+                >
+                  <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Now:</span>
+                  <RollupChip label="Open" value={focusedCases.filter(c => c.status !== 'resolved' && c.status !== 'closed').length} tone="info" />
+                  <RollupChip label="Overdue" value={focusedCases.filter(c => deriveSlaStatus(c).status === 'overdue').length} tone="critical" />
+                  <RollupChip label="Escalated" value={focusedCases.filter(c => c.escalated === true && c.status !== 'resolved' && c.status !== 'closed').length} tone="critical" />
+                  <RollupChip label="High-risk audits" value={focusedAudits.filter(a => { const f = deriveHighRiskFlag(a).flag; return f === 'critical' || f === 'high_risk'; }).length} tone="warn" />
+                  <RollupChip label="Domain issues" value={focusedDomains.filter(d => d.status === 'failed' || d.status === 'pending' || d.status === 'verifying').length} tone="warn" />
+                </div>
               </div>
             </div>
 
@@ -681,15 +702,17 @@ const CommandCenterPage: React.FC = () => {
             </div>
           )}
 
-          <p className="text-[11px] font-medium text-slate-500">
+          {/* Phase 1.1.2 — visible truth label (verbatim, shared across surfaces). */}
+          <p
+            data-testid="mission-control-truth"
+            className="text-[11px] font-medium text-slate-500 border-t border-slate-200/70 pt-3"
+          >
             {focusMode === 'normal' && (
               <>
                 {FOCUS_MODE_DESCRIPTION[focusMode]}{' '}
               </>
             )}
-            <span className="text-slate-400">
-              All values are derived from in-session signals — no live infrastructure or AI.
-            </span>
+            <span className="text-slate-400">{PHASE_112_TRUTH_LABEL}</span>
           </p>
         </div>
       </section>
@@ -739,19 +762,14 @@ const CommandCenterPage: React.FC = () => {
           )}
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-          <DistributionWidget title="Cases by Severity" hint="Open support cases grouped by severity." buckets={widgets.casesBySeverity} testId="widget-cases-by-severity" />
-          <DistributionWidget title="SLA Pressure" hint="Derived from each case's resolution due time." buckets={widgets.slaPressure} testId="widget-sla-pressure" />
-          <DistributionWidget title="Tenant Risk Distribution" hint="Tenants by derived risk band." buckets={widgets.tenantRisk} testId="widget-tenant-risk" />
-          <DistributionWidget title="Audit by Severity" hint={`Audit events in ${TIME_RANGE_LABEL[timeRange].toLowerCase()}.`} buckets={widgets.auditsBySeverity} testId="widget-audit-by-severity" />
-          <DistributionWidget title="Domain Snapshot" hint="Current domain status counts." buckets={widgets.domainsByStatus} testId="widget-domain-snapshot" />
+          <DistributionWidget widgetId="cases-by-severity" buckets={widgets.casesBySeverity} testId="widget-cases-by-severity" />
+          <DistributionWidget widgetId="sla-pressure" buckets={widgets.slaPressure} testId="widget-sla-pressure" />
+          <DistributionWidget widgetId="tenant-risk" buckets={widgets.tenantRisk} testId="widget-tenant-risk" />
+          <DistributionWidget widgetId="audit-by-severity" buckets={widgets.auditsBySeverity} testId="widget-audit-by-severity" />
+          <DistributionWidget widgetId="domain-snapshot" buckets={widgets.domainsByStatus} testId="widget-domain-snapshot" />
 
           {/* High-risk audit stream */}
-          <ListWidget
-            title="High-Risk Stream"
-            hint="Audit events flagged critical or high-risk."
-            empty="No high-risk events in range."
-            testId="widget-high-risk-stream"
-          >
+          <ListWidget widgetId="high-risk-stream" testId="widget-high-risk-stream">
             {highRiskStream.map(({ a, flag }) => (
               <li key={a.id} className="py-2 first:pt-0 last:pb-0 border-b border-slate-100 last:border-0 flex items-start justify-between gap-2">
                 <div className="min-w-0">
@@ -770,12 +788,7 @@ const CommandCenterPage: React.FC = () => {
           </ListWidget>
 
           {/* Escalated cases */}
-          <ListWidget
-            title="Escalated Cases"
-            hint="Open cases manually escalated by an operator."
-            empty={focusMode === 'normal' ? 'No escalated cases.' : 'No incident-level items in this mode.'}
-            testId="widget-escalated-cases"
-          >
+          <ListWidget widgetId="escalated-cases" testId="widget-escalated-cases">
             {focusedEscalatedCases.map(c => (
               <li key={c.id} className="py-2 first:pt-0 last:pb-0 border-b border-slate-100 last:border-0 flex items-start justify-between gap-2">
                 <div className="min-w-0">
@@ -793,12 +806,7 @@ const CommandCenterPage: React.FC = () => {
           </ListWidget>
 
           {/* Add-on / Commercial Attention */}
-          <ListWidget
-            title="Add-on / Commercial Attention"
-            hint="Non-active activations + billing-related cases."
-            empty="No commercial issues to review."
-            testId="widget-commercial-attention"
-          >
+          <ListWidget widgetId="commercial-attention" testId="widget-commercial-attention">
             {commercialAttention.map(item => (
               <li key={item.id} className="py-2 first:pt-0 last:pb-0 border-b border-slate-100 last:border-0 flex items-start justify-between gap-2">
                 <div className="min-w-0">
@@ -812,13 +820,15 @@ const CommandCenterPage: React.FC = () => {
         </div>
       </section>
 
-      {/* ============== NEXT BEST ACTIONS ============== */}
+      {/* ============== NEXT BEST ACTIONS (Phase 1.1.2 — tiered) ============== */}
       <section className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
         <div className="px-8 py-5 border-b border-slate-100 flex items-center justify-between flex-wrap gap-2">
           <div>
             <h3 className="text-lg font-black text-primary tracking-tight">Next Best Actions</h3>
             <p className="text-xs text-slate-500 font-medium">
-              Deterministic rule-based recommendations — no AI. Each action links to its source surface.
+              Deterministic rule-based recommendations
+              <span className="ml-1 px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-slate-200 text-[9px] font-black uppercase tracking-widest">Rule-based · not AI</span>
+              <span className="ml-2">Each action links to its source surface.</span>
             </p>
           </div>
           <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">
@@ -826,27 +836,38 @@ const CommandCenterPage: React.FC = () => {
           </span>
         </div>
         {nba.length === 0 ? (
-          <div className="p-12 text-center text-slate-400 text-sm font-bold">No recommended actions right now.</div>
+          <div className="p-12 text-center text-slate-400 text-sm font-bold" data-testid="next-best-actions-empty">
+            {focusMode === 'normal'
+              ? 'No recommended actions right now.'
+              : `No actions surface in ${FOCUS_MODE_LABEL[focusMode]} mode — try Normal to see all signals.`}
+          </div>
         ) : (
           <ul className="divide-y divide-slate-100" data-testid="next-best-actions">
-            {nba.slice(0, 12).map(action => (
-              <li key={action.id} className="px-8 py-4 flex items-center justify-between gap-4 hover:bg-slate-50/70">
-                <div className="flex items-start gap-3 min-w-0">
-                  <span className={`shrink-0 px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${PRIORITY_STYLES[action.priority]}`}>
-                    {action.priority}
-                  </span>
-                  <div className="min-w-0">
-                    <p className="text-sm font-bold text-slate-900 truncate">{action.title}</p>
-                    <p className="text-xs text-slate-500 truncate">
-                      {action.tenant ? `${action.tenant} · ` : ''}{action.reason}
-                    </p>
+            {nba.slice(0, 12).map(action => {
+              const tier = tierForPriority(action.priority);
+              return (
+                <li key={action.id} className="px-8 py-4 flex items-center justify-between gap-4 hover:bg-slate-50/70" data-testid={`nba-row-${action.id}`}>
+                  <div className="flex items-start gap-3 min-w-0">
+                    <span
+                      data-testid={`nba-tier-${action.id}`}
+                      title={`Tier ${NBA_TIER_LABEL[tier]} (priority: ${action.priority})`}
+                      className={`shrink-0 inline-flex items-center justify-center w-9 h-9 text-xs font-black uppercase tracking-widest rounded-xl border-2 ${NBA_TIER_STYLES[tier]}`}
+                    >
+                      {NBA_TIER_LABEL[tier]}
+                    </span>
+                    <div className="min-w-0">
+                      <p className="text-sm font-bold text-slate-900 truncate">{action.title}</p>
+                      <p className="text-xs text-slate-500 truncate">
+                        {action.tenant ? `${action.tenant} · ` : ''}{action.reason}
+                      </p>
+                    </div>
                   </div>
-                </div>
-                <Link to={action.href} className="shrink-0 px-3 py-1.5 text-[10px] font-black uppercase tracking-widest bg-white text-slate-600 border border-slate-200 rounded-xl hover:bg-primary/5 hover:text-primary transition-colors">
-                  {action.ctaLabel}
-                </Link>
-              </li>
-            ))}
+                  <Link to={action.href} className="shrink-0 px-3 py-1.5 text-[10px] font-black uppercase tracking-widest bg-white text-slate-600 border border-slate-200 rounded-xl hover:bg-primary/5 hover:text-primary transition-colors">
+                    {action.ctaLabel}
+                  </Link>
+                </li>
+              );
+            })}
           </ul>
         )}
       </section>
@@ -1161,30 +1182,63 @@ const PulseCard: React.FC<{
   );
 };
 
+// Phase 1.1.2 — small chip used by the Mission Control "what needs attention now" rollup.
+const ROLLUP_TONE: Record<'info' | 'warn' | 'critical', string> = {
+  info: 'bg-slate-100 text-slate-700 border-slate-200',
+  warn: 'bg-amber-400/10 text-amber-700 border-amber-400/20',
+  critical: 'bg-red-500/10 text-red-700 border-red-500/30',
+};
+const RollupChip: React.FC<{ label: string; value: number; tone: 'info' | 'warn' | 'critical' }> = ({ label, value, tone }) => (
+  <span
+    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10px] font-black uppercase tracking-widest ${value > 0 ? ROLLUP_TONE[tone] : 'bg-slate-50 text-slate-400 border-slate-200'}`}
+    title={`${label}: ${value}`}
+    data-testid={`mission-rollup-${label.toLowerCase().replace(/\s+/g, '-')}`}
+  >
+    <span>{label}</span>
+    <span className="font-black">{value}</span>
+  </span>
+);
+
+// Phase 1.1.2 — DistributionWidget: now takes a widgetId and uses
+// `WIDGET_META` for title/helper/empty + `bucketNavigateTo` so each bucket can
+// deep-link to its filtered surface (e.g. severity → support queue, severity →
+// audit lens). Header shows an "Open all" link when a navigateTo exists.
 const DistributionWidget: React.FC<{
-  title: string;
-  hint: string;
+  widgetId: WidgetId;
   buckets: DistributionBucket[];
   testId: string;
-}> = ({ title, hint, buckets, testId }) => {
+}> = ({ widgetId, buckets, testId }) => {
+  const meta = WIDGET_META[widgetId];
   const total = buckets.reduce((s, b) => s + b.value, 0);
   return (
     <div className="bg-white/80 backdrop-blur-xl rounded-3xl border border-slate-200 shadow-sm p-5" data-testid={testId}>
-      <div className="flex items-start justify-between mb-2">
-        <div>
-          <h4 className="text-sm font-black text-primary tracking-tight">{title}</h4>
-          <p className="text-[11px] text-slate-500 mt-0.5">{hint}</p>
+      <div className="flex items-start justify-between mb-2 gap-2">
+        <div className="min-w-0">
+          <h4 className="text-sm font-black text-primary tracking-tight">{meta.title}</h4>
+          <p className="text-[11px] text-slate-500 mt-0.5 leading-snug">{meta.helper}</p>
         </div>
-        <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">{total}</span>
+        <div className="flex flex-col items-end gap-1 shrink-0">
+          <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">{total}</span>
+          {meta.navigateTo && total > 0 && (
+            <Link
+              to={meta.navigateTo}
+              data-testid={`${testId}-open-all`}
+              className="text-[10px] font-black uppercase tracking-widest text-primary hover:underline"
+            >
+              Open →
+            </Link>
+          )}
+        </div>
       </div>
       {total === 0 ? (
-        <p className="text-xs text-slate-400 italic mt-4">No data in range.</p>
+        <p className="text-xs text-slate-400 italic mt-4" data-testid={`${testId}-empty`}>{meta.emptyMessage}</p>
       ) : (
         <ul className="space-y-2 mt-3">
           {buckets.map(b => {
             const pct = total ? Math.round((b.value / total) * 100) : 0;
-            return (
-              <li key={b.key} className="text-xs">
+            const navTo = b.value > 0 ? bucketNavigateTo(widgetId, b.key) : undefined;
+            const inner = (
+              <>
                 <div className="flex items-center justify-between mb-1">
                   <span className={`font-bold ${TONE_TEXT[b.tone]}`}>{b.label}</span>
                   <span className="font-bold text-slate-700">{b.value} <span className="text-slate-400 font-medium">· {pct}%</span></span>
@@ -1192,6 +1246,21 @@ const DistributionWidget: React.FC<{
                 <div className="h-1.5 rounded-full bg-slate-100 overflow-hidden">
                   <div className={`h-full ${TONE_BAR[b.tone]} rounded-full transition-all`} style={{ width: `${pct}%` }} />
                 </div>
+              </>
+            );
+            return (
+              <li key={b.key} className="text-xs">
+                {navTo ? (
+                  <Link
+                    to={navTo}
+                    data-testid={`${testId}-bucket-${b.key}`}
+                    className="block rounded-lg -mx-1 px-1 py-1 hover:bg-primary/5 transition-colors"
+                  >
+                    {inner}
+                  </Link>
+                ) : (
+                  <div data-testid={`${testId}-bucket-${b.key}`}>{inner}</div>
+                )}
               </li>
             );
           })}
@@ -1202,21 +1271,31 @@ const DistributionWidget: React.FC<{
 };
 
 const ListWidget: React.FC<{
-  title: string;
-  hint: string;
-  empty: string;
+  widgetId: WidgetId;
   testId: string;
   children: React.ReactNode;
-}> = ({ title, hint, empty, testId, children }) => {
+}> = ({ widgetId, testId, children }) => {
+  const meta = WIDGET_META[widgetId];
   const arr = React.Children.toArray(children);
   return (
     <div className="bg-white/80 backdrop-blur-xl rounded-3xl border border-slate-200 shadow-sm p-5" data-testid={testId}>
-      <div className="mb-3">
-        <h4 className="text-sm font-black text-primary tracking-tight">{title}</h4>
-        <p className="text-[11px] text-slate-500 mt-0.5">{hint}</p>
+      <div className="mb-3 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <h4 className="text-sm font-black text-primary tracking-tight">{meta.title}</h4>
+          <p className="text-[11px] text-slate-500 mt-0.5 leading-snug">{meta.helper}</p>
+        </div>
+        {meta.navigateTo && arr.length > 0 && (
+          <Link
+            to={meta.navigateTo}
+            data-testid={`${testId}-open-all`}
+            className="shrink-0 text-[10px] font-black uppercase tracking-widest text-primary hover:underline"
+          >
+            Open →
+          </Link>
+        )}
       </div>
       {arr.length === 0 ? (
-        <p className="text-xs text-slate-400 italic">{empty}</p>
+        <p className="text-xs text-slate-400 italic" data-testid={`${testId}-empty`}>{meta.emptyMessage}</p>
       ) : (
         <ul className="text-xs">{children}</ul>
       )}
@@ -1274,13 +1353,13 @@ const Tenant360Drawer: React.FC<{ t: Tenant360Result; onClose: () => void }> = (
         })}
       </Tenant360Block>
 
-      {t.overdueOrAtRiskCases.length > 0 && (
-        <Tenant360Block title={`SLA Pressure (${t.overdueOrAtRiskCases.length})`} empty="No SLA pressure.">
-          {t.overdueOrAtRiskCases.map(c => (
-            <li key={c.id} className="py-1.5 border-b border-slate-100 last:border-0 text-xs text-slate-600 truncate">{c.subject} — {deriveSlaStatus(c).label}</li>
-          ))}
-        </Tenant360Block>
-      )}
+      {/* Phase 1.1.2 — render unconditionally so the truthful empty-state
+          ("No SLA pressure.") shows when the tenant has none. */}
+      <Tenant360Block title={`SLA Pressure (${t.overdueOrAtRiskCases.length})`} empty="No SLA pressure.">
+        {t.overdueOrAtRiskCases.map(c => (
+          <li key={c.id} className="py-1.5 border-b border-slate-100 last:border-0 text-xs text-slate-600 truncate">{c.subject} — {deriveSlaStatus(c).label}</li>
+        ))}
+      </Tenant360Block>
 
       <Tenant360Block title={`Recent Audit Events (${t.recentAudits.length})`} empty="No recent audit events.">
         {t.recentAudits.map(a => {
@@ -1307,16 +1386,35 @@ const Tenant360Drawer: React.FC<{ t: Tenant360Result; onClose: () => void }> = (
         ))}
       </Tenant360Block>
 
-      <div className="pt-4 border-t border-slate-100">
+      {/* Phase 1.1.2 — Quick Links: jump straight to filtered Audit + Support
+          for this tenant so the operator does not page-hop. */}
+      <div className="pt-4 border-t border-slate-100" data-testid="tenant360-quick-links">
+        <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Quick Links</p>
+        <div className="grid grid-cols-2 gap-2">
+          <Link
+            to={`/owner/audit-security?tenant=${encodeURIComponent(t.tenantId)}`}
+            onClick={onClose}
+            className="text-center px-3 py-2 text-[10px] font-black uppercase tracking-widest bg-white text-slate-700 border border-slate-200 rounded-xl hover:bg-primary/5 hover:text-primary hover:border-primary/30 transition-colors"
+          >
+            Audit (this tenant)
+          </Link>
+          <Link
+            to={`/owner/support-tools?tenant=${encodeURIComponent(t.tenantId)}`}
+            onClick={onClose}
+            className="text-center px-3 py-2 text-[10px] font-black uppercase tracking-widest bg-white text-slate-700 border border-slate-200 rounded-xl hover:bg-primary/5 hover:text-primary hover:border-primary/30 transition-colors"
+          >
+            Support (this tenant)
+          </Link>
+        </div>
         <Link
           to={`/owner/tenants/${t.tenantId}`}
           onClick={onClose}
-          className="inline-block w-full text-center px-4 py-2.5 text-xs font-black uppercase tracking-widest bg-primary text-white rounded-xl hover:bg-primary/90"
+          className="block mt-2 w-full text-center px-4 py-2.5 text-xs font-black uppercase tracking-widest bg-primary text-white rounded-xl hover:bg-primary/90"
         >
           Open full tenant page
         </Link>
       </div>
-      <p className="text-[10px] text-slate-400 text-center">All values are derived in-session — not live.</p>
+      <p className="text-[10px] text-slate-400 text-center">{PHASE_112_TRUTH_LABEL}</p>
     </div>
   </div>
 );

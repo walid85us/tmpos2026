@@ -1,0 +1,598 @@
+Platform Operations & Security — Phase 1.1.2 Competitive Ops Console Maturity Review + UX Completion
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is Phase 1.1.2 of the Platform Operations & Security roadmap.
+
+This is NOT an escalation-only pass.
+
+This is a broader competitive benchmark + maturity completion pass for the entire Phase 1.1.1 operational experience:
+
+1) Mission Control / Command Center
+2) Operational pulse + interactive widgets
+3) Focus modes
+4) Next Best Actions
+5) Tenant 360
+6) Audit & Security
+7) Support Tools
+8) SLA / macros / escalation / timeline as part of Support Tools
+
+Do not implement Phase 1.2, Phase 1.3, Phase 1.4, Phase 2, Phase 3, or Phase 4.
+Do not implement real DNS/SSL checks.
+Do not implement real SSO/SCIM.
+Do not implement external notifications.
+Do not implement Slack/Teams/PagerDuty/email/SMS integrations.
+Do not implement compliance evidence center.
+Do not implement AI/ML prediction.
+Do not implement real infrastructure uptime monitoring.
+
+This phase should make the current Phase 1.1.1 experience feel much more like a mature SaaS platform operations console.
+
+==================================================
+ROLE STACK — ADD TO PROJECT KNOWLEDGE / SKILLS
+==================================================
+
+Before implementation, add this workstream role model to project knowledge / skills and act on it.
+
+Do not treat these roles as decorative text.
+Use them to guide product design, architecture, interaction design, data derivation, visual hierarchy, safety, auditability, QA, and non-regression decisions.
+
+Primary roles:
+- Senior Platform Operations Architect
+- Senior SaaS Command Center Architect
+- Senior Audit & Security Engineer and Architect
+- Senior Support Tools Engineer
+- Senior Incident / Escalation Workflow Architect
+- Senior Operations UX / Dashboard Systems Designer
+- Senior Multi-Tenant Risk Visualization Architect
+- Senior React/TypeScript Interaction Engineer
+- Senior Security-by-Default Architect
+- QA Gatekeeper
+- Systems Thinker
+- Side Auditor
+
+Awareness roles for future phases:
+- Senior Platform Settings Architect
+- Senior Domains Engineer
+- Senior Platform Team Governance Leader
+- Senior Automation + Alerts / IaC Architect
+- Senior Real Integrations Architect for SSO, SCIM, DNS, SSL, and notification systems
+- Senior Compliance & Evidence Architect
+- Senior Predictive / AI Operations Architect
+
+Core responsibility:
+Make Phase 1.1.1 feel like a real operations console, not a collection of static cards.
+
+==================================================
+BENCHMARK / COMPETITOR RESEARCH REQUIREMENT
+==================================================
+
+Before coding, perform a short benchmark review.
+
+If browsing/web search is available:
+Review public patterns from best-in-class operations, support, audit, and incident platforms:
+
+1) Datadog
+Focus:
+- dashboard widgets
+- time-range controls
+- event/list widgets
+- widget click-through
+- operational visual hierarchy
+
+2) PagerDuty
+Focus:
+- incident operations
+- escalation policies
+- acknowledgement
+- incident roles
+- response lifecycle
+- operations urgency
+
+3) Zendesk
+Focus:
+- support ticket views
+- SLA badges
+- macros/templates
+- automations
+- support queues
+- internal notes
+
+4) Atlassian / Jira Service Management / Atlassian Administration
+Focus:
+- audit logs
+- filters
+- audit details
+- export
+- organization activity tracking
+- service queues if useful
+
+5) Freshservice / Freshdesk, ServiceNow, Vercel, or similar SaaS admin platforms if useful
+Focus:
+- modern admin console patterns
+- support operations
+- security/admin audit surfaces
+- domain/platform admin controls
+
+Do not copy proprietary code.
+Use the benchmark to extract product patterns.
+
+Document a concise “Phase 1.1.2 Benchmark Patterns Considered” note in replit.md.
+
+If browsing is unavailable:
+- state browsing unavailable
+- proceed using SaaS operations and ITSM best practices
+- still document the design rationale in replit.md
+
+==================================================
+CURRENT QA CONTEXT
+==================================================
+
+Phase 1.1.1 QA mostly passed, but final acceptance is still blocked because the experience can be stronger.
+
+Current QA notes:
+- Mission Control header exists but should feel stronger.
+- Focus mode now works, but should be evaluated against mature ops-console patterns.
+- Operational pulse items now work, but should feel like real operational controls.
+- Audit saved views improved, but should be benchmarked against mature audit/security consoles.
+- Support SLA badges, macro UX, escalation UX, related entities, and timeline should be reviewed against mature support tools.
+- Escalation should be part of the Support Tools maturity review, not the only focus.
+
+==================================================
+LOCKED / DO-NOT-TOUCH WORKSTREAMS
+==================================================
+
+Do not modify or regress:
+
+- Shipping Module / Shipping Center behavior
+- Add-on Governance and Implementation Readiness rules
+- Plans & Features Matrix source-of-truth behavior
+- Tenant Features commercial-entitlement rules
+- Store Permissions Matrix entitlement behavior
+- POS
+- Repairs
+- Inventory
+- Customers
+- Invoices
+- Services
+- Tenant provisioning
+- Paid Override invoice workflow
+- Server PII log-scrubbing behavior
+- Domains manual verification truth labels
+- Platform Settings truth labels
+- Platform Team Management directory-only truth labels
+
+Any interaction with these areas must be read-only unless explicitly scoped.
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Review and improve Phase 1.1.1 across all major surfaces so it feels modern, dynamic, interactive, and operationally mature.
+
+The System Owner should immediately understand:
+
+- What needs attention?
+- What is getting worse?
+- What is overdue?
+- Which tenant is most at risk?
+- Which audit/security event should be reviewed?
+- Which support case needs escalation/acknowledgement?
+- Which widget or pulse item can take me to the right place?
+- What is the next operational action?
+
+Use deterministic, transparent, rule-based operational intelligence.
+
+Do not implement AI in this pass.
+
+==================================================
+PART A — MISSION CONTROL / COMMAND CENTER MATURITY
+==================================================
+
+Review the current Mission Control header against mature SaaS operations-console patterns.
+
+Improve as needed.
+
+Required:
+- stronger top-level visual hierarchy
+- clearer platform state panel
+- stronger “what needs attention now” summary
+- last refreshed timestamp
+- refresh button
+- active time range
+- active focus mode
+- operational truth label
+- clear separation between:
+  - platform state
+  - operational workload
+  - risk
+  - next actions
+
+The header should feel like the System Owner’s operating cockpit.
+
+Do not claim infrastructure uptime monitoring.
+
+Truth label remains:
+“Operational state is derived from support, audit, domain, and workflow signals — not infrastructure uptime monitoring.”
+
+==================================================
+PART B — FOCUS MODES + OPERATIONAL PULSE MATURITY
+==================================================
+
+Review focus modes and pulse items against operations-console patterns.
+
+Focus modes:
+- Normal
+- Watch
+- Incident Review
+
+Required:
+- mode change must visibly affect prioritization/filtering
+- mode explanation must be visible
+- empty states must be clear
+- Watch should emphasize at-risk/warning/overdue/escalated signals
+- Incident Review should emphasize critical/overdue/escalated/high-risk signals
+
+Operational pulse:
+- pulse items must be clickable
+- active pulse filter state should be clear
+- clear/reset should be available when filtering
+- pulse item should explain what it is counting
+- pulse item click should navigate/filter/open detail consistently
+
+Review and improve:
+- click-through behavior
+- active state
+- helper text
+- hover state
+- visual priority
+- consistency with widgets and Needs Attention
+
+==================================================
+PART C — INTERACTIVE WIDGET GRID MATURITY
+==================================================
+
+Review the widget grid against Datadog-style operational dashboard principles.
+
+Widgets should feel like operational tools, not static cards.
+
+Required:
+- Support Cases by Severity
+- SLA Pressure
+- Tenant Risk Distribution
+- Audit Events by Severity
+- Domain Status Snapshot
+- Recent High-Risk Event Stream
+- Escalated Cases
+- Add-on / Commercial Attention where data is available
+
+Improve where needed:
+- visual hierarchy
+- distribution bars/charts
+- click-through
+- empty states
+- helper text
+- active filters
+- consistent colors/badges
+- time-range behavior
+- focus-mode behavior
+
+Do not add a heavy charting dependency unless already available and appropriate.
+
+==================================================
+PART D — NEXT BEST ACTIONS MATURITY
+==================================================
+
+Review Next Best Actions.
+
+It should feel like deterministic operational guidance, not a random list.
+
+Required:
+- priority ordering
+- reason
+- related tenant/entity
+- action label
+- click-through
+- empty state
+- clearly rule-based, not AI
+
+Improve rules where needed:
+- overdue critical support cases first
+- unacknowledged escalations
+- escalated cases
+- critical/high-risk audit events
+- failed domains
+- at-risk SLA
+- tenant risk issues
+- add-on readiness/commercial blockers if safely available
+
+No automated action execution.
+Navigation/review only.
+
+==================================================
+PART E — TENANT 360 MATURITY
+==================================================
+
+Review Tenant 360 against mature admin-console drill-down patterns.
+
+Improve as needed:
+- tenant summary
+- plan/status
+- risk score/status
+- risk reasons
+- open support cases
+- SLA pressure
+- recent audit events
+- domain issues
+- add-on/commercial warnings
+- quick links
+- clear empty states
+- consistent labels with Command Center / Support / Audit
+
+Tenant 360 should reduce cognitive load and avoid forcing the System Owner to jump across five pages.
+
+Do not modify Tenant Detail itself.
+
+==================================================
+PART F — AUDIT & SECURITY MATURITY
+==================================================
+
+Review Audit & Security against audit/admin consoles.
+
+Improve as needed:
+- saved views should feel like operational lenses, not basic chips
+- saved views should show counts where practical
+- active state must be obvious
+- filter bar should feel like an audit command bar
+- high-risk flags should be clear and deterministic
+- related timeline should be easy to scan
+- actor context should be easy to scan
+- linked case badge/action should be easy to find
+- CSV export must remain available and working
+
+Audit patterns to consider:
+- organization audit activity logs
+- filtered activity search
+- detailed side panel
+- export
+- category/severity filters
+- actor-focused investigation context
+
+Do not expose secrets, API keys, or raw payloads.
+
+==================================================
+PART G — SUPPORT TOOLS MATURITY
+==================================================
+
+Review Support Tools against Zendesk/Freshdesk/Jira Service Management/PagerDuty-style support operations patterns.
+
+Improve as needed across all support sections, not escalation only.
+
+1) SLA UX
+- SLA badge/status must be highly scannable
+- due/remaining/overdue context should be visible where available
+- unknown must be honest
+- overdue/at-risk must stand out
+
+2) Saved support views
+- views should feel like queues
+- views should show counts where practical
+- active queue state should be clear
+- Overdue / Critical / Waiting / Escalated should be easy to access
+
+3) Macros/templates
+- preview before insert where practical
+- internal-only label remains visible
+- selected macro title and body preview
+- insert only into internal note/draft
+- no external message sent
+
+4) Escalation
+Escalation should be reviewed as part of support workflow maturity.
+
+Improve if needed:
+- escalation status
+- reason
+- owner/team
+- level
+- acknowledged/review state if practical
+- escalation age
+- de-escalation
+- timeline/audit
+- Command Center visibility
+
+Do not implement external notifications or PagerDuty integration.
+
+5) Case detail
+- clearer case header
+- SLA section
+- escalation section
+- tenant health
+- related entities
+- notes/macros
+- timeline
+- action buttons
+
+6) Timeline
+- visually grouped events
+- clear event types
+- status/severity/assignment/note/escalation actions
+- easy scanning
+
+==================================================
+PART H — CROSS-SURFACE CONSISTENCY
+==================================================
+
+Ensure Command Center, Audit & Security, and Support Tools share:
+
+- severity labels
+- risk labels
+- SLA labels
+- tenant names
+- case IDs
+- audit event IDs
+- high-risk rules
+- colors/badges
+- empty-state language
+- truth labels
+
+Use or extend:
+- src/owner/platformOpsDerive.ts
+
+Avoid duplicated inconsistent logic.
+
+==================================================
+PART I — AUDITABILITY
+==================================================
+
+Audit meaningful actions only.
+
+Maintain or add audit for:
+- Command Center quick actions
+- Next Best Action clicked if already implemented
+- audit CSV export
+- support case created from audit event
+- support macro inserted
+- support case status/severity/assignment changes
+- support escalation/de-escalation
+- support note added
+- security note actions
+
+Do not create noisy audit spam for passive viewing/hovering.
+
+==================================================
+PART J — NON-REGRESSION
+==================================================
+
+Preserve:
+- Command Center existing functionality
+- Needs Attention links
+- Tenant 360
+- Next Best Actions
+- Audit CSV export
+- Create support case from audit event
+- Support case detail
+- Support saved views
+- Macros/templates internal-only behavior
+- Escalation/de-escalation behavior
+- Security note delete confirmation
+- Add-on Governance
+- Shipping
+- Store Permissions Matrix
+- Tenant provisioning
+- Server PII logging rules
+
+==================================================
+PART K — DOCUMENTATION
+==================================================
+
+Update replit.md with:
+
+- Phase 1.1.2 Competitive Ops Console Maturity Review
+- benchmark patterns considered
+- what was improved across:
+  - Mission Control
+  - focus modes
+  - pulse items
+  - widgets
+  - Next Best Actions
+  - Tenant 360
+  - Audit & Security
+  - Support Tools
+- truthful limitations
+- out-of-scope items
+- non-regression commitments
+
+Do not rewrite the roadmap.
+
+==================================================
+OUT OF SCOPE
+==================================================
+
+Do NOT implement:
+- real infrastructure uptime monitoring
+- real DNS checks
+- real SSL checks
+- domain lifecycle deep work from Phase 1.2
+- Platform Settings registry/change-control from Phase 1.2
+- Team Governance/PIM/PAM from Phase 1.3
+- Automation + Alerts from Phase 1.4
+- external notifications
+- SSO/SCIM
+- PagerDuty/Slack/Teams/email/SMS integration
+- compliance evidence center
+- AI/ML prediction
+- tenant-facing support portal
+- Stripe/payment processor
+- customer storefront billing
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Benchmark/research notes are documented.
+2) Mission Control feels more mature and operational.
+3) Focus modes visibly change operational context.
+4) Pulse items are interactive and useful.
+5) Widget grid feels more like an operational dashboard.
+6) Widgets have click-through, helper text, and truthful empty states.
+7) Next Best Actions feel deterministic and useful.
+8) Tenant 360 reduces cross-page hunting.
+9) Audit & Security saved views feel like operational lenses.
+10) Audit investigation context is easier to scan.
+11) Support SLA UX is materially improved.
+12) Support saved views feel like queues.
+13) Support macro/template UX is materially improved.
+14) Support escalation UX is evaluated and improved as part of the broader support workflow.
+15) Support case detail and timeline are easier to scan.
+16) Cross-surface terminology and derivation remain consistent.
+17) Existing Add-on Governance remains intact.
+18) Existing Shipping Module remains intact.
+19) Existing Store Permissions Matrix remains intact.
+20) Existing tenant provisioning remains intact.
+21) Server PII logging rules are not regressed.
+22) Future phases remain out of scope.
+23) replit.md is updated.
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this order:
+
+1) Benchmark / architecture review
+2) Inspect current Phase 1.1.1 implementation
+3) Identify gaps across all sections, not escalation only
+4) Extend shared derivation helpers only where needed
+5) Improve Mission Control
+6) Improve focus modes and pulse interactions
+7) Improve widgets
+8) Improve Next Best Actions
+9) Improve Tenant 360
+10) Improve Audit & Security
+11) Improve Support Tools including SLA, macros, escalation, detail, timeline
+12) Preserve all accepted behavior
+13) Update documentation
+14) Run typecheck/smoke tests
+15) Provide final implementation report
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Benchmark / Competitor Patterns Reviewed
+3. Mission Control + Focus Mode Improvements
+4. Operational Pulse + Widget Improvements
+5. Next Best Actions + Tenant 360 Improvements
+6. Audit & Security Improvements
+7. Support Tools Improvements
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes
