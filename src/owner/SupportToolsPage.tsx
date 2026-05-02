@@ -10,6 +10,8 @@ import {
   type SupportCaseStatus,
   type SupportCaseSeverity,
   type SupportCaseNote,
+  type SupportCaseEscalationEntry,
+  type SupportCaseAssignmentEntry,
   type SupportMacro,
 } from './mockData';
 import { pushPlatformAudit } from './platformOpsAudit';
@@ -19,16 +21,52 @@ import {
   predefinedSupportViews,
   countCasesForSupportView,
   PHASE_112_TRUTH_LABEL,
+  PHASE_113A_TRUTH_LABEL,
+  PHASE_113A_PERMISSION_LABEL,
   SLA_STATUS_LABEL,
   SLA_STATUS_STYLES,
   RISK_STATUS_LABEL,
   RISK_STATUS_STYLES,
+  ESCALATION_STATUS_LABEL,
+  ESCALATION_STATUS_STYLES,
+  ESCALATION_LEVEL_LABEL,
+  ESCALATION_LEVEL_STYLES,
+  ESCALATION_LEVEL_OPTIONS,
+  ESCALATION_REASON_LABEL,
+  ESCALATION_REASON_OPTIONS,
+  ESCALATION_TARGET_TEAM_OPTIONS,
+  PLATFORM_OPS_ROLE_LABEL,
+  PLATFORM_OPS_ROLE_DESCRIPTION,
+  ROLE_TEAM_BY_ROLE,
+  effectiveEscalationStatus,
+  isEscalationAckOverdue,
+  isEscalationCritical,
+  can,
   type AuditEventLike,
   type SupportViewFilters,
+  type SupportViewCtx,
+  type PlatformOpsRole,
+  type EscalationLevel,
+  type EscalationReasonCode,
+  type EscalationTargetTeam,
+  type EscalationAction,
+  type CanResult,
 } from './platformOpsDerive';
 
 const CASES_KEY = 'support_cases_v1';
 const DOMAINS_KEY = 'tenant_domains_v1';
+const ROLE_KEY = 'platform_ops_role_v1';
+const OPERATOR_KEY = 'platform_ops_operator_v1';
+
+const ROLE_OPTIONS: PlatformOpsRole[] = [
+  'platform_owner',
+  'platform_admin',
+  'platform_lead',
+  'platform_operator',
+  'platform_security',
+  'platform_billing',
+  'platform_readonly',
+];
 
 const STATUS_LABELS: Record<SupportCaseStatus, string> = {
   open: 'Open',
@@ -100,8 +138,62 @@ const SupportToolsPage: React.FC = () => {
   const [slaFilter, setSlaFilter] = useState<'any' | 'overdue' | 'at_risk'>('any');
   const [severityViewFilter, setSeverityViewFilter] = useState<'all' | SupportCaseSeverity>('all');
   const [sortMode, setSortMode] = useState<'opened_desc' | 'updated_desc'>('opened_desc');
-  const [escalateOpen, setEscalateOpen] = useState(false);
-  const [escalateReason, setEscalateReason] = useState('');
+  // Phase 1.1.3A — advisory operator role + display name. Sticky in
+  // localStorage. Used by `can()` for UI gating and to resolve the
+  // "Assigned to Me" / "My Team" saved views. No real RBAC enforcement.
+  const [currentRole, setCurrentRole] = useState<PlatformOpsRole>(() => {
+    if (typeof window === 'undefined') return 'platform_admin';
+    const raw = (window.localStorage?.getItem(ROLE_KEY) || '') as PlatformOpsRole;
+    return ROLE_OPTIONS.includes(raw) ? raw : 'platform_admin';
+  });
+  const [operatorName, setOperatorName] = useState<string>(() => {
+    if (typeof window === 'undefined') return 'Admin Bob';
+    return window.localStorage?.getItem(OPERATOR_KEY) || 'Admin Bob';
+  });
+  useEffect(() => {
+    try { window.localStorage?.setItem(ROLE_KEY, currentRole); } catch { /* noop */ }
+  }, [currentRole]);
+  useEffect(() => {
+    try { window.localStorage?.setItem(OPERATOR_KEY, operatorName); } catch { /* noop */ }
+  }, [operatorName]);
+
+  // Saved-view escalation token + ctx for queue counts.
+  const [escalationFilter, setEscalationFilter] =
+    useState<NonNullable<SupportViewFilters['escalation']> | 'any'>('any');
+
+  // Phase 1.1.3A — escalation lifecycle modals.
+  const [escalateModal, setEscalateModal] = useState<SupportCaseRecord | null>(null);
+  const [assignModal, setAssignModal] = useState<SupportCaseRecord | null>(null);
+  const [levelModal, setLevelModal] = useState<SupportCaseRecord | null>(null);
+  const [resolveModal, setResolveModal] = useState<SupportCaseRecord | null>(null);
+  const [deescalateModal, setDeescalateModal] = useState<SupportCaseRecord | null>(null);
+  const [closeWarnModal, setCloseWarnModal] = useState<SupportCaseRecord | null>(null);
+  const [escalateDraft, setEscalateDraft] = useState<{
+    reasonCode: EscalationReasonCode;
+    reasonNote: string;
+    level: EscalationLevel;
+    targetTeam: EscalationTargetTeam;
+    ownerName: string;
+    ackHours: number;
+  }>({
+    reasonCode: 'manual',
+    reasonNote: '',
+    level: 'L2',
+    targetTeam: 'Support Tier 2',
+    ownerName: '',
+    ackHours: 4,
+  });
+  const [assignDraft, setAssignDraft] = useState<{
+    ownerName: string;
+    team: EscalationTargetTeam;
+    reason: string;
+  }>({ ownerName: '', team: 'Support Tier 2', reason: '' });
+  const [levelDraft, setLevelDraft] = useState<{ level: EscalationLevel; reason: string }>({
+    level: 'L2',
+    reason: '',
+  });
+  const [resolveDraft, setResolveDraft] = useState<{ note: string }>({ note: '' });
+  const [deescalateDraft, setDeescalateDraft] = useState<{ note: string }>({ note: '' });
 
   // Live audit + domain mirrors so we can derive related entities + tenant risk.
   const [audits, setAudits] = useState<AuditEventLike[]>([]);
@@ -140,6 +232,9 @@ const SupportToolsPage: React.FC = () => {
     setSlaFilter(f.sla === 'overdue' ? 'overdue' : f.sla === 'at_risk' ? 'at_risk' : 'any');
     setSeverityViewFilter(f.severity && f.severity !== 'all' ? (f.severity as SupportCaseSeverity) : 'all');
     setSortMode(f.sort === 'updated_desc' ? 'updated_desc' : 'opened_desc');
+    // Phase 1.1.3A — saved-view escalation token. Defaults to 'any' for
+    // non-escalation lenses so the existing queues stay unchanged.
+    setEscalationFilter(f.escalation || 'any');
   };
 
   const [draft, setDraft] = useState({
@@ -200,7 +295,14 @@ const SupportToolsPage: React.FC = () => {
     return m;
   }, []);
 
+  const teamForCurrentRole = ROLE_TEAM_BY_ROLE[currentRole] || '';
+  const supportViewCtx: SupportViewCtx = useMemo(
+    () => ({ operatorName, teamName: teamForCurrentRole }),
+    [operatorName, teamForCurrentRole]
+  );
+
   const filteredCases = useMemo(() => {
+    const now = new Date();
     const filtered = cases.filter(c => {
       // Phase 1.1.2 — group tokens mirror the same predicates used by
       // `countCasesForSupportView` so list and saved-view counts agree.
@@ -217,6 +319,33 @@ const SupportToolsPage: React.FC = () => {
         if (slaFilter === 'overdue' && sla.status !== 'overdue') return false;
         if (slaFilter === 'at_risk' && sla.status !== 'at_risk') return false;
       }
+      // Phase 1.1.3A — escalation queue token. Mirrors the predicates in
+      // `matchesEscalationFilter` (platformOpsDerive.ts) so the visible
+      // list matches the saved-view chip count exactly.
+      if (escalationFilter !== 'any') {
+        const eff = effectiveEscalationStatus(c);
+        const ownerName = (c.escalationOwnerName || '').trim();
+        const team = (c.escalationTargetTeam || c.assignedTeamName || '').trim();
+        if (escalationFilter === 'active') {
+          if (!eff.active) return false;
+        } else if (escalationFilter === 'unacknowledged') {
+          if (eff.status !== 'escalated') return false;
+        } else if (escalationFilter === 'overdue_ack') {
+          if (!isEscalationAckOverdue(c, now)) return false;
+        } else if (escalationFilter === 'critical') {
+          if (!eff.active || !isEscalationCritical(c)) return false;
+        } else if (escalationFilter === 'unassigned') {
+          if (!eff.active || ownerName) return false;
+        } else if (escalationFilter === 'deescalated') {
+          if (eff.status !== 'deescalated') return false;
+        } else if (escalationFilter === 'resolved') {
+          if (eff.status !== 'resolved') return false;
+        } else if (escalationFilter === 'mine') {
+          if (!eff.active || !operatorName || ownerName !== operatorName) return false;
+        } else if (escalationFilter === 'team') {
+          if (!eff.active || !teamForCurrentRole || team !== teamForCurrentRole) return false;
+        }
+      }
       if (search.trim()) {
         const tenantName = tenantById.get(c.tenantId) || '';
         const hay = `${c.subject} ${c.description} ${tenantName} ${c.id}`.toLowerCase();
@@ -229,7 +358,7 @@ const SupportToolsPage: React.FC = () => {
       const bKey = sortMode === 'updated_desc' ? b.updatedAt : b.openedAt;
       return aKey < bKey ? 1 : -1;
     });
-  }, [cases, statusFilter, severityViewFilter, slaFilter, search, tenantById, sortMode]);
+  }, [cases, statusFilter, severityViewFilter, slaFilter, escalationFilter, search, tenantById, sortMode, operatorName, teamForCurrentRole]);
 
   const tenantSearchHits = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -313,14 +442,45 @@ const SupportToolsPage: React.FC = () => {
 
   const changeStatus = (c: SupportCaseRecord, next: SupportCaseStatus) => {
     if (c.status === next) return;
-    const transitionNote: SupportCaseNote = {
+    const nowIso = new Date().toISOString();
+    const notes: SupportCaseNote[] = [...(c.notes || []), {
       id: `cn_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
       author: 'System Owner',
       body: `Status: ${c.status} → ${next}`,
-      createdAt: new Date().toISOString(),
+      createdAt: nowIso,
       kind: 'status_change',
-    };
-    updateCase(c.id, { status: next, notes: [...(c.notes || []), transitionNote] });
+    }];
+    // Phase 1.1.3A — when the case moves to a terminal state (resolved /
+    // closed), auto-resolve any active escalation so Command Center pulse
+    // counters and Needs-Attention queues do not show "ghost" escalations
+    // for already-closed cases. Emits a paired escalation_resolved audit
+    // + history entry for traceability.
+    const patch: Partial<SupportCaseRecord> = { status: next, notes };
+    const isTerminal = next === 'resolved' || next === 'closed';
+    const eff = effectiveEscalationStatus(c);
+    const escWasActive = eff.active;
+    if (isTerminal && escWasActive) {
+      const histEntry: SupportCaseEscalationEntry = {
+        at: nowIso,
+        by: operatorName,
+        byRole: currentRole,
+        action: 'resolved',
+        oldValue: eff.status,
+        newValue: 'resolved',
+        note: `Auto-resolved on case ${next}`,
+      };
+      patch.escalationStatus = 'resolved';
+      patch.escalated = false;
+      patch.escalationHistory = [...(c.escalationHistory || []), histEntry];
+      notes.push({
+        id: `cn_${Date.now()}_${Math.random().toString(36).slice(2, 5)}_esc`,
+        author: 'System Owner',
+        body: `Escalation auto-resolved (case ${next})`,
+        createdAt: nowIso,
+        kind: 'escalation',
+      });
+    }
+    updateCase(c.id, patch);
     pushPlatformAudit({
       actor: 'System Owner',
       action: 'support_case_status_changed',
@@ -329,8 +489,21 @@ const SupportToolsPage: React.FC = () => {
       tenantId: c.tenantId,
       oldValue: c.status,
       newValue: next,
-      severity: next === 'closed' || next === 'resolved' ? 'info' : 'notice',
+      severity: isTerminal ? 'info' : 'notice',
     });
+    if (isTerminal && escWasActive) {
+      pushPlatformAudit({
+        actor: 'System Owner',
+        action: 'support_case_escalation_resolved',
+        target: `${tenantById.get(c.tenantId) || c.tenantId} · ${c.subject}`,
+        category: 'support',
+        tenantId: c.tenantId,
+        oldValue: eff.status,
+        newValue: 'resolved',
+        severity: 'info',
+        note: `Auto-resolved on case ${next}`,
+      });
+    }
   };
 
   const changeSeverity = (c: SupportCaseRecord, next: SupportCaseSeverity) => {
@@ -366,56 +539,332 @@ const SupportToolsPage: React.FC = () => {
 
   const flaggedTenants = tenants.filter(t => t.flags.length > 0);
 
-  // Phase 1.1 — escalation, macro insertion, close/reopen.
-  const escalateCase = (c: SupportCaseRecord, reason: string) => {
+  // Phase 1.1.3A — escalation lifecycle handlers. Each transition writes
+  // exactly one audit row + one timeline note + one escalationHistory
+  // entry. Legacy `escalated:true/false` is kept in sync so existing
+  // CommandCenter pulse / Needs-Attention / NBA logic continues to work
+  // without changes (back-compat).
+  const buildTarget = (c: SupportCaseRecord) =>
+    `${tenantById.get(c.tenantId) || c.tenantId} · ${c.subject}`;
+
+  const escalateCaseStructured = (c: SupportCaseRecord) => {
+    const draft = escalateDraft;
+    const check = can(currentRole, 'escalate', { targetTeam: draft.targetTeam });
+    if (!check.allowed) return;
     const now = new Date();
+    const ackDue = new Date(now.getTime() + Math.max(1, draft.ackHours) * 36e5);
+    const escDue = new Date(now.getTime() + 72 * 36e5);
+    const reasonLabel = ESCALATION_REASON_LABEL[draft.reasonCode];
+    const reasonText = draft.reasonNote.trim()
+      ? `${reasonLabel} — ${draft.reasonNote.trim()}`
+      : reasonLabel;
+    const historyEntry: SupportCaseEscalationEntry = {
+      at: now.toISOString(),
+      by: operatorName,
+      byRole: currentRole,
+      action: 'escalated',
+      newValue: draft.level,
+      note: reasonText,
+    };
     const transitionNote: SupportCaseNote = {
       id: `cn_${now.getTime()}_${Math.random().toString(36).slice(2, 5)}`,
-      author: 'System Owner',
-      body: `Escalated: ${reason || '(no reason)'}`,
+      author: operatorName,
+      body: `Escalated · ${draft.level} · ${draft.targetTeam} · ${reasonText}`,
       createdAt: now.toISOString(),
-      kind: 'status_change',
+      kind: 'escalation',
     };
     updateCase(c.id, {
       escalated: true,
-      escalationReason: reason || null,
+      escalationStatus: 'escalated',
+      escalationLevel: draft.level,
+      escalationReasonCode: draft.reasonCode,
+      escalationReasonNote: draft.reasonNote.trim() || null,
+      escalationReason: reasonText,
+      escalationOwnerName: draft.ownerName.trim() || null,
+      escalationOwnerId: draft.ownerName.trim()
+        ? `op_${draft.ownerName.trim().toLowerCase().replace(/\s+/g, '_')}`
+        : null,
+      escalationTargetTeam: draft.targetTeam,
+      assignedTeamName: draft.targetTeam,
       escalatedAt: now.toISOString(),
-      escalatedBy: 'System Owner',
+      escalatedBy: operatorName,
+      escalatedByRole: currentRole,
+      acknowledgementDueAt: ackDue.toISOString(),
+      escalationDueAt: escDue.toISOString(),
+      escalationHistory: [...(c.escalationHistory || []), historyEntry],
       notes: [...(c.notes || []), transitionNote],
     });
     pushPlatformAudit({
-      actor: 'System Owner',
+      actor: operatorName,
       action: 'support_case_escalated',
-      target: `${tenantById.get(c.tenantId) || c.tenantId} · ${c.subject}`,
+      target: buildTarget(c),
       category: 'support',
       tenantId: c.tenantId,
+      severity: 'warning',
+      newValue: draft.level,
+      note: `${draft.targetTeam} · ${reasonText}`,
+    });
+  };
+
+  const acknowledgeEscalation = (c: SupportCaseRecord) => {
+    const isOwner = !!c.escalationOwnerName && c.escalationOwnerName === operatorName;
+    const check = can(currentRole, 'acknowledge', {
+      targetTeam: c.escalationTargetTeam,
+      isOwner,
+    });
+    if (!check.allowed) return;
+    const now = new Date();
+    const historyEntry: SupportCaseEscalationEntry = {
+      at: now.toISOString(),
+      by: operatorName,
+      byRole: currentRole,
+      action: 'acknowledged',
+    };
+    const transitionNote: SupportCaseNote = {
+      id: `cn_${now.getTime()}_${Math.random().toString(36).slice(2, 5)}`,
+      author: operatorName,
+      body: `Acknowledged escalation`,
+      createdAt: now.toISOString(),
+      kind: 'escalation',
+    };
+    updateCase(c.id, {
+      escalationStatus: 'acknowledged',
+      acknowledgedAt: now.toISOString(),
+      acknowledgedBy: operatorName,
+      acknowledgedByRole: currentRole,
+      escalationHistory: [...(c.escalationHistory || []), historyEntry],
+      notes: [...(c.notes || []), transitionNote],
+    });
+    pushPlatformAudit({
+      actor: operatorName,
+      action: 'support_case_escalation_acknowledged',
+      target: buildTarget(c),
+      category: 'support',
+      tenantId: c.tenantId,
+      severity: 'notice',
+    });
+  };
+
+  const assignEscalation = (c: SupportCaseRecord) => {
+    const owner = assignDraft.ownerName.trim();
+    const team = assignDraft.team;
+    const reason = assignDraft.reason.trim();
+    const check = can(currentRole, 'assign_owner', { targetTeam: team });
+    if (!check.allowed) return;
+    const isReassign = !!(c.escalationOwnerName || c.assignedTeamName);
+    const now = new Date();
+    const historyEntry: SupportCaseEscalationEntry = {
+      at: now.toISOString(),
+      by: operatorName,
+      byRole: currentRole,
+      action: isReassign ? 'reassigned' : 'assigned',
+      oldValue: c.escalationOwnerName || c.assignedTeamName || null,
+      newValue: `${owner || '—'} · ${team}`,
+      note: reason || null,
+    };
+    const assnEntry: SupportCaseAssignmentEntry = {
+      at: now.toISOString(),
+      by: operatorName,
+      oldOwnerName: c.escalationOwnerName || null,
+      newOwnerName: owner || null,
+      oldTeamName: c.assignedTeamName || null,
+      newTeamName: team,
+      reason: reason || null,
+    };
+    const transitionNote: SupportCaseNote = {
+      id: `cn_${now.getTime()}_${Math.random().toString(36).slice(2, 5)}`,
+      author: operatorName,
+      body: `${isReassign ? 'Reassigned' : 'Assigned'} · ${owner || '—'} · ${team}${
+        reason ? ` — ${reason}` : ''
+      }`,
+      createdAt: now.toISOString(),
+      kind: 'escalation',
+    };
+    updateCase(c.id, {
+      escalationOwnerName: owner || null,
+      escalationOwnerId: owner
+        ? `op_${owner.toLowerCase().replace(/\s+/g, '_')}`
+        : null,
+      escalationTargetTeam: team,
+      assignedTeamName: team,
+      assignmentReason: reason || null,
+      assignmentHistory: [...(c.assignmentHistory || []), assnEntry],
+      escalationHistory: [...(c.escalationHistory || []), historyEntry],
+      notes: [...(c.notes || []), transitionNote],
+    });
+    pushPlatformAudit({
+      actor: operatorName,
+      action: isReassign
+        ? 'support_case_escalation_reassigned'
+        : 'support_case_escalation_assigned',
+      target: buildTarget(c),
+      category: 'support',
+      tenantId: c.tenantId,
+      oldValue: c.escalationOwnerName || c.assignedTeamName || '—',
+      newValue: `${owner || '—'} · ${team}`,
+      severity: 'notice',
+      note: reason || undefined,
+    });
+  };
+
+  const changeEscalationLevel = (c: SupportCaseRecord) => {
+    const level = levelDraft.level;
+    const reason = levelDraft.reason.trim();
+    const check = can(currentRole, 'change_level', { targetTeam: c.escalationTargetTeam });
+    if (!check.allowed) return;
+    if (c.escalationLevel === level) return;
+    const now = new Date();
+    const historyEntry: SupportCaseEscalationEntry = {
+      at: now.toISOString(),
+      by: operatorName,
+      byRole: currentRole,
+      action: 'level_changed',
+      oldValue: c.escalationLevel || null,
+      newValue: level,
+      note: reason || null,
+    };
+    const transitionNote: SupportCaseNote = {
+      id: `cn_${now.getTime()}_${Math.random().toString(36).slice(2, 5)}`,
+      author: operatorName,
+      body: `Escalation level: ${c.escalationLevel || '—'} → ${level}${
+        reason ? ` — ${reason}` : ''
+      }`,
+      createdAt: now.toISOString(),
+      kind: 'escalation',
+    };
+    const eff = effectiveEscalationStatus(c);
+    const nextStatus =
+      eff.status === 'deescalated' || eff.status === 'resolved'
+        ? 'in_review'
+        : eff.status === 'none'
+          ? 'in_review'
+          : eff.status;
+    updateCase(c.id, {
+      escalated: true,
+      escalationStatus: nextStatus,
+      escalationLevel: level,
+      escalationHistory: [...(c.escalationHistory || []), historyEntry],
+      notes: [...(c.notes || []), transitionNote],
+    });
+    pushPlatformAudit({
+      actor: operatorName,
+      action: 'support_case_escalation_level_changed',
+      target: buildTarget(c),
+      category: 'support',
+      tenantId: c.tenantId,
+      oldValue: c.escalationLevel || '—',
+      newValue: level,
       severity: 'warning',
       note: reason || undefined,
     });
   };
 
-  const deescalateCase = (c: SupportCaseRecord) => {
+  const resolveEscalation = (c: SupportCaseRecord) => {
+    const note = resolveDraft.note.trim();
+    const check = can(currentRole, 'resolve_escalation', {
+      targetTeam: c.escalationTargetTeam,
+    });
+    if (!check.allowed) return;
     const now = new Date();
+    const historyEntry: SupportCaseEscalationEntry = {
+      at: now.toISOString(),
+      by: operatorName,
+      byRole: currentRole,
+      action: 'resolved',
+      note: note || null,
+    };
     const transitionNote: SupportCaseNote = {
       id: `cn_${now.getTime()}_${Math.random().toString(36).slice(2, 5)}`,
-      author: 'System Owner',
-      body: 'De-escalated',
+      author: operatorName,
+      body: `Escalation resolved${note ? ` — ${note}` : ''}`,
       createdAt: now.toISOString(),
-      kind: 'status_change',
+      kind: 'escalation',
     };
     updateCase(c.id, {
       escalated: false,
-      escalationReason: null,
+      escalationStatus: 'resolved',
+      resolvedEscalationAt: now.toISOString(),
+      resolvedEscalationBy: operatorName,
+      escalationHistory: [...(c.escalationHistory || []), historyEntry],
       notes: [...(c.notes || []), transitionNote],
     });
     pushPlatformAudit({
-      actor: 'System Owner',
-      action: 'support_case_deescalated',
-      target: `${tenantById.get(c.tenantId) || c.tenantId} · ${c.subject}`,
+      actor: operatorName,
+      action: 'support_case_escalation_resolved',
+      target: buildTarget(c),
       category: 'support',
       tenantId: c.tenantId,
       severity: 'notice',
+      note: note || undefined,
     });
+  };
+
+  const deescalateCase = (c: SupportCaseRecord) => {
+    const note = deescalateDraft.note.trim();
+    const isOwner = !!c.escalationOwnerName && c.escalationOwnerName === operatorName;
+    const check = can(currentRole, 'deescalate', {
+      targetTeam: c.escalationTargetTeam,
+      isOwner,
+    });
+    if (!check.allowed) return;
+    const now = new Date();
+    const historyEntry: SupportCaseEscalationEntry = {
+      at: now.toISOString(),
+      by: operatorName,
+      byRole: currentRole,
+      action: 'deescalated',
+      note: note || null,
+    };
+    const transitionNote: SupportCaseNote = {
+      id: `cn_${now.getTime()}_${Math.random().toString(36).slice(2, 5)}`,
+      author: operatorName,
+      body: `De-escalated${note ? ` — ${note}` : ''}`,
+      createdAt: now.toISOString(),
+      kind: 'escalation',
+    };
+    updateCase(c.id, {
+      escalated: false,
+      escalationStatus: 'deescalated',
+      deescalatedAt: now.toISOString(),
+      deescalatedBy: operatorName,
+      escalationReason: null,
+      escalationHistory: [...(c.escalationHistory || []), historyEntry],
+      notes: [...(c.notes || []), transitionNote],
+    });
+    pushPlatformAudit({
+      actor: operatorName,
+      action: 'support_case_deescalated',
+      target: buildTarget(c),
+      category: 'support',
+      tenantId: c.tenantId,
+      severity: 'notice',
+      note: note || undefined,
+    });
+  };
+
+  const confirmCloseWithActiveEscalation = (c: SupportCaseRecord) => {
+    pushPlatformAudit({
+      actor: operatorName,
+      action: 'support_case_close_with_active_escalation_warning',
+      target: buildTarget(c),
+      category: 'support',
+      tenantId: c.tenantId,
+      severity: 'warning',
+      note: `Closed while escalation status was ${
+        c.escalationStatus || (c.escalated ? 'escalated' : 'none')
+      }.`,
+    });
+    closeCase(c);
+    setCloseWarnModal(null);
+  };
+
+  const handleCloseCaseClick = (c: SupportCaseRecord) => {
+    const eff = effectiveEscalationStatus(c);
+    if (eff.active) {
+      setCloseWarnModal(c);
+      return;
+    }
+    closeCase(c);
   };
 
   const insertMacro = (id: string, macro: SupportMacro, currentDraft: string, setNoteDraft: (s: string) => void) => {
@@ -500,11 +949,53 @@ const SupportToolsPage: React.FC = () => {
   return (
     <div className="space-y-8">
       <div className="flex items-end justify-between flex-wrap gap-4">
-        <div>
+        <div className="flex-1 min-w-0">
           <h2 className="text-2xl font-black text-primary tracking-tight">Support Tools</h2>
           <p className="text-slate-500 font-medium">Tenant search, case management, and operational helpers.</p>
+          {/* Phase 1.1.3A — visible truth labels (escalation = internal
+              workflow + advisory permissions). */}
+          <div className="mt-2 flex flex-wrap gap-1.5" data-testid="support-truth-labels">
+            <span className="text-[10px] font-bold text-slate-500 italic">{PHASE_113A_TRUTH_LABEL}</span>
+            <span className="text-[10px] font-bold text-slate-400 italic">·</span>
+            <span className="text-[10px] font-bold text-slate-500 italic">{PHASE_113A_PERMISSION_LABEL}</span>
+          </div>
         </div>
-        <button onClick={() => setShowCreate(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl uppercase tracking-widest shadow-lg shadow-primary/20 hover:bg-primary/90 transition-all">+ New Case</button>
+        <div className="flex items-center gap-3 flex-wrap">
+          {/* Phase 1.1.3A — advisory operator + role selector. Sticky in
+              localStorage. Drives can() for UI gating and "mine"/"team"
+              saved-view counts. No real RBAC. */}
+          <div
+            className="flex items-center gap-2 px-3 py-2 rounded-2xl bg-white border border-slate-200 shadow-sm"
+            data-testid="support-role-selector"
+          >
+            <span className="material-symbols-outlined text-base text-slate-400">badge</span>
+            <div className="flex flex-col">
+              <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">Acting as</span>
+              <div className="flex items-center gap-1.5">
+                <input
+                  value={operatorName}
+                  onChange={e => setOperatorName(e.target.value)}
+                  data-testid="support-operator-name"
+                  className="text-xs font-black text-slate-700 bg-transparent border-0 focus:outline-none focus:ring-0 w-24"
+                  placeholder="Operator name"
+                />
+                <span className="text-slate-300">·</span>
+                <select
+                  value={currentRole}
+                  onChange={e => setCurrentRole(e.target.value as PlatformOpsRole)}
+                  data-testid="support-role-select"
+                  title={PLATFORM_OPS_ROLE_DESCRIPTION[currentRole]}
+                  className="text-[10px] font-black uppercase tracking-widest text-primary bg-transparent border-0 focus:outline-none focus:ring-0"
+                >
+                  {ROLE_OPTIONS.map(r => (
+                    <option key={r} value={r}>{PLATFORM_OPS_ROLE_LABEL[r]}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
+          <button onClick={() => setShowCreate(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl uppercase tracking-widest shadow-lg shadow-primary/20 hover:bg-primary/90 transition-all">+ New Case</button>
+        </div>
       </div>
 
       {/* Tenant search */}
@@ -556,7 +1047,9 @@ const SupportToolsPage: React.FC = () => {
           <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 mr-1">Saved views:</span>
           {predefinedSupportViews.map(v => {
             // Phase 1.1.2 — saved view "queue" count from shared helper.
-            const count = countCasesForSupportView(v, cases);
+            // Phase 1.1.3A — pass operator/team ctx so the new "Assigned
+            // to Me" / "My Team" escalation queues count correctly.
+            const count = countCasesForSupportView(v, cases, undefined, supportViewCtx);
             const active = activeView === v.id;
             return (
               <button
@@ -602,10 +1095,71 @@ const SupportToolsPage: React.FC = () => {
                   <td className="px-6 py-3.5">
                     <p className="text-sm font-bold text-slate-900 truncate max-w-[260px]">
                       {c.subject}
-                      {c.escalated && <span className="ml-2 px-1.5 py-0.5 text-[9px] font-black uppercase tracking-widest rounded bg-red-500/10 text-red-700 border border-red-500/20">escalated</span>}
                       {c.sourceAuditEventId && <span className="ml-2 px-1.5 py-0.5 text-[9px] font-black uppercase tracking-widest rounded bg-blue-400/10 text-blue-700 border border-blue-400/20">from audit</span>}
                     </p>
                     <p className="text-[10px] text-slate-400 font-mono">{c.id}</p>
+                    {(() => {
+                      const eff = effectiveEscalationStatus(c);
+                      if (eff.status === 'none') return null;
+                      const ackOverdue = isEscalationAckOverdue(c);
+                      const owner = (c.escalationOwnerName || '').trim();
+                      const team = (c.escalationTargetTeam || c.assignedTeamName || '').trim();
+                      return (
+                        <div
+                          className="flex flex-wrap gap-1 mt-1.5"
+                          data-testid={`support-case-row-escalation-${c.id}`}
+                        >
+                          <span
+                            className={`px-1.5 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border ${ESCALATION_STATUS_STYLES[eff.status]}`}
+                            title={ESCALATION_STATUS_LABEL[eff.status]}
+                            data-testid={`support-case-row-esc-status-${c.id}`}
+                          >
+                            {ESCALATION_STATUS_LABEL[eff.status]}
+                          </span>
+                          {eff.level && (
+                            <span
+                              className={`px-1.5 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border ${ESCALATION_LEVEL_STYLES[eff.level]}`}
+                              data-testid={`support-case-row-esc-level-${c.id}`}
+                            >
+                              {ESCALATION_LEVEL_LABEL[eff.level]}
+                            </span>
+                          )}
+                          {eff.active && ackOverdue && (
+                            <span
+                              className="px-1.5 py-0.5 text-[9px] font-black uppercase tracking-widest rounded bg-red-500/10 text-red-700 border border-red-500/30"
+                              data-testid={`support-case-row-esc-overdue-${c.id}`}
+                            >
+                              Ack Overdue
+                            </span>
+                          )}
+                          {eff.active && !owner && (
+                            <span
+                              className="px-1.5 py-0.5 text-[9px] font-black uppercase tracking-widest rounded bg-amber-400/10 text-amber-700 border border-amber-400/20"
+                              data-testid={`support-case-row-esc-unassigned-${c.id}`}
+                            >
+                              Unassigned
+                            </span>
+                          )}
+                          {eff.active && (owner || team) && (
+                            <span
+                              className="px-1.5 py-0.5 text-[9px] font-black uppercase tracking-widest rounded bg-slate-100 text-slate-600 border border-slate-200"
+                              data-testid={`support-case-row-esc-owner-${c.id}`}
+                              title={team ? `Team: ${team}` : undefined}
+                            >
+                              {owner || team}
+                            </span>
+                          )}
+                          {eff.isLegacyOnly && (
+                            <span
+                              className="px-1.5 py-0.5 text-[9px] font-black uppercase tracking-widest rounded bg-slate-100 text-slate-500 border border-slate-200 italic"
+                              title="Legacy escalated:true with no structured lifecycle yet."
+                            >
+                              Legacy
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </td>
                   <td className="px-6 py-3.5 text-sm font-bold text-slate-700">{tenantById.get(c.tenantId) || c.tenantId}</td>
                   <td className="px-6 py-3.5"><span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${STATUS_STYLES[c.status]}`}>{STATUS_LABELS[c.status]}</span></td>
@@ -857,32 +1411,253 @@ const SupportToolsPage: React.FC = () => {
                   </div>
                 )}
 
-                {/* Escalation row */}
-                <div className="p-4 rounded-2xl border border-slate-100 bg-slate-50/40">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Escalation</p>
-                      {selected.escalated ? (
-                        <>
-                          <p className="text-sm font-bold text-red-700 mt-1">Escalated</p>
-                          {selected.escalationReason && (
-                            <p className="text-xs text-slate-600 mt-0.5">Reason: {selected.escalationReason}</p>
+                {/* Phase 1.1.3A — Escalation Card (full lifecycle metadata
+                    + role-gated buttons via can()). Replaces the simple
+                    Phase 1.1 escalation row. */}
+                {(() => {
+                  const eff = effectiveEscalationStatus(selected);
+                  const ackOverdue = isEscalationAckOverdue(selected);
+                  const isOwner = !!selected.escalationOwnerName && selected.escalationOwnerName === operatorName;
+                  const ctx = { targetTeam: selected.escalationTargetTeam ?? null, isOwner };
+                  const checks: Record<EscalationAction, CanResult> = {
+                    escalate: can(currentRole, 'escalate', ctx),
+                    assign_owner: can(currentRole, 'assign_owner', ctx),
+                    acknowledge: can(currentRole, 'acknowledge', ctx),
+                    change_level: can(currentRole, 'change_level', ctx),
+                    deescalate: can(currentRole, 'deescalate', ctx),
+                    resolve_escalation: can(currentRole, 'resolve_escalation', ctx),
+                    close_with_active_escalation: can(currentRole, 'close_with_active_escalation', ctx),
+                    edit_assignment: can(currentRole, 'edit_assignment', ctx),
+                  };
+                  const Btn: React.FC<{
+                    action: EscalationAction;
+                    label: string;
+                    onClick: () => void;
+                    variant?: 'primary' | 'ghost' | 'danger';
+                    testId: string;
+                  }> = ({ action, label, onClick, variant = 'ghost', testId }) => {
+                    const r = checks[action];
+                    const base = 'px-3 py-2 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all';
+                    const styles = !r.allowed
+                      ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
+                      : variant === 'primary'
+                        ? 'bg-primary text-white hover:bg-primary/90'
+                        : variant === 'danger'
+                          ? 'bg-red-500/90 text-white hover:bg-red-500'
+                          : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-50';
+                    return (
+                      <button
+                        type="button"
+                        onClick={r.allowed ? onClick : undefined}
+                        disabled={!r.allowed}
+                        title={r.allowed ? PLATFORM_OPS_ROLE_DESCRIPTION[currentRole] : r.reason}
+                        data-testid={testId}
+                        data-allowed={r.allowed ? 'true' : 'false'}
+                        className={`${base} ${styles}`}
+                      >
+                        {label}
+                      </button>
+                    );
+                  };
+                  return (
+                    <div
+                      className="p-4 rounded-2xl border border-slate-100 bg-slate-50/40 space-y-3"
+                      data-testid="support-case-escalation-card"
+                    >
+                      <div className="flex items-start justify-between gap-3 flex-wrap">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Escalation</p>
+                            <span
+                              className={`px-2 py-0.5 text-[10px] font-black uppercase tracking-widest rounded border ${ESCALATION_STATUS_STYLES[eff.status]}`}
+                              data-testid="support-case-esc-status-pill"
+                            >
+                              {ESCALATION_STATUS_LABEL[eff.status]}
+                            </span>
+                            {eff.level && (
+                              <span
+                                className={`px-2 py-0.5 text-[10px] font-black uppercase tracking-widest rounded border ${ESCALATION_LEVEL_STYLES[eff.level]}`}
+                                data-testid="support-case-esc-level-pill"
+                              >
+                                {ESCALATION_LEVEL_LABEL[eff.level]}
+                              </span>
+                            )}
+                            {eff.active && ackOverdue && (
+                              <span className="px-2 py-0.5 text-[10px] font-black uppercase tracking-widest rounded bg-red-500/10 text-red-700 border border-red-500/30" data-testid="support-case-esc-ack-overdue">
+                                Ack Overdue
+                              </span>
+                            )}
+                            {eff.active && isEscalationCritical(selected) && (
+                              <span className="px-2 py-0.5 text-[10px] font-black uppercase tracking-widest rounded bg-red-600/10 text-red-800 border border-red-600/30">
+                                Critical
+                              </span>
+                            )}
+                          </div>
+                          <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-0.5 text-[11px] text-slate-600">
+                            {selected.escalationReasonCode && (
+                              <div>
+                                <span className="text-slate-400 font-bold">Reason:</span>{' '}
+                                <span className="font-bold">{ESCALATION_REASON_LABEL[selected.escalationReasonCode]}</span>
+                              </div>
+                            )}
+                            {selected.escalationTargetTeam && (
+                              <div>
+                                <span className="text-slate-400 font-bold">Team:</span>{' '}
+                                <span className="font-bold">{selected.escalationTargetTeam}</span>
+                              </div>
+                            )}
+                            {(selected.escalationOwnerName || selected.escalationOwnerId) && (
+                              <div>
+                                <span className="text-slate-400 font-bold">Owner:</span>{' '}
+                                <span className="font-bold" data-testid="support-case-esc-owner">
+                                  {selected.escalationOwnerName || selected.escalationOwnerId}
+                                </span>
+                              </div>
+                            )}
+                            {selected.escalatedAt && (
+                              <div>
+                                <span className="text-slate-400 font-bold">Escalated:</span>{' '}
+                                <span className="font-bold">{new Date(selected.escalatedAt).toLocaleString()}</span>
+                                {selected.escalatedBy && (
+                                  <span className="text-slate-400"> by {selected.escalatedBy}</span>
+                                )}
+                              </div>
+                            )}
+                            {selected.acknowledgementDueAt && eff.status === 'escalated' && (
+                              <div>
+                                <span className="text-slate-400 font-bold">Ack due:</span>{' '}
+                                <span className={`font-bold ${ackOverdue ? 'text-red-700' : 'text-slate-700'}`}>
+                                  {new Date(selected.acknowledgementDueAt).toLocaleString()}
+                                </span>
+                              </div>
+                            )}
+                            {selected.acknowledgedAt && (
+                              <div>
+                                <span className="text-slate-400 font-bold">Acknowledged:</span>{' '}
+                                <span className="font-bold">{new Date(selected.acknowledgedAt).toLocaleString()}</span>
+                                {selected.acknowledgedBy && (
+                                  <span className="text-slate-400"> by {selected.acknowledgedBy}</span>
+                                )}
+                              </div>
+                            )}
+                            {selected.deescalatedAt && (
+                              <div>
+                                <span className="text-slate-400 font-bold">De-escalated:</span>{' '}
+                                <span className="font-bold">{new Date(selected.deescalatedAt).toLocaleString()}</span>
+                                {selected.deescalatedBy && (
+                                  <span className="text-slate-400"> by {selected.deescalatedBy}</span>
+                                )}
+                              </div>
+                            )}
+                            {selected.resolvedEscalationAt && (
+                              <div>
+                                <span className="text-slate-400 font-bold">Resolved:</span>{' '}
+                                <span className="font-bold">{new Date(selected.resolvedEscalationAt).toLocaleString()}</span>
+                                {selected.resolvedEscalationBy && (
+                                  <span className="text-slate-400"> by {selected.resolvedEscalationBy}</span>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                          {selected.escalationReasonNote && (
+                            <p className="text-xs text-slate-700 mt-1.5 bg-white border border-slate-100 rounded-xl p-2">
+                              {selected.escalationReasonNote}
+                            </p>
                           )}
-                          {selected.escalatedAt && (
-                            <p className="text-[10px] text-slate-400 mt-0.5">at {new Date(selected.escalatedAt).toLocaleString()} by {selected.escalatedBy || '—'}</p>
+                          {!eff.active && eff.status === 'none' && (
+                            <p className="text-sm font-bold text-slate-600 mt-1">Not escalated</p>
                           )}
-                        </>
-                      ) : (
-                        <p className="text-sm font-bold text-slate-600 mt-1">Not escalated</p>
-                      )}
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-100" data-testid="support-case-esc-actions">
+                        {!eff.active && (
+                          <Btn
+                            action="escalate"
+                            label="Escalate"
+                            variant="danger"
+                            testId="support-case-esc-btn-escalate"
+                            onClick={() => {
+                              setEscalateDraft({
+                                reasonCode: 'manual',
+                                reasonNote: '',
+                                level: selected.severity === 'urgent' ? 'L3' : 'L2',
+                                targetTeam: ROLE_TEAM_BY_ROLE[currentRole] as EscalationTargetTeam || 'Support Tier 2',
+                                ownerName: '',
+                                ackHours: selected.severity === 'urgent' ? 1 : 4,
+                              });
+                              setEscalateModal(selected);
+                            }}
+                          />
+                        )}
+                        {eff.status === 'escalated' && (
+                          <Btn
+                            action="acknowledge"
+                            label="Acknowledge"
+                            variant="primary"
+                            testId="support-case-esc-btn-ack"
+                            onClick={() => acknowledgeEscalation(selected)}
+                          />
+                        )}
+                        {eff.active && (
+                          <Btn
+                            action="assign_owner"
+                            label={selected.escalationOwnerName ? 'Reassign' : 'Assign'}
+                            testId="support-case-esc-btn-assign"
+                            onClick={() => {
+                              setAssignDraft({
+                                ownerName: selected.escalationOwnerName || '',
+                                team: (selected.escalationTargetTeam as EscalationTargetTeam) || 'Support Tier 2',
+                                reason: '',
+                              });
+                              setAssignModal(selected);
+                            }}
+                          />
+                        )}
+                        {eff.active && (
+                          <Btn
+                            action="change_level"
+                            label="Change Level"
+                            testId="support-case-esc-btn-level"
+                            onClick={() => {
+                              setLevelDraft({
+                                level: selected.escalationLevel || 'L2',
+                                reason: '',
+                              });
+                              setLevelModal(selected);
+                            }}
+                          />
+                        )}
+                        {eff.active && (
+                          <Btn
+                            action="deescalate"
+                            label="De-escalate"
+                            testId="support-case-esc-btn-deesc"
+                            onClick={() => {
+                              setDeescalateDraft({ note: '' });
+                              setDeescalateModal(selected);
+                            }}
+                          />
+                        )}
+                        {eff.active && (
+                          <Btn
+                            action="resolve_escalation"
+                            label="Resolve Escalation"
+                            testId="support-case-esc-btn-resolve"
+                            onClick={() => {
+                              setResolveDraft({ note: '' });
+                              setResolveModal(selected);
+                            }}
+                          />
+                        )}
+                      </div>
+                      {/* Inline role explanation so the user always knows
+                          why a button is disabled. */}
+                      <p className="text-[10px] text-slate-400 italic">
+                        Acting as <span className="font-black uppercase tracking-widest text-slate-500">{PLATFORM_OPS_ROLE_LABEL[currentRole]}</span> · {PLATFORM_OPS_ROLE_DESCRIPTION[currentRole]}
+                      </p>
                     </div>
-                    {selected.escalated ? (
-                      <button onClick={() => deescalateCase(selected)} className="px-3 py-2 text-[10px] font-black uppercase tracking-widest text-slate-600 bg-white border border-slate-200 rounded-xl hover:bg-slate-50">De-escalate</button>
-                    ) : (
-                      <button onClick={() => { setEscalateReason(''); setEscalateOpen(true); }} className="px-3 py-2 text-[10px] font-black uppercase tracking-widest text-white bg-red-500/90 rounded-xl hover:bg-red-500">Escalate</button>
-                    )}
-                  </div>
-                </div>
+                  );
+                })()}
 
                 {/* Tenant Health mini-card */}
                 {tenantRiskForSelected && (
@@ -1000,10 +1775,17 @@ const SupportToolsPage: React.FC = () => {
                   onInsertMacro={(macro, currentDraft, setDraft) => insertMacro(selected.id, macro, currentDraft, setDraft)}
                 />
 
-                {/* Close / Reopen */}
+                {/* Close / Reopen — close is guarded when an active
+                    escalation is present (Phase 1.1.3A). */}
                 <div className="flex gap-2 pt-3 border-t border-slate-100">
                   {selected.status !== 'closed' ? (
-                    <button onClick={() => closeCase(selected)} className="px-4 py-2 text-[10px] font-black uppercase tracking-widest text-slate-700 bg-white border border-slate-200 rounded-xl hover:bg-slate-50">Close case</button>
+                    <button
+                      onClick={() => handleCloseCaseClick(selected)}
+                      data-testid="support-case-close-btn"
+                      className="px-4 py-2 text-[10px] font-black uppercase tracking-widest text-slate-700 bg-white border border-slate-200 rounded-xl hover:bg-slate-50"
+                    >
+                      Close case
+                    </button>
                   ) : (
                     <button onClick={() => reopenCase(selected)} className="px-4 py-2 text-[10px] font-black uppercase tracking-widest text-white bg-primary rounded-xl hover:bg-primary/90">Reopen case</button>
                   )}
@@ -1023,23 +1805,322 @@ const SupportToolsPage: React.FC = () => {
         )}
       </AnimatePresence>
 
-      {/* Escalate modal */}
+      {/* Phase 1.1.3A — Escalate modal (full lifecycle form). */}
       <AnimatePresence>
-        {escalateOpen && selected && (
-          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setEscalateOpen(false)} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
-            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="relative w-full max-w-md bg-white rounded-[2rem] shadow-2xl overflow-hidden">
-              <div className="p-7 border-b border-slate-100">
+        {escalateModal && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" data-testid="support-escalate-modal">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setEscalateModal(null)} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="relative w-full max-w-lg bg-white rounded-[2rem] shadow-2xl overflow-hidden">
+              <div className="p-6 border-b border-slate-100">
                 <h3 className="text-lg font-black text-primary tracking-tight">Escalate Case</h3>
-                <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mt-1">{selected.id} · {selected.subject}</p>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mt-1">{escalateModal.id} · {escalateModal.subject}</p>
+                <p className="text-[10px] font-bold text-slate-400 italic mt-1">{PHASE_113A_TRUTH_LABEL}</p>
               </div>
-              <div className="p-7">
-                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Reason</label>
-                <textarea value={escalateReason} onChange={e => setEscalateReason(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm text-slate-700 h-28 resize-none" placeholder="Why is this being escalated?" />
+              <div className="p-6 space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Reason</label>
+                    <select
+                      value={escalateDraft.reasonCode}
+                      onChange={e => setEscalateDraft(d => ({ ...d, reasonCode: e.target.value as EscalationReasonCode }))}
+                      data-testid="support-escalate-reason-code"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700"
+                    >
+                      {ESCALATION_REASON_OPTIONS.map(r => (
+                        <option key={r} value={r}>{ESCALATION_REASON_LABEL[r]}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Level</label>
+                    <select
+                      value={escalateDraft.level}
+                      onChange={e => setEscalateDraft(d => ({ ...d, level: e.target.value as EscalationLevel }))}
+                      data-testid="support-escalate-level"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700"
+                    >
+                      {ESCALATION_LEVEL_OPTIONS.map(l => (
+                        <option key={l} value={l}>{ESCALATION_LEVEL_LABEL[l]}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Target Team</label>
+                    <select
+                      value={escalateDraft.targetTeam}
+                      onChange={e => setEscalateDraft(d => ({ ...d, targetTeam: e.target.value as EscalationTargetTeam }))}
+                      data-testid="support-escalate-team"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700"
+                    >
+                      {ESCALATION_TARGET_TEAM_OPTIONS.map(t => (
+                        <option key={t} value={t}>{t}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Ack Due (hours)</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={72}
+                      value={escalateDraft.ackHours}
+                      onChange={e => setEscalateDraft(d => ({ ...d, ackHours: Math.max(1, Number(e.target.value) || 1) }))}
+                      data-testid="support-escalate-ack-hours"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700"
+                    />
+                  </div>
+                  <div className="col-span-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Owner (optional)</label>
+                    <input
+                      value={escalateDraft.ownerName}
+                      onChange={e => setEscalateDraft(d => ({ ...d, ownerName: e.target.value }))}
+                      data-testid="support-escalate-owner"
+                      placeholder="Leave blank to keep unassigned"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700"
+                    />
+                  </div>
+                  <div className="col-span-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Reason note (optional)</label>
+                    <textarea
+                      value={escalateDraft.reasonNote}
+                      onChange={e => setEscalateDraft(d => ({ ...d, reasonNote: e.target.value }))}
+                      data-testid="support-escalate-reason-note"
+                      placeholder="Add operator context for the audit trail…"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 h-20 resize-none"
+                    />
+                  </div>
+                </div>
               </div>
-              <div className="p-7 border-t border-slate-100 bg-slate-50/40 flex justify-end gap-2">
-                <button onClick={() => setEscalateOpen(false)} className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-white">Cancel</button>
-                <button onClick={() => { escalateCase(selected, escalateReason.trim()); setEscalateOpen(false); }} className="px-6 py-2.5 bg-red-500/90 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-red-500">Escalate</button>
+              <div className="p-5 border-t border-slate-100 bg-slate-50/40 flex justify-end gap-2">
+                <button onClick={() => setEscalateModal(null)} className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-white">Cancel</button>
+                <button
+                  onClick={() => { escalateCaseStructured(escalateModal); setEscalateModal(null); }}
+                  data-testid="support-escalate-confirm"
+                  className="px-6 py-2.5 bg-red-500/90 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-red-500"
+                >
+                  Escalate
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Phase 1.1.3A — Assign / Reassign modal. */}
+      <AnimatePresence>
+        {assignModal && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" data-testid="support-assign-modal">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setAssignModal(null)} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="relative w-full max-w-md bg-white rounded-[2rem] shadow-2xl overflow-hidden">
+              <div className="p-6 border-b border-slate-100">
+                <h3 className="text-lg font-black text-primary tracking-tight">{assignModal.escalationOwnerName ? 'Reassign Owner' : 'Assign Owner'}</h3>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mt-1">{assignModal.id} · {assignModal.subject}</p>
+              </div>
+              <div className="p-6 space-y-3">
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Owner</label>
+                  <input
+                    value={assignDraft.ownerName}
+                    onChange={e => setAssignDraft(d => ({ ...d, ownerName: e.target.value }))}
+                    data-testid="support-assign-owner"
+                    placeholder="Operator display name"
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Team</label>
+                  <select
+                    value={assignDraft.team}
+                    onChange={e => setAssignDraft(d => ({ ...d, team: e.target.value as EscalationTargetTeam }))}
+                    data-testid="support-assign-team"
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700"
+                  >
+                    {ESCALATION_TARGET_TEAM_OPTIONS.map(t => (
+                      <option key={t} value={t}>{t}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Reason (optional)</label>
+                  <textarea
+                    value={assignDraft.reason}
+                    onChange={e => setAssignDraft(d => ({ ...d, reason: e.target.value }))}
+                    data-testid="support-assign-reason"
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 h-20 resize-none"
+                  />
+                </div>
+              </div>
+              <div className="p-5 border-t border-slate-100 bg-slate-50/40 flex justify-end gap-2">
+                <button onClick={() => setAssignModal(null)} className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-white">Cancel</button>
+                <button
+                  onClick={() => { assignEscalation(assignModal); setAssignModal(null); }}
+                  data-testid="support-assign-confirm"
+                  className="px-6 py-2.5 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90"
+                >
+                  {assignModal.escalationOwnerName ? 'Reassign' : 'Assign'}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Phase 1.1.3A — Change Level modal. */}
+      <AnimatePresence>
+        {levelModal && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" data-testid="support-level-modal">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setLevelModal(null)} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="relative w-full max-w-md bg-white rounded-[2rem] shadow-2xl overflow-hidden">
+              <div className="p-6 border-b border-slate-100">
+                <h3 className="text-lg font-black text-primary tracking-tight">Change Escalation Level</h3>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mt-1">{levelModal.id} · {levelModal.subject}</p>
+              </div>
+              <div className="p-6 space-y-3">
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">New Level</label>
+                  <select
+                    value={levelDraft.level}
+                    onChange={e => setLevelDraft(d => ({ ...d, level: e.target.value as EscalationLevel }))}
+                    data-testid="support-level-select"
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700"
+                  >
+                    {ESCALATION_LEVEL_OPTIONS.map(l => (
+                      <option key={l} value={l}>{ESCALATION_LEVEL_LABEL[l]}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Reason (optional)</label>
+                  <textarea
+                    value={levelDraft.reason}
+                    onChange={e => setLevelDraft(d => ({ ...d, reason: e.target.value }))}
+                    data-testid="support-level-reason"
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 h-20 resize-none"
+                  />
+                </div>
+              </div>
+              <div className="p-5 border-t border-slate-100 bg-slate-50/40 flex justify-end gap-2">
+                <button onClick={() => setLevelModal(null)} className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-white">Cancel</button>
+                <button
+                  onClick={() => { changeEscalationLevel(levelModal); setLevelModal(null); }}
+                  data-testid="support-level-confirm"
+                  className="px-6 py-2.5 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90"
+                >
+                  Update Level
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Phase 1.1.3A — Resolve Escalation modal. */}
+      <AnimatePresence>
+        {resolveModal && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" data-testid="support-resolve-modal">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setResolveModal(null)} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="relative w-full max-w-md bg-white rounded-[2rem] shadow-2xl overflow-hidden">
+              <div className="p-6 border-b border-slate-100">
+                <h3 className="text-lg font-black text-primary tracking-tight">Resolve Escalation</h3>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mt-1">{resolveModal.id} · {resolveModal.subject}</p>
+                <p className="text-[10px] font-bold text-slate-400 italic mt-1">Marks the escalation as resolved. The case itself remains in its current status.</p>
+              </div>
+              <div className="p-6 space-y-3">
+                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Resolution note (optional)</label>
+                <textarea
+                  value={resolveDraft.note}
+                  onChange={e => setResolveDraft({ note: e.target.value })}
+                  data-testid="support-resolve-note"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 h-24 resize-none"
+                />
+              </div>
+              <div className="p-5 border-t border-slate-100 bg-slate-50/40 flex justify-end gap-2">
+                <button onClick={() => setResolveModal(null)} className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-white">Cancel</button>
+                <button
+                  onClick={() => { resolveEscalation(resolveModal); setResolveModal(null); }}
+                  data-testid="support-resolve-confirm"
+                  className="px-6 py-2.5 bg-emerald-600 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-emerald-700"
+                >
+                  Resolve Escalation
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Phase 1.1.3A — De-escalate modal (with reason). */}
+      <AnimatePresence>
+        {deescalateModal && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" data-testid="support-deesc-modal">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setDeescalateModal(null)} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="relative w-full max-w-md bg-white rounded-[2rem] shadow-2xl overflow-hidden">
+              <div className="p-6 border-b border-slate-100">
+                <h3 className="text-lg font-black text-primary tracking-tight">De-escalate</h3>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mt-1">{deescalateModal.id} · {deescalateModal.subject}</p>
+              </div>
+              <div className="p-6 space-y-3">
+                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Reason / context (optional)</label>
+                <textarea
+                  value={deescalateDraft.note}
+                  onChange={e => setDeescalateDraft({ note: e.target.value })}
+                  data-testid="support-deesc-note"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 h-24 resize-none"
+                />
+              </div>
+              <div className="p-5 border-t border-slate-100 bg-slate-50/40 flex justify-end gap-2">
+                <button onClick={() => setDeescalateModal(null)} className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-white">Cancel</button>
+                <button
+                  onClick={() => { deescalateCase(deescalateModal); setDeescalateModal(null); }}
+                  data-testid="support-deesc-confirm"
+                  className="px-6 py-2.5 bg-violet-600 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-violet-700"
+                >
+                  De-escalate
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Phase 1.1.3A — Close-with-active-escalation warning. */}
+      <AnimatePresence>
+        {closeWarnModal && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" data-testid="support-close-warn-modal">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setCloseWarnModal(null)} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="relative w-full max-w-md bg-white rounded-[2rem] shadow-2xl overflow-hidden">
+              <div className="p-6 border-b border-slate-100">
+                <h3 className="text-lg font-black text-red-700 tracking-tight">Close with active escalation?</h3>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mt-1">{closeWarnModal.id} · {closeWarnModal.subject}</p>
+              </div>
+              <div className="p-6 space-y-2 text-xs text-slate-600">
+                <p>This case still has an active escalation ({ESCALATION_STATUS_LABEL[effectiveEscalationStatus(closeWarnModal).status]}). Closing now will write a warning audit row.</p>
+                {(() => {
+                  const r = can(currentRole, 'close_with_active_escalation', { targetTeam: closeWarnModal.escalationTargetTeam });
+                  if (!r.allowed) {
+                    return (
+                      <p className="text-red-700 font-bold pt-1" data-testid="support-close-warn-blocked">{r.reason}</p>
+                    );
+                  }
+                  return null;
+                })()}
+              </div>
+              <div className="p-5 border-t border-slate-100 bg-slate-50/40 flex justify-end gap-2">
+                <button onClick={() => setCloseWarnModal(null)} className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-white">Cancel</button>
+                {(() => {
+                  const r = can(currentRole, 'close_with_active_escalation', { targetTeam: closeWarnModal.escalationTargetTeam });
+                  return (
+                    <button
+                      disabled={!r.allowed}
+                      onClick={() => confirmCloseWithActiveEscalation(closeWarnModal)}
+                      data-testid="support-close-warn-confirm"
+                      title={r.allowed ? '' : r.reason}
+                      className={`px-6 py-2.5 text-[10px] font-black uppercase tracking-widest rounded-xl ${r.allowed ? 'bg-red-500/90 text-white hover:bg-red-500' : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'}`}
+                    >
+                      Close anyway
+                    </button>
+                  );
+                })()}
               </div>
             </motion.div>
           </div>

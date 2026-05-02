@@ -86,7 +86,7 @@ const AUDIT_VIEW_META: Record<string, { icon: string; tone: string }> = {
 // against the full row set — independent of the user's currently-active
 // search / tenant / additional filters.
 function countForView(
-  view: { filters: { severity?: string; category?: string; highRiskOnly?: boolean } },
+  view: { filters: { severity?: string; category?: string; highRiskOnly?: boolean; actionPrefix?: string } },
   rows: AuditRow[]
 ): number {
   return rows.filter(r => {
@@ -101,6 +101,10 @@ function countForView(
       const { flag } = deriveHighRiskFlag(r);
       if (!flag) return false;
     }
+    // Phase 1.1.3A — actionPrefix predicate (e.g. 'support_case_escalat'
+    // matches both legacy '*_escalated/_deescalated' and new lifecycle
+    // ids). Plain prefix match — no regex.
+    if (f.actionPrefix && !((r.action || '').startsWith(f.actionPrefix))) return false;
     return true;
   }).length;
 }
@@ -204,8 +208,17 @@ const AuditSecurityPage: React.FC = () => {
     );
   }, [mirrored]);
 
+  // Phase 1.1.3A — actionPrefix from the active saved view (only the
+  // 'escalation_lifecycle' view sets this). When set, applied as an
+  // additional row predicate alongside category / severity / search.
+  const activeActionPrefix = useMemo(() => {
+    const v = predefinedAuditViews.find(x => x.id === activeView);
+    return v?.filters.actionPrefix ?? null;
+  }, [activeView]);
+
   const visibleRows = useMemo(() => {
     return allRows.filter(r => {
+      if (activeActionPrefix && !((r.action || '').startsWith(activeActionPrefix))) return false;
       if (categoryFilter !== 'all') {
         if (categoryFilter === 'other') {
           if (['commercial', 'security', 'support', 'configuration', 'domains', 'team'].includes(r.category || '')) return false;
@@ -225,7 +238,7 @@ const AuditSecurityPage: React.FC = () => {
       }
       return true;
     });
-  }, [allRows, categoryFilter, severityFilter, tenantFilter, searchText, highRiskOnly]);
+  }, [allRows, categoryFilter, severityFilter, tenantFilter, searchText, highRiskOnly, activeActionPrefix]);
 
   const tenantNameById = useMemo(() => {
     const m = new Map<string, string>();
@@ -842,6 +855,29 @@ const AuditSecurityPage: React.FC = () => {
                   {selected.tenantId && <Row label="Tenant" value={tenantNameById.get(selected.tenantId) || selected.tenantId} />}
                   {selected.oldValue != null && <Row label="From" value={String(selected.oldValue)} />}
                   {selected.newValue != null && <Row label="To" value={String(selected.newValue)} />}
+                  {/* Phase 1.1.3A — escalation lifecycle before/after card.
+                      Renders for any support_case_escalat* action so
+                      reviewers see the structured transition (status,
+                      level, owner/team) without needing to open the
+                      support case. */}
+                  {(selected.action || '').startsWith('support_case_escalat') && (selected.oldValue != null || selected.newValue != null) && (
+                    <div
+                      className="rounded-2xl border border-slate-100 bg-slate-50/40 p-4 space-y-1.5"
+                      data-testid="audit-drawer-escalation-diff"
+                    >
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Escalation Transition</p>
+                      <div className="flex items-center gap-2 text-xs font-bold text-slate-700 flex-wrap">
+                        <span className="px-2 py-1 rounded-lg bg-white border border-slate-200" data-testid="audit-drawer-esc-old">
+                          {selected.oldValue != null ? String(selected.oldValue) : '—'}
+                        </span>
+                        <span className="text-slate-400">→</span>
+                        <span className="px-2 py-1 rounded-lg bg-primary/10 border border-primary/20 text-primary" data-testid="audit-drawer-esc-new">
+                          {selected.newValue != null ? String(selected.newValue) : '—'}
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-slate-400 italic">Action: <span className="font-mono">{selected.action}</span></p>
+                    </div>
+                  )}
                   {selected.note && (
                     <div>
                       <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Note</p>

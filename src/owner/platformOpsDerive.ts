@@ -228,6 +228,10 @@ export interface AuditViewFilters {
   severity?: 'all' | 'info' | 'notice' | 'warning' | 'critical';
   category?: 'all' | string;
   highRiskOnly?: boolean;
+  // Phase 1.1.3A — match audit rows whose `action` starts with this
+  // prefix. Used by the new "Escalation Lifecycle" saved view to
+  // capture every support_case_escalat* action id.
+  actionPrefix?: string;
 }
 
 export interface SupportViewFilters {
@@ -235,6 +239,21 @@ export interface SupportViewFilters {
   severity?: 'all' | SupportCaseSeverity;
   sla?: 'any' | 'overdue' | 'at_risk';
   sort?: 'updated_desc' | 'opened_desc';
+  // Phase 1.1.3A — escalation queue tokens. Active escalations are
+  // status in {escalated, acknowledged, in_review}. "overdue_ack" requires
+  // status='escalated' AND now > acknowledgementDueAt. "mine"/"team" rely
+  // on the optional ctx passed to countCasesForSupportView /
+  // applyEscalationFilter.
+  escalation?:
+    | 'active'
+    | 'unacknowledged'
+    | 'overdue_ack'
+    | 'critical'
+    | 'unassigned'
+    | 'deescalated'
+    | 'resolved'
+    | 'mine'
+    | 'team';
 }
 
 export interface SavedView<F> {
@@ -254,6 +273,9 @@ export const predefinedAuditViews: SavedView<AuditViewFilters>[] = [
   { id: 'security', label: 'Security Notes', filters: { category: 'security' } },
   { id: 'billing', label: 'Billing / Invoice', filters: { category: 'billing' } },
   { id: 'addon', label: 'Add-on Governance', filters: { category: 'addon' } },
+  // Phase 1.1.3A — escalation lifecycle saved view. Filters audit
+  // events by the support escalation action ids (legacy + new).
+  { id: 'escalation_lifecycle', label: 'Escalation Lifecycle', filters: { actionPrefix: 'support_case_escalat' } },
 ];
 
 export const predefinedSupportViews: SavedView<SupportViewFilters>[] = [
@@ -263,6 +285,18 @@ export const predefinedSupportViews: SavedView<SupportViewFilters>[] = [
   { id: 'waiting_customer', label: 'Waiting Customer', filters: { status: 'waiting_customer' } },
   { id: 'recent', label: 'Recently Updated', filters: { sort: 'updated_desc' } },
   { id: 'resolved', label: 'Resolved / Closed', filters: { status: 'resolved_group' } },
+  // Phase 1.1.3A — escalation queues. All purely advisory; "mine"/"team"
+  // resolve against the in-app advisory operator/team context (no real
+  // RBAC). Counts come from countCasesForSupportView.
+  { id: 'esc_active', label: 'Escalated Active', filters: { escalation: 'active' } },
+  { id: 'esc_unack', label: 'Unacknowledged Escalations', filters: { escalation: 'unacknowledged' } },
+  { id: 'esc_overdue_ack', label: 'Escalation Ack Overdue', filters: { escalation: 'overdue_ack' } },
+  { id: 'esc_critical', label: 'Critical Escalations', filters: { escalation: 'critical' } },
+  { id: 'esc_mine', label: 'Assigned to Me', filters: { escalation: 'mine' } },
+  { id: 'esc_team', label: 'Assigned to My Team', filters: { escalation: 'team' } },
+  { id: 'esc_unassigned', label: 'Unassigned Escalations', filters: { escalation: 'unassigned' } },
+  { id: 'esc_deescalated', label: 'De-escalated', filters: { escalation: 'deescalated' } },
+  { id: 'esc_resolved', label: 'Escalation Resolved', filters: { escalation: 'resolved' } },
 ];
 
 // --- CSV -------------------------------------------------------------------
@@ -473,7 +507,14 @@ export interface PulseMetric {
     | 'high_risk_audits'
     | 'domain_issues'
     | 'tenants_at_risk'
-    | 'pending_actions';
+    | 'pending_actions'
+    // Phase 1.1.3A — escalation lifecycle pulse cells (additive). The
+    // legacy `escalated` cell is preserved unchanged for back-compat;
+    // these add visibility into unacknowledged / overdue-ack /
+    // unassigned escalations so operators can route work.
+    | 'unacknowledged_escalations'
+    | 'overdue_ack'
+    | 'unassigned_escalations';
   label: string;
   value: number;
   hint: string;
@@ -485,6 +526,18 @@ export function deriveOperationalPulse(input: PulseInputs): PulseMetric[] {
   const openCases = input.cases.filter(c => c.status !== 'resolved' && c.status !== 'closed');
   const overdue = openCases.filter(c => deriveSlaStatus(c, now).status === 'overdue').length;
   const escalated = openCases.filter(c => c.escalated === true).length;
+  // Phase 1.1.3A — escalation lifecycle counters. We use the
+  // effectiveEscalationStatus helper so legacy `escalated:true` cases
+  // (no structured status yet) still count, then sub-segment by
+  // unacknowledged / overdue-ack / unassigned.
+  const activeEscalations = openCases.filter(c => effectiveEscalationStatus(c).active);
+  const unacknowledgedEscalations = activeEscalations.filter(
+    c => effectiveEscalationStatus(c).status === 'escalated'
+  ).length;
+  const overdueAck = activeEscalations.filter(c => isEscalationAckOverdue(c, now)).length;
+  const unassignedEscalations = activeEscalations.filter(
+    c => !((c.escalationOwnerName || '').trim())
+  ).length;
   const highRisk = input.audits.filter(a => {
     const f = deriveHighRiskFlag(a).flag;
     return f === 'critical' || f === 'high_risk';
@@ -502,6 +555,10 @@ export function deriveOperationalPulse(input: PulseInputs): PulseMetric[] {
     { id: 'domain_issues', label: 'Domain Issues', value: domainIssues, hint: 'Domains failed, pending, or verifying. Verification is manual.', tone: domainIssues > 0 ? 'warn' : 'ok' },
     { id: 'tenants_at_risk', label: 'Tenants At Risk', value: tenantsAtRisk, hint: 'Tenants whose derived risk is At Risk or Critical.', tone: tenantsAtRisk > 0 ? 'warn' : 'ok' },
     { id: 'pending_actions', label: 'Pending Actions', value: input.attentionCount, hint: 'Total items in the Needs Attention queue.', tone: input.attentionCount > 5 ? 'warn' : input.attentionCount > 0 ? 'info' : 'ok' },
+    // Phase 1.1.3A — additive escalation pulse cells.
+    { id: 'unacknowledged_escalations', label: 'Unacked Escalations', value: unacknowledgedEscalations, hint: 'Active escalations not yet acknowledged by an operator.', tone: unacknowledgedEscalations > 0 ? 'warn' : 'ok' },
+    { id: 'overdue_ack', label: 'Overdue Ack', value: overdueAck, hint: 'Active escalations past their acknowledgement-due time.', tone: overdueAck > 0 ? 'critical' : 'ok' },
+    { id: 'unassigned_escalations', label: 'Unassigned Escalations', value: unassignedEscalations, hint: 'Active escalations without an assigned owner.', tone: unassignedEscalations > 0 ? 'warn' : 'ok' },
   ];
 }
 
@@ -634,6 +691,97 @@ export function deriveNextBestActions(input: NbaInputs): NextBestAction[] {
       ctaLabel: 'Open case',
       href: `/owner/support-tools?caseId=${encodeURIComponent(c.id)}`,
     }));
+
+  // Phase 1.1.3A — escalation lifecycle NBAs (additive). Each rule
+  // surfaces a structured escalation gap operators should close. None
+  // duplicate the existing #2 rule above because they target a more
+  // specific lifecycle defect (no owner / unacknowledged / ack overdue
+  // / critical level / SLA breach concurrent / level mismatch).
+  openCases.forEach(c => {
+    const eff = effectiveEscalationStatus(c);
+    if (!eff.active) return;
+    const ackOverdue = isEscalationAckOverdue(c, now);
+    const critical = isEscalationCritical(c);
+    const owner = (c.escalationOwnerName || '').trim();
+    const sla = deriveSlaStatus(c, now).status;
+    const tenant = input.tenantNameById.get(c.tenantId) || c.tenantId;
+    const href = `/owner/support-tools?caseId=${encodeURIComponent(c.id)}`;
+    // a) Ack overdue — critical priority.
+    if (ackOverdue) {
+      out.push({
+        id: `nba_eack_${c.id}`,
+        priority: 'critical',
+        title: `Acknowledge overdue escalation · ${c.subject}`,
+        reason: 'Escalation past its acknowledgement-due time.',
+        tenant,
+        ctaLabel: 'Open case',
+        href,
+      });
+    }
+    // b) Unacknowledged but not yet overdue.
+    else if (eff.status === 'escalated') {
+      out.push({
+        id: `nba_eunack_${c.id}`,
+        priority: critical ? 'critical' : 'high',
+        title: `Acknowledge escalation · ${c.subject}`,
+        reason: critical ? 'Critical escalation awaiting acknowledgement.' : 'Escalation awaiting acknowledgement.',
+        tenant,
+        ctaLabel: 'Open case',
+        href,
+      });
+    }
+    // c) Active escalation with no owner.
+    if (!owner) {
+      out.push({
+        id: `nba_enown_${c.id}`,
+        priority: critical ? 'high' : 'medium',
+        title: `Assign owner for escalation · ${c.subject}`,
+        reason: 'Active escalation without an assigned owner.',
+        tenant,
+        ctaLabel: 'Open case',
+        href,
+      });
+    }
+    // d) Critical-level escalation — emphasize review.
+    if (critical && eff.status !== 'in_review') {
+      out.push({
+        id: `nba_ecrit_${c.id}`,
+        priority: 'critical',
+        title: `Review critical escalation · ${c.subject}`,
+        reason: `Level: ${c.escalationLevel || 'urgent'}. Critical lifecycle review required.`,
+        tenant,
+        ctaLabel: 'Open case',
+        href,
+      });
+    }
+    // e) Active escalation that is also SLA-overdue.
+    if (sla === 'overdue') {
+      out.push({
+        id: `nba_eslad_${c.id}`,
+        priority: 'critical',
+        title: `Resolve SLA-breached escalation · ${c.subject}`,
+        reason: 'Active escalation past resolution SLA.',
+        tenant,
+        ctaLabel: 'Open case',
+        href,
+      });
+    }
+    // f) Acknowledged but stalled (no resolution after 48h).
+    if (eff.status === 'acknowledged' && c.acknowledgedAt) {
+      const ackedMs = new Date(c.acknowledgedAt).getTime();
+      if (Number.isFinite(ackedMs) && now.getTime() - ackedMs > 48 * 36e5) {
+        out.push({
+          id: `nba_estall_${c.id}`,
+          priority: 'high',
+          title: `Drive escalation to resolution · ${c.subject}`,
+          reason: 'Acknowledged > 48h without resolution.',
+          tenant,
+          ctaLabel: 'Open case',
+          href,
+        });
+      }
+    }
+  });
 
   // 3) Critical or high-risk audit events.
   input.audits.slice(0, 25).forEach(a => {
@@ -857,6 +1005,20 @@ export const PULSE_ROUTING: Record<PulseFilterId, PulseRouting> = {
     filterLabel: 'All pending actions',
     filtersAttention: () => true,
   },
+  // Phase 1.1.3A — escalation pulse routing. Each filters the Needs
+  // Attention queue by the corresponding new attention item type.
+  unacknowledged_escalations: {
+    filterLabel: 'Unacked escalations',
+    filtersAttention: it => it.type === 'Unacknowledged escalation',
+  },
+  overdue_ack: {
+    filterLabel: 'Overdue ack',
+    filtersAttention: it => it.type === 'Overdue escalation acknowledgement',
+  },
+  unassigned_escalations: {
+    filterLabel: 'Unassigned escalations',
+    filtersAttention: it => it.type === 'Escalation without owner',
+  },
 };
 
 export function deriveTenant360(input: Tenant360Inputs): Tenant360Result {
@@ -914,7 +1076,8 @@ export const PHASE_112_TRUTH_LABEL =
 export function countCasesForSupportView(
   view: SavedView<SupportViewFilters>,
   cases: SupportCaseRecord[],
-  now: Date = new Date()
+  now: Date = new Date(),
+  ctx?: SupportViewCtx
 ): number {
   const f = view.filters;
   return cases.filter(c => {
@@ -931,6 +1094,9 @@ export function countCasesForSupportView(
     if (f.sla === 'overdue' || f.sla === 'at_risk') {
       const s = deriveSlaStatus(c, now).status;
       if (s !== f.sla) return false;
+    }
+    if (f.escalation) {
+      if (!matchesEscalationFilter(c, f.escalation, now, ctx)) return false;
     }
     return true;
   }).length;
@@ -1052,4 +1218,398 @@ export function tierForPriority(priority: NbaPriority): NbaTier {
   if (priority === 'critical') return 'p1';
   if (priority === 'high') return 'p2';
   return 'p3';
+}
+
+// ===========================================================================
+// Phase 1.1.3A — Operating Model + Permission-Aware Escalation
+// ===========================================================================
+// Strictly additive on Phase 1.1 / 1.1.1 / 1.1.2. All helpers below are
+// pure, deterministic, and rule-based. There is no real RBAC enforcement,
+// no real notifications, no on-call routing, no PagerDuty / Slack / SMS /
+// email, no AI. Roles + can() are advisory governance controls used to
+// shape which buttons appear in the UI; they do not gate any persisted
+// data, server endpoint, or external service.
+
+export const PHASE_113A_TRUTH_LABEL =
+  'Escalation is an internal workflow — assignment, acknowledgement, level changes, and resolution are tracked and audited in-app. No paging, on-call routing, or external notifications are wired in this phase.';
+
+export const PHASE_113A_PERMISSION_LABEL =
+  'Permission checks are advisory governance controls — buttons gate the UI to make ownership and approval flows obvious, but no persisted RBAC is enforced server-side in this phase.';
+
+// --- Advisory roles --------------------------------------------------------
+
+export type PlatformOpsRole =
+  | 'platform_owner'
+  | 'platform_admin'
+  | 'platform_lead'
+  | 'platform_operator'
+  | 'platform_security'
+  | 'platform_billing'
+  | 'platform_readonly';
+
+export const PLATFORM_OPS_ROLE_LABEL: Record<PlatformOpsRole, string> = {
+  platform_owner: 'Platform Owner',
+  platform_admin: 'Platform Admin',
+  platform_lead: 'Support Lead',
+  platform_operator: 'Operator',
+  platform_security: 'Security Reviewer',
+  platform_billing: 'Billing Reviewer',
+  platform_readonly: 'Read-only',
+};
+
+export const PLATFORM_OPS_ROLE_DESCRIPTION: Record<PlatformOpsRole, string> = {
+  platform_owner: 'Full operating-model authority across every escalation lifecycle action.',
+  platform_admin: 'Day-to-day escalation governance — escalate, assign, acknowledge, level, de-escalate, resolve, close.',
+  platform_lead: 'Triage + acknowledgement + assignment authority for the support queue. Cannot close cases that still have an active escalation.',
+  platform_operator: 'Frontline operator — can escalate and acknowledge / de-escalate items they own. Cannot reassign or change level.',
+  platform_security: 'Security-routed acknowledgement, level changes, and resolution.',
+  platform_billing: 'Billing-routed acknowledgement and de-escalation.',
+  platform_readonly: 'Read-only — every escalation lifecycle button is disabled with a reason.',
+};
+
+// Sample team for "Assigned to My Team" mapping. Pure advisory.
+export const ROLE_TEAM_BY_ROLE: Record<PlatformOpsRole, string | null> = {
+  platform_owner: 'Engineering / Platform Ops',
+  platform_admin: 'Engineering / Platform Ops',
+  platform_lead: 'Support Tier 2',
+  platform_operator: 'Support Tier 1',
+  platform_security: 'Security Review',
+  platform_billing: 'Billing Operations',
+  platform_readonly: null,
+};
+
+// --- Escalation labels / styles -------------------------------------------
+
+export type EscalationStatus = NonNullable<SupportCaseRecord['escalationStatus']>;
+export type EscalationLevel = NonNullable<SupportCaseRecord['escalationLevel']>;
+export type EscalationReasonCode = NonNullable<SupportCaseRecord['escalationReasonCode']>;
+export type EscalationTargetTeam = NonNullable<SupportCaseRecord['escalationTargetTeam']>;
+
+export const ESCALATION_STATUS_LABEL: Record<EscalationStatus, string> = {
+  none: 'Not escalated',
+  escalated: 'Escalated',
+  acknowledged: 'Acknowledged',
+  in_review: 'In Review',
+  deescalated: 'De-escalated',
+  resolved: 'Escalation Resolved',
+};
+
+export const ESCALATION_STATUS_STYLES: Record<EscalationStatus, string> = {
+  none: 'bg-slate-100 text-slate-500 border-slate-200',
+  escalated: 'bg-red-500/10 text-red-700 border-red-500/30',
+  acknowledged: 'bg-amber-400/10 text-amber-700 border-amber-400/20',
+  in_review: 'bg-blue-400/10 text-blue-700 border-blue-400/20',
+  deescalated: 'bg-violet-400/10 text-violet-700 border-violet-400/20',
+  resolved: 'bg-emerald-400/10 text-emerald-700 border-emerald-400/20',
+};
+
+export const ESCALATION_LEVEL_LABEL: Record<EscalationLevel, string> = {
+  L1: 'L1',
+  L2: 'L2',
+  L3: 'L3',
+  'Manager Review': 'Manager Review',
+  'Security Review': 'Security Review',
+  'Critical Incident Review': 'Critical Incident Review',
+};
+
+export const ESCALATION_LEVEL_STYLES: Record<EscalationLevel, string> = {
+  L1: 'bg-slate-100 text-slate-700 border-slate-200',
+  L2: 'bg-amber-400/10 text-amber-700 border-amber-400/20',
+  L3: 'bg-orange-400/10 text-orange-700 border-orange-400/20',
+  'Manager Review': 'bg-red-500/10 text-red-700 border-red-500/30',
+  'Security Review': 'bg-red-500/10 text-red-700 border-red-500/30',
+  'Critical Incident Review': 'bg-red-600/10 text-red-800 border-red-600/40',
+};
+
+export const ESCALATION_LEVEL_OPTIONS: EscalationLevel[] = [
+  'L1',
+  'L2',
+  'L3',
+  'Manager Review',
+  'Security Review',
+  'Critical Incident Review',
+];
+
+export const ESCALATION_REASON_LABEL: Record<EscalationReasonCode, string> = {
+  sla_breach: 'SLA breach',
+  sla_at_risk: 'SLA at risk',
+  customer_impact: 'Customer impact',
+  security_concern: 'Security concern',
+  billing_risk: 'Billing risk',
+  domain_issue: 'Domain / DNS issue',
+  product_defect: 'Product defect',
+  repeated_failure: 'Repeated failure',
+  manual: 'Manual / other',
+};
+
+export const ESCALATION_REASON_OPTIONS: EscalationReasonCode[] = [
+  'sla_breach',
+  'sla_at_risk',
+  'customer_impact',
+  'security_concern',
+  'billing_risk',
+  'domain_issue',
+  'product_defect',
+  'repeated_failure',
+  'manual',
+];
+
+export const ESCALATION_TARGET_TEAM_OPTIONS: EscalationTargetTeam[] = [
+  'Support Tier 1',
+  'Support Tier 2',
+  'Engineering / Platform Ops',
+  'Security Review',
+  'Billing Operations',
+  'Customer Success',
+  'Executive Review',
+];
+
+const CRITICAL_ESCALATION_LEVELS = new Set<EscalationLevel>([
+  'Manager Review',
+  'Security Review',
+  'Critical Incident Review',
+]);
+
+// --- Effective status (back-compat with legacy `escalated:true`) ----------
+
+export interface EffectiveEscalation {
+  status: EscalationStatus;
+  level: EscalationLevel | null;
+  active: boolean;
+  isLegacyOnly: boolean;
+}
+
+export function effectiveEscalationStatus(
+  c: Pick<
+    SupportCaseRecord,
+    'escalated' | 'escalationStatus' | 'escalationLevel'
+  >
+): EffectiveEscalation {
+  const explicit = c.escalationStatus;
+  if (explicit && explicit !== 'none') {
+    const active =
+      explicit === 'escalated' || explicit === 'acknowledged' || explicit === 'in_review';
+    return {
+      status: explicit,
+      level: c.escalationLevel ?? null,
+      active,
+      isLegacyOnly: false,
+    };
+  }
+  if (c.escalated === true) {
+    return {
+      status: 'escalated',
+      level: c.escalationLevel ?? null,
+      active: true,
+      isLegacyOnly: !c.escalationStatus,
+    };
+  }
+  return {
+    status: 'none',
+    level: c.escalationLevel ?? null,
+    active: false,
+    isLegacyOnly: false,
+  };
+}
+
+export function isEscalationAckOverdue(
+  c: Pick<SupportCaseRecord, 'escalationStatus' | 'escalated' | 'acknowledgementDueAt'>,
+  now: Date = new Date()
+): boolean {
+  const eff = effectiveEscalationStatus(c as SupportCaseRecord);
+  if (eff.status !== 'escalated') return false;
+  if (!c.acknowledgementDueAt) return false;
+  const due = new Date(c.acknowledgementDueAt);
+  if (isNaN(due.getTime())) return false;
+  return now.getTime() > due.getTime();
+}
+
+export function isEscalationCritical(
+  c: Pick<SupportCaseRecord, 'severity' | 'escalated' | 'escalationStatus' | 'escalationLevel'>
+): boolean {
+  const eff = effectiveEscalationStatus(c as SupportCaseRecord);
+  if (!eff.active) return false;
+  if (eff.level && CRITICAL_ESCALATION_LEVELS.has(eff.level)) return true;
+  if (c.severity === 'urgent') return true;
+  return false;
+}
+
+// --- Saved-view ctx + escalation filter matcher ---------------------------
+
+export interface SupportViewCtx {
+  /** Display name used to resolve `escalation: 'mine'` queues. */
+  operatorName?: string | null;
+  /** Team name used to resolve `escalation: 'team'` queues. */
+  teamName?: string | null;
+}
+
+function matchesEscalationFilter(
+  c: SupportCaseRecord,
+  token: NonNullable<SupportViewFilters['escalation']>,
+  now: Date,
+  ctx?: SupportViewCtx
+): boolean {
+  const eff = effectiveEscalationStatus(c);
+  if (token === 'active') return eff.active;
+  if (token === 'unacknowledged') return eff.status === 'escalated';
+  if (token === 'overdue_ack') return isEscalationAckOverdue(c, now);
+  if (token === 'critical') return eff.active && isEscalationCritical(c);
+  if (token === 'unassigned') {
+    return eff.active && !((c.escalationOwnerName || c.escalationOwnerId || '').trim());
+  }
+  if (token === 'deescalated') return eff.status === 'deescalated';
+  if (token === 'resolved') return eff.status === 'resolved';
+  if (token === 'mine') {
+    if (!eff.active) return false;
+    const me = (ctx?.operatorName || '').trim();
+    if (!me) return false;
+    return (c.escalationOwnerName || '').trim() === me;
+  }
+  if (token === 'team') {
+    if (!eff.active) return false;
+    const team = (ctx?.teamName || '').trim();
+    if (!team) return false;
+    return (
+      (c.escalationTargetTeam || '').trim() === team ||
+      (c.assignedTeamName || '').trim() === team
+    );
+  }
+  return true;
+}
+
+// --- can() — advisory permission helper ----------------------------------
+
+export type EscalationAction =
+  | 'escalate'
+  | 'assign_owner'
+  | 'acknowledge'
+  | 'change_level'
+  | 'deescalate'
+  | 'resolve_escalation'
+  | 'close_with_active_escalation'
+  | 'edit_assignment';
+
+export interface CanCtx {
+  /** Optional escalation target team — used to scope security/billing roles. */
+  targetTeam?: EscalationTargetTeam | null;
+  /** Whether the acting role currently owns the case escalation. */
+  isOwner?: boolean;
+}
+
+export interface CanResult {
+  allowed: boolean;
+  reason: string;
+}
+
+const ROLE_TEAM_SCOPE: Partial<Record<PlatformOpsRole, EscalationTargetTeam[]>> = {
+  platform_security: ['Security Review'],
+  platform_billing: ['Billing Operations'],
+};
+
+function teamInScope(
+  role: PlatformOpsRole,
+  ctx?: CanCtx
+): boolean {
+  const scope = ROLE_TEAM_SCOPE[role];
+  if (!scope) return true;
+  if (!ctx?.targetTeam) return false;
+  return scope.includes(ctx.targetTeam);
+}
+
+const CAN_MATRIX: Record<EscalationAction, Partial<Record<PlatformOpsRole, true>>> = {
+  escalate: {
+    platform_owner: true,
+    platform_admin: true,
+    platform_lead: true,
+    platform_operator: true,
+    platform_security: true,
+    platform_billing: true,
+  },
+  assign_owner: {
+    platform_owner: true,
+    platform_admin: true,
+    platform_lead: true,
+    platform_security: true,
+    platform_billing: true,
+  },
+  acknowledge: {
+    platform_owner: true,
+    platform_admin: true,
+    platform_lead: true,
+    platform_operator: true,
+    platform_security: true,
+    platform_billing: true,
+  },
+  change_level: {
+    platform_owner: true,
+    platform_admin: true,
+    platform_lead: true,
+    platform_security: true,
+  },
+  deescalate: {
+    platform_owner: true,
+    platform_admin: true,
+    platform_lead: true,
+    platform_operator: true,
+    platform_security: true,
+    platform_billing: true,
+  },
+  resolve_escalation: {
+    platform_owner: true,
+    platform_admin: true,
+    platform_lead: true,
+    platform_security: true,
+    platform_billing: true,
+  },
+  close_with_active_escalation: {
+    platform_owner: true,
+    platform_admin: true,
+  },
+  edit_assignment: {
+    platform_owner: true,
+    platform_admin: true,
+    platform_lead: true,
+  },
+};
+
+export function can(
+  role: PlatformOpsRole,
+  action: EscalationAction,
+  ctx?: CanCtx
+): CanResult {
+  if (role === 'platform_readonly') {
+    return {
+      allowed: false,
+      reason: 'Read-only role cannot run escalation lifecycle actions.',
+    };
+  }
+  const allowedRoles = CAN_MATRIX[action];
+  if (!allowedRoles[role]) {
+    return {
+      allowed: false,
+      reason: `${PLATFORM_OPS_ROLE_LABEL[role]} cannot ${action.replace(/_/g, ' ')} in this phase.`,
+    };
+  }
+  // Operator restriction — operators may only acknowledge / de-escalate
+  // cases they own.
+  if (
+    role === 'platform_operator' &&
+    (action === 'acknowledge' || action === 'deescalate')
+  ) {
+    if (ctx && ctx.isOwner === false) {
+      return {
+        allowed: false,
+        reason: 'Operators can only acknowledge / de-escalate cases they own.',
+      };
+    }
+  }
+  // Security / billing scoping — they only act on team-scoped escalations.
+  if (!teamInScope(role, ctx)) {
+    const scope = ROLE_TEAM_SCOPE[role];
+    return {
+      allowed: false,
+      reason: `${PLATFORM_OPS_ROLE_LABEL[role]} can only act on ${(scope || []).join(' / ') || 'their team'} escalations.`,
+    };
+  }
+  return { allowed: true, reason: '' };
 }

@@ -72,6 +72,13 @@ import {
   NBA_TIER_STYLES,
   PHASE_112_TRUTH_LABEL,
   type WidgetId,
+  // Phase 1.1.3A — escalation lifecycle helpers (additive).
+  effectiveEscalationStatus,
+  isEscalationAckOverdue,
+  isEscalationCritical,
+  ESCALATION_STATUS_LABEL,
+  ESCALATION_LEVEL_LABEL,
+  PHASE_113A_TRUTH_LABEL,
 } from './platformOpsDerive';
 import { pushPlatformAudit } from './platformOpsAudit';
 
@@ -329,6 +336,91 @@ const CommandCenterPage: React.FC = () => {
       age: c.openedAt,
       href: `/owner/support-tools?caseId=${encodeURIComponent(c.id)}`,
     });
+    alreadyQueuedCaseIds.add(c.id);
+  });
+
+  // Phase 1.1.3A — structured escalation lifecycle attention items.
+  // Each is a distinct lifecycle defect (unack / overdue ack / critical
+  // / no owner / SLA breached). Items are pushed in addition to the
+  // legacy "Escalated support case" entry so operators see the
+  // *reason* the escalation needs hands-on attention.
+  openCases.forEach(c => {
+    const eff = effectiveEscalationStatus(c);
+    if (!eff.active) return;
+    const tenant = c.tenantId ? (tenantById.get(c.tenantId) || c.tenantId) : 'Unknown tenant';
+    const ackOverdue = isEscalationAckOverdue(c);
+    const critical = isEscalationCritical(c);
+    const owner = (c.escalationOwnerName || '').trim();
+    const sla = deriveSlaStatus(c).status;
+    // a) Overdue acknowledgement — critical priority.
+    if (ackOverdue) {
+      attention.push({
+        id: `eack_${c.id}`,
+        priority: 'critical',
+        type: 'Overdue escalation acknowledgement',
+        tenantId: c.tenantId,
+        tenant,
+        title: c.subject,
+        reason: `Ack due ${c.acknowledgementDueAt ? new Date(c.acknowledgementDueAt).toLocaleString() : '—'}`,
+        age: c.escalatedAt || c.openedAt,
+        href: `/owner/support-tools?caseId=${encodeURIComponent(c.id)}`,
+      });
+    } else if (eff.status === 'escalated') {
+      // b) Unacknowledged but not yet overdue.
+      attention.push({
+        id: `eunack_${c.id}`,
+        priority: critical ? 'critical' : 'high',
+        type: 'Unacknowledged escalation',
+        tenantId: c.tenantId,
+        tenant,
+        title: c.subject,
+        reason: `${eff.level ? `${ESCALATION_LEVEL_LABEL[eff.level]} · ` : ''}awaiting acknowledgement`,
+        age: c.escalatedAt || c.openedAt,
+        href: `/owner/support-tools?caseId=${encodeURIComponent(c.id)}`,
+      });
+    }
+    // c) Critical-level escalation (regardless of ack state).
+    if (critical) {
+      attention.push({
+        id: `ecrit_${c.id}`,
+        priority: 'critical',
+        type: 'Critical escalation',
+        tenantId: c.tenantId,
+        tenant,
+        title: c.subject,
+        reason: `${eff.level ? ESCALATION_LEVEL_LABEL[eff.level] : 'Urgent severity'} · ${ESCALATION_STATUS_LABEL[eff.status]}`,
+        age: c.escalatedAt || c.openedAt,
+        href: `/owner/support-tools?caseId=${encodeURIComponent(c.id)}`,
+      });
+    }
+    // d) Active escalation without an assigned owner.
+    if (!owner) {
+      attention.push({
+        id: `enown_${c.id}`,
+        priority: critical ? 'high' : 'medium',
+        type: 'Escalation without owner',
+        tenantId: c.tenantId,
+        tenant,
+        title: c.subject,
+        reason: c.escalationTargetTeam ? `Team: ${c.escalationTargetTeam}` : 'No owner or team assigned',
+        age: c.escalatedAt || c.openedAt,
+        href: `/owner/support-tools?caseId=${encodeURIComponent(c.id)}`,
+      });
+    }
+    // e) Active escalation with SLA-breach concurrency.
+    if (sla === 'overdue') {
+      attention.push({
+        id: `eslad_${c.id}`,
+        priority: 'critical',
+        type: 'Escalation with SLA breach',
+        tenantId: c.tenantId,
+        tenant,
+        title: c.subject,
+        reason: `${ESCALATION_STATUS_LABEL[eff.status]} · resolution SLA overdue`,
+        age: c.escalatedAt || c.openedAt,
+        href: `/owner/support-tools?caseId=${encodeURIComponent(c.id)}`,
+      });
+    }
   });
   filteredAudits.slice(0, 50).forEach(a => {
     const { flag } = deriveHighRiskFlag(a);
@@ -713,6 +805,8 @@ const CommandCenterPage: React.FC = () => {
               </>
             )}
             <span className="text-slate-400">{PHASE_112_TRUTH_LABEL}</span>
+            <span className="text-slate-300">·</span>
+            <span className="text-slate-400" data-testid="cc-phase-113a-truth-label">{PHASE_113A_TRUTH_LABEL}</span>
           </p>
         </div>
       </section>

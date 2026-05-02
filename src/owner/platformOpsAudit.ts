@@ -59,7 +59,17 @@ export type PlatformAuditAction =
   | 'command_center_focus_mode_changed'
   | 'command_center_tenant360_opened'
   // Phase 1.1.1 UX Correction — interactive pulse filter
-  | 'command_center_pulse_filter_applied';
+  | 'command_center_pulse_filter_applied'
+  // Phase 1.1.3A — Operating Model + Permission-Aware Escalation.
+  // All actions are advisory governance only — no real notifications,
+  // no real RBAC enforcement, no on-call routing.
+  | 'support_case_escalation_assigned'
+  | 'support_case_escalation_reassigned'
+  | 'support_case_escalation_acknowledged'
+  | 'support_case_escalation_level_changed'
+  | 'support_case_escalation_resolved'
+  | 'support_case_close_with_active_escalation_warning'
+  | 'support_case_assignment_changed';
 
 export interface PushPlatformAuditInput {
   actor: string;
@@ -141,6 +151,14 @@ const DEFAULT_SEVERITY_BY_ACTION: Partial<Record<PlatformAuditAction, PlatformAu
   command_center_time_range_changed: 'info',
   command_center_focus_mode_changed: 'info',
   command_center_tenant360_opened: 'info',
+  // Phase 1.1.3A
+  support_case_escalation_assigned: 'notice',
+  support_case_escalation_reassigned: 'notice',
+  support_case_escalation_acknowledged: 'notice',
+  support_case_escalation_level_changed: 'warning',
+  support_case_escalation_resolved: 'notice',
+  support_case_close_with_active_escalation_warning: 'warning',
+  support_case_assignment_changed: 'info',
 };
 
 export function pushPlatformAudit(input: PushPlatformAuditInput): MirrorRow {

@@ -754,7 +754,38 @@ export interface SupportCaseNote {
   body: string;
   createdAt: string;
   // 'note' = internal note, 'status_change' = audit-style status transition
-  kind: 'note' | 'status_change';
+  // Phase 1.1.3A — `escalation` kind for lifecycle transitions written by
+  // the structured escalate / acknowledge / assign / level-change /
+  // resolve / de-escalate handlers. Strictly additive on the existing
+  // 'note' | 'status_change' set.
+  kind: 'note' | 'status_change' | 'escalation';
+}
+
+export interface SupportCaseAssignmentEntry {
+  at: string;
+  by: string;
+  oldOwnerName?: string | null;
+  newOwnerName?: string | null;
+  oldTeamName?: string | null;
+  newTeamName?: string | null;
+  reason?: string | null;
+}
+
+export interface SupportCaseEscalationEntry {
+  at: string;
+  by: string;
+  byRole?: string | null;
+  action:
+    | 'escalated'
+    | 'assigned'
+    | 'reassigned'
+    | 'acknowledged'
+    | 'level_changed'
+    | 'deescalated'
+    | 'resolved';
+  oldValue?: string | null;
+  newValue?: string | null;
+  note?: string | null;
 }
 
 export interface SupportCaseRecord {
@@ -781,9 +812,68 @@ export interface SupportCaseRecord {
   escalationReason?: string | null;
   escalatedAt?: string | null;
   escalatedBy?: string | null;
+  escalatedByRole?: string | null;
   // Cross-surface link: the audit event that originated this case (when
   // created via "Create Support Case from Event").
   sourceAuditEventId?: string | null;
+
+  // Phase 1.1.3A — Operating Model + Permission-Aware Escalation.
+  // All fields are optional and additive. The legacy `escalated:true`
+  // boolean still drives existing pulse / NBA / Needs-Attention logic;
+  // helpers in platformOpsDerive.ts (`effectiveEscalationStatus`) bridge
+  // it to the structured lifecycle. No real notifications, no on-call
+  // routing, no real RBAC enforcement — these are advisory governance
+  // controls only.
+  assignedTo?: string | null;
+  assignedTeamId?: string | null;
+  assignedTeamName?: string | null;
+  assignmentReason?: string | null;
+  assignmentHistory?: SupportCaseAssignmentEntry[];
+  escalationStatus?:
+    | 'none'
+    | 'escalated'
+    | 'acknowledged'
+    | 'in_review'
+    | 'deescalated'
+    | 'resolved';
+  escalationLevel?:
+    | 'L1'
+    | 'L2'
+    | 'L3'
+    | 'Manager Review'
+    | 'Security Review'
+    | 'Critical Incident Review';
+  escalationReasonCode?:
+    | 'sla_breach'
+    | 'sla_at_risk'
+    | 'customer_impact'
+    | 'security_concern'
+    | 'billing_risk'
+    | 'domain_issue'
+    | 'product_defect'
+    | 'repeated_failure'
+    | 'manual';
+  escalationReasonNote?: string | null;
+  escalationOwnerId?: string | null;
+  escalationOwnerName?: string | null;
+  escalationTargetTeam?:
+    | 'Support Tier 1'
+    | 'Support Tier 2'
+    | 'Engineering / Platform Ops'
+    | 'Security Review'
+    | 'Billing Operations'
+    | 'Customer Success'
+    | 'Executive Review';
+  acknowledgedAt?: string | null;
+  acknowledgedBy?: string | null;
+  acknowledgedByRole?: string | null;
+  deescalatedAt?: string | null;
+  deescalatedBy?: string | null;
+  resolvedEscalationAt?: string | null;
+  resolvedEscalationBy?: string | null;
+  escalationDueAt?: string | null;
+  acknowledgementDueAt?: string | null;
+  escalationHistory?: SupportCaseEscalationEntry[];
 }
 
 // Phase 1.1 — internal support response macros / templates. Inserted
@@ -847,6 +937,27 @@ export const supportCases: SupportCaseRecord[] = [
     escalationReason: 'Repeat occurrence — flagged for senior review.',
     escalatedAt: '2026-03-22T14:00:00Z',
     escalatedBy: 'Admin Bob',
+    // Phase 1.1.3A — structured escalation metadata. Owner acknowledged.
+    assignedTo: 'op_alice',
+    assignedTeamId: 'team_eng_platform',
+    assignedTeamName: 'Engineering / Platform Ops',
+    escalationStatus: 'acknowledged',
+    escalationLevel: 'L2',
+    escalationReasonCode: 'repeated_failure',
+    escalationReasonNote: 'Repeat occurrence — flagged for senior review.',
+    escalationOwnerId: 'op_bob',
+    escalationOwnerName: 'Admin Bob',
+    escalationTargetTeam: 'Engineering / Platform Ops',
+    acknowledgedAt: '2026-03-22T15:10:00Z',
+    acknowledgedBy: 'Admin Bob',
+    acknowledgedByRole: 'platform_lead',
+    acknowledgementDueAt: '2026-03-22T18:00:00Z',
+    escalationDueAt: '2026-03-25T18:00:00Z',
+    escalationHistory: [
+      { at: '2026-03-22T14:00:00Z', by: 'Admin Bob', byRole: 'platform_admin', action: 'escalated', newValue: 'L2', note: 'Repeat occurrence — flagged for senior review.' },
+      { at: '2026-03-22T14:01:00Z', by: 'Admin Bob', byRole: 'platform_admin', action: 'assigned', newValue: 'Admin Bob · Engineering / Platform Ops' },
+      { at: '2026-03-22T15:10:00Z', by: 'Admin Bob', byRole: 'platform_lead', action: 'acknowledged' },
+    ],
     notes: [
       { id: 'cn_001a', author: 'Admin Alice', body: 'Reproduced on staging — opened internal ticket SHIP-441.', createdAt: '2026-03-12', kind: 'note' },
       { id: 'cn_001b', author: 'Admin Alice', body: 'Status: open → in_progress', createdAt: '2026-03-12', kind: 'status_change' },
@@ -890,6 +1001,119 @@ export const supportCases: SupportCaseRecord[] = [
     notes: [
       { id: 'cn_004a', author: 'Admin Carol', body: 'Setup call completed 2026-03-03. Tenant comfortable with workflows.', createdAt: '2026-03-03', kind: 'note' },
       { id: 'cn_004b', author: 'Admin Carol', body: 'Status: in_progress → resolved', createdAt: '2026-03-03', kind: 'status_change' },
+    ],
+  },
+  // Phase 1.1.3A — demo escalation seeds covering each lifecycle stage.
+  {
+    id: 'case_005', tenantId: 't4', subject: 'Repeated 5xx on checkout for premium tenant',
+    description: 'Quick Fix Electronics is hitting 502s during card capture. Two separate sessions affected.',
+    status: 'in_progress', severity: 'urgent', assignee: 'Admin Alice',
+    openedAt: '2026-04-26', updatedAt: '2026-04-29',
+    firstResponseDueAt: '2026-04-26T20:00:00Z',
+    resolutionDueAt: '2026-04-28T20:00:00Z',
+    firstRespondedAt: '2026-04-26T19:30:00Z',
+    resolvedAt: null,
+    escalated: true,
+    escalationReason: 'Customer impact — checkout intermittently failing.',
+    escalatedAt: '2026-04-28T22:30:00Z',
+    escalatedBy: 'Admin Alice',
+    assignedTo: null,
+    assignedTeamId: 'team_eng_platform',
+    assignedTeamName: 'Engineering / Platform Ops',
+    escalationStatus: 'escalated',
+    escalationLevel: 'L3',
+    escalationReasonCode: 'customer_impact',
+    escalationReasonNote: 'Customer impact — checkout intermittently failing.',
+    escalationOwnerId: null,
+    escalationOwnerName: null,
+    escalationTargetTeam: 'Engineering / Platform Ops',
+    acknowledgementDueAt: '2026-04-29T02:00:00Z',
+    escalationDueAt: '2026-05-01T22:00:00Z',
+    escalationHistory: [
+      { at: '2026-04-28T22:30:00Z', by: 'Admin Alice', byRole: 'platform_admin', action: 'escalated', newValue: 'L3', note: 'Customer impact — checkout intermittently failing.' },
+    ],
+    notes: [
+      { id: 'cn_005a', author: 'Admin Alice', body: 'Captured logs from edge gateway, repro reliable on tenant t4.', createdAt: '2026-04-27', kind: 'note' },
+      { id: 'cn_005b', author: 'Admin Alice', body: 'Escalated · L3 · target Engineering / Platform Ops', createdAt: '2026-04-28', kind: 'status_change' },
+    ],
+  },
+  {
+    id: 'case_006', tenantId: 't3', subject: 'Suspicious admin login from new geography',
+    description: 'Mobile Fix Hub admin login from new country, MFA challenge passed but flagged for review.',
+    status: 'in_progress', severity: 'high', assignee: 'Admin Bob',
+    openedAt: '2026-04-22', updatedAt: '2026-04-28',
+    firstResponseDueAt: '2026-04-22T19:00:00Z',
+    resolutionDueAt: '2026-04-26T19:00:00Z',
+    firstRespondedAt: '2026-04-22T18:45:00Z',
+    resolvedAt: null,
+    escalated: true,
+    escalationReason: 'Security review — unfamiliar geography for privileged login.',
+    escalatedAt: '2026-04-23T15:00:00Z',
+    escalatedBy: 'Admin Bob',
+    assignedTo: 'op_security',
+    assignedTeamId: 'team_security',
+    assignedTeamName: 'Security Review',
+    escalationStatus: 'in_review',
+    escalationLevel: 'Security Review',
+    escalationReasonCode: 'security_concern',
+    escalationReasonNote: 'Security review — unfamiliar geography for privileged login.',
+    escalationOwnerId: 'op_security',
+    escalationOwnerName: 'Security Lead',
+    escalationTargetTeam: 'Security Review',
+    acknowledgedAt: '2026-04-23T16:30:00Z',
+    acknowledgedBy: 'Security Lead',
+    acknowledgedByRole: 'platform_security',
+    acknowledgementDueAt: '2026-04-23T18:00:00Z',
+    escalationDueAt: '2026-04-30T18:00:00Z',
+    escalationHistory: [
+      { at: '2026-04-23T15:00:00Z', by: 'Admin Bob', byRole: 'platform_admin', action: 'escalated', newValue: 'Security Review', note: 'Security review — unfamiliar geography for privileged login.' },
+      { at: '2026-04-23T15:01:00Z', by: 'Admin Bob', byRole: 'platform_admin', action: 'assigned', newValue: 'Security Lead · Security Review' },
+      { at: '2026-04-23T16:30:00Z', by: 'Security Lead', byRole: 'platform_security', action: 'acknowledged' },
+      { at: '2026-04-25T13:00:00Z', by: 'Security Lead', byRole: 'platform_security', action: 'level_changed', oldValue: 'L2', newValue: 'Security Review' },
+    ],
+    notes: [
+      { id: 'cn_006a', author: 'Admin Bob', body: 'Security review — unfamiliar geography for privileged login.', createdAt: '2026-04-23', kind: 'status_change' },
+      { id: 'cn_006b', author: 'Security Lead', body: 'Acknowledged escalation. Reviewing IP / device history.', createdAt: '2026-04-23', kind: 'note' },
+    ],
+  },
+  {
+    id: 'case_007', tenantId: 't1', subject: 'Domain DNS misconfig blocking storefront',
+    description: 'Tenant attempted custom domain swap; CNAME mismatched. De-escalated after operator self-resolved DNS.',
+    status: 'in_progress', severity: 'normal', assignee: 'Admin Carol',
+    openedAt: '2026-04-12', updatedAt: '2026-04-21',
+    firstResponseDueAt: '2026-04-13T17:00:00Z',
+    resolutionDueAt: '2026-04-20T17:00:00Z',
+    firstRespondedAt: '2026-04-12T19:00:00Z',
+    resolvedAt: null,
+    escalated: false,
+    escalationReason: 'Domain verification failed twice — escalated then resolved at L1.',
+    escalatedAt: '2026-04-15T14:00:00Z',
+    escalatedBy: 'Admin Carol',
+    assignedTo: 'op_carol',
+    assignedTeamId: 'team_support_t1',
+    assignedTeamName: 'Support Tier 1',
+    escalationStatus: 'deescalated',
+    escalationLevel: 'L1',
+    escalationReasonCode: 'domain_issue',
+    escalationReasonNote: 'Domain verification failed twice — escalated then resolved at L1.',
+    escalationOwnerId: 'op_carol',
+    escalationOwnerName: 'Admin Carol',
+    escalationTargetTeam: 'Support Tier 1',
+    acknowledgedAt: '2026-04-15T14:30:00Z',
+    acknowledgedBy: 'Admin Carol',
+    acknowledgedByRole: 'platform_operator',
+    deescalatedAt: '2026-04-21T17:00:00Z',
+    deescalatedBy: 'Admin Carol',
+    acknowledgementDueAt: '2026-04-15T16:00:00Z',
+    escalationDueAt: '2026-04-22T16:00:00Z',
+    escalationHistory: [
+      { at: '2026-04-15T14:00:00Z', by: 'Admin Carol', byRole: 'platform_operator', action: 'escalated', newValue: 'L1', note: 'Domain verification failed twice — escalated.' },
+      { at: '2026-04-15T14:30:00Z', by: 'Admin Carol', byRole: 'platform_operator', action: 'acknowledged' },
+      { at: '2026-04-21T17:00:00Z', by: 'Admin Carol', byRole: 'platform_operator', action: 'deescalated', note: 'Tenant DNS records corrected; verification cleared.' },
+    ],
+    notes: [
+      { id: 'cn_007a', author: 'Admin Carol', body: 'Walked tenant through CNAME / TXT setup with macro template.', createdAt: '2026-04-15', kind: 'note' },
+      { id: 'cn_007b', author: 'Admin Carol', body: 'De-escalated · domain verified', createdAt: '2026-04-21', kind: 'status_change' },
     ],
   },
 ];

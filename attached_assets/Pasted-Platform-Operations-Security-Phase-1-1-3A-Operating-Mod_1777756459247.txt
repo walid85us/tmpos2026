@@ -1,0 +1,824 @@
+Platform Operations & Security — Phase 1.1.3A Operating Model + Permission-Aware Escalation
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is Phase 1.1.3A of the Platform Operations & Security roadmap.
+
+Implement only:
+- Operating model foundation for Support Tools escalation
+- Permission-aware escalation workflow
+- Assignment/ownership clarity for escalations
+- Acknowledgement lifecycle
+- Command Center escalation visibility
+- Audit & Security escalation visibility
+- Advisory role/permission model for Platform Operations support actions
+
+This is NOT a full Platform Team Governance phase.
+This is NOT real RBAC enforcement.
+This is NOT real notifications.
+This is NOT real on-call scheduling.
+This is NOT PagerDuty/Slack/Teams/email/SMS integration.
+
+The goal is to make escalation clear:
+- who can escalate
+- who can assign
+- who owns the escalation
+- who can acknowledge
+- who can resolve escalation
+- who can close the case
+- who sees escalation
+- what the assigned person should do next
+- where escalation appears in Command Center, Support Tools, and Audit & Security
+
+==================================================
+PHASE SEQUENCE CONTEXT — DO NOT SKIP
+==================================================
+
+This workstream is part of the Phase 1.1.x maturity sequence.
+
+Accepted:
+- Phase 1.1 — Command Center + Workflow Maturity
+- Phase 1.1 Support Case Detail + Linked Case Correction
+- Phase 1.1 Escalated Case Needs Attention Correction
+- Phase 1.1.1 Interactive Command Center UX + Operational Intelligence Polish
+- Phase 1.1.1 UX Correction
+- Phase 1.1.2 Competitive Ops Console Maturity Review / Future Vision Report
+
+Now implement:
+- Phase 1.1.3A — Operating Model + Permission-Aware Escalation
+
+Next planned phases after this:
+- Phase 1.1.3B — Advanced Command Center Intelligence
+- Phase 1.1.3C — Support Queue / SLA / Macro Maturity
+- Phase 1.1.3D — Audit Investigation Center
+- Phase 1.2 — Domains + Platform Settings Maturity
+- Phase 1.3 — Platform Team Governance
+- Phase 1.4 — Automation + Alerts
+- Phase 2 — Real Integrations
+- Phase 3 — Compliance + Evidence
+- Phase 4 — Predictive / AI Operations
+
+Do not implement 1.1.3B, 1.1.3C, or 1.1.3D in this pass.
+Only document them as next planned workstreams if needed.
+
+==================================================
+ROLE STACK — ADD TO PROJECT KNOWLEDGE / SKILLS
+==================================================
+
+Before implementation, add this workstream role model to project knowledge / skills and act on it.
+
+Do not treat these roles as decorative text.
+Use them to guide product design, data model, UX, state transitions, auditability, safety, non-regression, and QA.
+
+Primary roles for Phase 1.1.3A:
+- Senior Platform Operations Architect
+- Senior Support Tools Engineer
+- Senior Incident / Escalation Workflow Architect
+- Senior Audit & Security Engineer and Architect
+- Senior SaaS Command Center Architect
+- Senior Platform Team Governance Leader
+- Senior RBAC / Permission-Governance Architect
+- Senior Operations UX Designer
+- Senior React/TypeScript Engineer
+- QA Gatekeeper
+- Systems Thinker
+- Side Auditor
+
+Awareness roles for later phases:
+- Senior Automation + Alerts / IaC Architect
+- Senior Real Integrations Architect for SSO, SCIM, DNS, SSL, PagerDuty-style notifications, Slack/Teams, email/SMS, and webhook systems
+- Senior Compliance & Evidence Architect
+- Senior Predictive / AI Operations Architect
+
+Core responsibility:
+Escalation must become an operating model, not just a badge.
+
+Value goals:
+- reduce cognitive load
+- clarify ownership
+- increase operational velocity
+- preserve security-by-default
+- preserve continuous-compliance readiness
+- avoid fake integrations
+- prepare for future automation, real integrations, compliance, and AI without overbuilding now
+
+==================================================
+READ FIRST
+==================================================
+
+Read first:
+- replit.md
+- Platform Operations & Security Master Roadmap
+- Phase 1.1 implementation notes
+- Phase 1.1.1 implementation notes
+- Phase 1.1.2 Competitive Ops Console Maturity Review if stored or summarized
+- src/owner/CommandCenterPage.tsx
+- src/owner/SupportToolsPage.tsx
+- src/owner/AuditSecurityPage.tsx
+- src/owner/platformOpsDerive.ts
+- src/owner/platformOpsAudit.ts
+- src/owner/mockData.ts
+- owner navigation / route files
+
+Preserve all accepted workstreams and locked behavior.
+
+==================================================
+LOCKED / DO-NOT-TOUCH WORKSTREAMS
+==================================================
+
+Do not modify or regress:
+
+- Shipping Module / Shipping Center behavior
+- Add-on Governance and Implementation Readiness rules
+- Plans & Features Matrix source-of-truth behavior
+- Tenant Features commercial-entitlement rules
+- Store Permissions Matrix entitlement behavior
+- POS
+- Repairs
+- Inventory
+- Customers
+- Invoices
+- Services
+- Tenant provisioning
+- Paid Override invoice workflow
+- Server PII log-scrubbing behavior
+- Domains manual verification truth labels
+- Platform Settings truth labels
+- Platform Team Management directory-only truth labels
+- Existing Command Center widgets except where read-only escalation signals must be added
+- Existing Audit CSV export
+- Existing Support case creation and linked-case navigation
+- Existing security note delete confirmation
+
+Any interaction with these areas must be read-only unless explicitly scoped below.
+
+==================================================
+CURRENT PROBLEM
+==================================================
+
+Phase 1.1.2 made the Command Center, Audit & Security, and Support Tools feel more mature, but one operating-model gap remains:
+
+Escalation exists visually, but the process is not clear enough.
+
+Current unresolved questions:
+- Who can escalate a case?
+- Who can escalate any case vs. only assigned/owned case?
+- Who can assign escalation ownership?
+- Who sees escalations?
+- To whom is escalation assigned?
+- Who can acknowledge escalation?
+- Who can resolve escalation?
+- Who can close the support case?
+- What is the difference between escalation, assignment, acknowledgement, escalation resolution, and case closure?
+- How does the assigned person see the escalation and take action?
+- How does Command Center show unacknowledged escalations?
+- How does Audit & Security show escalation lifecycle?
+- What remains manual now versus future automation in Phase 1.4?
+
+This phase must answer those questions in the product.
+
+==================================================
+BENCHMARK / ARCHITECTURE CONTEXT
+==================================================
+
+The Phase 1.1.2 Competitive Ops Console report identified useful patterns:
+
+- PagerDuty-style distinction between escalation, acknowledgement, ownership, and resolution.
+- Zendesk-style support queues, SLAs, macros, and internal notes.
+- Jira Service Management-style queues, workflow statuses, and escalation paths.
+- ServiceNow-style assignment groups and major incident distinction.
+- Freshservice/Freshdesk-style SLA escalation matrix.
+- Datadog-style Command Center visibility and operational urgency.
+- Vercel/Shopify/enterprise SaaS-style auditability and admin governance.
+
+Do not copy any external product.
+Use these as product-pattern references.
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Implement a clear internal escalation operating model for Phase 1.1.x.
+
+This should be:
+
+- internal-only
+- advisory permission-aware
+- auditable
+- visible in Command Center
+- visible in Support Tools
+- visible in Audit & Security
+- truthful about limitations
+- future-ready for Team Governance, Automation + Alerts, Real Integrations, Compliance, and AI
+
+No fake external notification or real RBAC enforcement.
+
+==================================================
+PART A — ESCALATION DEFINITIONS IN PRODUCT
+==================================================
+
+The UI and documentation must clarify these concepts.
+
+1) Assignment
+Meaning:
+A support case has an owner/operator or team responsible for handling it.
+
+Assignment does not necessarily mean escalation.
+
+2) Escalation
+Meaning:
+A support case requires higher attention, a defined owner/team, and acknowledgement.
+
+Escalation is a higher operational state on the case, not a separate incident record.
+
+3) Acknowledgement
+Meaning:
+The assigned escalation owner/team has seen and accepted responsibility for the escalation.
+
+Acknowledgement does not mean resolved.
+
+4) Escalation Resolution
+Meaning:
+The elevated/escalated concern has been resolved or returned to normal handling.
+
+Resolving escalation does not automatically close the support case.
+
+5) Case Closure
+Meaning:
+The support case itself is resolved/closed.
+
+Case closure is separate from escalation resolution.
+
+6) Incident
+Meaning:
+A future coordination artifact for platform-wide or multi-tenant impact.
+
+Do not implement incidents in this phase.
+Mention future only if helpful.
+
+Required:
+Show a concise explanation in the Support Tools escalation area, such as:
+“Escalation identifies ownership and acknowledgement for cases needing elevated attention. Resolving escalation does not automatically close the support case.”
+
+==================================================
+PART B — ADVISORY PLATFORM SUPPORT ROLE MODEL
+==================================================
+
+Implement a lightweight advisory role model for Platform Operations support actions.
+
+This is not full production auth/RBAC.
+This is a client-side/advisory governance foundation.
+
+Roles:
+- platform_owner
+- platform_admin
+- platform_lead
+- platform_operator
+- platform_security
+- platform_billing
+- platform_readonly
+
+Support-focused role aliases if useful:
+- support_admin
+- support_lead
+- support_operator
+- support_viewer
+
+Use existing platform team/member data if available.
+If not fully connected to auth, make this truthful:
+“Role checks are advisory governance controls in this phase. Server-enforced Platform RBAC is planned for Platform Team Governance.”
+
+Required permission logic:
+
+platform_owner:
+- all actions
+
+platform_admin:
+- all support escalation actions
+- configure future policy placeholders if present
+
+platform_lead:
+- escalate any case
+- assign escalation owner/team
+- acknowledge escalation
+- change level/owner/team
+- de-escalate
+- resolve escalation
+- close case
+- export audit if already allowed
+
+platform_operator:
+- escalate assigned/owned case
+- acknowledge escalation if assigned to them or their team
+- add notes
+- resolve escalation if assigned/owned, if policy allows
+- request closure but not close if not lead/admin
+
+platform_security:
+- view security/audit escalation context
+- escalate security-related cases
+- acknowledge security escalation if assigned to security team
+- view restricted audit context if already supported
+- should not automatically close non-security cases unless also lead/admin/owner
+
+platform_billing:
+- escalate billing-related cases
+- acknowledge billing escalation if assigned to billing team
+- should not manage unrelated security/platform cases unless also lead/admin/owner
+
+platform_readonly:
+- view only
+- no mutation actions
+
+Required:
+- add a small “Current operator role” selector or internal dev/governance role context if the app lacks real auth role switching
+- label it clearly as governance preview/advisory if not enforced by server
+- action buttons should be enabled/disabled based on advisory role
+- disabled actions should explain why
+
+Do not confuse this with tenant employee roles or Store Permissions Matrix.
+
+==================================================
+PART C — ESCALATION DATA MODEL EXTENSIONS
+==================================================
+
+Extend support case escalation metadata using optional fields only.
+
+Do not make existing support case records invalid.
+
+Recommended optional fields:
+
+- assignedTo
+- assignedTeamId
+- assignedTeamName
+- assignmentReason
+- assignmentHistory[]
+
+- escalationStatus:
+  - none
+  - escalated
+  - acknowledged
+  - in_review
+  - deescalated
+  - resolved
+
+- escalationLevel:
+  - L1
+  - L2
+  - L3
+  - Manager Review
+  - Security Review
+  - Critical Incident Review
+
+- escalationReasonCode:
+  - sla_breach
+  - sla_at_risk
+  - customer_impact
+  - security_concern
+  - billing_risk
+  - domain_issue
+  - product_defect
+  - repeated_failure
+  - manual
+
+- escalationReasonNote
+
+- escalationOwnerId
+- escalationOwnerName
+- escalationTargetTeam:
+  - Support
+  - Engineering / Platform Ops
+  - Billing
+  - Security
+  - Domains
+  - Commercial Operations
+  - Platform Leadership
+
+- escalatedAt
+- escalatedBy
+- acknowledgedAt
+- acknowledgedBy
+- acknowledgedByRole
+- deescalatedAt
+- deescalatedBy
+- resolvedEscalationAt
+- resolvedEscalationBy
+- escalationDueAt
+- acknowledgementDueAt
+- escalationHistory[]
+
+All fields must be optional and backward compatible.
+
+==================================================
+PART D — ESCALATION LIFECYCLE ACTIONS
+==================================================
+
+Implement internal lifecycle actions.
+
+1) Escalate
+
+Required form fields:
+- reason code
+- reason note
+- escalation level
+- target team
+- owner/person if available or “Unassigned within team”
+- acknowledgement due time if practical, otherwise a deterministic default
+- optional related audit event/case context if already available
+
+Rules:
+- must require reason code and note
+- must require target team or owner
+- sets escalationStatus = escalated
+- sets escalatedAt / escalatedBy
+- records timeline entry
+- emits audit event
+
+2) Assign / Reassign Escalation
+
+Required:
+- change owner
+- change team
+- reason required
+- previous/new owner/team visible
+- timeline entry
+- audit event
+
+3) Acknowledge Escalation
+
+Required:
+- action visible to authorized role/assigned owner/team
+- acknowledgement note optional or required depending on role; choose sensible default
+- sets escalationStatus = acknowledged or in_review
+- sets acknowledgedAt / acknowledgedBy
+- timeline entry
+- audit event
+
+4) Change Level
+
+Required:
+- change escalation level
+- reason required
+- previous/new level visible
+- timeline entry
+- audit event
+
+5) De-escalate
+
+Required:
+- reason required
+- status becomes deescalated
+- active escalation removed from active queue
+- case remains open unless separately closed
+- timeline entry
+- audit event
+
+6) Resolve Escalation
+
+Required:
+- resolution note required
+- status becomes resolved
+- active escalation removed from active queue
+- case itself may remain open
+- timeline entry
+- audit event
+
+7) Close Case
+
+Do not change existing close case behavior unless needed to clarify:
+- closing support case is separate from resolving escalation
+- if closing an active escalated case, show in-app warning:
+  “This case has an active escalation. Resolve or de-escalate escalation first, or close with escalation resolution note.”
+Use a safe approach.
+
+==================================================
+PART E — SUPPORT TOOLS UX
+==================================================
+
+Upgrade Support Tools escalation UX.
+
+1) Case List
+
+Show columns/badges:
+- escalation status
+- escalation level
+- target team/owner
+- acknowledgement state
+- escalation age
+- assignment owner/team
+- active/unacknowledged indicator
+
+2) Case Detail Escalation Card
+
+Must show:
+- escalation status
+- escalation level
+- owner/person
+- target team
+- reason code
+- reason note
+- escalated by/at
+- acknowledged by/at
+- acknowledgement due status
+- time since escalation
+- current role permission explanation
+- action buttons appropriate to state and advisory role
+
+Actions:
+- Escalate
+- Assign/Reassign
+- Acknowledge
+- Change Level
+- De-escalate
+- Resolve Escalation
+
+3) Escalation Timeline
+
+Show:
+- escalated
+- assigned/reassigned
+- acknowledged
+- level changed
+- de-escalated
+- resolved escalation
+- case closed/reopened if relevant
+
+Use readable timeline entries with before/after values.
+
+4) Saved Views / Queues
+
+Add or improve support saved views:
+- Escalated Active
+- Unacknowledged Escalations
+- Escalation Overdue
+- Critical Escalations
+- Assigned to Me
+- Assigned to My Team
+- Unassigned
+- De-escalated
+- Escalation Resolved
+
+These should filter reliably.
+
+If “Me” or team is mock/advisory only, label truthfully.
+
+==================================================
+PART F — COMMAND CENTER INTEGRATION
+==================================================
+
+Command Center must reflect the operating model.
+
+Add/adjust:
+
+1) Operational Pulse
+
+Add or update pulse metrics:
+- Active Escalations
+- Unacknowledged Escalations
+- Escalation Overdue
+- Unassigned Escalations
+
+Pulse items should be clickable.
+
+2) Needs Attention
+
+Include:
+- unacknowledged escalation
+- escalation overdue for acknowledgement
+- critical escalation
+- escalated case without owner/team
+- escalated case with SLA breach
+
+Click-through opens support case detail directly.
+
+3) Next Best Actions
+
+Add rule-based actions:
+- Acknowledge escalation
+- Assign escalation owner
+- Review overdue escalation
+- Resolve escalation blocker
+- Review critical escalation
+- De-escalate resolved escalation
+
+Each action should show:
+- priority
+- reason
+- tenant/case
+- owner/team if available
+- link to case detail
+
+4) Tenant Risk
+
+Escalated/unacknowledged/overdue escalations should influence tenant risk reason list.
+
+Do not over-weight in a way that makes every tenant critical unless justified.
+
+==================================================
+PART G — AUDIT & SECURITY INTEGRATION
+==================================================
+
+Audit & Security should make escalation lifecycle visible.
+
+Required:
+- saved view / lens for “Escalation Lifecycle” if feasible
+- audit events for escalation lifecycle actions
+- audit detail shows before/after state where available
+- linked support case visible
+- actor context includes escalation actions
+- no duplicate audit rows
+
+==================================================
+PART H — AUDIT EVENTS
+==================================================
+
+Add or use audit action IDs only when emitted.
+
+Recommended audit actions:
+- support_case_escalated
+- support_case_escalation_assigned
+- support_case_escalation_reassigned
+- support_case_escalation_acknowledged
+- support_case_escalation_level_changed
+- support_case_deescalated
+- support_case_escalation_resolved
+- support_case_close_with_active_escalation_warning
+- support_case_assignment_changed
+
+Audit payload should include safe metadata:
+- case id
+- tenant id/name if available
+- previous/new escalation status
+- previous/new level
+- previous/new owner/team
+- reason code
+- note summary
+- actor
+- actor role
+- timestamp
+
+Do not log PII to server logs.
+This is client/platform audit, not server debug logging.
+
+==================================================
+PART I — TRUTHFUL LIMITATIONS
+==================================================
+
+Add visible copy where appropriate:
+
+“Escalation is an internal workflow in this phase. External notifications, on-call schedules, Slack/Teams, PagerDuty, email/SMS delivery, and automatic escalation timers are planned for later phases and are not active here.”
+
+“Permission checks are advisory governance controls in this phase. Server-enforced Platform RBAC is planned for Platform Team Governance.”
+
+Do not claim real notifications.
+Do not claim server-enforced RBAC if not implemented.
+Do not claim on-call rotations.
+
+==================================================
+PART J — NON-REGRESSION
+==================================================
+
+Preserve:
+- support case creation
+- support case detail
+- support notes/macros internal-only behavior
+- existing SLA timers
+- existing saved views
+- Command Center Mission Control
+- operational pulse behavior
+- widgets
+- Tenant 360
+- Next Best Actions
+- Audit saved views
+- Audit CSV export
+- security note confirmation
+- linked-case navigation
+- Add-on Governance
+- Shipping
+- Store Permissions Matrix
+- Tenant provisioning
+- Server PII logging rules
+
+==================================================
+PART K — DOCUMENTATION
+==================================================
+
+Update replit.md with:
+
+1) Phase 1.1.3A Operating Model + Permission-Aware Escalation
+2) escalation definitions
+3) advisory role/permission model
+4) escalation lifecycle
+5) data model fields
+6) Support Tools behavior
+7) Command Center escalation signals
+8) Audit & Security escalation visibility
+9) truthful limitations
+10) non-regression commitments
+11) next planned phases:
+   - Phase 1.1.3B — Advanced Command Center Intelligence
+   - Phase 1.1.3C — Support Queue / SLA / Macro Maturity
+   - Phase 1.1.3D — Audit Investigation Center
+
+Do not rewrite the roadmap.
+Do not overwrite accepted Phase 1.1 / 1.1.1 / 1.1.2 sections.
+
+==================================================
+OUT OF SCOPE
+==================================================
+
+Do NOT implement:
+- real RBAC enforcement
+- server-side permission enforcement
+- real teams/on-call schedules
+- PagerDuty
+- Slack/Teams
+- email/SMS escalation delivery
+- automatic escalation timers
+- auto-assignment
+- incident bridge / major incident room
+- public tenant support portal
+- compliance evidence center
+- AI/ML
+- real infrastructure uptime monitoring
+- real DNS/SSL
+- SSO/SCIM
+- Phase 1.1.3B / 1.1.3C / 1.1.3D implementation
+- Phase 1.2 / 1.3 / 1.4 / 2 / 3 / 4 implementation
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Escalation definitions are clear in product and documentation.
+2) Advisory role/permission model exists and is truthful.
+3) Current operator role/context is visible or testable.
+4) Unauthorized actions are disabled/hidden with explanation.
+5) Escalate requires reason, level, and owner/team.
+6) Escalation owner/team is visible.
+7) Escalation can be assigned/reassigned.
+8) Escalation can be acknowledged.
+9) Escalation level can be changed.
+10) Escalation can be de-escalated.
+11) Escalation can be resolved separately from case closure.
+12) Case closure and escalation resolution are clearly distinct.
+13) Support case list shows escalation status/level/owner/acknowledgement.
+14) Support case detail escalation card is mature and informative.
+15) Escalation timeline/history exists.
+16) Escalation saved views/queues work.
+17) Command Center shows active/unacknowledged/overdue/unassigned escalation signals.
+18) Needs Attention includes escalation operating-model items.
+19) Next Best Actions include escalation operating-model items.
+20) Tenant risk reasons include escalation signals where applicable.
+21) Audit & Security shows escalation lifecycle audit events.
+22) Audit rows are not duplicated for one action.
+23) Truth labels clearly state no external notifications/on-call/real RBAC yet.
+24) Existing Add-on Governance remains intact.
+25) Existing Shipping Module remains intact.
+26) Existing Store Permissions Matrix remains intact.
+27) Existing tenant provisioning remains intact.
+28) Server PII logging rules are not regressed.
+29) Future phases 1.1.3B/1.1.3C/1.1.3D remain documented as next, not implemented.
+30) replit.md is updated.
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this order:
+
+1) Inspect current Support Tools escalation code and data shape.
+2) Inspect Command Center escalation signals.
+3) Inspect Audit & Security saved views/actions.
+4) Add optional escalation/assignment fields safely.
+5) Add advisory role/permission helper.
+6) Add/upgrade escalation lifecycle modals/actions.
+7) Upgrade Support Tools list/detail/timeline.
+8) Upgrade Command Center escalation signals.
+9) Upgrade Audit & Security escalation saved view/audit display.
+10) Ensure no duplicate audit rows.
+11) Add truthful limitation labels.
+12) Update documentation.
+13) Run typecheck and smoke tests.
+14) Provide final implementation report.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Advisory Role / Permission Model
+3. Escalation Data Model
+4. Escalation Lifecycle UX
+5. Support Tools Escalation Queues
+6. Command Center Escalation Signals
+7. Audit & Security Escalation Visibility
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes
