@@ -10,6 +10,12 @@ import {
   type SupportCaseSeverity,
 } from './mockData';
 import { pushPlatformAudit } from './platformOpsAudit';
+import { useAccess } from '../context/AccessContext';
+import {
+  hasPlatformPermission,
+  PLATFORM_ROLE_DISPLAY_LABEL,
+} from './platformPermissionsConfig';
+import type { Role } from '../context/accessConfig';
 import {
   deriveHighRiskFlag,
   HIGH_RISK_FLAG_LABEL,
@@ -110,6 +116,19 @@ function countForView(
 }
 
 const AuditSecurityPage: React.FC = () => {
+  // Phase 1.1.3A correction — pull active platform role from the Dev Session
+  // and use it to gate sensitive actions (CSV export, security note add /
+  // delete, "Create Support Case from Event") via the platform permissions
+  // catalog. The page is read-accessible to all platform roles by default
+  // (controlled in the Global Permissions Matrix).
+  const { session } = useAccess();
+  const sessionRole = (session?.role as Role | undefined) || null;
+  const exportGate = hasPlatformPermission(sessionRole, 'export_audit_csv');
+  const addNoteGate = hasPlatformPermission(sessionRole, 'add_security_note');
+  const deleteNoteGate = hasPlatformPermission(sessionRole, 'delete_security_note');
+  const createCaseFromAuditGate = hasPlatformPermission(sessionRole, 'create_support_case_from_audit');
+  const createCaseGate = hasPlatformPermission(sessionRole, 'create_support_case');
+
   // Mirrored cross-cutting audit entries (commercial + platform ops).
   const [mirrored, setMirrored] = useState<AuditRow[]>([]);
   useEffect(() => {
@@ -248,6 +267,7 @@ const AuditSecurityPage: React.FC = () => {
 
   // CSV export — whitelisted, safe-fields only.
   const exportCsv = () => {
+    if (!exportGate.allowed) return;
     const rows = visibleRows.map(r => {
       const { flag } = deriveHighRiskFlag(r);
       return {
@@ -388,6 +408,7 @@ const AuditSecurityPage: React.FC = () => {
   }, [allRows]);
 
   const addNote = (linkedEventIdOverride?: string | null) => {
+    if (!addNoteGate.allowed) return;
     const body = newNoteBody.trim();
     if (!body) return;
     const note: SecurityNote = {
@@ -417,6 +438,7 @@ const AuditSecurityPage: React.FC = () => {
   const confirmDeleteNote = () => {
     const id = pendingDeleteNoteId;
     if (!id) return;
+    if (!deleteNoteGate.allowed) { setPendingDeleteNoteId(null); return; }
     const target = notes.find(n => n.id === id);
     persistNotes(notes.filter(n => n.id !== id));
     if (target) {
@@ -440,6 +462,14 @@ const AuditSecurityPage: React.FC = () => {
       <div>
         <h2 className="text-2xl font-black text-primary tracking-tight">Audit & Security</h2>
         <p className="text-slate-500 font-medium">Monitor platform activity, security posture, and recent events.</p>
+        <p className="mt-1 text-[10px] font-black uppercase tracking-widest text-slate-400" data-testid="audit-active-role-label">
+          Active platform role:{' '}
+          <span className="text-primary">{sessionRole ? PLATFORM_ROLE_DISPLAY_LABEL[sessionRole] : 'No session'}</span>
+          <span className="text-slate-300 mx-1">·</span>
+          <span className="font-medium normal-case tracking-normal text-slate-500">
+            Sensitive actions are gated by the Global Permissions Matrix.
+          </span>
+        </p>
       </div>
 
       {/* Posture cards */}
@@ -563,7 +593,7 @@ const AuditSecurityPage: React.FC = () => {
             <input type="checkbox" checked={highRiskOnly} onChange={e => { setHighRiskOnly(e.target.checked); setActiveView('custom'); }} />
             High-risk only
           </label>
-          <button onClick={exportCsv} className="px-4 py-2.5 bg-white border border-slate-200 text-slate-700 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/5 hover:text-primary transition-colors">
+          <button onClick={exportCsv} disabled={!exportGate.allowed} title={exportGate.allowed ? '' : exportGate.reason} data-testid="audit-export-csv-top" className="px-4 py-2.5 bg-white border border-slate-200 text-slate-700 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/5 hover:text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
             Export CSV ({visibleRows.length})
           </button>
         </div>
@@ -650,6 +680,8 @@ const AuditSecurityPage: React.FC = () => {
               </button>
               <button
                 onClick={exportCsv}
+                disabled={!exportGate.allowed}
+                title={exportGate.allowed ? '' : exportGate.reason}
                 data-testid="audit-command-export"
                 className="px-4 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 transition-colors flex items-center gap-1"
               >
@@ -745,7 +777,7 @@ const AuditSecurityPage: React.FC = () => {
           {linkedNoteEventId && (
             <button onClick={() => setLinkedNoteEventId(null)} className="px-3 py-3 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-2xl hover:bg-slate-50">Unlink</button>
           )}
-          <button onClick={() => addNote()} disabled={!newNoteBody.trim()} className="px-5 py-3 bg-primary text-white font-black text-xs rounded-2xl uppercase tracking-widest disabled:opacity-40 hover:bg-primary/90 transition-all">Add Note</button>
+          <button onClick={() => addNote()} disabled={!newNoteBody.trim() || !addNoteGate.allowed} title={addNoteGate.allowed ? '' : addNoteGate.reason} data-testid="security-note-save" className="px-5 py-3 bg-primary text-white font-black text-xs rounded-2xl uppercase tracking-widest disabled:opacity-40 disabled:cursor-not-allowed hover:bg-primary/90 transition-all">Add Note</button>
         </div>
         <div className="space-y-2">
           {notes.length === 0 && <p className="text-xs text-slate-400 font-bold py-4 text-center">No security notes yet.</p>}
@@ -760,7 +792,7 @@ const AuditSecurityPage: React.FC = () => {
                   )}
                 </p>
               </div>
-              <button data-testid={`security-note-delete-${n.id}`} onClick={() => requestDeleteNote(n.id)} className="text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-red-600 transition-colors">Delete</button>
+              <button data-testid={`security-note-delete-${n.id}`} onClick={() => { if (deleteNoteGate.allowed) requestDeleteNote(n.id); }} disabled={!deleteNoteGate.allowed} title={deleteNoteGate.allowed ? '' : deleteNoteGate.reason} className="text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-red-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-400">Delete</button>
             </div>
           ))}
         </div>
@@ -898,7 +930,20 @@ const AuditSecurityPage: React.FC = () => {
                   })()}
                   <div className="flex flex-wrap gap-2 pt-3 border-t border-slate-100">
                     {!linkedCaseByEvent.get(selected.id) && (
-                      <button onClick={() => setShowCreateCase(true)} className="px-4 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 transition-colors">
+                      <button
+                        onClick={() => {
+                          if (!createCaseFromAuditGate.allowed || !createCaseGate.allowed) return;
+                          setShowCreateCase(true);
+                        }}
+                        disabled={!createCaseFromAuditGate.allowed || !createCaseGate.allowed}
+                        title={
+                          !createCaseFromAuditGate.allowed
+                            ? createCaseFromAuditGate.reason
+                            : !createCaseGate.allowed ? createCaseGate.reason : ''
+                        }
+                        data-testid="audit-create-case-from-event"
+                        className="px-4 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
                         Create Support Case from this Event
                       </button>
                     )}

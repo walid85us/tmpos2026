@@ -15,6 +15,12 @@ import {
   type SupportMacro,
 } from './mockData';
 import { pushPlatformAudit } from './platformOpsAudit';
+import { useAccess } from '../context/AccessContext';
+import {
+  hasPlatformPermission,
+  PLATFORM_ROLE_DISPLAY_LABEL,
+} from './platformPermissionsConfig';
+import type { Role } from '../context/accessConfig';
 import {
   deriveSlaStatus,
   deriveTenantRisk,
@@ -55,18 +61,28 @@ import {
 
 const CASES_KEY = 'support_cases_v1';
 const DOMAINS_KEY = 'tenant_domains_v1';
-const ROLE_KEY = 'platform_ops_role_v1';
-const OPERATOR_KEY = 'platform_ops_operator_v1';
 
-const ROLE_OPTIONS: PlatformOpsRole[] = [
-  'platform_owner',
-  'platform_admin',
-  'platform_lead',
-  'platform_operator',
-  'platform_security',
-  'platform_billing',
-  'platform_readonly',
-];
+// Phase 1.1.3A correction — the local Acting-As selector has been removed.
+// The active platform role is now sourced exclusively from the Dev Session /
+// AccessContext (`useAccess().session.role`). To preserve the existing
+// advisory `can()` matrix in `platformOpsDerive.ts` (which is keyed by the
+// older `PlatformOpsRole` taxonomy used during Phase 1.1.3A development), we
+// map the AccessContext `Role` to the closest `PlatformOpsRole` here. New
+// permission checks should use `hasPlatformPermission(session.role, …)` from
+// `platformPermissionsConfig.ts` directly — this map exists only for the
+// existing escalation lifecycle gates that were already wired with `can()`.
+const PLATFORM_ROLE_TO_OPS_ROLE: Record<Role, PlatformOpsRole> = {
+  system_owner: 'platform_owner',
+  operations_admin: 'platform_admin',
+  support_admin: 'platform_lead',
+  security_admin: 'platform_security',
+  billing_admin: 'platform_billing',
+  // Tenant-side roles never operate Support Tools — surface as read-only.
+  store_owner: 'platform_readonly',
+  manager: 'platform_readonly',
+  technician: 'platform_readonly',
+  sales_staff: 'platform_readonly',
+};
 
 const STATUS_LABELS: Record<SupportCaseStatus, string> = {
   open: 'Open',
@@ -123,6 +139,7 @@ const saveCases = (cases: SupportCaseRecord[]) => {
 };
 
 const SupportToolsPage: React.FC = () => {
+  const { session } = useAccess();
   const [searchParams, setSearchParams] = useSearchParams();
   const [cases, setCases] = useState<SupportCaseRecord[]>(() => loadCases());
   const [search, setSearch] = useState('');
@@ -138,24 +155,17 @@ const SupportToolsPage: React.FC = () => {
   const [slaFilter, setSlaFilter] = useState<'any' | 'overdue' | 'at_risk'>('any');
   const [severityViewFilter, setSeverityViewFilter] = useState<'all' | SupportCaseSeverity>('all');
   const [sortMode, setSortMode] = useState<'opened_desc' | 'updated_desc'>('opened_desc');
-  // Phase 1.1.3A — advisory operator role + display name. Sticky in
-  // localStorage. Used by `can()` for UI gating and to resolve the
-  // "Assigned to Me" / "My Team" saved views. No real RBAC enforcement.
-  const [currentRole, setCurrentRole] = useState<PlatformOpsRole>(() => {
-    if (typeof window === 'undefined') return 'platform_admin';
-    const raw = (window.localStorage?.getItem(ROLE_KEY) || '') as PlatformOpsRole;
-    return ROLE_OPTIONS.includes(raw) ? raw : 'platform_admin';
-  });
-  const [operatorName, setOperatorName] = useState<string>(() => {
-    if (typeof window === 'undefined') return 'Admin Bob';
-    return window.localStorage?.getItem(OPERATOR_KEY) || 'Admin Bob';
-  });
-  useEffect(() => {
-    try { window.localStorage?.setItem(ROLE_KEY, currentRole); } catch { /* noop */ }
-  }, [currentRole]);
-  useEffect(() => {
-    try { window.localStorage?.setItem(OPERATOR_KEY, operatorName); } catch { /* noop */ }
-  }, [operatorName]);
+  // Phase 1.1.3A correction — operator identity + acting role are now
+  // sourced from the active Dev Session / AccessContext. The page no
+  // longer exposes an "Acting as" selector and no longer persists role
+  // or operator name to localStorage. The Global Permissions Matrix in
+  // Team Management governs what each role can do here; switching roles
+  // for testing is done from the Dev Session role switcher.
+  const sessionRole: Role | null = (session?.role as Role | undefined) || null;
+  const currentRole: PlatformOpsRole = sessionRole
+    ? PLATFORM_ROLE_TO_OPS_ROLE[sessionRole]
+    : 'platform_readonly';
+  const operatorName: string = session?.user?.name || '';
 
   // Saved-view escalation token + ctx for queue counts.
   const [escalationFilter, setEscalationFilter] =
@@ -961,40 +971,43 @@ const SupportToolsPage: React.FC = () => {
           </div>
         </div>
         <div className="flex items-center gap-3 flex-wrap">
-          {/* Phase 1.1.3A — advisory operator + role selector. Sticky in
-              localStorage. Drives can() for UI gating and "mine"/"team"
-              saved-view counts. No real RBAC. */}
+          {/* Phase 1.1.3A correction — read-only "Active platform role"
+              badge. The local Acting-As selector has been removed. Role
+              is sourced from the active Dev Session and governed by the
+              Global Permissions Matrix in Team Management. */}
           <div
             className="flex items-center gap-2 px-3 py-2 rounded-2xl bg-white border border-slate-200 shadow-sm"
-            data-testid="support-role-selector"
+            data-testid="support-active-role-badge"
+            title="Role is controlled by Dev Session / Platform Team permissions. Switch roles from the Dev Session switcher."
           >
             <span className="material-symbols-outlined text-base text-slate-400">badge</span>
             <div className="flex flex-col">
-              <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">Acting as</span>
+              <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">Active platform role</span>
               <div className="flex items-center gap-1.5">
-                <input
-                  value={operatorName}
-                  onChange={e => setOperatorName(e.target.value)}
-                  data-testid="support-operator-name"
-                  className="text-xs font-black text-slate-700 bg-transparent border-0 focus:outline-none focus:ring-0 w-24"
-                  placeholder="Operator name"
-                />
+                <span data-testid="support-operator-name" className="text-xs font-black text-slate-700">
+                  {operatorName || '—'}
+                </span>
                 <span className="text-slate-300">·</span>
-                <select
-                  value={currentRole}
-                  onChange={e => setCurrentRole(e.target.value as PlatformOpsRole)}
-                  data-testid="support-role-select"
-                  title={PLATFORM_OPS_ROLE_DESCRIPTION[currentRole]}
-                  className="text-[10px] font-black uppercase tracking-widest text-primary bg-transparent border-0 focus:outline-none focus:ring-0"
-                >
-                  {ROLE_OPTIONS.map(r => (
-                    <option key={r} value={r}>{PLATFORM_OPS_ROLE_LABEL[r]}</option>
-                  ))}
-                </select>
+                <span data-testid="support-active-role" className="text-[10px] font-black uppercase tracking-widest text-primary">
+                  {sessionRole ? PLATFORM_ROLE_DISPLAY_LABEL[sessionRole] : 'No session'}
+                </span>
               </div>
             </div>
           </div>
-          <button onClick={() => setShowCreate(true)} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl uppercase tracking-widest shadow-lg shadow-primary/20 hover:bg-primary/90 transition-all">+ New Case</button>
+          {(() => {
+            const createGate = hasPlatformPermission(sessionRole, 'create_support_case');
+            return (
+              <button
+                onClick={() => { if (createGate.allowed) setShowCreate(true); }}
+                disabled={!createGate.allowed}
+                title={createGate.allowed ? '' : createGate.reason}
+                data-testid="support-create-case-button"
+                className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl uppercase tracking-widest shadow-lg shadow-primary/20 hover:bg-primary/90 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                + New Case
+              </button>
+            );
+          })()}
         </div>
       </div>
 

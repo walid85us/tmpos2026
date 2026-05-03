@@ -41,6 +41,7 @@ export type PlatformAuditAction =
   | 'platform_team_member_status_changed'
   | 'platform_role_created'
   | 'platform_permission_changed'
+  | 'platform_sub_permission_changed'
   | 'security_note_added'
   | 'security_note_deleted'
   // Phase 1.1 — additional governance actions for Command Center,
@@ -135,6 +136,7 @@ const DEFAULT_SEVERITY_BY_ACTION: Partial<Record<PlatformAuditAction, PlatformAu
   platform_team_member_status_changed: 'warning',
   platform_role_created: 'notice',
   platform_permission_changed: 'warning',
+  platform_sub_permission_changed: 'warning',
   security_note_added: 'notice',
   security_note_deleted: 'notice',
   // Phase 1.1

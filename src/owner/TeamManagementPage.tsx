@@ -1,9 +1,37 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import PageShell from '../components/PageShell';
 import { useAccess } from '../context/AccessContext';
 import { platformTeamMembers, type PlatformTeamStatus } from './mockData';
 import { pushPlatformAudit } from './platformOpsAudit';
+import type { PermissionLevel } from '../types';
+import type { Role } from '../context/accessConfig';
+import {
+  PLATFORM_FEATURE_GROUPS,
+  PLATFORM_PERMISSION_LEVELS,
+  PLATFORM_PERMISSION_LEVEL_LABEL,
+  PLATFORM_ROLE_DISPLAY_LABEL,
+  DEFAULT_PLATFORM_FEATURE_LEVELS,
+  readPlatformPermissionsOverrides,
+  writePlatformPermissionsOverrides,
+  platformPermissionMeets,
+  getPlatformFeatureLevel,
+  getPlatformSubPermissionLevel,
+  type PlatformFeatureKey,
+  type PlatformPermissionsOverrides,
+} from './platformPermissionsConfig';
+
+// Phase 1.1.3A correction — the Global Permissions Matrix is governed by the
+// 5 hardcoded platform roles. Custom roles created via "Create Role" still
+// live in AccessContext.platformRolesState (legacy permissions array) and
+// are NOT shown as columns here — they remain visible on the Roles tab.
+const MATRIX_ROLES: Role[] = [
+  'system_owner',
+  'support_admin',
+  'billing_admin',
+  'operations_admin',
+  'security_admin',
+];
 
 type TeamMember = { id: string; name: string; email: string; role: string; status: PlatformTeamStatus };
 
@@ -208,76 +236,217 @@ export default function TeamManagementPage() {
     </div>
   );
 
-  const getPermissionLevel = (role: any, featureId: string): string => {
-    if (Array.isArray(role.permissions)) {
-      if (role.permissions.includes('all')) return 'full';
-      if (role.permissions.includes(featureId)) return 'full';
-      if (role.permissions.includes(`${featureId}_read`)) return 'view';
-      return 'none';
-    }
-    if (role.permissions?.['all'] === 'full') return 'full';
-    return role.permissions?.[featureId] || 'none';
+  // ----- Phase 1.1.3A correction — Global Permissions Matrix -------------
+  // The matrix now reads from / writes to sessionStorage
+  // `platform_permissions_v1` and uses `platformPermissionsConfig` as the
+  // single source of truth. System Owner remains locked at Full Access.
+  // Sub-permission rows are collapsible per parent feature.
+  const [overrides, setOverrides] = useState<PlatformPermissionsOverrides>(() => readPlatformPermissionsOverrides());
+  const [expandedFeatures, setExpandedFeatures] = useState<Record<PlatformFeatureKey, boolean>>(() => ({} as any));
+
+  useEffect(() => {
+    const onChange = () => setOverrides(readPlatformPermissionsOverrides());
+    window.addEventListener('platform_permissions:changed', onChange);
+    window.addEventListener('storage', onChange);
+    return () => {
+      window.removeEventListener('platform_permissions:changed', onChange);
+      window.removeEventListener('storage', onChange);
+    };
+  }, []);
+
+  const isOwner = session?.role === 'system_owner';
+
+  const setFeatureLevel = (role: Role, featureKey: PlatformFeatureKey, level: PermissionLevel) => {
+    if (!isOwner || role === 'system_owner') return;
+    const oldLevel = getPlatformFeatureLevel(role, featureKey, overrides);
+    if (oldLevel === level) return;
+    const next: PlatformPermissionsOverrides = { ...overrides };
+    const roleEntry = { ...(next[role] || {}) };
+    const features = { ...(roleEntry.features || {}) };
+    features[featureKey] = level;
+    roleEntry.features = features;
+    next[role] = roleEntry;
+    setOverrides(next);
+    writePlatformPermissionsOverrides(next);
+    const featureLabel = PLATFORM_FEATURE_GROUPS.find(g => g.key === featureKey)?.label || featureKey;
+    const roleLabel = PLATFORM_ROLE_DISPLAY_LABEL[role];
+    logActivity('Updated Permissions', `Set ${featureLabel} to ${level} for ${roleLabel}`);
+    pushPlatformAudit({
+      actor: session?.user?.name || 'System Owner',
+      action: 'platform_permission_changed',
+      target: `${roleLabel} · ${featureLabel}`,
+      category: 'team',
+      oldValue: oldLevel,
+      newValue: level,
+      severity: 'warning',
+    });
   };
 
+  const setSubLevel = (role: Role, featureKey: PlatformFeatureKey, subKey: string, level: PermissionLevel) => {
+    if (!isOwner || role === 'system_owner') return;
+    const oldLevel = getPlatformSubPermissionLevel(role, subKey, overrides);
+    if (oldLevel === level) return;
+    const next: PlatformPermissionsOverrides = { ...overrides };
+    const roleEntry = { ...(next[role] || {}) };
+    const subs = { ...(roleEntry.subs || {}) };
+    subs[subKey] = level;
+    roleEntry.subs = subs;
+    next[role] = roleEntry;
+    setOverrides(next);
+    writePlatformPermissionsOverrides(next);
+    const group = PLATFORM_FEATURE_GROUPS.find(g => g.key === featureKey);
+    const subDef = group?.subPermissions.find(s => s.id === subKey);
+    const roleLabel = PLATFORM_ROLE_DISPLAY_LABEL[role];
+    logActivity('Updated Sub-Permission', `Set ${subDef?.label || subKey} to ${level} for ${roleLabel}`);
+    pushPlatformAudit({
+      actor: session?.user?.name || 'System Owner',
+      action: 'platform_sub_permission_changed',
+      target: `${roleLabel} · ${group?.label || featureKey} · ${subDef?.label || subKey}`,
+      category: 'team',
+      oldValue: oldLevel,
+      newValue: level,
+      severity: 'warning',
+    });
+  };
+
+  const enabledSubCount = (role: Role, featureKey: PlatformFeatureKey): { enabled: number; total: number } => {
+    const group = PLATFORM_FEATURE_GROUPS.find(g => g.key === featureKey);
+    if (!group) return { enabled: 0, total: 0 };
+    let enabled = 0;
+    for (const sp of group.subPermissions) {
+      const lvl = getPlatformSubPermissionLevel(role, sp.id, overrides);
+      if (platformPermissionMeets(lvl, sp.threshold)) enabled++;
+    }
+    return { enabled, total: group.subPermissions.length };
+  };
+
+  const renderLevelSelect = (
+    value: PermissionLevel,
+    onChange: (lvl: PermissionLevel) => void,
+    disabled: boolean,
+    testId?: string
+  ) => (
+    <select
+      data-testid={testId}
+      disabled={disabled}
+      value={value}
+      onChange={e => onChange(e.target.value as PermissionLevel)}
+      className="text-[11px] font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 focus:ring-2 focus:ring-primary/20 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+    >
+      {PLATFORM_PERMISSION_LEVELS.map(lvl => (
+        <option key={lvl} value={lvl}>{PLATFORM_PERMISSION_LEVEL_LABEL[lvl]}</option>
+      ))}
+    </select>
+  );
+
   const renderPermissions = () => (
-    <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm">
-      <h2 className="text-2xl font-black text-primary tracking-tight mb-6">Global Permissions Matrix</h2>
-      <p className="text-slate-500 text-sm font-medium mb-8">Configure which roles have access to specific platform features.</p>
-      
+    <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm" data-testid="global-permissions-matrix">
+      <div className="flex items-start justify-between gap-6 flex-wrap mb-4">
+        <div>
+          <h2 className="text-2xl font-black text-primary tracking-tight">Global Permissions Matrix</h2>
+          <p className="text-slate-500 text-sm font-medium mt-1 max-w-3xl">
+            Configure platform-side feature access for each platform role using the same 7-level hierarchy used elsewhere in the app
+            (None / View Only / Create / Edit / Approve / Manage / Full Access). Expand a row to fine-tune approval-sensitive sub-permissions.
+          </p>
+        </div>
+      </div>
+      <div className="bg-amber-400/10 border border-amber-400/30 rounded-2xl p-4 flex items-start gap-3 mb-6" data-testid="matrix-truth-banner">
+        <span className="material-symbols-outlined text-amber-700 text-lg mt-0.5">info</span>
+        <div className="text-xs font-medium text-amber-900 leading-relaxed space-y-1">
+          <p><span className="font-black uppercase tracking-widest">Scope:</span> these permissions control System Owner / platform staff access. Tenant / store employee access is governed separately by the Store Permissions Matrix.</p>
+          <p><span className="font-black uppercase tracking-widest">Limitations:</span> permissions are UI-enforced only — there is no server-side RBAC, PIM, or PAM in this phase. Server-side enforcement is planned for Phase 1.3. System Owner is always Full Access and is intentionally not editable.</p>
+        </div>
+      </div>
+
       <div className="overflow-x-auto">
-        <table className="w-full text-left border-collapse">
+        <table className="w-full text-left border-collapse min-w-[920px]">
           <thead>
             <tr className="border-b border-slate-100">
-              <th className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Feature</th>
-              {platformRolesState.map(role => (
-                <th key={role.id} className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">{role.name}</th>
+              <th className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest w-[28%]">Feature / Sub-Permission</th>
+              {MATRIX_ROLES.map(role => (
+                <th key={role} className="px-3 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">
+                  {PLATFORM_ROLE_DISPLAY_LABEL[role]}
+                  {role === 'system_owner' && <div className="text-[9px] font-medium text-slate-400 normal-case tracking-normal mt-0.5">(locked)</div>}
+                </th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {platformFeatures.map(feature => (
-              <tr key={feature.id} className="border-b border-slate-50">
-                <td className="px-4 py-4 text-sm font-bold text-slate-700">{feature.name}</td>
-                {platformRolesState.map(role => {
-                  const currentLevel = getPermissionLevel(role, feature.id);
-                  return (
-                    <td key={role.id} className="px-4 py-4 text-center">
-                      <select
-                        disabled={session?.role !== 'system_owner' || role.id === 'system_owner'}
-                        value={currentLevel}
-                        onChange={(e) => {
-                          if (session?.role !== 'system_owner' || role.id === 'system_owner') return;
-                          const newLevel = e.target.value;
-                          const newPermissions = Array.isArray(role.permissions) 
-                            ? { ...role.permissions.reduce((acc: any, p: string) => ({ ...acc, [p]: 'full' }), {}), [feature.id]: newLevel }
-                            : { ...role.permissions, [feature.id]: newLevel };
-                          updatePlatformRole(role.id, newPermissions as any);
-                          logActivity('Updated Permissions', `Set ${feature.name} to ${newLevel} for ${role.name}`);
-                          pushPlatformAudit({
-                            actor: session?.user?.name || 'System Owner',
-                            action: 'platform_permission_changed',
-                            target: `${role.name} · ${feature.name}`,
-                            category: 'team',
-                            oldValue: currentLevel,
-                            newValue: newLevel,
-                            severity: 'warning',
-                          });
-                        }}
-                        className="text-xs font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 focus:ring-2 focus:ring-primary/20 focus:outline-none disabled:opacity-50"
+            {PLATFORM_FEATURE_GROUPS.map(group => {
+              const expanded = !!expandedFeatures[group.key];
+              return (
+                <React.Fragment key={group.key}>
+                  <tr className="border-b border-slate-100 bg-slate-50/40" data-testid={`matrix-feature-row-${group.key}`}>
+                    <td className="px-4 py-4 align-top">
+                      <button
+                        type="button"
+                        onClick={() => setExpandedFeatures(prev => ({ ...prev, [group.key]: !prev[group.key] }))}
+                        data-testid={`matrix-expand-${group.key}`}
+                        className="flex items-center gap-2 text-sm font-black text-slate-800 hover:text-primary transition-colors"
                       >
-                        <option value="none">None</option>
-                        <option value="view">View Only</option>
-                        <option value="create">Create</option>
-                        <option value="edit">Edit</option>
-                        <option value="approve">Approve</option>
-                        <option value="manage">Manage</option>
-                        <option value="full">Full Access</option>
-                      </select>
+                        <span className={`material-symbols-outlined text-base transition-transform ${expanded ? 'rotate-90' : ''}`}>chevron_right</span>
+                        {group.label}
+                      </button>
+                      <p className="text-[10px] font-medium text-slate-500 mt-0.5 ml-6">{group.description}</p>
                     </td>
-                  );
-                })}
-              </tr>
-            ))}
+                    {MATRIX_ROLES.map(role => {
+                      const lvl = getPlatformFeatureLevel(role, group.key, overrides);
+                      const { enabled, total } = enabledSubCount(role, group.key);
+                      const lockedRow = !isOwner || role === 'system_owner';
+                      const displayLvl: PermissionLevel = role === 'system_owner' ? 'full' : lvl;
+                      return (
+                        <td key={role} className="px-3 py-4 text-center align-top">
+                          {renderLevelSelect(
+                            displayLvl,
+                            (next) => setFeatureLevel(role, group.key, next),
+                            lockedRow,
+                            `matrix-feature-${group.key}-${role}`
+                          )}
+                          <div className="text-[9px] font-bold uppercase tracking-widest text-slate-400 mt-1">
+                            {role === 'system_owner' ? `${total} / ${total} enabled` : `${enabled} / ${total} enabled`}
+                          </div>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                  {expanded && group.subPermissions.map(sp => (
+                    <tr key={`${group.key}-${sp.id}`} className="border-b border-slate-50" data-testid={`matrix-sub-row-${sp.id}`}>
+                      <td className="px-4 py-3 pl-12">
+                        <p className="text-xs font-bold text-slate-700 flex items-center gap-2">
+                          {sp.label}
+                          {sp.sensitive && (
+                            <span className="px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest rounded bg-amber-400/10 text-amber-700 border border-amber-400/20">sensitive</span>
+                          )}
+                        </p>
+                        <p className="text-[10px] font-medium text-slate-500 mt-0.5">
+                          {sp.description}
+                          <span className="text-slate-400"> · Requires {PLATFORM_PERMISSION_LEVEL_LABEL[sp.threshold]} or higher.</span>
+                        </p>
+                      </td>
+                      {MATRIX_ROLES.map(role => {
+                        const lvl = getPlatformSubPermissionLevel(role, sp.id, overrides);
+                        const lockedRow = !isOwner || role === 'system_owner';
+                        const displayLvl: PermissionLevel = role === 'system_owner' ? 'full' : lvl;
+                        const meets = platformPermissionMeets(displayLvl, sp.threshold);
+                        return (
+                          <td key={role} className="px-3 py-3 text-center">
+                            {renderLevelSelect(
+                              displayLvl,
+                              (next) => setSubLevel(role, group.key, sp.id, next),
+                              lockedRow,
+                              `matrix-sub-${sp.id}-${role}`
+                            )}
+                            <div className={`text-[9px] font-bold uppercase tracking-widest mt-1 ${meets ? 'text-emerald-600' : 'text-slate-400'}`}>
+                              {meets ? 'enabled' : 'disabled'}
+                            </div>
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </React.Fragment>
+              );
+            })}
           </tbody>
         </table>
       </div>

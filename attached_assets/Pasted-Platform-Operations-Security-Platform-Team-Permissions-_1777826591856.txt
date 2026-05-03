@@ -1,0 +1,868 @@
+Platform Operations & Security — Platform Team Permissions Matrix + Support Tools Role Source Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict correction/enhancement pass before continuing Phase 1.1.3A QA.
+
+Do not proceed with Phase 1.1.3A QA assumptions yet.
+Do not implement Phase 1.1.3B, 1.1.3C, 1.1.3D, Phase 1.2, Phase 1.3, Phase 1.4, Phase 2, Phase 3, or Phase 4.
+
+Fix the platform role/permission model so Support Tools and Platform Operations use the central Team Management / Global Permissions Matrix instead of a local “Acting as” selector.
+
+This is a platform-side permission architecture correction, similar in spirit to the Store Permissions Matrix sub-permission model, but it must use the existing Global Permissions Matrix permission hierarchy.
+
+==================================================
+ROLE STACK — ADD TO PROJECT KNOWLEDGE / SKILLS
+==================================================
+
+Before implementation, add this workstream role model to project knowledge / skills and act on it.
+
+Do not treat these roles as decorative text.
+Use them to guide architecture, data model, UI, permission logic, state handling, security boundaries, auditability, non-regression, and QA.
+
+Act as:
+- Senior Platform Team Governance Leader
+- Senior RBAC / Permission-Governance Architect
+- Senior Platform Operations Architect
+- Senior Support Tools Engineer
+- Senior Audit & Security Engineer
+- Senior SaaS Command Center Architect
+- Senior React/TypeScript Engineer
+- Senior Security-by-Default Architect
+- QA Gatekeeper
+- Systems Thinker
+- Side Auditor
+
+Core responsibility:
+Platform permissions must be centrally governed through Team Management / Global Permissions Matrix, not local feature-level role selectors.
+
+Value goals:
+- Reduce cognitive load by having one permission source of truth.
+- Increase velocity by standardizing platform action gating.
+- Preserve security-by-default by separating platform roles from tenant/store roles.
+- Preserve continuous-compliance readiness through auditable permission changes.
+- Prepare for future Phase 1.3 Platform Team Governance, server-enforced RBAC, PIM/PAM, temporary access, and access reviews.
+
+==================================================
+CURRENT ISSUE
+==================================================
+
+Support Tools currently has a local “Acting as” selector/card.
+
+This is not the correct long-term design because:
+
+1) The app already has Dev Session role switching.
+2) Platform roles should be selected through the Dev Session / active platform user context.
+3) Global Permissions Matrix should define what each platform role can do.
+4) Support Tools should read permissions from the active platform role, not from a local selector.
+5) This should work like the tenant/store side, where role/sub-permission behavior is controlled centrally by a matrix.
+
+The local “Acting as” selector must be removed from Support Tools.
+
+Support Tools should only ask:
+“What permissions does the active platform role have?”
+
+==================================================
+IMPORTANT CORRECTION — USE EXISTING GLOBAL PERMISSION LEVELS
+==================================================
+
+The Global Permissions Matrix already supports these permission levels:
+
+- None
+- View Only
+- Create
+- Edit
+- Approve
+- Manage
+- Full Access
+
+Do NOT replace this model with a simplified model.
+
+Do NOT reduce it to:
+- None
+- View
+- Manage
+- Full Access
+
+Use the existing permission hierarchy everywhere in this workstream.
+
+Permission level meaning:
+
+None:
+- No access.
+- Feature/action hidden or blocked.
+
+View Only:
+- Can open/read/view.
+- Cannot create, edit, approve, manage, or perform operational mutations.
+
+Create:
+- Can create new records, such as support cases, domain records, notes, or draft items where applicable.
+- Does not automatically allow editing existing records unless Edit or higher is granted.
+
+Edit:
+- Can update existing records and normal workflow fields.
+- Does not automatically allow approval-sensitive actions unless Approve or higher is granted.
+
+Approve:
+- Can perform approval/authorization-sensitive workflow actions.
+- Use for actions that approve, acknowledge, override, de-escalate, resolve sensitive escalations, approve exceptions, or authorize sensitive transitions.
+- Approval is distinct from general management.
+
+Manage:
+- Can administer operational configuration and manage the feature area broadly.
+- Can perform most Create/Edit/Approve actions unless a sub-permission is explicitly denied or protected.
+
+Full Access:
+- All actions.
+- System Owner should retain Full Access and should not be reducible if owner permanence is part of the current design.
+
+==================================================
+PARENT FEATURE LEVEL VS SUB-PERMISSIONS
+==================================================
+
+Parent feature permission controls general access level.
+
+Sub-permissions refine specific actions.
+
+Required behavior:
+
+- Parent feature level should provide reasonable default capability.
+- Sensitive sub-permissions must still be checked directly.
+- Parent Full Access grants all sub-permissions unless explicitly protected by System Owner permanence rules.
+- Parent Manage should generally allow most operational actions, but approval-sensitive actions should still respect Approve / Manage / Full Access thresholds.
+- Parent Edit should not automatically allow approval, escalation resolution, audit export, permission-matrix edits, delete actions, or other sensitive actions unless the matching sub-permission allows it.
+- Parent Create should not automatically allow editing existing records.
+- Parent View Only should never allow mutation actions.
+- Explicit denied / None sub-permission should not be overridden by parent level except for System Owner Full Access if that is the existing app rule.
+- Sub-permissions must use the existing hierarchy: None, View Only, Create, Edit, Approve, Manage, Full Access.
+
+==================================================
+PRIMARY GOAL
+==================================================
+
+Create a proper platform-side permission model:
+
+1) Keep the Global Permissions Matrix as the platform-team permissions source of truth.
+2) Expand it from broad feature-level access into feature + sub-permission access.
+3) Use the existing permission hierarchy:
+   None / View Only / Create / Edit / Approve / Manage / Full Access.
+4) Add platform sub-permissions for:
+   - Command Center
+   - Audit & Security
+   - Support Tools
+   - Tenant Management
+   - Billing & Subscriptions
+   - Platform Settings
+   - Domains
+   - Team Management
+   - Provisioning
+   - Feature Matrix / Plans & Features
+   - Commercial Controls / Add-on Governance
+5) Make Support Tools escalation actions check the active platform role’s sub-permissions.
+6) Use Dev Session role switching to test different platform roles.
+7) Remove the local Support Tools “Acting as” selector.
+8) Keep platform permissions separate from tenant/store permissions.
+
+==================================================
+IMPORTANT DESIGN RULE — PLATFORM VS STORE PERMISSIONS
+==================================================
+
+Do not confuse these two systems:
+
+Tenant/store employee permissions:
+- controlled by Store Permissions Matrix
+- applies to tenant/store users and store employees
+
+Platform/system-owner permissions:
+- controlled by Global Permissions Matrix / Team Management
+- applies to platform/system-owner team members
+
+These must remain separate.
+
+Do not add Platform Operations permissions to Store Permissions Matrix.
+Do not add tenant/store permissions to Global Permissions Matrix.
+Do not change Store Permissions Matrix behavior in this pass.
+
+==================================================
+PART A — REMOVE SUPPORT TOOLS LOCAL “ACTING AS”
+==================================================
+
+Remove the local “Acting as” selector/card from Support Tools.
+
+Support Tools should derive active platform role/user from the existing Dev Session / platform session context.
+
+Required:
+- no local “Acting as” selector/card inside Support Tools
+- no duplicate role state inside Support Tools
+- no Support Tools-only role override
+- role switching should happen through Dev Session only
+
+If current session context is incomplete:
+- use the existing active Dev Session platform role if available
+- otherwise create a small shared helper that maps active Dev Session role to platform permission role
+- do not create another local selector inside Support Tools
+
+Allowed:
+- a small read-only label, if useful:
+  “Active platform role: Support Admin”
+- a helper note:
+  “Role is controlled by Dev Session / Platform Team permissions.”
+
+==================================================
+PART B — PLATFORM PERMISSION MATRIX ENHANCEMENT
+==================================================
+
+Improve Global Permissions Matrix so it supports feature-level and sub-permission-level platform permissions.
+
+Required:
+- keep current top-level features
+- preserve current permission dropdown levels:
+  None / View Only / Create / Edit / Approve / Manage / Full Access
+- add expandable sub-permission rows under each feature
+- each sub-permission should use the same permission-level hierarchy
+- show parent feature permission
+- show sub-permission controls per platform role
+- show count of enabled sub-permissions per feature/role if practical
+- allow expand/collapse by feature
+- keep UI readable and not overly cluttered
+- include helper text explaining:
+  “These permissions control System Owner/platform staff access. Tenant/store employee access is controlled separately by Store Permissions Matrix.”
+
+System Owner permanence:
+- System Owner should retain Full Access to everything
+- if current design treats System Owner as immutable, keep System Owner dropdowns disabled/read-only
+- do not allow accidental downgrade of System Owner’s platform access
+
+==================================================
+PART C — REQUIRED PLATFORM FEATURE GROUPS + SUB-PERMISSIONS
+==================================================
+
+Add platform sub-permissions under these feature groups.
+
+Use stable keys.
+Do not duplicate sub-permission keys.
+Do not create tenant/store permissions here.
+
+--------------------------------------------------
+1) Command Center
+--------------------------------------------------
+
+Sub-permissions:
+- view_command_center
+- view_operational_pulse
+- view_needs_attention
+- view_tenant_360
+- use_command_quick_actions
+- view_next_best_actions
+
+Minimum thresholds:
+- view_command_center: View Only or higher
+- view_operational_pulse: View Only or higher
+- view_needs_attention: View Only or higher
+- view_tenant_360: View Only or higher
+- use_command_quick_actions:
+  - View Only or higher when the quick action only navigates
+  - Create or higher when the quick action creates a record
+  - must also respect target feature permission
+- view_next_best_actions: View Only or higher
+
+--------------------------------------------------
+2) Audit & Security
+--------------------------------------------------
+
+Sub-permissions:
+- view_audit_logs
+- view_restricted_audit_details
+- export_audit_csv
+- view_actor_profile
+- view_related_event_timeline
+- add_security_note
+- delete_security_note
+- create_support_case_from_audit
+- view_escalation_lifecycle_audit
+
+Minimum thresholds:
+- view_audit_logs: View Only or higher
+- view_restricted_audit_details: Approve, Manage, or Full Access
+- export_audit_csv: Approve, Manage, or Full Access
+- view_actor_profile: View Only or higher unless restricted details are shown
+- view_related_event_timeline: View Only or higher
+- add_security_note: Create or higher
+- delete_security_note: Approve, Manage, or Full Access
+- create_support_case_from_audit:
+  - Create or higher in Audit & Security
+  - AND create_support_case permission in Support Tools
+- view_escalation_lifecycle_audit: View Only or higher
+
+--------------------------------------------------
+3) Support Tools
+--------------------------------------------------
+
+Sub-permissions:
+- view_support_cases
+- create_support_case
+- edit_support_case
+- change_support_status
+- change_support_severity
+- assign_support_case
+- add_internal_support_note
+- use_support_macro
+- manage_support_macros
+- escalate_assigned_case
+- escalate_any_case
+- assign_escalation_owner_team
+- acknowledge_escalation
+- change_escalation_level
+- deescalate_support_case
+- resolve_escalation
+- close_support_case
+- reopen_support_case
+- view_support_sla
+- view_support_tenant_health
+- view_support_related_entities
+
+Minimum thresholds:
+- view_support_cases: View Only or higher
+- create_support_case: Create or higher
+- edit_support_case: Edit or higher
+- change_support_status: Edit or higher
+- change_support_severity: Edit or higher
+- assign_support_case: Manage or Full Access
+- add_internal_support_note: Create or higher
+- use_support_macro: Create or higher
+- manage_support_macros: Manage or Full Access
+- view_support_sla: View Only or higher
+- view_support_tenant_health: View Only or higher
+- view_support_related_entities: View Only or higher
+
+Escalation thresholds:
+- escalate_assigned_case:
+  - Create or higher if the case is assigned to the active user/team
+  - Approve or higher if escalating someone else’s case
+- escalate_any_case: Approve or higher
+- assign_escalation_owner_team: Manage or Full Access
+- acknowledge_escalation:
+  - Approve or higher
+  - OR Edit/Create if the escalation is assigned to the active user/team, if supported by the current data model
+- change_escalation_level: Approve or higher
+- deescalate_support_case: Approve or higher
+- resolve_escalation: Approve or higher
+- close_support_case: Approve or higher
+- reopen_support_case:
+  - Edit or higher
+  - Approve or higher if current design treats reopen as sensitive
+
+--------------------------------------------------
+4) Tenant Management
+--------------------------------------------------
+
+Sub-permissions:
+- view_tenants
+- create_tenant
+- edit_tenant
+- disable_suspend_tenant
+- view_tenant_detail
+- manage_tenant_owner_users
+- view_tenant_activity_audit
+
+Minimum thresholds:
+- view_tenants: View Only or higher
+- create_tenant: Create or higher
+- edit_tenant: Edit or higher
+- disable_suspend_tenant: Approve, Manage, or Full Access
+- view_tenant_detail: View Only or higher
+- manage_tenant_owner_users: Manage or Full Access
+- view_tenant_activity_audit: View Only or higher
+
+--------------------------------------------------
+5) Billing & Subscriptions
+--------------------------------------------------
+
+Sub-permissions:
+- view_billing
+- create_internal_invoice
+- mark_invoice_paid
+- cancel_invoice
+- grant_paid_override
+- revoke_paid_override
+- view_pending_payments
+- edit_billing_defaults_if_allowed
+
+Minimum thresholds:
+- view_billing: View Only or higher
+- create_internal_invoice: Create or higher
+- mark_invoice_paid: Approve, Manage, or Full Access
+- cancel_invoice: Approve, Manage, or Full Access
+- grant_paid_override: Approve, Manage, or Full Access
+- revoke_paid_override: Approve, Manage, or Full Access
+- view_pending_payments: View Only or higher
+- edit_billing_defaults_if_allowed: Manage or Full Access
+
+--------------------------------------------------
+6) Platform Settings
+--------------------------------------------------
+
+Sub-permissions:
+- view_platform_settings
+- edit_platform_identity
+- edit_support_defaults
+- edit_billing_defaults
+- edit_security_documentation_settings
+- edit_communication_templates
+
+Minimum thresholds:
+- view_platform_settings: View Only or higher
+- edit_platform_identity: Edit or higher
+- edit_support_defaults: Edit or higher
+- edit_billing_defaults: Manage or Full Access
+- edit_security_documentation_settings: Approve, Manage, or Full Access
+- edit_communication_templates: Edit or higher
+
+--------------------------------------------------
+7) Domains
+--------------------------------------------------
+
+Sub-permissions:
+- view_domains
+- create_domain_record
+- edit_domain_record
+- mark_domain_verified
+- mark_domain_active
+- mark_domain_failed
+- disable_enable_domain
+- copy_dns_instructions
+
+Minimum thresholds:
+- view_domains: View Only or higher
+- create_domain_record: Create or higher
+- edit_domain_record: Edit or higher
+- mark_domain_verified: Approve, Manage, or Full Access
+- mark_domain_active: Approve, Manage, or Full Access
+- mark_domain_failed: Edit or higher
+- disable_enable_domain: Approve, Manage, or Full Access
+- copy_dns_instructions: View Only or higher
+
+--------------------------------------------------
+8) Team Management
+--------------------------------------------------
+
+Sub-permissions:
+- view_platform_team
+- invite_platform_team_member
+- edit_platform_team_member
+- change_platform_member_status
+- change_platform_role
+- edit_global_permissions_matrix
+- view_team_activity
+
+Minimum thresholds:
+- view_platform_team: View Only or higher
+- invite_platform_team_member: Create or higher
+- edit_platform_team_member: Edit or higher
+- change_platform_member_status: Approve, Manage, or Full Access
+- change_platform_role: Manage or Full Access
+- edit_global_permissions_matrix: Full Access only unless existing design allows Manage
+- view_team_activity: View Only or higher
+
+--------------------------------------------------
+9) Provisioning
+--------------------------------------------------
+
+Sub-permissions:
+- view_provisioning
+- run_provisioning_wizard
+- retry_failed_provisioning
+- view_provisioning_audit
+
+Minimum thresholds:
+- view_provisioning: View Only or higher
+- run_provisioning_wizard: Create or higher
+- retry_failed_provisioning: Manage or Full Access
+- view_provisioning_audit: View Only or higher
+
+--------------------------------------------------
+10) Feature Matrix / Plans & Features
+--------------------------------------------------
+
+Sub-permissions:
+- view_feature_matrix
+- edit_plan_features
+- manage_feature_lifecycle
+- view_plan_entitlements
+- edit_plan_entitlements
+
+Minimum thresholds:
+- view_feature_matrix: View Only or higher
+- edit_plan_features: Edit or higher
+- manage_feature_lifecycle: Manage or Full Access
+- view_plan_entitlements: View Only or higher
+- edit_plan_entitlements: Approve, Manage, or Full Access
+
+--------------------------------------------------
+11) Commercial Controls / Add-on Governance
+--------------------------------------------------
+
+Sub-permissions:
+- view_addon_catalog
+- create_edit_addon
+- archive_delete_addon
+- manage_addon_compatible_plans
+- manage_addon_readiness
+- generate_addon_implementation_brief
+- grant_trial
+- grant_paid_override
+- revoke_addon_override
+
+Minimum thresholds:
+- view_addon_catalog: View Only or higher
+- create_edit_addon: Create/Edit or higher depending action
+- archive_delete_addon: Approve, Manage, or Full Access
+- manage_addon_compatible_plans: Manage or Full Access
+- manage_addon_readiness: Manage or Full Access
+- generate_addon_implementation_brief: View Only or Create or higher, depending whether generation mutates state
+- grant_trial: Approve, Manage, or Full Access
+- grant_paid_override: Approve, Manage, or Full Access
+- revoke_addon_override: Approve, Manage, or Full Access
+
+If the app currently merges Feature Matrix and Add-on Governance under one page, keep UI consistent but still define sub-permissions clearly.
+
+==================================================
+PART D — DEFAULT ROLE PERMISSIONS
+==================================================
+
+Seed sensible defaults using the existing permission levels.
+
+System Owner:
+- Full Access to everything
+- cannot be reduced if existing owner permanence applies
+
+Support Admin:
+- Manage or Full Access for Support Tools
+- View Only / Create for Command Center actions
+- View Only or Approve for Audit & Security depending existing intended scope
+- can create support case from audit if allowed
+- no billing mutation by default
+- no Feature Matrix / Add-on admin by default
+- no Global Permissions Matrix editing by default
+
+Billing Admin:
+- Manage or Full Access for Billing & Subscriptions
+- View Only for tenants and Command Center
+- Create/Edit billing records where applicable
+- no support escalation unless billing-specific escalation permissions are intentionally granted
+- no audit export unless explicitly granted
+
+Operations Admin:
+- Manage tenants, provisioning, domains, and Command Center
+- View Only or Edit for Support Tools depending current intended operations scope
+- no billing paid override unless separately granted
+- no Global Permissions Matrix editing by default
+
+Security/Audit Admin:
+- Manage or Full Access for Audit & Security
+- View Only for Command Center
+- View Only/Create for Support Tools where creating audit-linked support cases is needed
+- no billing/add-on mutation by default
+- no tenant provisioning mutation unless separately granted
+- no support close unless separately granted
+
+Read Only if present:
+- View Only only
+- no Create/Edit/Approve/Manage/Full Access mutation actions
+
+==================================================
+PART E — PERMISSION ENFORCEMENT IN PLATFORM OPERATIONS SURFACES
+==================================================
+
+Apply platform permission checks to current Phase 1.1.x surfaces.
+
+Command Center:
+- page requires view_command_center
+- operational pulse requires view_operational_pulse
+- Needs Attention requires view_needs_attention
+- Tenant 360 requires view_tenant_360
+- quick actions require use_command_quick_actions and target feature permission
+- Next Best Actions require view_next_best_actions and target action permission
+
+Audit & Security:
+- page requires view_audit_logs
+- export requires export_audit_csv
+- restricted details require view_restricted_audit_details
+- actor profile requires view_actor_profile
+- related event timeline requires view_related_event_timeline
+- security note add/delete require add_security_note / delete_security_note
+- create support case from audit requires create_support_case_from_audit and create_support_case
+- escalation lifecycle audit requires view_escalation_lifecycle_audit
+
+Support Tools:
+- page requires view_support_cases
+- create case requires create_support_case
+- edit case requires edit_support_case
+- status/severity changes require change_support_status / change_support_severity
+- assignment requires assign_support_case
+- notes require add_internal_support_note
+- macro use requires use_support_macro
+- macro management requires manage_support_macros
+- escalation actions require their matching sub-permissions:
+  - escalate_assigned_case
+  - escalate_any_case
+  - assign_escalation_owner_team
+  - acknowledge_escalation
+  - change_escalation_level
+  - deescalate_support_case
+  - resolve_escalation
+  - close_support_case
+  - reopen_support_case
+
+Use disabled buttons with tooltips/explanations where helpful:
+“You need Approve or higher permission to acknowledge this escalation.”
+
+Do not crash when role lacks permission.
+Do not silently allow sensitive actions when permission is missing.
+
+==================================================
+PART F — DEV SESSION ROLE SWITCHING
+==================================================
+
+Use the existing Dev Session role switching for testing platform role behavior.
+
+Required:
+- changing Dev Session platform role updates available platform actions
+- Support Tools no longer has its own role selector
+- Command Center / Audit & Security / Support Tools reflect the active Dev Session role
+- if a refresh is required, document it; ideally update live
+- no duplicate role state
+
+Expected:
+- Dev Session = System Owner should show full platform access
+- Dev Session = Support Admin should show support-oriented access
+- Dev Session = Billing Admin should show billing-oriented access
+- Dev Session = Operations Admin should show operations/tenant/domain/provisioning-oriented access
+- Dev Session = Security/Audit Admin should show audit/security-oriented access
+
+==================================================
+PART G — GLOBAL PERMISSIONS MATRIX UI IMPROVEMENT
+==================================================
+
+Improve Global Permissions Matrix UI so it remains usable with sub-permissions.
+
+Required:
+- expandable/collapsible sub-permission rows per feature
+- current permission dropdown levels preserved:
+  None / View Only / Create / Edit / Approve / Manage / Full Access
+- parent feature row clearly separated from sub-permissions
+- sub-permission controls per role
+- helper descriptions for sensitive sub-permissions
+- enabled sub-permission count per feature/role if practical
+- good spacing and grouping
+- clear visual difference between platform permissions and tenant/store permissions
+- System Owner full access should be locked/read-only if owner permanence applies
+
+Avoid:
+- flat overwhelming table only
+- removing existing role columns
+- replacing existing dropdown hierarchy
+- mixing Store Permissions Matrix behavior
+
+==================================================
+PART H — AUDITABILITY
+==================================================
+
+Audit:
+
+- platform parent permission changed
+- platform sub-permission changed
+- Global Permissions Matrix updated
+- support escalation action performed
+- audit export performed
+- security note added/deleted
+- support case from audit created
+
+Optional:
+- support action blocked due to permission, if not noisy
+
+At minimum:
+- changes to Global Permissions Matrix must be audited
+- sensitive support escalation actions must remain audited
+- no duplicate audit rows for one action
+
+Audit payload should include:
+- actor
+- role
+- feature
+- sub-permission if applicable
+- previous value
+- new value
+- timestamp
+- reason/note if available
+
+Do not log PII to server logs.
+
+==================================================
+PART I — TRUTHFUL LIMITATIONS
+==================================================
+
+Display or document:
+
+“Platform permissions are enforced in the System Owner UI in this phase. Server-enforced Platform RBAC and PIM/PAM are planned for Platform Team Governance.”
+
+“Tenant/store permissions remain separate and are controlled by Store Permissions Matrix.”
+
+“Dev Session role switching is used for preview/testing of platform role behavior.”
+
+Do not claim:
+- server-enforced RBAC
+- PIM/PAM
+- temporary access
+- access reviews
+- SSO/SCIM
+- production identity enforcement
+
+Those are future phases.
+
+==================================================
+PART J — NON-REGRESSION
+==================================================
+
+Do not change:
+- Store Permissions Matrix behavior
+- Tenant Features behavior
+- Add-on Governance behavior except where platform permissions guard platform actions
+- Shipping behavior
+- POS
+- Repairs
+- Inventory
+- Customers
+- Invoices
+- Services
+- Tenant provisioning behavior
+- Paid Override invoice workflow
+- server PII logging rules
+- Command Center data derivations except permission checks
+- Support case data except permission/action checks
+- Audit CSV export behavior except permission checks
+
+==================================================
+PART K — DOCUMENTATION
+==================================================
+
+Update replit.md with:
+
+- Platform Team Permissions Matrix correction
+- removal of Support Tools local Acting As selector
+- Dev Session role switching as platform role test path
+- platform vs tenant permission separation
+- preservation of existing Global Permission levels:
+  None / View Only / Create / Edit / Approve / Manage / Full Access
+- platform feature/sub-permission model
+- parent feature level vs sub-permission behavior
+- role defaults
+- UI-enforced permission limitations
+- future Phase 1.3 server-enforced RBAC / PIM / PAM / access review direction
+- non-regression commitments
+- next planned phases:
+  - Phase 1.1.3A QA resumes after this correction
+  - Phase 1.1.3B Advanced Command Center Intelligence
+  - Phase 1.1.3C Support Queue / SLA / Macro Maturity
+  - Phase 1.1.3D Audit Investigation Center
+
+Do not rewrite the roadmap.
+Do not implement Phase 1.3.
+
+==================================================
+OUT OF SCOPE
+==================================================
+
+Do NOT implement:
+- server-enforced RBAC
+- PIM/PAM
+- temporary access
+- access reviews
+- SSO/SCIM
+- on-call schedules
+- external notifications
+- real teams/on-call routing
+- tenant/store permission redesign
+- Phase 1.3 Team Governance
+- Phase 1.4 Automation + Alerts
+- Phase 2 Real Integrations
+- Phase 3 Compliance
+- Phase 4 AI Operations
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Support Tools local “Acting as” selector is removed.
+2) Support Tools uses active Dev Session / platform role context.
+3) Global Permissions Matrix preserves existing permission levels:
+   None / View Only / Create / Edit / Approve / Manage / Full Access.
+4) Replit does not replace the existing permission model with a simplified model.
+5) Global Permissions Matrix supports sub-permissions.
+6) Sub-permissions use the existing permission hierarchy.
+7) Platform permissions are clearly separate from Store Permissions Matrix.
+8) Command Center actions respect platform permissions.
+9) Audit & Security actions respect platform permissions.
+10) Support Tools actions respect platform permissions.
+11) Escalation actions are gated by proper sub-permissions.
+12) Approval-sensitive escalation actions require Approve, Manage, or Full Access unless explicitly allowed for assigned owner/team.
+13) Create/Edit actions respect Create/Edit thresholds.
+14) Unauthorized actions are disabled/hidden with explanation.
+15) Permission-denied actions explain which permission level is required.
+16) Dev Session role switching changes available platform actions.
+17) System Owner retains Full Access.
+18) Role defaults are sensible for Support Admin, Billing Admin, Operations Admin, Security/Audit Admin.
+19) Global Permissions Matrix UI remains usable and not overly cluttered.
+20) Platform permission changes are audited.
+21) Existing Add-on Governance remains intact.
+22) Existing Shipping Module remains intact.
+23) Existing Store Permissions Matrix remains intact.
+24) Existing tenant provisioning remains intact.
+25) Server PII logging rules are not regressed.
+26) replit.md is updated.
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this order:
+
+1) Inspect existing Global Permissions Matrix implementation.
+2) Confirm current permission levels and do not replace them.
+3) Inspect Dev Session platform role switching.
+4) Inspect Support Tools local Acting As selector.
+5) Remove local Support Tools role selector.
+6) Add shared platform permission helper using existing hierarchy.
+7) Add feature/sub-permission data model.
+8) Add expandable sub-permission UI to Global Permissions Matrix.
+9) Wire Command Center permission checks.
+10) Wire Audit & Security permission checks.
+11) Wire Support Tools permission checks.
+12) Verify Dev Session role switching affects platform actions.
+13) Add audit events for permission changes.
+14) Update replit.md.
+15) Run typecheck and smoke tests.
+16) Provide final implementation report.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Support Tools Role Source Correction
+3. Existing Permission Levels Preserved
+4. Platform Permissions Matrix Enhancements
+5. Platform Sub-Permissions Added
+6. Permission Enforcement
+7. Dev Session Role Switching
+8. Auditability
+9. Files Changed
+10. Documentation Updated
+11. Non-Regression Notes

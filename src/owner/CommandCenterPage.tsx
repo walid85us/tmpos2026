@@ -81,6 +81,12 @@ import {
   PHASE_113A_TRUTH_LABEL,
 } from './platformOpsDerive';
 import { pushPlatformAudit } from './platformOpsAudit';
+import { useAccess } from '../context/AccessContext';
+import {
+  hasPlatformPermission,
+  PLATFORM_ROLE_DISPLAY_LABEL,
+} from './platformPermissionsConfig';
+import type { Role } from '../context/accessConfig';
 
 const CASES_KEY = 'support_cases_v1';
 const NOTES_KEY = 'platform_security_notes';
@@ -183,6 +189,16 @@ function formatRelative(iso?: string | null): string {
 
 const CommandCenterPage: React.FC = () => {
   const navigate = useNavigate();
+  // Phase 1.1.3A correction — derive active platform role from the Dev
+  // Session and gate Quick Actions / Tenant 360 / NBA click-throughs via
+  // the platform permissions catalog. Pulse cells remain visible at the
+  // View level and only their click-throughs are disabled.
+  const { session } = useAccess();
+  const sessionRole = (session?.role as Role | undefined) || null;
+  const viewPageGate = hasPlatformPermission(sessionRole, 'view_command_center');
+  const viewTenant360Gate = hasPlatformPermission(sessionRole, 'view_tenant_360');
+  const useQuickActionsGate = hasPlatformPermission(sessionRole, 'use_command_quick_actions');
+  const actNbaGate = hasPlatformPermission(sessionRole, 'act_on_nba_recommendations');
   const [cases, setCases] = useState<SupportCaseRecord[]>([]);
   const [audits, setAudits] = useState<AuditEventLike[]>([]);
   const [domains, setDomains] = useState<typeof tenantDomains>([]);
@@ -808,6 +824,17 @@ const CommandCenterPage: React.FC = () => {
             <span className="text-slate-300">·</span>
             <span className="text-slate-400" data-testid="cc-phase-113a-truth-label">{PHASE_113A_TRUTH_LABEL}</span>
           </p>
+          <p
+            data-testid="cc-active-role-label"
+            className="mt-1 text-[10px] font-black uppercase tracking-widest text-slate-400"
+          >
+            Active platform role:{' '}
+            <span className="text-primary">{sessionRole ? PLATFORM_ROLE_DISPLAY_LABEL[sessionRole] : 'No session'}</span>
+            <span className="text-slate-300 mx-1">·</span>
+            <span className="font-medium normal-case tracking-normal text-slate-500">
+              Quick actions and Tenant 360 follow the Global Permissions Matrix.
+            </span>
+          </p>
         </div>
       </section>
 
@@ -971,12 +998,35 @@ const CommandCenterPage: React.FC = () => {
         <span className="px-3 py-1 text-[10px] font-black uppercase tracking-widest text-slate-400">
           Quick actions
         </span>
-        <QuickActionButton label="Create Support Case" onClick={() => onQuickAction('Create Support Case', '/owner/support-tools')} highlight />
-        <QuickActionButton label="Open Audit & Security" onClick={() => onQuickAction('Open Audit & Security', '/owner/audit-security')} />
-        <QuickActionButton label="Open Support Tools" onClick={() => onQuickAction('Open Support Tools', '/owner/support-tools')} />
-        <QuickActionButton label="Open Domains" onClick={() => onQuickAction('Open Domains', '/owner/domains')} />
-        <QuickActionButton label="Open Platform Settings" onClick={() => onQuickAction('Open Platform Settings', '/owner/platform-settings')} />
-        <QuickActionButton label="Open Team Management" onClick={() => onQuickAction('Open Team Management', '/owner/team-management')} />
+        {(() => {
+          // Phase 1.1.3A correction — quick action visibility / interactivity
+          // is gated by `use_command_quick_actions` plus the destination
+          // feature's view permission. Disabled buttons keep the same
+          // layout but show a tooltip explaining the gap.
+          const gates = [
+            { label: 'Create Support Case', path: '/owner/support-tools', target: 'create_support_case', highlight: true },
+            { label: 'Open Audit & Security', path: '/owner/audit-security', target: 'view_audit_security', highlight: false },
+            { label: 'Open Support Tools', path: '/owner/support-tools', target: 'view_support_tools', highlight: false },
+            { label: 'Open Domains', path: '/owner/domains', target: 'view_domains', highlight: false },
+            { label: 'Open Platform Settings', path: '/owner/platform-settings', target: 'view_platform_settings', highlight: false },
+            { label: 'Open Team Management', path: '/owner/team-management', target: 'view_team', highlight: false },
+          ];
+          return gates.map(g => {
+            const targetGate = hasPlatformPermission(sessionRole, g.target);
+            const allowed = useQuickActionsGate.allowed && targetGate.allowed;
+            const reason = !useQuickActionsGate.allowed ? useQuickActionsGate.reason : targetGate.reason;
+            return (
+              <QuickActionButton
+                key={g.label}
+                label={g.label}
+                disabled={!allowed}
+                title={allowed ? '' : reason}
+                onClick={() => { if (allowed) onQuickAction(g.label, g.path); }}
+                highlight={g.highlight}
+              />
+            );
+          });
+        })()}
       </div>
 
       {/* ============== NEEDS ATTENTION (preserved) ============== */}
@@ -1044,8 +1094,10 @@ const CommandCenterPage: React.FC = () => {
                   <td className="px-6 py-3.5 text-sm text-slate-600">
                     {item.tenant && item.tenantId ? (
                       <button
-                        onClick={() => onOpenTenant360(item.tenantId)}
-                        className="hover:text-primary hover:underline"
+                        onClick={() => { if (viewTenant360Gate.allowed) onOpenTenant360(item.tenantId); }}
+                        disabled={!viewTenant360Gate.allowed}
+                        title={viewTenant360Gate.allowed ? '' : viewTenant360Gate.reason}
+                        className="hover:text-primary hover:underline disabled:no-underline disabled:opacity-60 disabled:cursor-not-allowed"
                         data-testid={`tenant360-open-${item.tenantId}`}
                       >
                         {item.tenant}
@@ -1098,7 +1150,9 @@ const CommandCenterPage: React.FC = () => {
                 <tr key={tenant.id} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/70 transition-colors">
                   <td className="px-6 py-3.5 text-sm font-bold text-slate-900">
                     <button
-                      onClick={() => onOpenTenant360(tenant.id)}
+                      onClick={() => { if (viewTenant360Gate.allowed) onOpenTenant360(tenant.id); }}
+                      disabled={!viewTenant360Gate.allowed}
+                      title={viewTenant360Gate.allowed ? '' : viewTenant360Gate.reason}
                       className="hover:text-primary hover:underline"
                       data-testid={`tenant360-open-${tenant.id}-row`}
                     >
@@ -1527,10 +1581,12 @@ const Tenant360Block: React.FC<{ title: string; empty: string; children: React.R
   );
 };
 
-const QuickActionButton: React.FC<{ label: string; onClick: () => void; highlight?: boolean }> = ({ label, onClick, highlight }) => (
+const QuickActionButton: React.FC<{ label: string; onClick: () => void; highlight?: boolean; disabled?: boolean; title?: string }> = ({ label, onClick, highlight, disabled, title }) => (
   <button
     onClick={onClick}
-    className={`px-4 py-2 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all ${highlight ? 'bg-primary text-white shadow-md hover:bg-primary/90' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'}`}
+    disabled={disabled}
+    title={title}
+    className={`px-4 py-2 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all disabled:opacity-40 disabled:cursor-not-allowed ${highlight ? 'bg-primary text-white shadow-md hover:bg-primary/90' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'}`}
   >
     {label}
   </button>

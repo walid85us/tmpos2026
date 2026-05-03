@@ -1,0 +1,528 @@
+// =============================================================================
+// Phase 1.1.3A correction — Platform Permissions catalog & helpers.
+//
+// This module is the SINGLE source of truth for platform-side ("System Owner /
+// platform staff") permissions. It is intentionally additive on top of the
+// existing access model in `src/context/accessConfig.ts`:
+//
+//   - It reuses the same `PermissionLevel` 7-level hierarchy
+//     (none / view / create / edit / approve / manage / full).
+//   - It does NOT replace the existing `PERMISSION_HIERARCHY` ordering;
+//     `meetsPermissionLevel(actual, required)` still works for the rest of
+//     the app exactly as before.
+//   - It does NOT replace or alter the Store Permissions Matrix or the
+//     tenant-side `SUB_PERMISSIONS` catalog (those govern store employees).
+//   - It does NOT introduce server-side RBAC or PIM/PAM. All gating here is
+//     UI-enforced — see the truthful-limitations banner shown in the matrix.
+//
+// Spec semantics — "Approve, Manage, or Full Access" (PART E of the spec):
+// approval-sensitive platform actions accept any of those three levels. To
+// avoid changing global hierarchy semantics this module ships its own
+// `platformPermissionMeets(actual, threshold)` that maps the platform spec
+// onto the existing levels:
+//
+//   threshold='view'    → view, create, edit, approve, manage, full
+//   threshold='create'  → create, edit, approve, manage, full
+//   threshold='edit'    → edit, approve, manage, full
+//   threshold='approve' → approve, manage, full         (spec-aligned)
+//   threshold='manage'  → manage, full
+//   threshold='full'    → full
+//
+// Override storage: per-role overrides written by the Global Permissions
+// Matrix UI live in `sessionStorage.platform_permissions_v1` as
+// `{ [roleId]: { features: {[featureKey]: PermissionLevel}, subs: {[subKey]: PermissionLevel} } }`.
+// System Owner is locked at Full Access and cannot be overridden.
+// =============================================================================
+
+import type { PermissionLevel } from '../types';
+import type { Role } from '../context/accessConfig';
+
+export const PLATFORM_PERMISSION_LEVELS: PermissionLevel[] = [
+  'none', 'view', 'create', 'edit', 'approve', 'manage', 'full',
+];
+
+export const PLATFORM_PERMISSION_LEVEL_LABEL: Record<PermissionLevel, string> = {
+  none: 'None',
+  view: 'View Only',
+  create: 'Create',
+  edit: 'Edit',
+  approve: 'Approve',
+  manage: 'Manage',
+  full: 'Full Access',
+};
+
+const LEVEL_RANK: Record<PermissionLevel, number> = {
+  none: 0,
+  view: 1,
+  create: 2,
+  edit: 3,
+  approve: 4,
+  manage: 5,
+  full: 6,
+};
+
+/**
+ * Spec-aligned threshold check for platform permissions.
+ * Approve / Manage / Full Access all satisfy an Approve threshold.
+ * Manage / Full Access satisfy a Manage threshold.
+ * Full Access satisfies all thresholds.
+ *
+ * Note: this is intentionally separate from `meetsPermissionLevel()` in
+ * accessConfig.ts (which uses a different array ordering and is consumed
+ * by the tenant / store side of the app). Do not unify them.
+ */
+export function platformPermissionMeets(
+  actual: PermissionLevel,
+  threshold: PermissionLevel
+): boolean {
+  if (threshold === 'none') return true;
+  return LEVEL_RANK[actual] >= LEVEL_RANK[threshold];
+}
+
+// ---------------------------------------------------------------------------
+// Feature catalog — 11 platform feature groups + their sub-permissions.
+// ---------------------------------------------------------------------------
+
+export type PlatformFeatureKey =
+  | 'command_center'
+  | 'audit_security'
+  | 'support_tools'
+  | 'tenant_management'
+  | 'billing_subscriptions'
+  | 'platform_settings'
+  | 'domains'
+  | 'team_management'
+  | 'provisioning'
+  | 'feature_matrix'
+  | 'addon_governance';
+
+export interface PlatformSubPermissionDef {
+  /** Stable string id used by callers like `hasPlatformPermission(role, 'export_audit_csv')`. */
+  id: string;
+  /** Human-readable label used in the matrix UI. */
+  label: string;
+  /** Short tooltip / description used in the matrix UI and helper text. */
+  description: string;
+  /** Minimum level required for this sub-permission to be considered "enabled". */
+  threshold: PermissionLevel;
+  /** True if this is an approval-sensitive action (delete / export sensitive data / change_level / etc). */
+  sensitive?: boolean;
+}
+
+export interface PlatformFeatureGroupDef {
+  key: PlatformFeatureKey;
+  label: string;
+  description: string;
+  subPermissions: PlatformSubPermissionDef[];
+}
+
+export const PLATFORM_FEATURE_GROUPS: PlatformFeatureGroupDef[] = [
+  {
+    key: 'command_center',
+    label: 'Command Center',
+    description: 'Platform-wide pulse, NBA recommendations, and Tenant 360 quick access.',
+    subPermissions: [
+      { id: 'view_command_center', label: 'View Command Center', description: 'Open the Command Center page and see pulse cells.', threshold: 'view' },
+      { id: 'view_tenant_360', label: 'Open Tenant 360 Drawer', description: 'Click through to a tenant\'s Tenant 360 read-only summary.', threshold: 'view' },
+      { id: 'use_command_quick_actions', label: 'Use Quick Actions', description: 'Click Command Center quick action buttons (navigation only).', threshold: 'view' },
+      { id: 'view_nba_recommendations', label: 'View NBA Recommendations', description: 'See Next Best Action recommendations list.', threshold: 'view' },
+      { id: 'act_on_nba_recommendations', label: 'Act on NBA Recommendations', description: 'Click through NBA actions to take operational steps.', threshold: 'edit' },
+    ],
+  },
+  {
+    key: 'audit_security',
+    label: 'Audit & Security',
+    description: 'Audit log viewer, security notes, and audit-driven case creation.',
+    subPermissions: [
+      { id: 'view_audit_security', label: 'View Audit & Security', description: 'Open the Audit & Security page and read the log.', threshold: 'view' },
+      { id: 'view_actor_profile', label: 'View Actor Profile', description: 'Open actor / related-events tabs in the audit drawer.', threshold: 'view' },
+      { id: 'export_audit_csv', label: 'Export Audit CSV', description: 'Export the currently visible audit rows as CSV.', threshold: 'approve', sensitive: true },
+      { id: 'add_security_note', label: 'Add Security Note', description: 'Add a security / posture / incident note (per-session store).', threshold: 'create' },
+      { id: 'delete_security_note', label: 'Delete Security Note', description: 'Permanently delete a security note (writes a `security_note_deleted` audit row).', threshold: 'approve', sensitive: true },
+      { id: 'create_support_case_from_audit', label: 'Create Case from Audit Event', description: 'Open the "Create Support Case from Event" modal in the audit drawer.', threshold: 'create' },
+    ],
+  },
+  {
+    key: 'support_tools',
+    label: 'Support Tools',
+    description: 'Support cases, escalation lifecycle, tenant impersonation links.',
+    subPermissions: [
+      { id: 'view_support_tools', label: 'View Support Tools', description: 'Open the Support Tools page and read cases.', threshold: 'view' },
+      { id: 'view_escalation_history', label: 'View Escalation History', description: 'Read the escalation history timeline on a case.', threshold: 'view' },
+      { id: 'create_support_case', label: 'Create Support Case', description: 'Create a new support case.', threshold: 'create' },
+      { id: 'change_support_status', label: 'Change Case Status', description: 'Move a case between Open / In Progress / Waiting Customer / Resolved.', threshold: 'edit' },
+      { id: 'change_support_severity', label: 'Change Case Severity', description: 'Change the severity of a support case.', threshold: 'edit' },
+      { id: 'assign_support_case', label: 'Assign Support Case', description: 'Assign a case owner / team.', threshold: 'edit' },
+      { id: 'close_support_case', label: 'Close Support Case', description: 'Close a case (without an active escalation).', threshold: 'manage', sensitive: true },
+      { id: 'escalate_assigned_case', label: 'Escalate Owned Case', description: 'Escalate a case the current operator owns or is assigned.', threshold: 'edit' },
+      { id: 'escalate_any_case', label: 'Escalate Any Case', description: 'Escalate any case across the platform.', threshold: 'manage' },
+      { id: 'acknowledge_escalation', label: 'Acknowledge Escalation', description: 'Acknowledge an escalation (own or any).', threshold: 'edit' },
+      { id: 'assign_escalation_owner_team', label: 'Assign Escalation Owner / Team', description: 'Assign or reassign escalation ownership.', threshold: 'manage', sensitive: true },
+      { id: 'change_escalation_level', label: 'Change Escalation Level', description: 'Promote / demote escalation level (L1 / L2 / L3 / Manager / Security / Critical).', threshold: 'approve', sensitive: true },
+      { id: 'deescalate_support_case', label: 'De-escalate Case', description: 'De-escalate an acknowledged or in-review escalation.', threshold: 'edit' },
+      { id: 'resolve_escalation', label: 'Resolve Escalation', description: 'Resolve an active escalation (writes paired audit row).', threshold: 'approve', sensitive: true },
+      { id: 'close_with_active_escalation', label: 'Close Case with Active Escalation', description: 'Override-close a case that still has an active escalation.', threshold: 'manage', sensitive: true },
+    ],
+  },
+  {
+    key: 'tenant_management',
+    label: 'Tenant Management',
+    description: 'Tenant directory, profile, status, and lifecycle.',
+    subPermissions: [
+      { id: 'view_tenants', label: 'View Tenants', description: 'Open the tenant directory and tenant detail.', threshold: 'view' },
+      { id: 'edit_tenant_profile', label: 'Edit Tenant Profile', description: 'Edit tenant name, contacts, etc.', threshold: 'edit' },
+      { id: 'change_tenant_status', label: 'Change Tenant Status', description: 'Suspend / reactivate / mark read-only.', threshold: 'manage', sensitive: true },
+    ],
+  },
+  {
+    key: 'billing_subscriptions',
+    label: 'Billing & Subscriptions',
+    description: 'Plans, subscriptions, invoices, dunning, refunds.',
+    subPermissions: [
+      { id: 'view_billing', label: 'View Billing', description: 'Read billing data, invoices, and dunning queue.', threshold: 'view' },
+      { id: 'edit_subscriptions', label: 'Edit Subscriptions', description: 'Change a tenant\'s plan or billing cycle.', threshold: 'edit' },
+      { id: 'approve_billing_actions', label: 'Approve Billing Actions', description: 'Approve refunds, credits, or write-offs.', threshold: 'approve', sensitive: true },
+    ],
+  },
+  {
+    key: 'platform_settings',
+    label: 'Platform Settings',
+    description: 'Branding, regional, feature flags, system toggles.',
+    subPermissions: [
+      { id: 'view_platform_settings', label: 'View Platform Settings', description: 'Open the platform settings page.', threshold: 'view' },
+      { id: 'edit_platform_settings', label: 'Edit Platform Settings', description: 'Save changes to platform-wide configuration.', threshold: 'manage', sensitive: true },
+    ],
+  },
+  {
+    key: 'domains',
+    label: 'Domains',
+    description: 'Custom domains, subdomains, DNS, SSL.',
+    subPermissions: [
+      { id: 'view_domains', label: 'View Domains', description: 'Open the domains directory.', threshold: 'view' },
+      { id: 'manage_domain_lifecycle', label: 'Manage Domain Lifecycle', description: 'Verify, provision, retire domains.', threshold: 'manage', sensitive: true },
+    ],
+  },
+  {
+    key: 'team_management',
+    label: 'Team Management',
+    description: 'Platform team directory, platform roles, Global Permissions Matrix.',
+    subPermissions: [
+      { id: 'view_team', label: 'View Team', description: 'Open the team directory and roles list.', threshold: 'view' },
+      { id: 'manage_team_members', label: 'Manage Team Members', description: 'Invite / suspend / disable platform team members.', threshold: 'manage', sensitive: true },
+      { id: 'manage_platform_roles', label: 'Manage Platform Roles', description: 'Create / edit platform roles and the Global Permissions Matrix.', threshold: 'full', sensitive: true },
+    ],
+  },
+  {
+    key: 'provisioning',
+    label: 'Provisioning',
+    description: 'New tenant provisioning, environment seeding.',
+    subPermissions: [
+      { id: 'view_provisioning', label: 'View Provisioning', description: 'Open the provisioning queue.', threshold: 'view' },
+      { id: 'run_provisioning', label: 'Run Provisioning', description: 'Trigger a provisioning step or seed run.', threshold: 'manage', sensitive: true },
+    ],
+  },
+  {
+    key: 'feature_matrix',
+    label: 'Feature Matrix / Plans',
+    description: 'Plan catalog and feature-to-plan matrix.',
+    subPermissions: [
+      { id: 'view_feature_matrix', label: 'View Feature Matrix', description: 'Read the plan / feature matrix.', threshold: 'view' },
+      { id: 'edit_feature_matrix', label: 'Edit Feature Matrix', description: 'Change plan / feature mappings.', threshold: 'manage', sensitive: true },
+    ],
+  },
+  {
+    key: 'addon_governance',
+    label: 'Commercial Controls / Add-on Governance',
+    description: 'Add-on catalog, commercial overrides, paid-add-on controls.',
+    subPermissions: [
+      { id: 'view_addon_governance', label: 'View Add-on Governance', description: 'Read the add-on catalog and overrides.', threshold: 'view' },
+      { id: 'edit_addon_overrides', label: 'Edit Add-on Overrides', description: 'Grant or revoke commercial overrides for tenants.', threshold: 'approve', sensitive: true },
+    ],
+  },
+];
+
+const FEATURE_BY_KEY: Map<PlatformFeatureKey, PlatformFeatureGroupDef> = new Map(
+  PLATFORM_FEATURE_GROUPS.map(g => [g.key, g])
+);
+
+const SUB_LOOKUP: Map<string, { feature: PlatformFeatureKey; def: PlatformSubPermissionDef }> = (() => {
+  const m = new Map<string, { feature: PlatformFeatureKey; def: PlatformSubPermissionDef }>();
+  for (const g of PLATFORM_FEATURE_GROUPS) {
+    for (const sp of g.subPermissions) m.set(sp.id, { feature: g.key, def: sp });
+  }
+  return m;
+})();
+
+export function getPlatformFeatureGroup(key: PlatformFeatureKey): PlatformFeatureGroupDef | null {
+  return FEATURE_BY_KEY.get(key) || null;
+}
+
+export function findSubPermissionDef(
+  subKey: string
+): { feature: PlatformFeatureKey; def: PlatformSubPermissionDef } | null {
+  return SUB_LOOKUP.get(subKey) || null;
+}
+
+// ---------------------------------------------------------------------------
+// Per-role default feature levels (spec PART D).
+// Tenant roles intentionally get all `none` — they have no platform access.
+// System Owner is hardcoded to `full` and is never overridable.
+// ---------------------------------------------------------------------------
+
+type FeatureLevels = Record<PlatformFeatureKey, PermissionLevel>;
+
+const ALL_NONE: FeatureLevels = {
+  command_center: 'none',
+  audit_security: 'none',
+  support_tools: 'none',
+  tenant_management: 'none',
+  billing_subscriptions: 'none',
+  platform_settings: 'none',
+  domains: 'none',
+  team_management: 'none',
+  provisioning: 'none',
+  feature_matrix: 'none',
+  addon_governance: 'none',
+};
+
+const ALL_FULL: FeatureLevels = {
+  command_center: 'full',
+  audit_security: 'full',
+  support_tools: 'full',
+  tenant_management: 'full',
+  billing_subscriptions: 'full',
+  platform_settings: 'full',
+  domains: 'full',
+  team_management: 'full',
+  provisioning: 'full',
+  feature_matrix: 'full',
+  addon_governance: 'full',
+};
+
+export const DEFAULT_PLATFORM_FEATURE_LEVELS: Record<Role, FeatureLevels> = {
+  system_owner: { ...ALL_FULL },
+
+  support_admin: {
+    command_center: 'manage',
+    audit_security: 'view',
+    support_tools: 'full',
+    tenant_management: 'edit',
+    billing_subscriptions: 'view',
+    platform_settings: 'view',
+    domains: 'view',
+    team_management: 'view',
+    provisioning: 'view',
+    feature_matrix: 'view',
+    addon_governance: 'view',
+  },
+
+  billing_admin: {
+    command_center: 'view',
+    audit_security: 'view',
+    support_tools: 'view',
+    tenant_management: 'view',
+    billing_subscriptions: 'full',
+    platform_settings: 'view',
+    domains: 'none',
+    team_management: 'view',
+    provisioning: 'none',
+    feature_matrix: 'manage',
+    addon_governance: 'manage',
+  },
+
+  operations_admin: {
+    command_center: 'manage',
+    audit_security: 'view',
+    support_tools: 'manage',
+    tenant_management: 'full',
+    billing_subscriptions: 'view',
+    platform_settings: 'edit',
+    domains: 'full',
+    team_management: 'view',
+    provisioning: 'full',
+    feature_matrix: 'manage',
+    addon_governance: 'edit',
+  },
+
+  security_admin: {
+    command_center: 'manage',
+    audit_security: 'full',
+    support_tools: 'approve',
+    tenant_management: 'view',
+    billing_subscriptions: 'view',
+    platform_settings: 'manage',
+    domains: 'view',
+    team_management: 'manage',
+    provisioning: 'view',
+    feature_matrix: 'view',
+    addon_governance: 'view',
+  },
+
+  // Tenant-side roles never have platform-side access by default.
+  store_owner: { ...ALL_NONE },
+  manager: { ...ALL_NONE },
+  technician: { ...ALL_NONE },
+  sales_staff: { ...ALL_NONE },
+};
+
+// ---------------------------------------------------------------------------
+// Override storage in sessionStorage. Pure read — writes happen in the matrix
+// UI in TeamManagementPage.
+// ---------------------------------------------------------------------------
+
+export const PLATFORM_PERMISSIONS_STORAGE_KEY = 'platform_permissions_v1';
+
+export interface PlatformRoleOverrides {
+  features?: Partial<Record<PlatformFeatureKey, PermissionLevel>>;
+  subs?: Record<string, PermissionLevel>;
+}
+
+export type PlatformPermissionsOverrides = Partial<Record<Role, PlatformRoleOverrides>>;
+
+export function readPlatformPermissionsOverrides(): PlatformPermissionsOverrides {
+  if (typeof window === 'undefined' || !window.sessionStorage) return {};
+  try {
+    const raw = window.sessionStorage.getItem(PLATFORM_PERMISSIONS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return (parsed && typeof parsed === 'object') ? parsed as PlatformPermissionsOverrides : {};
+  } catch {
+    return {};
+  }
+}
+
+export function writePlatformPermissionsOverrides(next: PlatformPermissionsOverrides): void {
+  if (typeof window === 'undefined' || !window.sessionStorage) return;
+  try {
+    window.sessionStorage.setItem(PLATFORM_PERMISSIONS_STORAGE_KEY, JSON.stringify(next));
+    window.dispatchEvent(new Event('platform_permissions:changed'));
+  } catch { /* noop */ }
+}
+
+// ---------------------------------------------------------------------------
+// Reader helpers.
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the effective feature-level for a role. System Owner is locked to
+ * `full`; tenant-side roles always return `none`. Otherwise: the override
+ * value (if present) wins, else the spec default.
+ */
+export function getPlatformFeatureLevel(
+  role: Role | undefined | null,
+  featureKey: PlatformFeatureKey,
+  overrides?: PlatformPermissionsOverrides
+): PermissionLevel {
+  if (!role) return 'none';
+  if (role === 'system_owner') return 'full';
+  const ov = (overrides ?? readPlatformPermissionsOverrides())[role]?.features?.[featureKey];
+  if (ov) return ov;
+  return DEFAULT_PLATFORM_FEATURE_LEVELS[role]?.[featureKey] ?? 'none';
+}
+
+/**
+ * Returns the effective sub-permission level for a role. Resolution rule:
+ *   1. System Owner → 'full'.
+ *   2. Tenant role → 'none'.
+ *   3. Explicit sub override (sessionStorage) → that level.
+ *   4. Otherwise inherit from the parent feature level.
+ *
+ * No "auto-grant by inheritance for sensitive subs" — the caller decides
+ * via `hasPlatformPermission()` whether the inherited level meets the
+ * sensitive sub-permission's threshold.
+ */
+export function getPlatformSubPermissionLevel(
+  role: Role | undefined | null,
+  subKey: string,
+  overrides?: PlatformPermissionsOverrides
+): PermissionLevel {
+  if (!role) return 'none';
+  if (role === 'system_owner') return 'full';
+  const sub = SUB_LOOKUP.get(subKey);
+  if (!sub) return 'none';
+  const ov = overrides ?? readPlatformPermissionsOverrides();
+  const explicit = ov[role]?.subs?.[subKey];
+  if (explicit) return explicit;
+  return getPlatformFeatureLevel(role, sub.feature, ov);
+}
+
+/**
+ * The single permission gate used by Command Center, Audit & Security, and
+ * Support Tools. Returns { allowed, reason }. Reason is empty when allowed.
+ *
+ * `subKey` must be a registered sub-permission id from the catalog. Unknown
+ * keys deny with a clear reason so accidental typos surface immediately
+ * instead of silently passing.
+ */
+export interface PlatformPermissionResult {
+  allowed: boolean;
+  reason: string;
+  /** Effective level we resolved for diagnostics / tooltips. */
+  level: PermissionLevel;
+  /** The sub-permission threshold the caller had to meet. */
+  threshold: PermissionLevel;
+}
+
+export function hasPlatformPermission(
+  role: Role | undefined | null,
+  subKey: string,
+  overrides?: PlatformPermissionsOverrides
+): PlatformPermissionResult {
+  const sub = SUB_LOOKUP.get(subKey);
+  if (!sub) {
+    return {
+      allowed: false,
+      reason: `Unknown platform permission "${subKey}".`,
+      level: 'none',
+      threshold: 'view',
+    };
+  }
+  if (!role) {
+    return {
+      allowed: false,
+      reason: 'No active session.',
+      level: 'none',
+      threshold: sub.def.threshold,
+    };
+  }
+  const level = getPlatformSubPermissionLevel(role, subKey, overrides);
+  const allowed = platformPermissionMeets(level, sub.def.threshold);
+  return {
+    allowed,
+    reason: allowed
+      ? ''
+      : `${PLATFORM_PERMISSION_LEVEL_LABEL[sub.def.threshold]} or higher required for ${sub.def.label}; current level is ${PLATFORM_PERMISSION_LEVEL_LABEL[level]}.`,
+    level,
+    threshold: sub.def.threshold,
+  };
+}
+
+/**
+ * Convenience wrapper: returns just the boolean. Use when you need a quick
+ * gate and don't want to render the reason in a tooltip.
+ */
+export function canPlatform(
+  role: Role | undefined | null,
+  subKey: string,
+  overrides?: PlatformPermissionsOverrides
+): boolean {
+  return hasPlatformPermission(role, subKey, overrides).allowed;
+}
+
+// ---------------------------------------------------------------------------
+// Role display labels for the active-role badge shown on Support Tools /
+// Audit & Security / Command Center. Mirrors `accessConfig.platformRoles`
+// but exported here so consumers don't have to reach into AccessContext.
+// ---------------------------------------------------------------------------
+
+export const PLATFORM_ROLE_DISPLAY_LABEL: Record<Role, string> = {
+  system_owner: 'System Owner',
+  support_admin: 'Support Admin',
+  billing_admin: 'Billing Admin',
+  operations_admin: 'Operations Admin',
+  security_admin: 'Security/Audit Admin',
+  store_owner: 'Store Owner',
+  manager: 'Manager',
+  technician: 'Technician',
+  sales_staff: 'Sales Staff',
+};
