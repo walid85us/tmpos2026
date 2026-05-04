@@ -1,0 +1,517 @@
+Platform Operations & Security — Platform Effective Permission Resolver Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict correction pass.
+
+Do not continue Phase 1.1.3A QA until this is fixed.
+Do not implement Phase 1.1.3B, 1.1.3C, 1.1.3D, Phase 1.2, Phase 1.3, Phase 1.4, Phase 2, Phase 3, or Phase 4.
+
+Fix the remaining platform permission issues so Global Permissions Matrix works as the true source of truth for:
+- sidebar visibility
+- page access
+- child/sub-permission visibility
+- action gating
+- Support Tools escalation actions
+- Command Center NBA / Tenant 360 / quick actions
+- Audit & Security viewing and restricted actions
+- Commercial/Add-on trial and override actions
+- reset-to-default confirmation
+
+==================================================
+ROLE STACK — ADD TO PROJECT KNOWLEDGE / SKILLS
+==================================================
+
+Before implementation, add this workstream role model to project knowledge / skills and act on it.
+
+Act as:
+- Access Analyst
+- Identity and Access Management (IAM) Specialist
+- System Administrator
+- Senior Platform Team Governance Leader
+- Senior RBAC / Permission-Governance Architect
+- Senior Platform Operations Architect
+- Senior Support Tools Engineer
+- Senior Audit & Security Engineer
+- Senior SaaS Command Center Architect
+- Senior Enterprise Admin Console UX Architect
+- Senior React/TypeScript Engineer
+- Senior Security-by-Default Architect
+- QA Gatekeeper
+- Systems Thinker
+- Side Auditor
+
+Use these roles actively.
+
+Key responsibilities:
+- define and map roles correctly
+- enforce least privilege
+- validate permission inheritance and overrides
+- audit permission changes
+- manage user/role lifecycle readiness
+- troubleshoot effective access defects
+- separate subjects, objects, and permissions clearly
+- avoid security gaps caused by inconsistent permission checks
+
+Subjects:
+- platform roles
+- Dev Session active user/role
+- future platform team members
+
+Objects:
+- platform modules
+- sidebar entries
+- pages/routes
+- action buttons
+- support cases
+- audit records
+- add-ons/plans
+
+Permissions:
+- None
+- View Only
+- Create
+- Edit
+- Approve
+- Manage
+- Full Access
+
+==================================================
+CURRENT QA FAILURES
+==================================================
+
+Manual QA failed because platform permissions are still inconsistent.
+
+Failures to fix:
+
+1) Command Center actions follow matrix permissions — FAIL
+Example:
+- NBA permission was set to None for Billing Admin and Operations Admin.
+- NBA list was still visible.
+Expected:
+- If view_next_best_actions is None, NBA list should hide or be blocked.
+- If act_on_nba_recommendations is None, NBA actions should hide/disable.
+- If parent Command Center is None but child sub-permission is View Only or higher, Command Center should still appear because at least one child grants access.
+
+2) Audit & Security actions follow matrix permissions — FAIL
+Example:
+- View Audit & Security set to None for Support Admin.
+- Support Admin could still see/read audit log.
+Expected:
+- If view_audit_logs is None and parent Audit & Security is None, Audit & Security page/sidebar should not show.
+- Direct route should show access denied.
+- No audit logs should be readable.
+
+3) De-escalate follows sub-permission — FAIL
+Example:
+- Billing Admin has Support Tools parent View Only.
+- deescalate_support_case was set to Full Access.
+- Billing Admin still could not De-escalate.
+Expected:
+- The specific sub-permission should grant the action if it meets required threshold.
+- Parent View Only should allow page visibility.
+- Sub-permission Full Access should allow that action.
+
+4) Resolve Escalation follows sub-permission — FAIL
+Same as point 3:
+- Support Tools parent View Only + resolve_escalation Full Access should allow Resolve Escalation.
+
+5) Acknowledge Escalation follows sub-permission — PASS partially
+Example:
+- Billing Admin had Full Access to acknowledge_escalation but button stayed disabled.
+Expected:
+- Full Access on acknowledge_escalation should allow Acknowledge.
+
+6) Old hardcoded role logic does not override matrix denial — PASS partially
+Example:
+- Support Admin case worked.
+- Billing Admin with Manage escalation sub-permission still could not escalate.
+Expected:
+- Old hardcoded role model must not block a matrix-granted action.
+- Matrix-specific sub-permission should be the final source of truth for action authorization.
+
+7) Add-on / Commercial permission issue
+Example:
+- Grant Trial set to None still allowed grant trial/end trial.
+Expected:
+- grant_trial None must block/hide Grant Trial and End Trial if that same permission controls trial lifecycle.
+- grant_paid_override None must block paid override grant.
+- revoke_addon_override None must block revoke/end/re-grant where applicable.
+- Main Add-on/Commercial parent None should hide the tab unless at least one child sub-permission is View Only or higher.
+
+8) Reset to defaults lacks confirmation
+Expected:
+- Reset to defaults must open in-app confirmation before applying reset.
+- Cancel should not reset.
+- Confirm should reset and audit the reset.
+
+9) Permission-denied actions
+Preference:
+- Hide unavailable actions where safe.
+- Use minimal disabled tooltip/helper only when the user needs context.
+- Avoid cluttering the UI with repeated permission messages.
+
+==================================================
+CRITICAL EFFECTIVE PERMISSION RULE
+==================================================
+
+Create one final platform effective permission resolver and use it everywhere.
+
+The resolver must support:
+
+1) Parent permission
+2) Sub-permission
+3) Explicit sub-permission override
+4) Child-granted feature visibility
+5) System Owner permanence
+6) Dev Session active role
+7) Matrix overrides from sessionStorage
+8) No hardcoded role override unless used only as default seed
+
+Definitions:
+
+Parent feature permission:
+- controls broad module access
+
+Sub-permission:
+- controls specific action or child capability
+
+Effective feature visibility:
+A platform feature/page/sidebar item is visible if:
+- parent feature permission is View Only or higher
+OR
+- any child sub-permission under that feature is View Only or higher
+OR
+- System Owner Full Access applies
+
+Effective page access:
+A page can open if:
+- its parent feature is effectively visible
+AND
+- the page’s required view sub-permission is View Only or higher, if the page has a required view sub-permission
+OR
+- at least one page-relevant child permission is View Only or higher
+
+Effective action access:
+An action is allowed if:
+- the specific action sub-permission meets the required threshold
+OR
+- no explicit sub-permission override exists and parent feature permission meets the required threshold
+OR
+- System Owner Full Access applies
+
+Critical override rule:
+- If a specific sub-permission is explicitly set to None, that action is denied.
+- If a specific sub-permission is explicitly set to Full Access, that action is allowed, assuming the user can access the page.
+- Old hardcoded role rules cannot deny a matrix-granted action.
+- Old hardcoded role rules cannot allow a matrix-denied action.
+
+Use old role rules only as:
+- default seed values
+- optional advisory explanation
+- not final authorization
+
+==================================================
+KEEP EXISTING PERMISSION LEVELS
+==================================================
+
+Preserve exactly:
+
+- None
+- View Only
+- Create
+- Edit
+- Approve
+- Manage
+- Full Access
+
+Do not simplify.
+
+Required threshold behavior:
+- View Only satisfies View Only
+- Create satisfies View Only + Create
+- Edit satisfies View Only + Create + Edit
+- Approve satisfies View Only + Create + Edit + Approve
+- Manage satisfies View Only + Create + Edit + Approve + Manage
+- Full Access satisfies all
+
+==================================================
+PART A — FIX SIDEBAR AND ROUTE ACCESS
+==================================================
+
+Sidebar must use effective feature visibility.
+
+Required behavior:
+- Command Center appears if parent Command Center is View Only+ OR any Command Center sub-permission is View Only+.
+- Audit & Security appears if parent Audit & Security is View Only+ OR any Audit & Security sub-permission is View Only+.
+- Support Tools appears if parent Support Tools is View Only+ OR any Support Tools sub-permission is View Only+.
+- Add-on/Commercial appears if parent Commercial Controls is View Only+ OR any child sub-permission is View Only+.
+- Plans/Feature Matrix appears if parent Feature Matrix is View Only+ OR any child sub-permission is View Only+.
+- Same logic should apply to Domains, Platform Settings, Team Management, Tenant Management, Billing, and Provisioning where currently wired.
+
+Direct route:
+- If no effective feature/page access, show clean Access Denied.
+- Do not show page data.
+- Do not crash.
+
+==================================================
+PART B — FIX COMMAND CENTER SUB-PERMISSIONS
+==================================================
+
+Command Center must obey:
+
+view_command_center:
+- controls general page/view access where appropriate
+
+view_operational_pulse:
+- if None, hide operational pulse strip
+
+view_needs_attention:
+- if None, hide Needs Attention queue
+
+view_tenant_360:
+- if None, hide/disable Tenant 360 click-throughs
+
+view_next_best_actions:
+- if None, hide Next Best Actions list
+
+act_on_nba_recommendations:
+- if None, show NBA recommendations read-only if view is allowed, but action buttons should hide/disable
+
+use_command_quick_actions:
+- if None, hide/disable quick actions
+
+Expected from QA:
+- Setting NBA view/action sub-permissions to None must visibly affect NBA area.
+- Billing Admin / Operations Admin must follow the matrix, not hardcoded defaults.
+
+==================================================
+PART C — FIX AUDIT & SECURITY PAGE ACCESS
+==================================================
+
+Audit & Security must obey:
+
+view_audit_logs:
+- if None and parent Audit & Security is None, hide sidebar and block direct route
+- if None, audit log table must not be readable
+
+view_restricted_audit_details:
+- controls restricted drawer/details if present
+
+export_audit_csv:
+- controls export
+
+add_security_note:
+- controls adding note
+
+delete_security_note:
+- controls deletion
+
+create_support_case_from_audit:
+- controls create case from audit, also requires Support Tools create_support_case
+
+view_escalation_lifecycle_audit:
+- controls escalation lifecycle lens/detail if separated
+
+Expected:
+- If Support Admin has Audit & Security View None, they cannot see/read audit logs.
+- If Security/Audit Admin is granted Audit & Security View/Manage, the page appears and opens.
+
+==================================================
+PART D — FIX SUPPORT TOOLS ESCALATION ACTIONS
+==================================================
+
+Support Tools escalation action access must be based on specific sub-permission.
+
+Required:
+
+deescalate_support_case:
+- None = cannot de-escalate
+- Approve/Manage/Full Access = can de-escalate
+- Full Access must work even if Support Tools parent is View Only
+
+resolve_escalation:
+- None = cannot resolve
+- Approve/Manage/Full Access = can resolve
+- Full Access must work even if Support Tools parent is View Only
+
+acknowledge_escalation:
+- None = cannot acknowledge
+- Approve/Manage/Full Access = can acknowledge
+- Full Access must work even if Support Tools parent is View Only
+
+escalate_assigned_case:
+- follows its sub-permission
+
+escalate_any_case:
+- follows its sub-permission
+
+assign_escalation_owner_team:
+- follows its sub-permission
+
+change_escalation_level:
+- follows its sub-permission
+
+close_support_case:
+- follows its sub-permission
+
+reopen_support_case:
+- follows its sub-permission
+
+Important:
+- Remove or refactor any old role can() checks that still block Billing Admin or other roles after matrix grants the action.
+- Handler-level checks must use the same final effective permission resolver.
+- Stale modals cannot bypass denial.
+- If action is denied, hide where safe or disable with minimal tooltip.
+
+==================================================
+PART E — FIX ADD-ON / COMMERCIAL ACTIONS
+==================================================
+
+Commercial/Add-on Governance must obey child permissions.
+
+Required:
+- Parent None + all children None = hide tab/section/page.
+- Parent None + one child View Only+ = show relevant section/page.
+- grant_trial None = block/hide Grant Trial.
+- grant_trial None = block/hide End Trial if End Trial is part of trial lifecycle.
+- grant_paid_override None = block/hide Paid Override.
+- revoke_addon_override None = block/hide Revoke / End / Re-grant paid where applicable.
+- create_addon controls Create Add-on.
+- edit_addon controls Edit Add-on.
+- create_plan controls Create Plan.
+- edit_plan controls Edit Plan.
+- archive/delete actions require corresponding permissions.
+
+Important:
+- UI button state and handler-level checks must both enforce permissions.
+- Matrix denial must win.
+
+==================================================
+PART F — RESET TO DEFAULTS CONFIRMATION
+==================================================
+
+Global Permissions Matrix “Reset to Defaults” must use in-app confirmation.
+
+Required:
+- Clicking Reset to Defaults opens modal.
+- Modal clearly states role/permissions that will reset.
+- Cancel leaves permissions unchanged.
+- Confirm performs reset.
+- Reset action is audited.
+- No browser native confirm if app uses modals.
+
+==================================================
+PART G — MATRIX UX AND PERMISSION EXPLANATION
+==================================================
+
+Preserve improved Matrix UX:
+- search/filter
+- expand/collapse
+- sticky header
+- effective access preview
+- reset defaults
+
+Improve if needed:
+- effective access preview should explain when a child sub-permission grants feature visibility even if parent is None
+- explain when sub-permission None denies a specific action
+- explain when System Owner Full Access applies
+
+==================================================
+PART H — AUDITABILITY
+==================================================
+
+Audit:
+- parent permission changes
+- sub-permission changes
+- reset to defaults
+- sensitive action attempts if already implemented and not noisy
+- successful sensitive actions
+
+Do not duplicate audit rows.
+No server PII logging.
+
+==================================================
+PART I — NON-REGRESSION
+==================================================
+
+Do not change:
+- Store Permissions Matrix behavior
+- tenant/store permissions
+- Shipping
+- POS / Repairs / Inventory / Customers / Invoices / Services
+- Tenant Features
+- tenant provisioning
+- paid override invoice workflow except platform gates already scoped
+- server PII log-scrubbing
+- support case data model except permission checks
+- escalation lifecycle data except permission checks
+
+==================================================
+PART J — DOCUMENTATION
+==================================================
+
+Update replit.md with:
+- Effective Platform Permission Resolver rule
+- parent vs child permission behavior
+- child-granted feature visibility
+- explicit sub-permission None denial rule
+- explicit sub-permission Full Access grant rule
+- old hardcoded role logic cannot override matrix
+- reset to defaults confirmation
+- UI-only enforcement limitation
+- server-enforced RBAC/PIM/PAM remains Phase 1.3
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Sidebar uses effective feature visibility.
+2) Direct routes are blocked when effective access is missing.
+3) Parent None + child View Only+ can show the relevant feature/page.
+4) Parent View Only + child Full Access allows that child action.
+5) Child None denies that child action even if hardcoded role would allow it.
+6) Old can() role logic cannot block matrix-granted escalation actions.
+7) Old can() role logic cannot allow matrix-denied escalation actions.
+8) Command Center NBA view/action permissions work.
+9) Audit & Security view_audit_logs None blocks audit reading.
+10) De-escalate follows deescalate_support_case.
+11) Resolve follows resolve_escalation.
+12) Acknowledge follows acknowledge_escalation.
+13) Billing Admin or any non-support role can perform an action if matrix grants the exact sub-permission and page access exists.
+14) Grant Trial follows grant_trial.
+15) Paid Override follows grant_paid_override.
+16) Revoke/End paid override follows revoke_addon_override.
+17) Add-on/Commercial tab hides when parent and all child permissions are None.
+18) Create Plan and Create Add-on remain separate permissions.
+19) Reset to Defaults requires in-app confirmation.
+20) Permission changes and reset are audited.
+21) Existing Add-on Governance remains intact except platform gates.
+22) Existing Shipping Module remains intact.
+23) Existing Store Permissions Matrix remains intact.
+24) Existing tenant provisioning remains intact.
+25) Server PII logging rules are not regressed.
+26) replit.md is updated.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Root Cause
+3. Effective Permission Resolver Fix
+4. Sidebar / Route Access Fix
+5. Command Center Permission Fix
+6. Audit & Security Permission Fix
+7. Support Tools Escalation Permission Fix
+8. Commercial / Add-on Permission Fix
+9. Reset Confirmation
+10. Files Changed
+11. Documentation Updated
+12. Non-Regression Notes

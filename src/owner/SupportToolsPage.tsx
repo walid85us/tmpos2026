@@ -557,7 +557,7 @@ const SupportToolsPage: React.FC = () => {
   const buildTarget = (c: SupportCaseRecord) =>
     `${tenantById.get(c.tenantId) || c.tenantId} · ${c.subject}`;
 
-  const gatedCan = (action: EscalationAction, ctx: { targetTeam?: EscalationTargetTeam | string | null; isOwner?: boolean }): CanResult => {
+  const gatedCan = (action: EscalationAction, _ctx: { targetTeam?: EscalationTargetTeam | string | null; isOwner?: boolean }): CanResult => {
     const MATRIX_SUB_KEY: Record<EscalationAction, string> = {
       escalate: 'escalate_assigned_case',
       assign_owner: 'assign_escalation_owner_team',
@@ -570,10 +570,10 @@ const SupportToolsPage: React.FC = () => {
     };
     const subKey = MATRIX_SUB_KEY[action];
     const matrixResult = hasPlatformPermission(sessionRole, subKey);
-    if (!matrixResult.allowed) {
-      return { allowed: false, reason: matrixResult.reason };
-    }
-    return can(currentRole, action, ctx);
+    return {
+      allowed: matrixResult.allowed,
+      reason: matrixResult.reason,
+    };
   };
 
   const escalateCaseStructured = (c: SupportCaseRecord) => {

@@ -123,6 +123,8 @@ export const PLATFORM_FEATURE_GROUPS: PlatformFeatureGroupDef[] = [
     description: 'Platform-wide pulse, NBA recommendations, and Tenant 360 quick access.',
     subPermissions: [
       { id: 'view_command_center', label: 'View Command Center', description: 'Open the Command Center page and see pulse cells.', threshold: 'view' },
+      { id: 'view_operational_pulse', label: 'View Operational Pulse', description: 'See the Operational Pulse strip with live metrics.', threshold: 'view' },
+      { id: 'view_needs_attention', label: 'View Needs Attention', description: 'See the Needs Attention priority queue.', threshold: 'view' },
       { id: 'view_tenant_360', label: 'Open Tenant 360 Drawer', description: 'Click through to a tenant\'s Tenant 360 read-only summary.', threshold: 'view' },
       { id: 'use_command_quick_actions', label: 'Use Quick Actions', description: 'Click Command Center quick action buttons (navigation only).', threshold: 'view' },
       { id: 'view_nba_recommendations', label: 'View NBA Recommendations', description: 'See Next Best Action recommendations list.', threshold: 'view' },
@@ -135,11 +137,14 @@ export const PLATFORM_FEATURE_GROUPS: PlatformFeatureGroupDef[] = [
     description: 'Audit log viewer, security notes, and audit-driven case creation.',
     subPermissions: [
       { id: 'view_audit_security', label: 'View Audit & Security', description: 'Open the Audit & Security page and read the log.', threshold: 'view' },
+      { id: 'view_audit_logs', label: 'View Audit Logs', description: 'Read the audit log table content. None hides all audit rows.', threshold: 'view' },
       { id: 'view_actor_profile', label: 'View Actor Profile', description: 'Open actor / related-events tabs in the audit drawer.', threshold: 'view' },
       { id: 'export_audit_csv', label: 'Export Audit CSV', description: 'Export the currently visible audit rows as CSV.', threshold: 'approve', sensitive: true },
       { id: 'add_security_note', label: 'Add Security Note', description: 'Add a security / posture / incident note (per-session store).', threshold: 'create' },
       { id: 'delete_security_note', label: 'Delete Security Note', description: 'Permanently delete a security note (writes a `security_note_deleted` audit row).', threshold: 'approve', sensitive: true },
       { id: 'create_support_case_from_audit', label: 'Create Case from Audit Event', description: 'Open the "Create Support Case from Event" modal in the audit drawer.', threshold: 'create' },
+      { id: 'view_restricted_audit_details', label: 'View Restricted Audit Details', description: 'Access restricted/sensitive detail in the audit drawer.', threshold: 'approve' },
+      { id: 'view_escalation_lifecycle_audit', label: 'View Escalation Lifecycle Audit', description: 'Access escalation lifecycle lens/detail in audit context.', threshold: 'view' },
     ],
   },
   {
@@ -521,6 +526,46 @@ export function canPlatform(
   return hasPlatformPermission(role, subKey, overrides).allowed;
 }
 
+/**
+ * Effective Feature Visibility — the unified resolver per the spec.
+ *
+ * A platform feature/page/sidebar item is visible if:
+ *   - parent feature permission is View Only or higher
+ *   OR
+ *   - any child sub-permission under that feature is View Only or higher
+ *     (explicit override in sessionStorage that grants access even when
+ *     parent is None)
+ *   OR
+ *   - System Owner Full Access applies
+ *
+ * This function is the SINGLE place that decides sidebar visibility
+ * and route-level access for platform features. canAccess() in
+ * AccessContext delegates to it.
+ */
+export function hasEffectiveFeatureAccess(
+  role: Role | undefined | null,
+  featureKey: PlatformFeatureKey,
+  overrides?: PlatformPermissionsOverrides
+): boolean {
+  if (!role) return false;
+  if (role === 'system_owner') return true;
+
+  const ov = overrides ?? readPlatformPermissionsOverrides();
+
+  const parentLevel = getPlatformFeatureLevel(role, featureKey, ov);
+  if (parentLevel !== 'none') return true;
+
+  const group = FEATURE_BY_KEY.get(featureKey);
+  if (!group) return false;
+
+  for (const sp of group.subPermissions) {
+    const subLevel = getPlatformSubPermissionLevel(role, sp.id, ov);
+    if (subLevel !== 'none') return true;
+  }
+
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Nav / route feature-key → PlatformFeatureKey mapping.
 // The sidebar and AccessGuard use short feature keys like 'tenants', 'billing',
@@ -542,6 +587,11 @@ export const NAV_FEATURE_TO_PLATFORM_KEY: Record<string, PlatformFeatureKey> = {
   domains: 'domains',
   team_management: 'team_management',
   provisioning: 'provisioning',
+  addon_governance: 'addon_governance',
+};
+
+export const NAV_FEATURE_SECONDARY_KEYS: Partial<Record<string, PlatformFeatureKey[]>> = {
+  plans: ['addon_governance'],
 };
 
 // ---------------------------------------------------------------------------

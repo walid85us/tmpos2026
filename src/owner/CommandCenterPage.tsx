@@ -195,8 +195,11 @@ const CommandCenterPage: React.FC = () => {
   const { session } = useAccess();
   const sessionRole = (session?.role as Role | undefined) || null;
   const viewPageGate = hasPlatformPermission(sessionRole, 'view_command_center');
+  const viewPulseGate = hasPlatformPermission(sessionRole, 'view_operational_pulse');
+  const viewNeedsAttentionGate = hasPlatformPermission(sessionRole, 'view_needs_attention');
   const viewTenant360Gate = hasPlatformPermission(sessionRole, 'view_tenant_360');
   const useQuickActionsGate = hasPlatformPermission(sessionRole, 'use_command_quick_actions');
+  const viewNbaGate = hasPlatformPermission(sessionRole, 'view_nba_recommendations');
   const actNbaGate = hasPlatformPermission(sessionRole, 'act_on_nba_recommendations');
   const [cases, setCases] = useState<SupportCaseRecord[]>([]);
   const [audits, setAudits] = useState<AuditEventLike[]>([]);
@@ -830,6 +833,7 @@ const CommandCenterPage: React.FC = () => {
       </section>
 
       {/* ============== OPERATIONAL PULSE STRIP ============== */}
+      {viewPulseGate.allowed && (
       <section className="space-y-3">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <h3 className="text-sm font-black text-primary uppercase tracking-widest">Operational Pulse</h3>
@@ -859,6 +863,7 @@ const CommandCenterPage: React.FC = () => {
           })}
         </div>
       </section>
+      )}
 
       {/* ============== WIDGET GRID (8 widgets) ============== */}
       <section className="space-y-3">
@@ -933,6 +938,7 @@ const CommandCenterPage: React.FC = () => {
       </section>
 
       {/* ============== NEXT BEST ACTIONS (Phase 1.1.2 — tiered) ============== */}
+      {viewNbaGate.allowed && (
       <section className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
         <div className="px-8 py-5 border-b border-slate-100 flex items-center justify-between flex-wrap gap-2">
           <div>
@@ -974,15 +980,22 @@ const CommandCenterPage: React.FC = () => {
                       </p>
                     </div>
                   </div>
+                  {actNbaGate.allowed ? (
                   <Link to={action.href} className="shrink-0 px-3 py-1.5 text-[10px] font-black uppercase tracking-widest bg-white text-slate-600 border border-slate-200 rounded-xl hover:bg-primary/5 hover:text-primary transition-colors">
                     {action.ctaLabel}
                   </Link>
+                  ) : (
+                  <span className="shrink-0 px-3 py-1.5 text-[10px] font-black uppercase tracking-widest bg-slate-50 text-slate-400 border border-slate-100 rounded-xl cursor-not-allowed" title={actNbaGate.reason}>
+                    {action.ctaLabel}
+                  </span>
+                  )}
                 </li>
               );
             })}
           </ul>
         )}
       </section>
+      )}
 
       {/* ============== QUICK ACTIONS (preserved) ============== */}
       <div className="bg-white/80 backdrop-blur-xl p-4 rounded-[2rem] border border-slate-200 shadow-sm flex flex-wrap gap-2 items-center">
@@ -1021,6 +1034,7 @@ const CommandCenterPage: React.FC = () => {
       </div>
 
       {/* ============== NEEDS ATTENTION (preserved) ============== */}
+      {viewNeedsAttentionGate.allowed && (
       <section
         data-testid="needs-attention-section"
         className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm"
@@ -1109,6 +1123,7 @@ const CommandCenterPage: React.FC = () => {
           </table>
         )}
       </section>
+      )}
 
       {/* ============== TENANT RISK SUMMARY (preserved + Tenant 360 link) ============== */}
       <section className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">

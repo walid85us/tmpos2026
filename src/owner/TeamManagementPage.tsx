@@ -61,6 +61,8 @@ export default function TeamManagementPage() {
     { id: 'a2', user: 'Support Rep', action: 'Reset Password', details: 'Reset password for store tenant-1', time: '2024-03-20 11:30' },
   ]);
 
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+
   const platformFeatures = [
     { id: 'tenants', name: 'Manage Tenants' },
     { id: 'billing', name: 'Billing & Subscriptions' },
@@ -354,6 +356,10 @@ export default function TeamManagementPage() {
   };
 
   const resetToDefaults = () => {
+    setShowResetConfirm(true);
+  };
+
+  const confirmReset = () => {
     writePlatformPermissionsOverrides({});
     setOverrides({});
     logActivity('Reset Permissions', 'All overrides cleared — reverted to default levels');
@@ -365,6 +371,7 @@ export default function TeamManagementPage() {
       severity: 'warning',
       note: 'All overrides cleared to defaults',
     });
+    setShowResetConfirm(false);
   };
 
   const filteredGroups = useMemo(() => {
@@ -399,8 +406,10 @@ export default function TeamManagementPage() {
             const { enabled, total } = enabledSubCount(previewRole, g.key);
             const isNone = lvl === 'none';
             const isFull = lvl === 'full';
+            const childGranted = isNone && enabled > 0;
             return (
               <div key={g.key} className={`px-3 py-2.5 rounded-xl border text-xs ${
+                childGranted ? 'bg-amber-50 border-amber-200 text-amber-700' :
                 isNone ? 'bg-red-50 border-red-200 text-red-700' :
                 isFull ? 'bg-emerald-50 border-emerald-200 text-emerald-700' :
                 'bg-white border-slate-200 text-slate-700'
@@ -408,6 +417,12 @@ export default function TeamManagementPage() {
                 <p className="font-black text-[10px] uppercase tracking-widest truncate">{g.label}</p>
                 <p className="font-bold mt-0.5">{PLATFORM_PERMISSION_LEVEL_LABEL[lvl]}</p>
                 <p className="text-[9px] font-medium mt-0.5 opacity-70">{enabled}/{total} subs enabled</p>
+                {childGranted && (
+                  <p className="text-[8px] font-black mt-1 text-amber-600 uppercase tracking-widest">Sidebar visible via child</p>
+                )}
+                {previewRole === 'system_owner' && (
+                  <p className="text-[8px] font-black mt-1 text-emerald-600 uppercase tracking-widest">Locked</p>
+                )}
               </div>
             );
           })}
@@ -893,6 +908,48 @@ export default function TeamManagementPage() {
                   >
                     Create Role
                   </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {showResetConfirm && (
+            <div className="fixed inset-0 bg-black/40 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setShowResetConfirm(false)} onKeyDown={e => { if (e.key === 'Escape') setShowResetConfirm(false); }}>
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95, y: 10 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 10 }}
+                transition={{ duration: 0.2 }}
+                onClick={e => e.stopPropagation()}
+                className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-200"
+              >
+                <div className="p-8">
+                  <div className="flex items-center gap-3 mb-4">
+                    <span className="material-symbols-outlined text-amber-500 text-2xl">warning</span>
+                    <h3 className="text-xl font-black text-slate-900 tracking-tight">Reset to Defaults</h3>
+                  </div>
+                  <p className="text-sm text-slate-600 mb-2">
+                    This will clear all permission overrides for every platform role and revert them to their default levels.
+                  </p>
+                  <p className="text-xs text-slate-500 mb-6">
+                    Affected roles: {MATRIX_ROLES.filter(r => r !== 'system_owner').map(r => PLATFORM_ROLE_DISPLAY_LABEL[r]).join(', ')}. System Owner remains locked at Full Access.
+                  </p>
+                  <div className="flex gap-3">
+                    <button
+                      onClick={() => setShowResetConfirm(false)}
+                      className="flex-1 py-3 bg-white text-slate-600 font-black text-[10px] rounded-2xl border border-slate-200 hover:bg-slate-50 transition-all uppercase tracking-widest"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={confirmReset}
+                      className="flex-1 py-3 bg-amber-500 text-white font-black text-[10px] rounded-2xl shadow-lg shadow-amber-500/20 uppercase tracking-widest hover:bg-amber-600 transition-all"
+                    >
+                      Confirm Reset
+                    </button>
+                  </div>
                 </div>
               </motion.div>
             </div>

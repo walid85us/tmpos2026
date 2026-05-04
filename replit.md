@@ -60,6 +60,16 @@ The frontend is built using React 19, TypeScript, Vite 6, and Tailwind CSS v4.
 -   **SLA Timer Logic (`deriveSlaStatus`)**: Determines the status of support cases (overdue, at_risk, paused, met) based on predefined deadlines and case status.
 -   **High-Risk Audit Flag Logic (`deriveHighRiskFlag`)**: Identifies critical, sensitive, or burst audit events.
 -   **Operating Model + Permission-Aware Escalation**: Introduces an advisory operating model with `PlatformOpsRole` unions, structured `EscalationStatus`, `EscalationLevel`, `EscalationReasonCode`, and `EscalationTargetTeam`. Includes a `can(role, action, ctx)` helper for UX guarding of escalation lifecycle actions.
+-   **Global Permissions Matrix as Source of Truth**: The `platformPermissionsConfig.ts` matrix is the single authority for sidebar visibility, page access, and action gating across all platform pages. Key design:
+    -   `hasEffectiveFeatureAccess(role, featureKey)` resolves visibility by checking the parent level OR any child sub-permission >= view, enabling child-granted sidebar access even when the parent is None.
+    -   `canAccess()` in `AccessContext.tsx` uses effective access with secondary key mapping (e.g. `plans` → `addon_governance`) for nav items that span multiple feature groups.
+    -   `gatedCan()` in SupportToolsPage returns the matrix result directly without falling through to old `can()` logic, so matrix-granted actions are never blocked by legacy role checks.
+    -   CommandCenter gates Operational Pulse, NBA, and Needs Attention sections with `view_operational_pulse`, `view_next_best_actions`, `view_needs_attention` sub-permissions. NBA action buttons gated by `act_on_nba_recommendations`.
+    -   AuditSecurityPage gates the audit log table with `view_audit_logs`.
+    -   TenantDetailPage gates Trial/Paid Override/Revoke/End Trial/Re-trial/Re-grant Paid buttons with `grant_trial`, `grant_paid_override`, `revoke_addon_override`.
+    -   PlansPage hides the Add-ons tab when `addon_governance` effective access is denied.
+    -   TeamManagementPage shows a confirmation modal before resetting all permission overrides to defaults.
+    -   The Effective Access Preview panel highlights child-granted visibility (amber) and System Owner locked status.
 
 # External Dependencies
 

@@ -11,6 +11,9 @@ import { tenantUsers } from './accessMockData';
 import { resolveTenantFeature, REASON_LABEL, REASON_EXPLAINER, type EntitlementReason } from './entitlements';
 import { pushCommercialAudit } from './commercialAudit';
 import { getAddOnGrantSafety } from './readiness';
+import { hasPlatformPermission } from './platformPermissionsConfig';
+import type { Role } from '../context/accessConfig';
+import { useAccess } from '../context/AccessContext';
 import {
   readInvoices,
   getInvoiceById,
@@ -27,6 +30,11 @@ type Tab = 'Overview' | 'Owner & Users' | 'Subscription' | 'Features' | 'Billing
 const TenantDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { session } = useAccess();
+  const tdpRole = (session?.role as Role | undefined) || null;
+  const canGrantTrial = hasPlatformPermission(tdpRole, 'grant_trial').allowed;
+  const canGrantPaidOverride = hasPlatformPermission(tdpRole, 'grant_paid_override').allowed;
+  const canRevokeOverride = hasPlatformPermission(tdpRole, 'revoke_addon_override').allowed;
   const tenant = tenants.find(t => t.id === id);
   const [activeTab, setActiveTab] = useState<Tab>('Overview');
   const [noteInput, setNoteInput] = useState('');
@@ -1792,8 +1800,7 @@ const TenantDetailPage: React.FC = () => {
                         <div className="flex items-center gap-1 flex-wrap justify-end">
                           {/* Spec L: Pending payment rows show ONLY Mark Paid / Cancel
                               Invoice / View Invoice — no Trial, no Paid Override, no Re-grant. */}
-                          {finalCanOfferGrant && !isPendingPayment && (
-                            <>
+                          {finalCanOfferGrant && !isPendingPayment && canGrantTrial && (
                               <button
                                 onClick={() => setFeatureTrialModal(feature.id)}
                                 title={grantWarningByReadiness ? grantSafety!.warningText : undefined}
@@ -1803,6 +1810,8 @@ const TenantDetailPage: React.FC = () => {
                                     : 'text-indigo-600 bg-indigo-50 hover:bg-indigo-100'
                                 }`}
                               >Trial</button>
+                          )}
+                          {finalCanOfferGrant && !isPendingPayment && canGrantPaidOverride && (
                               <button
                                 onClick={() => { setPaidOverridePrice(eligibleAddOn && r.addOn?.price ? String(r.addOn.price) : ''); setPaidOverrideModel(eligibleAddOn && r.addOn?.billingCadence === 'annual' ? 'annual' : eligibleAddOn && r.addOn?.billingCadence === 'one_time' ? 'one_time' : 'monthly'); setPaidOverrideActivation('after_payment'); setPaidOverrideDueDate((() => { const d = new Date('2026-03-26'); d.setDate(d.getDate() + 30); return d.toISOString().slice(0, 10); })()); setFeaturePaidModal(feature.id); }}
                                 title={grantWarningByReadiness ? grantSafety!.warningText : undefined}
@@ -1812,7 +1821,6 @@ const TenantDetailPage: React.FC = () => {
                                     : 'text-emerald-600 bg-emerald-50 hover:bg-emerald-100'
                                 }`}
                               >Paid Override</button>
-                            </>
                           )}
                           {/* Add-on Implementation Readiness — compact reason
                               chip when grant is blocked, or short warning
@@ -1847,10 +1855,10 @@ const TenantDetailPage: React.FC = () => {
                           {isPendingPayment && !ov?.invoiceId && (
                             <button onClick={() => handleRevokeFeature(feature.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">Cancel</button>
                           )}
-                          {isTrialActive && (
+                          {isTrialActive && canRevokeOverride && (
                             <button onClick={() => handleRevokeFeature(feature.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">End Trial</button>
                           )}
-                          {isPaidActive && (
+                          {isPaidActive && canRevokeOverride && (
                             <>
                               <button onClick={() => handleRevokeFeature(feature.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">Revoke</button>
                               {ov?.invoiceId && (r.invoiceUiStatus === 'open' || r.invoiceUiStatus === 'overdue') && (
@@ -1861,8 +1869,7 @@ const TenantDetailPage: React.FC = () => {
                               )}
                             </>
                           )}
-                          {finalCanReGrant && (
-                            <>
+                          {finalCanReGrant && canGrantTrial && (
                               <button
                                 onClick={() => setFeatureTrialModal(feature.id)}
                                 title={grantWarningByReadiness ? grantSafety!.warningText : undefined}
@@ -1872,6 +1879,8 @@ const TenantDetailPage: React.FC = () => {
                                     : 'text-indigo-600 bg-indigo-50 hover:bg-indigo-100'
                                 }`}
                               >Re-trial</button>
+                          )}
+                          {finalCanReGrant && canGrantPaidOverride && (
                               <button
                                 onClick={() => { setPaidOverridePrice(eligibleAddOn && r.addOn?.price ? String(r.addOn.price) : ''); setPaidOverrideModel(eligibleAddOn && r.addOn?.billingCadence === 'annual' ? 'annual' : eligibleAddOn && r.addOn?.billingCadence === 'one_time' ? 'one_time' : 'monthly'); setPaidOverrideActivation('after_payment'); setPaidOverrideDueDate((() => { const d = new Date('2026-03-26'); d.setDate(d.getDate() + 30); return d.toISOString().slice(0, 10); })()); setFeaturePaidModal(feature.id); }}
                                 title={grantWarningByReadiness ? grantSafety!.warningText : undefined}
@@ -1881,7 +1890,6 @@ const TenantDetailPage: React.FC = () => {
                                     : 'text-emerald-600 bg-emerald-50 hover:bg-emerald-100'
                                 }`}
                               >Re-grant Paid</button>
-                            </>
                           )}
                           {(isExpired || isRevoked) && feature.lifecycle === 'implemented' && grantBlockedByReadiness && (
                             <span

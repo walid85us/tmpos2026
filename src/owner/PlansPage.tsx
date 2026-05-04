@@ -14,7 +14,7 @@ import {
   generateImplementationBrief,
 } from './readiness';
 import { useAccess } from '../context/AccessContext';
-import { hasPlatformPermission } from './platformPermissionsConfig';
+import { hasPlatformPermission, hasEffectiveFeatureAccess } from './platformPermissionsConfig';
 import type { Role } from '../context/accessConfig';
 
 type PlanData = Omit<typeof initialPlans[0], 'status'> & { status: 'active' | 'archived' };
@@ -111,17 +111,20 @@ const PlansPage: React.FC = () => {
   const canGrantPaidOverride = hasPlatformPermission(pRole, 'grant_paid_override').allowed;
   const canRevokeOverride = hasPlatformPermission(pRole, 'revoke_addon_override').allowed;
   const canGenBrief = hasPlatformPermission(pRole, 'generate_addon_implementation_brief').allowed;
+  const canSeeAddons = pRole ? hasEffectiveFeatureAccess(pRole, 'addon_governance') : false;
 
   const [searchParams, setSearchParams] = useSearchParams();
   const tabFromUrl = searchParams.get('tab');
-  const initialTab = tabFromUrl === 'features' ? 'features' : tabFromUrl === 'addons' ? 'addons' : 'plans';
+  const initialTab = tabFromUrl === 'features' ? 'features' : (tabFromUrl === 'addons' && canSeeAddons) ? 'addons' : 'plans';
   const [activeTab, setActiveTab] = useState<'plans' | 'features' | 'addons'>(initialTab);
 
   useEffect(() => {
-    if (tabFromUrl === 'features' || tabFromUrl === 'addons' || tabFromUrl === 'plans') {
-      setActiveTab(tabFromUrl as 'plans' | 'features' | 'addons');
+    if (tabFromUrl === 'features' || tabFromUrl === 'plans') {
+      setActiveTab(tabFromUrl as 'plans' | 'features');
+    } else if (tabFromUrl === 'addons' && canSeeAddons) {
+      setActiveTab('addons');
     }
-  }, [tabFromUrl]);
+  }, [tabFromUrl, canSeeAddons]);
 
   const switchTab = (tab: 'plans' | 'features' | 'addons') => {
     setActiveTab(tab);
@@ -1153,7 +1156,7 @@ const PlansPage: React.FC = () => {
   const tabs = [
     { id: 'plans' as const, label: 'Plans', icon: 'workspace_premium' },
     { id: 'features' as const, label: 'Feature Matrix', icon: 'grid_view' },
-    { id: 'addons' as const, label: 'Add-ons', icon: 'extension' },
+    ...(canSeeAddons ? [{ id: 'addons' as const, label: 'Add-ons', icon: 'extension' }] : []),
   ];
 
   return (
@@ -1419,7 +1422,7 @@ const PlansPage: React.FC = () => {
         </div>
       )}
 
-      {activeTab === 'addons' && (
+      {activeTab === 'addons' && canSeeAddons && (
         <>
           <div className="flex items-center justify-between gap-4 flex-wrap">
             <div className="flex gap-2 items-center text-[10px] font-black uppercase tracking-widest">

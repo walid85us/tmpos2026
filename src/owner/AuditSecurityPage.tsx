@@ -122,6 +122,7 @@ const AuditSecurityPage: React.FC = () => {
   // (controlled in the Global Permissions Matrix).
   const { session } = useAccess();
   const sessionRole = (session?.role as Role | undefined) || null;
+  const viewAuditLogsGate = hasPlatformPermission(sessionRole, 'view_audit_logs');
   const exportGate = hasPlatformPermission(sessionRole, 'export_audit_csv');
   const addNoteGate = hasPlatformPermission(sessionRole, 'add_security_note');
   const deleteNoteGate = hasPlatformPermission(sessionRole, 'delete_security_note');
@@ -688,6 +689,7 @@ const AuditSecurityPage: React.FC = () => {
       })()}
 
       {/* Table */}
+      {viewAuditLogsGate.allowed ? (
       <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
         <table className="w-full text-left border-collapse">
           <thead>
@@ -751,6 +753,13 @@ const AuditSecurityPage: React.FC = () => {
           </tbody>
         </table>
       </div>
+      ) : (
+      <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm p-12 text-center">
+        <span className="material-symbols-outlined text-4xl text-slate-300 mb-3 block">lock</span>
+        <p className="text-sm font-bold text-slate-500">Audit log access restricted</p>
+        <p className="text-xs text-slate-400 mt-1">{viewAuditLogsGate.reason}</p>
+      </div>
+      )}
 
       {/* Security Notes panel */}
       <div className="bg-white/80 backdrop-blur-xl p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">

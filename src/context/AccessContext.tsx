@@ -4,7 +4,7 @@ import { doc, getDoc } from 'firebase/firestore';
 import { auth, db } from '../firebase';
 import { Role, Plan, AccountStatus, platformRoles as initialPlatformRoles, tenantRoles as initialTenantRoles, planFeatures, adminPermissions, PERMISSION_HIERARCHY, meetsPermissionLevel, PERMISSION_DOMAINS, SUB_PERMISSIONS, isSubPermissionPlanAvailable } from './accessConfig';
 import { EmployeeRole, PermissionLevel } from '../types';
-import { NAV_FEATURE_TO_PLATFORM_KEY, getPlatformFeatureLevel } from '../owner/platformPermissionsConfig';
+import { NAV_FEATURE_TO_PLATFORM_KEY, NAV_FEATURE_SECONDARY_KEYS, hasEffectiveFeatureAccess } from '../owner/platformPermissionsConfig';
 
 interface Session {
   user: { id: string; name: string; email: string };
@@ -258,8 +258,14 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     if (session.userType === 'platform') {
       const platformKey = NAV_FEATURE_TO_PLATFORM_KEY[feature];
       if (platformKey) {
-        const level = getPlatformFeatureLevel(session.role, platformKey);
-        return level !== 'none';
+        if (hasEffectiveFeatureAccess(session.role, platformKey)) return true;
+        const secondaryKeys = NAV_FEATURE_SECONDARY_KEYS[feature];
+        if (secondaryKeys) {
+          for (const sk of secondaryKeys) {
+            if (hasEffectiveFeatureAccess(session.role, sk)) return true;
+          }
+        }
+        return false;
       }
       const roleConfig = platformRolesState.find(r => r.id === session.role);
       if (!roleConfig) return false;
