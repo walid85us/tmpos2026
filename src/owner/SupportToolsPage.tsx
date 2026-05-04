@@ -557,9 +557,28 @@ const SupportToolsPage: React.FC = () => {
   const buildTarget = (c: SupportCaseRecord) =>
     `${tenantById.get(c.tenantId) || c.tenantId} · ${c.subject}`;
 
+  const gatedCan = (action: EscalationAction, ctx: { targetTeam?: EscalationTargetTeam | string | null; isOwner?: boolean }): CanResult => {
+    const MATRIX_SUB_KEY: Record<EscalationAction, string> = {
+      escalate: 'escalate_assigned_case',
+      assign_owner: 'assign_escalation_owner_team',
+      acknowledge: 'acknowledge_escalation',
+      change_level: 'change_escalation_level',
+      deescalate: 'deescalate_support_case',
+      resolve_escalation: 'resolve_escalation',
+      close_with_active_escalation: 'close_with_active_escalation',
+      edit_assignment: 'assign_support_case',
+    };
+    const subKey = MATRIX_SUB_KEY[action];
+    const matrixResult = hasPlatformPermission(sessionRole, subKey);
+    if (!matrixResult.allowed) {
+      return { allowed: false, reason: matrixResult.reason };
+    }
+    return can(currentRole, action, ctx);
+  };
+
   const escalateCaseStructured = (c: SupportCaseRecord) => {
     const draft = escalateDraft;
-    const check = can(currentRole, 'escalate', { targetTeam: draft.targetTeam });
+    const check = gatedCan('escalate', { targetTeam: draft.targetTeam });
     if (!check.allowed) return;
     const now = new Date();
     const ackDue = new Date(now.getTime() + Math.max(1, draft.ackHours) * 36e5);
@@ -618,7 +637,7 @@ const SupportToolsPage: React.FC = () => {
 
   const acknowledgeEscalation = (c: SupportCaseRecord) => {
     const isOwner = !!c.escalationOwnerName && c.escalationOwnerName === operatorName;
-    const check = can(currentRole, 'acknowledge', {
+    const check = gatedCan('acknowledge', {
       targetTeam: c.escalationTargetTeam,
       isOwner,
     });
@@ -659,7 +678,7 @@ const SupportToolsPage: React.FC = () => {
     const owner = assignDraft.ownerName.trim();
     const team = assignDraft.team;
     const reason = assignDraft.reason.trim();
-    const check = can(currentRole, 'assign_owner', { targetTeam: team });
+    const check = gatedCan('assign_owner', { targetTeam: team });
     if (!check.allowed) return;
     const isReassign = !!(c.escalationOwnerName || c.assignedTeamName);
     const now = new Date();
@@ -720,7 +739,7 @@ const SupportToolsPage: React.FC = () => {
   const changeEscalationLevel = (c: SupportCaseRecord) => {
     const level = levelDraft.level;
     const reason = levelDraft.reason.trim();
-    const check = can(currentRole, 'change_level', { targetTeam: c.escalationTargetTeam });
+    const check = gatedCan('change_level', { targetTeam: c.escalationTargetTeam });
     if (!check.allowed) return;
     if (c.escalationLevel === level) return;
     const now = new Date();
@@ -771,7 +790,7 @@ const SupportToolsPage: React.FC = () => {
 
   const resolveEscalation = (c: SupportCaseRecord) => {
     const note = resolveDraft.note.trim();
-    const check = can(currentRole, 'resolve_escalation', {
+    const check = gatedCan('resolve_escalation', {
       targetTeam: c.escalationTargetTeam,
     });
     if (!check.allowed) return;
@@ -812,7 +831,7 @@ const SupportToolsPage: React.FC = () => {
   const deescalateCase = (c: SupportCaseRecord) => {
     const note = deescalateDraft.note.trim();
     const isOwner = !!c.escalationOwnerName && c.escalationOwnerName === operatorName;
-    const check = can(currentRole, 'deescalate', {
+    const check = gatedCan('deescalate', {
       targetTeam: c.escalationTargetTeam,
       isOwner,
     });
@@ -971,29 +990,6 @@ const SupportToolsPage: React.FC = () => {
           </div>
         </div>
         <div className="flex items-center gap-3 flex-wrap">
-          {/* Phase 1.1.3A correction — read-only "Active platform role"
-              badge. The local Acting-As selector has been removed. Role
-              is sourced from the active Dev Session and governed by the
-              Global Permissions Matrix in Team Management. */}
-          <div
-            className="flex items-center gap-2 px-3 py-2 rounded-2xl bg-white border border-slate-200 shadow-sm"
-            data-testid="support-active-role-badge"
-            title="Role is controlled by Dev Session / Platform Team permissions. Switch roles from the Dev Session switcher."
-          >
-            <span className="material-symbols-outlined text-base text-slate-400">badge</span>
-            <div className="flex flex-col">
-              <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">Active platform role</span>
-              <div className="flex items-center gap-1.5">
-                <span data-testid="support-operator-name" className="text-xs font-black text-slate-700">
-                  {operatorName || '—'}
-                </span>
-                <span className="text-slate-300">·</span>
-                <span data-testid="support-active-role" className="text-[10px] font-black uppercase tracking-widest text-primary">
-                  {sessionRole ? PLATFORM_ROLE_DISPLAY_LABEL[sessionRole] : 'No session'}
-                </span>
-              </div>
-            </div>
-          </div>
           {(() => {
             const createGate = hasPlatformPermission(sessionRole, 'create_support_case');
             return (
@@ -1433,14 +1429,14 @@ const SupportToolsPage: React.FC = () => {
                   const isOwner = !!selected.escalationOwnerName && selected.escalationOwnerName === operatorName;
                   const ctx = { targetTeam: selected.escalationTargetTeam ?? null, isOwner };
                   const checks: Record<EscalationAction, CanResult> = {
-                    escalate: can(currentRole, 'escalate', ctx),
-                    assign_owner: can(currentRole, 'assign_owner', ctx),
-                    acknowledge: can(currentRole, 'acknowledge', ctx),
-                    change_level: can(currentRole, 'change_level', ctx),
-                    deescalate: can(currentRole, 'deescalate', ctx),
-                    resolve_escalation: can(currentRole, 'resolve_escalation', ctx),
-                    close_with_active_escalation: can(currentRole, 'close_with_active_escalation', ctx),
-                    edit_assignment: can(currentRole, 'edit_assignment', ctx),
+                    escalate: gatedCan('escalate', ctx),
+                    assign_owner: gatedCan('assign_owner', ctx),
+                    acknowledge: gatedCan('acknowledge', ctx),
+                    change_level: gatedCan('change_level', ctx),
+                    deescalate: gatedCan('deescalate', ctx),
+                    resolve_escalation: gatedCan('resolve_escalation', ctx),
+                    close_with_active_escalation: gatedCan('close_with_active_escalation', ctx),
+                    edit_assignment: gatedCan('edit_assignment', ctx),
                   };
                   const Btn: React.FC<{
                     action: EscalationAction;
@@ -1663,10 +1659,8 @@ const SupportToolsPage: React.FC = () => {
                           />
                         )}
                       </div>
-                      {/* Inline role explanation so the user always knows
-                          why a button is disabled. */}
                       <p className="text-[10px] text-slate-400 italic">
-                        Acting as <span className="font-black uppercase tracking-widest text-slate-500">{PLATFORM_OPS_ROLE_LABEL[currentRole]}</span> · {PLATFORM_OPS_ROLE_DESCRIPTION[currentRole]}
+                        Escalation actions follow the Global Permissions Matrix.
                       </p>
                     </div>
                   );
@@ -2109,7 +2103,7 @@ const SupportToolsPage: React.FC = () => {
               <div className="p-6 space-y-2 text-xs text-slate-600">
                 <p>This case still has an active escalation ({ESCALATION_STATUS_LABEL[effectiveEscalationStatus(closeWarnModal).status]}). Closing now will write a warning audit row.</p>
                 {(() => {
-                  const r = can(currentRole, 'close_with_active_escalation', { targetTeam: closeWarnModal.escalationTargetTeam });
+                  const r = gatedCan('close_with_active_escalation', { targetTeam: closeWarnModal.escalationTargetTeam });
                   if (!r.allowed) {
                     return (
                       <p className="text-red-700 font-bold pt-1" data-testid="support-close-warn-blocked">{r.reason}</p>
@@ -2121,7 +2115,7 @@ const SupportToolsPage: React.FC = () => {
               <div className="p-5 border-t border-slate-100 bg-slate-50/40 flex justify-end gap-2">
                 <button onClick={() => setCloseWarnModal(null)} className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-white">Cancel</button>
                 {(() => {
-                  const r = can(currentRole, 'close_with_active_escalation', { targetTeam: closeWarnModal.escalationTargetTeam });
+                  const r = gatedCan('close_with_active_escalation', { targetTeam: closeWarnModal.escalationTargetTeam });
                   return (
                     <button
                       disabled={!r.allowed}

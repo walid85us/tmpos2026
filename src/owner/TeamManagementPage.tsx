@@ -243,6 +243,8 @@ export default function TeamManagementPage() {
   // Sub-permission rows are collapsible per parent feature.
   const [overrides, setOverrides] = useState<PlatformPermissionsOverrides>(() => readPlatformPermissionsOverrides());
   const [expandedFeatures, setExpandedFeatures] = useState<Record<PlatformFeatureKey, boolean>>(() => ({} as any));
+  const [matrixSearch, setMatrixSearch] = useState('');
+  const [previewRole, setPreviewRole] = useState<Role | null>(null);
 
   useEffect(() => {
     const onChange = () => setOverrides(readPlatformPermissionsOverrides());
@@ -339,6 +341,81 @@ export default function TeamManagementPage() {
     </select>
   );
 
+  const allExpanded = PLATFORM_FEATURE_GROUPS.every(g => expandedFeatures[g.key]);
+
+  const toggleExpandAll = () => {
+    if (allExpanded) {
+      setExpandedFeatures({} as any);
+    } else {
+      const all: Record<PlatformFeatureKey, boolean> = {} as any;
+      PLATFORM_FEATURE_GROUPS.forEach(g => { all[g.key] = true; });
+      setExpandedFeatures(all);
+    }
+  };
+
+  const resetToDefaults = () => {
+    writePlatformPermissionsOverrides({});
+    setOverrides({});
+    logActivity('Reset Permissions', 'All overrides cleared — reverted to default levels');
+    pushPlatformAudit({
+      actor: session?.user?.name || 'System Owner',
+      action: 'platform_permissions_reset',
+      target: 'All roles',
+      category: 'team',
+      severity: 'warning',
+      note: 'All overrides cleared to defaults',
+    });
+  };
+
+  const filteredGroups = useMemo(() => {
+    if (!matrixSearch.trim()) return PLATFORM_FEATURE_GROUPS;
+    const q = matrixSearch.toLowerCase();
+    return PLATFORM_FEATURE_GROUPS.filter(g =>
+      g.label.toLowerCase().includes(q) ||
+      g.description.toLowerCase().includes(q) ||
+      g.subPermissions.some(sp => sp.label.toLowerCase().includes(q) || sp.description.toLowerCase().includes(q))
+    );
+  }, [matrixSearch]);
+
+  const hasOverrides = Object.keys(overrides).length > 0;
+
+  const renderPreviewPanel = () => {
+    if (!previewRole) return null;
+    const roleLabel = PLATFORM_ROLE_DISPLAY_LABEL[previewRole];
+    return (
+      <div className="bg-indigo-50/60 border border-indigo-200/60 rounded-2xl p-5 mb-6">
+        <div className="flex items-center justify-between gap-3 mb-3">
+          <h3 className="text-sm font-black text-indigo-900 uppercase tracking-widest flex items-center gap-2">
+            <span className="material-symbols-outlined text-base">visibility</span>
+            Effective Access — {roleLabel}
+          </h3>
+          <button onClick={() => setPreviewRole(null)} className="text-indigo-400 hover:text-indigo-600 transition-colors">
+            <span className="material-symbols-outlined text-sm">close</span>
+          </button>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
+          {PLATFORM_FEATURE_GROUPS.map(g => {
+            const lvl = previewRole === 'system_owner' ? 'full' as PermissionLevel : getPlatformFeatureLevel(previewRole, g.key, overrides);
+            const { enabled, total } = enabledSubCount(previewRole, g.key);
+            const isNone = lvl === 'none';
+            const isFull = lvl === 'full';
+            return (
+              <div key={g.key} className={`px-3 py-2.5 rounded-xl border text-xs ${
+                isNone ? 'bg-red-50 border-red-200 text-red-700' :
+                isFull ? 'bg-emerald-50 border-emerald-200 text-emerald-700' :
+                'bg-white border-slate-200 text-slate-700'
+              }`}>
+                <p className="font-black text-[10px] uppercase tracking-widest truncate">{g.label}</p>
+                <p className="font-bold mt-0.5">{PLATFORM_PERMISSION_LEVEL_LABEL[lvl]}</p>
+                <p className="text-[9px] font-medium mt-0.5 opacity-70">{enabled}/{total} subs enabled</p>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
   const renderPermissions = () => (
     <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-8 shadow-sm" data-testid="global-permissions-matrix">
       <div className="flex items-start justify-between gap-6 flex-wrap mb-4">
@@ -358,10 +435,66 @@ export default function TeamManagementPage() {
         </div>
       </div>
 
+      <div className="flex flex-wrap items-center gap-3 mb-4">
+        <div className="relative flex-1 min-w-[220px] max-w-sm">
+          <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">search</span>
+          <input
+            type="text"
+            placeholder="Search features or sub-permissions..."
+            value={matrixSearch}
+            onChange={e => setMatrixSearch(e.target.value)}
+            className="w-full pl-9 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary placeholder:text-slate-400"
+          />
+          {matrixSearch && (
+            <button onClick={() => setMatrixSearch('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+              <span className="material-symbols-outlined text-sm">close</span>
+            </button>
+          )}
+        </div>
+        <button
+          onClick={toggleExpandAll}
+          className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all flex items-center gap-1.5"
+        >
+          <span className="material-symbols-outlined text-sm">{allExpanded ? 'unfold_less' : 'unfold_more'}</span>
+          {allExpanded ? 'Collapse All' : 'Expand All'}
+        </button>
+        {isOwner && hasOverrides && (
+          <button
+            onClick={resetToDefaults}
+            className="px-4 py-2.5 bg-amber-50 hover:bg-amber-100 text-amber-700 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all flex items-center gap-1.5 border border-amber-200"
+          >
+            <span className="material-symbols-outlined text-sm">restart_alt</span>
+            Reset to Defaults
+          </button>
+        )}
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Preview:</span>
+          <select
+            value={previewRole || ''}
+            onChange={e => setPreviewRole(e.target.value ? e.target.value as Role : null)}
+            className="text-[11px] font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-primary/20 focus:outline-none"
+          >
+            <option value="">Select role...</option>
+            {MATRIX_ROLES.map(r => (
+              <option key={r} value={r}>{PLATFORM_ROLE_DISPLAY_LABEL[r]}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {renderPreviewPanel()}
+
+      {matrixSearch && filteredGroups.length === 0 && (
+        <div className="text-center py-12 text-slate-400">
+          <span className="material-symbols-outlined text-4xl mb-2 block">search_off</span>
+          <p className="text-sm font-bold">No features match "{matrixSearch}"</p>
+        </div>
+      )}
+
       <div className="overflow-x-auto">
         <table className="w-full text-left border-collapse min-w-[920px]">
           <thead>
-            <tr className="border-b border-slate-100">
+            <tr className="border-b border-slate-100 bg-white/90 backdrop-blur-sm sticky top-0 z-10">
               <th className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest w-[28%]">Feature / Sub-Permission</th>
               {MATRIX_ROLES.map(role => (
                 <th key={role} className="px-3 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">
@@ -372,8 +505,14 @@ export default function TeamManagementPage() {
             </tr>
           </thead>
           <tbody>
-            {PLATFORM_FEATURE_GROUPS.map(group => {
+            {filteredGroups.map(group => {
               const expanded = !!expandedFeatures[group.key];
+              const searchActive = !!matrixSearch.trim();
+              const q = matrixSearch.toLowerCase();
+              const matchingSubs = searchActive
+                ? group.subPermissions.filter(sp => sp.label.toLowerCase().includes(q) || sp.description.toLowerCase().includes(q))
+                : group.subPermissions;
+              const showExpanded = expanded || (searchActive && matchingSubs.length > 0);
               return (
                 <React.Fragment key={group.key}>
                   <tr className="border-b border-slate-100 bg-slate-50/40" data-testid={`matrix-feature-row-${group.key}`}>
@@ -384,7 +523,7 @@ export default function TeamManagementPage() {
                         data-testid={`matrix-expand-${group.key}`}
                         className="flex items-center gap-2 text-sm font-black text-slate-800 hover:text-primary transition-colors"
                       >
-                        <span className={`material-symbols-outlined text-base transition-transform ${expanded ? 'rotate-90' : ''}`}>chevron_right</span>
+                        <span className={`material-symbols-outlined text-base transition-transform ${showExpanded ? 'rotate-90' : ''}`}>chevron_right</span>
                         {group.label}
                       </button>
                       <p className="text-[10px] font-medium text-slate-500 mt-0.5 ml-6">{group.description}</p>
@@ -409,7 +548,7 @@ export default function TeamManagementPage() {
                       );
                     })}
                   </tr>
-                  {expanded && group.subPermissions.map(sp => (
+                  {showExpanded && (searchActive ? matchingSubs : group.subPermissions).map(sp => (
                     <tr key={`${group.key}-${sp.id}`} className="border-b border-slate-50" data-testid={`matrix-sub-row-${sp.id}`}>
                       <td className="px-4 py-3 pl-12">
                         <p className="text-xs font-bold text-slate-700 flex items-center gap-2">

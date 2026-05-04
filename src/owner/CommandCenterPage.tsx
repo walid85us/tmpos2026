@@ -84,7 +84,6 @@ import { pushPlatformAudit } from './platformOpsAudit';
 import { useAccess } from '../context/AccessContext';
 import {
   hasPlatformPermission,
-  PLATFORM_ROLE_DISPLAY_LABEL,
 } from './platformPermissionsConfig';
 import type { Role } from '../context/accessConfig';
 
@@ -824,16 +823,8 @@ const CommandCenterPage: React.FC = () => {
             <span className="text-slate-300">·</span>
             <span className="text-slate-400" data-testid="cc-phase-113a-truth-label">{PHASE_113A_TRUTH_LABEL}</span>
           </p>
-          <p
-            data-testid="cc-active-role-label"
-            className="mt-1 text-[10px] font-black uppercase tracking-widest text-slate-400"
-          >
-            Active platform role:{' '}
-            <span className="text-primary">{sessionRole ? PLATFORM_ROLE_DISPLAY_LABEL[sessionRole] : 'No session'}</span>
-            <span className="text-slate-300 mx-1">·</span>
-            <span className="font-medium normal-case tracking-normal text-slate-500">
-              Quick actions and Tenant 360 follow the Global Permissions Matrix.
-            </span>
+          <p className="mt-1 text-[10px] font-medium text-slate-500">
+            Quick actions and Tenant 360 follow the Global Permissions Matrix.
           </p>
         </div>
       </section>

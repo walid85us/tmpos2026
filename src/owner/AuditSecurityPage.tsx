@@ -13,7 +13,6 @@ import { pushPlatformAudit } from './platformOpsAudit';
 import { useAccess } from '../context/AccessContext';
 import {
   hasPlatformPermission,
-  PLATFORM_ROLE_DISPLAY_LABEL,
 } from './platformPermissionsConfig';
 import type { Role } from '../context/accessConfig';
 import {
@@ -462,13 +461,8 @@ const AuditSecurityPage: React.FC = () => {
       <div>
         <h2 className="text-2xl font-black text-primary tracking-tight">Audit & Security</h2>
         <p className="text-slate-500 font-medium">Monitor platform activity, security posture, and recent events.</p>
-        <p className="mt-1 text-[10px] font-black uppercase tracking-widest text-slate-400" data-testid="audit-active-role-label">
-          Active platform role:{' '}
-          <span className="text-primary">{sessionRole ? PLATFORM_ROLE_DISPLAY_LABEL[sessionRole] : 'No session'}</span>
-          <span className="text-slate-300 mx-1">·</span>
-          <span className="font-medium normal-case tracking-normal text-slate-500">
-            Sensitive actions are gated by the Global Permissions Matrix.
-          </span>
+        <p className="mt-1 text-[10px] font-medium text-slate-500">
+          Sensitive actions are gated by the Global Permissions Matrix.
         </p>
       </div>
 

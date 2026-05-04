@@ -70,7 +70,8 @@ export type PlatformAuditAction =
   | 'support_case_escalation_level_changed'
   | 'support_case_escalation_resolved'
   | 'support_case_close_with_active_escalation_warning'
-  | 'support_case_assignment_changed';
+  | 'support_case_assignment_changed'
+  | 'platform_permissions_reset';
 
 export interface PushPlatformAuditInput {
   actor: string;

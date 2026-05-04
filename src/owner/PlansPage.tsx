@@ -13,6 +13,9 @@ import {
   getReadinessStatus,
   generateImplementationBrief,
 } from './readiness';
+import { useAccess } from '../context/AccessContext';
+import { hasPlatformPermission } from './platformPermissionsConfig';
+import type { Role } from '../context/accessConfig';
 
 type PlanData = Omit<typeof initialPlans[0], 'status'> & { status: 'active' | 'archived' };
 type FeatureData = { id: string; name: string; planAvailability: Record<string, boolean>; source: 'inherited' | 'custom'; lifecycle: FeatureLifecycle };
@@ -95,6 +98,20 @@ const lifecycleBadge = (lifecycle: FeatureLifecycle | AddOnLifecycle) => {
 };
 
 const PlansPage: React.FC = () => {
+  const { session } = useAccess();
+  const pRole = (session?.role as Role | undefined) || null;
+  const canCreatePlan = hasPlatformPermission(pRole, 'create_plan').allowed;
+  const canEditPlan = hasPlatformPermission(pRole, 'edit_plan').allowed;
+  const canArchivePlan = hasPlatformPermission(pRole, 'archive_plan').allowed;
+  const canEditMatrix = hasPlatformPermission(pRole, 'edit_feature_matrix').allowed;
+  const canCreateAddon = hasPlatformPermission(pRole, 'create_addon').allowed;
+  const canEditAddon = hasPlatformPermission(pRole, 'edit_addon').allowed;
+  const canArchiveDeleteAddon = hasPlatformPermission(pRole, 'archive_delete_addon').allowed;
+  const canGrantTrial = hasPlatformPermission(pRole, 'grant_trial').allowed;
+  const canGrantPaidOverride = hasPlatformPermission(pRole, 'grant_paid_override').allowed;
+  const canRevokeOverride = hasPlatformPermission(pRole, 'revoke_addon_override').allowed;
+  const canGenBrief = hasPlatformPermission(pRole, 'generate_addon_implementation_brief').allowed;
+
   const [searchParams, setSearchParams] = useSearchParams();
   const tabFromUrl = searchParams.get('tab');
   const initialTab = tabFromUrl === 'features' ? 'features' : tabFromUrl === 'addons' ? 'addons' : 'plans';
@@ -246,6 +263,7 @@ const PlansPage: React.FC = () => {
   };
 
   const savePlan = () => {
+    if (editingPlan ? !canEditPlan : !canCreatePlan) return;
     const newPlan: PlanData = {
       id: editingPlan?.id || planForm.name.toLowerCase().replace(/\s+/g, '-'),
       name: planForm.name,
@@ -268,11 +286,13 @@ const PlansPage: React.FC = () => {
   };
 
   const archivePlan = (planId: string) => {
+    if (!canArchivePlan) return;
     setPlansData(prev => prev.map(p => p.id === planId ? { ...p, status: 'archived' as const } : p));
     setShowArchiveConfirm(null);
   };
 
   const restorePlan = (planId: string) => {
+    if (!canArchivePlan) return;
     setPlansData(prev => prev.map(p => p.id === planId ? { ...p, status: 'active' as const } : p));
   };
 
@@ -296,6 +316,7 @@ const PlansPage: React.FC = () => {
   };
 
   const toggleFeature = (featureId: string, planId: string) => {
+    if (!canEditMatrix) return;
     const feature = featuresData.find(f => f.id === featureId);
     if (!feature || feature.lifecycle !== 'implemented') return;
     // Archived standalone add-on cap rows are read-only at the
@@ -306,6 +327,7 @@ const PlansPage: React.FC = () => {
   };
 
   const changeLifecycle = (featureId: string, newLifecycle: FeatureLifecycle) => {
+    if (!canEditMatrix) return;
     // Archived standalone add-on cap rows are read-only at the
     // handler level. Lifecycle is owned by the add-on governance
     // transition; the matrix cannot drift from it.
@@ -322,6 +344,7 @@ const PlansPage: React.FC = () => {
   };
 
   const addFeature = () => {
+    if (!canEditMatrix) return;
     if (!newFeatureName.trim()) return;
     const id = newFeatureName.toLowerCase().replace(/\s+/g, '_');
     const defaultAvailability: Record<string, boolean> = {};
@@ -339,6 +362,7 @@ const PlansPage: React.FC = () => {
   };
 
   const removeFeature = (featureId: string) => {
+    if (!canEditMatrix) { setShowDeleteConfirm(null); return; }
     // Archived standalone add-on cap rows are read-only at the
     // handler level. They cannot be deleted directly from the
     // Plans & Features Matrix — they are owned by the add-on
@@ -489,6 +513,7 @@ const PlansPage: React.FC = () => {
   //     PRESERVED — only the Add-on Catalog association is removed.
   //   - Emit `addon_deleted` summarizing what was removed/preserved.
   const removeAddOn = (addonId: string) => {
+    if (!canArchiveDeleteAddon) { setShowAddOnDelete(null); return; }
     const addon = addOnsData.find(a => a.id === addonId);
     if (!addon) return;
     const blockers = getAddOnDeleteBlockers(addonId);
@@ -726,6 +751,7 @@ const PlansPage: React.FC = () => {
   };
 
   const saveAddOn = () => {
+    if (editingAddOn ? !canEditAddon : !canCreateAddon) return;
     const todayIso = new Date().toISOString().slice(0, 10);
     const isCreate = !editingAddOn;
     const id = editingAddOn?.id || addOnForm.name.toLowerCase().replace(/\s+/g, '-');
@@ -990,10 +1016,12 @@ const PlansPage: React.FC = () => {
   // export. See replit.md → "Add-on Implementation Readiness" →
   // Implementation Brief.
   const openBriefModal = (addonId: string) => {
+    if (!canGenBrief) return;
     setBriefModalAddOnId(addonId);
     setBriefCopyToast(false);
   };
   const copyBriefToClipboard = async (addon: AddOnData, briefText: string) => {
+    if (!canGenBrief) return;
     try {
       await navigator.clipboard.writeText(briefText);
       setBriefCopyToast(true);
@@ -1013,6 +1041,7 @@ const PlansPage: React.FC = () => {
   };
 
   const setAddOnGovernance = (addonId: string, next: AddOnGovernanceStatus) => {
+    if (!canArchiveDeleteAddon) return;
     // Archive Protection. Refuse the transition when ANY dependency
     // still references the add-on (linked feature in plan,
     // compatiblePlans, active trial / paid override / pending
@@ -1134,19 +1163,19 @@ const PlansPage: React.FC = () => {
           <h2 className="text-2xl font-black text-primary tracking-tight">Plans & Features</h2>
           <p className="text-slate-500 font-medium">Manage subscription plans, feature access, and add-ons.</p>
         </div>
-        {activeTab === 'plans' && (
+        {activeTab === 'plans' && canCreatePlan && (
           <button onClick={openCreatePlan} className="px-5 py-3 bg-primary text-white font-black text-[10px] rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
             <span className="material-symbols-outlined text-sm">add</span>
             Create New Plan
           </button>
         )}
-        {activeTab === 'features' && (
+        {activeTab === 'features' && canEditMatrix && (
           <button onClick={() => setShowFeatureModal(true)} className="px-5 py-3 bg-primary text-white font-black text-[10px] rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
             <span className="material-symbols-outlined text-sm">add</span>
             Add Feature
           </button>
         )}
-        {activeTab === 'addons' && (
+        {activeTab === 'addons' && canCreateAddon && (
           <button onClick={openCreateAddOn} className="px-5 py-3 bg-primary text-white font-black text-[10px] rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2 active:scale-95">
             <span className="material-symbols-outlined text-sm">add</span>
             Create Add-on
@@ -1218,17 +1247,23 @@ const PlansPage: React.FC = () => {
               </div>
 
               <div className="flex gap-2">
-                <button onClick={() => openEditPlan(plan)} className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
-                  Edit
-                </button>
+                {canEditPlan && (
+                  <button onClick={() => openEditPlan(plan)} className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
+                    Edit
+                  </button>
+                )}
                 {plan.status === 'archived' ? (
-                  <button onClick={() => restorePlan(plan.id)} className="flex-1 py-3 bg-lime-100 hover:bg-lime-200 text-lime-700 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
-                    Restore
-                  </button>
+                  canArchivePlan && (
+                    <button onClick={() => restorePlan(plan.id)} className="flex-1 py-3 bg-lime-100 hover:bg-lime-200 text-lime-700 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
+                      Restore
+                    </button>
+                  )
                 ) : (
-                  <button onClick={() => setShowArchiveConfirm(plan.id)} className="flex-1 py-3 bg-primary/10 hover:bg-primary/20 text-primary font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
-                    Archive
-                  </button>
+                  canArchivePlan && (
+                    <button onClick={() => setShowArchiveConfirm(plan.id)} className="flex-1 py-3 bg-primary/10 hover:bg-primary/20 text-primary font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
+                      Archive
+                    </button>
+                  )
                 )}
               </div>
             </motion.div>
@@ -1327,7 +1362,7 @@ const PlansPage: React.FC = () => {
                         <select
                           value={feature.lifecycle}
                           onChange={e => changeLifecycle(feature.id, e.target.value as FeatureLifecycle)}
-                          disabled={isArchivedCapRow}
+                          disabled={isArchivedCapRow || !canEditMatrix}
                           className="text-[9px] font-black uppercase tracking-widest bg-transparent border border-slate-200 rounded-lg px-2 py-1.5 cursor-pointer focus:outline-none focus:ring-1 focus:ring-primary/20 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           {LIFECYCLE_ORDER.map(lc => (
@@ -1337,7 +1372,7 @@ const PlansPage: React.FC = () => {
                       </td>
                       {activePlans.map(plan => (
                         <td key={plan.id} className="px-6 py-4 text-center">
-                          {isAssignable ? (
+                          {isAssignable && canEditMatrix ? (
                             <button
                               onClick={() => toggleFeature(feature.id, plan.id)}
                               className="transition-all hover:scale-110 active:scale-95"
@@ -1359,7 +1394,7 @@ const PlansPage: React.FC = () => {
                         </td>
                       ))}
                       <td className="px-8 py-4 text-center">
-                        {feature.source === 'custom' && !isArchivedCapRow ? (
+                        {feature.source === 'custom' && !isArchivedCapRow && canEditMatrix ? (
                           <button onClick={() => setShowDeleteConfirm(feature.id)} className="text-slate-400 hover:text-red-500 transition-colors">
                             <span className="material-symbols-outlined text-sm">delete</span>
                           </button>
@@ -1484,28 +1519,31 @@ const PlansPage: React.FC = () => {
                     <div className="flex gap-1.5 mb-3">
                       <button
                         onClick={() => setAddOnGovernance(addon.id, 'active')}
-                        disabled={addon.governanceStatus === 'active'}
+                        disabled={addon.governanceStatus === 'active' || !canArchiveDeleteAddon}
                         className={`flex-1 py-2 text-[9px] font-black uppercase tracking-widest rounded-xl transition-all ${
                           addon.governanceStatus === 'active'
                             ? 'bg-lime-500 text-white shadow-sm cursor-default'
+                            : !canArchiveDeleteAddon ? 'bg-slate-100 text-slate-300 cursor-not-allowed'
                             : 'bg-lime-100 hover:bg-lime-200 text-lime-700'
                         }`}
                       >Active</button>
                       <button
                         onClick={() => addon.governanceStatus === 'disabled' ? undefined : setShowAddOnDisableConfirm(addon.id)}
-                        disabled={addon.governanceStatus === 'disabled'}
+                        disabled={addon.governanceStatus === 'disabled' || !canArchiveDeleteAddon}
                         className={`flex-1 py-2 text-[9px] font-black uppercase tracking-widest rounded-xl transition-all ${
                           addon.governanceStatus === 'disabled'
                             ? 'bg-amber-500 text-white shadow-sm cursor-default'
+                            : !canArchiveDeleteAddon ? 'bg-slate-100 text-slate-300 cursor-not-allowed'
                             : 'bg-amber-100 hover:bg-amber-200 text-amber-700'
                         }`}
                       >Disabled</button>
                       <button
                         onClick={() => addon.governanceStatus === 'archived' ? undefined : requestArchiveAddOn(addon.id)}
-                        disabled={addon.governanceStatus === 'archived'}
+                        disabled={addon.governanceStatus === 'archived' || !canArchiveDeleteAddon}
                         className={`flex-1 py-2 text-[9px] font-black uppercase tracking-widest rounded-xl transition-all ${
                           addon.governanceStatus === 'archived'
                             ? 'bg-slate-500 text-white shadow-sm cursor-default'
+                            : !canArchiveDeleteAddon ? 'bg-slate-100 text-slate-300 cursor-not-allowed'
                             : 'bg-slate-100 hover:bg-slate-200 text-slate-600'
                         }`}
                       >Archived</button>
@@ -1522,12 +1560,16 @@ const PlansPage: React.FC = () => {
                     </div>
 
                     <div className="flex gap-2">
-                      <button onClick={() => openEditAddOn(addon)} className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
-                        Edit
-                      </button>
-                      <button onClick={() => requestDeleteAddOn(addon.id)} className="py-3 px-4 bg-red-50 hover:bg-red-100 text-red-500 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
-                        <span className="material-symbols-outlined text-sm">delete</span>
-                      </button>
+                      {canEditAddon && (
+                        <button onClick={() => openEditAddOn(addon)} className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
+                          Edit
+                        </button>
+                      )}
+                      {canArchiveDeleteAddon && (
+                        <button onClick={() => requestDeleteAddOn(addon.id)} className="py-3 px-4 bg-red-50 hover:bg-red-100 text-red-500 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all active:scale-95">
+                          <span className="material-symbols-outlined text-sm">delete</span>
+                        </button>
+                      )}
                     </div>
                   </motion.div>
                 );
@@ -2147,9 +2189,9 @@ const PlansPage: React.FC = () => {
                           </div>
                           <button
                             type="button"
-                            disabled={!editingAddOn}
-                            onClick={() => editingAddOn && openBriefModal(editingAddOn.id)}
-                            title={editingAddOn ? 'Generate brief' : 'Save the add-on first to generate a brief'}
+                            disabled={!editingAddOn || !canGenBrief}
+                            onClick={() => editingAddOn && canGenBrief && openBriefModal(editingAddOn.id)}
+                            title={!canGenBrief ? 'No permission to generate brief' : editingAddOn ? 'Generate brief' : 'Save the add-on first to generate a brief'}
                             className="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-black text-[10px] rounded-xl uppercase tracking-widest transition-all inline-flex items-center gap-1.5"
                           >
                             <span className="material-symbols-outlined text-[14px] leading-none">description</span>

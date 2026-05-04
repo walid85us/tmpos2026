@@ -227,6 +227,9 @@ export const PLATFORM_FEATURE_GROUPS: PlatformFeatureGroupDef[] = [
     description: 'Plan catalog and feature-to-plan matrix.',
     subPermissions: [
       { id: 'view_feature_matrix', label: 'View Feature Matrix', description: 'Read the plan / feature matrix.', threshold: 'view' },
+      { id: 'create_plan', label: 'Create Plan', description: 'Create a new subscription plan.', threshold: 'create' },
+      { id: 'edit_plan', label: 'Edit Plan', description: 'Edit an existing subscription plan.', threshold: 'edit' },
+      { id: 'archive_plan', label: 'Archive Plan', description: 'Archive a subscription plan.', threshold: 'manage', sensitive: true },
       { id: 'edit_feature_matrix', label: 'Edit Feature Matrix', description: 'Change plan / feature mappings.', threshold: 'manage', sensitive: true },
     ],
   },
@@ -236,6 +239,15 @@ export const PLATFORM_FEATURE_GROUPS: PlatformFeatureGroupDef[] = [
     description: 'Add-on catalog, commercial overrides, paid-add-on controls.',
     subPermissions: [
       { id: 'view_addon_governance', label: 'View Add-on Governance', description: 'Read the add-on catalog and overrides.', threshold: 'view' },
+      { id: 'create_addon', label: 'Create Add-on', description: 'Create a new add-on in the catalog.', threshold: 'create' },
+      { id: 'edit_addon', label: 'Edit Add-on', description: 'Edit an existing add-on.', threshold: 'edit' },
+      { id: 'archive_delete_addon', label: 'Archive / Delete Add-on', description: 'Archive or delete an add-on from the catalog.', threshold: 'manage', sensitive: true },
+      { id: 'manage_addon_compatible_plans', label: 'Manage Compatible Plans', description: 'Change which plans an add-on is compatible with.', threshold: 'edit' },
+      { id: 'manage_addon_readiness', label: 'Manage Add-on Readiness', description: 'Update add-on implementation readiness status and checklist.', threshold: 'edit' },
+      { id: 'generate_addon_implementation_brief', label: 'Generate Implementation Brief', description: 'Generate an implementation brief document for an add-on.', threshold: 'view' },
+      { id: 'grant_trial', label: 'Grant Trial', description: 'Grant a trial override for a tenant add-on.', threshold: 'approve', sensitive: true },
+      { id: 'grant_paid_override', label: 'Grant Paid Override', description: 'Grant a paid override for a tenant add-on.', threshold: 'approve', sensitive: true },
+      { id: 'revoke_addon_override', label: 'Revoke Override', description: 'Revoke an existing trial or paid override.', threshold: 'approve', sensitive: true },
       { id: 'edit_addon_overrides', label: 'Edit Add-on Overrides', description: 'Grant or revoke commercial overrides for tenants.', threshold: 'approve', sensitive: true },
     ],
   },
@@ -510,9 +522,31 @@ export function canPlatform(
 }
 
 // ---------------------------------------------------------------------------
-// Role display labels for the active-role badge shown on Support Tools /
-// Audit & Security / Command Center. Mirrors `accessConfig.platformRoles`
-// but exported here so consumers don't have to reach into AccessContext.
+// Nav / route feature-key → PlatformFeatureKey mapping.
+// The sidebar and AccessGuard use short feature keys like 'tenants', 'billing',
+// 'plans', etc. This map resolves them to the canonical PlatformFeatureKey used
+// by the Global Permissions Matrix. Keys that already match (e.g.
+// 'command_center') are included for completeness.
+// ---------------------------------------------------------------------------
+
+export const NAV_FEATURE_TO_PLATFORM_KEY: Record<string, PlatformFeatureKey> = {
+  command_center: 'command_center',
+  audit_security: 'audit_security',
+  support_tools: 'support_tools',
+  tenants: 'tenant_management',
+  billing: 'billing_subscriptions',
+  subscriptions: 'billing_subscriptions',
+  usage: 'billing_subscriptions',
+  plans: 'feature_matrix',
+  platform_settings: 'platform_settings',
+  domains: 'domains',
+  team_management: 'team_management',
+  provisioning: 'provisioning',
+};
+
+// ---------------------------------------------------------------------------
+// Role display labels. Mirrors `accessConfig.platformRoles` but exported here
+// so consumers don't have to reach into AccessContext.
 // ---------------------------------------------------------------------------
 
 export const PLATFORM_ROLE_DISPLAY_LABEL: Record<Role, string> = {

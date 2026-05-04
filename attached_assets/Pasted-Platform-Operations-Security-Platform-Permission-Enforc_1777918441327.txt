@@ -1,0 +1,622 @@
+Platform Operations & Security — Platform Permission Enforcement Correction + Matrix UX Maturity
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict correction pass.
+
+Do not continue Phase 1.1.3A QA assumptions until this is fixed.
+Do not implement Phase 1.1.3B, 1.1.3C, 1.1.3D, Phase 1.2, Phase 1.3, Phase 1.4, Phase 2, Phase 3, or Phase 4.
+
+This pass fixes the platform permission architecture so the Global Permissions Matrix becomes the true source of truth for:
+1) System Owner sidebar/navigation visibility
+2) page access
+3) page action gating
+4) Support Tools escalation actions
+5) Audit & Security actions
+6) Command Center actions
+7) Commercial/Add-on Governance actions
+
+Also improve the Global Permissions Matrix UI so it feels more professional, modern, interactive, and easier to test.
+
+==================================================
+ROLE STACK — ADD TO PROJECT KNOWLEDGE / SKILLS
+==================================================
+
+Before implementation, add this workstream role model to project knowledge / skills and act on it.
+
+Act as:
+- Senior Platform Team Governance Leader
+- Senior RBAC / Permission-Governance Architect
+- Senior Platform Operations Architect
+- Senior Support Tools Engineer
+- Senior Audit & Security Engineer
+- Senior SaaS Command Center Architect
+- Senior Enterprise Admin Console UX Architect
+- Senior React/TypeScript Engineer
+- Senior Security-by-Default Architect
+- QA Gatekeeper
+- Systems Thinker
+- Side Auditor
+
+Core responsibility:
+The Global Permissions Matrix must be the platform-side source of truth for navigation, page access, and all platform actions.
+
+Do not treat the matrix as decorative UI.
+
+==================================================
+BENCHMARK / DESIGN REFERENCE
+==================================================
+
+Before coding, review best-practice patterns from mature admin/permission systems.
+
+Use public patterns from:
+- Okta custom admin roles / granular admin permissions
+- GitHub Enterprise custom organization roles
+- Zendesk custom agent roles and ticket access permissions
+- Atlassian organization/site/app/admin role separation
+- ServiceNow / Jira Service Management style support ownership and escalation governance if useful
+
+Extract patterns:
+- central role permission source of truth
+- role-to-feature permissions
+- granular sub-permissions
+- clear denied-action explanations
+- read-only vs mutation separation
+- admin/super-admin permanence
+- audit of permission changes
+- permission matrix search/filter/grouping
+- impact preview / effective permission explanation
+
+Do not copy external code.
+
+Document briefly in replit.md:
+“Platform Permission Enforcement Correction — Benchmark Patterns Considered.”
+
+==================================================
+CURRENT QA FAILURES TO FIX
+==================================================
+
+Manual QA failed:
+
+1) Support Tools local Acting As selector was removed, but the new “Active platform role” badge is unnecessary.
+Expected:
+- Remove the Support Tools “Active platform role” badge/card.
+- Dev Session already shows active role and is enough.
+
+2) Command Center actions follow platform permissions — FAIL.
+Observed:
+- Support Admin was given Manage / Full Access to Command Center in Global Permissions Matrix.
+- After switching Dev Session to Support Admin, Command Center still did not appear in the sidebar.
+Expected:
+- Sidebar visibility must follow Global Permissions Matrix.
+
+3) Audit & Security actions follow platform permissions — FAIL.
+Observed:
+- Support Admin or Security/Audit Admin given access to Audit & Security still cannot see Audit & Security in sidebar.
+Expected:
+- Sidebar and route/page access must follow Global Permissions Matrix.
+
+4) Support Tools actions follow platform permissions — FAIL.
+Observed:
+- Permission model is not consistently controlling support actions.
+Expected:
+- Support Tools must obey Global Permissions Matrix.
+
+5) Escalation actions are permission-gated — FAIL.
+Observed:
+- Setting de-escalation permission to None for Support Admin still allowed De-escalate.
+- Setting Resolve Escalation permission to None for Support Admin still allowed Resolve Escalation.
+Expected:
+- Escalation actions must obey the Global Permissions Matrix sub-permissions.
+
+6) Add-on Governance remains intact — PASS partially / permission issue.
+Observed:
+- Billing Admin had access to manage add-ons.
+- Changing Add-on permission to None did not remove/hide Add-on access.
+Expected:
+- Add-on / Commercial Controls access must follow platform permission settings.
+- Also add separate sub-permissions for creating plans and creating add-ons.
+
+7) Permission denied messages:
+User preference:
+- Avoid showing excessive permission-denied messages.
+- Prefer hiding unavailable actions where safe.
+- For disabled buttons, use minimal tooltip/helper only when needed.
+
+8) Global Permissions Matrix UI:
+User wants a more professional, modern, interactive design.
+Expected:
+- Search competitor/admin permission matrix patterns and improve UI accordingly.
+
+==================================================
+CRITICAL ARCHITECTURE RULE
+==================================================
+
+Global Permissions Matrix must control:
+
+1) Sidebar navigation visibility
+2) route/page access
+3) page-level feature access
+4) action buttons
+5) sensitive workflow actions
+6) sub-permission actions
+
+No hardcoded platform role should override a Matrix denial.
+
+The final access decision must come from:
+- active Dev Session platform role
+- Global Permissions Matrix parent permission
+- Global Permissions Matrix sub-permission
+- System Owner permanence rule
+
+Support Tools must not use only the old hardcoded `can()` matrix.
+The old `can()` helper may be reused only if it is fed by / reconciled with the Global Permissions Matrix result.
+
+Rule:
+If Global Permissions Matrix says a sub-permission is None, the action must not be available for that role.
+
+==================================================
+KEEP EXISTING PERMISSION LEVELS
+==================================================
+
+Preserve existing levels exactly:
+
+- None
+- View Only
+- Create
+- Edit
+- Approve
+- Manage
+- Full Access
+
+Do not simplify.
+
+Meaning:
+None:
+- No access.
+
+View Only:
+- Can view/read only.
+
+Create:
+- Can create records.
+
+Edit:
+- Can edit existing records.
+
+Approve:
+- Can perform approval-sensitive workflow transitions.
+
+Manage:
+- Can manage operational area broadly.
+
+Full Access:
+- Full control.
+
+System Owner:
+- Full Access to everything.
+- Must remain locked/read-only if owner permanence is current design.
+
+==================================================
+PART A — REMOVE SUPPORT TOOLS ROLE BADGE
+==================================================
+
+Remove the “Active platform role” badge/card from Support Tools.
+
+Expected:
+- No local Acting As selector.
+- No Support Tools-specific Active Platform Role card.
+- No duplicate role UI inside Support Tools.
+- Dev Session remains the only visible role-switching/testing mechanism.
+
+Allowed:
+- If absolutely needed, a small inline text in a footer/help section, not a card:
+  “Permissions are based on the active Dev Session platform role.”
+
+==================================================
+PART B — FIX SIDEBAR / NAVIGATION PERMISSION GATING
+==================================================
+
+System Owner sidebar must use Global Permissions Matrix.
+
+Required:
+- If role has View Only or higher for Command Center, show Command Center.
+- If role has View Only or higher for Audit & Security, show Audit & Security.
+- If role has View Only or higher for Support Tools, show Support Tools.
+- If role has View Only or higher for Domains, show Domains.
+- If role has View Only or higher for Platform Settings, show Platform Settings.
+- If role has View Only or higher for Team Management, show Team Management.
+- If role has View Only or higher for Tenant Management, show Tenants.
+- If role has View Only or higher for Billing & Subscriptions, show Billing.
+- If role has View Only or higher for Feature Matrix / Plans & Features, show Plans & Features.
+- If role has View Only or higher for Commercial Controls / Add-on Governance, show Add-on Catalog / Commercial Controls wherever it appears.
+
+Do not rely only on hardcoded role names for nav visibility.
+
+If the app has route-level AccessGuard:
+- update route/page authorization to consult Global Permissions Matrix
+- do not bypass existing owner/security guards
+- do not break tenant/store routes
+
+If a user navigates directly by URL without permission:
+- show a clean access denied state
+- do not crash
+- do not leak sensitive data
+
+==================================================
+PART C — FIX PAGE-LEVEL ACCESS GATING
+==================================================
+
+Each System Owner page must check its matching parent feature permission.
+
+Examples:
+- Command Center requires view_command_center or parent Command Center View Only+
+- Audit & Security requires view_audit_logs or parent Audit & Security View Only+
+- Support Tools requires view_support_cases or parent Support Tools View Only+
+- Add-on Catalog / Commercial Controls requires view_addon_catalog or parent Commercial Controls View Only+
+- Plans & Features requires view_feature_matrix or parent Feature Matrix View Only+
+
+If permission is missing:
+- hide from sidebar
+- direct route shows clean access denied
+- no broken page
+
+==================================================
+PART D — FIX SUPPORT TOOLS ESCALATION SUB-PERMISSION ENFORCEMENT
+==================================================
+
+This is critical.
+
+Every escalation action must check Global Permissions Matrix sub-permissions.
+
+Actions and required sub-permissions:
+
+Escalate assigned case:
+- escalate_assigned_case
+
+Escalate any case:
+- escalate_any_case
+
+Assign/Reassign escalation owner/team:
+- assign_escalation_owner_team
+
+Acknowledge escalation:
+- acknowledge_escalation
+
+Change escalation level:
+- change_escalation_level
+
+De-escalate:
+- deescalate_support_case
+
+Resolve escalation:
+- resolve_escalation
+
+Close case:
+- close_support_case
+
+Reopen case:
+- reopen_support_case
+
+If sub-permission = None:
+- action must be hidden or disabled
+- no stale modal can bypass
+- no direct handler can bypass
+
+Important:
+Changing sub-permission in Global Permissions Matrix must immediately affect available actions after Dev Session role switch / matrix change event.
+
+Required implementation:
+- create a single final support action permission resolver
+- it must combine:
+  - active Dev Session role
+  - matrix parent permission
+  - matrix sub-permission
+  - assigned-owner/team exception if supported
+  - System Owner permanence
+- the old `can()` matrix cannot override Global Permissions Matrix denial
+- if both systems exist, the stricter result should win unless System Owner Full Access applies
+
+==================================================
+PART E — FIX COMMAND CENTER ACTION GATING
+==================================================
+
+Command Center must respect matrix permissions.
+
+Required:
+- Sidebar visibility follows Command Center View Only+
+- Page access follows Command Center View Only+
+- Tenant 360 requires view_tenant_360
+- Quick Actions require use_command_quick_actions plus target page permission
+- NBA actions require view_next_best_actions and target action permission
+- Pulse item click-throughs require target page permission
+
+If role has Command Center Manage:
+- Command Center must appear in sidebar
+- Command Center must open
+- actions available according to sub-permissions and target permissions
+
+==================================================
+PART F — FIX AUDIT & SECURITY ACTION GATING
+==================================================
+
+Audit & Security must respect matrix permissions.
+
+Required:
+- Sidebar visibility follows Audit & Security View Only+
+- Page access follows view_audit_logs / parent View Only+
+- Export CSV requires export_audit_csv Approve+
+- Add security note requires add_security_note Create+
+- Delete security note requires delete_security_note Approve+
+- Create support case from audit requires:
+  - create_support_case_from_audit
+  - and Support Tools create_support_case
+- Actor profile / related timeline require relevant sub-permissions
+- Escalation lifecycle audit requires view_escalation_lifecycle_audit
+
+If role is granted Audit & Security Manage / Full Access:
+- Audit & Security must appear in sidebar
+- page must open
+- actions must follow sub-permissions
+
+==================================================
+PART G — FIX COMMERCIAL / ADD-ON GOVERNANCE PERMISSION GATING
+==================================================
+
+Commercial Controls / Add-on Governance must respect Global Permissions Matrix.
+
+Required:
+- If parent permission is None, hide Add-on/Commercial sections from sidebar or page tabs where appropriate.
+- If parent permission is View Only, allow view but no mutation.
+- Create/Edit/Archive/Delete/Compatible Plans/Readiness/Implementation Brief/Trial/Paid Override actions must follow sub-permissions.
+
+Add or confirm separate sub-permissions:
+- create_plan
+- edit_plan
+- archive_plan if applicable
+- create_addon
+- edit_addon
+- archive_delete_addon
+- manage_addon_compatible_plans
+- manage_addon_readiness
+- generate_addon_implementation_brief
+- grant_trial
+- grant_paid_override
+- revoke_addon_override
+
+User note:
+There should be a separate permission for creating Plans and creating Add-ons under the related section in Global Permissions Matrix.
+
+Do not break existing Add-on Governance behavior.
+Only add platform permission gates.
+
+==================================================
+PART H — GLOBAL PERMISSIONS MATRIX UX MATURITY
+==================================================
+
+Improve the Global Permissions Matrix design.
+
+Do not make it just a huge flat table.
+
+Benchmark-inspired improvements:
+- role columns remain visible and readable
+- feature rows expandable/collapsible
+- search by feature/sub-permission
+- filter by role
+- filter by sensitive permissions
+- filter by changed/overridden permissions
+- badges/counts for enabled sub-permissions
+- sensitive permission pill
+- effective access preview
+- “why this role can/cannot do this” explanation
+- reset role to default if safe
+- collapse all / expand all
+- sticky header for role columns if practical
+- clear separation between platform and tenant/store permissions
+- modern, clean, premium UI
+
+Add helper text:
+“These permissions control System Owner/platform staff access. Tenant/store employee access is controlled separately by Store Permissions Matrix.”
+
+Add truth label:
+“Platform permissions are UI-enforced in this phase. Server-enforced Platform RBAC, PIM/PAM, temporary access, and access reviews are planned for Phase 1.3.”
+
+Do not overbuild full Phase 1.3.
+
+==================================================
+PART I — ROLE DEFAULTS AND MATRIX OVERRIDES
+==================================================
+
+Ensure role defaults are sensible and matrix overrides work.
+
+Default intent:
+
+System Owner:
+- Full Access to everything
+- locked/read-only
+
+Support Admin:
+- Support Tools Manage/Full
+- Command Center View/Manage
+- Audit & Security View/Create for case-from-audit if intended
+- no Billing mutation by default
+- no Add-on/Feature Matrix mutation by default
+
+Billing Admin:
+- Billing Manage/Full
+- View tenants
+- View Command Center
+- Commercial/Add-on access only if explicitly granted
+- no support escalation by default unless granted
+
+Operations Admin:
+- Tenant/Provisioning/Domains/Command Center Manage
+- Support view/edit if intended
+- no billing/add-on mutation unless granted
+
+Security/Audit Admin:
+- Audit & Security Manage/Full
+- Command Center View/Manage if granted
+- Support create-from-audit if granted
+- no billing/add-on mutation unless granted
+
+If System Owner changes a role permission:
+- the UI must reflect that change
+- sidebar must reflect that change
+- page access must reflect that change
+- actions must reflect that change
+
+==================================================
+PART J — AUDITABILITY
+==================================================
+
+Audit:
+- parent platform permission changed
+- platform sub-permission changed
+- role permission reset if implemented
+- sensitive permission changed
+- support escalation action performed
+- Add-on/Commercial sensitive action performed
+- audit export
+- security note lifecycle
+- support case from audit
+
+Do not duplicate audit rows.
+
+No server PII logging.
+
+==================================================
+PART K — NON-REGRESSION
+==================================================
+
+Do not change:
+- Store Permissions Matrix behavior
+- tenant/store role permissions
+- Tenant Features behavior
+- Shipping behavior
+- POS / Repairs / Inventory / Customers / Invoices / Services
+- tenant provisioning behavior
+- paid override invoice workflow
+- server PII log scrubbing rules
+- existing support case data/lifecycle except permission checks
+- existing escalation lifecycle data except permission checks
+- existing audit export behavior except permission checks
+
+==================================================
+PART L — DOCUMENTATION
+==================================================
+
+Update replit.md with:
+
+- Platform Permission Enforcement Correction
+- Global Permissions Matrix as platform source of truth
+- sidebar/page/action/sub-permission gating
+- removal of Support Tools role badge
+- Dev Session as the role switching path
+- existing seven permission levels preserved
+- Global Permissions Matrix UX improvements
+- Add-on/Commercial permission split including create_plan and create_addon
+- UI-enforced limitation
+- Phase 1.3 future server-side RBAC / PIM / PAM / access reviews
+- next phases remain:
+  - Phase 1.1.3A QA resumes after this correction
+  - Phase 1.1.3B Advanced Command Center Intelligence
+  - Phase 1.1.3C Support Queue / SLA / Macro Maturity
+  - Phase 1.1.3D Audit Investigation Center
+
+==================================================
+OUT OF SCOPE
+==================================================
+
+Do NOT implement:
+- server-enforced RBAC
+- PIM/PAM
+- temporary access
+- access reviews
+- SSO/SCIM
+- on-call schedules
+- external notifications
+- real teams/on-call routing
+- tenant/store permission redesign
+- Phase 1.3 Team Governance
+- Phase 1.4 Automation + Alerts
+- Phase 2 Real Integrations
+- Phase 3 Compliance
+- Phase 4 AI Operations
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Support Tools local Acting As selector remains removed.
+2) Support Tools Active Platform Role badge/card is removed.
+3) Dev Session remains the only role switching/testing path.
+4) Sidebar navigation follows Global Permissions Matrix.
+5) Direct route/page access follows Global Permissions Matrix.
+6) Command Center appears when role has Command Center View Only+.
+7) Audit & Security appears when role has Audit & Security View Only+.
+8) Support Tools appears when role has Support Tools View Only+.
+9) Add-on/Commercial sections follow Commercial Controls/Add-on Governance permissions.
+10) Support escalation actions obey Global Permissions Matrix sub-permissions.
+11) Setting deescalate_support_case to None disables/hides De-escalate.
+12) Setting resolve_escalation to None disables/hides Resolve Escalation.
+13) Setting acknowledge_escalation to None disables/hides Acknowledge.
+14) Sub-permission changes immediately affect action availability.
+15) Old hardcoded can() matrix cannot override a Global Permissions Matrix denial.
+16) Permission-denied actions are hidden where safe or disabled with minimal explanation.
+17) Existing seven permission levels are preserved.
+18) Create Plan and Create Add-on are separate permissions.
+19) Global Permissions Matrix UI is more modern, searchable/filterable, and usable.
+20) Platform vs Store permission separation remains clear.
+21) Platform permission changes are audited.
+22) Existing Add-on Governance behavior remains intact except platform gates.
+23) Existing Shipping Module remains intact.
+24) Existing Store Permissions Matrix remains intact.
+25) Existing tenant provisioning remains intact.
+26) Server PII logging rules are not regressed.
+27) replit.md is updated.
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+==================================================
+
+Follow this order:
+
+1) Inspect sidebar/navigation and route AccessGuard logic.
+2) Inspect Global Permissions Matrix storage and helpers.
+3) Inspect Support Tools escalation action gating.
+4) Inspect Command Center and Audit & Security page gating.
+5) Inspect Add-on/Commercial page gating.
+6) Build one final platform permission resolver used by nav, page, and actions.
+7) Remove Support Tools Active Platform Role card.
+8) Wire sidebar and route/page access to matrix.
+9) Wire Support escalation actions to matrix sub-permissions.
+10) Wire Add-on/Commercial actions to matrix sub-permissions.
+11) Improve Global Permissions Matrix UX.
+12) Confirm Store Permissions Matrix is untouched.
+13) Add/update audit events.
+14) Update replit.md.
+15) Run typecheck and smoke tests.
+16) Provide final report.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Root Cause
+3. Sidebar / Route Permission Fix
+4. Support Tools Escalation Permission Fix
+5. Audit & Security / Command Center Permission Fix
+6. Commercial / Add-on Governance Permission Fix
+7. Global Permissions Matrix UX Improvements
+8. Auditability
+9. Files Changed
+10. Documentation Updated
+11. Non-Regression Notes
