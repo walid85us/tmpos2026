@@ -699,6 +699,11 @@ const CommandCenterPage: React.FC = () => {
   return (
     <div className="space-y-8">
       {/* ============== MISSION CONTROL HEADER (Phase 1.1.1 UX Correction) ============== */}
+      {/* Section-level gate: Mission Control hero is the page-level overview.
+          When parent view_command_center is None and only a child section is
+          permitted (e.g. view_needs_attention=View Only), this header MUST
+          stay hidden so only the explicitly granted child section renders. */}
+      {viewPageGate.allowed && (
       <section
         className={`relative overflow-hidden rounded-[2.5rem] border shadow-sm ${MISSION_HERO_STYLES[overall.state]}`}
         data-testid="mission-control-hero"
@@ -831,6 +836,7 @@ const CommandCenterPage: React.FC = () => {
           </p>
         </div>
       </section>
+      )}
 
       {/* ============== OPERATIONAL PULSE STRIP ============== */}
       {viewPulseGate.allowed && (
@@ -866,6 +872,10 @@ const CommandCenterPage: React.FC = () => {
       )}
 
       {/* ============== WIDGET GRID (8 widgets) ============== */}
+      {/* Section-level gate: widgets are part of the page overview, gated by
+          the parent view_command_center permission. Hidden when the page is
+          only reachable via an unrelated child grant. */}
+      {viewPageGate.allowed && (
       <section className="space-y-3">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <h3 className="text-sm font-black text-primary uppercase tracking-widest">Operational Widgets</h3>
@@ -936,6 +946,7 @@ const CommandCenterPage: React.FC = () => {
           </ListWidget>
         </div>
       </section>
+      )}
 
       {/* ============== NEXT BEST ACTIONS (Phase 1.1.2 — tiered) ============== */}
       {viewNbaGate.allowed && (
@@ -998,6 +1009,10 @@ const CommandCenterPage: React.FC = () => {
       )}
 
       {/* ============== QUICK ACTIONS (preserved) ============== */}
+      {/* Section-level gate: hides the entire quick-action bar when
+          use_command_quick_actions is None. Per-button checks remain as a
+          defense-in-depth so destination feature permissions still apply. */}
+      {useQuickActionsGate.allowed && (
       <div className="bg-white/80 backdrop-blur-xl p-4 rounded-[2rem] border border-slate-200 shadow-sm flex flex-wrap gap-2 items-center">
         <span className="px-3 py-1 text-[10px] font-black uppercase tracking-widest text-slate-400">
           Quick actions
@@ -1032,6 +1047,7 @@ const CommandCenterPage: React.FC = () => {
           });
         })()}
       </div>
+      )}
 
       {/* ============== NEEDS ATTENTION (preserved) ============== */}
       {viewNeedsAttentionGate.allowed && (
@@ -1126,6 +1142,10 @@ const CommandCenterPage: React.FC = () => {
       )}
 
       {/* ============== TENANT RISK SUMMARY (preserved + Tenant 360 link) ============== */}
+      {/* Section-level gate: tenant risk summary is page-overview content
+          and contains tenant data. Hidden when the page is only reachable
+          via an unrelated child grant (e.g. view_needs_attention only). */}
+      {viewPageGate.allowed && (
       <section className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
         <div className="px-8 py-5 border-b border-slate-100 flex items-center justify-between flex-wrap gap-2">
           <div>
@@ -1187,8 +1207,11 @@ const CommandCenterPage: React.FC = () => {
           </tbody>
         </table>
       </section>
+      )}
 
       {/* ============== WORKFLOW HEALTH (preserved) ============== */}
+      {/* Section-level gate: workflow health is page-overview content. */}
+      {viewPageGate.allowed && (
       <section className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
         <div className="px-8 py-5 border-b border-slate-100 flex items-center justify-between flex-wrap gap-2">
           <div>
@@ -1207,8 +1230,11 @@ const CommandCenterPage: React.FC = () => {
           ))}
         </div>
       </section>
+      )}
 
       {/* ============== HOW RISK IS DERIVED (preserved) ============== */}
+      {/* Section-level gate: explanatory legend lives with the page overview. */}
+      {viewPageGate.allowed && (
       <section className="bg-white/60 backdrop-blur-xl rounded-2xl border border-slate-200 p-6">
         <h3 className="text-xs font-black text-primary uppercase tracking-widest mb-3">
           How risk &amp; flags are derived
@@ -1228,8 +1254,11 @@ const CommandCenterPage: React.FC = () => {
           />
         </div>
       </section>
+      )}
 
       {/* ============== LEGEND ============== */}
+      {/* Section-level gate: legend explains page-overview metrics. */}
+      {viewPageGate.allowed && (
       <div className="text-[10px] text-slate-400 font-bold uppercase tracking-widest flex flex-wrap gap-3 items-center">
         <span>Legend:</span>
         {(['critical', 'high_risk', 'needs_review'] as Exclude<HighRiskFlag, null>[]).map(f => (
@@ -1243,6 +1272,7 @@ const CommandCenterPage: React.FC = () => {
           </span>
         ))}
       </div>
+      )}
 
       {/* ============== TENANT 360 DRAWER ============== */}
       {tenant360 && (

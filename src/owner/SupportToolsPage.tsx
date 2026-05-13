@@ -452,6 +452,10 @@ const SupportToolsPage: React.FC = () => {
 
   const changeStatus = (c: SupportCaseRecord, next: SupportCaseStatus) => {
     if (c.status === next) return;
+    // Handler-level matrix check: status changes require change_support_status
+    // (Edit threshold). Stale UI / dropdown selection cannot bypass.
+    const perm = hasPlatformPermission(sessionRole, 'change_support_status');
+    if (!perm.allowed) { console.warn("[support-tools] permission denied:", perm.reason); return; }
     const nowIso = new Date().toISOString();
     const notes: SupportCaseNote[] = [...(c.notes || []), {
       id: `cn_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
@@ -518,6 +522,10 @@ const SupportToolsPage: React.FC = () => {
 
   const changeSeverity = (c: SupportCaseRecord, next: SupportCaseSeverity) => {
     if (c.severity === next) return;
+    // Handler-level matrix check: severity changes require
+    // change_support_severity (Edit threshold).
+    const perm = hasPlatformPermission(sessionRole, 'change_support_severity');
+    if (!perm.allowed) { console.warn("[support-tools] permission denied:", perm.reason); return; }
     updateCase(c.id, { severity: next });
     pushPlatformAudit({
       actor: 'System Owner',
@@ -534,6 +542,9 @@ const SupportToolsPage: React.FC = () => {
   const changeAssignee = (c: SupportCaseRecord, next: string) => {
     const assignee = next.trim() || null;
     if (assignee === c.assignee) return;
+    // Handler-level matrix check: assignment requires assign_support_case.
+    const perm = hasPlatformPermission(sessionRole, 'assign_support_case');
+    if (!perm.allowed) { console.warn("[support-tools] permission denied:", perm.reason); return; }
     updateCase(c.id, { assignee });
     pushPlatformAudit({
       actor: 'System Owner',
@@ -1334,13 +1345,25 @@ const SupportToolsPage: React.FC = () => {
                       <p className="text-xs font-bold mt-1.5 leading-snug">{selected.escalationReason}</p>
                     )}
                   </div>
-                  <button
-                    onClick={() => deescalateCase(selected)}
-                    className="px-3 py-1.5 bg-white/15 hover:bg-white/25 text-[10px] font-black uppercase tracking-widest rounded-lg backdrop-blur-sm transition-colors whitespace-nowrap"
-                    data-testid="support-case-deescalate-banner"
-                  >
-                    De-escalate
-                  </button>
+                  {(() => {
+                    // De-escalate banner button: hidden when permission is
+                    // missing (per spec — Request De-escalation flow is
+                    // documented as future scope and kept out of this pass).
+                    // When granted, the button opens the confirmation modal
+                    // with a required reason — never calls deescalateCase
+                    // directly, so confirmation is always enforced.
+                    const deescPerm = hasPlatformPermission(sessionRole, 'deescalate_support_case');
+                    if (!deescPerm.allowed) return null;
+                    return (
+                      <button
+                        onClick={() => setDeescalateModal(selected)}
+                        className="px-3 py-1.5 bg-white/15 hover:bg-white/25 text-[10px] font-black uppercase tracking-widest rounded-lg backdrop-blur-sm transition-colors whitespace-nowrap"
+                        data-testid="support-case-deescalate-banner"
+                      >
+                        De-escalate
+                      </button>
+                    );
+                  })()}
                 </div>
               )}
               {/* Phase 1.1.2 — case detail header summary band: SLA + escalation
@@ -1386,22 +1409,49 @@ const SupportToolsPage: React.FC = () => {
               </div>
               <div className="p-7 space-y-5">
                 <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Status</label>
-                    <select value={selected.status} onChange={e => changeStatus(selected, e.target.value as SupportCaseStatus)} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700">
-                      {(['open', 'in_progress', 'waiting_customer', 'resolved', 'closed'] as SupportCaseStatus[]).map(s => (
-                        <option key={s} value={s}>{STATUS_LABELS[s]}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Severity</label>
-                    <select value={selected.severity} onChange={e => changeSeverity(selected, e.target.value as SupportCaseSeverity)} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700">
-                      {(['low', 'normal', 'high', 'urgent'] as SupportCaseSeverity[]).map(s => (
-                        <option key={s} value={s}>{s}</option>
-                      ))}
-                    </select>
-                  </div>
+                  {(() => {
+                    // Section/UI-level matrix gates for status & severity.
+                    // Selects render disabled (with reason tooltip) when the
+                    // matching child sub-permission is not satisfied; the
+                    // handlers above also re-check the permission so a stale
+                    // DOM cannot bypass the gate.
+                    const statusPerm = hasPlatformPermission(sessionRole, 'change_support_status');
+                    const severityPerm = hasPlatformPermission(sessionRole, 'change_support_severity');
+                    return (
+                      <>
+                        <div>
+                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Status</label>
+                          <select
+                            value={selected.status}
+                            onChange={e => changeStatus(selected, e.target.value as SupportCaseStatus)}
+                            disabled={!statusPerm.allowed}
+                            title={statusPerm.allowed ? '' : statusPerm.reason}
+                            data-testid="support-case-status-select"
+                            className={`w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 ${!statusPerm.allowed ? 'opacity-60 cursor-not-allowed' : ''}`}
+                          >
+                            {(['open', 'in_progress', 'waiting_customer', 'resolved', 'closed'] as SupportCaseStatus[]).map(s => (
+                              <option key={s} value={s}>{STATUS_LABELS[s]}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Severity</label>
+                          <select
+                            value={selected.severity}
+                            onChange={e => changeSeverity(selected, e.target.value as SupportCaseSeverity)}
+                            disabled={!severityPerm.allowed}
+                            title={severityPerm.allowed ? '' : severityPerm.reason}
+                            data-testid="support-case-severity-select"
+                            className={`w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 ${!severityPerm.allowed ? 'opacity-60 cursor-not-allowed' : ''}`}
+                          >
+                            {(['low', 'normal', 'high', 'urgent'] as SupportCaseSeverity[]).map(s => (
+                              <option key={s} value={s}>{s}</option>
+                            ))}
+                          </select>
+                        </div>
+                      </>
+                    );
+                  })()}
                   <div className="col-span-2">
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Assignee</label>
                     <input
@@ -2067,20 +2117,27 @@ const SupportToolsPage: React.FC = () => {
                 <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mt-1">{deescalateModal.id} · {deescalateModal.subject}</p>
               </div>
               <div className="p-6 space-y-3">
-                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Reason / context (optional)</label>
+                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">
+                  Reason <span className="text-red-500">*</span> required
+                </label>
                 <textarea
                   value={deescalateDraft.note}
                   onChange={e => setDeescalateDraft({ note: e.target.value })}
                   data-testid="support-deesc-note"
+                  placeholder="Describe why this case is being de-escalated…"
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 h-24 resize-none"
                 />
+                {!deescalateDraft.note.trim() && (
+                  <p className="text-[10px] font-bold text-slate-400">Confirm is disabled until a reason is provided.</p>
+                )}
               </div>
               <div className="p-5 border-t border-slate-100 bg-slate-50/40 flex justify-end gap-2">
                 <button onClick={() => setDeescalateModal(null)} className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-white">Cancel</button>
                 <button
                   onClick={() => { deescalateCase(deescalateModal); setDeescalateModal(null); }}
+                  disabled={!deescalateDraft.note.trim()}
                   data-testid="support-deesc-confirm"
-                  className="px-6 py-2.5 bg-violet-600 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-violet-700"
+                  className="px-6 py-2.5 bg-violet-600 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-violet-700 disabled:bg-slate-300 disabled:cursor-not-allowed"
                 >
                   De-escalate
                 </button>

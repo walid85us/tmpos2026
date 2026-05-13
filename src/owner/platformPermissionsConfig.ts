@@ -610,3 +610,167 @@ export const PLATFORM_ROLE_DISPLAY_LABEL: Record<Role, string> = {
   technician: 'Technician',
   sales_staff: 'Sales Staff',
 };
+
+// ---------------------------------------------------------------------------
+// Unified Effective Access Resolver — section/action level explainability.
+//
+// Per the IAM/RBAC hardening spec, the matrix is the single source of truth
+// for sidebar visibility, page/route access, section/widget visibility, and
+// action/handler authorization. These helpers expose a uniform shape so
+// every gate decision is explainable, auditable, and testable.
+//
+// Source values:
+//   system_owner          — System Owner is locked Full Access.
+//   explicit_child        — Child sub-permission overridden in session storage.
+//   explicit_parent       — Parent feature overridden in session storage.
+//   default_parent        — Inherited from parent feature default level
+//                           (sub-permissions have no per-child default).
+//   denied_explicit_child — Explicit child None blocks action even if parent grants.
+//   denied_no_access      — No effective access at all.
+// ---------------------------------------------------------------------------
+
+export type AccessDecisionSource =
+  | 'system_owner'
+  | 'explicit_child'
+  | 'explicit_parent'
+  | 'default_parent'
+  | 'denied_explicit_child'
+  | 'denied_no_access';
+// Note: `default_child` is intentionally absent — sub-permissions inherit
+// from the parent feature default (no per-child default level is stored on
+// the def), so `default_parent` is the correct source label whenever the
+// effective level comes from `DEFAULT_PLATFORM_FEATURE_LEVELS`.
+
+export interface AccessDecision {
+  allowed: boolean;
+  effectiveLevel: PermissionLevel;
+  source: AccessDecisionSource;
+  reason: string;
+  threshold: PermissionLevel;
+}
+
+/**
+ * Returns the highest effective access level for a feature, considering
+ * parent + every child sub-permission. Used for sidebar/page-level visibility
+ * where any permitted child may grant access.
+ */
+export function getEffectiveFeatureAccess(
+  role: Role | undefined | null,
+  featureKey: PlatformFeatureKey,
+  overrides?: PlatformPermissionsOverrides
+): PermissionLevel {
+  if (!role) return 'none';
+  if (role === 'system_owner') return 'full';
+  const ov = overrides ?? readPlatformPermissionsOverrides();
+  let highest = getPlatformFeatureLevel(role, featureKey, ov);
+  if (highest === 'full') return highest;
+  const group = FEATURE_BY_KEY.get(featureKey);
+  if (!group) return highest;
+  for (const sp of group.subPermissions) {
+    const sl = getPlatformSubPermissionLevel(role, sp.id, ov);
+    if (LEVEL_RANK[sl] > LEVEL_RANK[highest]) {
+      highest = sl;
+    }
+  }
+  return highest;
+}
+
+/**
+ * Section/widget visibility — checks the EXACT child sub-permission against
+ * its threshold. Independent of parent feature level so that an explicit child
+ * grant (e.g. view_needs_attention=View Only with parent=None) reveals only
+ * that section and nothing else on the page.
+ */
+export function hasSectionAccess(
+  role: Role | undefined | null,
+  subKey: string,
+  overrides?: PlatformPermissionsOverrides
+): AccessDecision {
+  return explainAccessDecision(role, subKey, overrides);
+}
+
+/**
+ * Action/handler authorization — same semantics as hasSectionAccess but
+ * named for clarity at the call site for mutations / workflow transitions.
+ * Every mutation handler must call this (matrix is sole source of truth;
+ * UI button state alone is not sufficient).
+ */
+export function hasActionAccess(
+  role: Role | undefined | null,
+  subKey: string,
+  overrides?: PlatformPermissionsOverrides
+): AccessDecision {
+  return explainAccessDecision(role, subKey, overrides);
+}
+
+/**
+ * Returns a structured explanation of a permission decision, including the
+ * effective level and the source that produced it. Used by the matrix
+ * Effective Access Preview, debug logs, and gate tooltips.
+ */
+export function explainAccessDecision(
+  role: Role | undefined | null,
+  subKey: string,
+  overrides?: PlatformPermissionsOverrides
+): AccessDecision {
+  const sub = SUB_LOOKUP.get(subKey);
+  if (!sub) {
+    return {
+      allowed: false,
+      effectiveLevel: 'none',
+      source: 'denied_no_access',
+      reason: `Unknown platform permission "${subKey}".`,
+      threshold: 'view',
+    };
+  }
+  const threshold = sub.def.threshold;
+  if (!role) {
+    return {
+      allowed: false,
+      effectiveLevel: 'none',
+      source: 'denied_no_access',
+      reason: 'No active session.',
+      threshold,
+    };
+  }
+  if (role === 'system_owner') {
+    return {
+      allowed: true,
+      effectiveLevel: 'full',
+      source: 'system_owner',
+      reason: 'System Owner has Full Access (locked).',
+      threshold,
+    };
+  }
+  const ov = overrides ?? readPlatformPermissionsOverrides();
+  // Detect explicit child vs default child.
+  const explicitChild = ov[role]?.subs?.[subKey];
+  const explicitParent = ov[role]?.features?.[sub.feature];
+  let source: AccessDecisionSource;
+  let effectiveLevel: PermissionLevel;
+  if (explicitChild !== undefined) {
+    effectiveLevel = explicitChild;
+    source = explicitChild === 'none' ? 'denied_explicit_child' : 'explicit_child';
+  } else if (explicitParent !== undefined) {
+    effectiveLevel = explicitParent;
+    source = 'explicit_parent';
+  } else {
+    // No explicit override — fall back to the spec default for the parent
+    // feature (sub-permissions inherit their parent's role default).
+    effectiveLevel = (DEFAULT_PLATFORM_FEATURE_LEVELS[role]?.[sub.feature]) || 'none';
+    source = 'default_parent';
+  }
+  const allowed = platformPermissionMeets(effectiveLevel, threshold);
+  if (!allowed && source !== 'denied_explicit_child') {
+    if (effectiveLevel === 'none') source = 'denied_no_access';
+  }
+  return {
+    allowed,
+    effectiveLevel,
+    source,
+    reason: allowed
+      ? `${PLATFORM_PERMISSION_LEVEL_LABEL[effectiveLevel]} (${source.replace(/_/g, ' ')})`
+      : `${PLATFORM_PERMISSION_LEVEL_LABEL[threshold]} or higher required for ${sub.def.label}; current level is ${PLATFORM_PERMISSION_LEVEL_LABEL[effectiveLevel]} (${source.replace(/_/g, ' ')}).`,
+    threshold,
+  };
+}

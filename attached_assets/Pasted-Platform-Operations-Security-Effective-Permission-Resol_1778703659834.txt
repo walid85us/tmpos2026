@@ -1,0 +1,624 @@
+Platform Operations & Security — Effective Permission Resolver Final Hardening + Least-Privilege Enforcement
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict correction pass.
+
+Do not continue Phase 1.1.3A QA until this is fixed.
+Do not implement Phase 1.1.3B, 1.1.3C, 1.1.3D, Phase 1.2, Phase 1.3, Phase 1.4, Phase 2, Phase 3, or Phase 4.
+
+Fix the remaining platform permission defects so the Global Permissions Matrix behaves like a professional RBAC/IAM system.
+
+This pass must not only fix the exact tested examples. Replit must audit all currently wired platform permissions and actions to ensure the same rule is applied everywhere.
+
+==================================================
+ROLE STACK — ADD TO PROJECT KNOWLEDGE / SKILLS
+==================================================
+
+Before implementation, add this workstream role model to project knowledge / skills and act on it.
+
+Act as:
+- Identity and Access Management (IAM) Specialist
+- IAM Analyst
+- Access Analyst
+- Website Administrator / Governance Lead
+- Senior Role-Based Access Control (RBAC) Architect
+- Senior Platform Team Governance Leader
+- Senior System Administrator
+- Senior Platform Operations Architect
+- Senior Support Tools Engineer
+- Senior Audit & Security Engineer
+- Senior React/TypeScript Engineer
+- QA Gatekeeper
+- Systems Thinker
+- Side Auditor
+
+Use these roles actively.
+
+Key responsibilities:
+- defining and mapping roles
+- enforcing least privilege
+- validating effective access
+- auditing and compliance
+- managing user lifecycle readiness
+- troubleshooting permission inheritance and explicit-deny issues
+- separating subjects, objects, and permissions
+- ensuring precise permission settings without security gaps
+
+Subjects:
+- Dev Session active platform role
+- platform roles
+- future platform team members
+
+Objects:
+- sidebar modules
+- pages/routes
+- sections
+- widgets
+- action buttons
+- support cases
+- escalation actions
+- audit logs
+- commercial/add-on controls
+
+Permissions:
+- None
+- View Only
+- Create
+- Edit
+- Approve
+- Manage
+- Full Access
+
+==================================================
+CURRENT QA FAILURES TO FIX
+==================================================
+
+Manual QA failed on the following:
+
+1) Sidebar uses effective feature visibility — PASS partially
+Observed:
+- If child permissions are set to None, the tab can still show.
+Expected:
+- If parent permission is None AND all children are None, sidebar tab must disappear.
+- If parent permission is View Only+ OR at least one child is View Only+, the sidebar can appear.
+- But the page must only show the permitted sections/actions.
+
+2) Child permission can make feature visible — FAIL
+Observed:
+- Parent Command Center set to None.
+- One child permission, View Needs Attention, set to View Only.
+- User can see the entire Command Center.
+Expected:
+- Child permission may make the feature/page visible.
+- But it must only reveal the permitted child section.
+- Example:
+  - Parent Command Center = None
+  - view_needs_attention = View Only
+  - Result:
+    - Command Center appears.
+    - Needs Attention section appears.
+    - Mission Control, Operational Pulse, Tenant 360, NBA, widgets, quick actions, etc. should be hidden unless separately permitted.
+
+3) Command Center NBA view permission works — FAIL
+Observed:
+- NBA set to None.
+- User can still see NBA and click Open.
+Expected:
+- view_next_best_actions None hides the NBA list.
+- act_on_nba_recommendations None disables/hides action buttons.
+- If target page permission is missing, action must not route loosely to overview or another fallback page.
+
+4) De-escalate follows sub-permission — PASS partially
+Observed:
+- Full Access works.
+- If role has None/View Only, De-escalate should disappear or provide a request workflow.
+Expected:
+- If deescalate_support_case is None or below required threshold:
+  - Hide De-escalate action where safe.
+  - Or show a “Request De-escalation” path if the user has view/support-note permission.
+- Add in-app confirmation before actual De-escalate.
+
+5) Child None denies specific action — FAIL
+Observed:
+- create case was fixed.
+- But Change Case Status and Change Case Severity set to None still allowed status/severity changes.
+Expected:
+- Every child action must check its exact sub-permission.
+- change_support_status None must block status changes.
+- change_support_severity None must block severity changes.
+- Replit must review all Support Tools, Audit, Command Center, and Add-on actions, not just these examples.
+
+6) Permission level logic needs to be more professional
+Expected:
+- Parent None + all children None = no sidebar/page.
+- Parent None + one child View Only+ = page appears but only that child section is visible.
+- Child None = hide/block that child action/section.
+- Create cannot edit.
+- Edit cannot approve.
+- Approve/Manage/Full Access can approve-sensitive actions depending action threshold.
+- Explicit child None wins over parent Manage/Full, except System Owner permanence if that is the current app rule.
+
+7) Reset to Defaults already passed and must remain confirmed.
+
+==================================================
+CRITICAL IAM / RBAC DESIGN RULE
+==================================================
+
+Implement a final least-privilege effective access model.
+
+Do not treat feature visibility and section/action access as the same thing.
+
+There are four levels of access checks:
+
+1) Sidebar visibility
+2) Page/route access
+3) Section/widget visibility
+4) Action/button/handler authorization
+
+Each must be evaluated correctly.
+
+--------------------------------------------------
+A) Sidebar visibility
+--------------------------------------------------
+
+A sidebar item appears if:
+- parent permission is View Only or higher
+OR
+- any child sub-permission under that feature is View Only or higher
+OR
+- System Owner Full Access applies
+
+If parent is None and all children are None:
+- sidebar item must disappear.
+
+--------------------------------------------------
+B) Page/route access
+--------------------------------------------------
+
+A direct page route opens if:
+- parent permission is View Only or higher
+OR
+- at least one page-relevant child permission is View Only or higher
+OR
+- System Owner Full Access applies
+
+If no effective access:
+- show clean Access Denied.
+- do not leak page data.
+
+--------------------------------------------------
+C) Section/widget visibility
+--------------------------------------------------
+
+This is the missing piece.
+
+A page may open because one child permission grants access.
+But each section/widget must check its own permission.
+
+Example:
+Command Center:
+- view_operational_pulse controls Operational Pulse.
+- view_needs_attention controls Needs Attention.
+- view_tenant_360 controls Tenant 360 click-throughs.
+- view_next_best_actions controls NBA list.
+- act_on_nba_recommendations controls NBA action buttons.
+- use_command_quick_actions controls quick actions.
+
+If only view_needs_attention is granted:
+- show only Needs Attention section.
+- hide all other Command Center sections.
+
+--------------------------------------------------
+D) Action/button/handler authorization
+--------------------------------------------------
+
+Every mutation or workflow action must check its exact sub-permission.
+
+Examples:
+- change_support_status controls status dropdown/save.
+- change_support_severity controls severity dropdown/save.
+- assign_support_case controls assignment.
+- add_internal_support_note controls adding internal notes.
+- use_support_macro controls macro insertion.
+- deescalate_support_case controls de-escalation.
+- resolve_escalation controls resolve escalation.
+- grant_trial controls Grant Trial / End Trial.
+- grant_paid_override controls Paid Override.
+- revoke_addon_override controls Revoke / End / Re-grant paid override.
+
+UI button state is not enough.
+Handlers must also check permission.
+
+==================================================
+PERMISSION LEVEL HIERARCHY
+==================================================
+
+Preserve exactly:
+
+- None
+- View Only
+- Create
+- Edit
+- Approve
+- Manage
+- Full Access
+
+Threshold behavior:
+- View Only satisfies View Only
+- Create satisfies View Only + Create
+- Edit satisfies View Only + Create + Edit
+- Approve satisfies View Only + Create + Edit + Approve
+- Manage satisfies View Only + Create + Edit + Approve + Manage
+- Full Access satisfies all
+
+Least privilege:
+- Create does not allow editing existing records.
+- Edit does not allow approval-sensitive transitions.
+- Approve allows approval-sensitive workflow transitions.
+- Manage allows broad operational management.
+- Full Access allows all actions.
+- Explicit child None denies that child action/section even if parent is Manage/Full, except System Owner permanence if current design requires it.
+
+==================================================
+PART A — BUILD / FIX ONE EFFECTIVE ACCESS RESOLVER
+==================================================
+
+Create or correct one shared resolver used everywhere.
+
+Recommended helper concepts:
+- getEffectiveFeatureAccess(role, featureKey)
+- hasEffectiveFeatureAccess(role, featureKey)
+- hasSectionAccess(role, featureKey, childKey, threshold)
+- hasActionAccess(role, featureKey, childKey, threshold)
+- explainAccessDecision(role, featureKey, childKey, threshold)
+
+The resolver must return:
+- allowed: boolean
+- effectiveLevel
+- source:
+  - system_owner
+  - explicit_child
+  - explicit_parent
+  - default_child
+  - default_parent
+  - denied_explicit_child
+  - denied_no_access
+- reason text
+
+Rules:
+- Sidebar/page can use parent OR any child.
+- Sections/widgets use their own child permission.
+- Actions use exact child permission.
+- Explicit child None denies the child section/action.
+- Child Full Access grants that specific action even if parent is View Only or None, as long as page access is established by child permission.
+- Old hardcoded role logic cannot override the matrix.
+
+==================================================
+PART B — COMMAND CENTER SECTION-LEVEL GATING
+==================================================
+
+Fix Command Center.
+
+Required:
+
+view_command_center:
+- controls base page access / overview if applicable
+
+view_operational_pulse:
+- None = hide Operational Pulse
+
+view_needs_attention:
+- None = hide Needs Attention
+- View Only+ = show Needs Attention
+
+view_tenant_360:
+- None = hide/disable Tenant 360 click-throughs
+- View Only+ = allow Tenant 360 read-only drawer
+
+view_next_best_actions:
+- None = hide Next Best Actions list entirely
+- View Only+ = show NBA list
+
+act_on_nba_recommendations:
+- None = hide/disable action buttons inside NBA
+- Edit or threshold-defined level = allow action buttons
+
+use_command_quick_actions:
+- None = hide quick actions
+- appropriate level = show quick actions, still respecting target page permissions
+
+No unauthorized fallback navigation:
+- If user clicks a blocked/unauthorized action, do not route to overview or unrelated page.
+- If target page permission missing, action should be hidden/disabled.
+
+QA expectation:
+- Parent Command Center None + view_needs_attention View Only shows only Needs Attention.
+- NBA None hides NBA.
+- NBA action None disables/hides action buttons.
+
+==================================================
+PART C — SUPPORT TOOLS ACTION-LEVEL GATING AUDIT
+==================================================
+
+Audit all Support Tools actions.
+
+Do not only fix De-escalate / Resolve / Acknowledge.
+
+Required exact checks:
+
+view_support_cases:
+- controls page/list access
+
+create_support_case:
+- controls New Case
+
+edit_support_case:
+- controls editing general case fields
+
+change_support_status:
+- controls status dropdown/save
+
+change_support_severity:
+- controls severity dropdown/save
+
+assign_support_case:
+- controls assignment
+
+add_internal_support_note:
+- controls add note
+
+use_support_macro:
+- controls macro insertion
+
+manage_support_macros:
+- controls macro management if present
+
+view_support_sla:
+- controls SLA visibility if separated
+
+view_support_tenant_health:
+- controls tenant health panel
+
+view_support_related_entities:
+- controls related entities panel
+
+escalate_assigned_case:
+- controls escalating assigned case
+
+escalate_any_case:
+- controls escalating any case
+
+assign_escalation_owner_team:
+- controls escalation owner/team assignment
+
+acknowledge_escalation:
+- controls acknowledge escalation
+
+change_escalation_level:
+- controls change escalation level
+
+deescalate_support_case:
+- controls de-escalate
+
+resolve_escalation:
+- controls resolve escalation
+
+close_support_case:
+- controls close case
+
+reopen_support_case:
+- controls reopen case
+
+Handler-level checks:
+- every mutation handler must call the resolver.
+- stale modals cannot bypass.
+- dropdown changes must not save if permission is missing.
+- status/severity saves must check permission.
+
+UI behavior:
+- hide unavailable buttons where safe.
+- for fields/dropdowns, render read-only when permission missing.
+- use minimal tooltip/helper only where needed.
+
+==================================================
+PART D — DE-ESCALATION CONFIRMATION + REQUEST OPTION
+==================================================
+
+Add in-app confirmation for actual De-escalate.
+
+Required:
+- User clicks De-escalate.
+- Confirmation modal appears.
+- Reason is required.
+- Cancel does nothing.
+- Confirm performs de-escalation.
+- Audit row emitted once.
+
+For users without deescalate_support_case but with support view/note permission:
+- optional but preferred:
+  show “Request De-escalation” instead of De-escalate.
+- Request should:
+  - add an internal note or escalation history entry
+  - audit support_case_deescalation_requested or equivalent
+  - surface to users with de-escalation permission if practical
+- If this is too much for this correction, document as future and hide De-escalate completely.
+
+Do not implement external notifications.
+
+==================================================
+PART E — AUDIT & SECURITY SECTION/ACTION GATING
+==================================================
+
+Audit & Security must obey section/action permissions.
+
+Required:
+- view_audit_logs None hides audit table/log data.
+- view_actor_profile None hides actor profile.
+- view_related_event_timeline None hides related timeline.
+- view_restricted_audit_details None hides restricted/sensitive details.
+- export_audit_csv None hides/disables export.
+- add_security_note None hides add note.
+- delete_security_note None hides delete note.
+- create_support_case_from_audit None hides create case from audit.
+- view_escalation_lifecycle_audit None hides escalation lifecycle lens if separated.
+
+If parent Audit & Security None + view_audit_logs View Only:
+- page may appear and show audit logs only.
+- other sections/actions remain hidden unless permitted.
+
+==================================================
+PART F — COMMERCIAL / ADD-ON SECTION/ACTION GATING
+==================================================
+
+Audit all Add-on/Commercial actions.
+
+Required:
+- grant_trial None blocks Grant Trial and End Trial.
+- grant_paid_override None blocks Paid Override / Re-grant Paid where applicable.
+- revoke_addon_override None blocks Revoke / End paid override where applicable.
+- create_addon controls Create Add-on.
+- edit_addon controls Edit Add-on.
+- create_plan controls Create Plan.
+- edit_plan controls Edit Plan.
+- archive/delete controls archive/delete.
+- manage_addon_compatible_plans controls compatible plans.
+- manage_addon_readiness controls readiness.
+- generate_addon_implementation_brief controls brief generation/copy if treated as action.
+
+Parent None + all children None:
+- hide Add-on/Commercial tab/section.
+
+Parent None + one child View Only+:
+- show only relevant allowed section/action.
+
+==================================================
+PART G — MATRIX UX / EFFECTIVE ACCESS PREVIEW
+==================================================
+
+Improve effective access preview so System Owner can understand:
+
+- Parent None + child grant means feature visible but only that child section/action is available.
+- Child None explicitly denies the specific section/action.
+- Create cannot edit.
+- Edit cannot approve.
+- System Owner is locked Full Access.
+
+Preserve:
+- reset confirmation
+- search/filter
+- expand/collapse
+- sticky header
+- audit of changes
+
+==================================================
+PART H — AUDITABILITY
+==================================================
+
+Audit:
+- permission changes
+- reset to defaults
+- successful sensitive actions
+- de-escalation confirmation
+- de-escalation request if implemented
+
+Do not duplicate audit rows.
+Do not log PII to server logs.
+
+==================================================
+PART I — NON-REGRESSION
+==================================================
+
+Do not change:
+- Store Permissions Matrix
+- tenant/store permissions
+- Shipping
+- POS / Repairs / Inventory / Customers / Invoices / Services
+- Tenant Features except platform gates already scoped
+- tenant provisioning
+- paid override invoice workflow except platform gates
+- server PII log-scrubbing
+- support case data model except permission checks
+- escalation lifecycle data except confirmation/request if implemented
+
+==================================================
+PART J — FUTURE NOTE — TENANT PROVISIONING
+==================================================
+
+Do not implement this now.
+
+Add a small planning note in replit.md if appropriate:
+Future tenant provisioning maturity should be handled by roles such as:
+- Tenant Provisioning Specialist
+- Onboarding Specialist
+- Technical Account Manager
+- Implementation Specialist
+- SaaS Operations Specialist
+- Provisioning Technician
+- Customer Success Engineer
+
+Future scope:
+- technical setup
+- data migration
+- tenant configuration
+- API/database/identity setup
+- resource assignment
+- onboarding lifecycle
+- client communication
+
+But do not implement provisioning improvements in this pass.
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Parent None + all children None hides sidebar/page.
+2) Parent None + child View Only+ can show page but only permitted child section/action is visible.
+3) Command Center child permissions gate each section independently.
+4) view_next_best_actions None hides NBA list.
+5) act_on_nba_recommendations None disables/hides NBA actions.
+6) Unauthorized NBA action does not route to fallback/overview.
+7) view_audit_logs None hides audit log data.
+8) change_support_status None blocks status change.
+9) change_support_severity None blocks severity change.
+10) Child None denies every exact action, not just New Case.
+11) Parent View Only + child Full Access allows that exact child action.
+12) Old hardcoded role logic cannot block matrix-granted action.
+13) Old hardcoded role logic cannot allow matrix-denied action.
+14) De-escalate requires in-app confirmation.
+15) De-escalate hides or changes to Request De-escalation when permission missing.
+16) grant_trial None blocks Grant Trial and End Trial.
+17) grant_paid_override None blocks Paid Override / Re-grant Paid.
+18) revoke_addon_override None blocks Revoke / End paid override.
+19) Matrix effective access preview explains parent/child behavior.
+20) Permission changes and reset remain audited.
+21) Existing seven permission levels remain unchanged.
+22) Existing Add-on Governance remains intact except platform gates.
+23) Existing Shipping Module remains intact.
+24) Existing Store Permissions Matrix remains intact.
+25) Existing tenant provisioning remains intact.
+26) Server PII logging rules are not regressed.
+27) replit.md is updated.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Root Cause
+3. Final Effective Permission Resolver
+4. Command Center Section Gating
+5. Support Tools Action Gating
+6. De-escalation Confirmation / Request Flow
+7. Audit & Security Gating
+8. Commercial / Add-on Gating
+9. Matrix UX / Effective Access Preview
+10. Files Changed
+11. Documentation Updated
+12. Non-Regression Notes
