@@ -1,0 +1,338 @@
+Effective Permission Resolver Final Hardening — Pre-QA Blocker Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict correction pass.
+
+Do not run full manual QA assumptions yet.
+Do not implement new phases.
+Do not implement Phase 1.1.3A continuation.
+Do not implement Phase 1.1.3B, 1.1.3C, 1.1.3D, Phase 1.2, Phase 1.3, Phase 1.4, Phase 2, Phase 3, or Phase 4.
+
+Fix only the blockers identified in the “Effective Permission Resolver Final Hardening — Pre-QA Implementation Verification Report.”
+
+The report’s recommendation was:
+“Not Ready for Manual QA — correction needed.”
+
+This pass must make the implementation ready for manual QA.
+
+==================================================
+ROLE STACK — ACT UPON IT
+==================================================
+
+Act as:
+- Identity and Access Management (IAM) Specialist
+- IAM Analyst
+- Access Analyst
+- Website Administrator / Governance Lead
+- Senior Role-Based Access Control (RBAC) Architect
+- Senior Platform Team Governance Leader
+- Senior System Administrator
+- Senior Platform Operations Architect
+- Senior Support Tools Engineer
+- Senior Audit & Security Engineer
+- Senior React/TypeScript Engineer
+- QA Gatekeeper
+- Systems Thinker
+- Side Auditor
+
+Focus on:
+- least privilege
+- explicit deny
+- permission catalog integrity
+- parent vs child permission resolution
+- section-level gating
+- action-level gating
+- handler-level protection
+- stale modal bypass prevention
+- auditability
+- non-regression
+
+==================================================
+CURRENT PRE-QA BLOCKERS TO FIX
+==================================================
+
+Fix these exact blockers from the report:
+
+1) Verify and fix platform sub-permission catalog keys
+The report warns that CommandCenterPage references keys such as:
+- view_audit_security
+- view_support_tools
+- view_domains
+- view_platform_settings
+- view_team
+- create_support_case
+- view_nba_recommendations
+
+If any of these are missing from SUB_LOOKUP / platform permission catalog, the action silently denies forever.
+
+Required:
+- Audit every sub-permission key referenced by Command Center, Audit & Security, Support Tools, PlansPage, TenantDetailPage, and navigation.
+- Ensure every referenced key exists in the platform permission catalog.
+- Remove or rename stale keys.
+- No unknown platform permission keys should remain.
+- Unknown keys should still deny safely, but production code should not depend on unknown keys.
+
+2) Align NBA permission naming
+The report says code uses:
+- view_nba_recommendations
+
+But the prompt/spec used:
+- view_next_best_actions
+
+Required:
+Pick one canonical key and align all code, catalog, UI, documentation, and QA wording.
+
+Preferred canonical key:
+- view_next_best_actions
+
+If keeping view_nba_recommendations for compatibility:
+- add an alias or migration so both resolve correctly
+- document the canonical key
+- ensure Matrix UI shows the user-friendly label “View Next Best Actions”
+
+3) Fix End Trial gating semantics
+The report says:
+- Grant Trial and Re-trial are gated by grant_trial
+- End Trial is currently gated only by revoke_addon_override
+
+Decision:
+End Trial must require BOTH:
+- grant_trial
+- revoke_addon_override
+
+Reason:
+- grant_trial controls the trial lifecycle
+- revoke_addon_override controls removal of an entitlement/override
+
+Required:
+- Grant Trial requires grant_trial.
+- Re-trial requires grant_trial.
+- End Trial requires grant_trial AND revoke_addon_override.
+- If either permission is missing, End Trial is hidden/disabled.
+- Handler-level check must enforce both permissions.
+- Tooltip/helper should be concise if disabled.
+
+4) Disable Assignee input when assign_support_case is denied
+The report says:
+- handler aborts correctly
+- but the assignee input still accepts typing with no visible feedback
+
+Required:
+- If assign_support_case is denied:
+  - assignee input/select must be disabled or read-only
+  - user should receive minimal explanation via tooltip/helper
+  - handler-level abort must remain
+- If assign_support_case is granted:
+  - assignment works normally
+  - audit still fires once
+
+5) Add confirm-time re-check to Resolve Escalation modal and audit all escalation modals
+The report says:
+- Resolve modal relies on the button that opened the modal being gated
+- if permission is revoked between open and confirm, user could still complete the action
+
+Required:
+All state-changing escalation modals must re-check permission at confirm time:
+- Assign/Reassign
+- Acknowledge
+- Change Level
+- De-escalate
+- Resolve Escalation
+- Close with active escalation
+- any other escalation transition modal
+
+Specific requirement:
+- Resolve Escalation confirm button must call the final effective permission resolver at click time.
+- If permission is missing at confirm time:
+  - do not perform action
+  - close or keep modal with clear minimal reason
+  - do not emit success audit
+- Do not rely only on the opener button’s permission state.
+
+6) Decide and wire remaining ungated Support Tools sub-permissions
+The report says these are not explicitly located:
+- view_support_sla
+- view_support_tenant_health
+- view_support_related_entities
+- add_internal_support_note
+- use_support_macro
+- manage_support_macros
+- edit_support_case
+- close_support_case
+- reopen_support_case
+
+Decision:
+These must be explicitly wired now. Do not leave them parent-inherited only.
+
+Required behavior:
+- view_support_sla None hides SLA section/badges where practical.
+- view_support_tenant_health None hides Tenant Health panel.
+- view_support_related_entities None hides Related Entities panel.
+- add_internal_support_note None hides/disables Add Note.
+- use_support_macro None hides/disables macro insertion.
+- manage_support_macros None hides/disables macro management if such UI exists.
+- edit_support_case None blocks general case detail edits.
+- close_support_case None blocks Close Case.
+- reopen_support_case None blocks Reopen Case.
+- handlers must enforce permissions, not only UI.
+
+7) Decide and wire remaining ungated Audit & Security sub-permissions
+The report says these are not explicitly located:
+- view_actor_profile
+- view_related_event_timeline
+- view_restricted_audit_details
+- view_escalation_lifecycle_audit
+
+Decision:
+These must be explicitly wired now. Do not leave them parent-inherited only.
+
+Required behavior:
+- view_actor_profile None hides Actor Profile tab/panel.
+- view_related_event_timeline None hides Related Events / Timeline tab/panel.
+- view_restricted_audit_details None hides restricted/sensitive metadata.
+- view_escalation_lifecycle_audit None hides escalation lifecycle saved view/detail section if separated.
+- If parent Audit & Security is View Only but a child is None, that child section remains hidden.
+
+8) Tenant 360 child visibility
+The report warns:
+- Tenant 360 click uses view_tenant_360
+- but Tenant Risk Summary section is gated by view_command_center
+- if role only has view_tenant_360, Tenant 360 may not be reachable
+
+Decision:
+view_tenant_360 should be a section-revealing child.
+
+Required:
+- If Command Center parent is None and only view_tenant_360 is View Only:
+  - Command Center can open.
+  - A minimal Tenant 360 access surface appears.
+  - Other Command Center sections remain hidden unless separately permitted.
+- If view_tenant_360 is None:
+  - Tenant 360 links/drawers are hidden/disabled.
+
+9) De-escalation request alternate remains deferred
+Decision:
+Request De-escalation can remain future scope.
+
+Required:
+- If user lacks deescalate_support_case:
+  - De-escalate action must be hidden or disabled.
+  - No Request De-escalation required in this pass.
+- Document “Request De-escalation” as future optional enhancement only.
+
+==================================================
+CRITICAL RULES
+==================================================
+
+Global Permissions Matrix remains the single source of truth.
+
+Rules:
+- Parent None + all children None hides sidebar/page.
+- Parent None + one child View Only+ can show the page, but only that child section/action is visible.
+- Child None denies that exact section/action.
+- Parent View Only + child Full Access allows that exact child action.
+- Old hardcoded role logic cannot block matrix-granted access.
+- Old hardcoded role logic cannot allow matrix-denied access.
+- Every mutating handler must re-check permission at execution time.
+- Stale modals cannot bypass permission changes.
+- Unknown permission keys must never be used silently by intended actions.
+
+==================================================
+NON-REGRESSION
+==================================================
+
+Do not change:
+- Store Permissions Matrix
+- tenant/store permissions
+- Shipping
+- POS
+- Repairs
+- Inventory
+- Customers
+- Invoices
+- Services
+- Tenant Features except scoped platform gates
+- tenant provisioning
+- paid override invoice generation/persistence
+- server PII log-scrubbing
+- accepted Add-on Governance logic except scoped permission gates
+
+==================================================
+DOCUMENTATION
+==================================================
+
+Update replit.md with a short correction note covering:
+- catalog key audit completed
+- canonical Next Best Actions permission key
+- End Trial requires both grant_trial and revoke_addon_override
+- assignee input disabled when assign_support_case denied
+- confirm-time permission re-check for escalation modals
+- explicit Support Tools sub-permission wiring
+- explicit Audit & Security sub-permission wiring
+- Tenant 360 child access behavior
+- Request De-escalation remains future scope
+
+Do not rewrite roadmap.
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) No referenced platform sub-permission keys are missing from catalog.
+2) Next Best Actions permission naming is aligned and documented.
+3) view_next_best_actions / NBA permission works consistently.
+4) End Trial requires both grant_trial and revoke_addon_override.
+5) Assignee input is disabled/read-only when assign_support_case is denied.
+6) Resolve Escalation re-checks permission at confirm time.
+7) All escalation transition modals re-check permission at confirm time.
+8) view_support_sla explicitly gates SLA visibility.
+9) view_support_tenant_health explicitly gates Tenant Health panel.
+10) view_support_related_entities explicitly gates Related Entities panel.
+11) add_internal_support_note explicitly gates note creation.
+12) use_support_macro explicitly gates macro insertion.
+13) edit_support_case explicitly gates general case edits.
+14) close_support_case explicitly gates case closure.
+15) reopen_support_case explicitly gates case reopening.
+16) view_actor_profile explicitly gates Actor Profile.
+17) view_related_event_timeline explicitly gates Related Events / Timeline.
+18) view_restricted_audit_details explicitly gates restricted audit metadata.
+19) view_escalation_lifecycle_audit explicitly gates escalation lifecycle audit view/details.
+20) view_tenant_360 can reveal a minimal Tenant 360 surface when parent Command Center is None.
+21) De-escalate is hidden/disabled when permission is missing; Request De-escalation remains future scope.
+22) Permission changes are audited.
+23) Existing seven permission levels remain unchanged.
+24) Existing Add-on Governance remains intact except platform gates.
+25) Existing Shipping Module remains intact.
+26) Existing Store Permissions Matrix remains intact.
+27) Existing tenant provisioning remains intact.
+28) Server PII logging rules are not regressed.
+29) replit.md is updated.
+30) Implementation is ready for Manual QA.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Permission Catalog Key Audit
+3. Next Best Actions Naming Alignment
+4. End Trial Gating Decision
+5. Support Tools Explicit Sub-Permission Wiring
+6. Escalation Modal Confirm-Time Rechecks
+7. Audit & Security Explicit Sub-Permission Wiring
+8. Tenant 360 Child Access
+9. Files Changed
+10. Documentation Updated
+11. Non-Regression Notes
+12. Recommendation Before Manual QA
+
+==============================================
+
+Provide short final report

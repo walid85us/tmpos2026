@@ -167,6 +167,27 @@ const SupportToolsPage: React.FC = () => {
     : 'platform_readonly';
   const operatorName: string = session?.user?.name || '';
 
+  // Pre-QA correction — wire 9 Support Tools sub-permissions explicitly.
+  // These are read once per render so handlers and section gates share
+  // the same source of truth (the Global Permissions Matrix).
+  const closeSupportCaseGate = hasPlatformPermission(sessionRole, 'close_support_case');
+  const reopenSupportCaseGate = hasPlatformPermission(sessionRole, 'reopen_support_case');
+  // `edit_support_case` is declared in the catalog as a reserved umbrella
+  // sub-permission for future case-detail edit surfaces (e.g. inline
+  // description editing). It is intentionally not bound to existing
+  // mutation handlers because each existing field already has its own
+  // specific sub-permission (change_support_status, change_support_severity,
+  // assign_support_case, add_internal_support_note, close_support_case,
+  // reopen_support_case). Adding an umbrella AND-gate here would tighten
+  // existing roles unexpectedly. When a generic edit surface is added,
+  // wire `hasPlatformPermission(sessionRole, 'edit_support_case')` here.
+  const assignSupportCaseGate = hasPlatformPermission(sessionRole, 'assign_support_case');
+  const addInternalNoteGate = hasPlatformPermission(sessionRole, 'add_internal_support_note');
+  const useSupportMacroGate = hasPlatformPermission(sessionRole, 'use_support_macro');
+  const viewSupportSlaGate = hasPlatformPermission(sessionRole, 'view_support_sla');
+  const viewSupportTenantHealthGate = hasPlatformPermission(sessionRole, 'view_support_tenant_health');
+  const viewSupportRelatedEntitiesGate = hasPlatformPermission(sessionRole, 'view_support_related_entities');
+
   // Saved-view escalation token + ctx for queue counts.
   const [escalationFilter, setEscalationFilter] =
     useState<NonNullable<SupportViewFilters['escalation']> | 'any'>('any');
@@ -428,6 +449,9 @@ const SupportToolsPage: React.FC = () => {
 
   const addNote = (id: string, body: string) => {
     if (!body.trim()) return;
+    // Pre-QA correction: handler-level matrix check.
+    const perm = hasPlatformPermission(sessionRole, 'add_internal_support_note');
+    if (!perm.allowed) { console.warn("[support-tools] permission denied:", perm.reason); return; }
     const note: SupportCaseNote = {
       id: `cn_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
       author: 'System Owner',
@@ -908,6 +932,9 @@ const SupportToolsPage: React.FC = () => {
   };
 
   const insertMacro = (id: string, macro: SupportMacro, currentDraft: string, setNoteDraft: (s: string) => void) => {
+    // Pre-QA correction: macro insertion requires use_support_macro.
+    const perm = hasPlatformPermission(sessionRole, 'use_support_macro');
+    if (!perm.allowed) { console.warn("[support-tools] permission denied:", perm.reason); return; }
     const c = cases.find(x => x.id === id);
     setNoteDraft(currentDraft ? `${currentDraft}\n\n${macro.body}` : macro.body);
     pushPlatformAudit({
@@ -923,6 +950,9 @@ const SupportToolsPage: React.FC = () => {
 
   const closeCase = (c: SupportCaseRecord) => {
     if (c.status === 'closed') return;
+    // Pre-QA correction: closing a case requires close_support_case.
+    const perm = hasPlatformPermission(sessionRole, 'close_support_case');
+    if (!perm.allowed) { console.warn("[support-tools] permission denied:", perm.reason); return; }
     const now = new Date();
     const transitionNote: SupportCaseNote = {
       id: `cn_${now.getTime()}_${Math.random().toString(36).slice(2, 5)}`,
@@ -947,6 +977,9 @@ const SupportToolsPage: React.FC = () => {
   };
 
   const reopenCase = (c: SupportCaseRecord) => {
+    // Pre-QA correction: reopening a case requires reopen_support_case.
+    const perm = hasPlatformPermission(sessionRole, 'reopen_support_case');
+    if (!perm.allowed) { console.warn("[support-tools] permission denied:", perm.reason); return; }
     const now = new Date();
     const transitionNote: SupportCaseNote = {
       id: `cn_${now.getTime()}_${Math.random().toString(36).slice(2, 5)}`,
@@ -1185,26 +1218,31 @@ const SupportToolsPage: React.FC = () => {
                   <td className="px-6 py-3.5"><span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${STATUS_STYLES[c.status]}`}>{STATUS_LABELS[c.status]}</span></td>
                   <td className="px-6 py-3.5"><span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${SEVERITY_STYLES[c.severity]}`}>{c.severity}</span></td>
                   <td className="px-6 py-3.5">
-                    {/* Phase 1.1.1 UX Correction — bigger SLA pill with state-colored bar + microcopy. */}
-                    <div className="flex items-center gap-2" data-testid={`support-sla-${c.id}`}>
-                      <div
-                        className={`w-1 h-9 rounded-full ${
-                          sla.status === 'overdue' ? 'bg-red-500'
-                          : sla.status === 'at_risk' ? 'bg-orange-400'
-                          : sla.status === 'on_track' ? 'bg-emerald-500'
-                          : 'bg-slate-300'
-                        }`}
-                      />
-                      <div className="min-w-0">
-                        <span
-                          className={`inline-block px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border-2 ${SLA_STATUS_STYLES[sla.status]}`}
-                          title={sla.label}
-                        >
-                          {SLA_STATUS_LABEL[sla.status]}
-                        </span>
-                        <p className="text-[10px] text-slate-500 font-bold mt-0.5 truncate">{sla.label}</p>
+                    {/* Phase 1.1.1 UX Correction — bigger SLA pill with state-colored bar + microcopy.
+                        Pre-QA correction: pill content gated by view_support_sla. */}
+                    {viewSupportSlaGate.allowed ? (
+                      <div className="flex items-center gap-2" data-testid={`support-sla-${c.id}`}>
+                        <div
+                          className={`w-1 h-9 rounded-full ${
+                            sla.status === 'overdue' ? 'bg-red-500'
+                            : sla.status === 'at_risk' ? 'bg-orange-400'
+                            : sla.status === 'on_track' ? 'bg-emerald-500'
+                            : 'bg-slate-300'
+                          }`}
+                        />
+                        <div className="min-w-0">
+                          <span
+                            className={`inline-block px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border-2 ${SLA_STATUS_STYLES[sla.status]}`}
+                            title={sla.label}
+                          >
+                            {SLA_STATUS_LABEL[sla.status]}
+                          </span>
+                          <p className="text-[10px] text-slate-500 font-bold mt-0.5 truncate">{sla.label}</p>
+                        </div>
                       </div>
-                    </div>
+                    ) : (
+                      <span className="text-xs text-slate-300" data-testid={`support-sla-${c.id}-hidden`}>—</span>
+                    )}
                   </td>
                   <td className="px-6 py-3.5 text-sm font-bold text-slate-600">{c.assignee || '—'}</td>
                   <td className="px-6 py-3.5 text-sm font-bold text-slate-500 whitespace-nowrap">{c.updatedAt}</td>
@@ -1457,7 +1495,10 @@ const SupportToolsPage: React.FC = () => {
                     <input
                       defaultValue={selected.assignee || ''}
                       onBlur={e => changeAssignee(selected, e.target.value)}
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700"
+                      disabled={!assignSupportCaseGate.allowed}
+                      title={assignSupportCaseGate.allowed ? '' : assignSupportCaseGate.reason}
+                      data-testid="support-case-assignee-input"
+                      className={`w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 ${!assignSupportCaseGate.allowed ? 'opacity-60 cursor-not-allowed' : ''}`}
                       placeholder="Unassigned"
                     />
                   </div>
@@ -1716,8 +1757,8 @@ const SupportToolsPage: React.FC = () => {
                   );
                 })()}
 
-                {/* Tenant Health mini-card */}
-                {tenantRiskForSelected && (
+                {/* Tenant Health mini-card — gated by view_support_tenant_health. */}
+                {viewSupportTenantHealthGate.allowed && tenantRiskForSelected && (
                   <div className="p-4 rounded-2xl border border-slate-100 bg-white">
                     <div className="flex items-center justify-between mb-2">
                       <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Tenant Health</p>
@@ -1733,7 +1774,9 @@ const SupportToolsPage: React.FC = () => {
                   </div>
                 )}
 
-                {/* Phase 1.1.1 UX Correction — Related Entities grouped into 3 cards (Source / Audits / Domains). */}
+                {/* Phase 1.1.1 UX Correction — Related Entities grouped into 3 cards (Source / Audits / Domains).
+                    Pre-QA correction: gated by view_support_related_entities. */}
+                {viewSupportRelatedEntitiesGate.allowed && (
                 <div className="space-y-3" data-testid="support-related-entities">
                   <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Related Entities</p>
 
@@ -1819,32 +1862,48 @@ const SupportToolsPage: React.FC = () => {
                     </div>
                   </div>
                 </div>
+                )}
 
                 <div>
                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Timeline ({(selected.notes || []).length})</p>
                   <NotesTimeline notes={selected.notes || []} />
                 </div>
 
-                <NoteComposer
-                  caseId={selected.id}
-                  macros={supportMacros}
-                  onAdd={body => addNote(selected.id, body)}
-                  onInsertMacro={(macro, currentDraft, setDraft) => insertMacro(selected.id, macro, currentDraft, setDraft)}
-                />
+                {/* Pre-QA correction: Note Composer gated by add_internal_support_note;
+                    Macro picker gated by use_support_macro (passed via prop). */}
+                {addInternalNoteGate.allowed && (
+                  <NoteComposer
+                    caseId={selected.id}
+                    macros={supportMacros}
+                    canUseMacros={useSupportMacroGate.allowed}
+                    onAdd={body => addNote(selected.id, body)}
+                    onInsertMacro={(macro, currentDraft, setDraft) => insertMacro(selected.id, macro, currentDraft, setDraft)}
+                  />
+                )}
 
                 {/* Close / Reopen — close is guarded when an active
-                    escalation is present (Phase 1.1.3A). */}
+                    escalation is present (Phase 1.1.3A).
+                    Pre-QA correction: Close gated by close_support_case,
+                    Reopen gated by reopen_support_case. */}
                 <div className="flex gap-2 pt-3 border-t border-slate-100">
                   {selected.status !== 'closed' ? (
                     <button
                       onClick={() => handleCloseCaseClick(selected)}
+                      disabled={!closeSupportCaseGate.allowed}
+                      title={closeSupportCaseGate.allowed ? '' : closeSupportCaseGate.reason}
                       data-testid="support-case-close-btn"
-                      className="px-4 py-2 text-[10px] font-black uppercase tracking-widest text-slate-700 bg-white border border-slate-200 rounded-xl hover:bg-slate-50"
+                      className={`px-4 py-2 text-[10px] font-black uppercase tracking-widest text-slate-700 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 ${!closeSupportCaseGate.allowed ? 'opacity-50 cursor-not-allowed' : ''}`}
                     >
                       Close case
                     </button>
                   ) : (
-                    <button onClick={() => reopenCase(selected)} className="px-4 py-2 text-[10px] font-black uppercase tracking-widest text-white bg-primary rounded-xl hover:bg-primary/90">Reopen case</button>
+                    <button
+                      onClick={() => reopenCase(selected)}
+                      disabled={!reopenSupportCaseGate.allowed}
+                      title={reopenSupportCaseGate.allowed ? '' : reopenSupportCaseGate.reason}
+                      data-testid="support-case-reopen-btn"
+                      className={`px-4 py-2 text-[10px] font-black uppercase tracking-widest text-white bg-primary rounded-xl hover:bg-primary/90 ${!reopenSupportCaseGate.allowed ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    >Reopen case</button>
                   )}
                 </div>
 
@@ -2093,13 +2152,27 @@ const SupportToolsPage: React.FC = () => {
               </div>
               <div className="p-5 border-t border-slate-100 bg-slate-50/40 flex justify-end gap-2">
                 <button onClick={() => setResolveModal(null)} className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-white">Cancel</button>
+                {/* Pre-QA correction: confirm-time re-check of resolve_escalation
+                    so a stale UI state (e.g. role changed mid-modal) cannot
+                    bypass the matrix gate. Mirrors close-warn modal pattern. */}
+                {(() => {
+                  const r = gatedCan('resolve_escalation', { targetTeam: resolveModal.escalationTargetTeam });
+                  return (
                 <button
-                  onClick={() => { resolveEscalation(resolveModal); setResolveModal(null); }}
+                  onClick={() => {
+                    if (!r.allowed) return;
+                    resolveEscalation(resolveModal);
+                    setResolveModal(null);
+                  }}
+                  disabled={!r.allowed}
+                  title={r.allowed ? '' : r.reason}
                   data-testid="support-resolve-confirm"
-                  className="px-6 py-2.5 bg-emerald-600 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-emerald-700"
+                  className={`px-6 py-2.5 text-[10px] font-black uppercase tracking-widest rounded-xl ${r.allowed ? 'bg-emerald-600 text-white hover:bg-emerald-700' : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'}`}
                 >
                   Resolve Escalation
                 </button>
+                  );
+                })()}
               </div>
             </motion.div>
           </div>
@@ -2250,10 +2323,11 @@ const NotesTimeline: React.FC<{ notes: SupportCaseNote[] }> = ({ notes }) => {
 interface NoteComposerProps {
   caseId: string;
   macros: SupportMacro[];
+  canUseMacros?: boolean;
   onAdd: (body: string) => void;
   onInsertMacro: (macro: SupportMacro, currentDraft: string, setDraft: (s: string) => void) => void;
 }
-const NoteComposer: React.FC<NoteComposerProps> = ({ caseId, macros, onAdd, onInsertMacro }) => {
+const NoteComposer: React.FC<NoteComposerProps> = ({ caseId, macros, canUseMacros = true, onAdd, onInsertMacro }) => {
   const [body, setBody] = useState('');
   const [macroId, setMacroId] = useState('');
   // Reset draft when switching to a different case.
@@ -2262,22 +2336,25 @@ const NoteComposer: React.FC<NoteComposerProps> = ({ caseId, macros, onAdd, onIn
   const previewMacro = macros.find(m => m.id === macroId);
   return (
     <div className="space-y-2">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Templates</span>
-        <select
-          value={macroId}
-          onChange={e => setMacroId(e.target.value)}
-          data-testid="support-macro-picker"
-          className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700"
-        >
-          <option value="">Select template…</option>
-          {macros.map(m => (
-            <option key={m.id} value={m.id}>{m.label}</option>
-          ))}
-        </select>
-        <span className="text-[10px] text-slate-400 italic">Internal template only — no external message sent.</span>
-      </div>
-      {previewMacro && (
+      {/* Pre-QA correction: macro picker only renders when canUseMacros=true. */}
+      {canUseMacros && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Templates</span>
+          <select
+            value={macroId}
+            onChange={e => setMacroId(e.target.value)}
+            data-testid="support-macro-picker"
+            className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700"
+          >
+            <option value="">Select template…</option>
+            {macros.map(m => (
+              <option key={m.id} value={m.id}>{m.label}</option>
+            ))}
+          </select>
+          <span className="text-[10px] text-slate-400 italic">Internal template only — no external message sent.</span>
+        </div>
+      )}
+      {canUseMacros && previewMacro && (
         <div
           className="p-3 rounded-xl border border-blue-400/20 bg-blue-400/5 space-y-2"
           data-testid="support-macro-preview"

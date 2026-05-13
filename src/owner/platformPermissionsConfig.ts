@@ -127,7 +127,7 @@ export const PLATFORM_FEATURE_GROUPS: PlatformFeatureGroupDef[] = [
       { id: 'view_needs_attention', label: 'View Needs Attention', description: 'See the Needs Attention priority queue.', threshold: 'view' },
       { id: 'view_tenant_360', label: 'Open Tenant 360 Drawer', description: 'Click through to a tenant\'s Tenant 360 read-only summary.', threshold: 'view' },
       { id: 'use_command_quick_actions', label: 'Use Quick Actions', description: 'Click Command Center quick action buttons (navigation only).', threshold: 'view' },
-      { id: 'view_nba_recommendations', label: 'View NBA Recommendations', description: 'See Next Best Action recommendations list.', threshold: 'view' },
+      { id: 'view_next_best_actions', label: 'View Next Best Actions', description: 'See Next Best Action recommendations list.', threshold: 'view' },
       { id: 'act_on_nba_recommendations', label: 'Act on NBA Recommendations', description: 'Click through NBA actions to take operational steps.', threshold: 'edit' },
     ],
   },
@@ -167,6 +167,14 @@ export const PLATFORM_FEATURE_GROUPS: PlatformFeatureGroupDef[] = [
       { id: 'deescalate_support_case', label: 'De-escalate Case', description: 'De-escalate an acknowledged or in-review escalation.', threshold: 'edit' },
       { id: 'resolve_escalation', label: 'Resolve Escalation', description: 'Resolve an active escalation (writes paired audit row).', threshold: 'approve', sensitive: true },
       { id: 'close_with_active_escalation', label: 'Close Case with Active Escalation', description: 'Override-close a case that still has an active escalation.', threshold: 'manage', sensitive: true },
+      { id: 'view_support_sla', label: 'View Support SLA', description: 'See SLA timer pills, deadlines, and SLA microcopy on cases.', threshold: 'view' },
+      { id: 'view_support_tenant_health', label: 'View Tenant Health (Support)', description: 'See the Tenant Health mini-card on the support case drawer.', threshold: 'view' },
+      { id: 'view_support_related_entities', label: 'View Related Entities (Support)', description: 'See the Related Entities panel on the support case drawer (source event / audits / domains).', threshold: 'view' },
+      { id: 'add_internal_support_note', label: 'Add Internal Support Note', description: 'Append an internal note to the case timeline.', threshold: 'create' },
+      { id: 'use_support_macro', label: 'Use Support Macro', description: 'Insert a macro template into the note composer.', threshold: 'create' },
+      { id: 'manage_support_macros', label: 'Manage Support Macros', description: 'Create, edit, or delete shared support macro templates.', threshold: 'manage', sensitive: true },
+      { id: 'edit_support_case', label: 'Edit Support Case', description: 'Edit the case subject, description, or other case fields.', threshold: 'edit' },
+      { id: 'reopen_support_case', label: 'Reopen Support Case', description: 'Reopen a previously closed support case.', threshold: 'edit' },
     ],
   },
   {
@@ -262,10 +270,21 @@ const FEATURE_BY_KEY: Map<PlatformFeatureKey, PlatformFeatureGroupDef> = new Map
   PLATFORM_FEATURE_GROUPS.map(g => [g.key, g])
 );
 
+// Pre-QA correction: legacy sub-permission key aliases. Older callsites
+// may still reference the previous key; the lookup resolves the alias to
+// the canonical sub-permission so existing code keeps working.
+export const PLATFORM_SUB_PERMISSION_ALIASES: Record<string, string> = {
+  view_nba_recommendations: 'view_next_best_actions',
+};
+
 const SUB_LOOKUP: Map<string, { feature: PlatformFeatureKey; def: PlatformSubPermissionDef }> = (() => {
   const m = new Map<string, { feature: PlatformFeatureKey; def: PlatformSubPermissionDef }>();
   for (const g of PLATFORM_FEATURE_GROUPS) {
     for (const sp of g.subPermissions) m.set(sp.id, { feature: g.key, def: sp });
+  }
+  for (const [alias, canonical] of Object.entries(PLATFORM_SUB_PERMISSION_ALIASES)) {
+    const target = m.get(canonical);
+    if (target) m.set(alias, target);
   }
   return m;
 })();

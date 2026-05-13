@@ -128,6 +128,10 @@ const AuditSecurityPage: React.FC = () => {
   const deleteNoteGate = hasPlatformPermission(sessionRole, 'delete_security_note');
   const createCaseFromAuditGate = hasPlatformPermission(sessionRole, 'create_support_case_from_audit');
   const createCaseGate = hasPlatformPermission(sessionRole, 'create_support_case');
+  // Pre-QA correction — wire 4 Audit & Security sub-permissions explicitly.
+  const viewActorProfileGate = hasPlatformPermission(sessionRole, 'view_actor_profile');
+  const viewRestrictedDetailsGate = hasPlatformPermission(sessionRole, 'view_restricted_audit_details');
+  const viewEscalationLifecycleGate = hasPlatformPermission(sessionRole, 'view_escalation_lifecycle_audit');
 
   // Mirrored cross-cutting audit entries (commercial + platform ops).
   const [mirrored, setMirrored] = useState<AuditRow[]>([]);
@@ -839,12 +843,17 @@ const AuditSecurityPage: React.FC = () => {
                 </button>
               </div>
 
-              {/* Tabs */}
+              {/* Tabs — Pre-QA correction: 'related' and 'actor' tabs gated
+                  by view_actor_profile (sub-permission covers actor /
+                  related-events tabs in the audit drawer). */}
               <div className="px-7 pt-4 flex gap-2 border-b border-slate-100">
-                {(['detail', 'related', 'actor'] as const).map(t => (
+                {(['detail', 'related', 'actor'] as const)
+                  .filter(t => t === 'detail' || viewActorProfileGate.allowed)
+                  .map(t => (
                   <button
                     key={t}
                     onClick={() => setDrawerTab(t)}
+                    data-testid={`audit-drawer-tab-${t}`}
                     className={`px-3 pb-3 text-[10px] font-black uppercase tracking-widest border-b-2 ${drawerTab === t ? 'border-primary text-primary' : 'border-transparent text-slate-400 hover:text-slate-600'}`}
                   >
                     {t === 'detail' ? 'Detail' : t === 'related' ? `Related (${relatedEvents.length})` : 'Actor profile'}
@@ -895,7 +904,9 @@ const AuditSecurityPage: React.FC = () => {
                       reviewers see the structured transition (status,
                       level, owner/team) without needing to open the
                       support case. */}
-                  {(selected.action || '').startsWith('support_case_escalat') && (selected.oldValue != null || selected.newValue != null) && (
+                  {/* Pre-QA correction: escalation transition card gated by
+                      view_escalation_lifecycle_audit. */}
+                  {viewEscalationLifecycleGate.allowed && (selected.action || '').startsWith('support_case_escalat') && (selected.oldValue != null || selected.newValue != null) && (
                     <div
                       className="rounded-2xl border border-slate-100 bg-slate-50/40 p-4 space-y-1.5"
                       data-testid="audit-drawer-escalation-diff"
@@ -914,16 +925,49 @@ const AuditSecurityPage: React.FC = () => {
                     </div>
                   )}
                   {selected.note && (
-                    <div>
+                    <div data-testid="audit-drawer-note">
                       <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Note</p>
-                      <p className="text-sm text-slate-700 bg-slate-50 p-4 rounded-2xl">{selected.note}</p>
+                      {/* Pre-QA correction: free-form note may contain restricted
+                          context. For high-risk events (any deriveHighRiskFlag
+                          reasons), require view_restricted_audit_details to
+                          read the note body. */}
+                      {(() => {
+                        const { reasons } = deriveHighRiskFlag(selected);
+                        const isRestricted = reasons.length > 0;
+                        if (isRestricted && !viewRestrictedDetailsGate.allowed) {
+                          return (
+                            <p
+                              className="text-xs italic text-slate-400 bg-slate-50 p-4 rounded-2xl"
+                              data-testid="audit-drawer-note-restricted"
+                              title={viewRestrictedDetailsGate.reason}
+                            >
+                              Restricted — requires View Restricted Audit Details.
+                            </p>
+                          );
+                        }
+                        return (
+                          <p className="text-sm text-slate-700 bg-slate-50 p-4 rounded-2xl">{selected.note}</p>
+                        );
+                      })()}
                     </div>
                   )}
                   {(() => {
                     const { reasons } = deriveHighRiskFlag(selected);
                     if (!reasons.length) return null;
+                    // Pre-QA correction: "Why flagged" reasons are restricted
+                    // detail and require view_restricted_audit_details.
+                    if (!viewRestrictedDetailsGate.allowed) {
+                      return (
+                        <div data-testid="audit-drawer-why-flagged-restricted">
+                          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Why flagged</p>
+                          <p className="text-xs italic text-slate-400" title={viewRestrictedDetailsGate.reason}>
+                            Restricted — requires View Restricted Audit Details.
+                          </p>
+                        </div>
+                      );
+                    }
                     return (
-                      <div>
+                      <div data-testid="audit-drawer-why-flagged">
                         <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Why flagged</p>
                         <ul className="text-xs text-slate-600 list-disc pl-5 space-y-0.5">
                           {reasons.map(r => <li key={r}>{r}</li>)}

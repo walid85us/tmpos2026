@@ -608,6 +608,19 @@ const TenantDetailPage: React.FC = () => {
 
   const handleRevokeFeature = (featureId: string) => {
     const override = localOverrides.find(o => o.featureId === featureId) as (typeof localOverrides[0] & { price?: number }) | undefined;
+    // Pre-QA correction: handler-level enforcement so a stale UI state or
+    // direct invocation cannot bypass the matrix gate. Ending an active
+    // trial is jointly a trial-lifecycle action AND an override revocation,
+    // so it requires BOTH `grant_trial` AND `revoke_addon_override`. Other
+    // revoke paths only require `revoke_addon_override`.
+    if (!canRevokeOverride) {
+      console.warn('[tenant-detail] permission denied: revoke_addon_override');
+      return;
+    }
+    if (override?.type === 'trial' && !canGrantTrial) {
+      console.warn('[tenant-detail] permission denied: ending an active trial requires grant_trial AND revoke_addon_override');
+      return;
+    }
     if (override && override.type === 'paid_override' && override.price && override.price > 0) {
       setRevokeModal(featureId);
     } else {
@@ -1855,7 +1868,11 @@ const TenantDetailPage: React.FC = () => {
                           {isPendingPayment && !ov?.invoiceId && (
                             <button onClick={() => handleRevokeFeature(feature.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">Cancel</button>
                           )}
-                          {isTrialActive && canRevokeOverride && (
+                          {/* Pre-QA correction: ending an active trial is both a
+                              trial-lifecycle action AND an override revocation,
+                              so it requires BOTH `grant_trial` and
+                              `revoke_addon_override`. */}
+                          {isTrialActive && canRevokeOverride && canGrantTrial && (
                             <button onClick={() => handleRevokeFeature(feature.id)} className="text-[8px] font-black text-red-500 bg-red-50 px-2 py-1 rounded-lg uppercase tracking-widest hover:bg-red-100 transition-colors">End Trial</button>
                           )}
                           {isPaidActive && canRevokeOverride && (

@@ -199,7 +199,9 @@ const CommandCenterPage: React.FC = () => {
   const viewNeedsAttentionGate = hasPlatformPermission(sessionRole, 'view_needs_attention');
   const viewTenant360Gate = hasPlatformPermission(sessionRole, 'view_tenant_360');
   const useQuickActionsGate = hasPlatformPermission(sessionRole, 'use_command_quick_actions');
-  const viewNbaGate = hasPlatformPermission(sessionRole, 'view_nba_recommendations');
+  // Pre-QA correction: canonical key is `view_next_best_actions`. Legacy
+  // `view_nba_recommendations` still resolves via PLATFORM_SUB_PERMISSION_ALIASES.
+  const viewNbaGate = hasPlatformPermission(sessionRole, 'view_next_best_actions');
   const actNbaGate = hasPlatformPermission(sessionRole, 'act_on_nba_recommendations');
   const [cases, setCases] = useState<SupportCaseRecord[]>([]);
   const [audits, setAudits] = useState<AuditEventLike[]>([]);
@@ -1143,9 +1145,12 @@ const CommandCenterPage: React.FC = () => {
 
       {/* ============== TENANT RISK SUMMARY (preserved + Tenant 360 link) ============== */}
       {/* Section-level gate: tenant risk summary is page-overview content
-          and contains tenant data. Hidden when the page is only reachable
-          via an unrelated child grant (e.g. view_needs_attention only). */}
-      {viewPageGate.allowed && (
+          and contains tenant data. Visible when the operator has parent
+          Command Center access OR has the explicit `view_tenant_360`
+          child grant (the table is the primary Tenant 360 launchpad, so
+          revealing it for that explicit child is required for the
+          minimal Tenant 360 surface). Pre-QA correction. */}
+      {(viewPageGate.allowed || viewTenant360Gate.allowed) && (
       <section className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
         <div className="px-8 py-5 border-b border-slate-100 flex items-center justify-between flex-wrap gap-2">
           <div>
