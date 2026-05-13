@@ -1,0 +1,305 @@
+Effective Permission Resolver Final Hardening — Pre-QA Implementation Verification Report
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Report-only verification pass.
+
+Do not change code.
+Do not fix anything in this pass.
+Do not modify replit.md.
+Do not mark the task complete again.
+Do not implement new features.
+
+Goal:
+Generate a detailed verification report for the last implementation prompt:
+
+“Platform Operations & Security — Effective Permission Resolver Final Hardening + Least-Privilege Enforcement”
+
+I need this report before manual QA so I can confirm whether the implementation actually covers every required permission scenario.
+
+==================================================
+ROLE STACK — ACT UPON IT
+==================================================
+
+Act as:
+- Identity and Access Management (IAM) Specialist
+- IAM Analyst
+- Access Analyst
+- Website Administrator / Governance Lead
+- Senior Role-Based Access Control (RBAC) Architect
+- Senior Platform Team Governance Leader
+- Senior System Administrator
+- Senior Platform Operations Architect
+- Senior Support Tools Engineer
+- Senior Audit & Security Engineer
+- Senior React/TypeScript Engineer
+- QA Gatekeeper
+- Systems Thinker
+- Side Auditor
+
+Use these roles actively.
+
+Focus on:
+- least privilege
+- explicit deny behavior
+- parent vs child permission resolution
+- section-level gating
+- action-level gating
+- sidebar and route access
+- handler-level protection
+- auditability
+- non-regression
+
+==================================================
+REPORT PURPOSE
+==================================================
+
+The report must answer one core question:
+
+Does the Global Permissions Matrix now truly control sidebar visibility, page access, section visibility, and action authorization across Platform Operations?
+
+Do not give a generic summary.
+Give evidence from the actual implementation.
+
+==================================================
+WHAT TO INSPECT
+==================================================
+
+Inspect the actual code and report on:
+
+1) Shared effective permission resolver
+- files/functions added or modified
+- how parent permission is resolved
+- how child/sub-permission is resolved
+- how explicit child None works
+- how child Full Access works when parent is View Only or None
+- how System Owner permanence works
+- how Dev Session role is used
+- whether old hardcoded role logic can still override the matrix
+
+2) Sidebar and route access
+- where sidebar visibility is controlled
+- how Command Center visibility is resolved
+- how Audit & Security visibility is resolved
+- how Support Tools visibility is resolved
+- how Add-on/Commercial visibility is resolved
+- how direct URL access is blocked when permission is missing
+
+3) Command Center gating
+Verify each of these:
+- view_command_center
+- view_operational_pulse
+- view_needs_attention
+- view_tenant_360
+- view_next_best_actions
+- act_on_nba_recommendations
+- use_command_quick_actions
+
+Confirm:
+- Parent None + only view_needs_attention View Only shows only Needs Attention
+- NBA list hides when view_next_best_actions is None
+- NBA action buttons hide/disable when act_on_nba_recommendations is None
+- unauthorized NBA actions do not route to overview or fallback pages
+
+4) Support Tools gating
+Verify each of these:
+- view_support_cases
+- create_support_case
+- edit_support_case
+- change_support_status
+- change_support_severity
+- assign_support_case
+- add_internal_support_note
+- use_support_macro
+- manage_support_macros
+- view_support_sla
+- view_support_tenant_health
+- view_support_related_entities
+- escalate_assigned_case
+- escalate_any_case
+- assign_escalation_owner_team
+- acknowledge_escalation
+- change_escalation_level
+- deescalate_support_case
+- resolve_escalation
+- close_support_case
+- reopen_support_case
+
+Confirm:
+- each action has both UI gating and handler-level protection where applicable
+- change_support_status None blocks status changes
+- change_support_severity None blocks severity changes
+- deescalate_support_case None blocks de-escalation
+- resolve_escalation None blocks resolve escalation
+- acknowledge_escalation None blocks acknowledgement
+- Parent View Only + child Full Access allows that exact child action
+- Parent Full/Manage + child None denies that exact child action
+- old can() role logic cannot block matrix-granted access
+- old can() role logic cannot allow matrix-denied access
+
+5) De-escalation confirmation / request flow
+Verify:
+- De-escalate requires in-app confirmation
+- reason is required
+- Cancel does not change anything
+- Confirm performs de-escalation
+- audit event is emitted once
+- if user lacks de-escalation permission, action is hidden/disabled or request-only
+- no external notification was implemented
+
+6) Audit & Security gating
+Verify:
+- view_audit_logs
+- view_actor_profile
+- view_related_event_timeline
+- view_restricted_audit_details
+- export_audit_csv
+- add_security_note
+- delete_security_note
+- create_support_case_from_audit
+- view_escalation_lifecycle_audit
+
+Confirm:
+- view_audit_logs None hides or blocks audit log table/data
+- export action is blocked when export_audit_csv is None
+- add/delete note actions follow sub-permissions
+- create support case from audit requires both Audit and Support Tools permissions
+
+7) Commercial / Add-on gating
+Verify:
+- grant_trial
+- grant_paid_override
+- revoke_addon_override
+- create_addon
+- edit_addon
+- create_plan
+- edit_plan
+- archive/delete permissions
+- manage_addon_compatible_plans
+- manage_addon_readiness
+- generate_addon_implementation_brief
+
+Confirm:
+- grant_trial None blocks Grant Trial and End Trial
+- grant_paid_override None blocks Paid Override / Re-grant Paid
+- revoke_addon_override None blocks Revoke / End paid override
+- Create Plan and Create Add-on are separate permissions
+- Add-on/Commercial tab hides when parent and all child permissions are None
+- Parent None + child View Only+ exposes only relevant permitted area
+
+8) Matrix UX / Effective Access Preview
+Verify:
+- Effective Access Preview explains child-granted visibility
+- explicit child denial is explained
+- System Owner locked Full Access is explained
+- Create cannot edit
+- Edit cannot approve
+- reset confirmation still exists
+- search/filter/expand/collapse/sticky header still work
+
+9) Auditability
+Verify:
+- permission changes are audited
+- reset to defaults is audited
+- de-escalation confirmation is audited
+- sensitive action audits are not duplicated
+- no unsafe server PII logging was introduced
+
+10) Non-regression
+Confirm no behavior was changed in:
+- Store Permissions Matrix
+- tenant/store permissions
+- Shipping
+- POS
+- Repairs
+- Inventory
+- Customers
+- Invoices
+- Services
+- Tenant Features
+- tenant provisioning
+- paid override invoice workflow except scoped platform gates
+- server PII log-scrubbing
+
+==================================================
+TRACEABILITY TABLE REQUIRED
+==================================================
+
+Include a traceability table with this format:
+
+Requirement | Implemented? | Evidence / File / Function | Risk / Notes
+
+The table must cover every acceptance criterion from the implementation prompt:
+
+1) Parent None + all children None hides sidebar/page.
+2) Parent None + child View Only+ can show page but only permitted child section/action is visible.
+3) Command Center child permissions gate each section independently.
+4) view_next_best_actions None hides NBA list.
+5) act_on_nba_recommendations None disables/hides NBA actions.
+6) Unauthorized NBA action does not route to fallback/overview.
+7) view_audit_logs None hides audit log data.
+8) change_support_status None blocks status change.
+9) change_support_severity None blocks severity change.
+10) Child None denies every exact action, not just New Case.
+11) Parent View Only + child Full Access allows that exact child action.
+12) Old hardcoded role logic cannot block matrix-granted action.
+13) Old hardcoded role logic cannot allow matrix-denied action.
+14) De-escalate requires in-app confirmation.
+15) De-escalate hides or changes to Request De-escalation when permission missing.
+16) grant_trial None blocks Grant Trial and End Trial.
+17) grant_paid_override None blocks Paid Override / Re-grant Paid.
+18) revoke_addon_override None blocks Revoke / End paid override.
+19) Matrix effective access preview explains parent/child behavior.
+20) Permission changes and reset remain audited.
+21) Existing seven permission levels remain unchanged.
+22) Existing Add-on Governance remains intact except platform gates.
+23) Existing Shipping Module remains intact.
+24) Existing Store Permissions Matrix remains intact.
+25) Existing tenant provisioning remains intact.
+26) Server PII logging rules are not regressed.
+27) replit.md is updated.
+
+==================================================
+KNOWN HIGH-RISK AREAS TO CALL OUT
+==================================================
+
+Be especially honest about these areas:
+
+- Does parent None + one child permission still reveal too much of the page?
+- Are Command Center widgets individually gated?
+- Is NBA list separate from NBA actions?
+- Do status/severity dropdown handlers enforce permissions, not just the UI?
+- Can any stale modal bypass permission checks?
+- Can old can() logic still override the Global Permissions Matrix?
+- Are Add-on Trial / Paid Override / Revoke fully gated?
+- Does child None truly deny action even under parent Manage/Full?
+- Does child Full Access truly allow action even under parent View Only?
+
+If any of these are uncertain, say so clearly.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Verification Status
+2. Effective Permission Resolver
+3. Sidebar / Route Access Verification
+4. Command Center Permission Verification
+5. Support Tools Permission Verification
+6. De-escalation Confirmation / Request Verification
+7. Audit & Security Permission Verification
+8. Commercial / Add-on Permission Verification
+9. Matrix UX / Effective Access Preview Verification
+10. Auditability Verification
+11. Non-Regression Verification
+12. Traceability Table
+13. Known Risks / Gaps
+14. Recommendation Before Manual QA
+
+In section 14, clearly state one of:
+- “Ready for Manual QA”
+- “Not Ready for Manual QA — correction needed”
