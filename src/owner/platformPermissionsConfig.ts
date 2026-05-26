@@ -138,7 +138,8 @@ export const PLATFORM_FEATURE_GROUPS: PlatformFeatureGroupDef[] = [
     subPermissions: [
       { id: 'view_audit_security', label: 'View Audit & Security', description: 'Open the Audit & Security page and read the log.', threshold: 'view' },
       { id: 'view_audit_logs', label: 'View Audit Logs', description: 'Read the audit log table content. None hides all audit rows.', threshold: 'view' },
-      { id: 'view_actor_profile', label: 'View Actor Profile', description: 'Open actor / related-events tabs in the audit drawer.', threshold: 'view' },
+      { id: 'view_actor_profile', label: 'View Actor Profile', description: 'Open the actor profile tab in the audit drawer.', threshold: 'view' },
+      { id: 'view_related_event_timeline', label: 'View Related Event Timeline', description: 'Open the related-events / timeline tab in the audit drawer.', threshold: 'view' },
       { id: 'export_audit_csv', label: 'Export Audit CSV', description: 'Export the currently visible audit rows as CSV.', threshold: 'approve', sensitive: true },
       { id: 'add_security_note', label: 'Add Security Note', description: 'Add a security / posture / incident note (per-session store).', threshold: 'create' },
       { id: 'delete_security_note', label: 'Delete Security Note', description: 'Permanently delete a security note (writes a `security_note_deleted` audit row).', threshold: 'approve', sensitive: true },

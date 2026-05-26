@@ -130,6 +130,7 @@ const AuditSecurityPage: React.FC = () => {
   const createCaseGate = hasPlatformPermission(sessionRole, 'create_support_case');
   // Pre-QA correction — wire 4 Audit & Security sub-permissions explicitly.
   const viewActorProfileGate = hasPlatformPermission(sessionRole, 'view_actor_profile');
+  const viewRelatedEventTimelineGate = hasPlatformPermission(sessionRole, 'view_related_event_timeline');
   const viewRestrictedDetailsGate = hasPlatformPermission(sessionRole, 'view_restricted_audit_details');
   const viewEscalationLifecycleGate = hasPlatformPermission(sessionRole, 'view_escalation_lifecycle_audit');
 
@@ -843,12 +844,14 @@ const AuditSecurityPage: React.FC = () => {
                 </button>
               </div>
 
-              {/* Tabs — Pre-QA correction: 'related' and 'actor' tabs gated
-                  by view_actor_profile (sub-permission covers actor /
-                  related-events tabs in the audit drawer). */}
+              {/* Tabs — Pre-QA correction: 'related' tab gated by
+                  view_related_event_timeline, 'actor' tab gated by
+                  view_actor_profile (separate sub-permissions per spec). */}
               <div className="px-7 pt-4 flex gap-2 border-b border-slate-100">
                 {(['detail', 'related', 'actor'] as const)
-                  .filter(t => t === 'detail' || viewActorProfileGate.allowed)
+                  .filter(t => t === 'detail'
+                    || (t === 'related' && viewRelatedEventTimelineGate.allowed)
+                    || (t === 'actor' && viewActorProfileGate.allowed))
                   .map(t => (
                   <button
                     key={t}
