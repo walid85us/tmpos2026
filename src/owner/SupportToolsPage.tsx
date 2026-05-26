@@ -199,6 +199,11 @@ const SupportToolsPage: React.FC = () => {
   const [resolveModal, setResolveModal] = useState<SupportCaseRecord | null>(null);
   const [deescalateModal, setDeescalateModal] = useState<SupportCaseRecord | null>(null);
   const [closeWarnModal, setCloseWarnModal] = useState<SupportCaseRecord | null>(null);
+  // Request De-escalation (lightweight) — for operators who can view + add
+  // notes but cannot perform an actual de-escalation. Posts an internal
+  // note + audit row; never mutates escalation status.
+  const [requestDeescModal, setRequestDeescModal] = useState<SupportCaseRecord | null>(null);
+  const [requestDeescDraft, setRequestDeescDraft] = useState<{ note: string }>({ note: '' });
   const [escalateDraft, setEscalateDraft] = useState<{
     reasonCode: EscalationReasonCode;
     reasonNote: string;
@@ -1384,23 +1389,41 @@ const SupportToolsPage: React.FC = () => {
                     )}
                   </div>
                   {(() => {
-                    // De-escalate banner button: hidden when permission is
-                    // missing (per spec — Request De-escalation flow is
-                    // documented as future scope and kept out of this pass).
-                    // When granted, the button opens the confirmation modal
-                    // with a required reason — never calls deescalateCase
-                    // directly, so confirmation is always enforced.
+                    // De-escalate banner button: opens the confirmation
+                    // modal (which now also re-checks the permission at
+                    // confirm-time so a stale UI cannot bypass the gate).
+                    //
+                    // Lightweight Request De-escalation fallback: when the
+                    // operator cannot de-escalate but CAN add internal
+                    // notes, surface a "Request De-escalation" affordance
+                    // that posts an internal note + audit row WITHOUT
+                    // mutating escalation status. This gives front-line
+                    // staff a documented escalation-review path.
                     const deescPerm = hasPlatformPermission(sessionRole, 'deescalate_support_case');
-                    if (!deescPerm.allowed) return null;
-                    return (
-                      <button
-                        onClick={() => setDeescalateModal(selected)}
-                        className="px-3 py-1.5 bg-white/15 hover:bg-white/25 text-[10px] font-black uppercase tracking-widest rounded-lg backdrop-blur-sm transition-colors whitespace-nowrap"
-                        data-testid="support-case-deescalate-banner"
-                      >
-                        De-escalate
-                      </button>
-                    );
+                    if (deescPerm.allowed) {
+                      return (
+                        <button
+                          onClick={() => setDeescalateModal(selected)}
+                          className="px-3 py-1.5 bg-white/15 hover:bg-white/25 text-[10px] font-black uppercase tracking-widest rounded-lg backdrop-blur-sm transition-colors whitespace-nowrap"
+                          data-testid="support-case-deescalate-banner"
+                        >
+                          De-escalate
+                        </button>
+                      );
+                    }
+                    if (addInternalNoteGate.allowed) {
+                      return (
+                        <button
+                          onClick={() => { setRequestDeescDraft({ note: '' }); setRequestDeescModal(selected); }}
+                          title="You don't have permission to de-escalate. This will post an internal note and audit row requesting review by a permitted operator."
+                          className="px-3 py-1.5 bg-white/15 hover:bg-white/25 text-[10px] font-black uppercase tracking-widest rounded-lg backdrop-blur-sm transition-colors whitespace-nowrap"
+                          data-testid="support-case-request-deescalation"
+                        >
+                          Request De-escalation
+                        </button>
+                      );
+                    }
+                    return null;
                   })()}
                 </div>
               )}
@@ -2207,12 +2230,95 @@ const SupportToolsPage: React.FC = () => {
               <div className="p-5 border-t border-slate-100 bg-slate-50/40 flex justify-end gap-2">
                 <button onClick={() => setDeescalateModal(null)} className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-white">Cancel</button>
                 <button
-                  onClick={() => { deescalateCase(deescalateModal); setDeescalateModal(null); }}
+                  onClick={() => {
+                    // Confirm-time matrix re-check: mirrors the close-warn /
+                    // resolve-modal patterns so a stale UI (e.g. an open
+                    // modal after the permission was revoked mid-session)
+                    // cannot bypass the gate.
+                    const recheck = hasPlatformPermission(sessionRole, 'deescalate_support_case');
+                    if (!recheck.allowed) {
+                      console.warn('[support-tools] de-escalate denied at confirm:', recheck.reason);
+                      setDeescalateModal(null);
+                      return;
+                    }
+                    deescalateCase(deescalateModal);
+                    setDeescalateModal(null);
+                  }}
                   disabled={!deescalateDraft.note.trim()}
                   data-testid="support-deesc-confirm"
                   className="px-6 py-2.5 bg-violet-600 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-violet-700 disabled:bg-slate-300 disabled:cursor-not-allowed"
                 >
                   De-escalate
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Request De-escalation (lightweight) — posts internal note + audit row
+          requesting review by a permitted operator. Never mutates escalation
+          status. Confirm-time re-checks add_internal_support_note. */}
+      <AnimatePresence>
+        {requestDeescModal && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" data-testid="support-request-deesc-modal">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setRequestDeescModal(null)} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="relative w-full max-w-md bg-white rounded-[2rem] shadow-2xl overflow-hidden">
+              <div className="p-6 border-b border-slate-100">
+                <h3 className="text-lg font-black text-primary tracking-tight">Request De-escalation</h3>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mt-1">{requestDeescModal.id} · {requestDeescModal.subject}</p>
+                <p className="text-[10px] font-medium text-slate-500 mt-2 leading-snug">
+                  You don't have permission to de-escalate directly. This will post an internal note and audit row asking a permitted operator to review. Escalation status will not change.
+                </p>
+              </div>
+              <div className="p-6 space-y-3">
+                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">
+                  Reason <span className="text-red-500">*</span> required
+                </label>
+                <textarea
+                  value={requestDeescDraft.note}
+                  onChange={e => setRequestDeescDraft({ note: e.target.value })}
+                  data-testid="support-request-deesc-note"
+                  placeholder="Explain why this case should be reviewed for de-escalation…"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 h-24 resize-none"
+                />
+                {!requestDeescDraft.note.trim() && (
+                  <p className="text-[10px] font-bold text-slate-400">Confirm is disabled until a reason is provided.</p>
+                )}
+              </div>
+              <div className="p-5 border-t border-slate-100 bg-slate-50/40 flex justify-end gap-2">
+                <button onClick={() => setRequestDeescModal(null)} className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-white">Cancel</button>
+                <button
+                  onClick={() => {
+                    // Confirm-time recheck of the underlying note permission.
+                    const recheck = hasPlatformPermission(sessionRole, 'add_internal_support_note');
+                    if (!recheck.allowed) {
+                      console.warn('[support-tools] request-deesc denied at confirm:', recheck.reason);
+                      setRequestDeescModal(null);
+                      return;
+                    }
+                    const reason = requestDeescDraft.note.trim();
+                    if (!reason) return;
+                    const target = requestDeescModal;
+                    // Post internal note via existing addNote handler so the
+                    // case-timeline shape stays consistent.
+                    addNote(target.id, `De-escalation requested by ${operatorName} (${currentRole}): ${reason}`);
+                    pushPlatformAudit({
+                      actor: operatorName,
+                      action: 'support_case_deescalation_requested',
+                      target: `${tenantById.get(target.tenantId) || target.tenantId} · ${target.subject}`,
+                      category: 'support',
+                      tenantId: target.tenantId,
+                      severity: 'notice',
+                      note: reason,
+                    });
+                    setRequestDeescModal(null);
+                  }}
+                  disabled={!requestDeescDraft.note.trim()}
+                  data-testid="support-request-deesc-confirm"
+                  className="px-6 py-2.5 bg-violet-600 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-violet-700 disabled:bg-slate-300 disabled:cursor-not-allowed"
+                >
+                  Submit Request
                 </button>
               </div>
             </motion.div>

@@ -10,6 +10,9 @@ import {
   PLATFORM_FEATURE_GROUPS,
   PLATFORM_PERMISSION_LEVELS,
   PLATFORM_PERMISSION_LEVEL_LABEL,
+  PLATFORM_PERMISSION_DEPENDENCIES,
+  findSubPermissionDef,
+  explainAccessDecision,
   PLATFORM_ROLE_DISPLAY_LABEL,
   DEFAULT_PLATFORM_FEATURE_LEVELS,
   readPlatformPermissionsOverrides,
@@ -407,6 +410,13 @@ export default function TeamManagementPage() {
             const isNone = lvl === 'none';
             const isFull = lvl === 'full';
             const childGranted = isNone && enabled > 0;
+            // Count child sub-permissions that are blocked by a prerequisite
+            // for this role — surfaces prerequisite-driven gating in the
+            // Effective Access Preview ("X blocked by prerequisite").
+            const prereqBlocked = previewRole === 'system_owner' ? 0 : g.subPermissions.reduce((n, sp) => {
+              const dec = explainAccessDecision(previewRole, sp.id, overrides);
+              return n + (!dec.allowed && dec.source === 'denied_prerequisite' ? 1 : 0);
+            }, 0);
             return (
               <div key={g.key} className={`px-3 py-2.5 rounded-xl border text-xs ${
                 childGranted ? 'bg-amber-50 border-amber-200 text-amber-700' :
@@ -419,6 +429,15 @@ export default function TeamManagementPage() {
                 <p className="text-[9px] font-medium mt-0.5 opacity-70">{enabled}/{total} subs enabled</p>
                 {childGranted && (
                   <p className="text-[8px] font-black mt-1 text-amber-600 uppercase tracking-widest">Sidebar visible via child</p>
+                )}
+                {prereqBlocked > 0 && (
+                  <p
+                    data-testid={`preview-prereq-blocked-${g.key}`}
+                    title="Some child actions in this feature are auto-disabled because a prerequisite permission is None or below its threshold. Hover the matrix row for details."
+                    className="text-[8px] font-black mt-1 text-indigo-600 uppercase tracking-widest"
+                  >
+                    {prereqBlocked} blocked by prereq
+                  </p>
                 )}
                 {previewRole === 'system_owner' && (
                   <p className="text-[8px] font-black mt-1 text-emerald-600 uppercase tracking-widest">Locked</p>
@@ -563,13 +582,31 @@ export default function TeamManagementPage() {
                       );
                     })}
                   </tr>
-                  {showExpanded && (searchActive ? matchingSubs : group.subPermissions).map(sp => (
+                  {showExpanded && (searchActive ? matchingSubs : group.subPermissions).map(sp => {
+                    // Permission Dependency / Prerequisite Map feedback
+                    // (spec PART G). When this sub-permission depends on
+                    // others, render a quiet inline indicator so editors
+                    // know which prerequisite gates this action.
+                    const depKeys = PLATFORM_PERMISSION_DEPENDENCIES[sp.id] || [];
+                    const depLabels = depKeys
+                      .map(k => findSubPermissionDef(k)?.def.label)
+                      .filter(Boolean) as string[];
+                    return (
                     <tr key={`${group.key}-${sp.id}`} className="border-b border-slate-50" data-testid={`matrix-sub-row-${sp.id}`}>
                       <td className="px-4 py-3 pl-12">
-                        <p className="text-xs font-bold text-slate-700 flex items-center gap-2">
+                        <p className="text-xs font-bold text-slate-700 flex items-center gap-2 flex-wrap">
                           {sp.label}
                           {sp.sensitive && (
                             <span className="px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest rounded bg-amber-400/10 text-amber-700 border border-amber-400/20">sensitive</span>
+                          )}
+                          {depLabels.length > 0 && (
+                            <span
+                              data-testid={`matrix-sub-dep-${sp.id}`}
+                              title={`Depends on: ${depLabels.join(', ')}. If any prerequisite is None / below its threshold, this action is auto-disabled.`}
+                              className="px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest rounded bg-indigo-400/10 text-indigo-700 border border-indigo-400/20"
+                            >
+                              depends on {depLabels.length === 1 ? depLabels[0] : `${depLabels.length} prereqs`}
+                            </span>
                           )}
                         </p>
                         <p className="text-[10px] font-medium text-slate-500 mt-0.5">
@@ -581,7 +618,13 @@ export default function TeamManagementPage() {
                         const lvl = getPlatformSubPermissionLevel(role, sp.id, overrides);
                         const lockedRow = !isOwner || role === 'system_owner';
                         const displayLvl: PermissionLevel = role === 'system_owner' ? 'full' : lvl;
-                        const meets = platformPermissionMeets(displayLvl, sp.threshold);
+                        // Use explainAccessDecision so prerequisite-denied
+                        // is surfaced as a distinct, explanatory state
+                        // ("blocked by prerequisite") rather than just
+                        // "disabled".
+                        const dec = explainAccessDecision(role, sp.id, overrides);
+                        const meets = dec.allowed;
+                        const blockedByPrereq = !meets && dec.source === 'denied_prerequisite';
                         return (
                           <td key={role} className="px-3 py-3 text-center">
                             {renderLevelSelect(
@@ -590,14 +633,22 @@ export default function TeamManagementPage() {
                               lockedRow,
                               `matrix-sub-${sp.id}-${role}`
                             )}
-                            <div className={`text-[9px] font-bold uppercase tracking-widest mt-1 ${meets ? 'text-emerald-600' : 'text-slate-400'}`}>
-                              {meets ? 'enabled' : 'disabled'}
+                            <div
+                              title={!meets ? dec.reason : ''}
+                              className={`text-[9px] font-bold uppercase tracking-widest mt-1 ${
+                                meets ? 'text-emerald-600' :
+                                blockedByPrereq ? 'text-indigo-500' :
+                                'text-slate-400'
+                              }`}
+                            >
+                              {meets ? 'enabled' : blockedByPrereq ? 'blocked by prereq' : 'disabled'}
                             </div>
                           </td>
                         );
                       })}
                     </tr>
-                  ))}
+                    );
+                  })}
                 </React.Fragment>
               );
             })}

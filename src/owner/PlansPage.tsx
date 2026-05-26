@@ -1887,7 +1887,7 @@ const PlansPage: React.FC = () => {
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 20 }}
               onClick={e => e.stopPropagation()}
-              className="bg-white rounded-[3rem] shadow-2xl w-full max-w-3xl max-h-[92vh] flex flex-col overflow-hidden"
+              className="bg-white rounded-[3rem] shadow-2xl w-full max-w-5xl max-h-[94vh] flex flex-col overflow-hidden"
             >
               <div className="p-8 border-b border-slate-100 flex justify-between items-center shrink-0">
                 <div>
@@ -1898,7 +1898,7 @@ const PlansPage: React.FC = () => {
                   <span className="material-symbols-outlined text-lg">close</span>
                 </button>
               </div>
-              <div className="p-8 space-y-5 overflow-y-auto">
+              <div className="p-10 space-y-7 overflow-y-auto">
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">Add-on Name</label>
                   <input value={addOnForm.name} onChange={e => setAddOnForm(p => ({ ...p, name: e.target.value }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary" placeholder="e.g., Premium Support" />

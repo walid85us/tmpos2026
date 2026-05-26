@@ -294,6 +294,93 @@ export function getPlatformFeatureGroup(key: PlatformFeatureKey): PlatformFeatur
   return FEATURE_BY_KEY.get(key) || null;
 }
 
+// ---------------------------------------------------------------------------
+// Permission Dependency / Prerequisite Map (spec PART A).
+//
+// Some sub-permissions are MEANINGLESS without a prerequisite. e.g.:
+//   - "Act on NBA Recommendations" is useless if NBA view is None.
+//   - All Support Tools child actions assume the operator can at least open
+//     Support Tools (view_support_tools).
+//   - "Create Case from Audit Event" requires both "View Audit & Security"
+//     AND "Create Support Case".
+//   - Add-on commercial overrides require "View Add-on Governance".
+//
+// The resolver below (explainAccessDecision / hasPlatformPermission) auto-
+// reconciles: if ANY prerequisite resolves to denied, the dependent action
+// is denied with `source = 'denied_prerequisite'` and a concise reason that
+// names the missing prerequisite, so UI tooltips, the Effective Access
+// Preview, and audit logs can explain "this action is inactive because
+// prerequisite [X] is None/View Only" without each callsite repeating the
+// dependency check.
+//
+// NOTE: only direct prerequisites are listed — the resolver follows them
+// transitively with a small recursion guard to prevent cycles. Server-side
+// RBAC / PIM / PAM enforcement is out of scope for this phase (planned for
+// Phase 1.3).
+// ---------------------------------------------------------------------------
+
+export const PLATFORM_PERMISSION_DEPENDENCIES: Record<string, string[]> = {
+  // Command Center — NBA action requires NBA view.
+  act_on_nba_recommendations: ['view_next_best_actions'],
+
+  // Support Tools — every child action requires being able to OPEN the
+  // Support Tools surface (view_support_tools). This makes a stale UI
+  // (e.g. an open drawer after parent access is revoked) safe by design.
+  view_escalation_history: ['view_support_tools'],
+  create_support_case: ['view_support_tools'],
+  change_support_status: ['view_support_tools'],
+  change_support_severity: ['view_support_tools'],
+  assign_support_case: ['view_support_tools'],
+  close_support_case: ['view_support_tools'],
+  reopen_support_case: ['view_support_tools'],
+  edit_support_case: ['view_support_tools'],
+  escalate_assigned_case: ['view_support_tools'],
+  escalate_any_case: ['view_support_tools'],
+  acknowledge_escalation: ['view_support_tools'],
+  assign_escalation_owner_team: ['view_support_tools'],
+  change_escalation_level: ['view_support_tools'],
+  deescalate_support_case: ['view_support_tools'],
+  resolve_escalation: ['view_support_tools'],
+  close_with_active_escalation: ['view_support_tools', 'close_support_case'],
+  view_support_sla: ['view_support_tools'],
+  view_support_tenant_health: ['view_support_tools'],
+  view_support_related_entities: ['view_support_tools'],
+  add_internal_support_note: ['view_support_tools'],
+  use_support_macro: ['add_internal_support_note'],
+  manage_support_macros: ['view_support_tools'],
+
+  // Audit & Security — drawer sub-tabs, export, and note actions require
+  // being able to open Audit & Security at minimum.
+  view_audit_logs: ['view_audit_security'],
+  view_actor_profile: ['view_audit_security'],
+  view_related_event_timeline: ['view_audit_security'],
+  view_restricted_audit_details: ['view_audit_security'],
+  view_escalation_lifecycle_audit: ['view_audit_security'],
+  export_audit_csv: ['view_audit_logs'],
+  add_security_note: ['view_audit_security'],
+  delete_security_note: ['view_audit_security'],
+  // Creating a support case FROM an audit event needs BOTH (Audit drawer
+  // visibility + the right to create a support case in Support Tools).
+  create_support_case_from_audit: ['view_audit_security', 'create_support_case'],
+
+  // Commercial Controls / Add-on Governance — every mutation depends on
+  // being able to see the add-on catalog.
+  create_addon: ['view_addon_governance'],
+  edit_addon: ['view_addon_governance'],
+  archive_delete_addon: ['view_addon_governance'],
+  manage_addon_compatible_plans: ['view_addon_governance'],
+  manage_addon_readiness: ['view_addon_governance'],
+  generate_addon_implementation_brief: ['view_addon_governance'],
+  grant_trial: ['view_addon_governance'],
+  grant_paid_override: ['view_addon_governance'],
+  revoke_addon_override: ['view_addon_governance'],
+  edit_addon_overrides: ['view_addon_governance'],
+};
+
+export function getPlatformPermissionDependencies(subKey: string): string[] {
+  return PLATFORM_PERMISSION_DEPENDENCIES[subKey] || [];
+}
+
 export function findSubPermissionDef(
   subKey: string
 ): { feature: PlatformFeatureKey; def: PlatformSubPermissionDef } | null {
@@ -505,32 +592,15 @@ export function hasPlatformPermission(
   subKey: string,
   overrides?: PlatformPermissionsOverrides
 ): PlatformPermissionResult {
-  const sub = SUB_LOOKUP.get(subKey);
-  if (!sub) {
-    return {
-      allowed: false,
-      reason: `Unknown platform permission "${subKey}".`,
-      level: 'none',
-      threshold: 'view',
-    };
-  }
-  if (!role) {
-    return {
-      allowed: false,
-      reason: 'No active session.',
-      level: 'none',
-      threshold: sub.def.threshold,
-    };
-  }
-  const level = getPlatformSubPermissionLevel(role, subKey, overrides);
-  const allowed = platformPermissionMeets(level, sub.def.threshold);
+  // Delegate to explainAccessDecision so every gate decision honors the
+  // dependency/prerequisite map uniformly. This lets a single resolver auto-
+  // reconcile dependent permissions (e.g. NBA action requires NBA view).
+  const dec = explainAccessDecision(role, subKey, overrides);
   return {
-    allowed,
-    reason: allowed
-      ? ''
-      : `${PLATFORM_PERMISSION_LEVEL_LABEL[sub.def.threshold]} or higher required for ${sub.def.label}; current level is ${PLATFORM_PERMISSION_LEVEL_LABEL[level]}.`,
-    level,
-    threshold: sub.def.threshold,
+    allowed: dec.allowed,
+    reason: dec.allowed ? '' : dec.reason,
+    level: dec.effectiveLevel,
+    threshold: dec.threshold,
   };
 }
 
@@ -655,7 +725,8 @@ export type AccessDecisionSource =
   | 'explicit_parent'
   | 'default_parent'
   | 'denied_explicit_child'
-  | 'denied_no_access';
+  | 'denied_no_access'
+  | 'denied_prerequisite';
 // Note: `default_child` is intentionally absent — sub-permissions inherit
 // from the parent feature default (no per-child default level is stored on
 // the def), so `default_parent` is the correct source label whenever the
@@ -731,7 +802,8 @@ export function hasActionAccess(
 export function explainAccessDecision(
   role: Role | undefined | null,
   subKey: string,
-  overrides?: PlatformPermissionsOverrides
+  overrides?: PlatformPermissionsOverrides,
+  _depPath?: Set<string>
 ): AccessDecision {
   const sub = SUB_LOOKUP.get(subKey);
   if (!sub) {
@@ -780,10 +852,41 @@ export function explainAccessDecision(
     effectiveLevel = (DEFAULT_PLATFORM_FEATURE_LEVELS[role]?.[sub.feature]) || 'none';
     source = 'default_parent';
   }
-  const allowed = platformPermissionMeets(effectiveLevel, threshold);
+  let allowed = platformPermissionMeets(effectiveLevel, threshold);
   if (!allowed && source !== 'denied_explicit_child') {
     if (effectiveLevel === 'none') source = 'denied_no_access';
   }
+
+  // Dependency / prerequisite reconciliation. If this permission depends on
+  // other sub-permissions, EACH prerequisite must independently resolve to
+  // allowed. A failing prereq forces this decision to denied with a clear
+  // reason that names the missing prerequisite (UI tooltips, Effective
+  // Access Preview, audit log all read off this).
+  if (allowed) {
+    const deps = PLATFORM_PERMISSION_DEPENDENCIES[subKey] || [];
+    if (deps.length > 0) {
+      const path = _depPath ?? new Set<string>();
+      path.add(subKey);
+      for (const depKey of deps) {
+        if (path.has(depKey)) continue; // cycle guard
+        const depSub = SUB_LOOKUP.get(depKey);
+        if (!depSub) continue;
+        const depDec = explainAccessDecision(role, depKey, ov, path);
+        if (!depDec.allowed) {
+          allowed = false;
+          source = 'denied_prerequisite';
+          return {
+            allowed: false,
+            effectiveLevel,
+            source,
+            reason: `This action depends on "${depSub.def.label}", which is currently denied (${PLATFORM_PERMISSION_LEVEL_LABEL[depDec.effectiveLevel]}). Grant the prerequisite to enable this action.`,
+            threshold,
+          };
+        }
+      }
+    }
+  }
+
   return {
     allowed,
     effectiveLevel,
