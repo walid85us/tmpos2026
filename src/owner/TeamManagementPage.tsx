@@ -13,6 +13,9 @@ import {
   PLATFORM_PERMISSION_DEPENDENCIES,
   findSubPermissionDef,
   explainAccessDecision,
+  reconcileSubPermissionChange,
+  reconcileFeatureLevelChange,
+  type PermissionAdjustment,
   PLATFORM_ROLE_DISPLAY_LABEL,
   DEFAULT_PLATFORM_FEATURE_LEVELS,
   readPlatformPermissionsOverrides,
@@ -250,6 +253,23 @@ export default function TeamManagementPage() {
   const [expandedFeatures, setExpandedFeatures] = useState<Record<PlatformFeatureKey, boolean>>(() => ({} as any));
   const [matrixSearch, setMatrixSearch] = useState('');
   const [previewRole, setPreviewRole] = useState<Role | null>(null);
+  // Non-blocking notice surfaced when a permission change auto-reconciled
+  // one or more dependent or prerequisite permissions. Auto-dismisses after
+  // a few seconds; explicit close also clears it.
+  const [reconcileNotice, setReconcileNotice] = useState<
+    | null
+    | {
+        role: Role;
+        changedLabel: string;
+        adjustments: PermissionAdjustment[];
+        ts: number;
+      }
+  >(null);
+  useEffect(() => {
+    if (!reconcileNotice) return;
+    const t = window.setTimeout(() => setReconcileNotice(null), 8000);
+    return () => window.clearTimeout(t);
+  }, [reconcileNotice?.ts]);
 
   useEffect(() => {
     const onChange = () => setOverrides(readPlatformPermissionsOverrides());
@@ -267,14 +287,21 @@ export default function TeamManagementPage() {
     if (!isOwner || role === 'system_owner') return;
     const oldLevel = getPlatformFeatureLevel(role, featureKey, overrides);
     if (oldLevel === level) return;
+    const before = overrides;
     const next: PlatformPermissionsOverrides = { ...overrides };
     const roleEntry = { ...(next[role] || {}) };
     const features = { ...(roleEntry.features || {}) };
     features[featureKey] = level;
     roleEntry.features = features;
     next[role] = roleEntry;
-    setOverrides(next);
-    writePlatformPermissionsOverrides(next);
+    // Auto-reconcile dependents that became ineffective when the parent
+    // feature was lowered. Raising a parent only increases inherited levels
+    // and never violates a prereq, so reconciliation is a no-op in that
+    // direction (handled inside the helper).
+    const { next: reconciled, adjustments } =
+      reconcileFeatureLevelChange(role, featureKey, oldLevel, level, next, before);
+    setOverrides(reconciled);
+    writePlatformPermissionsOverrides(reconciled);
     const featureLabel = PLATFORM_FEATURE_GROUPS.find(g => g.key === featureKey)?.label || featureKey;
     const roleLabel = PLATFORM_ROLE_DISPLAY_LABEL[role];
     logActivity('Updated Permissions', `Set ${featureLabel} to ${level} for ${roleLabel}`);
@@ -287,20 +314,31 @@ export default function TeamManagementPage() {
       newValue: level,
       severity: 'warning',
     });
+    auditAdjustments(role, featureLabel, adjustments);
+    if (adjustments.length > 0) {
+      setReconcileNotice({ role, changedLabel: featureLabel, adjustments, ts: Date.now() });
+    }
   };
 
   const setSubLevel = (role: Role, featureKey: PlatformFeatureKey, subKey: string, level: PermissionLevel) => {
     if (!isOwner || role === 'system_owner') return;
     const oldLevel = getPlatformSubPermissionLevel(role, subKey, overrides);
     if (oldLevel === level) return;
+    const before = overrides;
     const next: PlatformPermissionsOverrides = { ...overrides };
     const roleEntry = { ...(next[role] || {}) };
     const subs = { ...(roleEntry.subs || {}) };
     subs[subKey] = level;
     roleEntry.subs = subs;
     next[role] = roleEntry;
-    setOverrides(next);
-    writePlatformPermissionsOverrides(next);
+    // Direction-aware auto-reconcile: raised → auto-raise prereqs; lowered
+    // → auto-cap dependents. Lowering a dependent never touches its read-
+    // only prerequisite (handled inside the helper). `before` is required
+    // so the helper can detect "was previously allowed" transitions.
+    const { next: reconciled, adjustments } =
+      reconcileSubPermissionChange(role, subKey, oldLevel, level, next, before);
+    setOverrides(reconciled);
+    writePlatformPermissionsOverrides(reconciled);
     const group = PLATFORM_FEATURE_GROUPS.find(g => g.key === featureKey);
     const subDef = group?.subPermissions.find(s => s.id === subKey);
     const roleLabel = PLATFORM_ROLE_DISPLAY_LABEL[role];
@@ -314,6 +352,44 @@ export default function TeamManagementPage() {
       newValue: level,
       severity: 'warning',
     });
+    auditAdjustments(role, subDef?.label || subKey, adjustments);
+    if (adjustments.length > 0) {
+      setReconcileNotice({
+        role,
+        changedLabel: subDef?.label || subKey,
+        adjustments,
+        ts: Date.now(),
+      });
+    }
+  };
+
+  // Emit one `platform_permission_dependency_reconciled` audit row per
+  // auto-adjustment. Deduplicates by subKey so a transitive chain that
+  // somehow re-visits the same node never doubles up.
+  const auditAdjustments = (
+    role: Role,
+    sourceLabel: string,
+    adjustments: PermissionAdjustment[]
+  ) => {
+    if (!adjustments.length) return;
+    const roleLabel = PLATFORM_ROLE_DISPLAY_LABEL[role];
+    const seen = new Set<string>();
+    for (const adj of adjustments) {
+      if (seen.has(adj.subKey)) continue;
+      seen.add(adj.subKey);
+      pushPlatformAudit({
+        actor: session?.user?.name || 'System Owner',
+        action: 'platform_permission_dependency_reconciled',
+        target: `${roleLabel} · ${adj.label}`,
+        category: 'team',
+        oldValue: adj.prevLevel,
+        newValue: adj.nextLevel,
+        severity: 'warning',
+        note: adj.reason === 'prereq_auto_raised'
+          ? `Auto-raised prerequisite to satisfy "${sourceLabel}".`
+          : `Auto-capped — depends on "${sourceLabel}" which was lowered.`,
+      });
+    }
   };
 
   const enabledSubCount = (role: Role, featureKey: PlatformFeatureKey): { enabled: number; total: number } => {
@@ -515,6 +591,45 @@ export default function TeamManagementPage() {
           </select>
         </div>
       </div>
+
+      {reconcileNotice && (
+        <div
+          className="bg-indigo-50 border border-indigo-200 rounded-2xl p-4 mb-4 flex items-start gap-3"
+          data-testid="permission-reconciliation-notice"
+        >
+          <span className="material-symbols-outlined text-indigo-600 text-lg mt-0.5">auto_fix_high</span>
+          <div className="flex-1 text-xs text-indigo-900 leading-relaxed">
+            <p className="font-black uppercase tracking-widest text-indigo-700 mb-1">
+              Dependent permissions adjusted to preserve least-privilege consistency
+            </p>
+            <p className="font-medium mb-1.5">
+              Changing <span className="font-black">"{reconcileNotice.changedLabel}"</span> for{' '}
+              <span className="font-black">{PLATFORM_ROLE_DISPLAY_LABEL[reconcileNotice.role]}</span>{' '}
+              auto-{reconcileNotice.adjustments[0]?.reason === 'prereq_auto_raised' ? 'raised' : 'capped'} the following:
+            </p>
+            <ul className="space-y-0.5 list-disc list-inside font-medium">
+              {reconcileNotice.adjustments.map(adj => (
+                <li key={adj.subKey}>
+                  <span className="font-black">{adj.label}</span>:{' '}
+                  {PLATFORM_PERMISSION_LEVEL_LABEL[adj.prevLevel]} → {PLATFORM_PERMISSION_LEVEL_LABEL[adj.nextLevel]}{' '}
+                  <span className="text-indigo-600">
+                    ({adj.reason === 'prereq_auto_raised'
+                      ? 'prerequisite auto-raised'
+                      : 'dependent auto-capped'})
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+          <button
+            onClick={() => setReconcileNotice(null)}
+            className="text-indigo-400 hover:text-indigo-700"
+            aria-label="Dismiss"
+          >
+            <span className="material-symbols-outlined text-sm">close</span>
+          </button>
+        </div>
+      )}
 
       {renderPreviewPanel()}
 

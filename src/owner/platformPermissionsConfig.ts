@@ -381,6 +381,246 @@ export function getPlatformPermissionDependencies(subKey: string): string[] {
   return PLATFORM_PERMISSION_DEPENDENCIES[subKey] || [];
 }
 
+// Reverse dependency index — given a prerequisite sub-key, list the
+// dependent sub-keys that require it. Built once at module-load.
+export const PLATFORM_PERMISSION_DEPENDENTS: Record<string, string[]> = (() => {
+  const map: Record<string, string[]> = {};
+  for (const [dependent, deps] of Object.entries(PLATFORM_PERMISSION_DEPENDENCIES)) {
+    for (const prereq of deps) {
+      if (!map[prereq]) map[prereq] = [];
+      map[prereq].push(dependent);
+    }
+  }
+  return map;
+})();
+
+export function getPlatformPermissionDependents(subKey: string): string[] {
+  return PLATFORM_PERMISSION_DEPENDENTS[subKey] || [];
+}
+
+// ---------------------------------------------------------------------------
+// Permission Dependency Auto-Sync (write-time reconciliation).
+//
+// Direction-aware IAM rules (mirrors PART A of the spec):
+//   1) RAISING a dependent action permission auto-raises each prerequisite to
+//      the minimum level needed to satisfy that prereq's own threshold (so the
+//      dependent action is actually usable).
+//   2) LOWERING a prerequisite auto-caps any dependent mutation/action perm
+//      that becomes ineffective as a result (set explicit `none`).
+//   3) LOWERING a dependent action does NOT touch its read-only prerequisite.
+//   4) System Owner is locked — no reconciliation runs for it.
+//   5) Every adjustment is returned so the caller can audit it.
+//
+// These helpers are pure — they take overrides in, return new overrides +
+// the list of adjustments. The matrix UI applies and audits the result.
+// ---------------------------------------------------------------------------
+
+export interface PermissionAdjustment {
+  /** The sub-permission whose stored value was auto-changed. */
+  subKey: string;
+  /** Display label of the adjusted sub-permission. */
+  label: string;
+  /** Effective level before the auto-adjustment. */
+  prevLevel: PermissionLevel;
+  /** Effective level after the auto-adjustment. */
+  nextLevel: PermissionLevel;
+  /** What kind of reconciliation occurred. */
+  reason: 'prereq_auto_raised' | 'dependent_auto_capped';
+  /** For prereq_auto_raised: the dependent action that triggered the raise. */
+  triggeredBy?: string;
+}
+
+export interface ReconciliationResult {
+  next: PlatformPermissionsOverrides;
+  adjustments: PermissionAdjustment[];
+}
+
+function cloneOverrides(o: PlatformPermissionsOverrides): PlatformPermissionsOverrides {
+  return JSON.parse(JSON.stringify(o || {}));
+}
+
+function setExplicitSub(
+  overrides: PlatformPermissionsOverrides,
+  role: Role,
+  subKey: string,
+  level: PermissionLevel
+): void {
+  const entry = { ...(overrides[role] || {}) };
+  entry.subs = { ...(entry.subs || {}), [subKey]: level };
+  overrides[role] = entry;
+}
+
+/**
+ * Reconcile dependencies after a single sub-permission was set to a new
+ * level. Direction-aware per the IAM rules above.
+ *
+ * @param role             The role whose permission was changed.
+ * @param subKey           The sub-permission that was changed.
+ * @param prevLevel        The effective level immediately BEFORE the user's
+ *                         change (used only as a fast direction check).
+ * @param nextLevel        The level the user just set.
+ * @param overrides        The full overrides snapshot AFTER the user's
+ *                         change has been applied (the changed sub already
+ *                         reflects `nextLevel`).
+ * @param overridesBefore  The full overrides snapshot BEFORE the user's
+ *                         change. Required for the "was previously allowed"
+ *                         test that drives dependent auto-capping.
+ */
+export function reconcileSubPermissionChange(
+  role: Role,
+  subKey: string,
+  prevLevel: PermissionLevel,
+  nextLevel: PermissionLevel,
+  overrides: PlatformPermissionsOverrides,
+  overridesBefore: PlatformPermissionsOverrides
+): ReconciliationResult {
+  if (role === 'system_owner') return { next: overrides, adjustments: [] };
+  if (LEVEL_RANK[nextLevel] === LEVEL_RANK[prevLevel]) {
+    return { next: overrides, adjustments: [] };
+  }
+  const working = cloneOverrides(overrides);
+  const adjustments: PermissionAdjustment[] = [];
+
+  const raised = LEVEL_RANK[nextLevel] > LEVEL_RANK[prevLevel];
+  const lowered = LEVEL_RANK[nextLevel] < LEVEL_RANK[prevLevel];
+
+  if (raised) {
+    // Walk this sub's prerequisites transitively; raise any currently-denied
+    // prereq to the minimum level that satisfies its own threshold. NEVER
+    // lower an already-higher level (least-privilege preserved).
+    const visited = new Set<string>();
+    const raiseChain = (k: string) => {
+      if (visited.has(k)) return;
+      visited.add(k);
+      const deps = PLATFORM_PERMISSION_DEPENDENCIES[k] || [];
+      for (const dk of deps) {
+        const def = SUB_LOOKUP.get(dk);
+        if (!def) continue;
+        const dec = explainAccessDecision(role, dk, working);
+        if (!dec.allowed) {
+          const target: PermissionLevel = def.def.threshold === 'none' ? 'view' : def.def.threshold;
+          const currentStored = getPlatformSubPermissionLevel(role, dk, working);
+          // Guard: never write a target that would LOWER an already-higher
+          // explicit/inherited level. This can occur in transitive chains
+          // where a prereq is itself denied because of yet another missing
+          // prereq — in that case raising its sibling prereq fixes things
+          // and we must not overwrite the unrelated sub.
+          if (LEVEL_RANK[target] <= LEVEL_RANK[currentStored]) {
+            raiseChain(dk);
+            continue;
+          }
+          setExplicitSub(working, role, dk, target);
+          adjustments.push({
+            subKey: dk,
+            label: def.def.label,
+            prevLevel: currentStored,
+            nextLevel: target,
+            reason: 'prereq_auto_raised',
+            triggeredBy: k,
+          });
+          raiseChain(dk);
+        }
+      }
+    };
+    raiseChain(subKey);
+  }
+
+  if (lowered) {
+    // Walk reverse dependencies transitively; cap any dependent that was
+    // allowed BEFORE the user's change but is now denied_prerequisite.
+    // Critical: compare against `overridesBefore` (true pre-change state)
+    // — using the post-change snapshot would mask the very transitions we
+    // need to detect.
+    const visited = new Set<string>();
+    const capChain = (k: string) => {
+      if (visited.has(k)) return;
+      visited.add(k);
+      const dependents = PLATFORM_PERMISSION_DEPENDENTS[k] || [];
+      for (const dk of dependents) {
+        const def = SUB_LOOKUP.get(dk);
+        if (!def) continue;
+        const prevDec = explainAccessDecision(role, dk, overridesBefore);
+        const nowDec = explainAccessDecision(role, dk, working);
+        if (prevDec.allowed && !nowDec.allowed && nowDec.source === 'denied_prerequisite') {
+          const prev = getPlatformSubPermissionLevel(role, dk, working);
+          if (prev !== 'none') {
+            setExplicitSub(working, role, dk, 'none');
+            adjustments.push({
+              subKey: dk,
+              label: def.def.label,
+              prevLevel: prev,
+              nextLevel: 'none',
+              reason: 'dependent_auto_capped',
+              triggeredBy: k,
+            });
+            capChain(dk);
+          }
+        }
+      }
+    };
+    capChain(subKey);
+  }
+
+  return { next: working, adjustments };
+}
+
+/**
+ * Reconcile dependencies after a parent FEATURE-level change. Only LOWERING
+ * a parent can drop dependents below their threshold (raising parent only
+ * increases inherited levels). For each sub in the changed feature whose
+ * effective level dropped, cap any dependents that became
+ * denied_prerequisite.
+ */
+export function reconcileFeatureLevelChange(
+  role: Role,
+  featureKey: PlatformFeatureKey,
+  prevLevel: PermissionLevel,
+  nextLevel: PermissionLevel,
+  overrides: PlatformPermissionsOverrides,
+  overridesBefore: PlatformPermissionsOverrides
+): ReconciliationResult {
+  if (role === 'system_owner') return { next: overrides, adjustments: [] };
+  if (LEVEL_RANK[nextLevel] >= LEVEL_RANK[prevLevel]) {
+    return { next: overrides, adjustments: [] };
+  }
+  const working = cloneOverrides(overrides);
+  const adjustments: PermissionAdjustment[] = [];
+  const group = FEATURE_BY_KEY.get(featureKey);
+  if (!group) return { next: working, adjustments };
+
+  const visited = new Set<string>();
+  const capChain = (k: string) => {
+    if (visited.has(k)) return;
+    visited.add(k);
+    const dependents = PLATFORM_PERMISSION_DEPENDENTS[k] || [];
+    for (const dk of dependents) {
+      const def = SUB_LOOKUP.get(dk);
+      if (!def) continue;
+      const prevDec = explainAccessDecision(role, dk, overridesBefore);
+      const nowDec = explainAccessDecision(role, dk, working);
+      if (prevDec.allowed && !nowDec.allowed && nowDec.source === 'denied_prerequisite') {
+        const prev = getPlatformSubPermissionLevel(role, dk, working);
+        if (prev !== 'none') {
+          setExplicitSub(working, role, dk, 'none');
+          adjustments.push({
+            subKey: dk,
+            label: def.def.label,
+            prevLevel: prev,
+            nextLevel: 'none',
+            reason: 'dependent_auto_capped',
+            triggeredBy: k,
+          });
+          capChain(dk);
+        }
+      }
+    }
+  };
+  for (const sp of group.subPermissions) {
+    capChain(sp.id);
+  }
+  return { next: working, adjustments };
+}
+
 export function findSubPermissionDef(
   subKey: string
 ): { feature: PlatformFeatureKey; def: PlatformSubPermissionDef } | null {
