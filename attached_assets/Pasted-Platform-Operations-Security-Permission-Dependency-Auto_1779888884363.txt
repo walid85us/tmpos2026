@@ -1,0 +1,314 @@
+Platform Operations & Security — Permission Dependency Auto-Sync + Request De-escalation Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict focused correction pass.
+
+Do not repeat broad permission work.
+Do not reopen already passed QA items.
+Do not implement Phase 1.1.3B, 1.1.3C, 1.1.3D, Phase 1.2, Phase 1.3, Phase 1.4, Phase 2, Phase 3, or Phase 4.
+
+Fix only the remaining QA notes from:
+Manual QA — Permission Dependency + Final UX Correction Review
+
+Remaining issues:
+1) Dependency feedback exists, but linked permissions should auto-sync / auto-reconcile to avoid inconsistent permission combinations.
+2) Request De-escalation did not appear when the user had view-level de-escalation permission but not enough permission to actually de-escalate.
+
+==================================================
+ROLE STACK — ACT UPON IT
+==================================================
+
+Act as:
+- Identity and Access Management (IAM) Specialist
+- IAM Analyst
+- Access Analyst
+- Website Administrator / Governance Lead
+- Senior Role-Based Access Control (RBAC) Architect
+- Senior Platform Team Governance Leader
+- Senior System Administrator
+- Senior Platform Operations Architect
+- Senior Support Tools Engineer
+- Senior Audit & Security Engineer
+- Senior React/TypeScript Engineer
+- QA Gatekeeper
+- Systems Thinker
+- Side Auditor
+
+Use these roles actively.
+
+Focus on:
+- least privilege
+- dependency-safe permissions
+- prerequisite enforcement
+- permission auto-reconciliation
+- explicit deny behavior
+- support escalation workflow safety
+- auditability
+- avoiding confusing permission combinations
+
+==================================================
+CURRENT QA RESULTS
+==================================================
+
+Passed:
+- NBA view/action dependency mostly works.
+- NBA action does not route without permission.
+- Change Case Status blocks correctly.
+- Change Case Severity blocks correctly.
+- De-escalate confirmation works.
+- Add-on modal UX improved.
+- Existing accepted behavior remains intact.
+
+Still failing / holding:
+1) Dependency feedback is only partial.
+User expectation:
+- Linked permissions should work together.
+- If dependency/prerequisite permission changes, related dependent permissions should reconcile automatically where appropriate.
+- Example:
+  - If View Next Best Actions is set to View Only, Act on NBA Recommendations should not remain Manage silently.
+  - If View Next Best Actions is set to None, Act on NBA Recommendations should be downgraded/disabled automatically.
+  - If Act on NBA Recommendations is raised above View, View Next Best Actions should be auto-raised to at least View Only because action cannot exist without visibility.
+
+2) Request De-escalation behavior failed.
+Observed:
+- User used a role with View-level De-escalate permission.
+- Request De-escalation did not appear.
+Expected:
+- De-escalate itself requires approval-level permission.
+- If user does not meet actual De-escalate threshold but can view the case and can add an internal note, show Request De-escalation.
+- View-level de-escalation permission should not authorize de-escalation, but it should allow visibility/request path if the user also has note/request capability.
+
+==================================================
+PART A — PERMISSION DEPENDENCY AUTO-SYNC MODEL
+==================================================
+
+Implement direction-aware dependency reconciliation.
+
+Do NOT implement unsafe full bidirectional mirroring.
+
+Use this professional IAM rule:
+
+1) Raising a dependent action permission should auto-raise prerequisites to the minimum needed view level.
+Example:
+- If act_on_nba_recommendations is changed to Edit / Approve / Manage / Full Access:
+  - view_next_best_actions must be auto-raised to at least View Only if it was None.
+  - do not auto-raise it beyond View Only unless required.
+
+2) Lowering a prerequisite permission should cap or downgrade dependent action permissions.
+Example:
+- If view_next_best_actions is changed to View Only:
+  - act_on_nba_recommendations should be reduced to View Only or None because it is a mutation/action permission.
+- If view_next_best_actions is changed to None:
+  - act_on_nba_recommendations should be set to None or marked ineffective.
+Preferred:
+  - auto-set dependent mutation permissions to None.
+  - audit the auto-adjustment.
+
+3) Lowering a dependent action permission should NOT lower prerequisite view permission.
+Example:
+- If act_on_nba_recommendations is set to None:
+  - view_next_best_actions may remain View Only because read-only visibility is still valid.
+
+4) Explicit System Owner Full Access remains locked/permanent.
+
+5) All auto-reconciliations must be auditable.
+
+==================================================
+PART B — DEPENDENCY GROUPS TO SUPPORT
+==================================================
+
+Apply the dependency auto-sync model at least to these groups.
+
+Command Center:
+- act_on_nba_recommendations depends on view_next_best_actions.
+- use_command_quick_actions depends on view_command_center.
+- view_tenant_360 depends on command center page access, but can itself reveal minimal Tenant 360 surface.
+
+Support Tools:
+- create_support_case depends on view_support_cases.
+- edit_support_case depends on view_support_cases.
+- change_support_status depends on view_support_cases.
+- change_support_severity depends on view_support_cases.
+- assign_support_case depends on view_support_cases.
+- add_internal_support_note depends on view_support_cases.
+- use_support_macro depends on view_support_cases and add_internal_support_note.
+- manage_support_macros depends on use_support_macro.
+- all escalation actions depend on view_support_cases.
+- request_deescalation, if added as separate permission, depends on view_support_cases and add_internal_support_note.
+
+Audit & Security:
+- export_audit_csv depends on view_audit_logs.
+- view_actor_profile depends on view_audit_logs.
+- view_related_event_timeline depends on view_audit_logs.
+- view_restricted_audit_details depends on view_audit_logs.
+- create_support_case_from_audit depends on view_audit_logs and create_support_case.
+
+Commercial / Add-on:
+- create_addon depends on view_addon_catalog.
+- edit_addon depends on view_addon_catalog.
+- grant_trial depends on view_addon_catalog.
+- grant_paid_override depends on view_addon_catalog.
+- revoke_addon_override depends on view_addon_catalog.
+- create_plan depends on view_feature_matrix.
+- edit_plan depends on view_feature_matrix.
+
+==================================================
+PART C — UI BEHAVIOR FOR AUTO-SYNC
+==================================================
+
+In Global Permissions Matrix:
+
+When a permission change triggers dependent auto-adjustment:
+- show a small in-app confirmation or clear inline notice before applying, if practical.
+- If confirmation is too heavy, show a non-blocking inline notice after save:
+  “Dependent permissions adjusted to preserve least-privilege consistency.”
+- Show which permissions changed.
+
+Effective Access Preview should show:
+- Depends on: [permission]
+- Auto-raises prerequisite to View Only when action is granted.
+- Auto-downgrades dependent action when prerequisite is lowered.
+- Blocked by prerequisite when dependency is not met.
+
+Do not make UI noisy.
+
+==================================================
+PART D — AUDIT AUTO-RECONCILIATION
+==================================================
+
+Audit every dependency auto-adjustment.
+
+Audit action suggestion:
+- platform_permission_dependency_reconciled
+
+Audit payload:
+- role
+- changed permission
+- changed permission previous/new value
+- dependent permission
+- dependent previous/new value
+- reason
+- actor
+- timestamp
+
+Do not duplicate audit rows for the same adjustment.
+
+==================================================
+PART E — REQUEST DE-ESCALATION CORRECTION
+==================================================
+
+Fix Request De-escalation visibility.
+
+Actual De-escalation requirement:
+- deescalate_support_case must meet Approve / Manage / Full Access threshold, unless current app defines another higher threshold.
+
+Request De-escalation should appear when all are true:
+1) user can view the support case:
+   - view_support_cases View Only or higher
+2) user cannot actually de-escalate:
+   - deescalate_support_case is below required threshold
+   - examples: None, View Only, Create, Edit
+3) user can add internal support note:
+   - add_internal_support_note Create or higher
+
+Required behavior:
+- If user has deescalate_support_case = View Only, Request De-escalation should appear if add_internal_support_note is allowed.
+- Request De-escalation opens modal.
+- Reason is required.
+- Submitting request does NOT change escalation status.
+- It adds internal note or escalation history entry.
+- It emits support_case_deescalation_requested audit row.
+- No external notification.
+- No state mutation to escalation itself.
+
+If user cannot add internal note:
+- hide Request De-escalation
+or
+- show disabled request button with minimal tooltip:
+  “Requires Add Internal Support Note permission.”
+
+Preferred:
+- hide if no note permission.
+
+==================================================
+PART F — DO NOT REGRESS ACTUAL DE-ESCALATION
+==================================================
+
+Actual De-escalation must still:
+- require Approve / Manage / Full Access threshold.
+- show in-app confirmation.
+- require reason.
+- re-check permission at confirm time.
+- emit one audit row.
+- change escalation status only after confirm.
+
+==================================================
+PART G — DOCUMENTATION
+==================================================
+
+Update replit.md with:
+- direction-aware dependency auto-sync model
+- prerequisite auto-raise behavior
+- dependent auto-downgrade behavior
+- audit event for dependency reconciliation
+- Request De-escalation visibility rules
+- De-escalate threshold vs Request De-escalation distinction
+- UI-only enforcement limitation; server-side RBAC remains Phase 1.3
+
+Do not rewrite the roadmap.
+
+==================================================
+NON-REGRESSION
+==================================================
+
+Do not change:
+- Store Permissions Matrix
+- tenant/store permissions
+- Shipping
+- POS / Repairs / Inventory / Customers / Invoices / Services
+- Tenant provisioning
+- Paid Override invoice generation/persistence
+- Server PII log-scrubbing
+- accepted Add-on Governance logic except permission dependency behavior already scoped
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Dependency auto-sync model exists.
+2) Raising dependent action permission auto-raises prerequisite view permission where needed.
+3) Lowering prerequisite permission auto-caps/downgrades dependent mutation permissions.
+4) Lowering dependent action permission does not automatically lower read/view prerequisite.
+5) NBA action permission cannot remain active when NBA view is None/View-only insufficient.
+6) Granting NBA action auto-raises NBA view to at least View Only.
+7) Dependency auto-adjustments are visible in UI or Effective Access Preview.
+8) Dependency auto-adjustments are audited.
+9) Request De-escalation appears when user can view/add note but cannot de-escalate.
+10) Request De-escalation appears when deescalate_support_case is View Only and add_internal_support_note is allowed.
+11) Request De-escalation requires reason.
+12) Request De-escalation does not change escalation status.
+13) Request De-escalation adds note/history and audit.
+14) Actual De-escalate still requires confirmation and proper permission.
+15) Existing NBA, status/severity, Add-on modal, Add-on Governance, Shipping, Store Permissions Matrix, and tenant provisioning behavior remain intact.
+16) replit.md is updated.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Dependency Auto-Sync Model
+3. NBA Dependency Correction
+4. Matrix UX / Effective Access Preview
+5. Request De-escalation Correction
+6. Auditability
+7. Files Changed
+8. Documentation Updated
+9. Non-Regression Notes
