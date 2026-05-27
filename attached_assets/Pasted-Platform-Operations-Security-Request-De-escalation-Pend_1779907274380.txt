@@ -1,0 +1,267 @@
+Platform Operations & Security — Request De-escalation Pending Review Workflow Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict focused correction pass.
+
+Do not repeat broad permission work.
+Do not reopen dependency auto-sync work.
+Do not implement Phase 1.1.3B, 1.1.3C, 1.1.3D, Phase 1.2, Phase 1.3, Phase 1.4, Phase 2, Phase 3, or Phase 4.
+
+Fix only the remaining QA notes from:
+Manual QA — Dependency Auto-Sync + Request De-escalation Correction Review
+
+Remaining issues:
+1) After Request De-escalation is submitted, the button remains active and allows repeated requests.
+2) There is no clear place for an authorized role to review/approve/reject the de-escalation request.
+3) Actual De-escalate still works, but the request workflow needs a pending-review lifecycle.
+
+==================================================
+ROLE STACK — ACT UPON IT
+==================================================
+
+Act as:
+- Identity and Access Management (IAM) Specialist
+- IAM Analyst
+- Access Analyst
+- Website Administrator / Governance Lead
+- Senior Role-Based Access Control (RBAC) Architect
+- Senior Platform Team Governance Leader
+- Senior System Administrator
+- Senior Platform Operations Architect
+- Senior Support Tools Engineer
+- Senior Audit & Security Engineer
+- Senior React/TypeScript Engineer
+- QA Gatekeeper
+- Systems Thinker
+- Side Auditor
+
+Focus on:
+- least privilege
+- request/approval workflow
+- avoiding duplicate requests
+- auditability
+- state clarity
+- clean operational UX
+
+==================================================
+CURRENT QA RESULTS
+==================================================
+
+Passed:
+- Dependency auto-sync works.
+- Lowering prerequisite downgrades dependent action.
+- Lowering action does not lower view.
+- Dependency auto-adjustment is audited.
+- Request De-escalation appears for a role that can view/add note but cannot de-escalate.
+- Request De-escalation does not directly mutate escalation status.
+- Request De-escalation records note/history/audit.
+- Actual De-escalate still requires confirmation and reason.
+
+Still failing:
+1) After Request De-escalation is submitted, the request button remains active.
+Expected:
+- It should become disabled or change to “De-escalation Request Submitted.”
+- User should not be able to submit duplicate active requests.
+
+2) Authorized users with De-escalate permission do not have a clear review/approval path.
+Expected:
+- Authorized users should see the pending request and be able to approve/de-escalate or reject/clear the request.
+
+==================================================
+PART A — ADD ACTIVE DE-ESCALATION REQUEST STATE
+==================================================
+
+Add lightweight internal state to support cases or escalation history.
+
+Use optional/backward-compatible fields only.
+
+Recommended fields:
+- deescalationRequestStatus:
+  - none
+  - pending
+  - approved
+  - rejected
+  - cancelled
+
+- deescalationRequestedAt
+- deescalationRequestedBy
+- deescalationRequestedByRole
+- deescalationRequestReason
+- deescalationRequestReviewedAt
+- deescalationRequestReviewedBy
+- deescalationRequestDecisionReason
+
+Or equivalent stored in escalationHistory if the app prefers history-based derivation.
+
+Required:
+- Existing cases must not break.
+- If there is already a pending request, derive active pending state safely.
+- One active pending de-escalation request per case is enough for now.
+
+==================================================
+PART B — REQUESTER UX
+==================================================
+
+For users who:
+- can view the case
+- can add internal note
+- cannot actually de-escalate
+
+Behavior:
+
+If no pending request exists:
+- Show “Request De-escalation.”
+- Clicking opens modal.
+- Reason is required.
+- Submit creates pending request.
+- Submit adds internal note/history.
+- Submit emits audit row.
+- Escalation status does not change.
+
+If pending request already exists:
+- Do not show active Request De-escalation button.
+- Show disabled/status pill:
+  “De-escalation Request Submitted”
+- Show requester, requested time, and reason if appropriate.
+- Do not allow duplicate request from same role/user.
+
+If request was rejected:
+- allow new request only if appropriate, or show “Request Again” if safe.
+- Keep this simple; default can allow new request after rejection.
+
+==================================================
+PART C — AUTHORIZED REVIEWER UX
+==================================================
+
+For users with actual deescalate_support_case permission at required threshold:
+- Show a “Pending De-escalation Request” card/banner when a request is pending.
+- Include:
+  - requested by
+  - requested at
+  - reason
+  - related case/escalation context
+- Provide actions:
+  1) Approve Request & De-escalate
+  2) Reject Request
+
+Approve Request & De-escalate:
+- opens confirmation modal or uses existing de-escalation confirmation
+- reason/comment required or optional with sensible default
+- re-checks deescalate_support_case at confirm time
+- performs actual de-escalation
+- marks request approved
+- updates escalation history/timeline
+- emits audit rows:
+  - support_case_deescalation_request_approved
+  - support_case_deescalated
+  or one combined audit if current audit design prefers, but avoid duplicates
+
+Reject Request:
+- opens modal
+- rejection reason required
+- does not change escalation status
+- marks request rejected
+- adds history/timeline entry
+- emits audit row:
+  - support_case_deescalation_request_rejected
+
+==================================================
+PART D — COMMAND CENTER / NEEDS ATTENTION OPTIONAL SIGNAL
+==================================================
+
+If practical and low-risk:
+- Pending de-escalation requests should appear in Support Tools case detail only.
+- Optional: add to Needs Attention / Next Best Actions for roles with deescalate_support_case permission:
+  “Review pending de-escalation request.”
+Do not overbuild if this risks touching too much.
+
+Minimum requirement:
+- reviewer can see and act on pending request from Support case detail.
+
+==================================================
+PART E — AUDITABILITY
+==================================================
+
+Audit these actions:
+- support_case_deescalation_requested
+- support_case_deescalation_request_approved
+- support_case_deescalation_request_rejected
+- support_case_deescalated
+
+Do not duplicate audit rows.
+Denied actions should not emit success audits.
+No server PII logging.
+
+==================================================
+PART F — NON-REGRESSION
+==================================================
+
+Do not change:
+- dependency auto-sync model
+- NBA behavior
+- status/severity permission behavior
+- Add-on modal UX
+- Add-on Governance
+- Shipping
+- Store Permissions Matrix
+- tenant provisioning
+- paid override invoice workflow
+- server PII log-scrubbing
+
+==================================================
+PART G — DOCUMENTATION
+==================================================
+
+Update replit.md with:
+- Request De-escalation pending state
+- no duplicate active requests
+- reviewer approval/rejection workflow
+- audit actions
+- no external notifications
+- actual de-escalation remains permission-gated and requires confirmation
+
+Do not rewrite roadmap.
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+Acceptance is literal:
+
+1) Request De-escalation creates a pending request.
+2) Request De-escalation does not mutate escalation status.
+3) After request is submitted, Request De-escalation button is no longer active.
+4) Requester sees “De-escalation Request Submitted” or equivalent pending state.
+5) Duplicate active requests are prevented.
+6) Authorized user with deescalate_support_case permission sees pending request.
+7) Authorized user can approve request and de-escalate.
+8) Authorized user can reject request without changing escalation status.
+9) Approval requires permission re-check at confirm time.
+10) Rejection requires reason.
+11) Request / approval / rejection / actual de-escalation are audited without duplicates.
+12) Existing actual De-escalate confirmation still works.
+13) Existing dependency auto-sync remains intact.
+14) Existing Add-on Governance remains intact.
+15) Existing Shipping Module remains intact.
+16) Existing Store Permissions Matrix remains intact.
+17) Existing tenant provisioning remains intact.
+18) Server PII logging rules are not regressed.
+19) replit.md is updated.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. De-escalation Request State
+3. Requester UX
+4. Reviewer Approval / Rejection UX
+5. Auditability
+6. Files Changed
+7. Documentation Updated
+8. Non-Regression Notes

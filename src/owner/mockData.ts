@@ -874,6 +874,19 @@ export interface SupportCaseRecord {
   escalationDueAt?: string | null;
   acknowledgementDueAt?: string | null;
   escalationHistory?: SupportCaseEscalationEntry[];
+
+  // Phase 1.1.3A correction — lightweight pending-review lifecycle for the
+  // "Request De-escalation" affordance. All fields optional / additive so
+  // existing seeds remain valid. Only one active pending request per case
+  // is supported. After rejection, a new request may be submitted.
+  deescalationRequestStatus?: 'none' | 'pending' | 'approved' | 'rejected' | 'cancelled';
+  deescalationRequestedAt?: string | null;
+  deescalationRequestedBy?: string | null;
+  deescalationRequestedByRole?: string | null;
+  deescalationRequestReason?: string | null;
+  deescalationRequestReviewedAt?: string | null;
+  deescalationRequestReviewedBy?: string | null;
+  deescalationRequestDecisionReason?: string | null;
 }
 
 // Phase 1.1 — internal support response macros / templates. Inserted

@@ -70,6 +70,8 @@ export type PlatformAuditAction =
   | 'support_case_escalation_level_changed'
   | 'support_case_escalation_resolved'
   | 'support_case_deescalation_requested'
+  | 'support_case_deescalation_request_approved'
+  | 'support_case_deescalation_request_rejected'
   | 'platform_permission_dependency_reconciled'
   | 'support_case_close_with_active_escalation_warning'
   | 'support_case_assignment_changed'
@@ -165,6 +167,8 @@ const DEFAULT_SEVERITY_BY_ACTION: Partial<Record<PlatformAuditAction, PlatformAu
   support_case_close_with_active_escalation_warning: 'warning',
   support_case_assignment_changed: 'info',
   support_case_deescalation_requested: 'notice',
+  support_case_deescalation_request_approved: 'notice',
+  support_case_deescalation_request_rejected: 'notice',
   platform_permission_dependency_reconciled: 'notice',
   platform_permissions_reset: 'warning',
 };

@@ -204,6 +204,15 @@ const SupportToolsPage: React.FC = () => {
   // note + audit row; never mutates escalation status.
   const [requestDeescModal, setRequestDeescModal] = useState<SupportCaseRecord | null>(null);
   const [requestDeescDraft, setRequestDeescDraft] = useState<{ note: string }>({ note: '' });
+  // Phase 1.1.3A correction — pending-review lifecycle. Reviewers with
+  // deescalate_support_case permission see a pending request card and can
+  // approve (→ actual de-escalate, marks approved) or reject (→ marks
+  // rejected with reason; never mutates escalation status).
+  const [rejectDeescModal, setRejectDeescModal] = useState<SupportCaseRecord | null>(null);
+  const [rejectDeescDraft, setRejectDeescDraft] = useState<{ reason: string }>({ reason: '' });
+  // When set, the De-escalate confirm flow will additionally mark the
+  // pending request as approved + emit the request-approved audit row.
+  const [approvingRequestForCaseId, setApprovingRequestForCaseId] = useState<string | null>(null);
   const [escalateDraft, setEscalateDraft] = useState<{
     reasonCode: EscalationReasonCode;
     reasonNote: string;
@@ -891,7 +900,12 @@ const SupportToolsPage: React.FC = () => {
       createdAt: now.toISOString(),
       kind: 'escalation',
     };
-    updateCase(c.id, {
+    // Phase 1.1.3A correction — if this de-escalation is approving a
+    // pending request, mark the request approved and emit the paired
+    // request-approved audit row alongside the deescalated audit.
+    const isApprovingRequest =
+      approvingRequestForCaseId === c.id && c.deescalationRequestStatus === 'pending';
+    const patch: Partial<SupportCaseRecord> = {
       escalated: false,
       escalationStatus: 'deescalated',
       deescalatedAt: now.toISOString(),
@@ -899,7 +913,26 @@ const SupportToolsPage: React.FC = () => {
       escalationReason: null,
       escalationHistory: [...(c.escalationHistory || []), historyEntry],
       notes: [...(c.notes || []), transitionNote],
-    });
+    };
+    if (isApprovingRequest) {
+      patch.deescalationRequestStatus = 'approved';
+      patch.deescalationRequestReviewedAt = now.toISOString();
+      patch.deescalationRequestReviewedBy = operatorName;
+      patch.deescalationRequestDecisionReason = note || null;
+    }
+    updateCase(c.id, patch);
+    if (isApprovingRequest) {
+      pushPlatformAudit({
+        actor: operatorName,
+        action: 'support_case_deescalation_request_approved',
+        target: buildTarget(c),
+        category: 'support',
+        tenantId: c.tenantId,
+        severity: 'notice',
+        note: note || undefined,
+      });
+      setApprovingRequestForCaseId(null);
+    }
     pushPlatformAudit({
       actor: operatorName,
       action: 'support_case_deescalated',
@@ -909,6 +942,51 @@ const SupportToolsPage: React.FC = () => {
       severity: 'notice',
       note: note || undefined,
     });
+  };
+
+  // Phase 1.1.3A correction — reject a pending de-escalation request.
+  // Requires reason. Never mutates escalation status. Emits one audit row
+  // and a timeline note for traceability.
+  const rejectDeescalationRequest = (c: SupportCaseRecord) => {
+    const reason = rejectDeescDraft.reason.trim();
+    if (!reason) return;
+    if (c.deescalationRequestStatus !== 'pending') {
+      setRejectDeescModal(null);
+      return;
+    }
+    // Reviewer must hold the de-escalate permission to act on the request.
+    const recheck = hasPlatformPermission(sessionRole, 'deescalate_support_case');
+    if (!recheck.allowed) {
+      console.warn('[support-tools] reject-request denied at confirm:', recheck.reason);
+      setRejectDeescModal(null);
+      return;
+    }
+    const nowIso = new Date().toISOString();
+    const rejectionNote: SupportCaseNote = {
+      id: `cn_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+      author: operatorName,
+      body: `De-escalation request rejected by ${operatorName} (${currentRole}): ${reason}`,
+      createdAt: nowIso,
+      kind: 'note',
+    };
+    updateCase(c.id, {
+      deescalationRequestStatus: 'rejected',
+      deescalationRequestReviewedAt: nowIso,
+      deescalationRequestReviewedBy: operatorName,
+      deescalationRequestDecisionReason: reason,
+      notes: [...(c.notes || []), rejectionNote],
+    });
+    pushPlatformAudit({
+      actor: operatorName,
+      action: 'support_case_deescalation_request_rejected',
+      target: buildTarget(c),
+      category: 'support',
+      tenantId: c.tenantId,
+      severity: 'notice',
+      note: reason,
+    });
+    setRejectDeescDraft({ reason: '' });
+    setRejectDeescModal(null);
   };
 
   const confirmCloseWithActiveEscalation = (c: SupportCaseRecord) => {
@@ -1399,16 +1477,38 @@ const SupportToolsPage: React.FC = () => {
                     // that posts an internal note + audit row WITHOUT
                     // mutating escalation status. This gives front-line
                     // staff a documented escalation-review path.
+                    //
+                    // Phase 1.1.3A correction — pending-review lifecycle:
+                    // when a request is currently pending, the request
+                    // affordance is replaced by a non-actionable status
+                    // pill so the requester cannot fire duplicate requests
+                    // (one active pending request per case). Reviewers
+                    // still see the De-escalate button alongside (the
+                    // pending card below adds approve/reject).
                     const deescPerm = hasPlatformPermission(sessionRole, 'deescalate_support_case');
+                    const requestPending = selected.deescalationRequestStatus === 'pending';
                     if (deescPerm.allowed) {
                       return (
                         <button
-                          onClick={() => setDeescalateModal(selected)}
+                          onClick={() => { setApprovingRequestForCaseId(null); setDeescalateModal(selected); }}
                           className="px-3 py-1.5 bg-white/15 hover:bg-white/25 text-[10px] font-black uppercase tracking-widest rounded-lg backdrop-blur-sm transition-colors whitespace-nowrap"
                           data-testid="support-case-deescalate-banner"
                         >
                           De-escalate
                         </button>
+                      );
+                    }
+                    if (requestPending) {
+                      // Requester (or any non-reviewer) sees the pending
+                      // pill — request button is intentionally not shown.
+                      return (
+                        <span
+                          data-testid="support-case-deesc-request-pending-pill"
+                          title={selected.deescalationRequestReason || 'De-escalation request pending review by a permitted operator.'}
+                          className="px-3 py-1.5 bg-white/20 text-[10px] font-black uppercase tracking-widest rounded-lg backdrop-blur-sm whitespace-nowrap cursor-default opacity-90"
+                        >
+                          De-escalation Request Submitted
+                        </span>
                       );
                     }
                     if (addInternalNoteGate.allowed) {
@@ -1427,6 +1527,78 @@ const SupportToolsPage: React.FC = () => {
                   })()}
                 </div>
               )}
+
+              {/* Phase 1.1.3A correction — Pending De-escalation Request card.
+                  Visible only for reviewers who can actually de-escalate
+                  AND when a pending request exists. Provides approve
+                  (→ existing De-escalate confirmation flow, also flips
+                  request to approved on confirm) and reject (→ requires
+                  reason; never mutates escalation status). */}
+              {selected.escalated &&
+                selected.deescalationRequestStatus === 'pending' &&
+                hasPlatformPermission(sessionRole, 'deescalate_support_case').allowed && (
+                  <div
+                    className="px-7 py-4 bg-amber-50 border-b border-amber-200 flex items-start gap-3"
+                    data-testid="support-case-deesc-request-reviewer-card"
+                  >
+                    <span className="material-symbols-outlined text-amber-700 text-2xl mt-0.5">rule</span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-black uppercase tracking-widest text-amber-800">
+                        Pending De-escalation Request
+                      </p>
+                      <p className="text-[11px] font-bold text-amber-900 mt-1.5">
+                        {selected.deescalationRequestedBy || '—'}
+                        {selected.deescalationRequestedByRole ? ` (${selected.deescalationRequestedByRole})` : ''}
+                        {selected.deescalationRequestedAt ? ` · ${new Date(selected.deescalationRequestedAt).toLocaleString()}` : ''}
+                      </p>
+                      {selected.deescalationRequestReason && (
+                        <p className="text-[11px] text-amber-900/80 font-medium mt-1 leading-snug">
+                          “{selected.deescalationRequestReason}”
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex flex-col gap-2">
+                      <button
+                        onClick={() => {
+                          // Use the existing De-escalate confirmation flow
+                          // (which re-checks the permission at confirm).
+                          // The deescalateCase handler will detect this
+                          // flag and emit the request-approved audit row.
+                          setApprovingRequestForCaseId(selected.id);
+                          setDeescalateModal(selected);
+                        }}
+                        className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-black uppercase tracking-widest rounded-lg whitespace-nowrap transition-colors"
+                        data-testid="support-case-deesc-request-approve"
+                      >
+                        Approve & De-escalate
+                      </button>
+                      <button
+                        onClick={() => { setRejectDeescDraft({ reason: '' }); setRejectDeescModal(selected); }}
+                        className="px-3 py-1.5 bg-white border border-amber-300 text-amber-800 hover:bg-amber-100 text-[10px] font-black uppercase tracking-widest rounded-lg whitespace-nowrap transition-colors"
+                        data-testid="support-case-deesc-request-reject"
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+              {/* Status echo for requester / others when the request was
+                  resolved (approved or rejected) and the case is still
+                  open — quiet, single-line transparency. */}
+              {selected.escalated &&
+                (selected.deescalationRequestStatus === 'rejected') && (
+                  <div
+                    className="px-7 py-2.5 bg-slate-50 border-b border-slate-200 text-[10px] font-bold text-slate-600 flex items-center gap-2"
+                    data-testid="support-case-deesc-request-rejected-pill"
+                  >
+                    <span className="material-symbols-outlined text-sm text-slate-500">cancel</span>
+                    De-escalation request rejected
+                    {selected.deescalationRequestReviewedBy ? ` by ${selected.deescalationRequestReviewedBy}` : ''}
+                    {selected.deescalationRequestReviewedAt ? ` · ${new Date(selected.deescalationRequestReviewedAt).toLocaleString()}` : ''}
+                    {selected.deescalationRequestDecisionReason ? ` — ${selected.deescalationRequestDecisionReason}` : ''}
+                  </div>
+                )}
               {/* Phase 1.1.2 — case detail header summary band: SLA + escalation
                   + tenant-risk pills surfaced at-a-glance. */}
               <div className="p-7 border-b border-slate-100 flex justify-between items-start" data-testid="support-case-header">
@@ -1756,6 +1928,7 @@ const SupportToolsPage: React.FC = () => {
                             label="De-escalate"
                             testId="support-case-esc-btn-deesc"
                             onClick={() => {
+                              setApprovingRequestForCaseId(null);
                               setDeescalateDraft({ note: '' });
                               setDeescalateModal(selected);
                             }}
@@ -2206,7 +2379,7 @@ const SupportToolsPage: React.FC = () => {
       <AnimatePresence>
         {deescalateModal && (
           <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" data-testid="support-deesc-modal">
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setDeescalateModal(null)} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => { setDeescalateModal(null); setApprovingRequestForCaseId(null); }} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
             <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="relative w-full max-w-md bg-white rounded-[2rem] shadow-2xl overflow-hidden">
               <div className="p-6 border-b border-slate-100">
                 <h3 className="text-lg font-black text-primary tracking-tight">De-escalate</h3>
@@ -2228,17 +2401,20 @@ const SupportToolsPage: React.FC = () => {
                 )}
               </div>
               <div className="p-5 border-t border-slate-100 bg-slate-50/40 flex justify-end gap-2">
-                <button onClick={() => setDeescalateModal(null)} className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-white">Cancel</button>
+                <button onClick={() => { setDeescalateModal(null); setApprovingRequestForCaseId(null); }} className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-white">Cancel</button>
                 <button
                   onClick={() => {
                     // Confirm-time matrix re-check: mirrors the close-warn /
                     // resolve-modal patterns so a stale UI (e.g. an open
                     // modal after the permission was revoked mid-session)
-                    // cannot bypass the gate.
+                    // cannot bypass the gate. Always clear the approval-
+                    // intent flag on any exit path so it cannot leak into
+                    // a later non-approval De-escalate flow.
                     const recheck = hasPlatformPermission(sessionRole, 'deescalate_support_case');
                     if (!recheck.allowed) {
                       console.warn('[support-tools] de-escalate denied at confirm:', recheck.reason);
                       setDeescalateModal(null);
+                      setApprovingRequestForCaseId(null);
                       return;
                     }
                     deescalateCase(deescalateModal);
@@ -2300,9 +2476,30 @@ const SupportToolsPage: React.FC = () => {
                     const reason = requestDeescDraft.note.trim();
                     if (!reason) return;
                     const target = requestDeescModal;
+                    // Guard: one active pending request per case.
+                    if (target.deescalationRequestStatus === 'pending') {
+                      console.warn('[support-tools] de-escalation request already pending');
+                      setRequestDeescModal(null);
+                      return;
+                    }
+                    const nowIso = new Date().toISOString();
                     // Post internal note via existing addNote handler so the
                     // case-timeline shape stays consistent.
                     addNote(target.id, `De-escalation requested by ${operatorName} (${currentRole}): ${reason}`);
+                    // Persist pending-review lifecycle state on the case so
+                    // the requester sees a "Submitted" pill and reviewers
+                    // with deescalate_support_case see the approve/reject
+                    // card. Never mutates escalation status.
+                    updateCase(target.id, {
+                      deescalationRequestStatus: 'pending',
+                      deescalationRequestedAt: nowIso,
+                      deescalationRequestedBy: operatorName,
+                      deescalationRequestedByRole: currentRole,
+                      deescalationRequestReason: reason,
+                      deescalationRequestReviewedAt: null,
+                      deescalationRequestReviewedBy: null,
+                      deescalationRequestDecisionReason: null,
+                    });
                     pushPlatformAudit({
                       actor: operatorName,
                       action: 'support_case_deescalation_requested',
@@ -2319,6 +2516,53 @@ const SupportToolsPage: React.FC = () => {
                   className="px-6 py-2.5 bg-violet-600 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-violet-700 disabled:bg-slate-300 disabled:cursor-not-allowed"
                 >
                   Submit Request
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Phase 1.1.3A correction — Reject pending de-escalation request.
+          Reviewer-only. Requires reason. Never mutates escalation status.
+          Confirm-time re-checks deescalate_support_case (the reviewer
+          gate) so a stale UI cannot bypass the gate. */}
+      <AnimatePresence>
+        {rejectDeescModal && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" data-testid="support-reject-deesc-modal">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setRejectDeescModal(null)} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="relative w-full max-w-md bg-white rounded-[2rem] shadow-2xl overflow-hidden">
+              <div className="p-6 border-b border-slate-100">
+                <h3 className="text-lg font-black text-primary tracking-tight">Reject De-escalation Request</h3>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mt-1">{rejectDeescModal.id} · {rejectDeescModal.subject}</p>
+                <p className="text-[10px] font-medium text-slate-500 mt-2 leading-snug">
+                  This will mark the pending request as rejected. Escalation status is NOT changed. The rejection (with your reason) is added to the case timeline and audit log.
+                </p>
+              </div>
+              <div className="p-6 space-y-3">
+                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">
+                  Rejection Reason <span className="text-red-500">*</span> required
+                </label>
+                <textarea
+                  value={rejectDeescDraft.reason}
+                  onChange={e => setRejectDeescDraft({ reason: e.target.value })}
+                  data-testid="support-reject-deesc-reason"
+                  placeholder="Explain why this de-escalation request is being rejected…"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 h-24 resize-none"
+                />
+                {!rejectDeescDraft.reason.trim() && (
+                  <p className="text-[10px] font-bold text-slate-400">Confirm is disabled until a reason is provided.</p>
+                )}
+              </div>
+              <div className="p-5 border-t border-slate-100 bg-slate-50/40 flex justify-end gap-2">
+                <button onClick={() => setRejectDeescModal(null)} className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-white">Cancel</button>
+                <button
+                  onClick={() => rejectDeescModal && rejectDeescalationRequest(rejectDeescModal)}
+                  disabled={!rejectDeescDraft.reason.trim()}
+                  data-testid="support-reject-deesc-confirm"
+                  className="px-6 py-2.5 bg-amber-600 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-amber-700 disabled:bg-slate-300 disabled:cursor-not-allowed"
+                >
+                  Reject Request
                 </button>
               </div>
             </motion.div>
