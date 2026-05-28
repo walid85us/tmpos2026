@@ -45,6 +45,7 @@ import {
   PLATFORM_OPS_ROLE_DESCRIPTION,
   ROLE_TEAM_BY_ROLE,
   effectiveEscalationStatus,
+  isActiveEscalation,
   isEscalationAckOverdue,
   isEscalationCritical,
   can,
@@ -1446,8 +1447,13 @@ const SupportToolsPage: React.FC = () => {
           <div className="fixed inset-0 z-50 flex justify-end" data-testid="support-case-detail">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={closeDrawer} className="absolute inset-0 bg-slate-900/30 backdrop-blur-sm" />
             <motion.div initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }} transition={{ type: 'spring', damping: 28, stiffness: 280 }} className="relative w-full max-w-lg h-full bg-white shadow-2xl border-l border-slate-200 overflow-y-auto">
-              {/* Phase 1.1.1 UX Correction — widened escalation banner with reason, who/when, De-escalate. */}
-              {selected.escalated && (
+              {/* Phase 1.1.1 UX Correction — widened escalation banner with reason, who/when, De-escalate.
+                  Phase 1.1.3A correction — banner visibility now follows the
+                  shared `isActiveEscalation` predicate so a case escalated via
+                  the structured `escalationStatus` (without flipping the legacy
+                  `escalated` boolean) still shows the red banner. Keeps banner,
+                  escalation detail card, and De-escalate button in lock-step. */}
+              {isActiveEscalation(selected) && (
                 <div
                   className="px-7 py-4 bg-gradient-to-r from-red-600 to-red-500 text-white border-b-2 border-red-700 flex items-start gap-3"
                   data-testid="support-case-escalation-banner"
@@ -1534,7 +1540,7 @@ const SupportToolsPage: React.FC = () => {
                   (→ existing De-escalate confirmation flow, also flips
                   request to approved on confirm) and reject (→ requires
                   reason; never mutates escalation status). */}
-              {selected.escalated &&
+              {isActiveEscalation(selected) &&
                 selected.deescalationRequestStatus === 'pending' &&
                 hasPlatformPermission(sessionRole, 'deescalate_support_case').allowed && (
                   <div
@@ -1586,7 +1592,7 @@ const SupportToolsPage: React.FC = () => {
               {/* Status echo for requester / others when the request was
                   resolved (approved or rejected) and the case is still
                   open — quiet, single-line transparency. */}
-              {selected.escalated &&
+              {isActiveEscalation(selected) &&
                 (selected.deescalationRequestStatus === 'rejected') && (
                   <div
                     className="px-7 py-2.5 bg-slate-50 border-b border-slate-200 text-[10px] font-bold text-slate-600 flex items-center gap-2"
@@ -1615,7 +1621,7 @@ const SupportToolsPage: React.FC = () => {
                         </span>
                       );
                     })()}
-                    {selected.escalated && (
+                    {isActiveEscalation(selected) && (
                       <span className="px-2 py-0.5 text-[10px] font-black uppercase tracking-widest rounded bg-red-500/10 text-red-700 border border-red-500/20">
                         Escalated
                       </span>

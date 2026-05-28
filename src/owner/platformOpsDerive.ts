@@ -442,7 +442,7 @@ export function deriveOverallPlatformState(input: PlatformStateInputs): {
   const criticalOpen = openCases.filter(c => c.severity === 'urgent');
   const overdue = openCases.filter(c => deriveSlaStatus(c, now).status === 'overdue');
   const atRisk = openCases.filter(c => deriveSlaStatus(c, now).status === 'at_risk');
-  const escalated = openCases.filter(c => c.escalated === true);
+  const escalated = openCases.filter(c => isActiveEscalation(c));
   const criticalAudits = input.audits.filter(a => deriveHighRiskFlag(a).flag === 'critical').length;
   const failedDomains = input.domains.filter(d => d.status === 'failed').length;
   const warningAudits = input.audits.filter(a => (a.severity || '').toLowerCase() === 'warning').length;
@@ -525,7 +525,7 @@ export function deriveOperationalPulse(input: PulseInputs): PulseMetric[] {
   const now = input.now || new Date();
   const openCases = input.cases.filter(c => c.status !== 'resolved' && c.status !== 'closed');
   const overdue = openCases.filter(c => deriveSlaStatus(c, now).status === 'overdue').length;
-  const escalated = openCases.filter(c => c.escalated === true).length;
+  const escalated = openCases.filter(c => isActiveEscalation(c)).length;
   // Phase 1.1.3A — escalation lifecycle counters. We use the
   // effectiveEscalationStatus helper so legacy `escalated:true` cases
   // (no structured status yet) still count, then sub-segment by
@@ -681,7 +681,7 @@ export function deriveNextBestActions(input: NbaInputs): NextBestAction[] {
 
   // 2) Active escalated cases.
   openCases
-    .filter(c => c.escalated === true)
+    .filter(c => isActiveEscalation(c))
     .forEach(c => out.push({
       id: `nba_es_${c.id}`,
       priority: c.severity === 'urgent' ? 'critical' : 'high',
@@ -873,6 +873,11 @@ export interface Tenant360Result {
   status?: string;
   risk: { status: RiskStatus; score: number; signals: string[] };
   openCases: SupportCaseRecord[];
+  /** Phase 1.1.3A correction — actively escalated cases for this tenant.
+   *  Uses the shared `isActiveEscalation` predicate so Tenant 360
+   *  agrees with Command Center counts/lists, Needs Attention, and
+   *  Support Tools surfaces. */
+  activeEscalations: SupportCaseRecord[];
   overdueOrAtRiskCases: SupportCaseRecord[];
   recentAudits: AuditEventLike[];
   domainIssues: { id: string; hostname: string; status: string; ssl: string }[];
@@ -905,7 +910,7 @@ export function applyFocusModeToCases(
   return cases.filter(c => {
     if (c.status === 'resolved' || c.status === 'closed') return false;
     if (c.severity === 'urgent') return true;
-    if (c.escalated === true) return true;
+    if (isActiveEscalation(c)) return true;
     if (deriveSlaStatus(c, now).status === 'overdue') return true;
     return false;
   });
@@ -1025,6 +1030,7 @@ export function deriveTenant360(input: Tenant360Inputs): Tenant360Result {
   const now = input.now || new Date();
   const tenantCases = input.cases.filter(c => c.tenantId === input.tenantId);
   const openCases = tenantCases.filter(c => c.status !== 'resolved' && c.status !== 'closed');
+  const activeEscalations = openCases.filter(c => isActiveEscalation(c));
   const overdueOrAtRiskCases = openCases.filter(c => {
     const s = deriveSlaStatus(c, now).status;
     return s === 'overdue' || s === 'at_risk';
@@ -1046,6 +1052,7 @@ export function deriveTenant360(input: Tenant360Inputs): Tenant360Result {
     status: input.status,
     risk,
     openCases,
+    activeEscalations,
     overdueOrAtRiskCases,
     recentAudits,
     domainIssues,
@@ -1410,6 +1417,31 @@ export function effectiveEscalationStatus(
     active: false,
     isLegacyOnly: false,
   };
+}
+
+// Phase 1.1.3A correction — single source of truth predicate. Use this
+// instead of the legacy `c.escalated === true` boolean across every
+// surface (Support Tools banner / card / pills, Command Center counts +
+// lists + rollups, Needs Attention, NBAs, Tenant Risk, Tenant 360,
+// focus-mode source filters). Keeps the legacy boolean working (cases
+// that only set `escalated:true` without a structured status still
+// count as active) while routing all visibility / count / list
+// decisions through `effectiveEscalationStatus().active`.
+export function isActiveEscalation(
+  c: Pick<SupportCaseRecord, 'escalated' | 'escalationStatus' | 'escalationLevel'>
+): boolean {
+  return effectiveEscalationStatus(c).active;
+}
+
+// Convenience: filter to only open cases that are actively escalated.
+// Mirrors the predicate used by every count/list surface so they cannot
+// drift apart. Open = not resolved/closed (terminal support statuses).
+export function getActiveEscalatedCases<T extends SupportCaseRecord>(
+  cases: T[]
+): T[] {
+  return cases.filter(
+    c => c.status !== 'resolved' && c.status !== 'closed' && isActiveEscalation(c)
+  );
 }
 
 export function isEscalationAckOverdue(

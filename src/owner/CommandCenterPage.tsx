@@ -74,6 +74,7 @@ import {
   type WidgetId,
   // Phase 1.1.3A — escalation lifecycle helpers (additive).
   effectiveEscalationStatus,
+  isActiveEscalation,
   isEscalationAckOverdue,
   isEscalationCritical,
   ESCALATION_STATUS_LABEL,
@@ -285,7 +286,10 @@ const CommandCenterPage: React.FC = () => {
   const openCases = filteredCases.filter(c => c.status !== 'resolved' && c.status !== 'closed');
   const criticalCases = openCases.filter(c => c.severity === 'urgent');
   const overdueCases = openCases.filter(c => deriveSlaStatus(c).status === 'overdue');
-  const escalatedCases = openCases.filter(c => c.escalated === true);
+  // Phase 1.1.3A correction — shared active-escalation predicate so this
+  // count agrees with the focused escalated-cases list rendered below
+  // (and with Support Tools, Tenant 360, Needs Attention, NBA).
+  const escalatedCases = openCases.filter(c => isActiveEscalation(c));
   const elevatedAuditCount = filteredAudits.filter(a => {
     const sev = (a.severity || '').toLowerCase();
     return sev === 'critical' || sev === 'warning';
@@ -557,7 +561,10 @@ const CommandCenterPage: React.FC = () => {
     [focusedAudits]
   );
   const focusedEscalatedCases = useMemo(
-    () => focusedCases.filter(c => c.escalated === true).slice(0, 5),
+    // Phase 1.1.3A correction — shared `isActiveEscalation` so the
+    // widget list cannot disagree with the Mission Control rollup,
+    // Operational Pulse, Needs Attention, or the escalated count.
+    () => focusedCases.filter(c => isActiveEscalation(c)).slice(0, 5),
     [focusedCases]
   );
 
@@ -755,7 +762,7 @@ const CommandCenterPage: React.FC = () => {
                   <span className="font-black uppercase tracking-widest text-[10px] text-slate-400">Now:</span>
                   <RollupChip label="Open" value={focusedCases.filter(c => c.status !== 'resolved' && c.status !== 'closed').length} tone="info" />
                   <RollupChip label="Overdue" value={focusedCases.filter(c => deriveSlaStatus(c).status === 'overdue').length} tone="critical" />
-                  <RollupChip label="Escalated" value={focusedCases.filter(c => c.escalated === true && c.status !== 'resolved' && c.status !== 'closed').length} tone="critical" />
+                  <RollupChip label="Escalated" value={focusedCases.filter(c => c.status !== 'resolved' && c.status !== 'closed' && isActiveEscalation(c)).length} tone="critical" />
                   <RollupChip label="High-risk audits" value={focusedAudits.filter(a => { const f = deriveHighRiskFlag(a).flag; return f === 'critical' || f === 'high_risk'; }).length} tone="warn" />
                   <RollupChip label="Domain issues" value={focusedDomains.filter(d => d.status === 'failed' || d.status === 'pending' || d.status === 'verifying').length} tone="warn" />
                 </div>
@@ -1527,6 +1534,57 @@ const Tenant360Drawer: React.FC<{ t: Tenant360Result; onClose: () => void }> = (
         )}
       </div>
 
+      {/* Phase 1.1.3A correction — Active Escalations card for the tenant.
+          Uses the same shared `isActiveEscalation` predicate (via
+          `deriveTenant360.activeEscalations`) so the count + click-through
+          here agree with Command Center's Escalated widget, Operational
+          Pulse, Needs Attention, NBA, and Support Tools. Click-through
+          opens the exact case in Support Tools. Rendered before Open
+          Cases so escalations get visual priority. */}
+      <Tenant360Block
+        title={`Active Escalations (${t.activeEscalations.length})`}
+        empty="No active escalations."
+      >
+        {t.activeEscalations.slice(0, 5).map(c => {
+          const eff = effectiveEscalationStatus(c);
+          return (
+            <li
+              key={c.id}
+              className="py-2 border-b border-slate-100 last:border-0"
+              data-testid={`tenant360-escalation-${c.id}`}
+            >
+              <Link
+                to={`/owner/support-tools?caseId=${encodeURIComponent(c.id)}`}
+                className="text-xs font-bold text-slate-800 hover:text-primary block truncate"
+                data-testid={`tenant360-escalation-open-${c.id}`}
+              >
+                {c.subject}
+              </Link>
+              <p className="text-[11px] text-slate-500 mt-0.5 flex flex-wrap items-center gap-1">
+                <span className="px-1.5 py-0.5 rounded-md border bg-red-500/10 text-red-700 border-red-500/30 font-bold uppercase tracking-wide">
+                  {ESCALATION_STATUS_LABEL[eff.status]}
+                </span>
+                {eff.level && (
+                  <span className="px-1.5 py-0.5 rounded-md border bg-slate-100 text-slate-600 border-slate-200 font-bold uppercase tracking-wide">
+                    {ESCALATION_LEVEL_LABEL[eff.level]}
+                  </span>
+                )}
+                {c.escalationOwnerName ? (
+                  <span>Owner: <span className="font-bold">{c.escalationOwnerName}</span></span>
+                ) : c.escalationTargetTeam ? (
+                  <span>Team: <span className="font-bold">{c.escalationTargetTeam}</span></span>
+                ) : (
+                  <span className="text-amber-700">Unassigned</span>
+                )}
+                {c.escalationReason && (
+                  <span className="truncate">· {c.escalationReason}</span>
+                )}
+              </p>
+            </li>
+          );
+        })}
+      </Tenant360Block>
+
       <Tenant360Block title={`Open Cases (${t.openCases.length})`} empty="No open cases.">
         {t.openCases.slice(0, 5).map(c => {
           const sla = deriveSlaStatus(c);
@@ -1535,7 +1593,7 @@ const Tenant360Drawer: React.FC<{ t: Tenant360Result; onClose: () => void }> = (
               <Link to={`/owner/support-tools?caseId=${encodeURIComponent(c.id)}`} className="text-xs font-bold text-slate-800 hover:text-primary block truncate">{c.subject}</Link>
               <p className="text-[11px] text-slate-500 mt-0.5">
                 Severity: {c.severity} · <span className={`px-1.5 py-0.5 rounded-md border ${SLA_STATUS_STYLES[sla.status]}`}>SLA {SLA_STATUS_LABEL[sla.status]}</span>
-                {c.escalated && <span className="ml-1 px-1.5 py-0.5 rounded-md border bg-red-500/10 text-red-700 border-red-500/30">Escalated</span>}
+                {isActiveEscalation(c) && <span className="ml-1 px-1.5 py-0.5 rounded-md border bg-red-500/10 text-red-700 border-red-500/30">Escalated</span>}
               </p>
             </li>
           );

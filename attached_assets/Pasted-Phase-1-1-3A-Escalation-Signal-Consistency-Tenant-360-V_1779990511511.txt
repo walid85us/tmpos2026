@@ -1,0 +1,292 @@
+Phase 1.1.3A — Escalation Signal Consistency + Tenant 360 Validation Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict focused correction pass.
+
+Do not reopen broad permissions work.
+Do not repeat dependency auto-sync work.
+Do not implement Phase 1.1.3B, 1.1.3C, 1.1.3D, Phase 1.2, Phase 1.3, Phase 1.4, Phase 2, Phase 3, or Phase 4.
+
+Fix only the remaining QA notes from:
+Manual QA — Phase 1.1.3A Operating Model + Permission-Aware Escalation Final Review
+
+Remaining issues:
+
+1. Escalation case detail card is not showing even when the case is escalated.
+2. Command Center shows escalated case count, but clicking the escalation list shows empty items.
+3. Tenant 360 validation needs clear escalation/risk signal behavior.
+
+==================================================
+ROLE STACK — ACT UPON IT
+========================
+
+Act as:
+
+* Senior Platform Operations Architect
+* Senior Support Tools Engineer
+* Senior Incident / Escalation Workflow Architect
+* Senior SaaS Command Center Architect
+* Senior Audit & Security Engineer
+* Identity and Access Management Specialist
+* Access Analyst
+* Senior React/TypeScript Engineer
+* QA Gatekeeper
+* Systems Thinker
+* Side Auditor
+
+Focus on:
+
+* single source of truth
+* escalation signal consistency
+* real-time/session-state consistency
+* Command Center accuracy
+* Support Tools accuracy
+* Tenant 360 accuracy
+* non-regression
+
+==================================================
+CURRENT QA NOTES TO FIX
+=======================
+
+QA item 20:
+Support case detail escalation card is mature and informative — PASS partially.
+Observed:
+
+* Case appears to be escalated because De-escalate button is shown.
+* But escalation card is not showing.
+  Expected:
+* If a case is actively escalated, the escalation detail card must always render.
+* The card should show status, level, owner/team, reason, by/at, acknowledgement, request state, and available actions.
+
+QA item 23:
+Command Center shows escalation signals — FAIL.
+Observed:
+
+* Command Center shows 3 escalated cases.
+* Clicking the escalation signal/list shows an empty list.
+  Expected:
+* Count and list must be derived from the same exact source and filter.
+* If count says 3, clicking must show those 3 cases or explain why they are filtered.
+* No stale count, no empty list mismatch.
+
+QA item 27:
+Tenant risk includes escalation signals — PASS partially.
+Need:
+
+* Make Tenant 360 escalation/risk signals clear and testable.
+
+==================================================
+CRITICAL RULE — ONE ESCALATION TRUTH SOURCE
+===========================================
+
+Create or consolidate a shared escalation predicate/helper.
+
+Recommended helper names:
+
+* isActiveEscalation(case)
+* isEscalationTerminal(case)
+* getEscalationStatusLabel(case)
+* getEscalationSignalsForCase(case)
+* getEscalatedCases(cases)
+* getTenantEscalationSignals(tenantId, cases)
+
+Use this helper across:
+
+* Support Tools case list
+* Support Tools case detail escalation card
+* escalation action visibility
+* escalation saved views
+* Command Center escalation count
+* Command Center escalation list
+* Needs Attention
+* Next Best Actions
+* Tenant Risk Summary
+* Tenant 360
+* Audit escalation lifecycle references where applicable
+
+Do not allow different pages to use different definitions.
+
+Suggested active escalation logic:
+A case is actively escalated when:
+
+* case.escalated === true
+  AND
+* case.escalationStatus is one of:
+
+  * escalated
+  * acknowledged
+  * in_review
+  * pending_review
+  * active
+    or current app equivalent
+    AND
+* support case itself is not closed/resolved terminal.
+
+If current data uses another status convention, adapt safely and document it.
+
+Terminal escalation statuses:
+
+* deescalated
+* resolved
+* rejected only if it refers to request rejection, not escalation status
+* none
+* cancelled
+* closed terminal support case if applicable
+
+==================================================
+PART A — SUPPORT CASE DETAIL ESCALATION CARD FIX
+================================================
+
+Fix SupportToolsPage case detail.
+
+Required:
+
+* If isActiveEscalation(selectedCase) is true, the escalation detail card must render.
+* Do not rely on a different flag than the De-escalate button uses.
+* De-escalate button and escalation card should agree.
+* If De-escalate is visible because the case is escalated, the escalation card must also be visible.
+* If escalation card is hidden, De-escalate should not be visible unless there is a clear reason.
+
+Escalation card must show:
+
+* escalation status
+* escalation level
+* owner/team
+* escalation reason
+* escalated by/at
+* acknowledgement state
+* pending de-escalation request if present
+* available actions based on permission
+
+==================================================
+PART B — COMMAND CENTER ESCALATION COUNT/LIST FIX
+=================================================
+
+Fix Command Center escalation signals.
+
+Required:
+
+* escalation count and list must come from the same helper and same dataset.
+* clicking escalated case count/pulse/widget must open a list containing the exact matching cases.
+* if a focus mode or time range filters the list, the count must use the same filter.
+* no count/list mismatch.
+* no stale data after support case escalation/de-escalation/resolve/reject/approve.
+* if there are zero matching cases, count should show zero or list should show truthful empty state.
+
+Check:
+
+* Active Escalations
+* Unacknowledged Escalations
+* Overdue Escalations
+* Unassigned Escalations
+* Needs Attention escalation items
+* Next Best Actions escalation items
+
+==================================================
+PART C — REAL-TIME / SESSION CONSISTENCY
+========================================
+
+For current app state:
+
+* Command Center should reflect the latest support case state from the app/session/local storage source currently used.
+* If Support Tools updates a case, Command Center should update after navigation or refresh.
+* If event dispatch/listener already exists, use it.
+* If not, add a lightweight support_cases:changed event or use the existing state/storage refresh pattern.
+
+Do not claim true backend real-time if this is still mock/session data.
+Truthful note:
+“Operational signals refresh from current app/session state. Firestore real-time listeners are future live-backend work.”
+
+==================================================
+PART D — TENANT 360 ESCALATION SIGNALS
+======================================
+
+Tenant 360 should clearly show escalation signals for that tenant.
+
+Required:
+
+* Tenant 360 should show active escalation count for the tenant.
+* It should list active escalated support cases or show a clear empty state.
+* It should show escalation reason/risk reason where applicable.
+* Clicking an escalated support case from Tenant 360 should open the correct case detail.
+* Tenant Risk Summary should include escalation as a risk reason if the tenant has active escalation.
+
+Do not overbuild Tenant 360 beyond this correction.
+
+==================================================
+PART E — DOCUMENTATION
+======================
+
+Update replit.md with:
+
+* shared escalation truth-source rule
+* active escalation predicate
+* Command Center count/list consistency rule
+* Support case detail card rendering rule
+* Tenant 360 escalation signal behavior
+* current app/session refresh limitation
+* future Firestore real-time listener note if applicable
+
+Do not rewrite roadmap.
+
+==================================================
+NON-REGRESSION
+==============
+
+Do not change:
+
+* permission dependency auto-sync
+* Request De-escalation pending review workflow
+* Add-on Governance
+* Shipping
+* Store Permissions Matrix
+* tenant provisioning
+* paid override invoice workflow
+* server PII log-scrubbing
+
+==================================================
+ACCEPTANCE CRITERIA
+===================
+
+Acceptance is literal:
+
+1. Shared active escalation helper/predicate exists.
+2. Support case detail escalation card appears whenever the case is actively escalated.
+3. De-escalate button and escalation detail card use consistent escalation logic.
+4. Command Center escalated count and escalated list use the same source/filter.
+5. Clicking escalation count/widget/list shows the same cases represented by the count.
+6. Command Center escalation signals update after support case escalation/de-escalation/resolve/request approval where current app state supports it.
+7. Needs Attention escalation items remain accurate.
+8. Next Best Actions escalation items remain accurate.
+9. Tenant Risk Summary includes escalation signal for tenants with active escalations.
+10. Tenant 360 shows active escalation count/list for that tenant.
+11. Tenant 360 escalation click-through opens correct support case.
+12. No stale “ghost” escalations after de-escalation/resolution/closed case.
+13. Existing Request De-escalation workflow remains intact.
+14. Existing permission dependency auto-sync remains intact.
+15. Existing Add-on Governance remains intact.
+16. Existing Shipping Module remains intact.
+17. Existing Store Permissions Matrix remains intact.
+18. Existing tenant provisioning remains intact.
+19. Server PII logging rules are not regressed.
+20. replit.md is updated.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+======================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Root Cause
+3. Shared Escalation Truth Source
+4. Support Case Detail Card Fix
+5. Command Center Count/List Fix
+6. Tenant 360 Escalation Signals
+7. Refresh / Session Consistency
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes
