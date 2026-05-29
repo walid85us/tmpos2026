@@ -1466,6 +1466,87 @@ export function isEscalationCritical(
   return false;
 }
 
+// Phase 1.1.3A correction — single escalation VIEW MODEL for the Support
+// case detail. The red banner, header "Escalated" pill, escalation detail
+// card, reviewer card, rejected pill, and the De-escalate button MUST all
+// read from this one object so they can never drift apart. Invariant:
+// `canShowEscalationBanner === isActive`, and the De-escalate action is
+// only offered when `isActive` is true. Because it wraps the same
+// `effectiveEscalationStatus`, a case escalated via the structured status
+// OR the legacy `escalated:true` boolean resolves identically everywhere.
+export interface EscalationViewModel {
+  isActive: boolean;
+  isTerminal: boolean;
+  status: EscalationStatus;
+  statusLabel: string;
+  level: EscalationLevel | null;
+  levelLabel: string | null;
+  ownerOrTeam: string | null;
+  reason: string | null;
+  escalatedBy: string | null;
+  escalatedAt: string | null;
+  acknowledgedBy: string | null;
+  acknowledgedAt: string | null;
+  pendingDeescalationRequest: boolean;
+  canShowEscalationBanner: boolean;
+  canShowEscalationCard: boolean;
+}
+
+export function buildEscalationViewModel(c: SupportCaseRecord): EscalationViewModel {
+  const eff = effectiveEscalationStatus(c);
+  const isActive = eff.active;
+  const isTerminal = eff.status === 'deescalated' || eff.status === 'resolved';
+  return {
+    isActive,
+    isTerminal,
+    status: eff.status,
+    statusLabel: ESCALATION_STATUS_LABEL[eff.status],
+    level: eff.level,
+    levelLabel: eff.level ? ESCALATION_LEVEL_LABEL[eff.level] : null,
+    ownerOrTeam: c.escalationOwnerName || c.escalationOwnerId || c.escalationTargetTeam || null,
+    reason: c.escalationReason || c.escalationReasonNote || null,
+    escalatedBy: c.escalatedBy || null,
+    escalatedAt: c.escalatedAt || null,
+    acknowledgedBy: c.acknowledgedBy || null,
+    acknowledgedAt: c.acknowledgedAt || null,
+    pendingDeescalationRequest: c.deescalationRequestStatus === 'pending',
+    // The card always renders (it shows lifecycle metadata even when not
+    // escalated); the banner is the active-only surface. Both flags are
+    // derived here so any future change can only move them together.
+    canShowEscalationBanner: isActive,
+    canShowEscalationCard: true,
+  };
+}
+
+// Phase 1.1.3A correction — ONE escalation signal object used by Command
+// Center for the escalated pulse COUNT, the escalated widget LIST, and the
+// Needs Attention "Escalated case" filter, so count and list cannot drift.
+// Callers MUST pass the SAME (focus/time-filtered) case slice that feeds
+// the Operational Pulse so the displayed count equals the filtered list.
+export interface EscalationSignal {
+  activeEscalatedCases: SupportCaseRecord[];
+  unacknowledgedEscalatedCases: SupportCaseRecord[];
+  overdueEscalatedCases: SupportCaseRecord[];
+  unassignedEscalatedCases: SupportCaseRecord[];
+}
+
+export function deriveEscalationSignal(
+  cases: SupportCaseRecord[],
+  now: Date = new Date()
+): EscalationSignal {
+  const activeEscalatedCases = getActiveEscalatedCases(cases);
+  return {
+    activeEscalatedCases,
+    unacknowledgedEscalatedCases: activeEscalatedCases.filter(
+      c => effectiveEscalationStatus(c).status === 'escalated'
+    ),
+    overdueEscalatedCases: activeEscalatedCases.filter(c => isEscalationAckOverdue(c, now)),
+    unassignedEscalatedCases: activeEscalatedCases.filter(
+      c => !((c.escalationOwnerName || '').trim())
+    ),
+  };
+}
+
 // --- Saved-view ctx + escalation filter matcher ---------------------------
 
 export interface SupportViewCtx {

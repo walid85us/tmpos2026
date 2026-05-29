@@ -45,7 +45,7 @@ import {
   PLATFORM_OPS_ROLE_DESCRIPTION,
   ROLE_TEAM_BY_ROLE,
   effectiveEscalationStatus,
-  isActiveEscalation,
+  buildEscalationViewModel,
   isEscalationAckOverdue,
   isEscalationCritical,
   can,
@@ -264,6 +264,30 @@ const SupportToolsPage: React.FC = () => {
     };
   }, []);
 
+  // Phase 1.1.3A correction (Part F) — keep this page's case list in sync
+  // with the canonical sessionStorage store after a mutation here or on
+  // another platform surface (e.g. Command Center). `selected` re-derives
+  // from `cases` by id, so the open drawer never shows stale escalation
+  // state. The identity guard prevents the self-dispatched
+  // 'support_cases:changed' (fired by saveCases) from causing a
+  // reload → save → dispatch loop. Truth label: operational signals
+  // refresh from current app/session state — Firestore real-time
+  // listeners are future live-backend work.
+  useEffect(() => {
+    const reload = () => {
+      const latest = loadCases();
+      setCases(prev =>
+        JSON.stringify(prev) === JSON.stringify(latest) ? prev : latest
+      );
+    };
+    window.addEventListener('support_cases:changed', reload);
+    window.addEventListener('storage', reload);
+    return () => {
+      window.removeEventListener('support_cases:changed', reload);
+      window.removeEventListener('storage', reload);
+    };
+  }, []);
+
   const applyView = (id: string) => {
     setActiveView(id);
     const v = predefinedSupportViews.find(x => x.id === id);
@@ -420,6 +444,17 @@ const SupportToolsPage: React.FC = () => {
   const selected = useMemo(
     () => cases.find(c => c.id === selectedId) || null,
     [cases, selectedId]
+  );
+
+  // Phase 1.1.3A correction — SHARED escalation view model. The red banner,
+  // header "Escalated" pill, reviewer card, rejected pill, escalation detail
+  // card, and the De-escalate button all read from this single object so
+  // "De-escalate visible" implies "banner/card visible" by construction.
+  // `selected` is re-derived from the latest `cases` list by id (above), so
+  // this view model never reflects a stale escalation state.
+  const escVm = useMemo(
+    () => (selected ? buildEscalationViewModel(selected) : null),
+    [selected]
   );
 
   const handleImpersonate = (tenantId: string) => {
@@ -1453,7 +1488,7 @@ const SupportToolsPage: React.FC = () => {
                   the structured `escalationStatus` (without flipping the legacy
                   `escalated` boolean) still shows the red banner. Keeps banner,
                   escalation detail card, and De-escalate button in lock-step. */}
-              {isActiveEscalation(selected) && (
+              {escVm?.canShowEscalationBanner && (
                 <div
                   className="px-7 py-4 bg-gradient-to-r from-red-600 to-red-500 text-white border-b-2 border-red-700 flex items-start gap-3"
                   data-testid="support-case-escalation-banner"
@@ -1540,7 +1575,7 @@ const SupportToolsPage: React.FC = () => {
                   (→ existing De-escalate confirmation flow, also flips
                   request to approved on confirm) and reject (→ requires
                   reason; never mutates escalation status). */}
-              {isActiveEscalation(selected) &&
+              {escVm?.isActive &&
                 selected.deescalationRequestStatus === 'pending' &&
                 hasPlatformPermission(sessionRole, 'deescalate_support_case').allowed && (
                   <div
@@ -1592,7 +1627,7 @@ const SupportToolsPage: React.FC = () => {
               {/* Status echo for requester / others when the request was
                   resolved (approved or rejected) and the case is still
                   open — quiet, single-line transparency. */}
-              {isActiveEscalation(selected) &&
+              {escVm?.isActive &&
                 (selected.deescalationRequestStatus === 'rejected') && (
                   <div
                     className="px-7 py-2.5 bg-slate-50 border-b border-slate-200 text-[10px] font-bold text-slate-600 flex items-center gap-2"
@@ -1621,7 +1656,7 @@ const SupportToolsPage: React.FC = () => {
                         </span>
                       );
                     })()}
-                    {isActiveEscalation(selected) && (
+                    {escVm?.isActive && (
                       <span className="px-2 py-0.5 text-[10px] font-black uppercase tracking-widest rounded bg-red-500/10 text-red-700 border border-red-500/20">
                         Escalated
                       </span>
@@ -1716,7 +1751,11 @@ const SupportToolsPage: React.FC = () => {
                     + role-gated buttons via can()). Replaces the simple
                     Phase 1.1 escalation row. */}
                 {(() => {
-                  const eff = effectiveEscalationStatus(selected);
+                  // Phase 1.1.3A correction — derive the card's active /
+                  // status / level from the SHARED escalation view model so
+                  // the card and its De-escalate button cannot drift from the
+                  // banner / header pill (which read the same `escVm`).
+                  const eff = { status: escVm!.status, level: escVm!.level, active: escVm!.isActive };
                   const ackOverdue = isEscalationAckOverdue(selected);
                   const isOwner = !!selected.escalationOwnerName && selected.escalationOwnerName === operatorName;
                   const ctx = { targetTeam: selected.escalationTargetTeam ?? null, isOwner };

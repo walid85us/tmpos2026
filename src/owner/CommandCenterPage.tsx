@@ -75,6 +75,7 @@ import {
   // Phase 1.1.3A — escalation lifecycle helpers (additive).
   effectiveEscalationStatus,
   isActiveEscalation,
+  deriveEscalationSignal,
   isEscalationAckOverdue,
   isEscalationCritical,
   ESCALATION_STATUS_LABEL,
@@ -290,6 +291,15 @@ const CommandCenterPage: React.FC = () => {
   // count agrees with the focused escalated-cases list rendered below
   // (and with Support Tools, Tenant 360, Needs Attention, NBA).
   const escalatedCases = openCases.filter(c => isActiveEscalation(c));
+  // Phase 1.1.3A correction — ONE escalation signal derived from the SAME
+  // focus/time-filtered slice that feeds the Operational Pulse, so the
+  // escalated pulse COUNT and the Needs Attention "Escalated case" LIST
+  // (built from `escalationSignal.activeEscalatedCases` below) are read
+  // from one source and can never disagree. Previously the escalated
+  // attention items were derived from `escalatedCases` AND skipped when a
+  // case was already queued as Critical/Overdue, so the count (e.g. 3)
+  // disagreed with the filtered list (0).
+  const escalationSignal = deriveEscalationSignal(focusedCases);
   const elevatedAuditCount = filteredAudits.filter(a => {
     const sev = (a.severity || '').toLowerCase();
     return sev === 'critical' || sev === 'warning';
@@ -343,12 +353,13 @@ const CommandCenterPage: React.FC = () => {
       href: `/owner/support-tools?caseId=${encodeURIComponent(c.id)}`,
     });
   });
-  const alreadyQueuedCaseIds = new Set<string>([
-    ...criticalCases.map(c => c.id),
-    ...overdueCases.map(c => c.id),
-  ]);
-  escalatedCases.forEach(c => {
-    if (alreadyQueuedCaseIds.has(c.id)) return;
+  // Phase 1.1.3A correction — emit exactly one "Escalated support case"
+  // attention item for EVERY active escalated case in the same focus-
+  // filtered slice the pulse counts (escalationSignal.activeEscalatedCases).
+  // The previous dedup-skip (suppressing escalation items when the case was
+  // already queued as Critical/Overdue) made the escalated COUNT disagree
+  // with the escalated FILTER list. Count and list now share one source.
+  escalationSignal.activeEscalatedCases.forEach(c => {
     const reasonText = (c.escalationReason || '').trim();
     attention.push({
       id: `ec_${c.id}`, priority: c.severity === 'urgent' ? 'critical' : 'high',
@@ -360,7 +371,6 @@ const CommandCenterPage: React.FC = () => {
       age: c.openedAt,
       href: `/owner/support-tools?caseId=${encodeURIComponent(c.id)}`,
     });
-    alreadyQueuedCaseIds.add(c.id);
   });
 
   // Phase 1.1.3A — structured escalation lifecycle attention items.
@@ -368,7 +378,11 @@ const CommandCenterPage: React.FC = () => {
   // / no owner / SLA breached). Items are pushed in addition to the
   // legacy "Escalated support case" entry so operators see the
   // *reason* the escalation needs hands-on attention.
-  openCases.forEach(c => {
+  // Phase 1.1.3A correction — iterate the SAME active-escalation slice the
+  // pulse counts (escalationSignal.activeEscalatedCases) so lifecycle
+  // attention items cannot reference cases excluded from the count. The
+  // inner `!eff.active` guard is now always satisfied but kept defensively.
+  escalationSignal.activeEscalatedCases.forEach(c => {
     const eff = effectiveEscalationStatus(c);
     if (!eff.active) return;
     const tenant = c.tenantId ? (tenantById.get(c.tenantId) || c.tenantId) : 'Unknown tenant';

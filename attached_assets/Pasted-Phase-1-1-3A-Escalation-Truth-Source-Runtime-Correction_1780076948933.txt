@@ -1,0 +1,327 @@
+Phase 1.1.3A — Escalation Truth Source Runtime Correction + Count/List Reconciliation
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict focused correction pass.
+
+Do not reopen broad permissions work.
+Do not repeat dependency auto-sync work.
+Do not modify Request De-escalation unless directly required for signal consistency.
+Do not implement Phase 1.1.3B, 1.1.3C, 1.1.3D, Phase 1.2, Phase 1.3, Phase 1.4, Phase 2, Phase 3, or Phase 4.
+
+Fix only the remaining QA failures from:
+Manual QA — Phase 1.1.3A Escalation Signal Consistency Correction
+
+Current QA failures:
+
+1. Active escalated case still does not show the Escalated banner/card in Support case detail.
+2. De-escalate button appears, which proves the case is considered escalated somewhere, but the escalation banner/card does not appear.
+3. Command Center escalated count shows cases, but clicking the escalated card/filter opens Needs Attention with “Escalated case” filter and the list is empty.
+4. Needs Attention escalation items are not aligned with the Command Center count.
+5. Final acceptance remains FAIL until these are corrected.
+
+==================================================
+ROLE STACK — ACT UPON IT
+========================
+
+Act as:
+
+* Senior Platform Operations Architect
+* Senior Support Tools Engineer
+* Senior Incident / Escalation Workflow Architect
+* Senior SaaS Command Center Architect
+* Senior Audit & Security Engineer
+* Identity and Access Management Specialist
+* Access Analyst
+* Senior React/TypeScript Engineer
+* QA Gatekeeper
+* Systems Thinker
+* Side Auditor
+
+Focus on:
+
+* one escalation truth source
+* runtime state consistency
+* count/list reconciliation
+* Support Tools detail consistency
+* Command Center accuracy
+* Needs Attention accuracy
+* no ghost or missing escalations
+* no stale selected-case state
+
+==================================================
+IMPORTANT CONTEXT
+=================
+
+The previous report claimed:
+
+* isActiveEscalation() was added as the shared predicate.
+* SupportToolsPage swapped four call sites from selected.escalated to isActiveEscalation(selected).
+* CommandCenterPage uses the same predicate for count/list.
+* Tenant 360 uses activeEscalations.
+
+Manual QA disproved full runtime consistency.
+
+Do not simply re-state that the helper exists.
+Inspect actual rendered conditions and runtime data flow.
+
+The final fix must prove:
+
+* if De-escalate is visible, the escalation banner/card is visible.
+* if Command Center count says N escalated cases, clicking the escalation card/list shows those exact N cases or the same filtered N count.
+* Needs Attention filter “Escalated case” uses the same source/filter as the count.
+
+==================================================
+PART A — RUNTIME ESCALATION STATE DEBUG / ROOT-CAUSE INSPECTION
+===============================================================
+
+Before changing code, inspect these actual runtime paths:
+
+SupportToolsPage:
+
+* condition for De-escalate visibility
+* condition for red escalation banner
+* condition for escalation detail card
+* condition for reviewer card
+* condition for header escalation pill
+* selected case refresh / selected case lookup after support_cases:changed
+* whether selected case is stale compared with supportCases list
+
+CommandCenterPage:
+
+* top escalated count source
+* escalation pulse/card click handler
+* Needs Attention source
+* Needs Attention filter value for “Escalated case”
+* focusedEscalatedCases source
+* focus-mode/time-range filters
+* whether count and list use different datasets
+
+platformOpsDerive.ts:
+
+* effectiveEscalationStatus()
+* isActiveEscalation()
+* getActiveEscalatedCases()
+* deriveOperationalPulse()
+* deriveNextBestActions()
+* deriveTenant360()
+* applyFocusModeToCases()
+
+Root cause must be explicitly reported.
+
+==================================================
+PART B — SINGLE ACTIVE ESCALATION VIEW MODEL
+============================================
+
+Create or strengthen one shared escalation view model.
+
+Recommended helper:
+buildEscalationViewModel(case)
+
+It should return:
+
+* isActive
+* isTerminal
+* status
+* statusLabel
+* level
+* ownerOrTeam
+* reason
+* escalatedBy
+* escalatedAt
+* acknowledgedBy
+* acknowledgedAt
+* pendingDeescalationRequest
+* canShowEscalationBanner
+* canShowEscalationCard
+
+Use this view model in SupportToolsPage so the banner/card/button cannot drift apart.
+
+Required rule:
+If De-escalate action is rendered because escalation is active, then the escalation banner/card must also render from the same view model.
+
+Do not use different checks for:
+
+* De-escalate button
+* escalation banner
+* escalation detail card
+* header escalation pill
+
+==================================================
+PART C — SUPPORT CASE DETAIL CARD FIX
+=====================================
+
+Fix SupportToolsPage.
+
+Required:
+
+* Open an actively escalated case.
+* Escalation banner must show.
+* Escalation detail card must show.
+* De-escalate button must not be the only escalation indicator.
+* Header escalation pill must agree.
+* Reviewer pending request card must not replace/hide the main escalation card incorrectly.
+* Rejected request pill must not hide main active escalation banner when escalation is still active.
+* If selected case is stale, selected case should be re-derived from the latest supportCases array by ID.
+
+Critical invariant:
+De-escalate visible === escalation banner/card visible.
+
+If the app intentionally allows De-escalate without banner, remove that behavior. The UX must be consistent.
+
+==================================================
+PART D — COMMAND CENTER COUNT / LIST RECONCILIATION
+===================================================
+
+Fix Command Center so count and list always match.
+
+Required:
+
+* The escalated count, escalated pulse/card, escalated widget list, and Needs Attention “Escalated case” filter must all use the same helper and same filtered dataset.
+* If focus mode or time range applies, both count and list must apply the same focus/time filters.
+* If clicking escalated count routes to Needs Attention with filter “Escalated case”, then Needs Attention must use the same active escalated case collection.
+* If count is 3, list must show 3.
+* If list is empty, count must be 0.
+* No fallback route to empty overview/list.
+
+Recommended:
+Create one derived object:
+const escalationSignal = deriveEscalationSignal(cases, filters)
+returning:
+
+* activeEscalatedCases
+* unacknowledgedEscalatedCases
+* overdueEscalatedCases
+* unassignedEscalatedCases
+* needsAttentionEscalationItems
+
+Then use that same object for:
+
+* top pulse/card count
+* widget list
+* Needs Attention filter
+* Next Best Actions escalation actions
+* Tenant 360 if applicable
+
+==================================================
+PART E — NEEDS ATTENTION ESCALATION FILTER FIX
+==============================================
+
+Fix Needs Attention.
+
+Required:
+
+* Needs Attention filter “Escalated case” must show active escalated cases.
+* It must not rely on stale text/category only.
+* It must not use a different field such as legacy selected.escalated if the count uses structured status.
+* Resolve/de-escalate/close terminal case should remove it from Needs Attention if it is no longer active.
+* If a case is escalated but not attention-worthy, then do not include it in the top escalated attention count. Count and list must still agree.
+
+Decision:
+For this phase, active escalated cases should appear as escalation signal items in Needs Attention unless terminal/resolved/de-escalated.
+
+==================================================
+PART F — SESSION REFRESH CONSISTENCY
+====================================
+
+Ensure Support Tools and Command Center stay aligned with current app/session data.
+
+Required:
+
+* When SupportToolsPage mutates a case, dispatch support_cases:changed.
+* CommandCenterPage must listen and reload.
+* When returning to Command Center after mutation, counts/lists reflect current state.
+* If storage/session cache has old data, reload from the canonical support case storage used by Support Tools.
+* selected support case in SupportToolsPage should refresh from latest list after mutation.
+
+Do not claim Firestore real-time.
+Truth label remains:
+“Operational signals refresh from current app/session state. Firestore real-time listeners are future live-backend work.”
+
+==================================================
+PART G — ADD TEMPORARY SAFE DIAGNOSTIC FOR DEVELOPMENT ONLY IF NEEDED
+=====================================================================
+
+If needed for troubleshooting, add a developer-only non-user-facing console/debug helper or a small hidden test data-testid summary for escalation state.
+
+Do not expose raw debug panels to normal UI.
+Do not add noisy console logs with PII.
+Do not leave visible debug clutter.
+
+==================================================
+PART H — DOCUMENTATION
+======================
+
+Update replit.md with:
+
+* escalation runtime consistency correction
+* escalation view model or shared derivation helper
+* Support detail invariant: De-escalate visible implies escalation banner/card visible
+* Command Center count/list same-source rule
+* Needs Attention escalation filter same-source rule
+* session refresh limitation
+
+Do not rewrite roadmap.
+
+==================================================
+NON-REGRESSION
+==============
+
+Do not change:
+
+* permission dependency auto-sync
+* Request De-escalation pending review workflow except if needed to keep card/banner visible
+* Add-on Governance
+* Shipping
+* Store Permissions Matrix
+* tenant provisioning
+* paid override invoice workflow
+* server PII log-scrubbing
+* Phase 1.1.3B+ roadmap
+
+==================================================
+ACCEPTANCE CRITERIA
+===================
+
+Acceptance is literal:
+
+1. Root cause is identified in the report.
+2. One shared escalation view model or equivalent runtime helper is used for Support case detail.
+3. If De-escalate is visible, escalation banner/card is visible.
+4. Escalation banner appears for every active escalated case.
+5. Escalation detail card appears for every active escalated case.
+6. Header escalation pill agrees with banner/card.
+7. Command Center escalated count and list use the same source/filter.
+8. Clicking escalated count/card opens a list containing the same cases represented by the count.
+9. Needs Attention “Escalated case” filter uses the same source/filter as the escalated count.
+10. No count/list mismatch remains.
+11. Command Center refreshes from current app/session state after escalation changes.
+12. No ghost escalation remains after de-escalation/resolution/closed terminal state.
+13. Tenant 360 escalation signals remain working.
+14. Request De-escalation workflow remains intact.
+15. Permission dependency auto-sync remains intact.
+16. Existing Add-on Governance remains intact.
+17. Existing Shipping Module remains intact.
+18. Existing Store Permissions Matrix remains intact.
+19. Existing tenant provisioning remains intact.
+20. Server PII logging rules are not regressed.
+21. replit.md is updated.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+======================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Root Cause
+3. Shared Escalation View Model
+4. Support Case Detail Banner/Card Fix
+5. Command Center Count/List Reconciliation
+6. Needs Attention Escalation Filter Fix
+7. Session Refresh Consistency
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes
