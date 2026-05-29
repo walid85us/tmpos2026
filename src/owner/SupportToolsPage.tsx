@@ -1281,6 +1281,26 @@ const SupportToolsPage: React.FC = () => {
                           className="flex flex-wrap gap-1 mt-1.5"
                           data-testid={`support-case-row-escalation-${c.id}`}
                         >
+                          {/* Phase 1.1.3A final — explicit ACTIVE ESCALATION
+                              badge driven by the SAME truth source as the
+                              detail view (eff.active === isActiveEscalation).
+                              Shown for EVERY active escalation — including
+                              acknowledged / in_review / security-review states
+                              — so a case that shows the Incident Escalated
+                              banner + De-escalate in detail is always visually
+                              identified as escalated in the list. It is added
+                              alongside (never replacing) the status / level /
+                              owner badges. Terminal de-escalated / resolved
+                              cases are not active, so they never show it. */}
+                          {eff.active && (
+                            <span
+                              className="px-1.5 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border bg-red-500/10 text-red-700 border-red-500/30"
+                              title="This case is actively escalated."
+                              data-testid={`support-case-row-esc-active-${c.id}`}
+                            >
+                              Escalated
+                            </span>
+                          )}
                           <span
                             className={`px-1.5 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border ${ESCALATION_STATUS_STYLES[eff.status]}`}
                             title={ESCALATION_STATUS_LABEL[eff.status]}

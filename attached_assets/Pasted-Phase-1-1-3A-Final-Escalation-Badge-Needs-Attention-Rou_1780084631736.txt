@@ -1,0 +1,278 @@
+Phase 1.1.3A — Final Escalation Badge + Needs Attention Routing Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict final correction pass.
+
+Do not reopen broad permission work.
+Do not repeat dependency auto-sync work.
+Do not modify Request De-escalation unless directly required for visual consistency.
+Do not implement Phase 1.1.3B, 1.1.3C, 1.1.3D, Phase 1.2, Phase 1.3, Phase 1.4, Phase 2, Phase 3, or Phase 4.
+
+Fix only the remaining QA failures from:
+Manual QA — Phase 1.1.3A Escalation Runtime Consistency Correction
+
+==================================================
+IMPORTANT WORKING STYLE
+=======================
+
+Before changing code, think step by step.
+
+Do not jump directly into code.
+First inspect:
+
+1. What data says the case is actively escalated.
+2. Which helper marks it active.
+3. Which UI components render escalation badges/cards.
+4. Which filter/list receives Command Center click-through.
+5. Why the current screen can show De-escalate / Incident Escalated but not the Escalated badge in the case row.
+
+Then implement the smallest correct fix.
+
+==================================================
+ROLE STACK — ACT UPON IT
+========================
+
+Act as:
+
+* Senior Platform Operations Architect
+* Senior Support Tools Engineer
+* Senior Incident / Escalation Workflow Architect
+* Senior SaaS Command Center Architect
+* Senior Audit & Security Engineer
+* Identity and Access Management Specialist
+* Access Analyst
+* Senior React/TypeScript Engineer
+* QA Gatekeeper
+* Systems Thinker
+* Side Auditor
+
+Focus on:
+
+* single escalation truth source
+* support case row/list consistency
+* active escalation visual consistency
+* Command Center → Needs Attention click-through clarity
+* no stale or misleading UI
+* no regression
+
+==================================================
+CURRENT QA FAILURES
+===================
+
+1. Support case row badge inconsistency
+
+Observed from QA screenshots:
+
+* case_006 appears in Support Cases list.
+* The row shows:
+
+  * IN REVIEW
+  * SECURITY REVIEW
+  * SECURITY LEAD
+* It does not show ESCALATED.
+* But when opening case_006, the detail view shows:
+
+  * red INCIDENT ESCALATED banner
+  * De-escalate button
+  * escalation detail context
+
+Expected:
+
+* If a case is actively escalated, the support case row/list must show an escalation badge/tag.
+* This must be true even if the structured escalation status is:
+
+  * acknowledged
+  * in_review
+  * security review
+  * active equivalent
+* “In Review” can remain, but it must not replace/hide the fact that the case is still escalated.
+* For case_006, the row should show an Escalated / Active Escalation badge in addition to its current in-review/security labels.
+
+2. De-escalate and banner/card consistency still fails at row/list level
+
+Observed:
+
+* The case detail is escalated and De-escalate is visible.
+* The support list row does not show escalated badge.
+  Expected:
+* Detail view, support list row, saved views, Command Center, Needs Attention, and Tenant 360 must all use the same active escalation truth.
+* A case cannot be escalated in detail but not visually identified as escalated in the list.
+
+3. Needs Attention escalation routing / filter clarity
+
+Observed:
+
+* Command Center escalated count/list now mostly matches.
+* But clicking the escalated card goes to Needs Attention with an “Escalated case” context, while the Needs Attention section does not have a visible filter.
+  Expected:
+* If Command Center routes to Needs Attention with “Escalated case,” the destination must clearly show:
+
+  * active filter/chip: Escalated case
+  * matching escalation items
+  * clear empty state if none
+    OR:
+* change the click target to a clear active escalation list/drawer instead of pretending there is a Needs Attention filter.
+
+Do not leave invisible filter behavior.
+
+==================================================
+PART A — SUPPORT CASE ROW ESCALATED BADGE FIX
+=============================================
+
+Fix SupportToolsPage case list / support case row rendering.
+
+Required:
+
+* Use the same shared escalation view model or isActiveEscalation helper used by the detail view.
+* If isActiveEscalation(case) is true, always render an escalation badge/tag in the case row.
+* This badge must appear even when escalationStatus is acknowledged / in_review / security review / active equivalent.
+* Preserve existing status badges such as IN REVIEW, SECURITY REVIEW, ACK OVERDUE, UNASSIGNED, etc.
+* Add “ESCALATED” or “ACTIVE ESCALATION” as an additional badge, not a replacement, unless the design already has a better equivalent.
+* Do not rely only on `case.escalated === true`.
+* Do not rely only on `escalationStatus === 'escalated'`.
+* Use the shared truth source.
+
+Acceptance example:
+
+* case_006 row should show an escalation badge because detail view shows Incident Escalated and De-escalate.
+
+==================================================
+PART B — SUPPORT SAVED VIEWS / QUEUES BADGE CONSISTENCY
+=======================================================
+
+Ensure all saved views/queues render the same escalation badge logic.
+
+Views to check:
+
+* All Open
+* Critical
+* Unacknowledged Escalations
+* Escalation Active / Escalation queue
+* Unassigned Escalations
+* De-escalated
+* Any filtered support view where escalated cases can appear
+
+Required:
+
+* Active escalated case shows escalation badge consistently in every list where it appears.
+* Acknowledged / in_review active escalations still show escalation badge.
+* Terminal de-escalated/resolved cases should not show active escalation badge.
+
+==================================================
+PART C — NEEDS ATTENTION ESCALATION FILTER / DESTINATION FIX
+============================================================
+
+Fix Command Center click-through behavior.
+
+Current issue:
+
+* Clicking escalation card/pulse can take user to Needs Attention with “Escalated case” context, but there is no visible filter in Needs Attention.
+
+Implement one of these two acceptable solutions:
+
+Option 1 — Preferred:
+Add a visible Needs Attention filter state.
+
+* When Command Center navigates to Needs Attention with Escalated case context:
+
+  * show visible active filter/chip: Escalated case
+  * show only matching active escalated cases
+  * show clear reset/clear filter option
+  * if no cases, show truthful empty state
+
+Option 2:
+Change click-through target.
+
+* Instead of routing to Needs Attention invisible filter, open a clear Active Escalations list/drawer/panel.
+* It must show the same cases counted by the escalation card.
+* It must have clear title: Active Escalations.
+* Each case must click through to correct Support case detail.
+
+Do not keep invisible filter behavior.
+
+==================================================
+PART D — COMMAND CENTER / NEEDS ATTENTION COUNT CONSISTENCY
+===========================================================
+
+Required:
+
+* Command Center escalated count and destination list must use the same active escalation helper and same focus/time filters.
+* Needs Attention escalation context must use the same helper.
+* If count = N, destination list = N.
+* If destination list = 0, count must be 0.
+* No stale empty list while count shows active escalations.
+
+==================================================
+PART E — DOCUMENTATION
+======================
+
+Update replit.md with:
+
+* Support case row escalation badge consistency rule
+* active escalation badge appears for in_review / acknowledged active escalations
+* Needs Attention visible filter or Active Escalations destination behavior
+* no invisible filter behavior
+* no change to permissions/dependency model
+
+Do not rewrite roadmap.
+
+==================================================
+NON-REGRESSION
+==============
+
+Do not change:
+
+* permission dependency auto-sync
+* Request De-escalation pending review workflow
+* Add-on Governance
+* Shipping
+* Store Permissions Matrix
+* tenant provisioning
+* paid override invoice workflow
+* server PII log-scrubbing
+* Phase 1.1.3B+ roadmap
+
+==================================================
+ACCEPTANCE CRITERIA
+===================
+
+Acceptance is literal:
+
+1. Active escalated case row always shows escalation badge/tag.
+2. case_006-style in_review active escalation shows both in-review/security context and escalation badge.
+3. Support case detail and support case list use the same active escalation truth source.
+4. De-escalate visible in detail implies row/list shows active escalation badge.
+5. Terminal de-escalated/resolved cases do not show active escalation badge.
+6. Support saved views/queues show escalation badge consistently.
+7. Command Center escalation click-through no longer uses invisible Needs Attention filter.
+8. Escalation destination visibly shows active filter/list/drawer.
+9. Escalation destination list matches Command Center count.
+10. Needs Attention escalation context remains accurate.
+11. Tenant 360 escalation signals remain working.
+12. Request De-escalation workflow remains intact.
+13. Permission dependency auto-sync remains intact.
+14. Existing Add-on Governance remains intact.
+15. Existing Shipping Module remains intact.
+16. Existing Store Permissions Matrix remains intact.
+17. Existing tenant provisioning remains intact.
+18. Server PII logging rules are not regressed.
+19. replit.md is updated.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+======================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Root Cause
+3. Support Case Row Escalation Badge Fix
+4. Support Saved Views / Queues Consistency
+5. Needs Attention / Escalation Destination Fix
+6. Command Center Count/List Consistency
+7. Files Changed
+8. Documentation Updated
+9. Non-Regression Notes
