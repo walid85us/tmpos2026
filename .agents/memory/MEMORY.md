@@ -1,1 +1,2 @@
 - [Command Center intelligence reconciliation](command-center-intelligence.md) — ribbon card count MUST match its drawer's kind filter exactly; tenant_risk drawer is synthesized from tenantHealth; bind UI to CommandSignal.reason/.category and RibbonCard.reason.
+- [Support queue no-drift](support-queue-no-drift.md) — count & drilldown must share one predicate AND one render-time `now`; gate all SLA indicators on view_support_sla; truth labels required.

@@ -1,0 +1,795 @@
+Platform Operations & Security — Phase 1.1.3C Support Queue / SLA / Macro Maturity
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is Phase 1.1.3C of the Platform Operations & Security roadmap.
+
+Implement only:
+
+* Support queue maturity
+* SLA visibility and SLA policy maturity
+* macro/template maturity
+* support case triage improvements
+* support queue analytics
+* support queue drilldowns
+* support operating-model polish
+* deterministic rule-based support operations intelligence from current app/session data
+
+Do not implement:
+
+* Phase 1.1.3D Audit Investigation Center
+* Phase 1.2 Domains + Platform Settings Maturity
+* Phase 1.3 Platform Team Governance
+* Phase 1.4 Automation + Alerts
+* Phase 2 Real Integrations
+* Phase 3 Compliance + Evidence
+* Phase 4 Predictive / AI Operations
+* real email/SMS/Slack/Teams/PagerDuty notifications
+* real customer portal messaging
+* real ticket intake channels
+* real AI
+* fake AI
+* autonomous assignment
+* autonomous escalation
+* external integrations
+* Firestore realtime migration
+* server-side RBAC
+* PIM/PAM
+* access reviews
+
+This phase must make Support Tools feel like a mature service operations workspace while staying truthful about current app/session data and internal-only workflows.
+
+==================================================
+WORKING STYLE — THINK STEP BY STEP
+==================================
+
+Before answering, implementing, correcting, or fixing anything, think step by step.
+
+Do not rush to code.
+
+First:
+
+1. Inspect SupportToolsPage.
+2. Inspect platformOpsDerive.ts.
+3. Inspect support case mock/session data.
+4. Inspect current escalation operating model.
+5. Inspect existing SLA timers and saved views.
+6. Inspect current macro/template behavior.
+7. Inspect permission helper and platform sub-permissions.
+8. Identify what is already accepted and must not regress.
+9. Design the support queue/SLA/macro maturity model.
+10. Implement slowly with reusable helpers and clear non-regression boundaries.
+
+==================================================
+ROLE STACK — ADD TO PROJECT KNOWLEDGE / SKILLS
+==============================================
+
+Before implementation, add this workstream role model to project knowledge / skills and act on it.
+
+Do not treat these roles as decorative text. Use them to guide design, UX, logic, auditability, and QA.
+
+Primary roles:
+
+* Senior Support Tools Engineer
+* Senior Support Operations Architect
+* Service Desk Manager
+* Support Queue Analyst
+* SLA / Service Level Manager
+* Support Macro / Knowledge Operations Manager
+* Incident / Escalation Workflow Architect
+* Command Center Analyst
+* Senior Platform Operations Architect
+* Senior SaaS Operations Architect
+* Identity and Access Management Specialist
+* Access Analyst
+* Senior React/TypeScript Engineer
+* QA Gatekeeper
+* Systems Thinker
+* Side Auditor
+
+Responsibilities to apply:
+
+* triage support demand
+* reduce queue noise
+* make ownership and priority clear
+* expose SLA risk early
+* distinguish response SLA vs resolution SLA
+* keep macros internal/draft-safe
+* prevent unauthorized support actions
+* preserve auditability
+* improve support agent speed without fake automation
+* prepare for future Phase 1.4 automation and Phase 2 integrations
+
+==================================================
+BENCHMARK / COMPETITOR RESEARCH REQUIREMENT
+===========================================
+
+Before coding, perform a short benchmark review using public patterns if browsing is available.
+
+Review patterns from:
+
+* Zendesk views, macros, SLA policies, triggers/automations, and support workflow design
+* Jira Service Management queues and SLA goals
+* Freshdesk canned responses, SLA policies, and automation rules
+* ServiceNow incident assignment, SLA definitions, classification, prioritization, escalation, and resolution
+* Intercom / Salesforce Service Cloud / Help Scout patterns if useful
+* PagerDuty / ITSM escalation patterns if useful
+
+Do not copy external code.
+
+Extract product patterns only:
+
+* saved queues
+* triage queues
+* SLA timers
+* breach prediction / at-risk labels
+* response vs resolution targets
+* agent/team ownership
+* canned responses/macros
+* macro placeholders
+* macro preview
+* queue analytics
+* assignment clarity
+* bulk triage patterns
+* internal notes and timeline discipline
+* support quality signals
+
+If browsing is unavailable:
+
+* say browsing was unavailable
+* proceed using SaaS/ITSM/support-operations best practices
+* document assumptions.
+
+Update replit.md with a concise:
+“Phase 1.1.3C Benchmark Patterns Considered” note.
+
+==================================================
+CURRENT ACCEPTED STATE
+======================
+
+Accepted and locked:
+
+* Phase 1.1 Foundation
+* Phase 1.1.1 Interactive Command Center UX
+* Phase 1.1.2 Competitive Ops Console Maturity Review
+* Phase 1.1.3A Operating Model + Permission-Aware Escalation
+* Platform Team Permissions Matrix corrections
+* Effective permission resolver hardening
+* Permission dependency auto-sync
+* Request De-escalation pending review workflow
+* Escalation signal consistency
+* Final escalation badge / Needs Attention routing correction
+* Phase 1.1.3B Advanced Command Center Intelligence
+* Duplicate Escalated Badge UI Correction
+* Documentation Organization
+
+Do not reopen those corrections.
+
+Phase 1.1.3C should build on them.
+
+==================================================
+LOCKED / DO-NOT-TOUCH AREAS
+===========================
+
+Do not modify or regress:
+
+* Shipping Module / Shipping Center behavior
+* Add-on Governance rules
+* Plans & Features Matrix source-of-truth behavior
+* Tenant Features commercial-entitlement rules
+* Store Permissions Matrix
+* Platform Team Permissions Matrix
+* Effective permission resolver
+* Permission dependency auto-sync
+* Request De-escalation workflow
+* Escalation operating model
+* Escalation badges and Command Center routing corrections
+* Advanced Command Center Intelligence
+* POS
+* Repairs
+* Inventory
+* Customers
+* Invoices
+* Services
+* tenant provisioning behavior
+* paid override invoice workflow
+* server PII log-scrubbing
+* real DNS / SSL truth labels
+* real SSO / SCIM truth labels
+* Platform Settings truth labels
+* Team Management directory-only truth labels
+
+Any interaction with those areas must be read-only unless explicitly scoped as Support Tools signal consumption.
+
+==================================================
+PRIMARY GOAL
+============
+
+Transform Support Tools into a mature support operations workspace.
+
+The System Owner / Support Admin should quickly understand:
+
+* Which support cases require triage?
+* Which cases are unassigned?
+* Which cases are at risk of SLA breach?
+* Which cases already breached response or resolution targets?
+* Which cases are waiting on escalation acknowledgement?
+* Which cases have pending de-escalation requests?
+* Which queues are overloaded?
+* Which macros are available and safe to use?
+* Which macro was inserted and where?
+* Which actions are draft/internal only?
+* What is current queue health?
+* What is real current app/session data vs future automation?
+
+Use deterministic, transparent, rule-based support operations logic.
+
+Do not implement real AI/ML.
+Do not implement real external messaging.
+Do not send emails.
+Do not send notifications.
+Do not pretend macros send to customers.
+Macros should insert internal note/draft only unless an existing accepted behavior says otherwise.
+
+==================================================
+PART A — SUPPORT OPERATIONS DATA MODEL
+======================================
+
+Create or extend shared derivation helpers for support operations.
+
+Recommended concepts:
+
+* SupportQueueDefinition
+* SupportQueueResult
+* SupportCaseSignal
+* SlaPolicyPreview
+* SlaStatus
+* SlaTimerSummary
+* SupportMacro
+* MacroCategory
+* MacroUsageEvent
+* SupportWorkloadSummary
+* SupportCaseHealth
+* SupportTriageReason
+
+All should be derived from existing support case data where possible.
+
+Use optional fields and safe defaults.
+Do not break existing support case records.
+
+Each support case signal should include:
+
+* case id
+* tenant
+* title/subject
+* priority/severity
+* status
+* assignment owner/team
+* escalation state
+* SLA response status
+* SLA resolution status
+* queue membership reasons
+* recommended next action
+* source/truth label
+
+==================================================
+PART B — SUPPORT QUEUE CENTER
+=============================
+
+Upgrade Support Tools to include a Support Queue Center.
+
+Add modern queue sections/cards such as:
+
+* All Open
+* New / Needs Triage
+* Unassigned
+* Assigned to Me
+* Assigned to My Team
+* SLA At Risk
+* SLA Breached
+* Escalated Active
+* Unacknowledged Escalations
+* Pending De-escalation Review
+* Critical / High Severity
+* Waiting on Customer / Waiting on Internal if current statuses support it
+* Recently Updated
+* Stale / No Recent Activity
+
+Each queue should show:
+
+* count
+* severity mix
+* oldest case age
+* SLA pressure
+* top reason
+* click-through to filtered case list
+* clear empty state
+
+Do not show meaningless empty sections if data is unavailable.
+Use truthful empty states.
+
+==================================================
+PART C — QUEUE FILTERS AND SAVED VIEWS
+======================================
+
+Improve Support Tools saved views.
+
+Required:
+
+* visible filter chips / tabs
+* search
+* tenant filter
+* severity filter
+* status filter
+* assignment filter
+* escalation filter
+* SLA filter
+* reset filters
+* clear active filter state
+
+Saved views should be consistent with queue cards.
+
+If user clicks SLA Breached queue:
+
+* active filter should visibly show SLA Breached.
+* case list should show matching cases.
+* no invisible filters.
+
+If user clicks Unassigned queue:
+
+* list should show unassigned cases.
+* clear active filter should reset.
+
+==================================================
+PART D — SLA MATURITY
+=====================
+
+Improve SLA visibility without implementing real external SLA engine.
+
+Add clear SLA concepts:
+
+* First Response SLA
+* Resolution SLA
+* At Risk
+* Breached
+* Paused / Not Applicable if supported or clearly future
+* Time remaining / overdue duration
+* SLA target basis:
+
+  * severity
+  * priority
+  * case type
+  * tenant plan if useful
+* business-hours limitation label if not implemented
+
+SLA cards should show:
+
+* response SLA status
+* resolution SLA status
+* due time / remaining time
+* breach risk
+* reason
+* source label:
+  “Rule-based from current app/session case timestamps.”
+
+If real business hours are not implemented, label clearly:
+“Business-hours calendars are not enforced in this phase.”
+
+==================================================
+PART E — SLA POLICY PREVIEW
+===========================
+
+Add an internal SLA Policy Preview panel.
+
+This should be a non-invasive preview/configuration-like surface, not a full automation engine.
+
+Show sample/default policy rules such as:
+
+* Critical: first response 1h, resolution 8h
+* High: first response 4h, resolution 24h
+* Medium: first response 8h, resolution 3 business days
+* Low: first response 24h, resolution 5 business days
+
+The exact values can be adjusted to current app conventions.
+
+Required:
+
+* label as “Policy preview / internal support standard — not externally enforced”
+* do not create real contract enforcement
+* do not send notifications
+* do not change tenant billing/plans
+* do not connect to external calendars
+
+If editable:
+
+* edit must be gated by platform permission
+* save must audit
+* keep safe defaults
+* if editing is too large, make it read-only preview for this phase
+
+Preferred for this phase:
+
+* editable local/session preview if low-risk
+* otherwise read-only with future note
+
+==================================================
+PART F — SLA BREACH / AT-RISK LOGIC
+===================================
+
+Use deterministic SLA logic.
+
+Rules:
+
+* calculate based on case createdAt / updatedAt / first response if available
+* if first response timestamp unavailable, use internal note/customer response proxies only if currently meaningful
+* be transparent about assumptions
+* resolution SLA should remain active until case closed/resolved
+* closed/resolved cases should show completed / not active
+* escalated cases may increase priority/attention but should not fake SLA policy change unless specified
+
+Add:
+
+* SLA At Risk if remaining time below threshold, e.g. below 25%
+* SLA Breached if target exceeded
+* Missing timestamp = “insufficient data” not fake breach
+
+==================================================
+PART G — MACRO / TEMPLATE MATURITY
+==================================
+
+Upgrade support macros/templates.
+
+Macros should include:
+
+* title
+* category
+* purpose
+* internal/customer-facing indicator
+* body
+* placeholder list
+* last used / usage count if practical
+* owner or status if practical
+* permission requirement
+* preview
+
+Categories:
+
+* Triage
+* SLA Update
+* Escalation
+* De-escalation Request
+* Domain Issue
+* Billing / Commercial
+* Add-on / Plan
+* Shipping
+* Security / Audit
+* General Follow-up
+
+Required behavior:
+
+* macro library panel
+* macro search/filter
+* macro preview before insert
+* placeholder substitution preview
+* insert into internal note/draft only
+* do not send externally
+* macro insertion should be auditable
+* macro insert requires use_support_macro
+* macro creation/editing if implemented requires manage_support_macros
+* if no macro manager UI, document as future and keep library curated/static
+
+==================================================
+PART H — MACRO PLACEHOLDERS
+===========================
+
+Support common placeholders:
+
+* {case_id}
+* {tenant_name}
+* {case_subject}
+* {severity}
+* {status}
+* {assigned_owner}
+* {assigned_team}
+* {sla_status}
+* {escalation_level}
+* {current_date}
+
+If placeholder value is missing:
+
+* show placeholder as unresolved or “Not available”
+* do not crash
+* preview should highlight unresolved placeholders
+
+==================================================
+PART I — CASE DETAIL OPERATIONS PANEL
+=====================================
+
+Improve support case detail with an operations panel.
+
+Show:
+
+* queue memberships
+* SLA response/resolution status
+* assigned owner/team
+* escalation state
+* pending de-escalation request if any
+* related tenant health
+* related audit/security events if already safely available
+* related domain/commercial blockers if already safely available
+* recommended next action
+* macro quick insert
+
+Keep layout modern and readable.
+
+Do not clutter the case detail page.
+
+==================================================
+PART J — WORKLOAD / TEAM VIEW
+=============================
+
+Add lightweight workload insight.
+
+Show:
+
+* cases by owner/team
+* unassigned count
+* overdue/at-risk count by owner/team
+* escalations by owner/team
+* pending review requests
+* workload balance indicator
+
+If team/user data is limited, label:
+“Workload is derived from current support case owner/team fields.”
+
+Do not implement full workforce management.
+
+==================================================
+PART K — BULK TRIAGE — SAFE LIMITED VERSION
+===========================================
+
+If low-risk, add safe bulk triage for selected cases:
+
+* assign owner/team
+* change severity
+* add internal note
+* apply macro as internal note/draft
+
+Every bulk action must:
+
+* require matching permission
+* show confirmation
+* show affected case count
+* audit one summary row or one row per case depending current audit pattern
+* avoid external communication
+
+If bulk triage is too risky:
+
+* do not implement it
+* document as future Phase 1.4/1.3-related enhancement
+
+Preferred:
+
+* implement only if simple and safe
+* otherwise skip and document future
+
+==================================================
+PART L — PERMISSIONS
+====================
+
+Respect existing Global Permissions Matrix.
+
+Required:
+
+* view_support_cases controls Support Tools access.
+* create_support_case controls new case.
+* edit_support_case controls general case edits.
+* change_support_status controls status changes.
+* change_support_severity controls severity changes.
+* assign_support_case controls assignment.
+* add_internal_support_note controls notes.
+* use_support_macro controls macro insertion.
+* manage_support_macros controls macro creation/editing if implemented.
+* view_support_sla controls SLA visibility.
+* view_support_tenant_health controls tenant health panel.
+* view_support_related_entities controls related entities panel.
+* escalation permissions remain as accepted.
+
+Do not change permission resolver unless a small non-regression bug is found.
+Do not reopen broad permission architecture.
+
+==================================================
+PART M — AUDITABILITY
+=====================
+
+Audit meaningful support operations actions:
+
+* queue opened if current audit pattern supports it and not noisy
+* saved view selected if meaningful and not noisy
+* SLA policy preview saved if editable
+* macro inserted
+* macro created/edited if implemented
+* bulk triage performed if implemented
+* assignment/status/severity changes remain audited
+* notes remain audited if already accepted
+
+Avoid audit spam:
+
+* do not audit passive hover
+* do not audit every filter click unless there is an existing pattern and it is useful
+* do not duplicate rows
+
+No server PII logging.
+
+==================================================
+PART N — COMMAND CENTER INTEGRATION
+===================================
+
+Command Center should benefit from Support Queue maturity but do not overbuild.
+
+Required:
+
+* Existing Command Center intelligence should still read correct SLA/queue signals where relevant.
+* Do not break ribbon counts.
+* Do not break NBA filters.
+* Do not break escalation drilldowns.
+* Do not introduce invisible filters.
+
+Optional:
+
+* update Command Center support/SLA drilldowns to use improved queue helper if low-risk.
+
+==================================================
+PART O — DOCUMENTATION
+======================
+
+Use the new documentation pattern:
+
+* Keep replit.md concise.
+* Add only a short summary under locked/current rules.
+* Put detailed Phase 1.1.3C implementation narrative in docs/platform-operations-security-history.md.
+
+Update:
+
+1. replit.md:
+
+* current phase summary
+* accepted rules added by this phase
+* next phase remains Phase 1.1.3D Audit Investigation Center after acceptance
+
+2. docs/platform-operations-security-history.md:
+
+* detailed Phase 1.1.3C notes
+* benchmark patterns considered
+* data model / helpers
+* support queue maturity
+* SLA maturity
+* macro maturity
+* permissions/auditability
+* out-of-scope limitations
+
+Do not make replit.md large again.
+
+==================================================
+TRUTH LABELS / LIMITATIONS
+==========================
+
+Required labels:
+
+* “Support queue intelligence is rule-based from current app/session data.”
+* “SLA timers are internal operational indicators in this phase.”
+* “Business-hours calendars are not enforced unless explicitly implemented.”
+* “Macros insert internal notes/drafts only; no external message is sent.”
+* “No external notifications or automations are active in this phase.”
+
+==================================================
+OUT OF SCOPE
+============
+
+Do NOT implement:
+
+* real external messaging
+* real customer portal
+* real email/SMS/Slack/Teams/PagerDuty
+* real AI response generation
+* autonomous assignment
+* automatic SLA escalation
+* real business-hours calendar integration
+* real support inbox
+* real knowledge base
+* Phase 1.1.3D Audit Investigation Center
+* Phase 1.2+
+* server-side RBAC/PIM/PAM
+* Firestore realtime migration
+
+==================================================
+ACCEPTANCE CRITERIA
+===================
+
+Acceptance is literal:
+
+1. Support Queue Center exists.
+2. Queue cards are useful and clickable.
+3. Queue click-through shows visible active filter.
+4. No invisible filters are introduced.
+5. Saved views/filters are improved and consistent.
+6. Search/tenant/severity/status/assignment/escalation/SLA filters work.
+7. SLA response and resolution indicators are visible.
+8. SLA at-risk/breached logic is explained.
+9. SLA policy preview exists or is clearly documented as future if skipped.
+10. SLA limitation labels are truthful.
+11. Macro library exists.
+12. Macro search/filter works.
+13. Macro preview works.
+14. Placeholder substitution preview works.
+15. Macro insert creates internal note/draft only.
+16. Macro insert is permission-gated.
+17. Macro insert is audited.
+18. Case detail operations panel is improved.
+19. Queue memberships are visible on case detail.
+20. Workload/team view exists or is clearly documented as future if skipped.
+21. Bulk triage is either safely implemented with permissions/confirmation/audit or explicitly deferred.
+22. Existing escalation operating model remains intact.
+23. Existing request de-escalation workflow remains intact.
+24. Existing permission dependency auto-sync remains intact.
+25. Existing Command Center intelligence remains intact.
+26. Existing Add-on Governance remains intact.
+27. Existing Shipping Module remains intact.
+28. Existing Store Permissions Matrix remains intact.
+29. Existing tenant provisioning remains intact.
+30. Server PII logging rules are not regressed.
+31. Future phases remain out of scope.
+32. replit.md remains concise.
+33. docs/platform-operations-security-history.md is updated.
+34. Documentation is updated.
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+=========================
+
+Follow this order:
+
+1. Think step by step.
+2. Benchmark support/SLA/macro patterns.
+3. Inspect existing Support Tools.
+4. Inspect existing support data and session persistence.
+5. Inspect existing permission gates.
+6. Define shared support queue/SLA/macro helpers.
+7. Implement queue center.
+8. Improve saved views/filters.
+9. Implement SLA response/resolution visibility.
+10. Add SLA policy preview.
+11. Upgrade macro library/preview/insert behavior.
+12. Improve case detail operations panel.
+13. Add workload/team insight if safe.
+14. Add safe bulk triage only if low-risk.
+15. Preserve permissions/audit.
+16. Preserve Command Center intelligence.
+17. Update replit.md concisely.
+18. Update docs/platform-operations-security-history.md in detail.
+19. Run typecheck/smoke tests.
+20. Provide final implementation report.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+======================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Benchmark / Patterns Considered
+3. Support Queue Model
+4. Support Queue Center
+5. Saved Views / Filters
+6. SLA Maturity
+7. SLA Policy Preview
+8. Macro Library / Placeholder Preview
+9. Case Detail Operations Panel
+10. Workload / Bulk Triage
+11. Permissions / Auditability
+12. Command Center / Non-Regression
+13. Files Changed
+14. Documentation Updated
+15. Non-Regression Notes

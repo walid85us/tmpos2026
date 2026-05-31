@@ -896,6 +896,12 @@ export interface SupportMacro {
   label: string;
   category: 'general' | 'billing' | 'domain' | 'shipping' | 'security';
   body: string;
+  // Phase 1.1.3C — additive, optional macro maturity fields. `purpose`
+  // documents when to reach for a macro; `placeholders` declares the
+  // `{{token}}` keys present in the body so the picker can show what will be
+  // filled from case context. All optional to keep existing seeds valid.
+  purpose?: string;
+  placeholders?: string[];
 }
 
 export const supportMacros: SupportMacro[] = [
@@ -903,27 +909,53 @@ export const supportMacros: SupportMacro[] = [
     id: 'macro_more_info',
     label: 'Ask tenant for more information',
     category: 'general',
+    purpose: 'Request reproduction details before triage when a report is too thin to act on.',
+    placeholders: ['tenant_name'],
     body:
-      'Hi — to help us reproduce this we need a few additional details: timestamp of the most recent occurrence (with timezone), the affected user / store, and any error message visible on screen. Replying here works best so we keep the case history together.',
+      'Hi {{tenant_name}} team — to help us reproduce this we need a few additional details: timestamp of the most recent occurrence (with timezone), the affected user / store, and any error message visible on screen. Replying here works best so we keep the case history together.',
+  },
+  {
+    id: 'macro_first_response',
+    label: 'First response acknowledgement',
+    category: 'general',
+    purpose: 'Send an initial acknowledgement so the case has a recorded first response.',
+    placeholders: ['tenant_name', 'case_id', 'operator_name'],
+    body:
+      'Hi {{tenant_name}} team — thanks for the report. This is {{operator_name}} from platform support and I have picked up case {{case_id}}. I am looking into it now and will follow up here with next steps shortly.',
+  },
+  {
+    id: 'macro_status_update',
+    label: 'Investigation status update',
+    category: 'general',
+    purpose: 'Give a mid-investigation progress note when a case is taking longer than expected.',
+    placeholders: ['case_id', 'status'],
+    body:
+      'Quick update on case {{case_id}}: it is currently {{status}}. We are actively working it and will post the next update here as soon as we have more. Thanks for your patience.',
   },
   {
     id: 'macro_domain_dns',
     label: 'Domain verification instructions',
     category: 'domain',
+    purpose: 'Walk a tenant through the DNS records required to verify a custom domain.',
+    placeholders: ['tenant_name'],
     body:
-      'To complete domain verification, please add the CNAME and TXT records shown in your Domains screen at your DNS provider. Propagation can take up to a few hours. Once the records are live, ping us here and we will mark the domain verified.',
+      'Hi {{tenant_name}} team — to complete domain verification, please add the CNAME and TXT records shown in your Domains screen at your DNS provider. Propagation can take up to a few hours. Once the records are live, ping us here and we will mark the domain verified.',
   },
   {
     id: 'macro_billing_followup',
     label: 'Billing follow-up',
     category: 'billing',
+    purpose: 'Follow up on a failed payment / past-due billing situation.',
+    placeholders: ['tenant_name'],
     body:
-      'A quick follow-up on the recent payment issue. Please confirm the card on file is up to date in your billing screen. If the retry succeeds the account returns to active automatically.',
+      'A quick follow-up on the recent payment issue for {{tenant_name}}. Please confirm the card on file is up to date in your billing screen. If the retry succeeds the account returns to active automatically.',
   },
   {
     id: 'macro_shipping_creds',
     label: 'Shipping provider credential issue',
     category: 'shipping',
+    purpose: 'Resolve a shipping integration failure caused by stale provider credentials.',
+    placeholders: [],
     body:
       'It looks like the shipping provider credentials on file may have expired or been rotated. Please re-enter the API key from your shipping provider portal in your Shipping settings and try again.',
   },
@@ -931,8 +963,19 @@ export const supportMacros: SupportMacro[] = [
     id: 'macro_security_ack',
     label: 'Security review acknowledgment',
     category: 'security',
+    purpose: 'Acknowledge a security report and confirm it has been routed for review.',
+    placeholders: ['case_id'],
     body:
-      'Acknowledged — your report has been received and routed to the platform security review queue. We will follow up here once the review is complete. No further action is needed from you right now.',
+      'Acknowledged — your report (case {{case_id}}) has been received and routed to the platform security review queue. We will follow up here once the review is complete. No further action is needed from you right now.',
+  },
+  {
+    id: 'macro_resolution',
+    label: 'Resolution / case closing summary',
+    category: 'general',
+    purpose: 'Summarise the fix and confirm closure when a case is resolved.',
+    placeholders: ['tenant_name', 'case_id', 'date'],
+    body:
+      'Hi {{tenant_name}} team — case {{case_id}} is now resolved as of {{date}}. If everything looks good on your side we will close it out. Reply here within a few days if the issue resurfaces and we will reopen it.',
   },
 ];
 

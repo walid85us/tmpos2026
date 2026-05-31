@@ -49,6 +49,18 @@ import {
   isEscalationAckOverdue,
   isEscalationCritical,
   can,
+  deriveResponseSlaStatus,
+  deriveSupportQueues,
+  matchesSupportQueue,
+  deriveSupportCaseSignal,
+  deriveSupportWorkload,
+  resolveMacroPlaceholders,
+  MACRO_PLACEHOLDERS,
+  SLA_POLICY_PREVIEW,
+  SLA_POLICY_PREVIEW_LABEL,
+  PHASE_113C_SLA_LABEL,
+  PHASE_113C_QUEUE_LABEL,
+  PHASE_113C_MACRO_LABEL,
   type AuditEventLike,
   type SupportViewFilters,
   type SupportViewCtx,
@@ -58,6 +70,8 @@ import {
   type EscalationTargetTeam,
   type EscalationAction,
   type CanResult,
+  type SupportQueueId,
+  type MacroPlaceholderCtx,
 } from './platformOpsDerive';
 
 const CASES_KEY = 'support_cases_v1';
@@ -193,6 +207,12 @@ const SupportToolsPage: React.FC = () => {
   const [escalationFilter, setEscalationFilter] =
     useState<NonNullable<SupportViewFilters['escalation']> | 'any'>('any');
 
+  // Phase 1.1.3C — Support Queue Center selection (exclusive queue mode),
+  // plus read-only Workload and SLA Policy Preview panel toggles.
+  const [activeQueue, setActiveQueue] = useState<SupportQueueId | null>(null);
+  const [showWorkload, setShowWorkload] = useState(false);
+  const [showSlaPolicy, setShowSlaPolicy] = useState(false);
+
   // Phase 1.1.3A — escalation lifecycle modals.
   const [escalateModal, setEscalateModal] = useState<SupportCaseRecord | null>(null);
   const [assignModal, setAssignModal] = useState<SupportCaseRecord | null>(null);
@@ -290,6 +310,8 @@ const SupportToolsPage: React.FC = () => {
 
   const applyView = (id: string) => {
     setActiveView(id);
+    // Leaving Queue Center mode whenever a saved view is applied.
+    setActiveQueue(null);
     const v = predefinedSupportViews.find(x => x.id === id);
     if (!v) return;
     const f: SupportViewFilters = v.filters;
@@ -305,6 +327,24 @@ const SupportToolsPage: React.FC = () => {
     // Phase 1.1.3A — saved-view escalation token. Defaults to 'any' for
     // non-escalation lenses so the existing queues stay unchanged.
     setEscalationFilter(f.escalation || 'any');
+  };
+
+  // Phase 1.1.3C — Queue Center selection. Queue mode is EXCLUSIVE: the
+  // visible list is driven solely by `matchesSupportQueue`, the same
+  // predicate that produced the card count, guaranteeing count === list.
+  // Selecting a queue clears the other filters so nothing is hidden.
+  const selectQueue = (id: SupportQueueId) => {
+    setActiveQueue(prev => (prev === id ? null : id));
+    setActiveView('custom');
+    setStatusFilter('all');
+    setSeverityViewFilter('all');
+    setSlaFilter('any');
+    setEscalationFilter('any');
+  };
+
+  const clearQueue = () => {
+    setActiveQueue(null);
+    setActiveView('all');
   };
 
   const [draft, setDraft] = useState({
@@ -371,9 +411,27 @@ const SupportToolsPage: React.FC = () => {
     [operatorName, teamForCurrentRole]
   );
 
+  // Phase 1.1.3C — single render-time `now` snapshot shared by the queue
+  // summaries, the workload rollup, AND the drilldown list so SLA-threshold
+  // queue counts and the rows they open are computed against the SAME instant
+  // (count and list cannot drift, even on time-relative predicates).
+  const renderNow = useMemo(
+    () => new Date(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [cases, activeQueue, statusFilter, severityViewFilter, slaFilter, escalationFilter, search, sortMode, operatorName, teamForCurrentRole]
+  );
+
   const filteredCases = useMemo(() => {
-    const now = new Date();
+    const now = renderNow;
     const filtered = cases.filter(c => {
+      // Phase 1.1.3C — Queue Center mode is EXCLUSIVE: when a queue is active
+      // the visible list is driven by the SAME predicate
+      // (`matchesSupportQueue`) that produced the card count, so count and
+      // drill-down list can never drift. A visible queue chip is shown; any
+      // free-text search still narrows on top (and is itself visible).
+      if (activeQueue) {
+        if (!matchesSupportQueue(c, activeQueue, now)) return false;
+      } else {
       // Phase 1.1.2 — group tokens mirror the same predicates used by
       // `countCasesForSupportView` so list and saved-view counts agree.
       if (statusFilter === 'open_group') {
@@ -416,6 +474,7 @@ const SupportToolsPage: React.FC = () => {
           if (!eff.active || !teamForCurrentRole || team !== teamForCurrentRole) return false;
         }
       }
+      }
       if (search.trim()) {
         const tenantName = tenantById.get(c.tenantId) || '';
         const hay = `${c.subject} ${c.description} ${tenantName} ${c.id}`.toLowerCase();
@@ -428,7 +487,17 @@ const SupportToolsPage: React.FC = () => {
       const bKey = sortMode === 'updated_desc' ? b.updatedAt : b.openedAt;
       return aKey < bKey ? 1 : -1;
     });
-  }, [cases, statusFilter, severityViewFilter, slaFilter, escalationFilter, search, tenantById, sortMode, operatorName, teamForCurrentRole]);
+  }, [cases, renderNow, activeQueue, statusFilter, severityViewFilter, slaFilter, escalationFilter, search, tenantById, sortMode, operatorName, teamForCurrentRole]);
+
+  // Phase 1.1.3C — Queue Center summaries + workload rollup. Both derive from
+  // the same `cases` list the table renders AND the same `renderNow` instant as
+  // the drilldown list, so count and list can never drift.
+  const supportQueues = useMemo(() => deriveSupportQueues(cases, renderNow), [cases, renderNow]);
+  const supportWorkload = useMemo(() => deriveSupportWorkload(cases, renderNow), [cases, renderNow]);
+  const activeQueueMeta = useMemo(
+    () => (activeQueue ? supportQueues.find(q => q.id === activeQueue) || null : null),
+    [activeQueue, supportQueues]
+  );
 
   const tenantSearchHits = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -1199,6 +1268,120 @@ const SupportToolsPage: React.FC = () => {
         )}
       </div>
 
+      {/* Phase 1.1.3C — Support Queue Center */}
+      <div className="bg-white/80 backdrop-blur-xl p-6 rounded-[2rem] border border-slate-200 shadow-sm" data-testid="support-queue-center">
+        <div className="flex items-start justify-between gap-4 flex-wrap mb-3">
+          <div>
+            <h3 className="text-sm font-black text-primary uppercase tracking-widest">Queue Center</h3>
+            <p className="text-[11px] text-slate-500 font-medium mt-0.5 max-w-2xl">{PHASE_113C_QUEUE_LABEL}</p>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            {viewSupportSlaGate.allowed && (
+              <button
+                onClick={() => setShowSlaPolicy(v => !v)}
+                data-testid="support-sla-policy-toggle"
+                className={`px-3 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all border ${showSlaPolicy ? 'bg-primary text-white border-primary' : 'bg-white text-slate-600 border-slate-200 hover:bg-primary/5 hover:text-primary'}`}
+              >
+                SLA Policy
+              </button>
+            )}
+            <button
+              onClick={() => setShowWorkload(v => !v)}
+              data-testid="support-workload-toggle"
+              className={`px-3 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all border ${showWorkload ? 'bg-primary text-white border-primary' : 'bg-white text-slate-600 border-slate-200 hover:bg-primary/5 hover:text-primary'}`}
+            >
+              Workload
+            </button>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
+          {supportQueues.map(q => {
+            const active = activeQueue === q.id;
+            return (
+              <button
+                key={q.id}
+                onClick={() => selectQueue(q.id)}
+                data-testid={`support-queue-${q.id}`}
+                data-active={active ? 'true' : 'false'}
+                title={q.helper}
+                className={`text-left p-3 rounded-2xl border transition-all ${active ? 'bg-primary text-white border-primary shadow-md ring-2 ring-primary/20' : 'bg-slate-50 border-slate-100 hover:border-primary/30 hover:bg-primary/5'}`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className={`text-[10px] font-black uppercase tracking-widest ${active ? 'text-white/80' : 'text-slate-400'}`}>{q.label}</span>
+                  {q.urgentCount > 0 && (
+                    <span className={`px-1.5 py-0.5 rounded-md text-[8px] font-black ${active ? 'bg-white/25 text-white' : 'bg-red-500/10 text-red-700'}`}>{q.urgentCount} urgent</span>
+                  )}
+                </div>
+                <p className={`text-2xl font-black mt-1 ${active ? 'text-white' : 'text-primary'}`} data-testid={`support-queue-${q.id}-count`}>{q.count}</p>
+                <p className={`text-[10px] font-medium mt-0.5 ${active ? 'text-white/70' : 'text-slate-400'}`}>
+                  {q.oldestDays !== null ? `Oldest ${q.oldestDays}d` : '—'}
+                </p>
+              </button>
+            );
+          })}
+        </div>
+
+        {showSlaPolicy && viewSupportSlaGate.allowed && (
+          <div className="mt-4 p-4 rounded-2xl border border-slate-200 bg-slate-50/60" data-testid="support-sla-policy-panel">
+            <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">SLA Policy Preview · reference only</p>
+            <p className="text-[11px] text-slate-500 italic mt-1 mb-3">{SLA_POLICY_PREVIEW_LABEL}</p>
+            <table className="w-full text-left">
+              <thead>
+                <tr className="border-b border-slate-200">
+                  <th className="py-2 text-[10px] font-black text-slate-400 uppercase tracking-widest">Severity</th>
+                  <th className="py-2 text-[10px] font-black text-slate-400 uppercase tracking-widest">First Response</th>
+                  <th className="py-2 text-[10px] font-black text-slate-400 uppercase tracking-widest">Resolution</th>
+                </tr>
+              </thead>
+              <tbody>
+                {SLA_POLICY_PREVIEW.map(row => (
+                  <tr key={row.severity} className="border-b border-slate-100 last:border-0">
+                    <td className="py-2">
+                      <span className={`px-2 py-0.5 rounded-md text-[10px] font-black uppercase tracking-widest border ${SEVERITY_STYLES[row.severity]}`}>{row.severity}</span>
+                    </td>
+                    <td className="py-2 text-xs font-bold text-slate-700">{row.firstResponseTarget}</td>
+                    <td className="py-2 text-xs font-bold text-slate-700">{row.resolutionTarget}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {showWorkload && (
+          <div className="mt-4 p-4 rounded-2xl border border-slate-200 bg-slate-50/60" data-testid="support-workload-panel">
+            <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Workload · open cases by owner</p>
+            <p className="text-[11px] text-slate-500 italic mt-1 mb-3">Read-only rollup of open cases. Derived from the current case list; no assignment happens here.</p>
+            {supportWorkload.length === 0 ? (
+              <p className="text-xs text-slate-400 italic">No open cases.</p>
+            ) : (
+              <table className="w-full text-left">
+                <thead>
+                  <tr className="border-b border-slate-200">
+                    <th className="py-2 text-[10px] font-black text-slate-400 uppercase tracking-widest">Owner</th>
+                    <th className="py-2 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Open</th>
+                    <th className="py-2 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Escalated</th>
+                    <th className="py-2 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Overdue SLA</th>
+                    <th className="py-2 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Urgent</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {supportWorkload.map(r => (
+                    <tr key={r.owner} className="border-b border-slate-100 last:border-0" data-testid={`support-workload-row-${r.owner.replace(/\s+/g, '-')}`}>
+                      <td className="py-2 text-xs font-bold text-slate-700">{r.owner}</td>
+                      <td className="py-2 text-xs font-black text-slate-900 text-center">{r.open}</td>
+                      <td className={`py-2 text-xs font-black text-center ${r.escalated > 0 ? 'text-red-700' : 'text-slate-400'}`}>{r.escalated}</td>
+                      <td className={`py-2 text-xs font-black text-center ${r.overdueSla > 0 ? 'text-red-700' : 'text-slate-400'}`}>{r.overdueSla}</td>
+                      <td className={`py-2 text-xs font-black text-center ${r.urgent > 0 ? 'text-orange-700' : 'text-slate-400'}`}>{r.urgent}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
+      </div>
+
       {/* Cases */}
       <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
         <div className="px-8 py-5 border-b border-slate-100 flex items-center justify-between gap-4 flex-wrap">
@@ -1207,7 +1390,7 @@ const SupportToolsPage: React.FC = () => {
             {(['all', 'open', 'in_progress', 'waiting_customer', 'resolved', 'closed'] as const).map(s => (
               <button
                 key={s}
-                onClick={() => { setStatusFilter(s); setActiveView('custom'); }}
+                onClick={() => { setActiveQueue(null); setStatusFilter(s); setActiveView('custom'); }}
                 className={`px-3 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${statusFilter === s ? 'bg-primary text-white' : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-50'}`}
               >
                 {s === 'all' ? 'All' : STATUS_LABELS[s]}
@@ -1241,7 +1424,23 @@ const SupportToolsPage: React.FC = () => {
               </button>
             );
           })}
-          {activeView === 'custom' && (
+          {activeQueueMeta && (
+            <span
+              data-testid="support-active-queue-chip"
+              className="px-3 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest bg-primary/10 text-primary border border-primary/30 inline-flex items-center gap-2"
+            >
+              Queue · {activeQueueMeta.label} ({activeQueueMeta.count})
+              <button
+                onClick={clearQueue}
+                data-testid="support-active-queue-clear"
+                className="material-symbols-outlined text-sm hover:text-primary/70"
+                title="Clear queue"
+              >
+                close
+              </button>
+            </span>
+          )}
+          {!activeQueueMeta && activeView === 'custom' && (
             <span className="px-3 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest bg-amber-400/10 text-amber-700 border border-amber-400/20">
               Custom filters
             </span>
@@ -1262,6 +1461,7 @@ const SupportToolsPage: React.FC = () => {
           <tbody>
             {filteredCases.map(c => {
               const sla = deriveSlaStatus(c);
+              const rsla = deriveResponseSlaStatus(c);
               return (
                 <tr key={c.id} data-testid={`support-case-row-${c.id}`} onClick={() => setSelectedId(c.id)} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/70 transition-colors cursor-pointer">
                   <td className="px-6 py-3.5">
@@ -1387,6 +1587,13 @@ const SupportToolsPage: React.FC = () => {
                             {SLA_STATUS_LABEL[sla.status]}
                           </span>
                           <p className="text-[10px] text-slate-500 font-bold mt-0.5 truncate">{sla.label}</p>
+                          <span
+                            data-testid={`support-response-sla-${c.id}`}
+                            className={`inline-block mt-1 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border ${SLA_STATUS_STYLES[rsla.status]}`}
+                            title={rsla.label}
+                          >
+                            1st reply · {SLA_STATUS_LABEL[rsla.status]}
+                          </span>
                         </div>
                       </div>
                     ) : (
@@ -1678,12 +1885,22 @@ const SupportToolsPage: React.FC = () => {
                   <h3 className="text-lg font-black text-primary mt-1">{selected.subject}</h3>
                   <p className="text-xs text-slate-500 font-bold mt-1">{tenantById.get(selected.tenantId) || selected.tenantId}</p>
                   <div className="flex flex-wrap gap-2 mt-2" data-testid="support-case-header-pills">
-                    {(() => {
+                    {viewSupportSlaGate.allowed && (() => {
                       const sla = deriveSlaStatus(selected);
+                      const rsla = deriveResponseSlaStatus(selected);
                       return (
-                        <span className={`px-2 py-0.5 text-[10px] font-black uppercase tracking-widest rounded border ${SLA_STATUS_STYLES[sla.status]}`} title={sla.label}>
-                          SLA · {SLA_STATUS_LABEL[sla.status]}
-                        </span>
+                        <>
+                          <span className={`px-2 py-0.5 text-[10px] font-black uppercase tracking-widest rounded border ${SLA_STATUS_STYLES[sla.status]}`} title={sla.label}>
+                            SLA · {SLA_STATUS_LABEL[sla.status]}
+                          </span>
+                          <span
+                            data-testid="support-case-header-response-sla"
+                            className={`px-2 py-0.5 text-[10px] font-black uppercase tracking-widest rounded border ${SLA_STATUS_STYLES[rsla.status]}`}
+                            title={rsla.label}
+                          >
+                            1st reply · {SLA_STATUS_LABEL[rsla.status]}
+                          </span>
+                        </>
                       );
                     })()}
                     {escVm?.isActive && (
@@ -1712,6 +1929,71 @@ const SupportToolsPage: React.FC = () => {
                 </button>
               </div>
               <div className="p-7 space-y-5">
+                {/* Phase 1.1.3C — Case Operations signal (deterministic).
+                    Surfaces response/resolution SLA, age/idle, attention
+                    flags, and recommended next actions. Read-only triage aid;
+                    no mutation happens here. */}
+                {(() => {
+                  const signal = deriveSupportCaseSignal(selected);
+                  return (
+                    <div className="p-4 rounded-2xl border border-slate-200 bg-slate-50/60" data-testid="support-case-operations">
+                      <div className="flex items-center justify-between gap-2 mb-2">
+                        <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Case Operations</p>
+                        <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Deterministic · rule-based · in-app state</span>
+                      </div>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
+                        {viewSupportSlaGate.allowed ? (
+                          <>
+                            <div className="p-2 rounded-xl bg-white border border-slate-100">
+                              <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">1st reply SLA</p>
+                              <p className={`text-xs font-black mt-0.5 ${signal.responseSla.status === 'overdue' ? 'text-red-700' : signal.responseSla.status === 'at_risk' ? 'text-orange-700' : 'text-slate-700'}`}>{SLA_STATUS_LABEL[signal.responseSla.status]}</p>
+                            </div>
+                            <div className="p-2 rounded-xl bg-white border border-slate-100">
+                              <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Resolution SLA</p>
+                              <p className={`text-xs font-black mt-0.5 ${signal.resolutionSla.status === 'overdue' ? 'text-red-700' : signal.resolutionSla.status === 'at_risk' ? 'text-orange-700' : 'text-slate-700'}`}>{SLA_STATUS_LABEL[signal.resolutionSla.status]}</p>
+                            </div>
+                          </>
+                        ) : (
+                          <div className="p-2 rounded-xl bg-white border border-slate-100 col-span-2" data-testid="support-case-operations-sla-hidden">
+                            <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">SLA</p>
+                            <p className="text-xs font-black mt-0.5 text-slate-300">Restricted</p>
+                          </div>
+                        )}
+                        <div className="p-2 rounded-xl bg-white border border-slate-100">
+                          <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Age</p>
+                          <p className="text-xs font-black mt-0.5 text-slate-700">{signal.ageDays}d</p>
+                        </div>
+                        <div className="p-2 rounded-xl bg-white border border-slate-100">
+                          <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Idle</p>
+                          <p className="text-xs font-black mt-0.5 text-slate-700">{signal.lastUpdateDays}d</p>
+                        </div>
+                      </div>
+                      {viewSupportSlaGate.allowed && (
+                        <p className="text-[10px] text-slate-400 italic mb-2" data-testid="support-case-operations-sla-label">{PHASE_113C_SLA_LABEL}</p>
+                      )}
+                      {signal.attentionFlags.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5 mb-2" data-testid="support-case-operations-flags">
+                          {signal.attentionFlags.map((f, i) => (
+                            <span key={i} className="px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border bg-amber-400/10 text-amber-700 border-amber-400/20">{f}</span>
+                          ))}
+                        </div>
+                      )}
+                      {signal.recommendedActions.length > 0 && (
+                        <ul className="space-y-1" data-testid="support-case-operations-actions">
+                          {signal.recommendedActions.map((a, i) => (
+                            <li key={i} className="text-[11px] text-slate-600 font-medium flex items-start gap-1.5">
+                              <span className="material-symbols-outlined text-sm text-primary/60 mt-px">arrow_right</span>
+                              <span>{a}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {signal.attentionFlags.length === 0 && signal.recommendedActions.length === 0 && (
+                        <p className="text-[11px] text-slate-400 italic">No attention flags. Case is within targets.</p>
+                      )}
+                    </div>
+                  );
+                })()}
                 <div className="grid grid-cols-2 gap-3">
                   {(() => {
                     // Section/UI-level matrix gates for status & severity.
@@ -2147,6 +2429,15 @@ const SupportToolsPage: React.FC = () => {
                     caseId={selected.id}
                     macros={supportMacros}
                     canUseMacros={useSupportMacroGate.allowed}
+                    placeholderCtx={{
+                      tenant_name: tenantById.get(selected.tenantId) || selected.tenantId,
+                      case_id: selected.id,
+                      case_subject: selected.subject,
+                      severity: selected.severity,
+                      status: STATUS_LABELS[selected.status],
+                      operator_name: operatorName,
+                      date: new Date().toLocaleDateString(),
+                    }}
                     onAdd={body => addNote(selected.id, body)}
                     onInsertMacro={(macro, currentDraft, setDraft) => insertMacro(selected.id, macro, currentDraft, setDraft)}
                   />
@@ -2749,37 +3040,82 @@ interface NoteComposerProps {
   caseId: string;
   macros: SupportMacro[];
   canUseMacros?: boolean;
+  placeholderCtx?: MacroPlaceholderCtx;
   onAdd: (body: string) => void;
   onInsertMacro: (macro: SupportMacro, currentDraft: string, setDraft: (s: string) => void) => void;
 }
-const NoteComposer: React.FC<NoteComposerProps> = ({ caseId, macros, canUseMacros = true, onAdd, onInsertMacro }) => {
+const MACRO_CATEGORIES: Array<SupportMacro['category'] | 'all'> = ['all', 'general', 'billing', 'domain', 'shipping', 'security'];
+const NoteComposer: React.FC<NoteComposerProps> = ({ caseId, macros, canUseMacros = true, placeholderCtx, onAdd, onInsertMacro }) => {
   const [body, setBody] = useState('');
   const [macroId, setMacroId] = useState('');
+  const [macroSearch, setMacroSearch] = useState('');
+  const [macroCategory, setMacroCategory] = useState<SupportMacro['category'] | 'all'>('all');
   // Reset draft when switching to a different case.
-  useEffect(() => { setBody(''); setMacroId(''); }, [caseId]);
+  useEffect(() => { setBody(''); setMacroId(''); setMacroSearch(''); setMacroCategory('all'); }, [caseId]);
   // Phase 1.1.1 UX Correction — 2-step macro UX: pick → preview → Insert Template.
+  // Phase 1.1.3C — searchable + category-filtered macro library; preview shows
+  // placeholders resolved from in-app case context (no external send).
   const previewMacro = macros.find(m => m.id === macroId);
+  const ctx: MacroPlaceholderCtx = placeholderCtx || {};
+  const filteredMacros = useMemo(() => {
+    const q = macroSearch.trim().toLowerCase();
+    return macros.filter(m => {
+      if (macroCategory !== 'all' && m.category !== macroCategory) return false;
+      if (!q) return true;
+      return `${m.label} ${m.purpose || ''} ${m.body}`.toLowerCase().includes(q);
+    });
+  }, [macros, macroSearch, macroCategory]);
+  const resolvedPreview = previewMacro ? resolveMacroPlaceholders(previewMacro.body, ctx) : null;
   return (
     <div className="space-y-2">
       {/* Pre-QA correction: macro picker only renders when canUseMacros=true. */}
       {canUseMacros && (
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Templates</span>
-          <select
-            value={macroId}
-            onChange={e => setMacroId(e.target.value)}
-            data-testid="support-macro-picker"
-            className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700"
-          >
-            <option value="">Select template…</option>
-            {macros.map(m => (
-              <option key={m.id} value={m.id}>{m.label}</option>
+        <div className="space-y-2" data-testid="support-macro-library">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Templates</span>
+            <input
+              value={macroSearch}
+              onChange={e => setMacroSearch(e.target.value)}
+              placeholder="Search templates…"
+              data-testid="support-macro-search"
+              className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 flex-1 min-w-[140px]"
+            />
+            <span className="text-[10px] text-slate-400 italic">Internal template only — no external message sent.</span>
+          </div>
+          <p className="text-[10px] text-slate-400 italic" data-testid="support-macro-truth-label">{PHASE_113C_MACRO_LABEL}</p>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {MACRO_CATEGORIES.map(cat => (
+              <button
+                key={cat}
+                onClick={() => setMacroCategory(cat)}
+                data-testid={`support-macro-cat-${cat}`}
+                className={`px-2.5 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all ${macroCategory === cat ? 'bg-primary text-white' : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-50'}`}
+              >
+                {cat}
+              </button>
             ))}
-          </select>
-          <span className="text-[10px] text-slate-400 italic">Internal template only — no external message sent.</span>
+          </div>
+          <div className="flex flex-wrap gap-1.5" data-testid="support-macro-list">
+            {filteredMacros.length === 0 ? (
+              <p className="text-[11px] text-slate-400 italic">No templates match this search.</p>
+            ) : (
+              filteredMacros.map(m => (
+                <button
+                  key={m.id}
+                  onClick={() => setMacroId(m.id)}
+                  data-testid={`support-macro-pick-${m.id}`}
+                  data-active={macroId === m.id ? 'true' : 'false'}
+                  title={m.purpose || ''}
+                  className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition-all border ${macroId === m.id ? 'bg-primary text-white border-primary' : 'bg-white text-slate-600 border-slate-200 hover:bg-primary/5 hover:text-primary hover:border-primary/30'}`}
+                >
+                  {m.label}
+                </button>
+              ))
+            )}
+          </div>
         </div>
       )}
-      {canUseMacros && previewMacro && (
+      {canUseMacros && previewMacro && resolvedPreview && (
         <div
           className="p-3 rounded-xl border border-blue-400/20 bg-blue-400/5 space-y-2"
           data-testid="support-macro-preview"
@@ -2804,7 +3140,20 @@ const NoteComposer: React.FC<NoteComposerProps> = ({ caseId, macros, canUseMacro
               </button>
             </div>
           </div>
-          <p className="text-xs text-slate-700 whitespace-pre-wrap line-clamp-4">{previewMacro.body}</p>
+          {previewMacro.purpose && (
+            <p className="text-[10px] text-slate-500 font-medium italic">{previewMacro.purpose}</p>
+          )}
+          <p className="text-xs text-slate-700 whitespace-pre-wrap line-clamp-4" data-testid="support-macro-preview-body">{resolvedPreview.text}</p>
+          {(resolvedPreview.resolved.length > 0 || resolvedPreview.unresolved.length > 0) && (
+            <div className="flex flex-wrap gap-1.5 pt-1 border-t border-blue-400/10">
+              {resolvedPreview.resolved.map(k => (
+                <span key={`r-${k}`} className="px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-widest bg-emerald-500/10 text-emerald-700 border border-emerald-500/20">{`{{${k}}}`} filled</span>
+              ))}
+              {resolvedPreview.unresolved.map(k => (
+                <span key={`u-${k}`} className="px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-widest bg-amber-400/10 text-amber-700 border border-amber-400/20">{`{{${k}}}`} unfilled</span>
+              ))}
+            </div>
+          )}
         </div>
       )}
       <textarea

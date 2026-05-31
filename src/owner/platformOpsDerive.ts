@@ -2810,3 +2810,355 @@ export function deriveCommercialNbas(blockers: CommercialBlocker[]): NextBestAct
     href: b.href,
   }));
 }
+
+// ===========================================================================
+// Phase 1.1.3C — Support Queue / SLA / Macro maturity
+// ---------------------------------------------------------------------------
+// Everything below is deterministic and rule-based. There is no AI, no
+// business-hours calendar, no external notification, and no server-side
+// enforcement. SLA timers are derived purely from each case's seeded due
+// dates; queues are pure predicates over the in-app case list; macros only
+// insert internal notes. These truth labels are surfaced verbatim in the UI.
+// ===========================================================================
+
+export const PHASE_113C_SLA_LABEL =
+  'SLA timers are internal indicators derived from each case\u2019s seeded due dates. Business-hours calendars are not applied, and an SLA breach never triggers any external alert or notification.';
+
+export const PHASE_113C_QUEUE_LABEL =
+  'Queues are deterministic, rule-based filters over the current in-app case list. Each card\u2019s count and the rows it opens come from one shared predicate, so the count and the list can never drift.';
+
+export const PHASE_113C_MACRO_LABEL =
+  'Macros insert internal notes only. Placeholders are filled from in-app case context \u2014 no email, SMS, or external message is ever sent.';
+
+// --- Response SLA ----------------------------------------------------------
+// Mirror of deriveSlaStatus (which tracks the RESOLUTION SLA) but for the
+// first-response commitment. Returns the shared SlaStatus vocabulary so the
+// existing SLA label/style maps can be reused.
+
+export function deriveResponseSlaStatus(
+  c: SlaCaseLike,
+  now: Date = new Date()
+): { status: SlaStatus; label: string } {
+  const due = c.firstResponseDueAt ? new Date(c.firstResponseDueAt) : null;
+  if (!due || isNaN(due.getTime())) return { status: 'unknown', label: 'No response SLA' };
+
+  // Once a first response is recorded the response SLA is settled.
+  if (c.firstRespondedAt) {
+    const responded = new Date(c.firstRespondedAt);
+    if (isNaN(responded.getTime())) return { status: 'unknown', label: 'No response time' };
+    return responded <= due
+      ? { status: 'met', label: 'First response met' }
+      : { status: 'missed', label: 'First response late' };
+  }
+
+  // No response yet. Terminal cases that were never responded to are not
+  // actionable as a response queue item.
+  if (c.status === 'resolved' || c.status === 'closed')
+    return { status: 'unknown', label: 'Closed without recorded response' };
+  if (c.status === 'waiting_customer')
+    return { status: 'paused', label: 'Paused \u2014 awaiting customer' };
+
+  const hours = (due.getTime() - now.getTime()) / 36e5;
+  if (hours < 0) return { status: 'overdue', label: `Response overdue by ${formatSlaDuration(-hours)}` };
+  if (hours <= 4) return { status: 'at_risk', label: `Respond within ${formatSlaDuration(hours)}` };
+  return { status: 'on_track', label: `Respond within ${formatSlaDuration(hours)}` };
+}
+
+function formatSlaDuration(hours: number): string {
+  if (hours < 1) return `${Math.max(1, Math.round(hours * 60))}m`;
+  if (hours < 48) return `${Math.round(hours)}h`;
+  return `${Math.round(hours / 24)}d`;
+}
+
+// --- SLA Policy Preview (read-only reference) ------------------------------
+// Illustrative reference targets. These are NOT enforced and do not drive the
+// seeded due dates on existing cases; they document the intent operators
+// should aim for. Editing/persisting a live policy is future work.
+
+export interface SlaPolicyRow {
+  severity: SupportCaseSeverity;
+  firstResponseTarget: string;
+  resolutionTarget: string;
+}
+
+export const SLA_POLICY_PREVIEW: SlaPolicyRow[] = [
+  { severity: 'urgent', firstResponseTarget: '1 hour', resolutionTarget: '8 hours' },
+  { severity: 'high', firstResponseTarget: '4 hours', resolutionTarget: '1 day' },
+  { severity: 'normal', firstResponseTarget: '8 hours', resolutionTarget: '3 days' },
+  { severity: 'low', firstResponseTarget: '1 day', resolutionTarget: '5 days' },
+];
+
+export const SLA_POLICY_PREVIEW_LABEL =
+  'Reference targets shown for context only. They are not enforced and do not change the due dates already stored on existing cases. A live, editable SLA policy is planned for a later phase.';
+
+// --- Support Queue Center --------------------------------------------------
+// Each queue is a single predicate. Queue counts and the rows a queue opens
+// are both produced from `matchesSupportQueue`, so a count can never disagree
+// with the list it drills into (the "no drift" invariant).
+
+export type SupportQueueId =
+  | 'needs_response'
+  | 'response_overdue'
+  | 'resolution_overdue'
+  | 'resolution_at_risk'
+  | 'active_escalations'
+  | 'unassigned_open'
+  | 'waiting_customer'
+  | 'critical_open';
+
+export interface SupportQueueMeta {
+  id: SupportQueueId;
+  label: string;
+  helper: string;
+}
+
+export const SUPPORT_QUEUES: SupportQueueMeta[] = [
+  { id: 'needs_response', label: 'Needs First Response', helper: 'Open cases with no first response recorded yet.' },
+  { id: 'response_overdue', label: 'Response Overdue', helper: 'Open cases past their first-response due time.' },
+  { id: 'resolution_overdue', label: 'Resolution Overdue', helper: 'Active cases past their resolution due time.' },
+  { id: 'resolution_at_risk', label: 'Resolution At Risk', helper: 'Active cases due within the at-risk window.' },
+  { id: 'active_escalations', label: 'Active Escalations', helper: 'Cases with an active escalation lifecycle.' },
+  { id: 'unassigned_open', label: 'Unassigned Open', helper: 'Open cases with no assignee.' },
+  { id: 'waiting_customer', label: 'Waiting on Customer', helper: 'Cases paused pending a customer reply.' },
+  { id: 'critical_open', label: 'Critical Open', helper: 'Urgent-severity cases that are still open.' },
+];
+
+const isOpenGroupCase = (c: SupportCaseRecord): boolean =>
+  c.status !== 'resolved' && c.status !== 'closed';
+
+export function matchesSupportQueue(
+  c: SupportCaseRecord,
+  id: SupportQueueId,
+  now: Date = new Date()
+): boolean {
+  switch (id) {
+    case 'needs_response':
+      return isOpenGroupCase(c) && !c.firstRespondedAt;
+    case 'response_overdue':
+      return isOpenGroupCase(c) && deriveResponseSlaStatus(c, now).status === 'overdue';
+    case 'resolution_overdue':
+      return deriveSlaStatus(c, now).status === 'overdue';
+    case 'resolution_at_risk':
+      return deriveSlaStatus(c, now).status === 'at_risk';
+    case 'active_escalations':
+      return effectiveEscalationStatus(c).active;
+    case 'unassigned_open':
+      return isOpenGroupCase(c) && !(c.assignee && c.assignee.trim());
+    case 'waiting_customer':
+      return c.status === 'waiting_customer';
+    case 'critical_open':
+      return isOpenGroupCase(c) && c.severity === 'urgent';
+    default:
+      return false;
+  }
+}
+
+export interface SupportQueueSummary extends SupportQueueMeta {
+  count: number;
+  urgentCount: number;
+  oldestDays: number | null;
+}
+
+export function deriveSupportQueues(
+  cases: SupportCaseRecord[],
+  now: Date = new Date()
+): SupportQueueSummary[] {
+  return SUPPORT_QUEUES.map(q => {
+    const matched = cases.filter(c => matchesSupportQueue(c, q.id, now));
+    let oldestDays: number | null = null;
+    for (const c of matched) {
+      const opened = new Date(c.openedAt);
+      if (isNaN(opened.getTime())) continue;
+      const days = Math.floor((now.getTime() - opened.getTime()) / 864e5);
+      if (oldestDays === null || days > oldestDays) oldestDays = days;
+    }
+    return {
+      ...q,
+      count: matched.length,
+      urgentCount: matched.filter(c => c.severity === 'urgent').length,
+      oldestDays,
+    };
+  });
+}
+
+// --- Per-case operations signal (Case Detail Operations panel) -------------
+
+export interface SupportCaseSignal {
+  responseSla: { status: SlaStatus; label: string };
+  resolutionSla: { status: SlaStatus; label: string };
+  escalation: { active: boolean; status: EscalationStatus; label: string };
+  ageDays: number;
+  lastUpdateDays: number;
+  attentionFlags: string[];
+  recommendedActions: string[];
+}
+
+export function deriveSupportCaseSignal(
+  c: SupportCaseRecord,
+  now: Date = new Date()
+): SupportCaseSignal {
+  const responseSla = deriveResponseSlaStatus(c, now);
+  const resolutionSla = deriveSlaStatus(c, now);
+  const eff = effectiveEscalationStatus(c);
+
+  const opened = new Date(c.openedAt);
+  const updated = new Date(c.updatedAt);
+  const ageDays = isNaN(opened.getTime())
+    ? 0
+    : Math.max(0, Math.floor((now.getTime() - opened.getTime()) / 864e5));
+  const lastUpdateDays = isNaN(updated.getTime())
+    ? 0
+    : Math.max(0, Math.floor((now.getTime() - updated.getTime()) / 864e5));
+
+  const attentionFlags: string[] = [];
+  const recommendedActions: string[] = [];
+
+  if (isOpenGroupCase(c)) {
+    if (!c.firstRespondedAt) {
+      attentionFlags.push('No first response recorded');
+      recommendedActions.push('Add a first response note to start the case clock.');
+    }
+    if (responseSla.status === 'overdue') {
+      attentionFlags.push('Response SLA overdue');
+    } else if (responseSla.status === 'at_risk') {
+      attentionFlags.push('Response SLA at risk');
+    }
+    if (resolutionSla.status === 'overdue') {
+      attentionFlags.push('Resolution SLA overdue');
+      recommendedActions.push('Resolution is overdue \u2014 consider escalating or re-prioritising.');
+    } else if (resolutionSla.status === 'at_risk') {
+      attentionFlags.push('Resolution SLA at risk');
+    }
+    if (!(c.assignee && c.assignee.trim())) {
+      attentionFlags.push('Unassigned');
+      recommendedActions.push('Assign an owner so the case is not unattended.');
+    }
+    if (c.severity === 'urgent') {
+      attentionFlags.push('Critical severity');
+    }
+  }
+
+  if (eff.active) {
+    attentionFlags.push('Active escalation');
+    if (eff.status === 'escalated') {
+      recommendedActions.push('Acknowledge the escalation to confirm ownership.');
+    }
+    if (isEscalationAckOverdue(c, now)) {
+      attentionFlags.push('Escalation acknowledgement overdue');
+    }
+    if (!((c.escalationOwnerName || c.escalationOwnerId || '').trim())) {
+      attentionFlags.push('Escalation has no owner');
+      recommendedActions.push('Assign an escalation owner.');
+    }
+  }
+
+  if (c.status === 'waiting_customer') {
+    recommendedActions.push('Awaiting customer \u2014 follow up if the reply window lapses.');
+  }
+
+  return {
+    responseSla,
+    resolutionSla,
+    escalation: { active: eff.active, status: eff.status, label: ESCALATION_STATUS_LABEL[eff.status] },
+    ageDays,
+    lastUpdateDays,
+    attentionFlags,
+    recommendedActions,
+  };
+}
+
+// --- Workload view ---------------------------------------------------------
+// Read-only rollup of open work by assignee. Pure aggregation over the
+// current case list; no assignment is performed here.
+
+export interface SupportWorkloadRow {
+  owner: string;
+  total: number;
+  open: number;
+  escalated: number;
+  overdueSla: number;
+  urgent: number;
+}
+
+export function deriveSupportWorkload(
+  cases: SupportCaseRecord[],
+  now: Date = new Date()
+): SupportWorkloadRow[] {
+  const rows = new Map<string, SupportWorkloadRow>();
+  const ensure = (owner: string): SupportWorkloadRow => {
+    let r = rows.get(owner);
+    if (!r) {
+      r = { owner, total: 0, open: 0, escalated: 0, overdueSla: 0, urgent: 0 };
+      rows.set(owner, r);
+    }
+    return r;
+  };
+  for (const c of cases) {
+    if (!isOpenGroupCase(c)) continue;
+    const owner = (c.assignee && c.assignee.trim()) ? c.assignee.trim() : 'Unassigned';
+    const r = ensure(owner);
+    r.total += 1;
+    r.open += 1;
+    if (effectiveEscalationStatus(c).active) r.escalated += 1;
+    if (deriveSlaStatus(c, now).status === 'overdue') r.overdueSla += 1;
+    if (c.severity === 'urgent') r.urgent += 1;
+  }
+  return Array.from(rows.values()).sort((a, b) => {
+    // Unassigned floats to the top, then by total descending.
+    if (a.owner === 'Unassigned' && b.owner !== 'Unassigned') return -1;
+    if (b.owner === 'Unassigned' && a.owner !== 'Unassigned') return 1;
+    return b.total - a.total;
+  });
+}
+
+// --- Macro placeholders ----------------------------------------------------
+// Placeholders are filled from in-app case context. Unresolved placeholders
+// are reported so the operator can see exactly what was (and was not) filled
+// before the macro is inserted as an internal note.
+
+export interface MacroPlaceholderMeta {
+  key: string;
+  label: string;
+  description: string;
+}
+
+export const MACRO_PLACEHOLDERS: MacroPlaceholderMeta[] = [
+  { key: 'tenant_name', label: 'Tenant name', description: 'Display name of the case tenant.' },
+  { key: 'case_id', label: 'Case ID', description: 'The support case identifier.' },
+  { key: 'case_subject', label: 'Case subject', description: 'The case subject line.' },
+  { key: 'severity', label: 'Severity', description: 'Current case severity.' },
+  { key: 'status', label: 'Status', description: 'Current case status.' },
+  { key: 'operator_name', label: 'Operator name', description: 'The signed-in operator.' },
+  { key: 'date', label: 'Today\u2019s date', description: 'Current date (ISO).' },
+];
+
+export type MacroPlaceholderCtx = Partial<Record<string, string | null | undefined>>;
+
+export interface ResolvedMacro {
+  text: string;
+  resolved: string[];
+  unresolved: string[];
+}
+
+export function resolveMacroPlaceholders(
+  body: string,
+  ctx: MacroPlaceholderCtx
+): ResolvedMacro {
+  const resolved = new Set<string>();
+  const unresolved = new Set<string>();
+  const text = body.replace(/\{\{\s*([a-z0-9_]+)\s*\}\}/gi, (_match, rawKey: string) => {
+    const key = rawKey.toLowerCase();
+    const value = ctx[key];
+    if (value !== undefined && value !== null && String(value).trim() !== '') {
+      resolved.add(key);
+      return String(value);
+    }
+    unresolved.add(key);
+    return `{{${key}}}`;
+  });
+  return {
+    text,
+    resolved: Array.from(resolved),
+    unresolved: Array.from(unresolved),
+  };
+}

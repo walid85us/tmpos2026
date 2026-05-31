@@ -152,3 +152,38 @@ A deterministic, rule-based operational-intelligence layer added on top of the e
 ### Duplicate Escalated Badge UI Correction
 
 Smallest-safe UI correction. In the Support Tools case list, an active escalated case whose structured status was literally `escalated` showed TWO red "Escalated" badges: the standalone active-escalation badge (`support-case-row-esc-active-<caseId>`) AND the status badge (`support-case-row-esc-status-<caseId>`), because `ESCALATION_STATUS_LABEL.escalated === 'Escalated'`. Fix: the standalone active-escalation badge now renders only when `eff.active && eff.status !== 'escalated'`, so a plain escalated case shows exactly one "Escalated" (the status badge), while other active states (`acknowledged` / `in_review` / security review) still show the standalone "Escalated" badge plus their differently-labeled status badge — one escalation identity badge, no duplicate. Terminal `deescalated` / `resolved` cases are not active and show no active-escalation badge. All other badges (L3, Ack Overdue, Unassigned, Engineering/Platform Ops, In Review, Security Review, Security Lead, Legacy, status, level, owner) are preserved. The active-escalation truth source is unchanged, so detail-view banner / De-escalate / Command Center reconciliation behave identically.
+
+---
+
+## Phase 1.1.3C — Support Queue / SLA / Macro Maturity
+
+A deterministic maturity pass over the owner Support Tools workspace. Everything is rule-based and derived synchronously from the same `supportCases` list the table renders; there is NO AI/ML, no external notifications (templates are internal-only), no Firestore realtime, and no server-side RBAC (UI gating only, reusing the existing Support permission keys). Every new intelligence surface carries a visible truth label.
+
+### Deterministic helpers (`platformOpsDerive.ts`)
+
+-   **Response (first-reply) SLA** — `deriveResponseSlaStatus(c, now)` returns the same `SlaStatus` vocabulary (`on_track` / `at_risk` / `overdue` / `met` / `none`) used by the existing resolution-SLA derivation (`deriveSlaStatus`), so both pills reuse `SLA_STATUS_LABEL` / `SLA_STATUS_STYLES`. It keys off `firstRespondedAt` vs. opened time against a per-severity first-response target; closed/resolved cases without a first response report `met` to avoid false overdue noise.
+-   **SLA Policy Preview** — `SLA_POLICY_PREVIEW` (per-severity first-response + resolution targets) plus `SLA_POLICY_PREVIEW_LABEL`. This is **reference-only / read-only** this phase; editable SLA policy authoring is explicitly deferred (documented as future).
+-   **Support queues** — `SupportQueueId` + `SUPPORT_QUEUES` (queue metadata: id/label/helper) + `matchesSupportQueue(c, queueId, now)` (single predicate) + `deriveSupportQueues(cases, now)` (returns `SupportQueueSummary` with `count` / `urgentCount` / `oldestDays`). The Queue Center card count and the drilldown list are produced by the **same** `matchesSupportQueue` predicate, so count and list can never drift.
+-   **Case signal** — `deriveSupportCaseSignal(c, now)` rolls up response + resolution SLA, effective escalation, age/idle days, `attentionFlags`, and `recommendedActions` into one `SupportCaseSignal` for the case-detail Operations panel. Pure read-only triage aid; it mutates nothing.
+-   **Workload** — `deriveSupportWorkload(cases, now)` aggregates open work per owner (`open` / `escalated` / `overdueSla` / `urgent`) as `SupportWorkloadRow[]`. Read-only rollup; no assignment happens here.
+-   **Macro placeholders** — `MACRO_PLACEHOLDERS` (placeholder catalogue) + `MacroPlaceholderCtx` (a `Partial<Record<string, string|null|undefined>>`) + `resolveMacroPlaceholders(body, ctx)` which substitutes `{{token}}` tokens from in-app case context and returns `{ text, resolved[], unresolved[] }` so the UI can show which tokens were filled vs. left literal.
+-   **Truth labels** — `PHASE_113C_SLA_LABEL`, `PHASE_113C_QUEUE_LABEL`, `PHASE_113C_MACRO_LABEL` keep each surface honestly described as deterministic / rule-based / internal-only.
+
+### Macro data-model maturity (`mockData.ts`)
+
+`SupportMacro` was extended **additively** with optional `purpose` (when to reach for the macro) and `placeholders` (the `{{token}}` keys present in the body) so all existing seeds remain valid. The macro library was expanded to 8 templates (added `macro_first_response`, `macro_status_update`, `macro_resolution`), each given a `purpose`, declared `placeholders`, and `{{token}}` bodies.
+
+### UI surfaces (`SupportToolsPage.tsx`)
+
+-   **Queue Center** — a card grid above the case list; each card is clickable (`selectQueue`) and shows the queue count, an urgent badge, and oldest-age. Selecting a queue puts the list into an **exclusive** queue mode driven by `matchesSupportQueue` (free-text search still narrows on top and is itself visible), shows a removable active-queue chip (`support-active-queue-chip` + clear), and any status-tab click exits queue mode. Count → drilldown cannot drift (shared predicate).
+-   **Response + resolution SLA indicators** — the case list SLA cell now shows a secondary "1st reply" pill beneath the existing resolution pill (header layout unchanged), and the case-detail header shows both SLA pills. Both gate on the existing `view_support_sla` permission.
+-   **SLA Policy Preview** — a read-only panel (toggle) rendering `SLA_POLICY_PREVIEW` with its truth label, gated by `view_support_sla`.
+-   **Workload view** — a read-only panel (toggle) rendering `deriveSupportWorkload` rows with a truth label.
+-   **Case Operations panel** — at the top of the case detail drawer, renders `deriveSupportCaseSignal` (SLA states, age/idle, attention flags, recommended actions) labeled deterministic / rule-based / in-app state. Read-only.
+-   **Macro library maturity** — `NoteComposer` gained a searchable + category-filtered template library (replacing the single dropdown) and a placeholder-aware preview: the preview resolves `{{token}}`s against case context (`tenant_name`, `case_id`, `case_subject`, `severity`, `status`, `operator_name`, `date`) and shows filled vs. unfilled token chips. Insertion still routes through the existing 2-step pick → preview → Insert Template flow and the existing `support_case_macro_inserted` audit path; templates remain internal-only (no external send). All gated by the existing `use_support_macro`.
+
+### Deferred (documented as future)
+
+-   **Editable SLA policy authoring** — the SLA Policy Preview is read-only this phase.
+-   **Safe bulk triage** — multi-select bulk status/assignment actions are deferred.
+-   These remain future work; nothing in this phase fakes them.

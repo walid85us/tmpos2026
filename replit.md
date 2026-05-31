@@ -13,8 +13,8 @@ Do not make changes to the file `Y`.
 # Current Project State
 
 -   **Current accepted checkpoint**: Phase 1.1.3B — Advanced Command Center Intelligence is **accepted**, including the **Duplicate Escalated Badge UI Correction**.
--   **Latest completed phase**: Phase 1.1.3B (Advanced Command Center Intelligence).
--   **Next planned phase**: Phase 1.1.3C — Support Queue / SLA / Macro Maturity.
+-   **Latest completed phase**: Phase 1.1.3C (Support Queue / SLA / Macro Maturity) — implemented, pending acceptance.
+-   **Next planned phase**: Phase 1.1.3D — Audit Investigation Center.
 -   **Detailed history**: Full long-form implementation notes and correction sequences for all completed Platform Operations & Security phases live in [`docs/platform-operations-security-history.md`](docs/platform-operations-security-history.md). `replit.md` keeps only the high-level overview, locked rules, and roadmap.
 
 # System Architecture
@@ -111,8 +111,8 @@ Do not change behavior in these areas as a side effect of other work:
 
 # Active Roadmap
 
--   **Phase 1.1.3C** — Support Queue / SLA / Macro Maturity **(next)**
--   **Phase 1.1.3D** — Audit Investigation Center
+-   **Phase 1.1.3C** — Support Queue / SLA / Macro Maturity **(done — pending acceptance)**
+-   **Phase 1.1.3D** — Audit Investigation Center **(next)**
 -   **Phase 1.2** — Domains + Platform Settings Maturity
 -   **Phase 1.3** — Platform Team Governance (server-side RBAC / PIM / PAM)
 -   **Phase 1.4** — Automation + Alerts
