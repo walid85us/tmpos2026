@@ -1,0 +1,154 @@
+# Platform Operations & Security — Implementation History
+
+> Detailed long-form implementation history for the Platform Operations & Security
+> workstream (System Owner surfaces: Command Center, Audit & Security, Support Tools,
+> Domains, Team Management). This file is the deep reference moved out of `replit.md`
+> to keep the main project README concise. **No accepted rule has been removed** — the
+> high-level locked rules remain summarized in `replit.md`; the full narrative,
+> correction sequences, and debugging-grade detail live here.
+>
+> Order follows phase / correction sequence. Preserve warnings and limitations.
+
+---
+
+## Phase 1.1 — Platform Operations Foundation
+
+-   **Platform Operations & Security**: A suite of System Owner surfaces (Audit & Security, Support Tools, Platform Settings, Domains, Team Management) for governance and operational control. Includes mock data, a platform audit helper, and truth labels for manual verification.
+-   **Command Center**: A central dashboard providing platform health overview, needs attention queue, tenant risk summary, and workflow health summary, with live updates.
+-   **Audit & Security Upgrade**: Includes saved views, CSV export, high-risk flags, linked case badges, and detailed drawers for event analysis, related events, actor profiles, and support case creation from audit events.
+-   **Support Tools Upgrade**: Features SLA timers, saved views, escalation mechanisms, tenant health mini-cards, a note composer with macro inserter, and related entities panels.
+-   **Risk Scoring (`deriveTenantRisk`)**: Calculates a per-tenant risk score based on critical audits, escalated cases, overdue/at-risk SLA cases, and domain verification statuses.
+-   **SLA Timer Logic (`deriveSlaStatus`)**: Determines the status of support cases (overdue, at_risk, paused, met) based on predefined deadlines and case status.
+-   **High-Risk Audit Flag Logic (`deriveHighRiskFlag`)**: Identifies critical, sensitive, or burst audit events.
+
+### IAM/RBAC Role Stack (project knowledge)
+
+Platform permission work is approached through the lenses of: IAM Specialist, Access Analyst, Senior RBAC Architect, Platform Team Governance Leader, Senior Platform Operations Architect, Senior Support Tools / Audit & Security Engineer, Senior React/TypeScript Engineer, QA Gatekeeper, and Side Auditor. Responsibilities span role mapping, least-privilege enforcement, effective-access validation, lifecycle audit, and inheritance/explicit-deny troubleshooting. Subjects = Dev Session role + platform roles + future team members. Objects = sidebar modules / pages / sections / widgets / action buttons / support cases / escalation actions / audit logs / commercial controls. Permissions = None / View Only / Create / Edit / Approve / Manage / Full Access (rank-ordered).
+
+### Four-Level Effective Access Model
+
+Every gate decision is evaluated at one of four levels — (1) **sidebar visibility** uses `hasEffectiveFeatureAccess` (parent OR any child >= view), (2) **page/route access** uses the same effective check with `NAV_FEATURE_SECONDARY_KEYS` mapping, (3) **section/widget visibility** uses `hasSectionAccess(role, subKey)` against the EXACT child sub-permission (independent of parent so explicit child grants reveal only that section), (4) **action/handler authorization** uses `hasActionAccess(role, subKey)` and is re-checked inside every mutation handler so stale UI / dropdowns cannot bypass the gate. `explainAccessDecision` returns `{allowed, effectiveLevel, source, reason, threshold}` where `source ∈ {system_owner, explicit_child, explicit_parent, default_parent, denied_explicit_child, denied_no_access}` (sub-permissions inherit the parent default, so there is no separate `default_child`) for full explainability.
+
+### Global Permissions Matrix as Source of Truth
+
+The `platformPermissionsConfig.ts` matrix is the single authority for sidebar visibility, page access, and action gating across all platform pages. Key design:
+
+-   `hasEffectiveFeatureAccess(role, featureKey)` resolves visibility by checking the parent level OR any child sub-permission >= view, enabling child-granted sidebar access even when the parent is None.
+-   `canAccess()` in `AccessContext.tsx` uses effective access with secondary key mapping (e.g. `plans` → `addon_governance`) for nav items that span multiple feature groups.
+-   `gatedCan()` in SupportToolsPage returns the matrix result directly without falling through to old `can()` logic, so matrix-granted actions are never blocked by legacy role checks.
+-   CommandCenter gates Operational Pulse, NBA, and Needs Attention sections with `view_operational_pulse`, `view_next_best_actions`, `view_needs_attention` sub-permissions. NBA action buttons gated by `act_on_nba_recommendations`.
+-   AuditSecurityPage gates the audit log table with `view_audit_logs`.
+-   TenantDetailPage gates Trial/Paid Override/Revoke/End Trial/Re-trial/Re-grant Paid buttons with `grant_trial`, `grant_paid_override`, `revoke_addon_override`.
+-   PlansPage hides the Add-ons tab when `addon_governance` effective access is denied.
+-   TeamManagementPage shows a confirmation modal before resetting all permission overrides to defaults.
+-   The Effective Access Preview panel highlights child-granted visibility (amber) and System Owner locked status.
+
+### Section-Level Gating in Command Center
+
+Mission Control hero, Operational Widgets, Workflow Health, How-Risk-Derived legend, and the Quick Actions bar are wrapped in `viewPageGate.allowed`/`useQuickActionsGate.allowed` so when only `view_needs_attention=View Only` is granted (parent None), only the Needs Attention section renders — Mission Control, widgets, NBA, pulse, and quick actions stay hidden.
+
+### Handler-Level Gating in Support Tools
+
+`changeStatus`, `changeSeverity`, and `changeAssignee` re-check `change_support_status` / `change_support_severity` / `assign_support_case` at the top of the handler and abort with a toast if denied. Status and severity selects render disabled (with reason tooltip) when the matching permission is missing.
+
+### De-escalate Confirmation Flow
+
+The de-escalate banner button is hidden when `deescalate_support_case` is denied; when granted, it opens the confirmation modal (it never calls `deescalateCase` directly). The modal requires a non-empty reason — Confirm is disabled until one is provided.
+
+---
+
+## Phase 1.1.1 — UX Polish
+
+### Add-on Create/Edit Modal — UX Improvement
+
+The Add-on modal in `PlansPage.tsx` widened from `max-w-3xl max-h-[92vh]` to `max-w-5xl max-h-[94vh]` with relaxed body spacing (`p-10 space-y-7`) so name, pricing, governance, lifecycle, compatible-plans, and readiness sections breathe. No behavior change — only layout/spacing.
+
+---
+
+## Phase 1.1.2 — Competitive Maturity
+
+### Benchmark Note (Platform Operations maturity)
+
+The System Owner surfaces (Command Center intelligence, Audit & Security, Support Tools, Domains, Team Management) are designed to mirror the operational-intelligence depth of mature multi-tenant SaaS control planes (e.g. tenant risk scoring, correlated incident episodes, what-changed deltas, and rule-based next-best-actions). All intelligence is deterministic and explainable by design — favoring auditable, rule-based derivations over opaque ML so every signal can be traced to its source data and threshold.
+
+### Platform Operations Role-Stack (project knowledge)
+
+Advanced Command Center work is approached through the lenses of: Senior Platform Operations Architect (signal model + correlation design), Site Reliability / Incident Commander (episode clustering, what-changed deltas, triage prioritization), Senior RBAC Architect (permission gating of every intelligence surface), Senior React/TypeScript Engineer (deterministic derivations + memoized UI), Data/Analytics Engineer (risk scoring + confidence model), QA Gatekeeper (count-vs-list reconciliation, truth-label verification), and Side Auditor (auditability + honest "rule-based, not AI" labeling).
+
+---
+
+## Phase 1.1.3A — Operating Model + Permission-Aware Escalation
+
+### Operating Model + Permission-Aware Escalation
+
+Introduces an advisory operating model with `PlatformOpsRole` unions, structured `EscalationStatus`, `EscalationLevel`, `EscalationReasonCode`, and `EscalationTargetTeam`. Includes a `can(role, action, ctx)` helper for UX guarding of escalation lifecycle actions.
+
+### Pre-QA Blocker Correction (Effective Permission Resolver Hardening)
+
+A focused correction pass closed 9 verifier-flagged blockers without expanding scope. Catalog gained 8 new Support Tools sub-permissions (`view_support_sla`, `view_support_tenant_health`, `view_support_related_entities`, `add_internal_support_note`, `use_support_macro`, `manage_support_macros`, `edit_support_case`, `reopen_support_case`); the NBA key was renamed to its canonical form `view_next_best_actions` and the legacy `view_nba_recommendations` is preserved as an alias via `PLATFORM_SUB_PERMISSION_ALIASES` so existing callsites still resolve. SupportToolsPage wires all 9 new sub-perms (handler-level checks in `addNote` / `closeCase` / `reopenCase` / `insertMacro`; section-level gates around the SLA pill, Tenant Health card, Related Entities panel, NoteComposer, macro picker, Reopen button; and an Assignee input now disables with a tooltip when `assign_support_case` is denied). The Resolve Escalation modal mirrors the close-warn confirm-time re-check pattern so a stale UI state cannot bypass `resolve_escalation`. AuditSecurityPage wires 4 sub-perms: `view_actor_profile` gates the Actor drawer tab, `view_related_event_timeline` gates the Related drawer tab (separate keys per spec), `view_escalation_lifecycle_audit` gates the escalation transition card, and `view_restricted_audit_details` redacts the free-form Note body and "Why flagged" reasons for high-risk events. TenantDetailPage End-Trial now requires BOTH `grant_trial` AND `revoke_addon_override` (ending an active trial is jointly a trial-lifecycle action and an override revocation). CommandCenter Tenant Risk Summary becomes the minimal Tenant 360 surface: it now renders when the operator holds either parent Command Center access OR the explicit `view_tenant_360` child grant. De-escalate visibility deferral remains as previously documented (button hidden when `deescalate_support_case` is denied; modal still required for confirmation when allowed).
+
+### Permission Dependency / Prerequisite Model
+
+`platformPermissionsConfig.ts` ships a `PLATFORM_PERMISSION_DEPENDENCIES` map declaring direct prerequisites for dependent sub-permissions. `explainAccessDecision` auto-reconciles deps: when ANY prerequisite resolves to denied, the dependent action is denied with `source = 'denied_prerequisite'` and a reason naming the missing prerequisite (transitive, with a recursion guard). `hasPlatformPermission` delegates to `explainAccessDecision`, so every UI gate, tooltip, handler check, and Effective Access Preview reads off the same reconciled result without callsites repeating the dep check. Mapped relationships include: `act_on_nba_recommendations → view_next_best_actions`; every Support Tools child action (`change_support_status/severity`, `assign_support_case`, `close_support_case`, `reopen_support_case`, escalate/acknowledge/deescalate/resolve/level/close-with-escalation, `add_internal_support_note`, `view_support_sla/tenant_health/related_entities`, `manage_support_macros`) → `view_support_tools`; `use_support_macro → add_internal_support_note`; `close_with_active_escalation → close_support_case`; `view_audit_logs/actor_profile/related_event_timeline/restricted_audit_details/escalation_lifecycle_audit`, `add_security_note`, `delete_security_note` → `view_audit_security`; `export_audit_csv → view_audit_logs`; `create_support_case_from_audit` requires BOTH `view_audit_security` AND `create_support_case`; all add-on mutations (`create_addon`, `edit_addon`, `archive_delete_addon`, `manage_addon_compatible_plans`, `manage_addon_readiness`, `generate_addon_implementation_brief`, `grant_trial`, `grant_paid_override`, `revoke_addon_override`, `edit_addon_overrides`) → `view_addon_governance`. Enforcement is UI-only this phase — server-side RBAC/PIM/PAM remains Phase 1.3.
+
+### Permission Dependency Auto-Sync (write-time)
+
+`reconcileSubPermissionChange(role, subKey, prev, next, overrides)` and `reconcileFeatureLevelChange(role, featureKey, prev, next, overrides, before)` in `platformPermissionsConfig.ts` apply direction-aware IAM rules whenever the Global Permissions Matrix is edited: (1) **Raising** a dependent action transitively auto-raises each currently-denied prerequisite to the minimum level that satisfies its own threshold (never beyond — least-privilege preserved). (2) **Lowering** a prerequisite (sub or parent feature) transitively auto-caps each dependent that was previously allowed but now resolves to `denied_prerequisite`, by writing explicit `none` on the dependent. (3) **Lowering** a dependent action never touches its read-only prerequisite. (4) System Owner is locked and never reconciled. Returned `PermissionAdjustment[]` drives a non-blocking indigo "Dependent permissions adjusted to preserve least-privilege consistency" notice in the matrix (auto-dismissed after 8s) and a deduplicated `platform_permission_dependency_reconciled` audit row per adjustment (with old/new value, role/permission target, and a short `note` describing which trigger permission caused the auto-adjustment).
+
+### Matrix Dependency Feedback (UX)
+
+In `TeamManagementPage.tsx` Global Permissions Matrix, each sub-permission row with a prerequisite renders a quiet "depends on …" badge (with full tooltip listing every prereq). Per-role status cell uses `explainAccessDecision` and shows `enabled` / `blocked by prereq` (indigo) / `disabled` so editors immediately see why an action is inactive. Effective Access Preview surfaces a `N blocked by prereq` indicator per feature when prerequisite-denied children exist for the previewed role — wording chosen to stay quiet (no toasts, no auto-flipping of stored levels; the resolver simply computes the reconciled state on read).
+
+### Request De-escalation (lightweight)
+
+Support case banner shows a "Request De-escalation" affordance when `deescalate_support_case` is denied but `add_internal_support_note` is granted. Opens a modal with a required reason; on confirm it re-checks `add_internal_support_note`, posts an internal note (`De-escalation requested by [operator] ([role]): [reason]`) via the existing `addNote` handler, and writes a `support_case_deescalation_requested` audit row. Never mutates escalation status — front-line operators get a documented review path without elevating privileges.
+
+### De-escalate Confirm-Time Re-Check
+
+The De-escalate confirmation modal now re-checks `deescalate_support_case` at confirm time (mirrors the close-warn / resolve-escalation pattern) so a stale UI cannot bypass the gate.
+
+### Request De-escalation (visibility rules)
+
+The lightweight Request De-escalation affordance on the escalation banner appears when ALL of (a) the case is currently escalated, (b) the operator cannot actually de-escalate (`hasPlatformPermission(role, 'deescalate_support_case').allowed === false` — i.e. effective level is below the spec `edit` threshold; a View-Only override on de-escalate qualifies), and (c) the operator can add internal notes (`add_internal_support_note` Create or higher). Submitting requires a non-empty reason, re-checks `add_internal_support_note` at confirm time, posts an internal note via `addNote`, and writes a `support_case_deescalation_requested` audit row. It never mutates escalation status — the actual De-escalate path continues to require Approve / Manage / Full Access via the standard confirmation modal with its own confirm-time recheck. When the operator lacks note permission, the request affordance is hidden (preferred per spec) rather than shown disabled.
+
+### Request De-escalation Pending-Review Lifecycle
+
+Submitting a Request De-escalation now persists `deescalationRequestStatus = 'pending'` on the `SupportCaseRecord` (plus `deescalationRequestedAt / By / ByRole / Reason`), alongside the existing internal note + `support_case_deescalation_requested` audit row. While a request is pending, the requester's "Request De-escalation" button is replaced with a non-actionable "De-escalation Request Submitted" pill (one active pending request per case — duplicates blocked at handler level too). Reviewers who hold `deescalate_support_case` see a yellow "Pending De-escalation Request" card directly under the escalation banner showing the requester, requested-at, and reason, with two actions: (1) **Approve & De-escalate** routes through the existing De-escalate confirmation modal (confirm-time re-check intact); on confirm the case is de-escalated AND the request is flipped to `approved` with reviewer + reviewed-at recorded, emitting a paired `support_case_deescalation_request_approved` audit row (in addition to the standard `support_case_deescalated` row). (2) **Reject** opens a modal requiring a rejection reason, re-checks `deescalate_support_case` at confirm-time, marks the request `rejected` with reviewer + reason, adds a timeline note, and emits `support_case_deescalation_request_rejected` — escalation status is never mutated. After a rejection, requesters may submit a new request (default). No external notifications. All new fields are optional / additive so existing seed cases remain valid.
+
+### Escalation Signal Single Source of Truth (`isActiveEscalation`)
+
+A shared predicate `isActiveEscalation(c)` (and convenience `getActiveEscalatedCases(cases)`) in `platformOpsDerive.ts` wraps `effectiveEscalationStatus(c).active` and is the authoritative answer for "is this case actively escalated?" across every surface. All count/list/visibility decisions for escalation MUST route through it:
+
+-   **Support Tools case detail**: the red escalation banner (with reason / who / when / De-escalate or Request De-escalation), the Pending De-escalation Request reviewer card, the rejected-status echo pill, and the header `Escalated` summary pill all gate on `isActiveEscalation(selected)` — so a case escalated via the structured `escalationStatus` (without the legacy `escalated` boolean) still shows the banner, and the banner / detail escalation card / De-escalate button cannot drift apart. The lower escalation detail card already gated on `effectiveEscalationStatus(c).active` for its action buttons and continues to do so.
+-   **Command Center**: `escalatedCases` count, `focusedEscalatedCases` widget list, the Mission Control "Escalated" rollup chip, and the per-case `Escalated` badge in the Tenant 360 Open Cases block all use `isActiveEscalation`. Count and list are derived from the same predicate over the same focus-mode-narrowed source — clicking the escalated widget shows exactly the cases counted by the rollup / pulse cell.
+-   **Operational Pulse / Needs Attention / Next Best Actions**: the legacy `escalated` pulse cell, `deriveOverallPlatformState`, and the structured escalation NBAs all read from `isActiveEscalation` (the lifecycle sub-cells — unacknowledged, overdue-ack, unassigned — continue to layer their own conditions on top).
+-   **Focus Mode source filter**: `applyFocusModeToCases` (Incident Review mode) admits cases via `isActiveEscalation` so a focused escalation cannot disappear from the widget list while still being counted at the top.
+-   **Tenant 360 (Command Center drawer)**: `deriveTenant360` returns an `activeEscalations: SupportCaseRecord[]` slice. The drawer renders a dedicated "Active Escalations" block above Open Cases showing status, level, owner-or-team-or-Unassigned, and reason, with a per-case `data-testid="tenant360-escalation-open-<caseId>"` Link that opens the exact case in Support Tools. Tenant Risk Summary continues to flag escalation as a risk signal via `deriveTenantRisk` (open-cases input, which is itself filtered through the shared predicate at the Command Center caller).
+
+### Phase 1.1.3A — Escalation View Model + Count/List Reconciliation (runtime correction)
+
+A focused correction pass fixing four QA failures without scope creep. Two new exports in `platformOpsDerive.ts`:
+
+-   **`buildEscalationViewModel(case): EscalationViewModel`** — the single escalation view model for the Support case detail. It wraps `effectiveEscalationStatus` and returns `{ isActive, isTerminal, status, statusLabel, level, levelLabel, ownerOrTeam, reason, escalatedBy/At, acknowledgedBy/At, pendingDeescalationRequest, canShowEscalationBanner (===isActive), canShowEscalationCard (always true) }`. SupportToolsPage computes `escVm = useMemo(buildEscalationViewModel(selected))` once and every escalation surface reads from it — the red banner (`escVm.canShowEscalationBanner`), the header "Escalated" pill, the reviewer card, the rejected-request pill (`escVm.isActive`), and the escalation detail card's `eff = { status, level, active }` (so the card's De-escalate button can never drift from the banner). This bulletproofs the invariant **"De-escalate visible ⟺ banner/card visible"** and fixes QA #1/#2 (a case escalated via the structured `escalationStatus` without the legacy `escalated:true` boolean now shows the banner). Because `selected` is re-derived from the latest `cases` list by id, the view model never reflects a stale escalation state.
+-   **`deriveEscalationSignal(cases, now): EscalationSignal`** — ONE escalation signal `{ activeEscalatedCases, unacknowledgedEscalatedCases, overdueEscalatedCases, unassignedEscalatedCases }` derived via `getActiveEscalatedCases`. CommandCenter computes `escalationSignal = deriveEscalationSignal(focusedCases)` over the SAME focus/time-filtered slice that feeds the Operational Pulse, then builds the Needs Attention "Escalated support case" items AND the lifecycle attention items from `escalationSignal.activeEscalatedCases`. This fixes QA #3/#4: previously the escalation attention items were suppressed by an `alreadyQueuedCaseIds` dedup-skip when a case was already queued as Critical/Overdue, so the escalated pulse COUNT (e.g. 3) disagreed with the escalated FILTER list (0). Count and list now read from one source and cannot drift.
+-   **Session refresh consistency (Part F)**: SupportToolsPage adds a `support_cases:changed` / `storage` listener that reloads from the canonical `sessionStorage['support_cases_v1']` store (with a `JSON.stringify` identity guard to prevent the self-dispatched save→dispatch→reload loop), so an escalation mutation on another surface is reflected in the open drawer. Truth label: operational signals refresh from current app/session state — Firestore real-time listeners are future live-backend work.
+-   **Support case ROW escalation badge consistency (final correction)**: The Support Tools case-list row renders an explicit red **Escalated** badge (`data-testid="support-case-row-esc-active-<caseId>"`) whenever `effectiveEscalationStatus(c).active` is true — the SAME active-escalation truth source the detail view's `escVm` uses. It appears for EVERY active escalation, including `acknowledged` / `in_review` / security-review states (e.g. case_006 shows "In Review" + "Security Review" + "Security Lead" AND the Escalated badge), so a case that shows the Incident Escalated banner + De-escalate in the detail can never appear un-escalated in the list. The badge is ADDED alongside (never replacing) the existing status / level / Ack-Overdue / Unassigned / owner / Legacy chips. Terminal `deescalated` / `resolved` cases are not active, so they never show it. Because every saved view / queue (All Open, Critical, Unacknowledged Escalations, Escalation Active, Unassigned Escalations, De-escalated, etc.) renders through the single `filteredCases.map` row renderer, the badge is consistent across all of them by construction.
+-   **Needs Attention escalation destination (no invisible filter)**: Clicking the Operational Pulse "Escalated" cell sets `activePulseFilter='escalated'`, scrolls the Needs Attention section into view, and renders a VISIBLE "Pulse filter active: Escalated cases" chip (`data-testid="needs-attention-pulse-filter"`) with a "Clear filter ✕" action; the list is filtered to `type === 'Escalated support case'` items and shows a truthful "No items match the active pulse filter." empty state when none. The escalated pulse COUNT and this filtered LIST are derived from the same `deriveEscalationSignal(focusedCases)` source, so count === list length. There is no invisible-filter behavior — the destination always shows the active filter chip, the matching items, or a clear empty state. The Mission Control "Escalated" rollup chip is a non-interactive indicator (no routing). No change to the permissions / dependency auto-sync model.
+
+### Refresh / Session Consistency Note
+
+Support case state is held in `sessionStorage['support_cases_v1']`. SupportToolsPage dispatches `window.dispatchEvent(new Event('support_cases:changed'))` on every mutation; CommandCenter listens for `support_cases:changed` and `storage` events and calls `reloadAll()` so the escalated count / list / Pulse / Needs Attention / NBAs / Tenant 360 reflect the latest case state after navigation or refresh. **Truthful label**: operational signals refresh from the current app / session state — Firestore real-time listeners are future live-backend work.
+
+---
+
+## Phase 1.1.3B — Advanced Command Center Intelligence
+
+A deterministic, rule-based operational-intelligence layer added on top of the existing Command Center. Everything is derived synchronously from the SAME focus-mode / time-range filtered slices that feed the Operational Pulse, so the new surfaces never disagree with existing counts/lists. There is NO AI/ML, no live infra/uptime, no real DNS/SSL/SSO/SCIM, no external notifications, and no Firestore realtime — all signals are computed in `platformOpsDerive.ts` from mock/session data.
+
+-   **Intelligence data model (`platformOpsDerive.ts`)**: New exports `deriveCommercialBlockers` (tenants × billing → failed-payment / provisioning blockers), `deriveCommandSignals` (unified `CommandSignal` stream across escalations, SLA, high-risk audits, domains, commercial), `deriveTenantHealthSignals` (per-tenant `TenantHealthSignal` with `score`/`tier`/`reasons`/`recommendedAction`), `deriveCorrelatedRiskGroups` (clusters related signals into `CorrelatedRiskGroup` episodes with `whyGrouped` + `confidence`), `buildCommandCenterSnapshot` + `diffCommandCenterSnapshots` (review baseline → `SnapshotDelta` with `newlyActive` / `gettingWorse`), `deriveIntelligenceRibbon` (6 `RibbonCard`s with tone + trend + drawer link), and `enrichNextBestActions` + `deriveCommercialNbas` + `nbaMatchesFilter` + `NBA_FILTERS` (NBA upgrade with `actionType` / `category` / `confidence`). Truth-label constants (`INTELLIGENCE_TRUTH_LABEL`, `CORRELATION_TRUTH_LABEL`, `SIGNAL_SOURCE_LABEL`, `ATTENTION_PRIORITY_LABEL`) keep every surface honestly labeled as rule-based.
+-   **UI surfaces (`CommandCenterPage.tsx`)**: An Operational Intelligence ribbon (6 clickable cards), a What-Changed panel (newly-active / getting-worse vs. an explicit review baseline with a "Mark reviewed" button), a Tenant Risk Heatmap (tiled by derived risk, opens Tenant 360), a Correlated Episodes list, an upgraded Next Best Actions block (type filter chips + confidence/type pills), and a Command Signal drilldown drawer. The ribbon, what-changed, heatmap, and episodes are gated by the parent `view_command_center` (page-level) check; NBA continues to use `view_next_best_actions` / `act_on_nba_recommendations`; Tenant 360 tiles respect `view_tenant_360`.
+-   **Auditability**: A persisted review baseline lives in `localStorage['cc_intel_snapshot_v1']`. "Mark reviewed" writes `command_center_snapshot_saved`; opening any drilldown drawer writes `command_center_intelligence_drawer_opened` (both `info` severity). No new permission keys were introduced — intelligence surfaces reuse the existing Command Center permission model.
+
+### Duplicate Escalated Badge UI Correction
+
+Smallest-safe UI correction. In the Support Tools case list, an active escalated case whose structured status was literally `escalated` showed TWO red "Escalated" badges: the standalone active-escalation badge (`support-case-row-esc-active-<caseId>`) AND the status badge (`support-case-row-esc-status-<caseId>`), because `ESCALATION_STATUS_LABEL.escalated === 'Escalated'`. Fix: the standalone active-escalation badge now renders only when `eff.active && eff.status !== 'escalated'`, so a plain escalated case shows exactly one "Escalated" (the status badge), while other active states (`acknowledged` / `in_review` / security review) still show the standalone "Escalated" badge plus their differently-labeled status badge — one escalation identity badge, no duplicate. Terminal `deescalated` / `resolved` cases are not active and show no active-escalation badge. All other badges (L3, Ack Overdue, Unassigned, Engineering/Platform Ops, In Review, Security Review, Security Lead, Legacy, status, level, owner) are preserved. The active-escalation truth source is unchanged, so detail-view banner / De-escalate / Command Center reconciliation behave identically.

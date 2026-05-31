@@ -1,0 +1,276 @@
+Documentation Organization — Replit.md Cleanup and Platform Operations History Split
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Documentation-only cleanup.
+
+Do not change app code.
+Do not change behavior.
+Do not change routes.
+Do not change permissions.
+Do not change tests.
+Do not change task status unless documentation-only task completion is required.
+Do not implement Phase 1.1.3C, Phase 1.1.3D, Phase 1.2, Phase 1.3, Phase 1.4, Phase 2, Phase 3, or Phase 4.
+
+This is a small documentation organization pass only.
+
+==================================================
+WORKING STYLE — THINK STEP BY STEP
+==================================
+
+Before editing documentation, think step by step.
+
+First inspect:
+
+1. Current replit.md size and structure.
+2. Which sections are core project instructions that must stay in replit.md.
+3. Which sections are detailed phase history/change-log content that can safely move to a separate documentation file.
+4. Which accepted/locked rules must remain easy for future Replit sessions to find.
+5. How to keep continuity without losing any important implementation details.
+
+Do not delete important project knowledge.
+Move or summarize carefully.
+
+==================================================
+ROLE STACK — ACT UPON IT
+========================
+
+Act as:
+
+* Senior Technical Documentation Architect
+* Senior Platform Operations Architect
+* Senior SaaS Product Documentation Lead
+* Senior Compliance / Evidence Documentation Specialist
+* Senior Replit Project Maintainer
+* QA Gatekeeper
+* Systems Thinker
+* Side Auditor
+
+Core responsibility:
+Keep replit.md concise, scannable, and useful as the main project instruction file, while preserving detailed historical implementation notes in separate documentation.
+
+==================================================
+CURRENT ISSUE
+=============
+
+Replit previously reported that replit.md is getting quite large and should be trimmed or reorganized at a natural pause.
+
+We are now at a natural pause because:
+
+* Phase 1.1.3A Operating Model + Permission-Aware Escalation is accepted.
+* Phase 1.1.3B Advanced Command Center Intelligence is accepted after the duplicate escalation badge correction.
+* The next planned phase is Phase 1.1.3C Support Queue / SLA / Macro Maturity.
+
+Goal:
+Make replit.md easier for future Replit sessions to read without losing the accepted project history.
+
+==================================================
+PRIMARY GOAL
+============
+
+Reorganize documentation so:
+
+1. replit.md remains the main high-level project memory / instruction file.
+2. Detailed historical phase logs are moved to a separate file.
+3. Critical locked rules remain in replit.md.
+4. Future phases remain clearly listed.
+5. No accepted workstream knowledge is lost.
+
+==================================================
+RECOMMENDED DOCUMENT STRUCTURE
+==============================
+
+Create a new documentation folder/file if not already present:
+
+docs/platform-operations-security-history.md
+
+Move detailed long-form Phase 1.1 / 1.1.1 / 1.1.2 / 1.1.3A / 1.1.3B implementation history into this file.
+
+Keep replit.md focused on:
+
+A) Current Project State
+
+* current accepted checkpoint
+* latest completed phase
+* next recommended phase
+
+B) Locked Product Rules
+
+* no regression rules
+* Add-on Governance accepted rules
+* Shipping Module accepted rules
+* Platform permissions source-of-truth
+* Effective permission resolver rules
+* Dependency auto-sync rules
+* Escalation operating model rules
+* Request De-escalation lifecycle
+* Advanced Command Center Intelligence accepted rules
+
+C) Active Roadmap
+
+* Phase 1.1.3C — Support Queue / SLA / Macro Maturity
+* Phase 1.1.3D — Audit Investigation Center
+* Phase 1.2 — Domains + Platform Settings Maturity
+* Phase 1.3 — Platform Team Governance
+* Phase 1.4 — Automation + Alerts
+* Phase 2 — Real Integrations
+* Phase 3 — Compliance + Evidence
+* Phase 4 — Predictive / AI Operations
+
+D) Documentation Links
+
+* link to docs/platform-operations-security-history.md for detailed phase history
+
+==================================================
+WHAT MUST REMAIN IN REPLIT.MD
+=============================
+
+Do not move these out completely. They must remain summarized in replit.md:
+
+1. Current accepted checkpoint:
+
+* Phase 1.1.3B Advanced Command Center Intelligence accepted.
+* Duplicate Escalated Badge UI Correction accepted.
+* Next planned phase: Phase 1.1.3C Support Queue / SLA / Macro Maturity.
+
+2. Platform permissions locked rules:
+
+* Global Permissions Matrix is platform source of truth.
+* Store Permissions Matrix remains tenant/store-only.
+* Existing permission levels remain:
+  None / View Only / Create / Edit / Approve / Manage / Full Access.
+* Parent/child permission behavior.
+* Explicit child None denial.
+* Parent View + child Full Access action allowance.
+* Permission dependency auto-sync:
+
+  * action grant auto-raises prerequisite view
+  * prerequisite downgrade downgrades dependent action
+  * lowering action does not lower view
+
+3. Escalation operating model locked rules:
+
+* assignment, escalation, acknowledgement, escalation resolution, and case closure are distinct.
+* Request De-escalation pending review lifecycle.
+* no duplicate active request.
+* reviewer approval/rejection.
+* auditability.
+* active escalation badge consistency.
+
+4. Command Center intelligence accepted rules:
+
+* deterministic rule-based intelligence only.
+* no fake AI.
+* no live infrastructure uptime.
+* no real DNS/SSL/SSO/SCIM.
+* no external notifications.
+* no Firestore realtime claim.
+* drilldowns must show records behind counts.
+* no invisible filters.
+* source/confidence/truth labels required.
+
+5. Non-regression locked areas:
+
+* Shipping Module
+* Add-on Governance
+* Store Permissions Matrix
+* Tenant Features
+* tenant provisioning
+* paid override invoice workflow
+* server PII logging rules
+
+==================================================
+WHAT CAN MOVE TO HISTORY FILE
+=============================
+
+Move detailed narrative history and long implementation notes for completed phases into:
+
+docs/platform-operations-security-history.md
+
+Include:
+
+* Phase 1.1 Foundation details
+* Phase 1.1.1 UX polish details
+* Phase 1.1.2 Competitive maturity report summary
+* Phase 1.1.3A correction sequence
+* Platform permission correction sequence
+* Effective permission resolver hardening sequence
+* Request De-escalation pending review lifecycle details
+* Escalation signal consistency corrections
+* Phase 1.1.3B Advanced Command Center Intelligence details
+* Duplicate Escalated Badge UI Correction details
+
+Preserve dates or sequence order where available.
+Preserve enough detail for future debugging.
+
+==================================================
+IMPORTANT RULES
+===============
+
+Do not delete accepted rules.
+Do not rewrite product history inaccurately.
+Do not remove warnings/limitations.
+Do not touch source code.
+Do not introduce new roadmap decisions.
+Do not mark future phases complete.
+Do not summarize away critical behavior details.
+
+This is organization, not product change.
+
+==================================================
+OUTPUT EXPECTED IN FILES
+========================
+
+Expected file changes:
+
+1. replit.md
+
+* shorter and more scannable
+* includes current state, locked rules, next roadmap, and link to history file
+
+2. docs/platform-operations-security-history.md
+
+* detailed historical implementation notes moved from replit.md
+* organized by phase and correction pass
+
+Optional:
+3) docs/README.md
+
+* only if a docs folder index already exists or it is useful
+* keep minimal
+
+==================================================
+ACCEPTANCE CRITERIA
+===================
+
+Acceptance is literal:
+
+1. replit.md is shorter and easier to scan.
+2. replit.md still contains current state and next phase.
+3. replit.md still contains all locked rules needed for future Replit prompts.
+4. Detailed phase history is preserved in docs/platform-operations-security-history.md.
+5. No accepted implementation details are lost.
+6. No source code is changed.
+7. No runtime behavior is changed.
+8. No routes, permissions, data models, or UI are changed.
+9. Future roadmap remains intact.
+10. Documentation clearly identifies Phase 1.1.3C as the next phase.
+11. Documentation states Phase 1.1.3B is accepted after Duplicate Escalated Badge UI Correction.
+12. Replit provides a concise report of what moved and what remained.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+======================
+
+Reply ONLY in this structure:
+
+1. Documentation Organization Status
+2. Files Changed
+3. What Stayed in replit.md
+4. What Moved to History File
+5. Current Accepted Checkpoint
+6. Next Planned Phase
+7. Non-Regression Confirmation
+8. Recommendation
