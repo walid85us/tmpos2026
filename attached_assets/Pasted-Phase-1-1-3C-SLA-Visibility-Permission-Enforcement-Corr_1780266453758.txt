@@ -1,0 +1,325 @@
+Phase 1.1.3C — SLA Visibility Permission Enforcement Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict focused correction pass.
+
+Do not repeat already-passed Phase 1.1.3C QA items.
+Do not reopen macro management.
+Do not reopen placeholder resolution.
+Do not reopen bulk triage.
+Do not reopen escalation operating model.
+Do not reopen Command Center intelligence.
+Do not reopen permission dependency auto-sync.
+Do not implement Phase 1.1.3D, Phase 1.2, Phase 1.3, Phase 1.4, Phase 2, Phase 3, or Phase 4.
+
+Fix only the remaining Phase 1.1.3C blocker:
+
+* SLA visibility does not fully respect `view_support_sla`.
+
+==================================================
+WORKING STYLE — THINK STEP BY STEP
+==================================
+
+Before changing code, think step by step.
+
+First inspect every place where SLA appears:
+
+1. Support case list columns.
+2. Support case row pills.
+3. Support case detail header.
+4. Case Operations panel.
+5. Queue Membership chips/reasons.
+6. SLA Policy Preview panel.
+7. Workload panel.
+8. Queue cards such as SLA At Risk / SLA Breached.
+9. Saved view/filter options.
+10. Any macro placeholder preview that exposes SLA status.
+11. Any Command Center support/SLA signal if touched by Support Tools.
+
+Then implement one consistent permission gate.
+
+==================================================
+ROLE STACK — ACT UPON IT
+========================
+
+Act as:
+
+* Identity and Access Management Specialist
+* Access Analyst
+* Senior Role-Based Access Control Architect
+* Senior Support Tools Engineer
+* SLA / Service Level Manager
+* Service Desk Manager
+* Senior React/TypeScript Engineer
+* QA Gatekeeper
+* Systems Thinker
+* Side Auditor
+
+Focus on:
+
+* least privilege
+* consistent permission enforcement
+* no partial data exposure
+* no stale SLA leakage
+* clean UI fallback
+* no regression
+
+==================================================
+CURRENT QA FAILURES
+===================
+
+Manual QA — Phase 1.1.3C Focused Correction Review
+
+4. SLA column hides without permission — FAIL
+
+5. SLA panels/details hide without permission — FAIL
+
+6. SLA visibility returns with permission — FAIL / not testable because #4 and #5 failed
+
+Expected:
+
+* If `view_support_sla` is denied, the user must not see SLA-specific information.
+* If `view_support_sla` is granted, SLA information should return.
+
+==================================================
+CRITICAL RULE
+=============
+
+`view_support_sla` is the single source of truth for SLA visibility in Support Tools.
+
+If denied:
+
+* hide SLA column in case list
+* hide First Response SLA pill
+* hide Resolution SLA pill
+* hide SLA Policy Preview
+* hide SLA fields in Case Operations panel
+* hide SLA metrics in Workload panel
+* hide SLA-specific queue cards or show them as restricted without counts/details
+* hide SLA-related queue membership chips/reasons
+* hide SLA filter options if they expose SLA state
+* hide SLA placeholder values in macro preview / insertion, or replace with “Restricted”
+* do not expose SLA status through tooltips, labels, drawer text, or hidden-but-rendered UI
+
+If granted:
+
+* SLA column returns
+* SLA pills return
+* SLA Policy Preview returns
+* SLA Case Operations fields return
+* Workload SLA metrics return
+* SLA queue cards return
+* SLA filters return
+* SLA macro placeholder values return
+
+Do not rely only on CSS.
+Use render-level gating and handler/derivation gating where applicable.
+
+==================================================
+PART A — CENTRAL SUPPORT SLA ACCESS HELPER
+==========================================
+
+Create or reuse a single helper inside SupportToolsPage or a shared permissions helper:
+
+Example:
+const canViewSupportSla = hasPlatformPermission('support_tools', 'view_support_sla', 'view_only')
+
+Use this one boolean everywhere in SupportToolsPage.
+
+Do not calculate SLA visibility differently in different components.
+
+==================================================
+PART B — SUPPORT CASE LIST SLA GATING
+=====================================
+
+Fix the support case list.
+
+If `canViewSupportSla` is false:
+
+* no SLA column
+* no First Response SLA pill
+* no Resolution SLA pill
+* no SLA At Risk / SLA Breached labels in row
+* no SLA tooltip/details
+
+If true:
+
+* SLA indicators appear as currently designed.
+
+==================================================
+PART C — CASE DETAIL SLA GATING
+===============================
+
+Fix case detail.
+
+If `canViewSupportSla` is false:
+
+* hide SLA indicators in header
+* hide SLA status in Case Operations panel
+* hide SLA queue membership chips/reasons
+* hide SLA policy references
+* do not show SLA-related recommended action text
+
+If true:
+
+* show all existing SLA detail.
+
+==================================================
+PART D — SUPPORT QUEUE CENTER SLA GATING
+========================================
+
+Fix queue cards and filters.
+
+If `canViewSupportSla` is false:
+
+* hide SLA At Risk queue card
+* hide SLA Breached queue card
+* hide SLA filter option/chip/dropdown value
+* remove SLA-specific counts from queue summaries
+* avoid showing SLA pressure as queue intelligence
+
+If true:
+
+* restore SLA queues and SLA filters.
+
+If a queue mode was active and permission is removed:
+
+* clear the queue mode if it is SLA-related
+* show a safe default list without SLA leakage
+
+==================================================
+PART E — SLA POLICY PREVIEW AND WORKLOAD PANEL GATING
+=====================================================
+
+If `canViewSupportSla` is false:
+
+* hide SLA Policy Preview entirely
+* hide SLA workload metrics
+* if the panel remains, show non-SLA workload only
+
+If true:
+
+* show the existing preview and workload SLA metrics.
+
+==================================================
+PART F — MACRO PLACEHOLDER SLA GATING
+=====================================
+
+If macros include `{sla_status}` or `{{sla_status}}`:
+
+If `canViewSupportSla` is false:
+
+* preview should show “Restricted” or “Not available”
+* inserted note should not expose SLA status
+* unresolved/restricted token should not crash
+
+If true:
+
+* resolve SLA status normally.
+
+==================================================
+PART G — QUEUE CENTER TUNE-UP NOTE
+==================================
+
+Do not do a large redesign now.
+
+But make a small improvement if safe:
+
+* Add a clearer explanation line under Support Queue Center:
+  “Queues are operational triage lenses, not just filters. Each queue groups cases by ownership, SLA pressure, escalation, age, and attention reason.”
+* Add or preserve queue card reason/top signal so the value is clearer.
+
+Do not overbuild.
+A deeper Support Queue Center UX upgrade can be a later follow-up after this phase is accepted.
+
+==================================================
+PART H — DOCUMENTATION
+======================
+
+Update replit.md concisely:
+
+* `view_support_sla` controls all SLA visibility in Support Tools.
+* SLA visibility is all-or-nothing for SLA-specific fields in this phase.
+
+Update docs/platform-operations-security-history.md in more detail:
+
+* SLA permission leak correction
+* all surfaces gated
+* macro SLA placeholder restriction
+* queue SLA filter/card gating
+
+Do not make replit.md large again.
+
+==================================================
+NON-REGRESSION
+==============
+
+Do not change:
+
+* macro management
+* macro placeholder resolution except SLA placeholder permission behavior
+* bulk triage visible deferral
+* escalation operating model
+* request de-escalation workflow
+* Command Center intelligence
+* Add-on Governance
+* Shipping
+* Store Permissions Matrix
+* tenant provisioning
+* paid override invoice workflow
+* server PII logging rules
+
+==================================================
+ACCEPTANCE CRITERIA
+===================
+
+Acceptance is literal:
+
+1. `view_support_sla` denied hides SLA column in support case list.
+2. `view_support_sla` denied hides First Response SLA pill.
+3. `view_support_sla` denied hides Resolution SLA pill.
+4. `view_support_sla` denied hides SLA fields in case detail header.
+5. `view_support_sla` denied hides SLA fields in Case Operations panel.
+6. `view_support_sla` denied hides SLA Policy Preview.
+7. `view_support_sla` denied hides SLA metrics in Workload panel.
+8. `view_support_sla` denied hides SLA At Risk / SLA Breached queue cards.
+9. `view_support_sla` denied hides SLA filter options.
+10. `view_support_sla` denied hides or restricts SLA queue membership chips/reasons.
+11. `view_support_sla` denied prevents SLA macro placeholder values from being exposed.
+12. `view_support_sla` granted restores all SLA visibility.
+13. SLA queue mode clears safely if permission is removed.
+14. Support Queue Center gets a small explanatory value note.
+15. Existing macro management remains intact.
+16. Existing macro placeholder resolution remains intact.
+17. Existing escalation operating model remains intact.
+18. Existing Command Center intelligence remains intact.
+19. Existing permission dependency auto-sync remains intact.
+20. Existing Add-on Governance remains intact.
+21. Existing Shipping Module remains intact.
+22. Existing Store Permissions Matrix remains intact.
+23. Existing tenant provisioning remains intact.
+24. Server PII logging rules are not regressed.
+25. replit.md remains concise.
+26. docs/platform-operations-security-history.md is updated.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+======================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Root Cause
+3. Central SLA Access Helper
+4. Support Case List SLA Gating
+5. Case Detail SLA Gating
+6. Queue / Filter SLA Gating
+7. SLA Policy / Workload Gating
+8. Macro SLA Placeholder Gating
+9. Queue Center Clarification
+10. Files Changed
+11. Documentation Updated
+12. Non-Regression Notes

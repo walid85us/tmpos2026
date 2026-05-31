@@ -13,7 +13,7 @@ Do not make changes to the file `Y`.
 # Current Project State
 
 -   **Current accepted checkpoint**: Phase 1.1.3B — Advanced Command Center Intelligence is **accepted**, including the **Duplicate Escalated Badge UI Correction**.
--   **Latest completed phase**: Phase 1.1.3C (Support Queue / SLA / Macro Maturity) — implemented including a **Focused Correction pass** (high-value queue cards + Queue Mode banner, handler-level SLA gating everywhere, case-level Queue Memberships, macro placeholder resolution for `{{token}}` and `{token}`, gated Macro Management with localStorage persistence + audit, and a truthful "Future" Bulk Triage panel) — pending acceptance.
+-   **Latest completed phase**: Phase 1.1.3C (Support Queue / SLA / Macro Maturity) — implemented including a **Focused Correction pass** (high-value queue cards + Queue Mode banner, handler-level SLA gating everywhere, case-level Queue Memberships, macro placeholder resolution for `{{token}}` and `{token}`, gated Macro Management with localStorage persistence + audit, and a truthful "Future" Bulk Triage panel) plus an **SLA Visibility Permission Enforcement correction** (`view_support_sla` is the single source of truth for ALL SLA visibility in Support Tools; SLA is all-or-nothing for SLA-specific fields) — pending acceptance.
 -   **Next planned phase**: Phase 1.1.3D — Audit Investigation Center.
 -   **Detailed history**: Full long-form implementation notes and correction sequences for all completed Platform Operations & Security phases live in [`docs/platform-operations-security-history.md`](docs/platform-operations-security-history.md). `replit.md` keeps only the high-level overview, locked rules, and roadmap.
 

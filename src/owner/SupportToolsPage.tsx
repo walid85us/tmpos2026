@@ -204,6 +204,12 @@ const SupportToolsPage: React.FC = () => {
   const useSupportMacroGate = hasPlatformPermission(sessionRole, 'use_support_macro');
   const manageSupportMacrosGate = hasPlatformPermission(sessionRole, 'manage_support_macros');
   const viewSupportSlaGate = hasPlatformPermission(sessionRole, 'view_support_sla');
+  // Phase 1.1.3C SLA Visibility correction — SINGLE source of truth for SLA
+  // visibility in Support Tools. Every SLA surface (case list column + pills,
+  // detail header, Case Operations panel, queue cards/filters, SLA Policy
+  // Preview, Workload SLA metrics, queue membership chips, macro SLA token)
+  // gates on this one boolean. Do not derive SLA visibility any other way.
+  const canViewSupportSla = viewSupportSlaGate.allowed;
   const viewSupportTenantHealthGate = hasPlatformPermission(sessionRole, 'view_support_tenant_health');
   const viewSupportRelatedEntitiesGate = hasPlatformPermission(sessionRole, 'view_support_related_entities');
 
@@ -531,6 +537,26 @@ const SupportToolsPage: React.FC = () => {
     () => (activeQueue ? supportQueues.find(q => q.id === activeQueue) || null : null),
     [activeQueue, supportQueues]
   );
+
+  // Phase 1.1.3C SLA Visibility correction — if SLA visibility is revoked while
+  // an SLA-exposing lens is active, clear it so no SLA state leaks through a
+  // lingering filter/queue mode. Resets the SLA status filter, exits any
+  // SLA-based saved view (e.g. "Overdue"), and exits an SLA-dependent queue —
+  // falling back to a safe default list with no SLA leakage.
+  useEffect(() => {
+    if (canViewSupportSla) return;
+    setSlaFilter('any');
+    const v = predefinedSupportViews.find(x => x.id === activeView);
+    const activeQueueIsSla = !!supportQueues.find(q => q.id === activeQueue)?.slaDependent;
+    if ((v?.filters.sla && v.filters.sla !== 'any') || activeQueueIsSla) {
+      setActiveQueue(null);
+      setActiveView('all');
+      setStatusFilter('all');
+      setSeverityViewFilter('all');
+      setEscalationFilter('any');
+      setSortMode('opened_desc');
+    }
+  }, [canViewSupportSla, activeView, activeQueue, supportQueues]);
 
   const tenantSearchHits = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -1166,7 +1192,7 @@ const SupportToolsPage: React.FC = () => {
       status: STATUS_LABELS[c.status],
       assigned_owner: c.assignee || undefined,
       assigned_team: c.assignedTeamName || undefined,
-      sla_status: viewSupportSlaGate.allowed ? deriveSlaStatus(c, renderNow).label : undefined,
+      sla_status: canViewSupportSla ? deriveSlaStatus(c, renderNow).label : undefined,
       escalation_level: eff.active
         ? (ESCALATION_LEVEL_LABEL[c.escalationLevel as EscalationLevel] || c.escalationLevel || 'Escalated')
         : 'Not escalated',
@@ -1398,9 +1424,13 @@ const SupportToolsPage: React.FC = () => {
           <div>
             <h3 className="text-sm font-black text-primary uppercase tracking-widest">Queue Center</h3>
             <p className="text-[11px] text-slate-500 font-medium mt-0.5 max-w-2xl">{PHASE_113C_QUEUE_LABEL}</p>
+            {/* Phase 1.1.3C Queue Center tune-up — clarify queues as triage lenses. */}
+            <p className="text-[11px] text-slate-500 font-medium mt-1 max-w-2xl" data-testid="support-queue-center-note">
+              Queues are operational triage lenses, not just filters. Each queue groups cases by ownership, SLA pressure, escalation, age, and attention reason.
+            </p>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
-            {viewSupportSlaGate.allowed && (
+            {canViewSupportSla && (
               <button
                 onClick={() => setShowSlaPolicy(v => !v)}
                 data-testid="support-sla-policy-toggle"
@@ -1437,7 +1467,7 @@ const SupportToolsPage: React.FC = () => {
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2.5">
           {supportQueues.map(q => {
             const active = activeQueue === q.id;
-            const locked = q.slaDependent && !viewSupportSlaGate.allowed;
+            const locked = q.slaDependent && !canViewSupportSla;
             const sub = active ? 'text-white/70' : 'text-slate-500';
             const subFaint = active ? 'text-white/60' : 'text-slate-400';
             return (
@@ -1479,7 +1509,7 @@ const SupportToolsPage: React.FC = () => {
                         </div>
                         <p className={`text-[9px] font-bold ${subFaint}`}>
                           {q.oldestDays !== null ? `Oldest ${q.oldestDays}d · ` : ''}{q.assignedCount} owned · {q.unassignedCount} unassigned
-                          {viewSupportSlaGate.allowed && (q.slaPressure.overdue > 0 || q.slaPressure.atRisk > 0)
+                          {canViewSupportSla && (q.slaPressure.overdue > 0 || q.slaPressure.atRisk > 0)
                             ? ` · SLA ${q.slaPressure.overdue} overdue / ${q.slaPressure.atRisk} at risk`
                             : ''}
                         </p>
@@ -1531,7 +1561,7 @@ const SupportToolsPage: React.FC = () => {
           </div>
         )}
 
-        {showSlaPolicy && viewSupportSlaGate.allowed && (
+        {showSlaPolicy && canViewSupportSla && (
           <div className="mt-4 p-4 rounded-2xl border border-slate-200 bg-slate-50/60" data-testid="support-sla-policy-panel">
             <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">SLA Policy Preview · reference only</p>
             <p className="text-[11px] text-slate-500 italic mt-1 mb-3">{SLA_POLICY_PREVIEW_LABEL}</p>
@@ -1572,7 +1602,7 @@ const SupportToolsPage: React.FC = () => {
                     <th className="py-2 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Open</th>
                     <th className="py-2 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Escalated</th>
                     {/* Phase 1.1.3C correction — Overdue SLA workload metric gated. */}
-                    {viewSupportSlaGate.allowed && (
+                    {canViewSupportSla && (
                       <th className="py-2 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Overdue SLA</th>
                     )}
                     <th className="py-2 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Urgent</th>
@@ -1584,7 +1614,7 @@ const SupportToolsPage: React.FC = () => {
                       <td className="py-2 text-xs font-bold text-slate-700">{r.owner}</td>
                       <td className="py-2 text-xs font-black text-slate-900 text-center">{r.open}</td>
                       <td className={`py-2 text-xs font-black text-center ${r.escalated > 0 ? 'text-red-700' : 'text-slate-400'}`}>{r.escalated}</td>
-                      {viewSupportSlaGate.allowed && (
+                      {canViewSupportSla && (
                         <td className={`py-2 text-xs font-black text-center ${r.overdueSla > 0 ? 'text-red-700' : 'text-slate-400'}`}>{r.overdueSla}</td>
                       )}
                       <td className={`py-2 text-xs font-black text-center ${r.urgent > 0 ? 'text-orange-700' : 'text-slate-400'}`}>{r.urgent}</td>
@@ -1630,7 +1660,12 @@ const SupportToolsPage: React.FC = () => {
         </div>
         <div className="px-8 py-3 border-b border-slate-100 bg-slate-50/40 flex items-center gap-2 flex-wrap" data-testid="support-saved-views">
           <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 mr-1">Saved views:</span>
-          {predefinedSupportViews.map(v => {
+          {predefinedSupportViews
+            // Phase 1.1.3C SLA Visibility correction — saved views that filter by
+            // SLA status (e.g. "Overdue") expose SLA state, so they are removed
+            // from the lens row when view_support_sla is denied.
+            .filter(v => canViewSupportSla || !(v.filters.sla && v.filters.sla !== 'any'))
+            .map(v => {
             // Phase 1.1.2 — saved view "queue" count from shared helper.
             // Phase 1.1.3A — pass operator/team ctx so the new "Assigned
             // to Me" / "My Team" escalation queues count correctly.
@@ -1685,7 +1720,7 @@ const SupportToolsPage: React.FC = () => {
               <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Severity</th>
               {/* Phase 1.1.3C correction — SLA column entirely hidden (header
                   + cells) when view_support_sla is denied, not just blanked. */}
-              {viewSupportSlaGate.allowed && (
+              {canViewSupportSla && (
                 <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">SLA</th>
               )}
               <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Assignee</th>
@@ -1803,7 +1838,7 @@ const SupportToolsPage: React.FC = () => {
                   {/* Phase 1.1.1 UX Correction — bigger SLA pill with state-colored bar + microcopy.
                       Phase 1.1.3C correction — the entire SLA cell is omitted (not
                       blanked) when view_support_sla is denied, matching the hidden header. */}
-                  {viewSupportSlaGate.allowed && (
+                  {canViewSupportSla && (
                     <td className="px-6 py-3.5">
                       <div className="flex items-center gap-2" data-testid={`support-sla-${c.id}`}>
                         <div
@@ -1839,7 +1874,7 @@ const SupportToolsPage: React.FC = () => {
               );
             })}
             {filteredCases.length === 0 && (
-              <tr><td colSpan={viewSupportSlaGate.allowed ? 7 : 6} className="px-8 py-12 text-center text-slate-400 text-sm font-bold">No support cases match these filters.</td></tr>
+              <tr><td colSpan={canViewSupportSla ? 7 : 6} className="px-8 py-12 text-center text-slate-400 text-sm font-bold">No support cases match these filters.</td></tr>
             )}
           </tbody>
         </table>
@@ -2118,7 +2153,7 @@ const SupportToolsPage: React.FC = () => {
                   <h3 className="text-lg font-black text-primary mt-1">{selected.subject}</h3>
                   <p className="text-xs text-slate-500 font-bold mt-1">{tenantById.get(selected.tenantId) || selected.tenantId}</p>
                   <div className="flex flex-wrap gap-2 mt-2" data-testid="support-case-header-pills">
-                    {viewSupportSlaGate.allowed && (() => {
+                    {canViewSupportSla && (() => {
                       const sla = deriveSlaStatus(selected);
                       const rsla = deriveResponseSlaStatus(selected);
                       return (
@@ -2167,7 +2202,7 @@ const SupportToolsPage: React.FC = () => {
                     flags, and recommended next actions. Read-only triage aid;
                     no mutation happens here. */}
                 {(() => {
-                  const signal = deriveSupportCaseSignal(selected);
+                  const signal = deriveSupportCaseSignal(selected, renderNow, { canViewSla: canViewSupportSla });
                   return (
                     <div className="p-4 rounded-2xl border border-slate-200 bg-slate-50/60" data-testid="support-case-operations">
                       <div className="flex items-center justify-between gap-2 mb-2">
@@ -2175,7 +2210,7 @@ const SupportToolsPage: React.FC = () => {
                         <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Deterministic · rule-based · in-app state</span>
                       </div>
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
-                        {viewSupportSlaGate.allowed ? (
+                        {canViewSupportSla ? (
                           <>
                             <div className="p-2 rounded-xl bg-white border border-slate-100">
                               <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">1st reply SLA</p>
@@ -2201,7 +2236,7 @@ const SupportToolsPage: React.FC = () => {
                           <p className="text-xs font-black mt-0.5 text-slate-700">{signal.lastUpdateDays}d</p>
                         </div>
                       </div>
-                      {viewSupportSlaGate.allowed && (
+                      {canViewSupportSla && (
                         <p className="text-[10px] text-slate-400 italic mb-2" data-testid="support-case-operations-sla-label">{PHASE_113C_SLA_LABEL}</p>
                       )}
                       {signal.attentionFlags.length > 0 && (
@@ -2234,7 +2269,7 @@ const SupportToolsPage: React.FC = () => {
                     queues are suppressed when view_support_sla is denied. */}
                 {(() => {
                   const memberships = deriveCaseQueueMemberships(selected, renderNow)
-                    .filter(q => !(q.slaDependent && !viewSupportSlaGate.allowed));
+                    .filter(q => !(q.slaDependent && !canViewSupportSla));
                   return (
                     <div className="p-4 rounded-2xl border border-slate-200 bg-slate-50/60" data-testid="support-case-queue-memberships">
                       <div className="flex items-center justify-between gap-2 mb-2">
@@ -2733,8 +2768,8 @@ const SupportToolsPage: React.FC = () => {
                 <div className="text-[10px] text-slate-400 pt-4 border-t border-slate-100 grid grid-cols-2 gap-2">
                   <div>Opened: <span className="font-bold text-slate-600">{selected.openedAt}</span></div>
                   <div>Updated: <span className="font-bold text-slate-600">{selected.updatedAt}</span></div>
-                  {viewSupportSlaGate.allowed && selected.firstResponseDueAt && <div>First response due: <span className="font-bold text-slate-600">{selected.firstResponseDueAt.slice(0, 10)}</span></div>}
-                  {viewSupportSlaGate.allowed && selected.resolutionDueAt && <div>Resolution due: <span className="font-bold text-slate-600">{selected.resolutionDueAt.slice(0, 10)}</span></div>}
+                  {canViewSupportSla && selected.firstResponseDueAt && <div>First response due: <span className="font-bold text-slate-600">{selected.firstResponseDueAt.slice(0, 10)}</span></div>}
+                  {canViewSupportSla && selected.resolutionDueAt && <div>Resolution due: <span className="font-bold text-slate-600">{selected.resolutionDueAt.slice(0, 10)}</span></div>}
                   {selected.firstRespondedAt && <div>First responded: <span className="font-bold text-slate-600">{selected.firstRespondedAt.slice(0, 10)}</span></div>}
                   {selected.resolvedAt && <div>Resolved: <span className="font-bold text-slate-600">{selected.resolvedAt.slice(0, 10)}</span></div>}
                 </div>

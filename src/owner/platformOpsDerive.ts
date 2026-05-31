@@ -3067,8 +3067,15 @@ export interface SupportCaseSignal {
 
 export function deriveSupportCaseSignal(
   c: SupportCaseRecord,
-  now: Date = new Date()
+  now: Date = new Date(),
+  opts?: { canViewSla?: boolean }
 ): SupportCaseSignal {
+  // Phase 1.1.3C SLA Visibility correction — SLA-derived attention flags and
+  // recommended-action text are only produced when the caller can view SLA
+  // (`view_support_sla`). When SLA is restricted, the panel still renders
+  // non-SLA signals (no first response, unassigned, escalation, age/idle) but
+  // never leaks SLA status through flags or recommended-action copy.
+  const canViewSla = opts?.canViewSla ?? true;
   const responseSla = deriveResponseSlaStatus(c, now);
   const resolutionSla = deriveSlaStatus(c, now);
   const eff = effectiveEscalationStatus(c);
@@ -3090,16 +3097,18 @@ export function deriveSupportCaseSignal(
       attentionFlags.push('No first response recorded');
       recommendedActions.push('Add a first response note to start the case clock.');
     }
-    if (responseSla.status === 'overdue') {
-      attentionFlags.push('Response SLA overdue');
-    } else if (responseSla.status === 'at_risk') {
-      attentionFlags.push('Response SLA at risk');
-    }
-    if (resolutionSla.status === 'overdue') {
-      attentionFlags.push('Resolution SLA overdue');
-      recommendedActions.push('Resolution is overdue \u2014 consider escalating or re-prioritising.');
-    } else if (resolutionSla.status === 'at_risk') {
-      attentionFlags.push('Resolution SLA at risk');
+    if (canViewSla) {
+      if (responseSla.status === 'overdue') {
+        attentionFlags.push('Response SLA overdue');
+      } else if (responseSla.status === 'at_risk') {
+        attentionFlags.push('Response SLA at risk');
+      }
+      if (resolutionSla.status === 'overdue') {
+        attentionFlags.push('Resolution SLA overdue');
+        recommendedActions.push('Resolution is overdue \u2014 consider escalating or re-prioritising.');
+      } else if (resolutionSla.status === 'at_risk') {
+        attentionFlags.push('Resolution SLA at risk');
+      }
     }
     if (!(c.assignee && c.assignee.trim())) {
       attentionFlags.push('Unassigned');

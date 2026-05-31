@@ -24,3 +24,8 @@ summary derivation and the list filter. This was a code-review finding on Phase
 **Truth labels & gating:** every Support intelligence surface needs a visible
 truth label, and all SLA indicators (list, detail header, operations panel)
 must gate on the `view_support_sla` permission uniformly — not just some of them.
+
+## SLA visibility is derivation-deep, not just render-deep
+Gating SLA on `view_support_sla` at the JSX render level is NOT enough. Derivation helpers that emit human-readable SLA text leak it through other panels: `deriveSupportCaseSignal` pushes SLA strings into `attentionFlags`/`recommendedActions`, which the Case Operations panel renders unconditionally. Fix at the source — pass `{ canViewSla }` so SLA flags/actions are never produced when denied.
+**Why:** UI tiles were gated but the attention-flag/recommended-action list still printed "Resolution SLA overdue" etc.
+**How to apply:** When gating a permission, audit every derivation that produces text/labels for that domain, not only the obvious component. Also: SLA-status saved views (`filters.sla`) and a lingering `slaFilter`/SLA queue mode must be cleared on permission revocation, or stale SLA state leaks through a filter. Central single boolean `canViewSupportSla` is the only source of truth.

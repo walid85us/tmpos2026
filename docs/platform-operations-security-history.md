@@ -214,3 +214,32 @@ A QA-driven correction pass over the same Support Tools workspace. It addressed 
 ### Still deferred (unchanged)
 
 -   Editable SLA policy authoring and functional bulk triage remain future work; the correction makes the deferral visible rather than faking the capability.
+
+## Phase 1.1.3C — SLA Visibility Permission Enforcement Correction
+
+A strict focused correction over the same Support Tools workspace. QA found that `view_support_sla` was not fully respected — SLA-specific information still leaked when the permission was denied (notably the Case Operations attention flags / recommended-action copy, SLA-based saved views, and a lingering SLA filter/queue mode). This pass makes `view_support_sla` the single source of truth for ALL SLA visibility in Support Tools. SLA visibility is all-or-nothing for SLA-specific fields this phase. Still deterministic, rule-based, internal-only.
+
+### Central SLA access helper
+
+-   A single boolean `canViewSupportSla` (wrapping `hasPlatformPermission(sessionRole, 'view_support_sla').allowed`) is computed once per render and is the ONLY way SLA visibility is decided anywhere in `SupportToolsPage`. Every prior scattered `viewSupportSlaGate.allowed` check was replaced by this one constant so no surface can compute SLA visibility differently.
+
+### Surfaces gated (all keyed on `canViewSupportSla`)
+
+-   **Case list** — SLA column header + `<td>` omitted (not blanked), empty-state `colSpan` adjusts (7/6), First Response + Resolution pills hidden.
+-   **Case detail header** — SLA / 1st-reply pills hidden.
+-   **Case Operations panel** — the SLA tiles fall back to a "Restricted" tile, AND `deriveSupportCaseSignal` now takes a `{ canViewSla }` option so SLA-derived attention flags ("Response/Resolution SLA overdue/at risk") and SLA recommended-action copy ("Resolution is overdue …") are never produced when denied. Non-SLA signals (no first response, unassigned, escalation, age/idle) still render.
+-   **Queue Memberships** — SLA-dependent queue chips suppressed; truthful empty state preserved.
+-   **SLA Policy Preview + toggle** — hidden entirely when denied.
+-   **Workload panel** — the "Overdue SLA" header + cell hidden; the rest of the workload rollup remains.
+-   **Queue cards** — SLA-dependent cards render a locked/restricted state with no counts or SLA detail; SLA pressure line suppressed.
+-   **Saved views / filters** — SLA-status saved views (e.g. "Overdue", `filters.sla`) are removed from the lens row when denied, so no SLA filter option is exposed.
+-   **Macro placeholder** — `sla_status` token resolves to "Not available" in both the preview and the inserted note when denied (via the shared `buildMacroCtx`), never exposing live SLA status.
+
+### Queue-mode safety + Queue Center tune-up
+
+-   A render effect clears any SLA-exposing lens when the permission is revoked: it resets the SLA status filter, exits an SLA-based saved view, and exits an SLA-dependent queue, falling back to a safe default list with no SLA leakage.
+-   A small Queue Center value note was added: "Queues are operational triage lenses, not just filters. Each queue groups cases by ownership, SLA pressure, escalation, age, and attention reason."
+
+### Non-regression
+
+-   Macro management, macro placeholder resolution (except the SLA-token permission behavior), bulk-triage deferral, escalation operating model, request de-escalation workflow, Command Center intelligence, permission dependency auto-sync, Add-on Governance, Shipping, Store Permissions Matrix, tenant provisioning, paid override invoice workflow, and server PII logging rules are all untouched.
