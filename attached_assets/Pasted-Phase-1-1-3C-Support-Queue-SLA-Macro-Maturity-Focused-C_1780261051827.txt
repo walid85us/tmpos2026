@@ -1,0 +1,478 @@
+Phase 1.1.3C — Support Queue / SLA / Macro Maturity Focused Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict focused correction pass for Phase 1.1.3C.
+
+Do not repeat already-passed QA areas.
+Do not reopen Command Center Intelligence.
+Do not reopen escalation operating model.
+Do not reopen permission dependency auto-sync.
+Do not modify Shipping, Add-on Governance, Store Permissions Matrix, tenant provisioning, paid override invoice flow, POS, Repairs, Inventory, Customers, Invoices, or Services.
+Do not implement Phase 1.1.3D, Phase 1.2, Phase 1.3, Phase 1.4, Phase 2, Phase 3, or Phase 4.
+
+Fix only the failed/unclear QA items from:
+Manual QA — Phase 1.1.3C Support Queue / SLA / Macro Maturity Review
+
+==================================================
+WORKING STYLE — THINK STEP BY STEP
+==================================
+
+Before correcting anything, think step by step.
+
+First inspect:
+
+1. Existing Support Queue Center behavior.
+2. Whether queue cards are just duplicating filters.
+3. Existing SLA permission gating locations.
+4. All places where SLA data is displayed.
+5. Macro token format in the macro library.
+6. Macro placeholder resolver expected syntax.
+7. Macro insertion path and inserted note body.
+8. Whether Macro Management exists or is only documented.
+9. Whether Bulk Triage is implemented or deferred.
+10. What must be made visible to users so QA is clear.
+
+Then implement the smallest safe corrections.
+
+==================================================
+ROLE STACK — ACT UPON IT
+========================
+
+Act as:
+
+* Senior Support Tools Engineer
+* Senior Support Operations Architect
+* Service Desk Manager
+* Support Queue Analyst
+* SLA / Service Level Manager
+* Support Macro / Knowledge Operations Manager
+* Incident / Escalation Workflow Architect
+* Identity and Access Management Specialist
+* Access Analyst
+* Senior React/TypeScript Engineer
+* QA Gatekeeper
+* Systems Thinker
+* Side Auditor
+
+Focus on:
+
+* making Support Queue Center operationally useful
+* avoiding “just another filter” UX
+* enforcing SLA visibility permissions everywhere
+* making macro placeholders reliable
+* adding clear Macro Management behavior
+* making Bulk Triage deferral visible and understandable
+* preserving all accepted behavior
+
+==================================================
+CURRENT QA ISSUES TO FIX
+========================
+
+1. Support Queue Center feels like only a filter layer.
+   Observed:
+
+* Queue cards click and filter correctly.
+* Counts match.
+* But the user does not see the operational benefit yet.
+
+Expected:
+
+* Support Queue Center should feel like an operational triage workspace.
+* Queue cards should not just behave like filters; they should explain operational meaning and show useful queue intelligence.
+
+2. Queue click-through / active filter is technically working but needs clearer UX.
+   Expected:
+
+* Active queue mode should be unmistakable.
+* Status tabs / saved views should clearly exit queue mode.
+* User should never wonder whether a queue filter is still active.
+
+3. SLA visibility follows permission — FAIL.
+   Observed:
+
+* A role without view_support_sla can still see the SLA column under Support Cases.
+
+Expected:
+
+* If view_support_sla is denied:
+
+  * hide SLA columns in case list
+  * hide SLA pills in case rows
+  * hide SLA indicators in case detail header
+  * hide SLA Policy Preview
+  * hide SLA-related queue cards or show locked/unavailable state
+  * hide SLA fields in Case Operations panel
+  * hide SLA workload metrics
+* Do not leave partial SLA visibility.
+
+4. Queue memberships on case detail unclear.
+   Expected:
+
+* Case detail should clearly show queue membership chips and reasons.
+* Example:
+
+  * Unassigned
+  * SLA At Risk
+  * SLA Breached
+  * Escalated Active
+  * Pending De-escalation Review
+  * Critical / High Severity
+  * Recently Updated
+  * Stale / No Recent Activity
+* If no queue membership applies, show a truthful empty state.
+
+5. Macro placeholder substitution failed.
+   Observed:
+
+* Preview shows unresolved text such as:
+
+  * Hi {{tenant_name}}
+  * {{case_id}}
+    Expected:
+* Macro preview should resolve placeholders using the selected support case context.
+* Support both token formats:
+
+  * {{tenant_name}}
+  * {tenant_name}
+* Inserted internal note should also use resolved text, not unresolved raw tokens.
+* Missing values should show “Not available” or clearly flagged unresolved placeholders.
+* No crash.
+
+6. Missing macro placeholders are not handled clearly.
+   Expected:
+
+* Filled placeholders should be visually marked.
+* Unavailable placeholders should be marked as “Not available.”
+* Preview should not leave raw template syntax unless intentionally marked as unresolved.
+
+7. Macro Management is unclear/missing.
+   Expected:
+   Implement a lightweight internal Macro Management panel/drawer now.
+
+It should be gated by manage_support_macros and support:
+
+* view macro library
+* create macro
+* edit macro
+* disable/enable macro
+* category
+* purpose
+* body
+* placeholder chips
+* internal-only truth label
+* no external sending
+* audit macro create/edit/disable/enable
+* safe local/session mock persistence if current app uses mock/session data
+
+If manage_support_macros is denied:
+
+* hide management actions or show read-only library only.
+
+8. Bulk Triage is deferred but not clear.
+   Expected:
+   Do not implement full bulk triage in this correction unless already safely present.
+
+Instead:
+
+* Add a visible “Bulk Triage — Future” card/panel in Support Tools.
+* Explain why it is deferred:
+
+  * requires stronger confirmation, audit, permissions, and batch safety
+  * no external automation in this phase
+* Mention future scope:
+
+  * bulk assign
+  * bulk severity change
+  * bulk internal note
+  * bulk macro insert
+* This panel should be informational only and must not mutate data.
+* Document it in replit.md and history file.
+
+9. Command Center and Support Tools still feel somewhat simple.
+   Expected for this correction:
+
+* Do not rebuild Command Center.
+* Improve Support Queue Center with richer operational value:
+
+  * triage summary
+  * top queue reason
+  * oldest case
+  * SLA pressure
+  * owner/team split
+  * recommended next action
+  * quick “Open queue” action
+  * queue explanation
+  * maybe a small preview of top cases
+* Keep changes focused inside Support Tools.
+
+==================================================
+PART A — SUPPORT QUEUE CENTER UX VALUE IMPROVEMENT
+==================================================
+
+Upgrade Support Queue Center so it clearly provides value beyond filtering.
+
+For each queue card, show where practical:
+
+* queue name
+* count
+* purpose / why this queue matters
+* top reason
+* oldest case age
+* SLA pressure if view_support_sla is allowed
+* severity mix
+* owner/team signal
+* recommended next action
+* preview of top 1–3 case references if space allows
+* click opens filtered list
+
+When a queue is active:
+
+* show a prominent active queue banner/chip:
+  “Queue Mode: SLA At Risk”
+* show queue explanation:
+  “Cases included because response/resolution SLA is at risk.”
+* show clear button:
+  “Clear queue”
+* status tab or saved view click should clearly exit queue mode and remove queue chip.
+
+Do not introduce invisible filters.
+
+==================================================
+PART B — SLA PERMISSION GATING FIX
+==================================
+
+Audit every SLA display.
+
+If view_support_sla is denied, hide or block:
+
+* SLA column in support case list
+* first response SLA pill
+* resolution SLA pill
+* SLA queue cards
+* SLA Policy Preview
+* SLA metrics in Workload panel
+* SLA fields in Case Operations panel
+* SLA chips in queue membership, unless replaced with generic “Restricted SLA signal”
+
+Preferred:
+
+* hide SLA-specific information completely.
+
+If view_support_sla is granted:
+
+* all SLA indicators return normally.
+
+Handler-level enforcement:
+
+* If any SLA-related panel is interactive, it must also check permission.
+* Do not rely only on CSS hiding.
+
+==================================================
+PART C — CASE DETAIL QUEUE MEMBERSHIP CLARITY
+=============================================
+
+Improve the Case Operations panel.
+
+Required:
+
+* show a clear “Queue Memberships” section.
+* render queue chips with reason.
+* each chip should correspond to the same queue predicate used by Support Queue Center.
+* if no membership, show:
+  “No active queue membership from current support rules.”
+* queue membership should not drift from queue center counts.
+
+==================================================
+PART D — MACRO PLACEHOLDER RESOLUTION FIX
+=========================================
+
+Fix macro placeholder resolution.
+
+Required:
+
+* Support both token formats:
+
+  * {{tenant_name}}
+  * {tenant_name}
+* Apply resolution to preview and inserted note/draft.
+* Common supported placeholders:
+
+  * tenant_name
+  * case_id
+  * case_subject
+  * severity
+  * status
+  * assigned_owner
+  * assigned_team
+  * sla_status
+  * escalation_level
+  * current_date
+* If value missing:
+
+  * render “Not available”
+  * show unresolved/missing chip
+  * do not crash
+* Do not leave raw {{token}} text in normal preview or inserted note unless clearly marked unresolved.
+
+==================================================
+PART E — MACRO MANAGEMENT PANEL
+===============================
+
+Add lightweight Macro Management.
+
+Requirements:
+
+* gated by manage_support_macros.
+* create macro.
+* edit macro.
+* disable/enable macro.
+* fields:
+
+  * title
+  * category
+  * purpose
+  * body
+  * internal/customer-facing indicator, but keep all macros internal-only for this phase
+  * active/disabled state
+* show available placeholder chips.
+* validate body/title required.
+* no external sending.
+* use mock/session/local persistence consistent with current app patterns.
+* audit:
+
+  * macro_created
+  * macro_updated
+  * macro_disabled
+  * macro_enabled
+    or equivalent existing action names.
+
+If role lacks manage_support_macros:
+
+* hide create/edit/disable controls.
+* macro library remains usable only if use_support_macro is granted.
+
+==================================================
+PART F — BULK TRIAGE VISIBLE DEFERRAL
+=====================================
+
+Do not implement full bulk triage now.
+
+Add a visible informational panel:
+“Bulk Triage — Future”
+
+It should say:
+
+* Not active in this phase.
+* Planned future capabilities:
+
+  * bulk assign owner/team
+  * bulk severity change
+  * bulk internal note
+  * bulk macro insert
+* Will require:
+
+  * permission checks
+  * confirmation
+  * audit summary
+  * batch safety
+* No automation or external messaging is active.
+
+This clears QA ambiguity without adding risky batch behavior.
+
+==================================================
+PART G — DOCUMENTATION
+======================
+
+Keep documentation organization pattern.
+
+Update replit.md concisely:
+
+* Phase 1.1.3C correction summary
+* SLA permission gating rule
+* macro placeholder resolution rule
+* macro management lightweight internal-only rule
+* bulk triage deferred visible panel
+
+Update docs/platform-operations-security-history.md in detail:
+
+* correction details
+* queue center UX improvements
+* SLA gating
+* macro placeholder support
+* macro management
+* bulk triage deferral
+
+Do not make replit.md large again.
+
+==================================================
+NON-REGRESSION
+==============
+
+Do not change:
+
+* escalation operating model
+* request de-escalation workflow
+* permission dependency auto-sync
+* Command Center intelligence
+* Add-on Governance
+* Shipping
+* Store Permissions Matrix
+* tenant provisioning
+* paid override invoice workflow
+* server PII log-scrubbing
+
+==================================================
+ACCEPTANCE CRITERIA
+===================
+
+Acceptance is literal:
+
+1. Support Queue Center feels operationally useful, not just a filter row.
+2. Queue cards show purpose/reason and useful operational signals.
+3. Active queue mode is clear and easy to reset.
+4. Status tab/saved view exits queue mode clearly.
+5. view_support_sla denied hides SLA column in case list.
+6. view_support_sla denied hides SLA pills/panels/details/workload SLA metrics.
+7. view_support_sla granted restores SLA visibility.
+8. Case detail shows clear Queue Memberships section.
+9. Queue membership chips use the same predicates as queue cards.
+10. Macro preview resolves {{token}} placeholders.
+11. Macro preview resolves {token} placeholders.
+12. Inserted macro note uses resolved values.
+13. Missing macro values show Not available or clear unresolved state.
+14. Macro Management panel exists.
+15. Macro create/edit/disable/enable are gated by manage_support_macros.
+16. Macro management actions are audited.
+17. Macros remain internal-only and do not send externally.
+18. Bulk Triage is visibly deferred with explanation.
+19. Existing escalation operating model remains intact.
+20. Existing Command Center intelligence remains intact.
+21. Existing permission dependency auto-sync remains intact.
+22. Existing Add-on Governance remains intact.
+23. Existing Shipping Module remains intact.
+24. Existing Store Permissions Matrix remains intact.
+25. Existing tenant provisioning remains intact.
+26. Server PII logging rules are not regressed.
+27. replit.md remains concise.
+28. docs/platform-operations-security-history.md is updated.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+======================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Root Cause
+3. Support Queue Center UX Improvement
+4. SLA Permission Gating Fix
+5. Case Detail Queue Memberships
+6. Macro Placeholder Resolution Fix
+7. Macro Management Panel
+8. Bulk Triage Deferral
+9. Files Changed
+10. Documentation Updated
+11. Non-Regression Notes

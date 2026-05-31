@@ -78,6 +78,12 @@ export type PlatformAuditAction =
   | 'platform_permission_dependency_reconciled'
   | 'support_case_close_with_active_escalation_warning'
   | 'support_case_assignment_changed'
+  // Phase 1.1.3C correction — lightweight internal macro management.
+  // Internal-only templates; no external send.
+  | 'support_macro_created'
+  | 'support_macro_updated'
+  | 'support_macro_disabled'
+  | 'support_macro_enabled'
   | 'platform_permissions_reset';
 
 export interface PushPlatformAuditInput {
@@ -176,6 +182,11 @@ const DEFAULT_SEVERITY_BY_ACTION: Partial<Record<PlatformAuditAction, PlatformAu
   support_case_deescalation_request_approved: 'notice',
   support_case_deescalation_request_rejected: 'notice',
   platform_permission_dependency_reconciled: 'notice',
+  // Phase 1.1.3C correction — macro management
+  support_macro_created: 'notice',
+  support_macro_updated: 'notice',
+  support_macro_disabled: 'notice',
+  support_macro_enabled: 'notice',
   platform_permissions_reset: 'warning',
 };
 

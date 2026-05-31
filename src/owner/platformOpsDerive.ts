@@ -2910,17 +2910,23 @@ export interface SupportQueueMeta {
   id: SupportQueueId;
   label: string;
   helper: string;
+  /** Why this queue matters operationally (shown on the card and active banner). */
+  purpose: string;
+  /** Deterministic next-best-action hint for cases in this queue. */
+  recommendedAction: string;
+  /** True if the queue is defined by an SLA timer; hidden/locked without view_support_sla. */
+  slaDependent: boolean;
 }
 
 export const SUPPORT_QUEUES: SupportQueueMeta[] = [
-  { id: 'needs_response', label: 'Needs First Response', helper: 'Open cases with no first response recorded yet.' },
-  { id: 'response_overdue', label: 'Response Overdue', helper: 'Open cases past their first-response due time.' },
-  { id: 'resolution_overdue', label: 'Resolution Overdue', helper: 'Active cases past their resolution due time.' },
-  { id: 'resolution_at_risk', label: 'Resolution At Risk', helper: 'Active cases due within the at-risk window.' },
-  { id: 'active_escalations', label: 'Active Escalations', helper: 'Cases with an active escalation lifecycle.' },
-  { id: 'unassigned_open', label: 'Unassigned Open', helper: 'Open cases with no assignee.' },
-  { id: 'waiting_customer', label: 'Waiting on Customer', helper: 'Cases paused pending a customer reply.' },
-  { id: 'critical_open', label: 'Critical Open', helper: 'Urgent-severity cases that are still open.' },
+  { id: 'needs_response', label: 'Needs First Response', helper: 'Open cases with no first response recorded yet.', purpose: 'These customers have not heard back at all yet — first contact protects trust and the response SLA.', recommendedAction: 'Send a first response to start the case clock.', slaDependent: false },
+  { id: 'response_overdue', label: 'Response Overdue', helper: 'Open cases past their first-response due time.', purpose: 'First-response commitment is already breached; these are the most time-sensitive trust risks.', recommendedAction: 'Respond immediately and note the delay.', slaDependent: true },
+  { id: 'resolution_overdue', label: 'Resolution Overdue', helper: 'Active cases past their resolution due time.', purpose: 'Resolution SLA is breached — these need re-prioritisation or escalation.', recommendedAction: 'Escalate or re-prioritise to close out.', slaDependent: true },
+  { id: 'resolution_at_risk', label: 'Resolution At Risk', helper: 'Active cases due within the at-risk window.', purpose: 'Resolution deadline is approaching; acting now avoids a breach.', recommendedAction: 'Progress the case before the window closes.', slaDependent: true },
+  { id: 'active_escalations', label: 'Active Escalations', helper: 'Cases with an active escalation lifecycle.', purpose: 'Escalated work needs senior ownership and acknowledgement.', recommendedAction: 'Acknowledge and assign an escalation owner.', slaDependent: false },
+  { id: 'unassigned_open', label: 'Unassigned Open', helper: 'Open cases with no assignee.', purpose: 'Nobody owns these yet — they can silently stall.', recommendedAction: 'Assign an owner so the case is not unattended.', slaDependent: false },
+  { id: 'waiting_customer', label: 'Waiting on Customer', helper: 'Cases paused pending a customer reply.', purpose: 'Paused on the customer; follow up if the reply window lapses.', recommendedAction: 'Follow up if the customer has gone quiet.', slaDependent: false },
+  { id: 'critical_open', label: 'Critical Open', helper: 'Urgent-severity cases that are still open.', purpose: 'Highest-severity open work — disproportionate business impact.', recommendedAction: 'Prioritise above normal-severity work.', slaDependent: false },
 ];
 
 const isOpenGroupCase = (c: SupportCaseRecord): boolean =>
@@ -2953,11 +2959,33 @@ export function matchesSupportQueue(
   }
 }
 
+export interface SupportQueueTopCase {
+  id: string;
+  subject: string;
+  severity: SupportCaseSeverity;
+  ageDays: number;
+}
+
 export interface SupportQueueSummary extends SupportQueueMeta {
   count: number;
   urgentCount: number;
   oldestDays: number | null;
+  /** Count of matched cases per severity (the "severity mix"). */
+  severityMix: Record<SupportCaseSeverity, number>;
+  /** Matched cases with no assignee (owner/team split signal). */
+  unassignedCount: number;
+  /** Matched cases that already have an owner. */
+  assignedCount: number;
+  /** SLA pressure inside this queue (gated behind view_support_sla in the UI). */
+  slaPressure: { overdue: number; atRisk: number };
+  /** Short human reason describing the dominant pressure in the queue. */
+  topReason: string;
+  /** Up to 3 oldest matched cases for an at-a-glance preview. */
+  topCases: SupportQueueTopCase[];
 }
+
+const EMPTY_SEVERITY_MIX = (): Record<SupportCaseSeverity, number> =>
+  ({ urgent: 0, high: 0, normal: 0, low: 0 });
 
 export function deriveSupportQueues(
   cases: SupportCaseRecord[],
@@ -2965,20 +2993,64 @@ export function deriveSupportQueues(
 ): SupportQueueSummary[] {
   return SUPPORT_QUEUES.map(q => {
     const matched = cases.filter(c => matchesSupportQueue(c, q.id, now));
-    let oldestDays: number | null = null;
-    for (const c of matched) {
+    const ageDays = (c: SupportCaseRecord): number => {
       const opened = new Date(c.openedAt);
-      if (isNaN(opened.getTime())) continue;
-      const days = Math.floor((now.getTime() - opened.getTime()) / 864e5);
+      if (isNaN(opened.getTime())) return 0;
+      return Math.max(0, Math.floor((now.getTime() - opened.getTime()) / 864e5));
+    };
+    let oldestDays: number | null = null;
+    const severityMix = EMPTY_SEVERITY_MIX();
+    let unassignedCount = 0;
+    let overdue = 0;
+    let atRisk = 0;
+    for (const c of matched) {
+      const days = ageDays(c);
       if (oldestDays === null || days > oldestDays) oldestDays = days;
+      severityMix[c.severity] += 1;
+      if (!(c.assignee && c.assignee.trim())) unassignedCount += 1;
+      const sla = deriveSlaStatus(c, now).status;
+      if (sla === 'overdue') overdue += 1;
+      else if (sla === 'at_risk') atRisk += 1;
     }
+    const topCases: SupportQueueTopCase[] = [...matched]
+      .sort((a, b) => ageDays(b) - ageDays(a))
+      .slice(0, 3)
+      .map(c => ({ id: c.id, subject: c.subject, severity: c.severity, ageDays: ageDays(c) }));
+
+    let topReason = q.purpose;
+    if (matched.length > 0) {
+      if (overdue > 0) topReason = `${overdue} SLA-breached`;
+      else if (severityMix.urgent > 0) topReason = `${severityMix.urgent} urgent`;
+      else if (atRisk > 0) topReason = `${atRisk} SLA at risk`;
+      else if (unassignedCount > 0) topReason = `${unassignedCount} unassigned`;
+      else if (oldestDays !== null) topReason = `oldest ${oldestDays}d`;
+    }
+
     return {
       ...q,
       count: matched.length,
-      urgentCount: matched.filter(c => c.severity === 'urgent').length,
+      urgentCount: severityMix.urgent,
       oldestDays,
+      severityMix,
+      unassignedCount,
+      assignedCount: matched.length - unassignedCount,
+      slaPressure: { overdue, atRisk },
+      topReason,
+      topCases,
     };
   });
+}
+
+// --- Per-case queue membership (Case Detail "Queue Memberships") -----------
+// Returns the queue metas a case currently belongs to, using the SAME
+// `matchesSupportQueue` predicates that power the Queue Center counts/lists.
+// This guarantees a case's membership chips cannot drift from the queue cards.
+
+export function deriveCaseQueueMemberships(
+  c: SupportCaseRecord,
+  now: Date = new Date()
+): SupportQueueMeta[] {
+  return SUPPORT_QUEUES.filter(q => matchesSupportQueue(c, q.id, now));
 }
 
 // --- Per-case operations signal (Case Detail Operations panel) -------------
@@ -3128,8 +3200,13 @@ export const MACRO_PLACEHOLDERS: MacroPlaceholderMeta[] = [
   { key: 'case_subject', label: 'Case subject', description: 'The case subject line.' },
   { key: 'severity', label: 'Severity', description: 'Current case severity.' },
   { key: 'status', label: 'Status', description: 'Current case status.' },
+  { key: 'assigned_owner', label: 'Assigned owner', description: 'Current case assignee (or Unassigned).' },
+  { key: 'assigned_team', label: 'Assigned team', description: 'Team handling the case.' },
+  { key: 'sla_status', label: 'SLA status', description: 'Current resolution SLA status.' },
+  { key: 'escalation_level', label: 'Escalation level', description: 'Current escalation lifecycle state.' },
   { key: 'operator_name', label: 'Operator name', description: 'The signed-in operator.' },
-  { key: 'date', label: 'Today\u2019s date', description: 'Current date (ISO).' },
+  { key: 'date', label: 'Today\u2019s date', description: 'Current date.' },
+  { key: 'current_date', label: 'Current date', description: 'Current date (alias of date).' },
 ];
 
 export type MacroPlaceholderCtx = Partial<Record<string, string | null | undefined>>;
@@ -3140,21 +3217,32 @@ export interface ResolvedMacro {
   unresolved: string[];
 }
 
+// Placeholder substitution for support macros.
+// - Supports BOTH `{{token}}` (double-brace) and `{token}` (single-brace) forms.
+// - A resolved value is substituted inline.
+// - A missing value is rendered as "Not available" (never left as raw template
+//   syntax) and reported in `unresolved` so the UI can flag it.
+// Used for BOTH the live preview and the text that is actually inserted as the
+// internal note, so the operator never inserts unresolved tokens.
+const MACRO_TOKEN_RE = /\{\{\s*([a-z0-9_]+)\s*\}\}|\{\s*([a-z0-9_]+)\s*\}/gi;
+export const MACRO_UNRESOLVED_TEXT = 'Not available';
+
 export function resolveMacroPlaceholders(
   body: string,
   ctx: MacroPlaceholderCtx
 ): ResolvedMacro {
   const resolved = new Set<string>();
   const unresolved = new Set<string>();
-  const text = body.replace(/\{\{\s*([a-z0-9_]+)\s*\}\}/gi, (_match, rawKey: string) => {
-    const key = rawKey.toLowerCase();
-    const value = ctx[key];
+  const text = body.replace(MACRO_TOKEN_RE, (_match, dbl: string | undefined, sgl: string | undefined) => {
+    const rawKey = (dbl ?? sgl ?? '').toLowerCase();
+    if (!rawKey) return _match;
+    const value = ctx[rawKey];
     if (value !== undefined && value !== null && String(value).trim() !== '') {
-      resolved.add(key);
+      resolved.add(rawKey);
       return String(value);
     }
-    unresolved.add(key);
-    return `{{${key}}}`;
+    unresolved.add(rawKey);
+    return MACRO_UNRESOLVED_TEXT;
   });
   return {
     text,

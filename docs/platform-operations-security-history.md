@@ -187,3 +187,30 @@ A deterministic maturity pass over the owner Support Tools workspace. Everything
 -   **Editable SLA policy authoring** — the SLA Policy Preview is read-only this phase.
 -   **Safe bulk triage** — multi-select bulk status/assignment actions are deferred.
 -   These remain future work; nothing in this phase fakes them.
+
+## Phase 1.1.3C — Support Queue / SLA / Macro Maturity — Focused Correction
+
+A QA-driven correction pass over the same Support Tools workspace. It addressed feedback that the Queue Center cards were low-value, SLA data leaked when `view_support_sla` was denied, queue membership was invisible at the case level, macros inserted raw `{{token}}` text, there was no way to manage templates, and bulk triage looked clickable but did nothing. Still deterministic, rule-based, internal-only — no AI, no external send, no Firestore realtime, no server RBAC.
+
+### Helpers / data / audit
+
+-   **`resolveMacroPlaceholders`** now resolves BOTH `{{token}}` and single-brace `{token}` forms. Any token with no value resolves to a single shared sentinel (`MACRO_UNRESOLVED_TEXT` = "Not available") and is reported in `unresolved[]` so the preview can flag it.
+-   **`MACRO_PLACEHOLDERS`** gained `assigned_owner`, `assigned_team`, `sla_status`, `escalation_level`, and `current_date` (alias of `date`). The meta shape uses `key` / `label` / `description`.
+-   **`SUPPORT_QUEUES`** metadata gained `purpose` (why the queue matters operationally), `recommendedAction` (the next best action), and `slaDependent` (whether the queue is defined by SLA timing). SLA-dependent queues are gated by `view_support_sla` in the UI.
+-   **`deriveSupportQueues`** summaries gained `severityMix`, `unassignedCount` / `assignedCount`, `slaPressure`, `topReason`, `topCases`, and `oldestCaseId` so each card can show real triage substance.
+-   **`deriveCaseQueueMemberships(c, now)`** returns the `SupportQueueMeta[]` a single case belongs to, computed via the SAME `matchesSupportQueue` predicate as the Queue Center — so a case's chips can never drift from the queue counts.
+-   **Audit** gained `support_macro_created` / `support_macro_updated` / `support_macro_disabled` / `support_macro_enabled` (all `notice` severity).
+-   **`SupportMacro`** gained optional `active?` (disabled macros are hidden from the insert picker but kept in the management library) and `origin?` (`seed` vs `custom`). A single-brace demonstration macro (`macro_internal_handoff`) was added.
+
+### UI surfaces (`SupportToolsPage.tsx`)
+
+-   **Part A — Queue Center cards** rewritten (responsive grid) to show purpose, top reason, severity mix, owner/team split, oldest case, SLA pressure (gated), a top 1–3 case preview, the recommended action, and an Open-queue affordance. SLA-dependent cards render a locked state when `view_support_sla` is denied. An unmistakable **Queue Mode** banner (purpose + recommended action + Clear) appears whenever a queue is active; status tabs and saved views still exit queue mode.
+-   **Part B — SLA gating** is handler-level, not CSS: the case-table SLA column header and `<td>` are fully omitted (not blanked) when denied, the empty-state `colSpan` adjusts (7/6), and the Workload "Overdue SLA" header + cell, SLA Policy preview, queue cards, membership chips, and the `sla_status` macro token are all suppressed without the permission.
+-   **Part C — Queue Memberships** section in the case-detail Operations area renders `deriveCaseQueueMemberships` as chips (same rules as Queue Center), filters out SLA-dependent queues when denied, and shows a truthful empty state.
+-   **Part D — Macro resolution**: a single `buildMacroCtx(case)` builds the placeholder context used by BOTH the preview and the actually-inserted note, so inserted notes contain resolved values (and "Not available" for blanks) instead of raw tokens. The composer is fed only `active !== false` macros from state.
+-   **Part E — Macro Management** modal (Templates button in the Queue Center toolbar) gated by `manage_support_macros`: create / edit / disable / enable with `localStorage` persistence (`support_macros_v1`, seeds merged with stored) and an audit row per mutation. Operators with only `use_support_macro` get a read-only library view.
+-   **Part F — Bulk Triage** is surfaced as an explicit "Future · not yet available" informational panel with a truth label — no checkboxes, no batch mutation, no hidden behaviour.
+
+### Still deferred (unchanged)
+
+-   Editable SLA policy authoring and functional bulk triage remain future work; the correction makes the deferral visible rather than faking the capability.

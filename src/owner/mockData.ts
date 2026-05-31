@@ -902,6 +902,13 @@ export interface SupportMacro {
   // filled from case context. All optional to keep existing seeds valid.
   purpose?: string;
   placeholders?: string[];
+  // Phase 1.1.3C correction — lightweight macro management. `active` defaults
+  // to true; a disabled macro is hidden from the insert picker but remains in
+  // the management library. `origin` distinguishes seeded vs operator-created
+  // templates (custom ones persist in session/local storage). All optional so
+  // existing seeds remain valid and internal-only.
+  active?: boolean;
+  origin?: 'seed' | 'custom';
 }
 
 export const supportMacros: SupportMacro[] = [
@@ -976,6 +983,17 @@ export const supportMacros: SupportMacro[] = [
     placeholders: ['tenant_name', 'case_id', 'date'],
     body:
       'Hi {{tenant_name}} team — case {{case_id}} is now resolved as of {{date}}. If everything looks good on your side we will close it out. Reply here within a few days if the issue resurfaces and we will reopen it.',
+  },
+  {
+    id: 'macro_internal_handoff',
+    label: 'Internal ownership handoff note',
+    category: 'general',
+    purpose: 'Record an internal handoff with current owner, team, SLA and escalation context.',
+    // Demonstrates single-brace {token} support alongside {{token}} and the
+    // newer context placeholders (owner/team/sla/escalation/current_date).
+    placeholders: ['case_id', 'assigned_owner', 'assigned_team', 'sla_status', 'escalation_level', 'current_date'],
+    body:
+      'Internal handoff for case {case_id} on {current_date}. Current owner: {{assigned_owner}}, team: {{assigned_team}}. Resolution SLA: {sla_status}. Escalation: {escalation_level}. Picking this up — will continue from the latest timeline note.',
   },
 ];
 
