@@ -1,0 +1,815 @@
+Platform Operations & Security — Phase 1.1.3B Advanced Command Center Intelligence
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is Phase 1.1.3B of the Platform Operations & Security roadmap.
+
+Implement only:
+
+* Advanced Command Center intelligence
+* deeper operational signal synthesis
+* richer Command Center widgets
+* clearer tenant risk intelligence
+* stronger “what changed / what is getting worse” insight
+* smarter operational drilldowns
+* deterministic rule-based intelligence from existing app/session data
+* future-ready structure for later Predictive / AI Operations
+
+Do not implement:
+
+* Phase 1.1.3C Support Queue / SLA / Macro Maturity
+* Phase 1.1.3D Audit Investigation Center
+* Phase 1.2 Domains + Platform Settings Maturity
+* Phase 1.3 Platform Team Governance
+* Phase 1.4 Automation + Alerts
+* Phase 2 Real Integrations
+* Phase 3 Compliance + Evidence
+* Phase 4 Predictive / AI Operations
+* real AI/ML
+* fake AI
+* real infrastructure uptime monitoring
+* real DNS / SSL checks
+* real SSO / SCIM
+* Slack / Teams / PagerDuty / email / SMS integrations
+* external notification delivery
+* automated remediation
+* real Firestore realtime listeners unless already safely present
+
+This phase must make the Command Center feel like the operating brain of the platform while remaining truthful about what data is real and what is derived from current app/session state.
+
+==================================================
+WORKING STYLE — THINK STEP BY STEP
+==================================
+
+Before answering, implementing, correcting, or fixing anything, think step by step.
+
+Do not rush to code.
+
+First:
+
+1. Inspect the current Command Center implementation.
+2. Inspect platformOpsDerive.ts and existing shared derivation helpers.
+3. Inspect Support Tools, Audit & Security, Domains, Tenant 360, Add-on Governance, and existing mock/session data sources.
+4. Identify which signals are real in the current app.
+5. Identify which signals are derived/rule-based.
+6. Identify which signals must be clearly labeled as future or not active.
+7. Design the Command Center intelligence model.
+8. Implement slowly with reusable helpers.
+9. Verify no accepted workstream regresses.
+
+==================================================
+ROLE STACK — ADD TO PROJECT KNOWLEDGE / SKILLS
+==============================================
+
+Before implementation, add this workstream role model to project knowledge / skills and act on it.
+
+Do not treat these roles as decorative text. Use them to guide product design, data derivation, UX, safety, auditability, and QA.
+
+Primary roles:
+
+* Command Center Analyst
+* Command and Control (C2) Specialist
+* Intelligence Operations Officer
+* Senior Platform Operations Architect
+* Senior SaaS Command Center Architect
+* Senior Multi-Tenant Risk Visualization Architect
+* Senior Support Operations Architect
+* Senior Audit & Security Engineer
+* Senior Incident / Escalation Workflow Architect
+* Senior Enterprise Admin Console UX Architect
+* Senior React/TypeScript Engineer
+* Senior Security-by-Default Architect
+* QA Gatekeeper
+* Systems Thinker
+* Side Auditor
+
+Specialized responsibilities to apply:
+
+Command Center Analyst:
+
+* synthesize operational signals
+* identify what needs attention now
+* compare current state against prior state
+* surface trends and anomalies
+* translate raw events into actionable operational summaries
+
+Command and Control (C2) Specialist:
+
+* coordinate response visibility
+* organize incidents/escalations/support/domain/commercial signals into clear priority
+* keep leadership-level operational awareness
+* ensure drilldowns connect to the correct execution surfaces
+
+Intelligence Operations Officer:
+
+* evaluate incoming signals
+* detect patterns and emerging risks
+* classify threats, anomalies, and operational concern levels
+* produce useful intelligence summaries without overstating confidence
+
+Enterprise / Corporate focus:
+
+* business continuity
+* IT operations
+* corporate risk
+* SaaS tenant health
+* customer support pressure
+* billing/commercial blockers
+* supply-chain/shipping operational signals where already available
+
+Defense/government-style concepts may inspire structure, but do not add military/weapon/surveillance concepts. This is an enterprise SaaS operations command center.
+
+==================================================
+BENCHMARK / COMPETITOR RESEARCH REQUIREMENT
+===========================================
+
+Before coding, perform a short benchmark review using public patterns if browsing is available.
+
+Review patterns from:
+
+* Datadog dashboards, service maps, anomaly/Watchdog patterns
+* PagerDuty AIOps / incident response / event intelligence
+* ServiceNow ITOM AIOps / Service Operations Workspace
+* Splunk ITSI Episode Review / notable event grouping
+* Jira Service Management operations queues if useful
+* Freshservice / Freshdesk support operations if useful
+* Vercel / Shopify / enterprise SaaS admin consoles if useful
+
+Do not copy proprietary code.
+
+Extract product patterns only:
+
+* operational signal aggregation
+* anomaly / change indicators
+* risk heatmaps
+* event correlation
+* noise reduction
+* incident/attention queues
+* drilldown workflows
+* executive summary panels
+* confidence / explanation labels
+* triage and response coordination
+
+If browsing is unavailable:
+
+* say browsing unavailable
+* proceed using SaaS/ITSM/AIOps best-practice patterns
+* document assumptions.
+
+Update replit.md with a concise:
+“Phase 1.1.3B Benchmark Patterns Considered” note.
+
+==================================================
+CURRENT ACCEPTED STATE
+======================
+
+Accepted and locked:
+
+* Phase 1.1 Platform Operations & Security Foundation
+* Phase 1.1.1 Interactive Command Center UX + Operational Intelligence Polish
+* Phase 1.1.2 Competitive Ops Console Maturity Review
+* Phase 1.1.3A Operating Model + Permission-Aware Escalation
+* Platform Team Permissions Matrix corrections
+* Effective permission resolver hardening
+* Permission dependency auto-sync
+* Request De-escalation pending review workflow
+* Escalation signal consistency
+* Final escalation badge / Needs Attention routing correction
+
+Do not reopen those corrections.
+
+Phase 1.1.3B should build on them.
+
+==================================================
+LOCKED / DO-NOT-TOUCH AREAS
+===========================
+
+Do not modify or regress:
+
+* Shipping Module / Shipping Center behavior
+* Add-on Governance rules
+* Plans & Features Matrix source-of-truth behavior
+* Tenant Features commercial-entitlement rules
+* Store Permissions Matrix
+* Platform Team Permissions Matrix
+* Effective permission resolver
+* Permission dependency auto-sync
+* Request De-escalation workflow
+* Escalation operating model
+* POS
+* Repairs
+* Inventory
+* Customers
+* Invoices
+* Services
+* tenant provisioning behavior
+* paid override invoice workflow
+* server PII log-scrubbing
+* real DNS / SSL truth labels
+* real SSO / SCIM truth labels
+* Platform Settings truth labels
+* Team Management directory-only truth labels
+
+Any interaction with those areas must be read-only unless explicitly scoped as a Command Center signal.
+
+==================================================
+PRIMARY GOAL
+============
+
+Transform Command Center from a good dashboard into a more advanced operational intelligence center.
+
+The System Owner should quickly understand:
+
+* What needs attention now?
+* What changed since last review?
+* What is getting worse?
+* Which tenant is most at risk?
+* Which risk signals are driving the score?
+* Which issues are correlated?
+* Which cases/escalations/audit events/domain/commercial items are related?
+* What should be reviewed next?
+* What is noise vs. real priority?
+* Which signals are verified vs. inferred?
+* What is rule-based now vs. future AI later?
+
+Use deterministic, transparent, rule-based intelligence.
+
+Do not implement real AI/ML in this phase.
+Do not label anything as AI-generated.
+Use terms like:
+
+* Rule-based insight
+* Derived signal
+* Confidence
+* Explanation
+* Source
+* Last updated
+* Current app/session state
+
+==================================================
+PART A — COMMAND CENTER INTELLIGENCE DATA MODEL
+===============================================
+
+Create or extend shared derivation helpers in platformOpsDerive.ts.
+
+Recommended concepts:
+
+* CommandSignal
+* IntelligenceInsight
+* TenantHealthSignal
+* OperationalTrend
+* CorrelatedRiskGroup
+* AttentionPriority
+* SignalConfidence
+* SignalSource
+* SignalFreshness
+
+All should be derived from existing available data:
+
+* support cases
+* escalations
+* SLA status
+* audit/security events
+* domain records
+* add-on/commercial blockers if safely available
+* tenant plan/status
+* shipping signals if already safely exposed
+* platform team/security notes if already available
+
+Use optional fields and safe defaults.
+Do not break existing data.
+
+Each insight should include:
+
+* id
+* title
+* severity / priority
+* category
+* tenant if applicable
+* related entity ids
+* reason
+* evidence/source
+* confidence label:
+
+  * High
+  * Medium
+  * Low
+* recommended action label
+* click target
+* truth label:
+
+  * “Rule-based from current app/session data”
+
+==================================================
+PART B — MISSION CONTROL INTELLIGENCE HEADER
+============================================
+
+Upgrade the Mission Control header.
+
+Required:
+
+* Platform Operational State:
+
+  * Healthy
+  * Watch
+  * At Risk
+  * Critical
+* “Why this state?” explanation
+* “Top driver” indicator
+* “Changed since last review” summary
+* last refreshed timestamp
+* current time range
+* current focus mode
+* active signal count
+* confidence label
+* truthful limitation label:
+  “Operational intelligence is rule-based from current app/session data. It is not live infrastructure uptime or AI prediction.”
+
+Add:
+
+* “What changed” mini-summary:
+
+  * new escalations
+  * newly overdue SLA
+  * newly failed/pending domain
+  * new high-risk audit event
+  * commercial/add-on blocker if available
+* If no historical snapshot exists, show:
+  “No previous snapshot available — current state only.”
+
+Use session/local storage snapshot if practical:
+
+* store last Command Center snapshot
+* compare current derived signals to previous snapshot
+* do not overbuild
+
+==================================================
+PART C — OPERATIONAL INTELLIGENCE RIBBON
+========================================
+
+Add or improve an intelligence ribbon below the header.
+
+It should show 4–6 compact signal cards, such as:
+
+* Highest Risk Tenant
+* Fastest Worsening Tenant
+* Active Escalations
+* SLA Pressure
+* High-Risk Audit Events
+* Domain Issues
+* Commercial Blockers
+* Unassigned Ownership
+
+Each card must show:
+
+* count or score
+* short reason
+* trend/changed indicator where available
+* click-through
+* confidence/source label
+
+Do not show empty meaningless cards.
+If no data, show truthful empty state.
+
+==================================================
+PART D — TENANT RISK HEATMAP / PRIORITY MATRIX
+==============================================
+
+Add a tenant risk heatmap or priority matrix.
+
+Required:
+
+* list tenants by risk tier:
+
+  * Critical
+  * At Risk
+  * Watch
+  * Healthy
+* risk score should be explainable
+* show top reasons:
+
+  * active escalation
+  * unacknowledged escalation
+  * overdue SLA
+  * critical support case
+  * high-risk audit event
+  * failed/pending domain
+  * billing/commercial blocker if available
+  * add-on readiness/blocker if available
+* each tenant row/card should click into Tenant 360
+* Tenant 360 should show the same risk reasons
+
+Avoid fake precision.
+Use simple scores such as 0–100 only if explained.
+Otherwise use tier + reasons.
+
+==================================================
+PART E — CORRELATED SIGNALS / OPERATIONS EPISODES
+=================================================
+
+Add a rule-based “Correlated Signals” or “Operational Episodes” section.
+
+This should group related signals when they share:
+
+* same tenant
+* same case
+* same domain
+* same severity
+* same audit actor
+* same time window
+* same operational category
+
+Examples:
+
+* Tenant has active escalation + overdue SLA + recent critical audit event.
+* Domain failed + support case open for same tenant.
+* Commercial blocker + tenant support case.
+* Repeated high-risk audit events for same actor/tenant.
+* Escalated support case + unassigned owner.
+
+Each group should show:
+
+* episode title
+* related signals count
+* severity
+* tenant/entity
+* why grouped
+* recommended next action
+* drilldown
+
+Truth label:
+“Rule-based correlation; not AI prediction.”
+
+Do not create fake incident records.
+This is a Command Center intelligence grouping only.
+
+==================================================
+PART F — WHAT CHANGED / WHAT IS GETTING WORSE
+=============================================
+
+Add a “What Changed” or “Signal Delta” panel.
+
+Required:
+
+* compare current signals to previous stored snapshot if practical
+* show:
+
+  * newly active escalation
+  * newly overdue SLA
+  * newly high-risk audit event
+  * newly failed/pending domain
+  * newly unassigned escalation
+  * tenant risk tier increased
+* show “No previous snapshot yet” if no baseline
+
+Add “Getting Worse” signals:
+
+* tenant moved Healthy → Watch / Watch → At Risk / At Risk → Critical
+* SLA went from at-risk to overdue
+* case severity increased
+* escalation became unacknowledged/overdue
+* audit severity increased
+
+Do not invent data.
+Only show deltas from available snapshots.
+
+==================================================
+PART G — NEXT BEST ACTIONS UPGRADE
+==================================
+
+Improve Next Best Actions into a stronger rule-based operational action queue.
+
+Each action should show:
+
+* priority
+* action title
+* reason
+* source evidence
+* affected tenant/entity
+* owner/team if available
+* time sensitivity
+* target surface
+* confidence
+* action type:
+
+  * Review
+  * Assign
+  * Acknowledge
+  * Resolve
+  * Investigate
+  * Configure
+  * Follow up
+
+Add sorting:
+
+* Critical first
+* overdue/unacknowledged next
+* unassigned next
+* high-risk audit next
+* domain/commercial blockers next
+
+Add filters:
+
+* All
+* Critical
+* Escalations
+* SLA
+* Audit/Security
+* Domains
+* Commercial
+* Tenant Risk
+
+Do not automate actions.
+Click-through/review only.
+
+==================================================
+PART H — COMMAND CENTER DRILLDOWN DRAWERS
+=========================================
+
+Improve drilldown behavior.
+
+When clicking a signal, open a focused drawer/panel when practical:
+
+* Active Escalations
+* SLA Pressure
+* High-Risk Audit Events
+* Domain Issues
+* Tenant Risk Details
+* Correlated Episode
+* Commercial Blockers
+
+Each drawer should:
+
+* show exact records behind the count
+* show why each record is included
+* link to the execution surface:
+
+  * Support Tools case detail
+  * Audit & Security event detail
+  * Domains detail
+  * Tenant 360
+  * Plans/Add-on page if allowed
+* avoid invisible filters
+
+This builds on the recently accepted “no invisible Needs Attention filter” rule.
+
+==================================================
+PART I — FOCUS MODES INTELLIGENCE
+=================================
+
+Improve focus modes:
+
+Normal:
+
+* full operational overview
+
+Watch:
+
+* only Watch / At Risk / warning / at-risk SLA / unassigned / pending domain signals emphasized
+
+Incident Review:
+
+* critical / escalated / overdue / high-risk / failed / active incident-like signals emphasized
+
+Each mode should:
+
+* visibly change intelligence sections
+* explain what it is emphasizing
+* hide low-value noise where practical
+* show empty state if no matching signals
+
+Do not implement real incident bridge.
+
+==================================================
+PART J — TENANT 360 INTELLIGENCE ENHANCEMENT
+============================================
+
+Tenant 360 should become more intelligence-oriented.
+
+Add/ensure:
+
+* tenant risk tier
+* risk reasons
+* active escalation count/list
+* SLA pressure
+* support case health
+* recent audit/security events
+* domain status
+* commercial/add-on blockers if available
+* last signal update
+* “Recommended review action”
+* click-through to execution surfaces
+
+Do not modify full Tenant Detail page.
+This is Command Center Tenant 360 drawer only.
+
+==================================================
+PART K — INTELLIGENCE QUALITY / TRUST LABELS
+============================================
+
+Every derived insight should be explainable.
+
+Add:
+
+* “Why am I seeing this?”
+* “Source”
+* “Confidence”
+* “Last updated”
+* “Rule-based from current app/session data”
+
+Avoid:
+
+* “AI says”
+* “prediction”
+* “real-time infrastructure”
+* “automatic remediation”
+* “live backend”
+  unless those are truly implemented.
+
+Recommended confidence logic:
+High:
+
+* direct source record, clear severity/status
+  Medium:
+* multiple related app/session signals
+  Low:
+* incomplete data or inferred from partial context
+
+==================================================
+PART L — AUDITABILITY
+=====================
+
+Audit meaningful Command Center actions only.
+
+Audit:
+
+* intelligence drawer opened
+* Command Center snapshot saved/refreshed if state-changing
+* CSV/export if any added
+* Next Best Action clicked if already pattern exists
+* Tenant 360 opened
+* correlated episode opened
+
+Do not audit passive hover.
+Do not create audit spam.
+Do not log PII to server logs.
+
+==================================================
+PART M — PERMISSIONS
+====================
+
+Respect existing Global Permissions Matrix.
+
+Required:
+
+* view_command_center controls page access.
+* view_operational_pulse controls pulse/ribbon.
+* view_needs_attention controls Needs Attention.
+* view_next_best_actions controls NBA list.
+* act_on_nba_recommendations controls NBA actions.
+* view_tenant_360 controls Tenant 360.
+* target page permission controls drilldown execution link.
+* if user lacks target permission, show disabled link or hide action with minimal explanation.
+
+Do not change permission resolver unless a small non-regression fix is required.
+Do not reopen broad permission architecture.
+
+==================================================
+PART N — DOCUMENTATION
+======================
+
+Update replit.md with:
+
+* Phase 1.1.3B Advanced Command Center Intelligence
+* benchmark patterns considered
+* rule-based intelligence model
+* data sources
+* trust labels
+* operational intelligence ribbon
+* tenant risk heatmap/matrix
+* correlated signals/episodes
+* what changed / getting worse panel
+* NBA upgrade
+* drilldown drawer pattern
+* focus mode intelligence
+* Tenant 360 intelligence
+* limitations:
+
+  * not AI
+  * not live infrastructure uptime
+  * not Firestore real-time
+  * no automated remediation
+* future path:
+
+  * Phase 1.1.3C Support Queue / SLA / Macro Maturity
+  * Phase 1.1.3D Audit Investigation Center
+  * Phase 4 Predictive / AI Operations
+
+Do not rewrite the roadmap.
+
+==================================================
+OUT OF SCOPE
+============
+
+Do NOT implement:
+
+* AI/ML prediction
+* fake AI assistant
+* autonomous remediation
+* real external integrations
+* real notifications
+* real incident bridge
+* new backend services
+* Firestore realtime migration
+* Phase 1.1.3C / 1.1.3D
+* Phase 1.2+
+* tenant provisioning redesign
+* support SLA policy overhaul
+* audit investigation graph overhaul
+
+==================================================
+ACCEPTANCE CRITERIA
+===================
+
+Acceptance is literal:
+
+1. Command Center header shows stronger operational intelligence state.
+2. Header includes explanation of top state driver.
+3. Header shows changed-since-last-review or clear no-baseline state.
+4. Operational intelligence ribbon exists and is useful.
+5. Ribbon items are clickable and explain their counts.
+6. Tenant risk heatmap/matrix exists.
+7. Tenant risk reasons are explainable.
+8. Tenant risk click-through opens Tenant 360.
+9. Correlated Signals / Operational Episodes section exists.
+10. Correlated groups explain why records are grouped.
+11. What Changed / Getting Worse panel exists or shows truthful no-baseline state.
+12. Next Best Actions are upgraded with priority, reason, source, confidence, and filters.
+13. NBA actions still respect permission dependency model.
+14. Drilldown drawers show exact records behind counts.
+15. Drilldown links go to correct execution surfaces.
+16. No invisible filters are introduced.
+17. Focus modes visibly change intelligence context.
+18. Tenant 360 shows intelligence-enhanced risk/support/audit/domain/commercial context.
+19. Derived insights show source/confidence/truth labels.
+20. Command Center actions are audited without spam.
+21. Existing escalation operating model remains intact.
+22. Existing permission dependency auto-sync remains intact.
+23. Existing Add-on Governance remains intact.
+24. Existing Shipping Module remains intact.
+25. Existing Store Permissions Matrix remains intact.
+26. Existing tenant provisioning remains intact.
+27. Server PII logging rules are not regressed.
+28. Future phases remain documented but not implemented.
+29. replit.md is updated.
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+=========================
+
+Follow this order:
+
+1. Think step by step.
+2. Benchmark/review available references.
+3. Inspect current CommandCenterPage and platformOpsDerive.
+4. Define shared intelligence data structures/helpers.
+5. Build intelligence derivations from existing data only.
+6. Upgrade Mission Control header.
+7. Add intelligence ribbon.
+8. Add tenant risk heatmap/matrix.
+9. Add correlated signals/episodes.
+10. Add what-changed/getting-worse panel.
+11. Upgrade Next Best Actions.
+12. Add/upgrade drilldown drawers.
+13. Improve focus mode intelligence.
+14. Improve Tenant 360 intelligence.
+15. Add trust labels.
+16. Respect existing permissions.
+17. Add meaningful audit events only.
+18. Update replit.md.
+19. Run typecheck/smoke tests.
+20. Provide final implementation report.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+======================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Benchmark / Patterns Considered
+3. Command Center Intelligence Model
+4. Mission Control Header Improvements
+5. Intelligence Ribbon
+6. Tenant Risk Heatmap / Matrix
+7. Correlated Signals / Operational Episodes
+8. What Changed / Getting Worse
+9. Next Best Actions Upgrade
+10. Drilldown Drawers
+11. Focus Modes + Tenant 360
+12. Permissions / Auditability
+13. Files Changed
+14. Documentation Updated
+15. Non-Regression Notes

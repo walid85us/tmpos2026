@@ -61,6 +61,9 @@ export type PlatformAuditAction =
   | 'command_center_tenant360_opened'
   // Phase 1.1.1 UX Correction — interactive pulse filter
   | 'command_center_pulse_filter_applied'
+  // Phase 1.1.3B — advanced command center intelligence.
+  | 'command_center_snapshot_saved'
+  | 'command_center_intelligence_drawer_opened'
   // Phase 1.1.3A — Operating Model + Permission-Aware Escalation.
   // All actions are advisory governance only — no real notifications,
   // no real RBAC enforcement, no on-call routing.
@@ -158,6 +161,9 @@ const DEFAULT_SEVERITY_BY_ACTION: Partial<Record<PlatformAuditAction, PlatformAu
   command_center_time_range_changed: 'info',
   command_center_focus_mode_changed: 'info',
   command_center_tenant360_opened: 'info',
+  // Phase 1.1.3B
+  command_center_snapshot_saved: 'info',
+  command_center_intelligence_drawer_opened: 'info',
   // Phase 1.1.3A
   support_case_escalation_assigned: 'notice',
   support_case_escalation_reassigned: 'notice',

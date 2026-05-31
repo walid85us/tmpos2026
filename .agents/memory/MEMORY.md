@@ -1,0 +1,1 @@
+- [Command Center intelligence reconciliation](command-center-intelligence.md) — ribbon card count MUST match its drawer's kind filter exactly; tenant_risk drawer is synthesized from tenantHealth; bind UI to CommandSignal.reason/.category and RibbonCard.reason.

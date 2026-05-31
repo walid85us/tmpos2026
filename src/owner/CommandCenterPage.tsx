@@ -26,6 +26,7 @@ import {
   tenants,
   tenantDomains,
   supportCases as supportCasesSeed,
+  billingTransactions,
   type SupportCaseRecord,
 } from './mockData';
 import {
@@ -81,6 +82,33 @@ import {
   ESCALATION_STATUS_LABEL,
   ESCALATION_LEVEL_LABEL,
   PHASE_113A_TRUTH_LABEL,
+  // Phase 1.1.3B — advanced command center intelligence (additive).
+  INTELLIGENCE_TRUTH_LABEL,
+  CORRELATION_TRUTH_LABEL,
+  SIGNAL_SOURCE_LABEL,
+  ATTENTION_PRIORITY_LABEL,
+  deriveCommercialBlockers,
+  deriveCommandSignals,
+  deriveTenantHealthSignals,
+  deriveCorrelatedRiskGroups,
+  buildCommandCenterSnapshot,
+  diffCommandCenterSnapshots,
+  deriveIntelligenceRibbon,
+  enrichNextBestActions,
+  deriveCommercialNbas,
+  nbaMatchesFilter,
+  NBA_FILTERS,
+  type CommercialBlocker,
+  type CommandSignal,
+  type TenantHealthSignal,
+  type CorrelatedRiskGroup,
+  type CommandCenterSnapshot,
+  type SnapshotDelta,
+  type RibbonCard,
+  type RibbonTone,
+  type CommandDrawerId,
+  type EnrichedNba,
+  type AttentionPriority,
 } from './platformOpsDerive';
 import { pushPlatformAudit } from './platformOpsAudit';
 import { useAccess } from '../context/AccessContext';
@@ -92,6 +120,45 @@ import type { Role } from '../context/accessConfig';
 const CASES_KEY = 'support_cases_v1';
 const NOTES_KEY = 'platform_security_notes';
 const DOMAINS_KEY = 'tenant_domains_v1';
+// Phase 1.1.3B — what-changed baseline snapshot persists across sessions.
+const SNAPSHOT_KEY = 'cc_intel_snapshot_v1';
+
+// Phase 1.1.3B — intelligence ribbon tone styling (card chrome only).
+const RIBBON_TONE_STYLES: Record<RibbonTone, string> = {
+  ok: 'border-emerald-200 bg-emerald-50/60',
+  info: 'border-sky-200 bg-sky-50/60',
+  warn: 'border-amber-200 bg-amber-50/60',
+  critical: 'border-red-200 bg-red-50/70',
+};
+const ATTENTION_PILL_STYLES: Record<AttentionPriority, string> = {
+  critical: 'bg-red-500/10 text-red-700 border-red-500/30',
+  high: 'bg-orange-500/10 text-orange-700 border-orange-500/30',
+  medium: 'bg-amber-500/10 text-amber-700 border-amber-500/30',
+  low: 'bg-slate-500/10 text-slate-600 border-slate-300',
+};
+const CONFIDENCE_PILL_STYLES: Record<'High' | 'Medium' | 'Low', string> = {
+  High: 'bg-emerald-500/10 text-emerald-700 border-emerald-500/30',
+  Medium: 'bg-sky-500/10 text-sky-700 border-sky-500/30',
+  Low: 'bg-slate-500/10 text-slate-600 border-slate-300',
+};
+const COMMAND_DRAWER_LABEL: Record<CommandDrawerId, string> = {
+  escalations: 'Active Escalations',
+  sla: 'SLA Pressure',
+  audits: 'High-Risk Audit Events',
+  domains: 'Domain Health',
+  commercial: 'Commercial Blockers',
+  tenant_risk: 'Tenant Risk',
+};
+
+function readLocal<T>(key: string, fallback: T): T {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return fallback;
+    const raw = window.localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
 
 type SecurityNote = { id: string; body: string; author: string; createdAt: string };
 
@@ -218,6 +285,12 @@ const CommandCenterPage: React.FC = () => {
   const [drawerTenantId, setDrawerTenantId] = useState<string | null>(null);
   // Phase 1.1.1 UX Correction — interactive pulse filter for Needs Attention.
   const [activePulseFilter, setActivePulseFilter] = useState<PulseFilterId | null>(null);
+  // Phase 1.1.3B — intelligence surfaces state.
+  const [commandDrawer, setCommandDrawer] = useState<CommandDrawerId | null>(null);
+  const [nbaFilter, setNbaFilter] = useState<string>('all');
+  const [reviewBaseline, setReviewBaseline] = useState<CommandCenterSnapshot | null>(
+    () => readLocal<CommandCenterSnapshot | null>(SNAPSHOT_KEY, null)
+  );
   // Tick to make the "Updated Xm ago" label feel live without a second state.
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -719,6 +792,120 @@ const CommandCenterPage: React.FC = () => {
     });
   }, [drawerTenantId, cases, audits, domains, notes]);
 
+  // --- Phase 1.1.3B — advanced command center intelligence -------------
+  // Everything below is deterministic and derived from the SAME focus/
+  // time-filtered slices that feed the Operational Pulse, so the new
+  // intelligence surfaces (ribbon, heatmap, episodes, what-changed,
+  // upgraded NBA) never disagree with the existing counts/lists.
+  const commercialBlockers: CommercialBlocker[] = useMemo(
+    () => deriveCommercialBlockers({ tenants, billing: billingTransactions }),
+    []
+  );
+  const commandSignals: CommandSignal[] = useMemo(
+    () => deriveCommandSignals({
+      cases: focusedCases,
+      audits: focusedAudits,
+      domains: focusedDomains,
+      commercialBlockers,
+      tenantNameById: tenantById,
+    }),
+    [focusedCases, focusedAudits, focusedDomains, commercialBlockers, tenantById]
+  );
+  const tenantHealth: TenantHealthSignal[] = useMemo(
+    () => deriveTenantHealthSignals({
+      tenants,
+      cases: filteredCases,
+      audits: filteredAudits,
+      domains,
+      commercialBlockers,
+    }),
+    [filteredCases, filteredAudits, domains, commercialBlockers]
+  );
+  const correlatedGroups: CorrelatedRiskGroup[] = useMemo(
+    () => deriveCorrelatedRiskGroups(commandSignals),
+    [commandSignals]
+  );
+  const currentSnapshot: CommandCenterSnapshot = useMemo(
+    () => buildCommandCenterSnapshot({ signals: commandSignals, tenantHealth, cases: focusedCases }),
+    [commandSignals, tenantHealth, focusedCases]
+  );
+  const snapshotDelta: SnapshotDelta = useMemo(
+    () => diffCommandCenterSnapshots(reviewBaseline, currentSnapshot),
+    [reviewBaseline, currentSnapshot]
+  );
+  const ribbon: RibbonCard[] = useMemo(
+    () => deriveIntelligenceRibbon({ signals: commandSignals, tenantHealth, delta: snapshotDelta }),
+    [commandSignals, tenantHealth, snapshotDelta]
+  );
+  const enrichedNba: EnrichedNba[] = useMemo(
+    () => enrichNextBestActions([...nba, ...deriveCommercialNbas(commercialBlockers)]),
+    [nba, commercialBlockers]
+  );
+  const filteredNba: EnrichedNba[] = useMemo(
+    () => enrichedNba.filter(a => nbaMatchesFilter(a, nbaFilter)),
+    [enrichedNba, nbaFilter]
+  );
+
+  // --- Phase 1.1.3B handlers (audited) ---------------------------------
+  const onMarkReviewed = () => {
+    setReviewBaseline(currentSnapshot);
+    try {
+      window.localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(currentSnapshot));
+    } catch { /* storage unavailable — baseline stays in-memory only */ }
+    pushPlatformAudit({
+      actor: 'System Owner',
+      action: 'command_center_snapshot_saved',
+      target: 'Command Center intelligence baseline',
+      category: 'configuration',
+      severity: 'info',
+    });
+  };
+  const onOpenCommandDrawer = (id: CommandDrawerId) => {
+    if (commandDrawer === id) { setCommandDrawer(null); return; }
+    setCommandDrawer(id);
+    pushPlatformAudit({
+      actor: 'System Owner',
+      action: 'command_center_intelligence_drawer_opened',
+      target: id,
+      category: 'configuration',
+      severity: 'info',
+    });
+  };
+  const onCloseCommandDrawer = () => setCommandDrawer(null);
+  const onNbaFilter = (id: string) => setNbaFilter(id);
+
+  const drawerSignals = useMemo<CommandSignal[]>(() => {
+    if (!commandDrawer) return [];
+    // Tenant risk drawer is sourced from tenantHealth (not the atomic signal
+    // stream), so synthesize CommandSignal-shaped rows for the at-risk tenants.
+    if (commandDrawer === 'tenant_risk') {
+      return tenantHealth
+        .filter(t => t.tier !== 'healthy')
+        .map<CommandSignal>(t => ({
+          id: `tenantrisk_${t.tenantId}`,
+          kind: 'critical_case',
+          category: 'tenant',
+          priority: t.tier === 'critical' ? 'critical' : t.tier === 'at_risk' ? 'high' : 'medium',
+          tenantId: t.tenantId,
+          tenant: t.tenantName,
+          label: `${RISK_STATUS_LABEL[t.tier]} · Score ${t.score}`,
+          reason: t.recommendedAction,
+          href: t.href,
+          confidence: t.confidence,
+        }));
+    }
+    // Each filter mirrors EXACTLY the kinds counted by its ribbon card so the
+    // card count and the drawer row count stay reconciled (one source).
+    const byDrawer: Record<Exclude<CommandDrawerId, 'tenant_risk'>, (s: CommandSignal) => boolean> = {
+      escalations: s => s.kind === 'escalation',
+      sla: s => s.kind === 'overdue_sla' || s.kind === 'at_risk_sla',
+      audits: s => s.kind === 'high_risk_audit',
+      domains: s => s.kind === 'failed_domain' || s.kind === 'pending_domain',
+      commercial: s => s.kind === 'commercial_blocker',
+    };
+    return commandSignals.filter(byDrawer[commandDrawer]);
+  }, [commandDrawer, commandSignals, tenantHealth]);
+
   return (
     <div className="space-y-8">
       {/* ============== MISSION CONTROL HEADER (Phase 1.1.1 UX Correction) ============== */}
@@ -861,6 +1048,101 @@ const CommandCenterPage: React.FC = () => {
       </section>
       )}
 
+      {/* ============== INTELLIGENCE RIBBON + WHAT-CHANGED (Phase 1.1.3B) ============== */}
+      {/* Section-level gate: the intelligence ribbon and what-changed delta
+          are page-overview content gated by the parent view_command_center
+          permission, like the widget grid and Mission Control hero. */}
+      {viewPageGate.allowed && (
+      <section className="space-y-4" data-testid="intelligence-ribbon-section">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <h3 className="text-sm font-black text-primary uppercase tracking-widest">Operational Intelligence</h3>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+              Click any card to drill into the underlying signals.
+            </p>
+          </div>
+          <span
+            data-testid="intelligence-ribbon-truth"
+            className="text-[10px] font-medium text-slate-400 max-w-md text-right"
+          >
+            {INTELLIGENCE_TRUTH_LABEL}
+          </span>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3" data-testid="intelligence-ribbon">
+          {ribbon.map(card => (
+            <RibbonCardView
+              key={card.id}
+              card={card}
+              onOpen={card.drawer ? () => onOpenCommandDrawer(card.drawer as CommandDrawerId) : undefined}
+            />
+          ))}
+        </div>
+
+        {/* What changed / getting worse since last review */}
+        <div
+          className="bg-white/80 backdrop-blur-xl rounded-[2rem] border border-slate-200 shadow-sm p-6"
+          data-testid="what-changed-panel"
+        >
+          <div className="flex items-start justify-between flex-wrap gap-3">
+            <div className="min-w-0">
+              <h4 className="text-sm font-black text-primary uppercase tracking-widest">What Changed</h4>
+              <p className="text-xs text-slate-500 mt-1" data-testid="what-changed-summary">
+                {snapshotDelta.summary}
+                {snapshotDelta.hasBaseline && snapshotDelta.baselineAt && (
+                  <span className="text-slate-400"> · Baseline {formatRelative(snapshotDelta.baselineAt)}</span>
+                )}
+              </p>
+            </div>
+            <button
+              onClick={onMarkReviewed}
+              data-testid="what-changed-mark-reviewed"
+              className="shrink-0 px-3 py-1.5 text-[10px] font-black uppercase tracking-widest bg-primary text-white rounded-xl hover:bg-primary/90 transition-colors shadow-sm"
+            >
+              Mark reviewed
+            </button>
+          </div>
+          {(snapshotDelta.newlyActive.length > 0 || snapshotDelta.gettingWorse.length > 0) && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+              <div data-testid="what-changed-new">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
+                  Newly active ({snapshotDelta.newlyActive.length})
+                </p>
+                {snapshotDelta.newlyActive.length === 0 ? (
+                  <p className="text-xs text-slate-400 italic">No new signals.</p>
+                ) : (
+                  <ul className="space-y-1.5">
+                    {snapshotDelta.newlyActive.slice(0, 6).map(d => (
+                      <li key={d.id} className="text-xs text-slate-600 flex items-start gap-2">
+                        <span className="shrink-0 px-1.5 py-0.5 rounded-md border bg-sky-500/10 text-sky-700 border-sky-500/30 text-[9px] font-black uppercase tracking-wide">{d.kind}</span>
+                        <Link to={d.href} className="hover:text-primary truncate">{d.label}</Link>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+              <div data-testid="what-changed-worse">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
+                  Getting worse ({snapshotDelta.gettingWorse.length})
+                </p>
+                {snapshotDelta.gettingWorse.length === 0 ? (
+                  <p className="text-xs text-slate-400 italic">Nothing escalating since last review.</p>
+                ) : (
+                  <ul className="space-y-1.5">
+                    {snapshotDelta.gettingWorse.slice(0, 6).map(d => (
+                      <li key={d.id} className="text-xs text-slate-600 flex items-start gap-2">
+                        <span className="shrink-0 px-1.5 py-0.5 rounded-md border bg-amber-500/10 text-amber-700 border-amber-500/30 text-[9px] font-black uppercase tracking-wide">{d.kind}</span>
+                        <Link to={d.href} className="hover:text-primary truncate">{d.label}</Link>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
+      )}
+
       {/* ============== OPERATIONAL PULSE STRIP ============== */}
       {viewPulseGate.allowed && (
       <section className="space-y-3">
@@ -971,6 +1253,90 @@ const CommandCenterPage: React.FC = () => {
       </section>
       )}
 
+      {/* ============== TENANT RISK HEATMAP + CORRELATED EPISODES (Phase 1.1.3B) ============== */}
+      {viewPageGate.allowed && (
+      <section className="grid grid-cols-1 xl:grid-cols-2 gap-4" data-testid="intelligence-grid">
+        {/* Tenant risk heatmap */}
+        <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 shadow-sm overflow-hidden">
+          <div className="px-6 py-5 border-b border-slate-100">
+            <h3 className="text-lg font-black text-primary tracking-tight">Tenant Risk Heatmap</h3>
+            <p className="text-xs text-slate-500 font-medium">
+              Tenants ranked by derived risk — escalations, SLA, audit, domain and commercial signals.
+            </p>
+          </div>
+          <div className="p-5 grid grid-cols-2 sm:grid-cols-3 gap-3" data-testid="tenant-risk-heatmap">
+            {tenantHealth.map(t => (
+              <button
+                key={t.tenantId}
+                onClick={() => { if (viewTenant360Gate.allowed) onOpenTenant360(t.tenantId); }}
+                disabled={!viewTenant360Gate.allowed}
+                title={viewTenant360Gate.allowed ? t.recommendedAction : viewTenant360Gate.reason}
+                data-testid={`heatmap-tile-${t.tenantId}`}
+                className={`text-left p-3 rounded-2xl border-2 transition-all disabled:cursor-not-allowed disabled:opacity-70 hover:shadow-md ${RISK_STATUS_STYLES[t.tier]}`}
+              >
+                <p className="text-xs font-black text-slate-900 truncate">{t.tenantName}</p>
+                <div className="flex items-center justify-between mt-1">
+                  <span className="text-[9px] font-black uppercase tracking-widest">{RISK_STATUS_LABEL[t.tier]}</span>
+                  <span className="text-[10px] font-bold text-slate-500">Score {t.score}</span>
+                </div>
+                <p className="text-[10px] text-slate-500 mt-1 truncate">
+                  {t.reasons[0]?.label || 'No active signals'}
+                </p>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Correlated operational episodes */}
+        <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 shadow-sm overflow-hidden">
+          <div className="px-6 py-5 border-b border-slate-100">
+            <h3 className="text-lg font-black text-primary tracking-tight">Correlated Episodes</h3>
+            <p className="text-xs text-slate-500 font-medium">{CORRELATION_TRUTH_LABEL}</p>
+          </div>
+          {correlatedGroups.length === 0 ? (
+            <div className="p-10 text-center text-slate-400 text-sm font-bold" data-testid="correlated-episodes-empty">
+              No correlated signal clusters right now.
+            </div>
+          ) : (
+            <ul className="divide-y divide-slate-100" data-testid="correlated-episodes">
+              {correlatedGroups.slice(0, 6).map(g => (
+                <li key={g.id} className="px-6 py-4" data-testid={`episode-${g.id}`}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-bold text-slate-900 truncate">{g.title}</p>
+                      <p className="text-xs text-slate-500 mt-0.5">{g.whyGrouped}</p>
+                      <p className="text-[11px] text-slate-500 mt-1">{g.recommendedAction}</p>
+                    </div>
+                    <div className="shrink-0 flex flex-col items-end gap-1">
+                      <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${ATTENTION_PILL_STYLES[g.severity]}`}>
+                        {ATTENTION_PRIORITY_LABEL[g.severity]}
+                      </span>
+                      <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${CONFIDENCE_PILL_STYLES[g.confidence]}`}>
+                        {g.confidence}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 mt-2 flex-wrap">
+                    {g.categories.map(c => (
+                      <span key={c} className="px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-slate-200 text-[9px] font-black uppercase tracking-wide">
+                        {SIGNAL_SOURCE_LABEL[c]}
+                      </span>
+                    ))}
+                    <Link
+                      to={g.href}
+                      className="ml-auto text-[10px] font-black uppercase tracking-widest text-slate-500 hover:text-primary transition-colors"
+                    >
+                      Open {g.tenant ? 'tenant' : 'audit'} →
+                    </Link>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </section>
+      )}
+
       {/* ============== NEXT BEST ACTIONS (Phase 1.1.2 — tiered) ============== */}
       {viewNbaGate.allowed && (
       <section className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
@@ -984,18 +1350,37 @@ const CommandCenterPage: React.FC = () => {
             </p>
           </div>
           <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">
-            {nba.length} action{nba.length !== 1 ? 's' : ''}
+            {filteredNba.length} of {enrichedNba.length} action{enrichedNba.length !== 1 ? 's' : ''}
           </span>
         </div>
-        {nba.length === 0 ? (
+        {/* Phase 1.1.3B — NBA filter chips (deterministic, by action type) */}
+        <div className="px-8 py-3 border-b border-slate-100 flex items-center gap-2 flex-wrap" data-testid="nba-filters">
+          {NBA_FILTERS.map(f => (
+            <button
+              key={f.id}
+              onClick={() => onNbaFilter(f.id)}
+              data-testid={`nba-filter-${f.id}`}
+              className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-xl border transition-colors ${
+                nbaFilter === f.id
+                  ? 'bg-primary text-white border-primary'
+                  : 'bg-white text-slate-500 border-slate-200 hover:text-primary hover:border-primary/40'
+              }`}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
+        {filteredNba.length === 0 ? (
           <div className="p-12 text-center text-slate-400 text-sm font-bold" data-testid="next-best-actions-empty">
-            {focusMode === 'normal'
-              ? 'No recommended actions right now.'
-              : `No actions surface in ${FOCUS_MODE_LABEL[focusMode]} mode — try Normal to see all signals.`}
+            {enrichedNba.length === 0
+              ? (focusMode === 'normal'
+                  ? 'No recommended actions right now.'
+                  : `No actions surface in ${FOCUS_MODE_LABEL[focusMode]} mode — try Normal to see all signals.`)
+              : 'No actions match the active filter.'}
           </div>
         ) : (
           <ul className="divide-y divide-slate-100" data-testid="next-best-actions">
-            {nba.slice(0, 12).map(action => {
+            {filteredNba.slice(0, 12).map(action => {
               const tier = tierForPriority(action.priority);
               return (
                 <li key={action.id} className="px-8 py-4 flex items-center justify-between gap-4 hover:bg-slate-50/70" data-testid={`nba-row-${action.id}`}>
@@ -1012,6 +1397,14 @@ const CommandCenterPage: React.FC = () => {
                       <p className="text-xs text-slate-500 truncate">
                         {action.tenant ? `${action.tenant} · ` : ''}{action.reason}
                       </p>
+                      <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                        <span className="px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-slate-200 text-[9px] font-black uppercase tracking-wide" data-testid={`nba-type-${action.id}`}>
+                          {action.actionType}
+                        </span>
+                        <span className={`px-1.5 py-0.5 rounded-md text-[9px] font-black uppercase tracking-wide border ${CONFIDENCE_PILL_STYLES[action.confidence]}`}>
+                          {action.confidence}
+                        </span>
+                      </div>
                     </div>
                   </div>
                   {actNbaGate.allowed ? (
@@ -1304,11 +1697,107 @@ const CommandCenterPage: React.FC = () => {
       {tenant360 && (
         <Tenant360Drawer t={tenant360} onClose={onCloseTenant360} />
       )}
+
+      {/* ============== COMMAND SIGNAL DRILLDOWN DRAWER (Phase 1.1.3B) ============== */}
+      {commandDrawer && (
+        <CommandSignalDrawer
+          drawerId={commandDrawer}
+          signals={drawerSignals}
+          onClose={onCloseCommandDrawer}
+        />
+      )}
     </div>
   );
 };
 
 // --- Sub-components --------------------------------------------------------
+
+// Phase 1.1.3B — intelligence ribbon card.
+const RibbonCardView: React.FC<{ card: RibbonCard; onOpen?: () => void }> = ({ card, onOpen }) => {
+  const body = (
+    <>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[10px] font-black uppercase tracking-widest opacity-70">{card.label}</span>
+        {card.trend && (
+          <span className="text-[10px] font-black" title={`Trend vs last review: ${card.trend}`}>
+            {card.trend === 'up' ? '▲' : card.trend === 'down' ? '▼' : '■'}
+          </span>
+        )}
+      </div>
+      <p className="text-2xl font-black mt-1 tabular-nums">{card.value}</p>
+      <p className="text-[10px] font-medium opacity-70 mt-0.5 truncate">{card.reason}</p>
+    </>
+  );
+  const cls = `block w-full text-left p-4 rounded-2xl border-2 transition-all ${RIBBON_TONE_STYLES[card.tone]}`;
+  if (onOpen) {
+    return (
+      <button onClick={onOpen} data-testid={`ribbon-card-${card.id}`} className={`${cls} hover:shadow-md`}>
+        {body}
+      </button>
+    );
+  }
+  return (
+    <div data-testid={`ribbon-card-${card.id}`} className={cls}>
+      {body}
+    </div>
+  );
+};
+
+// Phase 1.1.3B — command signal drilldown drawer.
+const CommandSignalDrawer: React.FC<{
+  drawerId: CommandDrawerId;
+  signals: CommandSignal[];
+  onClose: () => void;
+}> = ({ drawerId, signals, onClose }) => (
+  <div className="fixed inset-0 z-50 flex justify-end" data-testid="command-signal-drawer">
+    <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onClick={onClose} />
+    <div className="relative w-full max-w-md bg-white shadow-2xl h-full overflow-y-auto">
+      <div className="sticky top-0 bg-white/90 backdrop-blur-xl border-b border-slate-100 px-6 py-5 flex items-center justify-between">
+        <div>
+          <h3 className="text-lg font-black text-primary tracking-tight">{COMMAND_DRAWER_LABEL[drawerId]}</h3>
+          <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+            {signals.length} signal{signals.length !== 1 ? 's' : ''}
+          </p>
+        </div>
+        <button
+          onClick={onClose}
+          className="w-9 h-9 rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-50 transition-colors"
+          aria-label="Close"
+        >
+          ✕
+        </button>
+      </div>
+      {signals.length === 0 ? (
+        <div className="p-10 text-center text-slate-400 text-sm font-bold">No active signals in this category.</div>
+      ) : (
+        <ul className="divide-y divide-slate-100">
+          {signals.map(s => (
+            <li key={s.id} className="px-6 py-4" data-testid={`command-signal-${s.id}`}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-bold text-slate-900">{s.label}</p>
+                  {s.tenant && <p className="text-xs text-slate-500 mt-0.5">{s.tenant}</p>}
+                  <p className="text-[11px] text-slate-500 mt-1">{s.reason}</p>
+                </div>
+                <span className={`shrink-0 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${ATTENTION_PILL_STYLES[s.priority]}`}>
+                  {ATTENTION_PRIORITY_LABEL[s.priority]}
+                </span>
+              </div>
+              <div className="flex items-center gap-2 mt-2">
+                <span className="px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-slate-200 text-[9px] font-black uppercase tracking-wide">
+                  {SIGNAL_SOURCE_LABEL[s.category]}
+                </span>
+                <Link to={s.href} className="ml-auto text-[10px] font-black uppercase tracking-widest text-slate-500 hover:text-primary transition-colors">
+                  Open source →
+                </Link>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  </div>
+);
 
 const ChipGroup: React.FC<{
   label: string;

@@ -1726,3 +1726,1087 @@ export function can(
   }
   return { allowed: true, reason: '' };
 }
+
+// =====================================================================
+// PHASE 1.1.3B — ADVANCED COMMAND CENTER INTELLIGENCE
+// ---------------------------------------------------------------------
+// All helpers below are deterministic and rule-based, derived ONLY from
+// current app / session data (support cases, escalations, SLA status,
+// audit/security events, domains, tenant plan/status, commercial /
+// billing signals). They are NOT AI/ML, NOT predictive, NOT live
+// infrastructure/uptime, NOT real DNS/SSL, and NOT Firestore real-time.
+// Every surface that renders these signals must carry the truth label.
+// Types use optional fields + safe defaults so nothing existing breaks.
+// =====================================================================
+
+export const INTELLIGENCE_TRUTH_LABEL =
+  'Rule-based from current app / session data. Not AI prediction, live infrastructure uptime, real DNS/SSL, or Firestore real-time.';
+export const CORRELATION_TRUTH_LABEL =
+  'Rule-based correlation by shared tenant / actor / category — not AI prediction.';
+
+export type SignalConfidence = 'High' | 'Medium' | 'Low';
+export type AttentionPriority = 'critical' | 'high' | 'medium' | 'low';
+export type SignalSource =
+  | 'support_cases'
+  | 'escalations'
+  | 'sla'
+  | 'audit_security'
+  | 'domains'
+  | 'commercial'
+  | 'tenant'
+  | 'security_notes';
+
+export const SIGNAL_SOURCE_LABEL: Record<SignalSource, string> = {
+  support_cases: 'Support cases',
+  escalations: 'Escalations',
+  sla: 'SLA status',
+  audit_security: 'Audit & security',
+  domains: 'Domains',
+  commercial: 'Commercial / billing',
+  tenant: 'Tenant plan / status',
+  security_notes: 'Security notes',
+};
+
+export const ATTENTION_PRIORITY_LABEL: Record<AttentionPriority, string> = {
+  critical: 'Critical',
+  high: 'High',
+  medium: 'Medium',
+  low: 'Low',
+};
+
+const ATTENTION_RANK: Record<AttentionPriority, number> = {
+  critical: 0,
+  high: 1,
+  medium: 2,
+  low: 3,
+};
+
+function maxAttention(a: AttentionPriority, b: AttentionPriority): AttentionPriority {
+  return ATTENTION_RANK[a] <= ATTENTION_RANK[b] ? a : b;
+}
+
+// Generic explainable insight envelope (Part A canonical shape).
+export interface IntelligenceInsight {
+  id: string;
+  title: string;
+  priority: AttentionPriority;
+  category: SignalSource | 'tenant_risk' | 'correlation';
+  tenantId?: string | null;
+  tenant?: string | null;
+  relatedIds: string[];
+  reason: string;
+  evidence: string;
+  source: SignalSource[];
+  confidence: SignalConfidence;
+  recommendedAction: string;
+  href: string;
+  truthLabel: string;
+}
+
+export interface SignalFreshness {
+  lastUpdated: string;
+  source: SignalSource[];
+  label: string;
+}
+
+export interface OperationalTrend {
+  direction: 'up' | 'down' | 'flat';
+  delta: number;
+  label: string;
+}
+
+// --- COMMERCIAL BLOCKERS ---------------------------------------------------
+
+export type CommercialBlockerKind =
+  | 'subscription_overdue'
+  | 'subscription_suspended'
+  | 'activation_incomplete'
+  | 'payment_failed';
+
+export interface CommercialBlocker {
+  id: string;
+  tenantId: string;
+  tenantName: string;
+  kind: CommercialBlockerKind;
+  label: string;
+  reason: string;
+  priority: AttentionPriority;
+  confidence: SignalConfidence;
+  href: string;
+}
+
+export interface CommercialBlockerInput {
+  tenants: { id: string; name: string; status?: string; activationStatus?: string }[];
+  billing?: {
+    id?: string;
+    tenantId: string;
+    status: string;
+    type?: string;
+    invoiceNo?: string;
+    amount?: number;
+  }[];
+}
+
+export function deriveCommercialBlockers(input: CommercialBlockerInput): CommercialBlocker[] {
+  const out: CommercialBlocker[] = [];
+  input.tenants.forEach(t => {
+    if (t.status === 'overdue') {
+      out.push({
+        id: `cb_over_${t.id}`,
+        tenantId: t.id,
+        tenantName: t.name,
+        kind: 'subscription_overdue',
+        label: 'Subscription overdue',
+        reason: 'Tenant billing status is overdue.',
+        priority: 'high',
+        confidence: 'High',
+        href: `/owner/tenants/${t.id}`,
+      });
+    }
+    if (t.status === 'suspended') {
+      out.push({
+        id: `cb_susp_${t.id}`,
+        tenantId: t.id,
+        tenantName: t.name,
+        kind: 'subscription_suspended',
+        label: 'Subscription suspended',
+        reason: 'Tenant account is suspended.',
+        priority: 'high',
+        confidence: 'High',
+        href: `/owner/tenants/${t.id}`,
+      });
+    }
+    if (t.activationStatus && t.activationStatus !== 'active') {
+      out.push({
+        id: `cb_act_${t.id}`,
+        tenantId: t.id,
+        tenantName: t.name,
+        kind: 'activation_incomplete',
+        label: 'Activation incomplete',
+        reason: `Activation status: ${t.activationStatus.replace(/_/g, ' ')}.`,
+        priority: 'medium',
+        confidence: 'Medium',
+        href: `/owner/tenants/${t.id}`,
+      });
+    }
+  });
+  (input.billing || [])
+    .filter(b => b.status === 'failed')
+    .forEach(b => {
+      const t = input.tenants.find(x => x.id === b.tenantId);
+      out.push({
+        id: `cb_pay_${b.id || b.tenantId}`,
+        tenantId: b.tenantId,
+        tenantName: t?.name || b.tenantId,
+        kind: 'payment_failed',
+        label: 'Payment failed',
+        reason: `Failed ${b.type || 'payment'}${b.invoiceNo ? ` · ${b.invoiceNo}` : ''}.`,
+        priority: 'high',
+        confidence: 'High',
+        href: `/owner/tenants/${b.tenantId}`,
+      });
+    });
+  return out.sort((a, b) => ATTENTION_RANK[a.priority] - ATTENTION_RANK[b.priority]);
+}
+
+// --- COMMAND SIGNALS (atomic normalized signals) ---------------------------
+// One flat list of every active operational signal. Drives correlation,
+// the ribbon, drilldown drawers and the snapshot engine so every surface
+// counts / lists from the SAME source and cannot drift.
+
+export type CommandSignalKind =
+  | 'escalation'
+  | 'unack_escalation'
+  | 'overdue_sla'
+  | 'at_risk_sla'
+  | 'critical_case'
+  | 'high_risk_audit'
+  | 'failed_domain'
+  | 'pending_domain'
+  | 'commercial_blocker';
+
+export interface CommandSignal {
+  id: string;
+  kind: CommandSignalKind;
+  category: SignalSource;
+  priority: AttentionPriority;
+  tenantId: string | null;
+  tenant: string | null;
+  caseId?: string | null;
+  domainId?: string | null;
+  actor?: string | null;
+  severity?: string | null;
+  at?: string | null;
+  label: string;
+  reason: string;
+  href: string;
+  confidence: SignalConfidence;
+}
+
+export interface CommandSignalInput {
+  cases: SupportCaseRecord[];
+  audits: AuditEventLike[];
+  domains: { id: string; tenantId: string; hostname: string; status: string; ssl?: string }[];
+  commercialBlockers?: CommercialBlocker[];
+  tenantNameById: Map<string, string>;
+  now?: Date;
+}
+
+export function deriveCommandSignals(input: CommandSignalInput): CommandSignal[] {
+  const now = input.now || new Date();
+  const out: CommandSignal[] = [];
+  const tname = (id: string | null | undefined) =>
+    id ? input.tenantNameById.get(id) || id : null;
+  const openCases = input.cases.filter(
+    c => c.status !== 'resolved' && c.status !== 'closed'
+  );
+
+  openCases.forEach(c => {
+    const tenant = tname(c.tenantId);
+    const href = `/owner/support-tools?caseId=${encodeURIComponent(c.id)}`;
+    const eff = effectiveEscalationStatus(c);
+    if (eff.active) {
+      out.push({
+        id: `sig_esc_${c.id}`,
+        kind: 'escalation',
+        category: 'escalations',
+        priority: c.severity === 'urgent' ? 'critical' : 'high',
+        tenantId: c.tenantId,
+        tenant,
+        caseId: c.id,
+        severity: c.severity,
+        at: c.escalatedAt || c.openedAt,
+        label: `Escalated · ${c.subject}`,
+        reason: c.escalationReason ? `Escalated — ${c.escalationReason}` : 'Active escalation.',
+        href,
+        confidence: 'High',
+      });
+      if (eff.status === 'escalated') {
+        out.push({
+          id: `sig_unack_${c.id}`,
+          kind: 'unack_escalation',
+          category: 'escalations',
+          priority: isEscalationCritical(c) || isEscalationAckOverdue(c, now) ? 'critical' : 'high',
+          tenantId: c.tenantId,
+          tenant,
+          caseId: c.id,
+          at: c.escalatedAt || c.openedAt,
+          label: `Unacknowledged escalation · ${c.subject}`,
+          reason: isEscalationAckOverdue(c, now)
+            ? 'Escalation past acknowledgement-due time.'
+            : 'Escalation awaiting acknowledgement.',
+          href,
+          confidence: 'High',
+        });
+      }
+    }
+    const sla = deriveSlaStatus(c, now);
+    if (sla.status === 'overdue') {
+      out.push({
+        id: `sig_sla_${c.id}`,
+        kind: 'overdue_sla',
+        category: 'sla',
+        priority: c.severity === 'urgent' ? 'critical' : 'high',
+        tenantId: c.tenantId,
+        tenant,
+        caseId: c.id,
+        severity: c.severity,
+        at: c.openedAt,
+        label: `Overdue SLA · ${c.subject}`,
+        reason: sla.label,
+        href,
+        confidence: 'High',
+      });
+    } else if (sla.status === 'at_risk') {
+      out.push({
+        id: `sig_slar_${c.id}`,
+        kind: 'at_risk_sla',
+        category: 'sla',
+        priority: 'medium',
+        tenantId: c.tenantId,
+        tenant,
+        caseId: c.id,
+        severity: c.severity,
+        at: c.openedAt,
+        label: `SLA at risk · ${c.subject}`,
+        reason: sla.label,
+        href,
+        confidence: 'Medium',
+      });
+    }
+    if (c.severity === 'urgent') {
+      out.push({
+        id: `sig_crit_${c.id}`,
+        kind: 'critical_case',
+        category: 'support_cases',
+        priority: 'critical',
+        tenantId: c.tenantId,
+        tenant,
+        caseId: c.id,
+        severity: c.severity,
+        at: c.openedAt,
+        label: `Urgent case · ${c.subject}`,
+        reason: 'Case severity is urgent.',
+        href,
+        confidence: 'High',
+      });
+    }
+  });
+
+  input.audits.slice(0, 60).forEach(a => {
+    const flag = deriveHighRiskFlag(a).flag;
+    if (flag !== 'critical' && flag !== 'high_risk') return;
+    out.push({
+      id: `sig_aud_${a.id}`,
+      kind: 'high_risk_audit',
+      category: 'audit_security',
+      priority: flag === 'critical' ? 'critical' : 'high',
+      tenantId: a.tenantId || null,
+      tenant: tname(a.tenantId),
+      actor: a.actor || null,
+      severity: a.severity || null,
+      at: a.date,
+      label: a.action,
+      reason: `${a.target}${a.severity ? ` · ${a.severity}` : ''}`,
+      href: '/owner/audit-security',
+      confidence: 'High',
+    });
+  });
+
+  input.domains.forEach(d => {
+    if (d.status === 'failed') {
+      out.push({
+        id: `sig_dmf_${d.id}`,
+        kind: 'failed_domain',
+        category: 'domains',
+        priority: 'high',
+        tenantId: d.tenantId,
+        tenant: tname(d.tenantId),
+        domainId: d.id,
+        at: null,
+        label: `Failed domain · ${d.hostname}`,
+        reason: 'Domain verification failed.',
+        href: '/owner/domains',
+        confidence: 'High',
+      });
+    } else if (d.status === 'pending' || d.status === 'verifying') {
+      out.push({
+        id: `sig_dmp_${d.id}`,
+        kind: 'pending_domain',
+        category: 'domains',
+        priority: 'medium',
+        tenantId: d.tenantId,
+        tenant: tname(d.tenantId),
+        domainId: d.id,
+        at: null,
+        label: `Pending domain · ${d.hostname}`,
+        reason: `Domain status: ${d.status}.`,
+        href: '/owner/domains',
+        confidence: 'Medium',
+      });
+    }
+  });
+
+  (input.commercialBlockers || []).forEach(b => {
+    out.push({
+      id: `sig_com_${b.id}`,
+      kind: 'commercial_blocker',
+      category: 'commercial',
+      priority: b.priority,
+      tenantId: b.tenantId,
+      tenant: b.tenantName,
+      at: null,
+      label: b.label,
+      reason: b.reason,
+      href: b.href,
+      confidence: b.confidence,
+    });
+  });
+
+  return out.sort((a, b) => ATTENTION_RANK[a.priority] - ATTENTION_RANK[b.priority]);
+}
+
+// --- TENANT HEALTH SIGNALS (heatmap / priority matrix) ---------------------
+
+export interface TenantHealthReason {
+  code: string;
+  label: string;
+}
+
+export interface TenantHealthSignal {
+  tenantId: string;
+  tenantName: string;
+  plan?: string;
+  status?: string;
+  tier: RiskStatus;
+  score: number;
+  reasons: TenantHealthReason[];
+  confidence: SignalConfidence;
+  source: SignalSource[];
+  recommendedAction: string;
+  href: string;
+}
+
+export interface TenantHealthInput {
+  tenants: { id: string; name: string; plan?: string; status?: string; activationStatus?: string }[];
+  cases: SupportCaseRecord[];
+  audits: AuditEventLike[];
+  domains: { tenantId: string; status: string; ssl: string }[];
+  commercialBlockers?: CommercialBlocker[];
+  now?: Date;
+}
+
+export function deriveTenantHealthSignals(input: TenantHealthInput): TenantHealthSignal[] {
+  const now = input.now || new Date();
+  const blockersByTenant = new Map<string, CommercialBlocker[]>();
+  (input.commercialBlockers || []).forEach(b => {
+    const arr = blockersByTenant.get(b.tenantId) || [];
+    arr.push(b);
+    blockersByTenant.set(b.tenantId, arr);
+  });
+
+  return input.tenants
+    .map(t => {
+      const base = deriveTenantRisk(t.id, {
+        cases: input.cases,
+        audits: input.audits,
+        domains: input.domains,
+      });
+      let score = base.score;
+      const reasons: TenantHealthReason[] = [];
+      const source = new Set<SignalSource>();
+
+      const openCases = input.cases.filter(
+        c => c.tenantId === t.id && c.status !== 'resolved' && c.status !== 'closed'
+      );
+      const escalated = openCases.filter(c => isActiveEscalation(c));
+      if (escalated.length) {
+        score += escalated.length * 3;
+        reasons.push({
+          code: 'active_escalation',
+          label: `${escalated.length} active escalation${escalated.length > 1 ? 's' : ''}`,
+        });
+        source.add('escalations');
+      }
+      const overdue = openCases.filter(c => deriveSlaStatus(c, now).status === 'overdue');
+      if (overdue.length) {
+        reasons.push({
+          code: 'overdue_sla',
+          label: `${overdue.length} overdue SLA case${overdue.length > 1 ? 's' : ''}`,
+        });
+        source.add('sla');
+      }
+      // Carry the base risk signal text as explainable reasons.
+      base.signals.forEach(s => {
+        reasons.push({ code: 'risk', label: s });
+        source.add('support_cases');
+        source.add('audit_security');
+        source.add('domains');
+      });
+      const blockers = blockersByTenant.get(t.id) || [];
+      if (blockers.length) {
+        score += blockers.length * 2;
+        reasons.push({
+          code: 'commercial_blocker',
+          label: blockers.map(b => b.label).join(', '),
+        });
+        source.add('commercial');
+      }
+      if (t.status === 'overdue' || t.status === 'suspended') {
+        source.add('tenant');
+      }
+
+      const tier: RiskStatus =
+        score >= 8 ? 'critical' : score >= 5 ? 'at_risk' : score >= 2 ? 'watch' : 'healthy';
+      const confidence: SignalConfidence =
+        escalated.length || tier === 'critical'
+          ? 'High'
+          : reasons.length >= 2
+            ? 'Medium'
+            : reasons.length
+              ? 'Medium'
+              : 'Low';
+      const recommendedAction =
+        tier === 'critical'
+          ? 'Open Tenant 360 and triage immediately.'
+          : tier === 'at_risk'
+            ? 'Review tenant signals in Tenant 360.'
+            : tier === 'watch'
+              ? 'Monitor — minor signals present.'
+              : 'No action needed — tenant healthy.';
+
+      return {
+        tenantId: t.id,
+        tenantName: t.name,
+        plan: t.plan,
+        status: t.status,
+        tier,
+        score,
+        reasons,
+        confidence,
+        source: Array.from(source),
+        recommendedAction,
+        href: `/owner/tenants/${t.id}`,
+      };
+    })
+    .sort((a, b) => b.score - a.score);
+}
+
+// --- CORRELATED SIGNALS / OPERATIONAL EPISODES -----------------------------
+
+export interface CorrelatedRiskGroup {
+  id: string;
+  title: string;
+  tenantId: string | null;
+  tenant: string | null;
+  severity: AttentionPriority;
+  signalCount: number;
+  signals: CommandSignal[];
+  categories: SignalSource[];
+  whyGrouped: string;
+  recommendedAction: string;
+  href: string;
+  confidence: SignalConfidence;
+  truthLabel: string;
+}
+
+export function deriveCorrelatedRiskGroups(signals: CommandSignal[]): CorrelatedRiskGroup[] {
+  const groups: CorrelatedRiskGroup[] = [];
+
+  // 1) Same-tenant correlation: >=2 signals spanning >=2 categories.
+  const byTenant = new Map<string, CommandSignal[]>();
+  signals.forEach(s => {
+    if (!s.tenantId) return;
+    const arr = byTenant.get(s.tenantId) || [];
+    arr.push(s);
+    byTenant.set(s.tenantId, arr);
+  });
+  byTenant.forEach((arr, tenantId) => {
+    const cats = Array.from(new Set(arr.map(s => s.category)));
+    if (arr.length < 2 || cats.length < 2) return;
+    const severity = arr.reduce<AttentionPriority>((p, s) => maxAttention(p, s.priority), 'low');
+    const tenant = arr[0].tenant;
+    groups.push({
+      id: `epi_t_${tenantId}`,
+      title: `${tenant} — ${arr.length} correlated signals`,
+      tenantId,
+      tenant,
+      severity,
+      signalCount: arr.length,
+      signals: arr,
+      categories: cats,
+      whyGrouped: `Same tenant with signals across ${cats.map(c => SIGNAL_SOURCE_LABEL[c]).join(', ')}.`,
+      recommendedAction: 'Open Tenant 360 to review the combined risk picture.',
+      href: `/owner/tenants/${tenantId}`,
+      confidence: arr.length >= 3 ? 'High' : 'Medium',
+      truthLabel: CORRELATION_TRUTH_LABEL,
+    });
+  });
+
+  // 2) Same-actor correlation: repeated high-risk audit events (>=2).
+  const byActor = new Map<string, CommandSignal[]>();
+  signals
+    .filter(s => s.kind === 'high_risk_audit' && s.actor)
+    .forEach(s => {
+      const arr = byActor.get(s.actor as string) || [];
+      arr.push(s);
+      byActor.set(s.actor as string, arr);
+    });
+  byActor.forEach((arr, actor) => {
+    if (arr.length < 2) return;
+    const severity = arr.reduce<AttentionPriority>((p, s) => maxAttention(p, s.priority), 'low');
+    groups.push({
+      id: `epi_a_${actor.replace(/\s+/g, '_')}`,
+      title: `${actor} — ${arr.length} high-risk audit events`,
+      tenantId: null,
+      tenant: null,
+      severity,
+      signalCount: arr.length,
+      signals: arr,
+      categories: ['audit_security'],
+      whyGrouped: `Same actor produced ${arr.length} high-risk audit events.`,
+      recommendedAction: 'Investigate actor activity in Audit & Security.',
+      href: '/owner/audit-security',
+      confidence: 'Medium',
+      truthLabel: CORRELATION_TRUTH_LABEL,
+    });
+  });
+
+  return groups.sort((a, b) => ATTENTION_RANK[a.severity] - ATTENTION_RANK[b.severity]);
+}
+
+// --- SNAPSHOT + DELTA ENGINE (what changed / getting worse) ----------------
+
+export interface SnapshotEntry {
+  id: string;
+  label: string;
+  tenant: string | null;
+  href: string;
+}
+
+export interface CommandCenterSnapshot {
+  takenAt: string;
+  escalations: SnapshotEntry[];
+  unackEscalations: SnapshotEntry[];
+  unassignedEscalations: SnapshotEntry[];
+  overdueSla: SnapshotEntry[];
+  highRiskAudits: SnapshotEntry[];
+  failedDomains: SnapshotEntry[];
+  commercialBlockers: SnapshotEntry[];
+  tenantTiers: Record<string, RiskStatus>;
+  caseSeverity: Record<string, string>;
+}
+
+const SEVERITY_RANK: Record<string, number> = { low: 0, normal: 1, medium: 1, high: 2, urgent: 3 };
+const TIER_RANK: Record<RiskStatus, number> = { healthy: 0, watch: 1, at_risk: 2, critical: 3 };
+
+function signalEntries(signals: CommandSignal[], kind: CommandSignalKind): SnapshotEntry[] {
+  return signals
+    .filter(s => s.kind === kind)
+    .map(s => ({ id: s.id, label: s.label, tenant: s.tenant, href: s.href }));
+}
+
+export function buildCommandCenterSnapshot(input: {
+  signals: CommandSignal[];
+  tenantHealth: TenantHealthSignal[];
+  cases: SupportCaseRecord[];
+  now?: Date;
+}): CommandCenterSnapshot {
+  const now = input.now || new Date();
+  const tenantTiers: Record<string, RiskStatus> = {};
+  input.tenantHealth.forEach(t => {
+    tenantTiers[t.tenantId] = t.tier;
+  });
+  const caseSeverity: Record<string, string> = {};
+  input.cases
+    .filter(c => c.status !== 'resolved' && c.status !== 'closed')
+    .forEach(c => {
+      caseSeverity[c.id] = c.severity;
+    });
+  const unassignedEscalations: SnapshotEntry[] = input.cases
+    .filter(
+      c =>
+        c.status !== 'resolved' &&
+        c.status !== 'closed' &&
+        isActiveEscalation(c) &&
+        !(c.escalationOwnerName || '').trim()
+    )
+    .map(c => ({
+      id: `sig_unown_${c.id}`,
+      label: `Unassigned escalation · ${c.subject}`,
+      tenant: c.tenantId,
+      href: `/owner/support-tools?caseId=${encodeURIComponent(c.id)}`,
+    }));
+  return {
+    takenAt: now.toISOString(),
+    escalations: signalEntries(input.signals, 'escalation'),
+    unackEscalations: signalEntries(input.signals, 'unack_escalation'),
+    unassignedEscalations,
+    overdueSla: signalEntries(input.signals, 'overdue_sla'),
+    highRiskAudits: signalEntries(input.signals, 'high_risk_audit'),
+    failedDomains: signalEntries(input.signals, 'failed_domain'),
+    commercialBlockers: signalEntries(input.signals, 'commercial_blocker'),
+    tenantTiers,
+    caseSeverity,
+  };
+}
+
+export interface SnapshotDeltaItem {
+  id: string;
+  kind: string;
+  label: string;
+  tenant?: string | null;
+  href: string;
+  direction: 'new' | 'worse';
+}
+
+export interface SnapshotDelta {
+  hasBaseline: boolean;
+  baselineAt?: string;
+  newlyActive: SnapshotDeltaItem[];
+  gettingWorse: SnapshotDeltaItem[];
+  summary: string;
+}
+
+function diffEntryList(
+  prev: SnapshotEntry[],
+  curr: SnapshotEntry[],
+  kind: string
+): SnapshotDeltaItem[] {
+  const prevIds = new Set(prev.map(e => e.id));
+  return curr
+    .filter(e => !prevIds.has(e.id))
+    .map(e => ({
+      id: e.id,
+      kind,
+      label: e.label,
+      tenant: e.tenant,
+      href: e.href,
+      direction: 'new' as const,
+    }));
+}
+
+export function diffCommandCenterSnapshots(
+  prev: CommandCenterSnapshot | null,
+  curr: CommandCenterSnapshot
+): SnapshotDelta {
+  if (!prev) {
+    return {
+      hasBaseline: false,
+      newlyActive: [],
+      gettingWorse: [],
+      summary: 'No previous snapshot yet — mark this review to start tracking changes.',
+    };
+  }
+  const newlyActive: SnapshotDeltaItem[] = [
+    ...diffEntryList(prev.escalations, curr.escalations, 'New escalation'),
+    ...diffEntryList(prev.unackEscalations, curr.unackEscalations, 'New unacknowledged escalation'),
+    ...diffEntryList(prev.unassignedEscalations, curr.unassignedEscalations, 'Newly unassigned escalation'),
+    ...diffEntryList(prev.overdueSla, curr.overdueSla, 'Newly overdue SLA'),
+    ...diffEntryList(prev.highRiskAudits, curr.highRiskAudits, 'New high-risk audit'),
+    ...diffEntryList(prev.failedDomains, curr.failedDomains, 'Newly failed domain'),
+    ...diffEntryList(prev.commercialBlockers, curr.commercialBlockers, 'New commercial blocker'),
+  ];
+
+  const gettingWorse: SnapshotDeltaItem[] = [];
+  Object.entries(curr.tenantTiers).forEach(([tenantId, tier]) => {
+    const before = prev.tenantTiers[tenantId];
+    if (before && TIER_RANK[tier] > TIER_RANK[before]) {
+      gettingWorse.push({
+        id: `worse_tier_${tenantId}`,
+        kind: 'Tenant risk increased',
+        label: `${tenantId}: ${RISK_STATUS_LABEL[before]} → ${RISK_STATUS_LABEL[tier]}`,
+        tenant: tenantId,
+        href: `/owner/tenants/${tenantId}`,
+        direction: 'worse',
+      });
+    }
+  });
+  Object.entries(curr.caseSeverity).forEach(([caseId, sev]) => {
+    const before = prev.caseSeverity[caseId];
+    if (before && (SEVERITY_RANK[sev] ?? 0) > (SEVERITY_RANK[before] ?? 0)) {
+      gettingWorse.push({
+        id: `worse_sev_${caseId}`,
+        kind: 'Case severity increased',
+        label: `Case ${caseId}: ${before} → ${sev}`,
+        href: `/owner/support-tools?caseId=${encodeURIComponent(caseId)}`,
+        direction: 'worse',
+      });
+    }
+  });
+
+  const total = newlyActive.length + gettingWorse.length;
+  const summary =
+    total === 0
+      ? 'No changes since your last review — signals are stable.'
+      : `${newlyActive.length} new signal${newlyActive.length === 1 ? '' : 's'}, ${gettingWorse.length} getting worse since last review.`;
+
+  return {
+    hasBaseline: true,
+    baselineAt: prev.takenAt,
+    newlyActive,
+    gettingWorse,
+    summary,
+  };
+}
+
+// --- OPERATIONAL INTELLIGENCE RIBBON ---------------------------------------
+
+export type RibbonTone = 'ok' | 'info' | 'warn' | 'critical';
+export type CommandDrawerId =
+  | 'escalations'
+  | 'sla'
+  | 'audits'
+  | 'domains'
+  | 'commercial'
+  | 'tenant_risk';
+
+export interface RibbonCard {
+  id: string;
+  label: string;
+  value: string;
+  numeric: number;
+  reason: string;
+  tone: RibbonTone;
+  confidence: SignalConfidence;
+  source: string;
+  drawer?: CommandDrawerId;
+  href?: string;
+  trend?: 'up' | 'down' | 'flat' | null;
+  trendLabel?: string | null;
+}
+
+export interface RibbonInput {
+  signals: CommandSignal[];
+  tenantHealth: TenantHealthSignal[];
+  delta?: SnapshotDelta | null;
+}
+
+function countKind(signals: CommandSignal[], ...kinds: CommandSignalKind[]): number {
+  return signals.filter(s => kinds.includes(s.kind)).length;
+}
+
+function deltaTrend(
+  delta: SnapshotDelta | null | undefined,
+  kindLabels: string[]
+): { trend: 'up' | 'flat' | null; trendLabel: string | null } {
+  if (!delta || !delta.hasBaseline) return { trend: null, trendLabel: null };
+  const added = delta.newlyActive.filter(d => kindLabels.includes(d.kind)).length;
+  if (added > 0) return { trend: 'up', trendLabel: `+${added} since last review` };
+  return { trend: 'flat', trendLabel: 'No change' };
+}
+
+export function deriveIntelligenceRibbon(input: RibbonInput): RibbonCard[] {
+  const { signals, tenantHealth, delta } = input;
+  const cards: RibbonCard[] = [];
+
+  // 1) Highest risk tenant (always shown).
+  const top = tenantHealth.find(t => t.tier !== 'healthy');
+  cards.push({
+    id: 'ribbon_top_tenant',
+    label: 'Highest Risk Tenant',
+    value: top ? top.tenantName : 'All healthy',
+    numeric: top ? top.score : 0,
+    reason: top
+      ? `${RISK_STATUS_LABEL[top.tier]} · ${top.reasons[0]?.label || 'multiple signals'}`
+      : 'No tenant currently above the healthy threshold.',
+    tone: top ? (top.tier === 'critical' ? 'critical' : top.tier === 'at_risk' ? 'warn' : 'info') : 'ok',
+    confidence: top ? top.confidence : 'High',
+    source: SIGNAL_SOURCE_LABEL.tenant,
+    drawer: 'tenant_risk',
+  });
+
+  // 2) Active escalations.
+  const esc = countKind(signals, 'escalation');
+  const escTrend = deltaTrend(delta, ['New escalation']);
+  cards.push({
+    id: 'ribbon_escalations',
+    label: 'Active Escalations',
+    value: String(esc),
+    numeric: esc,
+    reason: esc ? 'Cases currently escalated and active.' : 'No active escalations.',
+    tone: esc ? 'critical' : 'ok',
+    confidence: 'High',
+    source: SIGNAL_SOURCE_LABEL.escalations,
+    drawer: 'escalations',
+    trend: escTrend.trend,
+    trendLabel: escTrend.trendLabel,
+  });
+
+  // 3) SLA pressure.
+  const sla = countKind(signals, 'overdue_sla', 'at_risk_sla');
+  const overdue = countKind(signals, 'overdue_sla');
+  const slaTrend = deltaTrend(delta, ['Newly overdue SLA']);
+  cards.push({
+    id: 'ribbon_sla',
+    label: 'SLA Pressure',
+    value: String(sla),
+    numeric: sla,
+    reason: sla ? `${overdue} overdue, ${sla - overdue} at risk.` : 'All SLAs healthy.',
+    tone: overdue ? 'critical' : sla ? 'warn' : 'ok',
+    confidence: overdue ? 'High' : 'Medium',
+    source: SIGNAL_SOURCE_LABEL.sla,
+    drawer: 'sla',
+    trend: slaTrend.trend,
+    trendLabel: slaTrend.trendLabel,
+  });
+
+  // 4) High-risk audit events.
+  const aud = countKind(signals, 'high_risk_audit');
+  const audTrend = deltaTrend(delta, ['New high-risk audit']);
+  cards.push({
+    id: 'ribbon_audits',
+    label: 'High-Risk Audit Events',
+    value: String(aud),
+    numeric: aud,
+    reason: aud ? 'Critical / high-risk audit events flagged.' : 'No high-risk audit events.',
+    tone: aud ? 'warn' : 'ok',
+    confidence: 'High',
+    source: SIGNAL_SOURCE_LABEL.audit_security,
+    drawer: 'audits',
+    trend: audTrend.trend,
+    trendLabel: audTrend.trendLabel,
+  });
+
+  // 5) Domain issues.
+  const dom = countKind(signals, 'failed_domain', 'pending_domain');
+  const failedDom = countKind(signals, 'failed_domain');
+  const domTrend = deltaTrend(delta, ['Newly failed domain']);
+  cards.push({
+    id: 'ribbon_domains',
+    label: 'Domain Issues',
+    value: String(dom),
+    numeric: dom,
+    reason: dom ? `${failedDom} failed, ${dom - failedDom} pending.` : 'No domain issues.',
+    tone: failedDom ? 'critical' : dom ? 'warn' : 'ok',
+    confidence: failedDom ? 'High' : 'Medium',
+    source: SIGNAL_SOURCE_LABEL.domains,
+    drawer: 'domains',
+    trend: domTrend.trend,
+    trendLabel: domTrend.trendLabel,
+  });
+
+  // 6) Commercial blockers.
+  const com = countKind(signals, 'commercial_blocker');
+  const comTrend = deltaTrend(delta, ['New commercial blocker']);
+  cards.push({
+    id: 'ribbon_commercial',
+    label: 'Commercial Blockers',
+    value: String(com),
+    numeric: com,
+    reason: com ? 'Overdue / suspended / failed-payment / incomplete activation.' : 'No commercial blockers.',
+    tone: com ? 'warn' : 'ok',
+    confidence: 'Medium',
+    source: SIGNAL_SOURCE_LABEL.commercial,
+    drawer: 'commercial',
+    trend: comTrend.trend,
+    trendLabel: comTrend.trendLabel,
+  });
+
+  return cards;
+}
+
+// --- NEXT BEST ACTIONS ENRICHMENT ------------------------------------------
+// Additive wrapper around deriveNextBestActions — never mutates the base
+// shape. Adds action type, topical category, confidence, time sensitivity,
+// owner/team and source so the upgraded queue can sort + filter
+// deterministically. Review / click-through only — no automation.
+
+export type NbaActionType =
+  | 'Review'
+  | 'Assign'
+  | 'Acknowledge'
+  | 'Resolve'
+  | 'Investigate'
+  | 'Configure'
+  | 'Follow up';
+
+export type NbaCategory =
+  | 'escalations'
+  | 'sla'
+  | 'audit_security'
+  | 'domains'
+  | 'commercial'
+  | 'tenant_risk';
+
+export interface EnrichedNba extends NextBestAction {
+  actionType: NbaActionType;
+  category: NbaCategory;
+  confidence: SignalConfidence;
+  timeSensitivity: string;
+  ownerTeam: string | null;
+  source: string;
+}
+
+export const NBA_FILTERS: { id: string; label: string }[] = [
+  { id: 'all', label: 'All' },
+  { id: 'critical', label: 'Critical' },
+  { id: 'escalations', label: 'Escalations' },
+  { id: 'sla', label: 'SLA' },
+  { id: 'audit_security', label: 'Audit & Security' },
+  { id: 'domains', label: 'Domains' },
+  { id: 'commercial', label: 'Commercial' },
+  { id: 'tenant_risk', label: 'Tenant Risk' },
+];
+
+const NBA_CATEGORY_RANK: Record<NbaCategory, number> = {
+  escalations: 0,
+  sla: 1,
+  audit_security: 2,
+  domains: 3,
+  commercial: 4,
+  tenant_risk: 5,
+};
+
+function nbaCategoryFor(id: string): NbaCategory {
+  if (id.startsWith('nba_aud') || id.includes('audit')) return 'audit_security';
+  if (id.startsWith('nba_dom') || id.includes('domain')) return 'domains';
+  if (id.startsWith('nba_com')) return 'commercial';
+  if (id.startsWith('nba_tr') || id.includes('risk')) return 'tenant_risk';
+  if (id.startsWith('nba_co') || id.includes('sla')) return 'sla';
+  if (id.startsWith('nba_e') || id.includes('esc')) return 'escalations';
+  return 'tenant_risk';
+}
+
+function nbaActionTypeFor(id: string, category: NbaCategory): NbaActionType {
+  if (id.includes('ack')) return 'Acknowledge';
+  if (id.includes('own') || id.includes('assign')) return 'Assign';
+  if (id.includes('slad') || id.startsWith('nba_co')) return 'Resolve';
+  if (category === 'audit_security') return 'Investigate';
+  if (category === 'domains') return 'Configure';
+  if (category === 'commercial') return 'Follow up';
+  if (category === 'escalations') return 'Review';
+  return 'Review';
+}
+
+function nbaTimeSensitivity(priority: NbaPriority): string {
+  return priority === 'critical'
+    ? 'Act now'
+    : priority === 'high'
+      ? 'Today'
+      : priority === 'medium'
+        ? 'This week'
+        : 'When possible';
+}
+
+export function enrichNextBestActions(actions: NextBestAction[]): EnrichedNba[] {
+  const enriched = actions.map(a => {
+    const category = nbaCategoryFor(a.id);
+    const actionType = nbaActionTypeFor(a.id, category);
+    const confidence: SignalConfidence =
+      category === 'tenant_risk' ? 'Medium' : a.priority === 'low' ? 'Medium' : 'High';
+    return {
+      ...a,
+      actionType,
+      category,
+      confidence,
+      timeSensitivity: nbaTimeSensitivity(a.priority),
+      ownerTeam: null,
+      source: SIGNAL_SOURCE_LABEL[
+        category === 'audit_security'
+          ? 'audit_security'
+          : category === 'domains'
+            ? 'domains'
+            : category === 'commercial'
+              ? 'commercial'
+              : category === 'sla'
+                ? 'sla'
+                : category === 'tenant_risk'
+                  ? 'tenant'
+                  : 'escalations'
+      ],
+    } as EnrichedNba;
+  });
+  return enriched.sort((a, b) => {
+    const pr =
+      (a.priority === 'critical' ? 0 : a.priority === 'high' ? 1 : a.priority === 'medium' ? 2 : 3) -
+      (b.priority === 'critical' ? 0 : b.priority === 'high' ? 1 : b.priority === 'medium' ? 2 : 3);
+    if (pr !== 0) return pr;
+    return NBA_CATEGORY_RANK[a.category] - NBA_CATEGORY_RANK[b.category];
+  });
+}
+
+export function nbaMatchesFilter(action: EnrichedNba, filter: string): boolean {
+  if (filter === 'all') return true;
+  if (filter === 'critical') return action.priority === 'critical';
+  return action.category === filter;
+}
+
+// Commercial blockers → Next Best Actions (review / follow-up only).
+export function deriveCommercialNbas(blockers: CommercialBlocker[]): NextBestAction[] {
+  return blockers.map(b => ({
+    id: `nba_com_${b.id}`,
+    priority: (b.priority === 'critical'
+      ? 'critical'
+      : b.priority === 'high'
+        ? 'high'
+        : b.priority === 'medium'
+          ? 'medium'
+          : 'low') as NbaPriority,
+    title: `Follow up on ${b.label.toLowerCase()} · ${b.tenantName}`,
+    reason: b.reason,
+    tenant: b.tenantName,
+    ctaLabel: 'Open tenant',
+    href: b.href,
+  }));
+}
