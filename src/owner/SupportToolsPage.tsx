@@ -1291,8 +1291,18 @@ const SupportToolsPage: React.FC = () => {
                               identified as escalated in the list. It is added
                               alongside (never replacing) the status / level /
                               owner badges. Terminal de-escalated / resolved
-                              cases are not active, so they never show it. */}
-                          {eff.active && (
+                              cases are not active, so they never show it.
+
+                              Duplicate-badge correction: when the structured
+                              status is literally `escalated`, the status badge
+                              below already reads "Escalated", so rendering this
+                              standalone active badge too would show "ESCALATED"
+                              twice. Suppress it in that one case; for every
+                              OTHER active state (acknowledged / in_review /
+                              security review) the status badge reads a different
+                              label, so this badge still provides the single
+                              escalation identity. */}
+                          {eff.active && eff.status !== 'escalated' && (
                             <span
                               className="px-1.5 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border bg-red-500/10 text-red-700 border-red-500/30"
                               title="This case is actively escalated."

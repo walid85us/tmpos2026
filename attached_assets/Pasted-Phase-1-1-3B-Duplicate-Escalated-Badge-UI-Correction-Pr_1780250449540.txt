@@ -1,0 +1,89 @@
+Phase 1.1.3B — Duplicate Escalated Badge UI Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict focused UI correction.
+
+Do not repeat Phase 1.1.3B implementation.
+Do not reopen Command Center intelligence.
+Do not reopen permissions, dependency auto-sync, Request De-escalation, escalation runtime consistency, Add-on Governance, Shipping, Store Permissions Matrix, or tenant provisioning.
+
+Fix only this remaining QA note:
+
+Manual QA — Phase 1.1.3B Advanced Command Center Intelligence Review
+
+Item 22) Existing escalation operating model remains intact — FAIL
+Observed:
+
+* In Support Tools case list, active escalated case shows “ESCALATED” twice.
+* Example from QA screenshot:
+
+  * case_005 shows two red ESCALATED badges.
+* This appears to be caused by both:
+
+  1. legacy/status badge rendering, and
+  2. new active escalation badge rendering.
+
+Expected:
+
+* Active escalated case should show only one escalation badge.
+* If the existing status/tag rendering already shows ESCALATED, do not render a second duplicate escalation badge.
+* If the case is active escalation but its status is IN REVIEW / ACKNOWLEDGED / SECURITY REVIEW / similar active escalation state, render one ESCALATED or ACTIVE ESCALATION badge.
+* Preserve other useful badges:
+
+  * L3
+  * ACK OVERDUE
+  * UNASSIGNED
+  * ENGINEERING / PLATFORM OPS
+  * IN REVIEW
+  * SECURITY REVIEW
+  * SECURITY LEAD
+* Terminal de-escalated/resolved cases must not show active escalation badge.
+
+==================================================
+WORKING STYLE
+=============
+
+Think step by step before changing code.
+
+First inspect:
+
+1. Which badge comes from status/tag rendering.
+2. Which badge comes from active escalation truth-source rendering.
+3. Whether the case already has an escalation badge before adding the active-escalation badge.
+4. Whether in-review active escalations still get one escalation badge.
+
+Then implement the smallest safe fix.
+
+==================================================
+ACCEPTANCE CRITERIA
+===================
+
+1. Active escalated row shows exactly one ESCALATED / Active Escalation badge.
+2. No support case row shows duplicate ESCALATED badges.
+3. In-review active escalation still shows one escalation badge.
+4. Non-escalated cases do not show escalation badge.
+5. De-escalated/resolved terminal cases do not show active escalation badge.
+6. Other badges remain unchanged.
+7. Existing Command Center intelligence remains intact.
+8. Existing escalation operating model remains intact.
+9. Existing permission dependency auto-sync remains intact.
+10. Existing Add-on Governance remains intact.
+11. Existing Shipping Module remains intact.
+12. Existing Store Permissions Matrix remains intact.
+13. Existing tenant provisioning remains intact.
+14. Server PII logging rules are not regressed.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+======================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Root Cause
+3. Duplicate Badge Fix
+4. Files Changed
+5. Non-Regression Notes
