@@ -1,0 +1,799 @@
+Platform Operations & Security — Phase 1.1.3D Audit Investigation Center
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is Phase 1.1.3D of the Platform Operations & Security roadmap.
+
+Implement only:
+
+* Audit Investigation Center maturity
+* audit event investigation workflow
+* audit search/filter/drilldown improvements
+* event correlation and investigation grouping
+* actor profile / actor activity context
+* entity timeline / related event context
+* investigation notes and case-from-audit workflow improvements
+* evidence-style export/summary preparation where safe
+* deterministic rule-based audit/security investigation intelligence from current app/session data
+
+Do not implement:
+
+* Phase 1.2 Domains + Platform Settings Maturity
+* Phase 1.3 Platform Team Governance
+* Phase 1.4 Automation + Alerts
+* Phase 2 Real Integrations
+* Phase 3 Compliance + Evidence
+* Phase 4 Predictive / AI Operations
+* real SIEM integration
+* real security incident automation
+* real external notifications
+* real SSO / SCIM
+* server-enforced RBAC
+* real immutable audit storage
+* blockchain / tamper-proof logging
+* fake AI
+* real AI / ML
+* autonomous remediation
+* Firestore realtime migration
+
+This phase must make Audit & Security feel like a serious investigation workspace while remaining truthful that it is currently using app/session audit data and rule-based derivations.
+
+==================================================
+WORKING STYLE — THINK STEP BY STEP
+==================================
+
+Before answering, implementing, correcting, or fixing anything, think step by step.
+
+Do not rush to code.
+
+First:
+
+1. Inspect AuditSecurityPage.
+2. Inspect platformOpsAudit.ts.
+3. Inspect existing audit_logs session/local storage contract.
+4. Inspect platformOpsDerive.ts and Command Center audit/security signals.
+5. Inspect Support Tools create-case-from-audit behavior.
+6. Inspect existing platform permission helpers.
+7. Identify all accepted behavior that must not regress.
+8. Identify which audit data is real/current app-session data.
+9. Identify what can be safely derived without fake security claims.
+10. Implement slowly with reusable helpers and clear truth labels.
+
+==================================================
+ROLE STACK — ADD TO PROJECT KNOWLEDGE / SKILLS
+==============================================
+
+Before implementation, add this workstream role model to project knowledge / skills and act on it.
+
+Do not treat these roles as decorative text. Use them to guide product design, data model, UX, security boundaries, auditability, investigation flow, and QA.
+
+Primary roles:
+
+* Senior Audit & Security Engineer
+* Security Operations Center Analyst
+* Audit Investigation Analyst
+* Incident Response Analyst
+* Governance, Risk & Compliance Analyst
+* Evidence / Compliance Documentation Specialist
+* Senior Platform Operations Architect
+* Senior SaaS Security Architect
+* Identity and Access Management Specialist
+* Access Analyst
+* Senior Enterprise Admin Console UX Architect
+* Senior React/TypeScript Engineer
+* QA Gatekeeper
+* Systems Thinker
+* Side Auditor
+
+Responsibilities to apply:
+
+* audit event triage
+* actor and entity investigation
+* suspicious pattern identification
+* event correlation
+* evidence trail clarity
+* investigation note discipline
+* support-case handoff
+* least-privilege visibility
+* restricted-data handling
+* no PII leakage
+* auditability of investigation actions
+* truthful security limitations
+
+==================================================
+BENCHMARK / COMPETITOR RESEARCH REQUIREMENT
+===========================================
+
+Before coding, perform a short benchmark review using public patterns if browsing is available.
+
+Review patterns from:
+
+* Datadog Audit Trail / audit dashboards
+* Splunk Enterprise Security Investigation Workbench / notable events / risk-based alerting
+* ServiceNow Security Incident Response workspace and lifecycle
+* Atlassian organization audit logs
+* Okta system logs / admin audit events if useful
+* GitHub Enterprise audit log patterns if useful
+* Microsoft Defender / Sentinel investigation concepts if useful
+
+Do not copy external code.
+
+Extract product patterns only:
+
+* audit event search and filtering
+* event timeline
+* actor profile
+* entity profile
+* related event grouping
+* investigation workspace
+* risk/severity scoring
+* evidence summary
+* case handoff
+* false-positive / reviewed state
+* investigation notes
+* export and audit trail integrity labels
+* restricted detail gating
+* explanation and source labels
+
+If browsing is unavailable:
+
+* state browsing was unavailable
+* proceed using SaaS/security-operations best-practice patterns
+* document assumptions.
+
+Update docs/platform-operations-security-history.md with a concise:
+“Phase 1.1.3D Benchmark Patterns Considered” note.
+
+Keep replit.md concise.
+
+==================================================
+CURRENT ACCEPTED STATE
+======================
+
+Accepted and locked:
+
+* Phase 1.1 Foundation
+* Phase 1.1.1 Interactive Command Center UX
+* Phase 1.1.2 Competitive Ops Console Maturity Review
+* Phase 1.1.3A Operating Model + Permission-Aware Escalation
+* Phase 1.1.3B Advanced Command Center Intelligence
+* Phase 1.1.3C Support Queue / SLA / Macro Maturity
+* Platform Team Permissions Matrix corrections
+* Effective permission resolver hardening
+* Permission dependency auto-sync
+* Request De-escalation pending review workflow
+* Escalation signal consistency
+* Final escalation badge / Needs Attention routing correction
+* Documentation organization pattern
+
+Do not reopen those corrections.
+
+Phase 1.1.3D should build on them.
+
+==================================================
+LOCKED / DO-NOT-TOUCH AREAS
+===========================
+
+Do not modify or regress:
+
+* Shipping Module / Shipping Center behavior
+* Add-on Governance rules
+* Plans & Features Matrix source-of-truth behavior
+* Tenant Features commercial-entitlement rules
+* Store Permissions Matrix
+* Platform Team Permissions Matrix
+* Effective permission resolver
+* Permission dependency auto-sync
+* Request De-escalation workflow
+* Escalation operating model
+* Advanced Command Center Intelligence
+* Support Queue / SLA / Macro Maturity
+* POS
+* Repairs
+* Inventory
+* Customers
+* Invoices
+* Services
+* tenant provisioning behavior
+* paid override invoice workflow
+* server PII log-scrubbing
+* real DNS / SSL truth labels
+* real SSO / SCIM truth labels
+* Platform Settings truth labels
+* Team Management directory-only truth labels
+
+Any interaction with those areas must be read-only unless explicitly scoped as audit/security signal consumption.
+
+==================================================
+PRIMARY GOAL
+============
+
+Transform Audit & Security from an audit table into an investigation workspace.
+
+The System Owner / Audit Admin / Security Admin should quickly understand:
+
+* What happened?
+* Who did it?
+* Which tenant/entity was affected?
+* Was this normal, suspicious, high-risk, or restricted?
+* What related events happened before and after?
+* Has this actor done similar actions?
+* Has this tenant/entity had repeated risk events?
+* Is there an existing support case linked to this event?
+* Should a support case be created from this event?
+* Has the event been reviewed?
+* What notes/evidence exist?
+* Can the investigation be summarized/exported safely?
+* What data is current app/session data vs future real SIEM/security tooling?
+
+Use deterministic, transparent, rule-based investigation logic.
+
+Do not implement real AI/ML.
+Do not claim SIEM-level detection.
+Do not claim immutable audit storage.
+Do not claim real threat detection.
+Use terms like:
+
+* Rule-based finding
+* Investigation signal
+* Current app/session audit data
+* Related event
+* Confidence
+* Source
+* Reviewed
+* Needs review
+* Restricted detail
+
+==================================================
+PART A — AUDIT INVESTIGATION DATA MODEL
+=======================================
+
+Create or extend shared audit/security derivation helpers.
+
+Recommended concepts:
+
+* AuditInvestigationEvent
+* AuditEventSeverity
+* AuditRiskSignal
+* AuditActorProfile
+* AuditEntityTimeline
+* AuditRelatedEventGroup
+* AuditInvestigationState
+* AuditReviewStatus
+* AuditEvidenceSummary
+* AuditCaseLink
+* AuditSearchQueryState
+
+Use current audit log data and safe optional fields.
+
+Do not break existing audit log records.
+
+Each investigation event should include:
+
+* event id
+* timestamp
+* actor
+* actor role if available
+* action
+* category
+* severity
+* tenant/entity if available
+* source surface
+* related entity id
+* risk reason
+* review status
+* linked support case if available
+* restricted flag if applicable
+* source/truth label
+
+==================================================
+PART B — AUDIT INVESTIGATION CENTER LAYOUT
+==========================================
+
+Upgrade Audit & Security into an investigation center.
+
+Recommended layout:
+
+1. Investigation Summary Header
+2. Audit Search / Filter Bar
+3. Investigation Lenses / Saved Views
+4. Event Timeline / Event Table
+5. Selected Event Investigation Drawer
+6. Actor Profile Panel
+7. Related Entity Timeline
+8. Correlated Event Groups
+9. Investigation Notes / Evidence Summary
+10. Create Support Case from Audit / Linked Case Panel
+
+Keep it modern and readable.
+Do not clutter.
+Keep existing audit/security posture cards if useful.
+
+==================================================
+PART C — SEARCH AND FILTER MATURITY
+===================================
+
+Improve audit search and filtering.
+
+Filters should include:
+
+* keyword
+* severity
+* category
+* tenant
+* actor
+* action type
+* source surface
+* reviewed / unreviewed
+* linked support case / no linked support case
+* restricted event
+* time range
+
+Required:
+
+* visible active filters
+* clear filters/reset
+* no invisible filters
+* empty state explains selected filters
+* filter counts remain consistent with visible rows
+
+Do not introduce backend search claims.
+Label:
+“Search uses current app/session audit data.”
+
+==================================================
+PART D — INVESTIGATION LENSES / SAVED VIEWS
+===========================================
+
+Add investigation lenses such as:
+
+* High-Risk Events
+* Needs Review
+* Permission / Role Changes
+* Support Escalation Lifecycle
+* Commercial / Add-on Changes
+* Domain / Configuration Changes
+* Failed / Blocked Actions if data exists
+* Actor Activity
+* Linked to Support Case
+* Unlinked High-Risk Events
+* Restricted Details
+
+Each lens should:
+
+* show count
+* explain why events are included
+* apply visible filter state
+* use same predicate for count/list
+* show empty state if none
+
+No invisible filters.
+
+==================================================
+PART E — EVENT INVESTIGATION DRAWER
+===================================
+
+Improve the selected audit event drawer.
+
+The drawer should show:
+
+* event summary
+* actor
+* timestamp
+* severity
+* category
+* affected tenant/entity
+* action
+* before/after fields if available
+* risk reason
+* source surface
+* linked support case
+* related events
+* review status
+* investigation notes
+* truth label
+
+Add “Why this matters” based on rule-based logic:
+Examples:
+
+* permission changed
+* billing/commercial entitlement changed
+* escalation lifecycle changed
+* domain status changed
+* high-severity support case changed
+* restricted detail event
+* repeated actor activity
+
+Do not invent risk.
+If no risk, say “No additional risk signal from current rules.”
+
+==================================================
+PART F — ACTOR PROFILE / ACTOR ACTIVITY
+=======================================
+
+Add actor investigation context.
+
+For selected event actor:
+
+* recent actions
+* actions by category
+* severity mix
+* tenants/entities touched
+* last activity
+* high-risk action count
+* support/commercial/domain/security actions
+* unusual activity label only if rule-based and explainable
+
+Do not claim behavioral AI.
+
+Rule-based examples:
+
+* “Actor performed multiple high-risk actions in selected window.”
+* “Actor changed permissions and commercial settings in same period.”
+* “Actor has no other related events in this time range.”
+
+Respect permissions:
+
+* view_actor_profile controls actor profile visibility.
+
+==================================================
+PART G — RELATED ENTITY TIMELINE
+================================
+
+Add related entity timeline.
+
+For selected event:
+
+* show events related to same tenant, support case, domain, add-on, plan, permission role, or actor where available
+* sort by time
+* highlight selected event
+* show before/after context where available
+* click related event to inspect
+
+Respect permissions:
+
+* view_related_event_timeline controls timeline visibility.
+
+==================================================
+PART H — CORRELATED AUDIT EVENT GROUPS
+======================================
+
+Add rule-based correlated audit groups.
+
+Group events by:
+
+* same actor in time window
+* same tenant/entity in time window
+* same category/action family
+* permission + support escalation chain
+* commercial/add-on change sequence
+* domain/configuration change sequence
+* repeated denied/blocked actions if data exists
+
+Each group should show:
+
+* title
+* severity
+* event count
+* why grouped
+* involved actor/entity/tenant
+* recommended review action
+* confidence label
+* click-through to filtered event list/drawer
+
+Truth label:
+“Rule-based correlation from current app/session audit data.”
+
+==================================================
+PART I — REVIEW STATUS AND INVESTIGATION NOTES
+==============================================
+
+Add review workflow.
+
+Each audit event or investigation group can be marked:
+
+* Needs Review
+* Reviewed
+* Dismissed / Informational if appropriate
+
+Add investigation notes:
+
+* internal only
+* timestamped
+* actor/role recorded
+* editable only if safe, otherwise append-only preferred
+* delete note requires delete_security_note or equivalent approved permission
+* add note requires add_security_note
+
+Audit these actions:
+
+* audit_event_marked_reviewed
+* audit_event_marked_needs_review
+* audit_event_dismissed
+* audit_investigation_note_added
+* audit_investigation_note_deleted if deletion exists
+
+Do not modify original audit event.
+Review state should be overlay metadata in session/local storage.
+
+==================================================
+PART J — CREATE SUPPORT CASE FROM AUDIT IMPROVEMENT
+===================================================
+
+Improve create-support-case-from-audit flow.
+
+Required:
+
+* show linked support case if already created
+* prevent duplicate support cases for the same audit event unless explicitly allowed
+* create case pre-fills:
+
+  * subject
+  * severity
+  * tenant/entity if known
+  * audit event reference
+  * summary
+  * reason
+* created case link opens Support Tools case detail
+* permission requires:
+
+  * create_support_case_from_audit
+  * Support Tools create_support_case
+* action audited
+* no external notification
+
+==================================================
+PART K — EVIDENCE SUMMARY / EXPORT PREP
+=======================================
+
+Add an investigation evidence summary.
+
+Options:
+
+* copyable summary panel
+* downloadable CSV/JSON only if existing export pattern safely supports it
+* otherwise internal copy-only summary is enough
+
+Summary should include:
+
+* selected event
+* actor
+* action
+* timestamp
+* related events
+* notes
+* linked case
+* review status
+* truth label
+
+Export/copy must respect:
+
+* export_audit_csv or equivalent export permission
+* view_restricted_audit_details for restricted fields
+
+Do not claim legal/compliance-grade export.
+Label:
+“Internal investigation summary from current app/session data.”
+
+==================================================
+PART L — RESTRICTED DETAIL HANDLING
+===================================
+
+Respect existing permissions:
+
+* view_audit_logs controls base page access.
+* view_restricted_audit_details controls restricted fields/details.
+* export_audit_csv controls export/copy of full audit details.
+* view_actor_profile controls actor profile.
+* view_related_event_timeline controls related events.
+* add_security_note controls notes.
+* delete_security_note controls deletion.
+* create_support_case_from_audit controls support case creation and also requires Support create permission.
+* view_escalation_lifecycle_audit controls escalation lifecycle lens/details.
+
+If permission is missing:
+
+* hide restricted details
+* show minimal “Restricted” label if useful
+* do not leak restricted content in tooltips, export, notes, or copy summary
+
+==================================================
+PART M — COMMAND CENTER INTEGRATION
+===================================
+
+Command Center should benefit from Audit Investigation Center but do not overbuild.
+
+Required:
+
+* existing Command Center high-risk audit signals remain accurate.
+* click-through from Command Center audit/security signal opens the relevant Audit & Security lens/drawer where practical.
+* no invisible filters.
+* do not break Command Center intelligence.
+
+Optional:
+
+* update Command Center audit drilldowns to use new investigation helper if low-risk.
+
+==================================================
+PART N — AUDITABILITY OF INVESTIGATION ACTIONS
+==============================================
+
+Audit meaningful investigation actions:
+
+* investigation drawer opened if current audit pattern supports and not spammy
+* event marked reviewed/needs review/dismissed
+* investigation note added/deleted
+* support case created from audit
+* evidence summary copied/exported
+
+Avoid audit spam:
+
+* do not audit passive hover
+* do not audit every row selection unless already expected and low-noise
+* do not duplicate rows
+
+No server PII logging.
+
+==================================================
+PART O — DOCUMENTATION
+======================
+
+Use the documentation pattern:
+
+* Keep replit.md concise.
+* Add only a short summary under current/locked rules.
+* Put detailed Phase 1.1.3D implementation narrative in docs/platform-operations-security-history.md.
+
+Update:
+
+1. replit.md:
+
+* Phase 1.1.3D short summary
+* accepted rules added by this phase after implementation
+* next phase after acceptance should be Phase 1.2 Domains + Platform Settings Maturity unless roadmap says otherwise
+
+2. docs/platform-operations-security-history.md:
+
+* detailed Phase 1.1.3D notes
+* benchmark patterns considered
+* data model/helpers
+* investigation center layout
+* search/filter/lenses
+* actor profile
+* entity timeline
+* correlated groups
+* review status/notes
+* support-case-from-audit
+* evidence summary
+* permissions/auditability
+* out-of-scope limitations
+
+Do not make replit.md large again.
+
+==================================================
+TRUTH LABELS / LIMITATIONS
+==========================
+
+Required labels:
+
+* “Audit Investigation Center uses current app/session audit data.”
+* “Rule-based correlation only — no AI or SIEM integration in this phase.”
+* “Investigation notes are internal only.”
+* “Evidence summary is internal and not compliance-certified.”
+* “Restricted fields require elevated audit permission.”
+* “No external notifications or automated remediation are active.”
+
+==================================================
+OUT OF SCOPE
+============
+
+Do NOT implement:
+
+* real SIEM
+* real threat intelligence
+* real AI
+* fake AI
+* tamper-proof audit storage
+* blockchain audit trail
+* legal-grade evidence vault
+* automated containment
+* automated remediation
+* real email/SMS/Slack/Teams/PagerDuty
+* server-side RBAC/PIM/PAM
+* Firestore realtime migration
+* Phase 1.2+
+* customer-facing incident notifications
+
+==================================================
+ACCEPTANCE CRITERIA
+===================
+
+Acceptance is literal:
+
+1. Audit Investigation Center exists.
+2. Audit search/filter bar is improved.
+3. Active audit filters are visible and clearable.
+4. Investigation lenses/saved views exist.
+5. Lens counts match filtered event lists.
+6. Event investigation drawer is improved.
+7. Drawer shows why the event matters.
+8. Actor profile panel exists and respects permission.
+9. Related entity timeline exists and respects permission.
+10. Correlated audit event groups exist.
+11. Correlation explains why events are grouped.
+12. Review status workflow exists.
+13. Investigation notes exist.
+14. Notes are permission-gated.
+15. Create support case from audit prevents duplicates.
+16. Created support case opens Support Tools case detail.
+17. Evidence summary/copy/export exists or is clearly scoped internally.
+18. Restricted details respect permission.
+19. Audit investigation actions are audited without spam.
+20. Command Center audit click-through remains accurate.
+21. No invisible filters are introduced.
+22. Truth labels are clear.
+23. Existing Command Center intelligence remains intact.
+24. Existing Support Queue / SLA / Macro Maturity remains intact.
+25. Existing escalation operating model remains intact.
+26. Existing permission dependency auto-sync remains intact.
+27. Existing Add-on Governance remains intact.
+28. Existing Shipping Module remains intact.
+29. Existing Store Permissions Matrix remains intact.
+30. Existing tenant provisioning remains intact.
+31. Server PII logging rules are not regressed.
+32. Future phases remain out of scope.
+33. replit.md remains concise.
+34. docs/platform-operations-security-history.md is updated.
+
+==================================================
+IMPLEMENTATION DISCIPLINE
+=========================
+
+Follow this order:
+
+1. Think step by step.
+2. Benchmark audit/security investigation patterns.
+3. Inspect existing AuditSecurityPage.
+4. Inspect audit log storage and helper contracts.
+5. Inspect permissions.
+6. Define shared audit investigation helpers.
+7. Implement investigation layout improvements.
+8. Improve search/filter/lenses.
+9. Improve event drawer.
+10. Add actor profile.
+11. Add related entity timeline.
+12. Add correlated groups.
+13. Add review status/notes.
+14. Improve create-support-case-from-audit.
+15. Add evidence summary.
+16. Respect restricted detail permissions.
+17. Add meaningful audits only.
+18. Preserve Command Center integration.
+19. Update replit.md concisely.
+20. Update docs/platform-operations-security-history.md in detail.
+21. Run typecheck/smoke tests.
+22. Provide final report.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+======================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Benchmark / Patterns Considered
+3. Audit Investigation Model
+4. Search / Filters / Lenses
+5. Event Investigation Drawer
+6. Actor Profile / Entity Timeline
+7. Correlated Event Groups
+8. Review Status / Investigation Notes
+9. Support Case from Audit
+10. Evidence Summary / Restricted Details
+11. Permissions / Auditability
+12. Command Center / Non-Regression
+13. Files Changed
+14. Documentation Updated
+15. Non-Regression Notes
