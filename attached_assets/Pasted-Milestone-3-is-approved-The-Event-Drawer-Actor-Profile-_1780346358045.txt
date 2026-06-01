@@ -1,0 +1,33 @@
+Milestone 3 is approved.
+
+The Event Drawer, Actor Profile, Related Entity Timeline, and Correlated Event Groups are acceptable and properly scoped.
+
+Confirmed acceptable:
+
+1. “Why this matters” is rule-based and explainable.
+2. Actor Profile is gated by `view_actor_profile`.
+3. Related Entity Timeline is gated by `view_related_event_timeline`.
+4. Restricted details remain gated by `view_restricted_audit_details`.
+5. Escalation lifecycle detail remains gated by `view_escalation_lifecycle_audit`.
+6. Correlated Event Groups use the same `group.eventIds` source for count and expanded member list.
+7. No AI, SIEM, prediction, immutable audit, threat-intelligence, or compliance-certified language was introduced.
+8. Review mutation, investigation notes, evidence summary, and create-support-case-from-audit were correctly left for Milestone 4.
+
+Please proceed to Milestone 4 — Review Status + Investigation Notes + Create Support Case from Audit + Evidence Summary.
+
+For Milestone 4:
+
+* Think step by step before implementing.
+* Keep scope limited to review status, investigation notes, create-support-case-from-audit improvements, and evidence summary.
+* Do not implement Command Center integration or final documentation beyond what is required for this milestone.
+* Do not reopen Milestone 1, 2, or 3 unless directly required.
+* Do not change permissions architecture.
+* Do not change Command Center Intelligence, Support Queue/SLA/Macro Maturity, escalation operating model, Add-on Governance, Shipping, Store Permissions Matrix, or tenant provisioning.
+* Use overlay/session/local storage for review status and notes; do not mutate original audit rows.
+* Review state must be auditable.
+* Investigation notes must be internal-only and permission-gated.
+* Create Support Case from Audit must prevent duplicate active linked cases.
+* Evidence summary must be internal and not compliance-certified.
+* Restricted details must be excluded or marked restricted unless `view_restricted_audit_details` is granted.
+* No external notification, no SIEM, no real immutable evidence vault, no legal-grade export, no fake AI.
+* Provide a milestone report before moving to Milestone 5.

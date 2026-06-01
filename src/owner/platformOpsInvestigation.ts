@@ -785,6 +785,178 @@ export function reviewStatusForEvent(
   return reviewState[eventId]?.status ?? 'needs_review';
 }
 
+// --- INVESTIGATION OVERLAY WRITES (review status + notes) ------------------
+// All writes are pure: they take the current overlay state and return a NEW
+// state object. The caller persists with writeAuditInvestigationState and is
+// responsible for emitting the matching audit row. Original audit rows are
+// NEVER modified — review status and notes live only in this overlay.
+
+export function writeAuditInvestigationState(state: AuditInvestigationState): void {
+  if (typeof window === 'undefined' || !window.sessionStorage) return;
+  try {
+    window.sessionStorage.setItem(AUDIT_INVESTIGATION_STORAGE_KEY, JSON.stringify(state));
+    window.dispatchEvent(new Event('audit_investigation:changed'));
+  } catch {
+    /* noop — overlay is best-effort session metadata */
+  }
+}
+
+// Returns a new state with the event's review status set. Stamps reviewedBy /
+// reviewedAt so the review action is attributable and auditable.
+export function setAuditReviewStatus(
+  state: AuditInvestigationState,
+  eventId: string,
+  status: AuditReviewStatus,
+  reviewedBy: string,
+): AuditInvestigationState {
+  return {
+    ...state,
+    reviews: {
+      ...state.reviews,
+      [eventId]: {
+        eventId,
+        status,
+        reviewedBy,
+        reviewedAt: new Date().toISOString(),
+      },
+    },
+  };
+}
+
+// Notes are append-only: addAuditInvestigationNote never edits an existing
+// note, it prepends a new immutable record. Deletion is a separate, gated
+// action (delete_security_note) audited as audit_investigation_note_deleted.
+export function addAuditInvestigationNote(
+  state: AuditInvestigationState,
+  eventId: string,
+  text: string,
+  author: string,
+  role?: string,
+): { state: AuditInvestigationState; note: AuditInvestigationNote } {
+  const note: AuditInvestigationNote = {
+    id: `ain_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    eventId,
+    text: text.trim(),
+    author,
+    role,
+    createdAt: new Date().toISOString(),
+  };
+  return {
+    state: { ...state, notes: [note, ...state.notes] },
+    note,
+  };
+}
+
+export function deleteAuditInvestigationNote(
+  state: AuditInvestigationState,
+  noteId: string,
+): AuditInvestigationState {
+  return { ...state, notes: state.notes.filter(n => n.id !== noteId) };
+}
+
+// Notes for a single event, newest first (createdAt desc).
+export function notesForEvent(
+  state: AuditInvestigationState,
+  eventId: string,
+): AuditInvestigationNote[] {
+  return state.notes
+    .filter(n => n.eventId === eventId)
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0));
+}
+
+// --- EVIDENCE SUMMARY (internal, copy-only) --------------------------------
+// Assembles a deterministic, internal investigation summary from data already
+// on screen. NOT a legal-grade export, evidence vault, or compliance artifact.
+
+export function buildAuditEvidenceSummary(input: {
+  event: AuditInvestigationEvent;
+  riskSignals: AuditRiskSignal[];
+  relatedEventIds: string[];
+  notes: AuditInvestigationNote[];
+  linkedCaseId: string | null;
+  reviewStatus: AuditReviewStatus;
+}): AuditEvidenceSummary {
+  return {
+    generatedAt: new Date().toISOString(),
+    event: input.event,
+    riskSignals: input.riskSignals,
+    relatedEventIds: input.relatedEventIds,
+    notes: input.notes,
+    linkedCaseId: input.linkedCaseId,
+    reviewStatus: input.reviewStatus,
+    truthLabel: AUDIT_EVIDENCE_TRUTH_LABEL,
+  };
+}
+
+// Renders the evidence summary as copyable plain text. When includeRestricted
+// is false, restricted detail (risk reason / free-form note for high-risk
+// events) is redacted with an explicit marker rather than silently dropped.
+const RESTRICTED_PLACEHOLDER = '[restricted — requires View Restricted Audit Details]';
+
+export function formatEvidenceSummaryText(
+  summary: AuditEvidenceSummary,
+  opts: { includeRestricted: boolean; tenantLabel?: string | null },
+): string {
+  const e = summary.event;
+  const restricted = e.flagReasons.length > 0;
+  const lines: string[] = [];
+  lines.push('AUDIT EVIDENCE SUMMARY (internal)');
+  lines.push(`Generated: ${summary.generatedAt}`);
+  lines.push('');
+  lines.push(`Event ID: ${e.id}`);
+  lines.push(`Date: ${e.date}`);
+  lines.push(`Actor: ${e.actor}`);
+  lines.push(`Action: ${e.action}`);
+  lines.push(`Target / Entity: ${e.target || '—'}`);
+  lines.push(`Tenant: ${opts.tenantLabel || e.tenantId || '—'}`);
+  lines.push(`Severity: ${e.severity}`);
+  lines.push(`Category: ${e.category}`);
+  lines.push(`Source surface: ${e.sourceSurface}`);
+  lines.push(`Review status: ${AUDIT_REVIEW_STATUS_LABEL[summary.reviewStatus]}`);
+  lines.push(`Linked support case: ${summary.linkedCaseId || 'none'}`);
+  if (e.oldValue != null || e.newValue != null) {
+    lines.push(`Before → After: ${e.oldValue != null ? String(e.oldValue) : '—'} → ${e.newValue != null ? String(e.newValue) : '—'}`);
+  }
+  lines.push('');
+  lines.push('Why this matters (rule-based):');
+  if (summary.riskSignals.length === 0) {
+    lines.push('  - No additional risk signal from current rules.');
+  } else {
+    summary.riskSignals.forEach(s => lines.push(`  - ${s.label}: ${s.detail}`));
+  }
+  lines.push('');
+  lines.push('Why flagged (restricted):');
+  if (!restricted) {
+    lines.push('  - Not flagged.');
+  } else if (!opts.includeRestricted) {
+    lines.push(`  - ${RESTRICTED_PLACEHOLDER}`);
+  } else {
+    e.flagReasons.forEach(r => lines.push(`  - ${r}`));
+  }
+  lines.push('');
+  lines.push('Note:');
+  if (!e.note) {
+    lines.push('  - (none)');
+  } else if (restricted && !opts.includeRestricted) {
+    lines.push(`  - ${RESTRICTED_PLACEHOLDER}`);
+  } else {
+    lines.push(`  - ${e.note}`);
+  }
+  lines.push('');
+  lines.push(`Related event IDs (${summary.relatedEventIds.length}): ${summary.relatedEventIds.length ? summary.relatedEventIds.join(', ') : 'none'}`);
+  lines.push('');
+  lines.push(`Investigation notes (${summary.notes.length}):`);
+  if (summary.notes.length === 0) {
+    lines.push('  - (none)');
+  } else {
+    summary.notes.forEach(n => lines.push(`  - [${n.createdAt}] ${n.author}${n.role ? ` (${n.role})` : ''}: ${n.text}`));
+  }
+  lines.push('');
+  lines.push(summary.truthLabel);
+  lines.push('Excludes: legal-grade evidence vault, automated containment / remediation, external notification (email / SMS / Slack / Teams / PagerDuty), and server-side RBAC/PIM/PAM enforcement.');
+  return lines.join('\n');
+}
+
 export function isRestrictedEvent(event: AuditInvestigationEvent): boolean {
   return event.flagReasons.length > 0;
 }

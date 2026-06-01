@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -30,6 +30,15 @@ import {
   getAuditLens,
   isDefaultAuditQuery,
   readAuditReviewState,
+  readAuditInvestigationState,
+  reviewStatusForEvent,
+  setAuditReviewStatus,
+  addAuditInvestigationNote,
+  deleteAuditInvestigationNote,
+  notesForEvent,
+  writeAuditInvestigationState,
+  buildAuditEvidenceSummary,
+  formatEvidenceSummaryText,
   deriveAuditRiskSignals,
   deriveAuditActorProfile,
   deriveEntityTimeline,
@@ -38,8 +47,12 @@ import {
   AUDIT_INVESTIGATION_TRUTH_LABEL,
   AUDIT_CORRELATION_TRUTH_LABEL,
   AUDIT_REVIEW_STATUS_LABEL,
+  AUDIT_REVIEW_STATUS_STYLES,
+  AUDIT_NOTE_TRUTH_LABEL,
+  AUDIT_EVIDENCE_TRUTH_LABEL,
   EMPTY_AUDIT_SEARCH_QUERY,
   type AuditInvestigationEvent,
+  type AuditInvestigationNote,
   type AuditActorProfile,
   type AuditEntityTimeline,
   type AuditRelatedEventGroup,
@@ -165,6 +178,12 @@ const AuditSecurityPage: React.FC = () => {
   const [showCreateCase, setShowCreateCase] = useState(false);
   const [linkedNoteEventId, setLinkedNoteEventId] = useState<string | null>(null);
   const [pendingDeleteNoteId, setPendingDeleteNoteId] = useState<string | null>(null);
+  // Phase 1.1.3D — per-event investigation overlay (review notes + evidence).
+  const [invNotes, setInvNotes] = useState<AuditInvestigationNote[]>([]);
+  const [invNoteDraft, setInvNoteDraft] = useState('');
+  const [pendingDeleteInvNoteId, setPendingDeleteInvNoteId] = useState<string | null>(null);
+  const [evidenceCopied, setEvidenceCopied] = useState(false);
+  const [showEvidence, setShowEvidence] = useState(false);
 
   // Persisted support cases (so we can show "linked support case" badges
   // when an event has been used as the source of a case).
@@ -198,7 +217,11 @@ const AuditSecurityPage: React.FC = () => {
   // filter (events with no record default to "needs review").
   const [reviewState, setReviewState] = useState<Record<string, AuditReviewState>>({});
   useEffect(() => {
-    const read = () => setReviewState(readAuditReviewState());
+    const read = () => {
+      const state = readAuditInvestigationState();
+      setReviewState(state.reviews);
+      setInvNotes(state.notes);
+    };
     read();
     window.addEventListener('audit_investigation:changed', read);
     window.addEventListener('storage', read);
@@ -409,9 +432,34 @@ const AuditSecurityPage: React.FC = () => {
     try { window.sessionStorage.setItem(CASES_KEY, JSON.stringify(next)); } catch { /* noop */ }
   };
 
+  // Reads the freshest persisted cases from storage (not React state) so the
+  // duplicate guard cannot be defeated by a stale render between writes.
+  const readPersistedCases = (): SupportCaseRecord[] => {
+    try {
+      const raw = window.sessionStorage.getItem(CASES_KEY);
+      return raw ? (JSON.parse(raw) as SupportCaseRecord[]) : cases;
+    } catch {
+      return cases;
+    }
+  };
+
+  // Synchronous submit lock — prevents a double-click from creating two cases
+  // before setCases/storage propagate (a useRef flips before any await/render).
+  const creatingCaseRef = useRef(false);
+
   const createCaseFromEvent = () => {
     if (!selected) return;
+    if (creatingCaseRef.current) return; // re-entrancy guard (double-submit)
+    // Part J — prevent a duplicate support case for the same audit event. Read
+    // fresh from storage (not React state) so a stale render cannot let a
+    // second case slip through for an event that already has one.
+    const persisted = readPersistedCases();
+    if (persisted.some(c => c.sourceAuditEventId === selected.id)) {
+      setShowCreateCase(false);
+      return;
+    }
     if (!caseDraft.tenantId || !caseDraft.subject.trim()) return;
+    creatingCaseRef.current = true;
     const now = new Date();
     const newCase: SupportCaseRecord = {
       id: `case_${now.getTime()}_${Math.random().toString(36).slice(2, 7)}`,
@@ -426,7 +474,7 @@ const AuditSecurityPage: React.FC = () => {
       notes: [],
       sourceAuditEventId: selected.id,
     };
-    persistCases([newCase, ...cases]);
+    persistCases([newCase, ...persisted]);
     pushPlatformAudit({
       actor: 'System Owner',
       action: 'support_case_created_from_audit',
@@ -437,6 +485,7 @@ const AuditSecurityPage: React.FC = () => {
       note: `From event ${selected.id}`,
     });
     setShowCreateCase(false);
+    creatingCaseRef.current = false;
   };
 
   const sslCoverage = useMemo(() => {
@@ -515,6 +564,126 @@ const AuditSecurityPage: React.FC = () => {
     () => (pendingDeleteNoteId ? notes.find(n => n.id === pendingDeleteNoteId) || null : null),
     [pendingDeleteNoteId, notes]
   );
+
+  // --- Phase 1.1.3D — investigation overlay writes (review status + notes) ---
+  // Review marking and per-event investigation notes are investigation-overlay
+  // writes. Per the locked permissions architecture we add NO new permission
+  // keys: add_security_note is reused as the "contribute to investigation
+  // overlay" grant (mark review + add note) and delete_security_note gates note
+  // deletion. Every write reads the freshest persisted overlay, applies a pure
+  // update, persists, mirrors into local state, and emits exactly one audit row.
+  // Original audit rows are never mutated.
+  const markReview = (eventId: string, status: AuditReviewStatus) => {
+    if (!addNoteGate.allowed) return;
+    const current = readAuditInvestigationState();
+    if ((current.reviews[eventId]?.status ?? 'needs_review') === status) return; // no-op → no audit spam
+    const next = setAuditReviewStatus(current, eventId, status, 'System Owner');
+    writeAuditInvestigationState(next);
+    setReviewState(next.reviews);
+    setInvNotes(next.notes);
+    const action =
+      status === 'reviewed' ? 'audit_event_marked_reviewed'
+      : status === 'dismissed' ? 'audit_event_dismissed'
+      : 'audit_event_marked_needs_review';
+    pushPlatformAudit({
+      actor: 'System Owner',
+      action,
+      target: `${eventId}${selected ? ` · ${selected.action}` : ''}`,
+      category: 'security',
+      tenantId: selected?.tenantId ?? null,
+    });
+  };
+
+  const addInvNote = (eventId: string) => {
+    if (!addNoteGate.allowed) return;
+    const text = invNoteDraft.trim();
+    if (!text) return;
+    const current = readAuditInvestigationState();
+    const { state: next } = addAuditInvestigationNote(current, eventId, text, 'System Owner', sessionRole || undefined);
+    writeAuditInvestigationState(next);
+    setReviewState(next.reviews);
+    setInvNotes(next.notes);
+    pushPlatformAudit({
+      actor: 'System Owner',
+      action: 'audit_investigation_note_added',
+      target: `${eventId} · ${text.length > 50 ? `${text.slice(0, 50)}…` : text}`,
+      category: 'security',
+      tenantId: selected?.tenantId ?? null,
+    });
+    setInvNoteDraft('');
+  };
+
+  const cancelDeleteInvNote = () => setPendingDeleteInvNoteId(null);
+
+  const confirmDeleteInvNote = () => {
+    const id = pendingDeleteInvNoteId;
+    if (!id) return;
+    if (!deleteNoteGate.allowed) { setPendingDeleteInvNoteId(null); return; }
+    const current = readAuditInvestigationState();
+    const target = current.notes.find(n => n.id === id);
+    const next = deleteAuditInvestigationNote(current, id);
+    writeAuditInvestigationState(next);
+    setReviewState(next.reviews);
+    setInvNotes(next.notes);
+    if (target) {
+      pushPlatformAudit({
+        actor: 'System Owner',
+        action: 'audit_investigation_note_deleted',
+        target: `${target.eventId} · ${target.text.length > 50 ? `${target.text.slice(0, 50)}…` : target.text}`,
+        category: 'security',
+      });
+    }
+    setPendingDeleteInvNoteId(null);
+  };
+
+  const pendingDeleteInvNote = useMemo(
+    () => (pendingDeleteInvNoteId ? invNotes.find(n => n.id === pendingDeleteInvNoteId) || null : null),
+    [pendingDeleteInvNoteId, invNotes]
+  );
+
+  // Notes attached to the currently selected event (newest first).
+  const selectedEventNotes = useMemo<AuditInvestigationNote[]>(
+    () => (selected ? notesForEvent({ reviews: reviewState, notes: invNotes }, selected.id) : []),
+    [selected, reviewState, invNotes]
+  );
+
+  // Deterministic, internal, copy-only evidence summary text. Restricted detail
+  // is redacted unless view_restricted_audit_details is granted.
+  const evidenceSummaryText = useMemo(() => {
+    if (!selectedInvEvent) return '';
+    const summary = buildAuditEvidenceSummary({
+      event: selectedInvEvent,
+      riskSignals: selectedRiskSignals,
+      relatedEventIds: relatedEvents.map(e => e.id),
+      notes: selectedEventNotes,
+      linkedCaseId: linkedCaseByEvent.get(selectedInvEvent.id)?.id ?? null,
+      reviewStatus: reviewStatusForEvent(selectedInvEvent.id, reviewState),
+    });
+    return formatEvidenceSummaryText(summary, {
+      includeRestricted: viewRestrictedDetailsGate.allowed,
+      tenantLabel: selectedInvEvent.tenantId
+        ? (tenantNameById.get(selectedInvEvent.tenantId) || selectedInvEvent.tenantId)
+        : null,
+    });
+  }, [selectedInvEvent, selectedRiskSignals, relatedEvents, selectedEventNotes, reviewState, viewRestrictedDetailsGate.allowed, linkedCaseByEvent, tenantNameById]);
+
+  const copyEvidenceSummary = async () => {
+    if (!evidenceSummaryText) return;
+    try {
+      await navigator.clipboard.writeText(evidenceSummaryText);
+      setEvidenceCopied(true);
+      setTimeout(() => setEvidenceCopied(false), 2000);
+    } catch {
+      setShowEvidence(true); // clipboard unavailable → reveal copy-able preview
+    }
+  };
+
+  // Reset transient drawer-investigation UI when switching selected event.
+  useEffect(() => {
+    setInvNoteDraft('');
+    setShowEvidence(false);
+    setEvidenceCopied(false);
+  }, [selected?.id]);
 
   return (
     <div className="space-y-8">
@@ -1225,6 +1394,110 @@ const AuditSecurityPage: React.FC = () => {
                     )}
                     <p className="text-[10px] text-slate-400 italic mt-2">{AUDIT_INVESTIGATION_TRUTH_LABEL}</p>
                   </div>
+
+                  {/* Phase 1.1.3D — Review status (Part I). Overlay metadata only;
+                      the original audit row is never modified. Marking is gated by
+                      add_security_note (investigation-overlay write). */}
+                  <div data-testid="audit-drawer-review" className="pt-3 border-t border-slate-100">
+                    <div className="flex items-center justify-between">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Review status</p>
+                      {(() => {
+                        const st = reviewStatusForEvent(selected.id, reviewState);
+                        return <span className={`px-2 py-0.5 text-[10px] font-black uppercase tracking-widest rounded border ${AUDIT_REVIEW_STATUS_STYLES[st]}`}>{AUDIT_REVIEW_STATUS_LABEL[st]}</span>;
+                      })()}
+                    </div>
+                    <div className="flex flex-wrap gap-2 mt-2">
+                      {(['needs_review', 'reviewed', 'dismissed'] as AuditReviewStatus[]).map(st => {
+                        const active = reviewStatusForEvent(selected.id, reviewState) === st;
+                        return (
+                          <button
+                            key={st}
+                            onClick={() => markReview(selected.id, st)}
+                            disabled={!addNoteGate.allowed}
+                            title={addNoteGate.allowed ? '' : addNoteGate.reason}
+                            data-testid={`audit-review-set-${st}`}
+                            className={`px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${active ? AUDIT_REVIEW_STATUS_STYLES[st] : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'}`}
+                          >
+                            {AUDIT_REVIEW_STATUS_LABEL[st]}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {(() => {
+                      const rec = reviewState[selected.id];
+                      return rec?.reviewedBy ? (
+                        <p className="text-[10px] text-slate-400 mt-1.5" data-testid="audit-review-stamp">
+                          Last set by {rec.reviewedBy}{rec.reviewedAt ? ` · ${new Date(rec.reviewedAt).toLocaleString()}` : ''}
+                        </p>
+                      ) : null;
+                    })()}
+                  </div>
+
+                  {/* Phase 1.1.3D — Investigation notes (Part I): internal-only,
+                      timestamped, actor/role recorded, append-only. Add gated by
+                      add_security_note; delete gated by delete_security_note. */}
+                  <div data-testid="audit-drawer-inv-notes" className="pt-3 border-t border-slate-100">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Investigation notes</p>
+                    <p className="text-[10px] text-slate-400 italic mb-2">{AUDIT_NOTE_TRUTH_LABEL}</p>
+                    <textarea
+                      value={invNoteDraft}
+                      onChange={e => setInvNoteDraft(e.target.value)}
+                      disabled={!addNoteGate.allowed}
+                      placeholder={addNoteGate.allowed ? 'Add an internal investigation note…' : addNoteGate.reason}
+                      data-testid="audit-inv-note-input"
+                      rows={2}
+                      className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm resize-none disabled:opacity-50 disabled:cursor-not-allowed"
+                    />
+                    <div className="flex justify-end mt-2">
+                      <button
+                        onClick={() => addInvNote(selected.id)}
+                        disabled={!invNoteDraft.trim() || !addNoteGate.allowed}
+                        title={addNoteGate.allowed ? '' : addNoteGate.reason}
+                        data-testid="audit-inv-note-save"
+                        className="px-4 py-2 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        Add Note
+                      </button>
+                    </div>
+                    <div className="space-y-2 mt-2">
+                      {selectedEventNotes.length === 0 && <p className="text-xs text-slate-400 font-bold py-2 text-center">No investigation notes for this event.</p>}
+                      {selectedEventNotes.map(n => (
+                        <div key={n.id} data-testid={`audit-inv-note-${n.id}`} className="p-3 bg-slate-50 rounded-xl border border-slate-100">
+                          <div className="flex justify-between items-start gap-2">
+                            <p className="text-sm text-slate-700 flex-1 whitespace-pre-wrap break-words">{n.text}</p>
+                            <button
+                              onClick={() => { if (deleteNoteGate.allowed) setPendingDeleteInvNoteId(n.id); }}
+                              disabled={!deleteNoteGate.allowed}
+                              title={deleteNoteGate.allowed ? '' : deleteNoteGate.reason}
+                              data-testid={`audit-inv-note-delete-${n.id}`}
+                              className="text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-red-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                          <p className="text-[10px] text-slate-400 mt-1">{n.author}{n.role ? ` · ${n.role}` : ''} · {new Date(n.createdAt).toLocaleString()}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Phase 1.1.3D — Evidence summary (Part K): internal, copy-only.
+                      Not a legal-grade export. Restricted detail is redacted unless
+                      view_restricted_audit_details is granted. */}
+                  <div data-testid="audit-drawer-evidence" className="pt-3 border-t border-slate-100">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Evidence summary</p>
+                      <div className="flex gap-2">
+                        <button onClick={() => setShowEvidence(v => !v)} data-testid="audit-evidence-toggle" className="px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50">{showEvidence ? 'Hide' : 'Preview'}</button>
+                        <button onClick={copyEvidenceSummary} data-testid="audit-evidence-copy" className="px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg bg-primary text-white hover:bg-primary/90">{evidenceCopied ? 'Copied' : 'Copy'}</button>
+                      </div>
+                    </div>
+                    <p className="text-[10px] text-slate-400 italic mt-1">{AUDIT_EVIDENCE_TRUTH_LABEL}{!viewRestrictedDetailsGate.allowed ? ' Restricted detail redacted.' : ''}</p>
+                    {showEvidence && (
+                      <pre data-testid="audit-evidence-preview" className="mt-2 p-3 bg-slate-900 text-slate-100 rounded-xl text-[10px] leading-relaxed whitespace-pre-wrap break-words max-h-72 overflow-y-auto">{evidenceSummaryText}</pre>
+                    )}
+                  </div>
+
                   <div className="flex flex-wrap gap-2 pt-3 border-t border-slate-100">
                     {!linkedCaseByEvent.get(selected.id) && (
                       <button
@@ -1479,6 +1752,29 @@ const AuditSecurityPage: React.FC = () => {
               <div className="p-7 border-t border-slate-100 bg-slate-50/40 flex justify-end gap-2">
                 <button onClick={() => setShowCreateCase(false)} className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-white">Cancel</button>
                 <button onClick={createCaseFromEvent} disabled={!caseDraft.tenantId || !caseDraft.subject.trim()} className="px-6 py-2.5 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/90 disabled:opacity-40">Create Case</button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Phase 1.1.3D — Investigation note delete confirmation */}
+      <AnimatePresence>
+        {pendingDeleteInvNote && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" data-testid="confirm-delete-inv-note">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={cancelDeleteInvNote} className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="relative w-full max-w-md bg-white rounded-[2rem] shadow-2xl overflow-hidden">
+              <div className="p-7 border-b border-slate-100">
+                <h3 className="text-lg font-black text-primary tracking-tight">Delete investigation note?</h3>
+                <p className="text-xs text-slate-500 font-medium mt-1">This removes the note from this browser session and writes an `audit_investigation_note_deleted` audit entry. The original audit event is not affected.</p>
+              </div>
+              <div className="p-7">
+                <p className="text-sm text-slate-700 bg-slate-50 p-4 rounded-2xl whitespace-pre-wrap break-words">{pendingDeleteInvNote.text}</p>
+                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-2">{pendingDeleteInvNote.author}{pendingDeleteInvNote.role ? ` · ${pendingDeleteInvNote.role}` : ''} · {new Date(pendingDeleteInvNote.createdAt).toLocaleString()}</p>
+              </div>
+              <div className="p-7 border-t border-slate-100 bg-slate-50/40 flex justify-end gap-2">
+                <button onClick={cancelDeleteInvNote} data-testid="confirm-delete-inv-note-cancel" className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-white">Cancel</button>
+                <button onClick={confirmDeleteInvNote} data-testid="confirm-delete-inv-note-confirm" className="px-6 py-2.5 bg-red-500/90 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-red-500">Delete note</button>
               </div>
             </motion.div>
           </div>

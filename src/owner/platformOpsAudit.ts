@@ -84,7 +84,15 @@ export type PlatformAuditAction =
   | 'support_macro_updated'
   | 'support_macro_disabled'
   | 'support_macro_enabled'
-  | 'platform_permissions_reset';
+  | 'platform_permissions_reset'
+  // Phase 1.1.3D — Audit Investigation Center review workflow + notes.
+  // Review state and notes are internal overlay metadata; original audit
+  // rows are never modified. No external notification.
+  | 'audit_event_marked_reviewed'
+  | 'audit_event_marked_needs_review'
+  | 'audit_event_dismissed'
+  | 'audit_investigation_note_added'
+  | 'audit_investigation_note_deleted';
 
 export interface PushPlatformAuditInput {
   actor: string;
@@ -188,6 +196,12 @@ const DEFAULT_SEVERITY_BY_ACTION: Partial<Record<PlatformAuditAction, PlatformAu
   support_macro_disabled: 'notice',
   support_macro_enabled: 'notice',
   platform_permissions_reset: 'warning',
+  // Phase 1.1.3D — Audit Investigation Center
+  audit_event_marked_reviewed: 'info',
+  audit_event_marked_needs_review: 'info',
+  audit_event_dismissed: 'notice',
+  audit_investigation_note_added: 'info',
+  audit_investigation_note_deleted: 'notice',
 };
 
 export function pushPlatformAudit(input: PushPlatformAuditInput): MirrorRow {
