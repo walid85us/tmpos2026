@@ -19,11 +19,28 @@ import {
   deriveHighRiskFlag,
   HIGH_RISK_FLAG_LABEL,
   HIGH_RISK_FLAG_STYLES,
-  predefinedAuditViews,
   AUDIT_CSV_COLUMNS,
   toCsv,
   downloadCsv,
 } from './platformOpsDerive';
+import {
+  toInvestigationEvent,
+  applyAuditSearch,
+  countForLens,
+  getAuditLens,
+  isDefaultAuditQuery,
+  readAuditReviewState,
+  AUDIT_INVESTIGATION_LENSES,
+  AUDIT_INVESTIGATION_TRUTH_LABEL,
+  AUDIT_REVIEW_STATUS_LABEL,
+  EMPTY_AUDIT_SEARCH_QUERY,
+  type AuditInvestigationEvent,
+  type AuditSearchQueryState,
+  type AuditSearchContext,
+  type AuditSourceSurface,
+  type AuditReviewStatus,
+  type AuditReviewState,
+} from './platformOpsInvestigation';
 
 type Severity = 'info' | 'notice' | 'warning' | 'critical';
 
@@ -70,49 +87,6 @@ const normalizeSeverity = (s: string): Severity => {
   if (s === 'notice' || s === 'warning' || s === 'critical') return s;
   return 'info';
 };
-
-// Phase 1.1.1 UX Correction — operational lens metadata for the saved-view
-// card grid. Pure presentational mapping; safe additive constant.
-const AUDIT_VIEW_META: Record<string, { icon: string; tone: string }> = {
-  all: { icon: 'list_alt', tone: 'slate' },
-  critical_warning: { icon: 'warning', tone: 'amber' },
-  high_risk: { icon: 'priority_high', tone: 'red' },
-  support: { icon: 'support_agent', tone: 'blue' },
-  domains: { icon: 'dns', tone: 'emerald' },
-  team: { icon: 'group', tone: 'violet' },
-  configuration: { icon: 'tune', tone: 'slate' },
-  security: { icon: 'shield', tone: 'red' },
-  billing: { icon: 'receipt_long', tone: 'amber' },
-  addon: { icon: 'extension', tone: 'blue' },
-};
-
-// Pure helper used to render the count badge on each operational lens card.
-// Applies only the view's own filters (severity / category / highRiskOnly)
-// against the full row set — independent of the user's currently-active
-// search / tenant / additional filters.
-function countForView(
-  view: { filters: { severity?: string; category?: string; highRiskOnly?: boolean; actionPrefix?: string } },
-  rows: AuditRow[]
-): number {
-  return rows.filter(r => {
-    const f = view.filters;
-    if (f.severity && normalizeSeverity(r.severity) !== (f.severity as Severity)) return false;
-    if (f.category && f.category !== 'all') {
-      if (f.category === 'other') {
-        if (['commercial', 'security', 'support', 'configuration', 'domains', 'team'].includes(r.category || '')) return false;
-      } else if (r.category !== f.category) return false;
-    }
-    if (f.highRiskOnly) {
-      const { flag } = deriveHighRiskFlag(r);
-      if (!flag) return false;
-    }
-    // Phase 1.1.3A — actionPrefix predicate (e.g. 'support_case_escalat'
-    // matches both legacy '*_escalated/_deescalated' and new lifecycle
-    // ids). Plain prefix match — no regex.
-    if (f.actionPrefix && !((r.action || '').startsWith(f.actionPrefix))) return false;
-    return true;
-  }).length;
-}
 
 const AuditSecurityPage: React.FC = () => {
   // Phase 1.1.3A correction — pull active platform role from the Dev Session
@@ -168,15 +142,15 @@ const AuditSecurityPage: React.FC = () => {
     try { window.sessionStorage.setItem(NOTES_KEY, JSON.stringify(next)); } catch { /* noop */ }
   };
 
-  // Filters
-  const [categoryFilter, setCategoryFilter] = useState<'all' | 'commercial' | 'security' | 'support' | 'configuration' | 'domains' | 'team' | 'other'>('all');
-  const [severityFilter, setSeverityFilter] = useState<'all' | Severity>('all');
-  const [tenantFilter, setTenantFilter] = useState<string>('all');
-  const [searchText, setSearchText] = useState('');
+  // Filters — Phase 1.1.3D consolidates all audit filters into a single
+  // AuditSearchQueryState so one predicate drives both counts and the list
+  // (no drift, no invisible filters). The active investigation lens is a
+  // separate scope applied on top of (and shown alongside) these filters.
+  const [query, setQuery] = useState<AuditSearchQueryState>({ ...EMPTY_AUDIT_SEARCH_QUERY });
+  const [activeLens, setActiveLens] = useState<string>('all');
+  const patchQuery = (patch: Partial<AuditSearchQueryState>) => setQuery(q => ({ ...q, ...patch }));
   const [selected, setSelected] = useState<AuditRow | null>(null);
   const [newNoteBody, setNewNoteBody] = useState('');
-  const [activeView, setActiveView] = useState<string>('all');
-  const [highRiskOnly, setHighRiskOnly] = useState(false);
   const [drawerTab, setDrawerTab] = useState<'detail' | 'related' | 'actor'>('detail');
   const [showCreateCase, setShowCreateCase] = useState(false);
   const [linkedNoteEventId, setLinkedNoteEventId] = useState<string | null>(null);
@@ -209,17 +183,20 @@ const AuditSecurityPage: React.FC = () => {
     return m;
   }, [cases]);
 
-  const applyView = (id: string) => {
-    setActiveView(id);
-    const v = predefinedAuditViews.find(x => x.id === id);
-    if (!v) return;
-    const f = v.filters;
-    setHighRiskOnly(!!f.highRiskOnly);
-    if (f.severity && f.severity !== 'all') setSeverityFilter(f.severity as Severity);
-    else setSeverityFilter('all');
-    if (f.category && f.category !== 'all') setCategoryFilter(f.category as typeof categoryFilter);
-    else setCategoryFilter('all');
-  };
+  // Read-only investigation review overlay (review status). Writes land in
+  // the review milestone; here it only powers the Needs Review lens + review
+  // filter (events with no record default to "needs review").
+  const [reviewState, setReviewState] = useState<Record<string, AuditReviewState>>({});
+  useEffect(() => {
+    const read = () => setReviewState(readAuditReviewState());
+    read();
+    window.addEventListener('audit_investigation:changed', read);
+    window.addEventListener('storage', read);
+    return () => {
+      window.removeEventListener('audit_investigation:changed', read);
+      window.removeEventListener('storage', read);
+    };
+  }, []);
 
   const allRows = useMemo<AuditRow[]>(() => {
     const seedIds = new Set(auditLogs.map(l => l.id));
@@ -232,37 +209,81 @@ const AuditSecurityPage: React.FC = () => {
     );
   }, [mirrored]);
 
-  // Phase 1.1.3A — actionPrefix from the active saved view (only the
-  // 'escalation_lifecycle' view sets this). When set, applied as an
-  // additional row predicate alongside category / severity / search.
-  const activeActionPrefix = useMemo(() => {
-    const v = predefinedAuditViews.find(x => x.id === activeView);
-    return v?.filters.actionPrefix ?? null;
-  }, [activeView]);
+  // Normalized, derived investigation events (1:1 with allRows by id). Used
+  // for all filtering, lens counts, and search so counts and the visible list
+  // can never disagree.
+  const investigationEvents = useMemo<AuditInvestigationEvent[]>(
+    () => allRows.map(toInvestigationEvent),
+    [allRows]
+  );
+
+  const linkedCaseEventIds = useMemo(
+    () => new Set(linkedCaseByEvent.keys()),
+    [linkedCaseByEvent]
+  );
+
+  const actorEventCounts = useMemo(() => {
+    const m = new Map<string, number>();
+    investigationEvents.forEach(e => m.set(e.actor, (m.get(e.actor) || 0) + 1));
+    return m;
+  }, [investigationEvents]);
+
+  const searchCtx = useMemo<AuditSearchContext>(
+    () => ({
+      linkedCaseEventIds,
+      reviewState,
+      actorEventCounts,
+      nowDayIndex: Math.floor(Date.now() / 86_400_000),
+    }),
+    [linkedCaseEventIds, reviewState, actorEventCounts]
+  );
+
+  const activeLensDef = useMemo(() => getAuditLens(activeLens), [activeLens]);
+
+  // Single source of truth for the visible set: apply the search query, then
+  // the active lens predicate. visibleRows maps back to raw rows by id so the
+  // existing table/drawer keep working unchanged.
+  const visibleEvents = useMemo(
+    () =>
+      applyAuditSearch(investigationEvents, query, searchCtx).filter(e =>
+        activeLensDef.predicate(e, searchCtx)
+      ),
+    [investigationEvents, query, searchCtx, activeLensDef]
+  );
 
   const visibleRows = useMemo(() => {
-    return allRows.filter(r => {
-      if (activeActionPrefix && !((r.action || '').startsWith(activeActionPrefix))) return false;
-      if (categoryFilter !== 'all') {
-        if (categoryFilter === 'other') {
-          if (['commercial', 'security', 'support', 'configuration', 'domains', 'team'].includes(r.category || '')) return false;
-        } else if (r.category !== categoryFilter) {
-          return false;
-        }
-      }
-      if (severityFilter !== 'all' && normalizeSeverity(r.severity) !== severityFilter) return false;
-      if (tenantFilter !== 'all' && (r.tenantId || '') !== tenantFilter) return false;
-      if (highRiskOnly) {
-        const { flag } = deriveHighRiskFlag(r);
-        if (flag !== 'critical' && flag !== 'high_risk') return false;
-      }
-      if (searchText.trim()) {
-        const hay = `${r.action} ${r.target} ${r.actor} ${r.note || ''}`.toLowerCase();
-        if (!hay.includes(searchText.trim().toLowerCase())) return false;
-      }
-      return true;
-    });
-  }, [allRows, categoryFilter, severityFilter, tenantFilter, searchText, highRiskOnly, activeActionPrefix]);
+    const ids = new Set(visibleEvents.map(e => e.id));
+    return allRows.filter(r => ids.has(r.id));
+  }, [allRows, visibleEvents]);
+
+  // Distinct option lists for the filter selects (truthful — derived from the
+  // events actually present in the current stream).
+  const actorOptions = useMemo(
+    () => Array.from(new Set<string>(investigationEvents.map(e => e.actor))).sort((a, b) => a.localeCompare(b)),
+    [investigationEvents]
+  );
+  const actionTypeOptions = useMemo(
+    () => Array.from(new Set<string>(investigationEvents.map(e => e.action))).sort((a, b) => a.localeCompare(b)),
+    [investigationEvents]
+  );
+  const sourceSurfaceOptions = useMemo(
+    () => Array.from(new Set<AuditSourceSurface>(investigationEvents.map(e => e.sourceSurface))).sort((a, b) => a.localeCompare(b)),
+    [investigationEvents]
+  );
+
+  const selectLens = (id: string) => {
+    setActiveLens(id);
+    // Reset ad-hoc filters so the visible list matches the lens card count
+    // exactly when a lens is chosen (no hidden residual filters).
+    setQuery({ ...EMPTY_AUDIT_SEARCH_QUERY });
+  };
+
+  const clearAllFilters = () => {
+    setActiveLens('all');
+    setQuery({ ...EMPTY_AUDIT_SEARCH_QUERY });
+  };
+
+  const hasActiveFilters = !isDefaultAuditQuery(query) || activeLens !== 'all';
 
   const tenantNameById = useMemo(() => {
     const m = new Map<string, string>();
@@ -293,7 +314,7 @@ const AuditSecurityPage: React.FC = () => {
     pushPlatformAudit({
       actor: 'System Owner',
       action: 'audit_view_exported',
-      target: `${rows.length} row${rows.length !== 1 ? 's' : ''}${activeView !== 'all' ? ` · view=${activeView}` : ''}`,
+      target: `${rows.length} row${rows.length !== 1 ? 's' : ''}${activeLens !== 'all' ? ` · lens=${activeLens}` : ''}`,
       category: 'configuration',
     });
   };
@@ -532,23 +553,25 @@ const AuditSecurityPage: React.FC = () => {
 
       {/* Filters */}
       <div className="bg-white/80 backdrop-blur-xl p-6 rounded-[2rem] border border-slate-200 shadow-sm space-y-4">
-        {/* Phase 1.1.1 UX Correction — operational lens cards (replaces chip row). */}
+        {/* Phase 1.1.3D — investigation lens cards. Each card's count and the
+            list it produces share one predicate (no drift). Selecting a lens
+            resets ad-hoc filters so the list matches the card count exactly. */}
         <div className="space-y-2" data-testid="audit-saved-views">
           <div className="flex items-baseline justify-between gap-2 flex-wrap">
-            <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Operational Lenses</p>
-            <p className="text-[10px] font-bold text-slate-400">Tap a card to switch lens · counts reflect that lens.</p>
+            <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Investigation Lenses</p>
+            <p className="text-[10px] font-bold text-slate-400">Tap a lens to scope the stream · counts and list use one predicate.</p>
           </div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
-            {predefinedAuditViews.map(v => {
-              const count = countForView(v, allRows);
-              const meta = AUDIT_VIEW_META[v.id] || { icon: 'list_alt', tone: 'slate' };
-              const isActive = activeView === v.id;
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+            {AUDIT_INVESTIGATION_LENSES.map(lens => {
+              const count = countForLens(lens, investigationEvents, searchCtx);
+              const isActive = activeLens === lens.id;
               return (
                 <button
-                  key={v.id}
-                  data-testid={`audit-saved-view-${v.id}`}
+                  key={lens.id}
+                  data-testid={`audit-saved-view-${lens.id}`}
                   data-active={isActive ? 'true' : 'false'}
-                  onClick={() => applyView(v.id)}
+                  onClick={() => selectLens(lens.id)}
+                  title={lens.description}
                   className={`text-left p-3 rounded-2xl border transition-all hover:-translate-y-0.5 active:translate-y-0 focus:outline-none focus:ring-2 focus:ring-primary/30 ${
                     isActive
                       ? 'border-primary ring-2 ring-primary/30 bg-primary/5 shadow-md'
@@ -557,14 +580,17 @@ const AuditSecurityPage: React.FC = () => {
                 >
                   <div className="flex items-start justify-between gap-2 mb-1.5">
                     <span className={`material-symbols-outlined text-base ${isActive ? 'text-primary' : 'text-slate-500'}`}>
-                      {meta.icon}
+                      {lens.icon}
                     </span>
                     <span className={`text-[10px] font-black px-1.5 py-0.5 rounded-md ${isActive ? 'bg-primary text-white' : 'bg-slate-100 text-slate-600'}`}>
                       {count}
                     </span>
                   </div>
                   <p className={`text-[11px] font-black uppercase tracking-widest leading-tight ${isActive ? 'text-primary' : 'text-slate-700'}`}>
-                    {v.label}
+                    {lens.label}
+                  </p>
+                  <p className="text-[9px] font-semibold text-slate-400 leading-tight mt-1 normal-case tracking-normal">
+                    {lens.description}
                   </p>
                 </button>
               );
@@ -573,36 +599,74 @@ const AuditSecurityPage: React.FC = () => {
         </div>
         <div className="flex flex-wrap gap-3 items-center">
           <input
-            value={searchText}
-            onChange={e => setSearchText(e.target.value)}
-            placeholder="Search action, target, actor…"
+            value={query.keyword}
+            onChange={e => patchQuery({ keyword: e.target.value })}
+            placeholder="Search action, target, actor, note…"
+            data-testid="audit-search-input"
             className="flex-1 min-w-[200px] px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 text-sm font-bold text-slate-700"
           />
-          <select value={severityFilter} onChange={e => { setSeverityFilter(e.target.value as any); setActiveView('custom'); }} className="px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-black uppercase tracking-widest text-slate-600">
+          <button onClick={exportCsv} disabled={!exportGate.allowed} title={exportGate.allowed ? '' : exportGate.reason} data-testid="audit-export-csv-top" className="px-4 py-2.5 bg-white border border-slate-200 text-slate-700 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/5 hover:text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+            Export CSV ({visibleRows.length})
+          </button>
+        </div>
+        <p className="text-[10px] font-semibold text-slate-400 -mt-1">{AUDIT_INVESTIGATION_TRUTH_LABEL}</p>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+          <select value={query.severity} onChange={e => patchQuery({ severity: e.target.value as AuditSearchQueryState['severity'] })} data-testid="audit-filter-severity" className="px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] font-black uppercase tracking-widest text-slate-600">
             <option value="all">All severities</option>
             <option value="info">Info</option>
             <option value="notice">Notice</option>
             <option value="warning">Warning</option>
             <option value="critical">Critical</option>
           </select>
-          <select value={tenantFilter} onChange={e => setTenantFilter(e.target.value)} className="px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-black uppercase tracking-widest text-slate-600">
+          <select value={query.timeRange} onChange={e => patchQuery({ timeRange: e.target.value as AuditSearchQueryState['timeRange'] })} data-testid="audit-filter-timerange" className="px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] font-black uppercase tracking-widest text-slate-600">
+            <option value="all">All time</option>
+            <option value="today">Today</option>
+            <option value="7d">Last 7 days</option>
+            <option value="30d">Last 30 days</option>
+          </select>
+          <select value={query.tenantId} onChange={e => patchQuery({ tenantId: e.target.value })} data-testid="audit-filter-tenant" className="px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] font-black uppercase tracking-widest text-slate-600">
             <option value="all">All tenants</option>
             {tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
           </select>
-          <label className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-600 px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl cursor-pointer">
-            <input type="checkbox" checked={highRiskOnly} onChange={e => { setHighRiskOnly(e.target.checked); setActiveView('custom'); }} />
-            High-risk only
-          </label>
-          <button onClick={exportCsv} disabled={!exportGate.allowed} title={exportGate.allowed ? '' : exportGate.reason} data-testid="audit-export-csv-top" className="px-4 py-2.5 bg-white border border-slate-200 text-slate-700 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/5 hover:text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
-            Export CSV ({visibleRows.length})
-          </button>
+          <select value={query.actor} onChange={e => patchQuery({ actor: e.target.value })} data-testid="audit-filter-actor" className="px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] font-black uppercase tracking-widest text-slate-600">
+            <option value="all">All actors</option>
+            {actorOptions.map(a => <option key={a} value={a}>{a}</option>)}
+          </select>
+          <select value={query.actionType} onChange={e => patchQuery({ actionType: e.target.value })} data-testid="audit-filter-action" className="px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] font-black uppercase tracking-widest text-slate-600">
+            <option value="all">All actions</option>
+            {actionTypeOptions.map(a => <option key={a} value={a}>{a}</option>)}
+          </select>
+          <select value={query.sourceSurface} onChange={e => patchQuery({ sourceSurface: e.target.value as AuditSearchQueryState['sourceSurface'] })} data-testid="audit-filter-source" className="px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] font-black uppercase tracking-widest text-slate-600">
+            <option value="all">All sources (derived)</option>
+            {sourceSurfaceOptions.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+          <select value={query.review} onChange={e => patchQuery({ review: e.target.value as AuditSearchQueryState['review'] })} data-testid="audit-filter-review" className="px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] font-black uppercase tracking-widest text-slate-600">
+            <option value="all">All review states</option>
+            <option value="needs_review">{AUDIT_REVIEW_STATUS_LABEL.needs_review}</option>
+            <option value="reviewed">{AUDIT_REVIEW_STATUS_LABEL.reviewed}</option>
+            <option value="dismissed">{AUDIT_REVIEW_STATUS_LABEL.dismissed}</option>
+          </select>
+          <select value={query.linkedCase} onChange={e => patchQuery({ linkedCase: e.target.value as AuditSearchQueryState['linkedCase'] })} data-testid="audit-filter-linked" className="px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] font-black uppercase tracking-widest text-slate-600">
+            <option value="all">Linked &amp; unlinked</option>
+            <option value="linked">Linked to a case</option>
+            <option value="unlinked">Not linked</option>
+          </select>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <label className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-600 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl cursor-pointer">
+            <input type="checkbox" checked={query.highRiskOnly} onChange={e => patchQuery({ highRiskOnly: e.target.checked })} data-testid="audit-filter-highrisk" />
+            High-risk only
+          </label>
+          <label className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-600 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl cursor-pointer">
+            <input type="checkbox" checked={query.restricted === 'restricted_only'} onChange={e => patchQuery({ restricted: e.target.checked ? 'restricted_only' : 'all' })} data-testid="audit-filter-restricted" />
+            Restricted details only
+          </label>
+          <span className="text-[10px] font-black uppercase tracking-widest text-slate-300">Category</span>
           {(['all', 'commercial', 'security', 'support', 'configuration', 'domains', 'team', 'other'] as const).map(c => (
             <button
               key={c}
-              onClick={() => { setCategoryFilter(c); setActiveView('custom'); }}
-              className={`px-3.5 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${categoryFilter === c ? 'bg-primary text-white' : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-50'}`}
+              onClick={() => patchQuery({ category: c })}
+              className={`px-3.5 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${query.category === c ? 'bg-primary text-white' : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-50'}`}
             >
               {c}
             </button>
@@ -610,15 +674,51 @@ const AuditSecurityPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Phase 1.1.1 UX Correction — Audit Command Bar */}
+      {/* Phase 1.1.3D — Audit Command Bar. Every active filter is shown as a
+          removable chip (no invisible filters); the active lens shows its
+          "why included" description. Reset all clears lens + filters. */}
       {(() => {
-        const hasExtraFilters =
-          severityFilter !== 'all' ||
-          categoryFilter !== 'all' ||
-          tenantFilter !== 'all' ||
-          !!searchText.trim() ||
-          highRiskOnly;
-        const activeViewLabel = predefinedAuditViews.find(v => v.id === activeView)?.label || 'Custom';
+        type Chip = { key: string; label: string; clear: () => void };
+        const chips: Chip[] = [];
+        if (activeLens !== 'all') {
+          chips.push({ key: 'lens', label: `Lens · ${activeLensDef.label}`, clear: () => setActiveLens('all') });
+        }
+        if (query.keyword.trim()) {
+          chips.push({ key: 'keyword', label: `Search · "${query.keyword.trim()}"`, clear: () => patchQuery({ keyword: '' }) });
+        }
+        if (query.severity !== 'all') {
+          chips.push({ key: 'severity', label: `Severity · ${query.severity}`, clear: () => patchQuery({ severity: 'all' }) });
+        }
+        if (query.timeRange !== 'all') {
+          chips.push({ key: 'timeRange', label: `Time · ${query.timeRange}`, clear: () => patchQuery({ timeRange: 'all' }) });
+        }
+        if (query.category !== 'all') {
+          chips.push({ key: 'category', label: `Category · ${query.category}`, clear: () => patchQuery({ category: 'all' }) });
+        }
+        if (query.tenantId !== 'all') {
+          chips.push({ key: 'tenant', label: `Tenant · ${tenants.find(t => t.id === query.tenantId)?.name || query.tenantId}`, clear: () => patchQuery({ tenantId: 'all' }) });
+        }
+        if (query.actor !== 'all') {
+          chips.push({ key: 'actor', label: `Actor · ${query.actor}`, clear: () => patchQuery({ actor: 'all' }) });
+        }
+        if (query.actionType !== 'all') {
+          chips.push({ key: 'action', label: `Action · ${query.actionType}`, clear: () => patchQuery({ actionType: 'all' }) });
+        }
+        if (query.sourceSurface !== 'all') {
+          chips.push({ key: 'source', label: `Source · ${query.sourceSurface}`, clear: () => patchQuery({ sourceSurface: 'all' }) });
+        }
+        if (query.review !== 'all') {
+          chips.push({ key: 'review', label: `Review · ${AUDIT_REVIEW_STATUS_LABEL[query.review as AuditReviewStatus]}`, clear: () => patchQuery({ review: 'all' }) });
+        }
+        if (query.linkedCase !== 'all') {
+          chips.push({ key: 'linked', label: `Case · ${query.linkedCase === 'linked' ? 'linked' : 'not linked'}`, clear: () => patchQuery({ linkedCase: 'all' }) });
+        }
+        if (query.restricted !== 'all') {
+          chips.push({ key: 'restricted', label: 'Restricted details only', clear: () => patchQuery({ restricted: 'all' }) });
+        }
+        if (query.highRiskOnly) {
+          chips.push({ key: 'highRisk', label: 'High-risk only', clear: () => patchQuery({ highRiskOnly: false }) });
+        }
         return (
           <div
             data-testid="audit-command-bar"
@@ -634,49 +734,39 @@ const AuditSecurityPage: React.FC = () => {
                 </p>
               </div>
             </div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Active:</span>
-              <span className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-[10px] font-black text-slate-700 uppercase tracking-widest">
-                Lens · {activeViewLabel}
-              </span>
-              {severityFilter !== 'all' && (
-                <span className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-[10px] font-black text-slate-700 uppercase tracking-widest">
-                  Severity · {severityFilter}
-                </span>
-              )}
-              {categoryFilter !== 'all' && (
-                <span className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-[10px] font-black text-slate-700 uppercase tracking-widest">
-                  Category · {categoryFilter}
-                </span>
-              )}
-              {tenantFilter !== 'all' && (
-                <span className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-[10px] font-black text-slate-700 uppercase tracking-widest">
-                  Tenant · {tenants.find(t => t.id === tenantFilter)?.name || tenantFilter}
-                </span>
-              )}
-              {searchText.trim() && (
-                <span className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-[10px] font-black text-slate-700 uppercase tracking-widest">
-                  Search · "{searchText.trim()}"
-                </span>
-              )}
-              {!hasExtraFilters && (
-                <span className="text-[10px] text-slate-400 italic">No additional filters</span>
+            <div className="flex flex-col gap-1.5 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Active:</span>
+                {chips.length === 0 && (
+                  <span className="text-[10px] text-slate-400 italic">No filters — showing all events</span>
+                )}
+                {chips.map(chip => (
+                  <button
+                    key={chip.key}
+                    onClick={chip.clear}
+                    data-testid={`audit-chip-${chip.key}`}
+                    title="Remove this filter"
+                    className="group inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-[10px] font-black text-slate-700 uppercase tracking-widest hover:border-red-300 hover:text-red-600 transition-colors"
+                  >
+                    {chip.label}
+                    <span className="material-symbols-outlined text-xs text-slate-400 group-hover:text-red-500">close</span>
+                  </button>
+                ))}
+              </div>
+              {activeLens !== 'all' && (
+                <p className="text-[10px] font-semibold text-slate-400">{activeLensDef.description}</p>
               )}
             </div>
             <div className="ml-auto flex items-center gap-2 flex-wrap">
               <button
-                onClick={() => { setHighRiskOnly(!highRiskOnly); setActiveView('custom'); }}
-                data-testid="audit-command-highrisk-toggle"
-                data-active={highRiskOnly ? 'true' : 'false'}
-                className={`px-4 py-2 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all flex items-center gap-1 ${
-                  highRiskOnly
-                    ? 'bg-red-500 text-white shadow-md'
-                    : 'bg-white border border-slate-200 text-slate-700 hover:bg-red-500/5 hover:border-red-500/30'
-                }`}
-                title="Show only events flagged as high-risk."
+                onClick={clearAllFilters}
+                disabled={!hasActiveFilters}
+                data-testid="audit-command-reset"
+                className="px-4 py-2 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all flex items-center gap-1 bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                title="Clear the active lens and all filters."
               >
-                <span className="material-symbols-outlined text-sm">priority_high</span>
-                High-Risk Only
+                <span className="material-symbols-outlined text-sm">filter_alt_off</span>
+                Reset all
               </button>
               <button
                 onClick={exportCsv}
@@ -753,7 +843,33 @@ const AuditSecurityPage: React.FC = () => {
               );
             })}
             {visibleRows.length === 0 && (
-              <tr><td colSpan={7} className="px-8 py-12 text-center text-slate-400 text-sm font-bold">No audit entries match these filters.</td></tr>
+              <tr><td colSpan={7} className="px-8 py-12 text-center">
+                <span className="material-symbols-outlined text-3xl text-slate-300 mb-2 block">search_off</span>
+                <p className="text-slate-500 text-sm font-bold">No audit events match the current lens and filters.</p>
+                {hasActiveFilters ? (
+                  <p className="text-slate-400 text-xs font-semibold mt-1">
+                    Active:{' '}
+                    {[
+                      activeLens !== 'all' && `lens "${activeLensDef.label}"`,
+                      query.keyword.trim() && `search "${query.keyword.trim()}"`,
+                      query.severity !== 'all' && `severity ${query.severity}`,
+                      query.timeRange !== 'all' && `time ${query.timeRange}`,
+                      query.category !== 'all' && `category ${query.category}`,
+                      query.tenantId !== 'all' && `tenant ${tenants.find(t => t.id === query.tenantId)?.name || query.tenantId}`,
+                      query.actor !== 'all' && `actor ${query.actor}`,
+                      query.actionType !== 'all' && `action ${query.actionType}`,
+                      query.sourceSurface !== 'all' && `source ${query.sourceSurface}`,
+                      query.review !== 'all' && `review ${AUDIT_REVIEW_STATUS_LABEL[query.review as AuditReviewStatus]}`,
+                      query.linkedCase !== 'all' && `${query.linkedCase === 'linked' ? 'linked' : 'not linked'} to case`,
+                      query.restricted !== 'all' && 'restricted details only',
+                      query.highRiskOnly && 'high-risk only',
+                    ].filter(Boolean).join(' · ')}
+                    . Use “Reset all” to clear.
+                  </p>
+                ) : (
+                  <p className="text-slate-400 text-xs font-semibold mt-1">No audit events are present in the current app/session stream.</p>
+                )}
+              </td></tr>
             )}
           </tbody>
         </table>

@@ -719,6 +719,7 @@ export interface AuditSearchQueryState {
   linkedCase: 'all' | 'linked' | 'unlinked';
   restricted: 'all' | 'restricted_only';
   timeRange: 'all' | 'today' | '7d' | '30d';
+  highRiskOnly: boolean;
 }
 
 export const EMPTY_AUDIT_SEARCH_QUERY: AuditSearchQueryState = {
@@ -733,4 +734,264 @@ export const EMPTY_AUDIT_SEARCH_QUERY: AuditSearchQueryState = {
   linkedCase: 'all',
   restricted: 'all',
   timeRange: 'all',
+  highRiskOnly: false,
 };
+
+// Raw categories the category filter treats as first-class; everything else
+// collapses into "other" (mirrors the page's long-standing category chips).
+const FIRST_CLASS_CATEGORIES = [
+  'commercial',
+  'security',
+  'support',
+  'configuration',
+  'domains',
+  'team',
+];
+
+// --- REVIEW-STATE STORAGE (read-only this phase) ---------------------------
+// Investigation overlay (review status + notes) is persisted separately from
+// the immutable audit rows. Read-only here so search/lenses can reflect review
+// status; the write/mutation helpers + UI land in the review milestone.
+
+export const AUDIT_INVESTIGATION_STORAGE_KEY = 'audit_investigation_state_v1';
+
+export function readAuditInvestigationState(): AuditInvestigationState {
+  if (typeof window === 'undefined' || !window.sessionStorage) {
+    return { reviews: {}, notes: [] };
+  }
+  try {
+    const raw = window.sessionStorage.getItem(AUDIT_INVESTIGATION_STORAGE_KEY);
+    if (!raw) return { reviews: {}, notes: [] };
+    const parsed = JSON.parse(raw) as Partial<AuditInvestigationState>;
+    return {
+      reviews: parsed.reviews && typeof parsed.reviews === 'object' ? parsed.reviews : {},
+      notes: Array.isArray(parsed.notes) ? parsed.notes : [],
+    };
+  } catch {
+    return { reviews: {}, notes: [] };
+  }
+}
+
+export function readAuditReviewState(): Record<string, AuditReviewState> {
+  return readAuditInvestigationState().reviews;
+}
+
+// Events with no explicit review record default to "needs review" — truthful:
+// an event nobody has marked reviewed still needs review.
+export function reviewStatusForEvent(
+  eventId: string,
+  reviewState: Record<string, AuditReviewState>
+): AuditReviewStatus {
+  return reviewState[eventId]?.status ?? 'needs_review';
+}
+
+export function isRestrictedEvent(event: AuditInvestigationEvent): boolean {
+  return event.flagReasons.length > 0;
+}
+
+// --- SINGLE SEARCH PREDICATE ----------------------------------------------
+// One predicate drives BOTH counts and the visible list so they can never
+// drift. No invisible filters: every field here maps to a visible control.
+
+export interface AuditSearchContext {
+  linkedCaseEventIds: Set<string>;
+  reviewState: Record<string, AuditReviewState>;
+  actorEventCounts: Map<string, number>;
+  nowDayIndex: number;
+}
+
+export function matchesAuditSearch(
+  event: AuditInvestigationEvent,
+  q: AuditSearchQueryState,
+  ctx: AuditSearchContext
+): boolean {
+  if (q.keyword.trim()) {
+    const hay = `${event.action} ${event.target} ${event.actor} ${event.note || ''}`.toLowerCase();
+    if (!hay.includes(q.keyword.trim().toLowerCase())) return false;
+  }
+  if (q.severity !== 'all' && event.severity !== q.severity) return false;
+  if (q.category !== 'all') {
+    if (q.category === 'other') {
+      if (FIRST_CLASS_CATEGORIES.includes(event.category)) return false;
+    } else if (event.category !== q.category) {
+      return false;
+    }
+  }
+  if (q.tenantId !== 'all' && (event.tenantId || '') !== q.tenantId) return false;
+  if (q.actor !== 'all' && event.actor !== q.actor) return false;
+  if (q.actionType !== 'all' && event.action !== q.actionType) return false;
+  if (q.sourceSurface !== 'all' && event.sourceSurface !== q.sourceSurface) return false;
+  if (q.review !== 'all' && reviewStatusForEvent(event.id, ctx.reviewState) !== q.review) return false;
+  if (q.linkedCase !== 'all') {
+    const linked = ctx.linkedCaseEventIds.has(event.id);
+    if (q.linkedCase === 'linked' && !linked) return false;
+    if (q.linkedCase === 'unlinked' && linked) return false;
+  }
+  if (q.restricted === 'restricted_only' && !isRestrictedEvent(event)) return false;
+  if (q.timeRange !== 'all') {
+    if (event.dayIndex == null) return false;
+    const age = ctx.nowDayIndex - event.dayIndex;
+    if (q.timeRange === 'today' && age !== 0) return false;
+    if (q.timeRange === '7d' && (age < 0 || age > 6)) return false;
+    if (q.timeRange === '30d' && (age < 0 || age > 29)) return false;
+  }
+  if (q.highRiskOnly && !event.isHighRisk) return false;
+  return true;
+}
+
+export function applyAuditSearch(
+  events: AuditInvestigationEvent[],
+  q: AuditSearchQueryState,
+  ctx: AuditSearchContext
+): AuditInvestigationEvent[] {
+  return events.filter(e => matchesAuditSearch(e, q, ctx));
+}
+
+export function isDefaultAuditQuery(q: AuditSearchQueryState): boolean {
+  return (
+    !q.keyword.trim() &&
+    q.severity === 'all' &&
+    q.category === 'all' &&
+    q.tenantId === 'all' &&
+    q.actor === 'all' &&
+    q.actionType === 'all' &&
+    q.sourceSurface === 'all' &&
+    q.review === 'all' &&
+    q.linkedCase === 'all' &&
+    q.restricted === 'all' &&
+    q.timeRange === 'all' &&
+    !q.highRiskOnly
+  );
+}
+
+// --- INVESTIGATION LENSES --------------------------------------------------
+// Each lens is a single predicate reused for BOTH its card count and the
+// list it produces — they cannot disagree. `description` is the required
+// "why these events are included" explanation. Lens scoping is on top of
+// (and shown alongside) the visible search filters — never invisible.
+
+export type AuditLensId =
+  | 'all'
+  | 'high_risk'
+  | 'needs_review'
+  | 'permission_changes'
+  | 'escalation_lifecycle'
+  | 'commercial'
+  | 'domain_config'
+  | 'failed_blocked'
+  | 'actor_activity'
+  | 'linked_case'
+  | 'unlinked_high_risk'
+  | 'restricted_details';
+
+export interface AuditInvestigationLens {
+  id: AuditLensId;
+  label: string;
+  description: string;
+  icon: string;
+  predicate: (event: AuditInvestigationEvent, ctx: AuditSearchContext) => boolean;
+}
+
+const FAILED_BLOCKED_RE = /(fail|failed|blocked|denied|rejected|error|revoked)/;
+
+export const AUDIT_INVESTIGATION_LENSES: AuditInvestigationLens[] = [
+  {
+    id: 'all',
+    label: 'All Events',
+    description: 'Every audit event in the current app/session stream.',
+    icon: 'list_alt',
+    predicate: () => true,
+  },
+  {
+    id: 'high_risk',
+    label: 'High-Risk Events',
+    description: 'Events flagged critical or high-risk by the high-risk rules.',
+    icon: 'priority_high',
+    predicate: e => e.isHighRisk,
+  },
+  {
+    id: 'needs_review',
+    label: 'Needs Review',
+    description: 'Events not yet marked reviewed in the investigation overlay.',
+    icon: 'rate_review',
+    predicate: (e, ctx) => reviewStatusForEvent(e.id, ctx.reviewState) === 'needs_review',
+  },
+  {
+    id: 'permission_changes',
+    label: 'Permission / Role Changes',
+    description: 'Permission- or role-related changes (team / security).',
+    icon: 'admin_panel_settings',
+    predicate: e =>
+      e.categoryFamily === 'permissions' || /(permission|role)/.test((e.action || '').toLowerCase()),
+  },
+  {
+    id: 'escalation_lifecycle',
+    label: 'Support Escalation Lifecycle',
+    description: 'Support escalation lifecycle transitions.',
+    icon: 'trending_up',
+    predicate: e => e.categoryFamily === 'support' && /escalat/.test((e.action || '').toLowerCase()),
+  },
+  {
+    id: 'commercial',
+    label: 'Commercial / Add-on Changes',
+    description: 'Billing, add-on, and commercial entitlement changes.',
+    icon: 'receipt_long',
+    predicate: e => e.categoryFamily === 'commercial',
+  },
+  {
+    id: 'domain_config',
+    label: 'Domain / Configuration Changes',
+    description: 'Domain and platform configuration changes.',
+    icon: 'dns',
+    predicate: e => e.categoryFamily === 'domains' || e.categoryFamily === 'configuration',
+  },
+  {
+    id: 'failed_blocked',
+    label: 'Failed / Blocked Actions',
+    description: 'Actions whose name indicates a failure, block, or denial.',
+    icon: 'block',
+    predicate: e => FAILED_BLOCKED_RE.test((e.action || '').toLowerCase()),
+  },
+  {
+    id: 'actor_activity',
+    label: 'Actor Activity',
+    description: 'Events by actors with repeated recent activity (3+ events).',
+    icon: 'group',
+    predicate: (e, ctx) => (ctx.actorEventCounts.get(e.actor) || 0) >= 3,
+  },
+  {
+    id: 'linked_case',
+    label: 'Linked to Support Case',
+    description: 'Events that are the source of a support case.',
+    icon: 'link',
+    predicate: (e, ctx) => ctx.linkedCaseEventIds.has(e.id),
+  },
+  {
+    id: 'unlinked_high_risk',
+    label: 'Unlinked High-Risk',
+    description: 'High-risk events not yet linked to a support case.',
+    icon: 'link_off',
+    predicate: (e, ctx) => e.isHighRisk && !ctx.linkedCaseEventIds.has(e.id),
+  },
+  {
+    id: 'restricted_details',
+    label: 'Restricted Details',
+    description: 'Events carrying restricted detail (require elevated permission to read).',
+    icon: 'lock',
+    predicate: e => isRestrictedEvent(e),
+  },
+];
+
+export function getAuditLens(id: string): AuditInvestigationLens {
+  return AUDIT_INVESTIGATION_LENSES.find(l => l.id === id) || AUDIT_INVESTIGATION_LENSES[0];
+}
+
+export function countForLens(
+  lens: AuditInvestigationLens,
+  events: AuditInvestigationEvent[],
+  ctx: AuditSearchContext
+): number {
+  let n = 0;
+  for (const e of events) if (lens.predicate(e, ctx)) n++;
+  return n;
+}
