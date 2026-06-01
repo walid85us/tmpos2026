@@ -243,3 +243,41 @@ A strict focused correction over the same Support Tools workspace. QA found that
 ### Non-regression
 
 -   Macro management, macro placeholder resolution (except the SLA-token permission behavior), bulk-triage deferral, escalation operating model, request de-escalation workflow, Command Center intelligence, permission dependency auto-sync, Add-on Governance, Shipping, Store Permissions Matrix, tenant provisioning, paid override invoice workflow, and server PII logging rules are all untouched.
+
+## Phase 1.1.3D — Audit Investigation Center
+
+A deterministic, rule-based investigation workspace layered onto the existing System Owner Audit & Security page. NO AI/ML, NO SIEM, NO realtime listeners, NO prediction, NO immutable/legal-grade/compliance-certified claims, NO external notification, NO server-side RBAC/PIM/PAM. Everything is derived from the same audit data already on screen (`audit_logs` session store + the `auditLogs` seed). Built and accepted milestone-by-milestone.
+
+All investigation derivations live in their own module `src/owner/platformOpsInvestigation.ts` (NOT `platformOpsDerive.ts`, which stays the locked Command Center/SLA/escalation source of truth). The new module reuses the existing `deriveHighRiskFlag` so high-risk classification never forks.
+
+### Data model + helpers (Milestone 1)
+
+-   `AuditInvestigationEvent` — normalized, derived event (1:1 with each raw audit row by `id`): id, date, actor, action, target, severity, category + `categoryFamily`, tenantId, derived `sourceSurface`, before/after values, note, `flag` + `flagReasons`, `isHighRisk`.
+-   Truth constraints baked in: audit rows are **date-granular only** (YYYY-MM-DD, no sub-day timestamp, no recorded actor role, no recorded source surface). Correlation windows are therefore expressed in **whole days** (`dayIndex()`), never hours. `sourceSurface` is **derived** best-effort from category and labeled as derived, never claimed as recorded.
+
+### Layout + search / filters / lenses (Milestone 2)
+
+-   `AuditSearchQueryState` + `matchesAuditSearch(event, query, ctx)` single predicate drives the visible list; `countForLens` runs the SAME functions over the same `investigationEvents`, so **count and list can never drift**.
+-   Investigation lenses / saved views (`AUDIT_INVESTIGATION_LENSES`): all, high_risk, unlinked_high_risk, needs_review, restricted, etc. Selecting a lens resets ad-hoc filters so the visible list equals the lens card count.
+-   **No invisible filters**: every active filter (keyword, severity, time, category, tenant, actor, action, source, review status, linked-case, restricted-only, high-risk-only) plus the active lens renders as a visible, removable chip with a truthful empty state.
+
+### Drawer + actor profile + entity timeline + correlation (Milestone 3)
+
+-   The page keeps `selected: AuditRow | null` as the single selection unit; derivations operate on normalized investigation events, bridged by `rowById`. Any clickable derived item resolves back to its row before `setSelected`.
+-   Investigation drawer tabs: Detail (with rule-based "why this matters" risk signals), Related entity timeline, Entity/actor timeline, and Actor profile — actor profile + related timeline respect `view_restricted_audit_details`.
+-   Correlated event groups: card count and expanded member list both derive from `group.eventIds` (one source), with a plain-language "why grouped" explanation. Day-window based, labeled deterministic.
+
+### Review status + investigation notes + case-from-audit + evidence (Milestone 4)
+
+-   **Review status overlay** — each event carries `needs_review` (default) / `reviewed` / `dismissed`. Persisted in a SEPARATE session overlay (`AUDIT_INVESTIGATION_STORAGE_KEY`, dispatches `audit_investigation:changed`), distinct from both the audit rows and the existing global `SecurityNote` system (`platform_security_notes`). **Original audit rows are never mutated.** A "last set by … · timestamp" stamp records attribution.
+-   **Investigation notes** — internal-only, timestamped, actor + role recorded, **append-only** (prepend, newest-first). Delete goes through a confirmation modal.
+-   **Permission reuse (no new keys)** — marking review status and adding an investigation note reuse `add_security_note`; deleting an investigation note reuses `delete_security_note`. Honors the locked permissions architecture: no new permission keys were introduced.
+-   **No audit spam** — all overlay writes go through pure helpers (`setAuditReviewStatus` / `addAuditInvestigationNote` / `deleteAuditInvestigationNote`) + `writeAuditInvestigationState`; handlers read fresh via `readAuditInvestigationState()` before writing (no stale closures). `markReview` no-ops when the status is unchanged, so only real transitions emit an audit row. Five new audit actions: `audit_event_marked_reviewed`, `audit_event_marked_needs_review`, `audit_event_dismissed`, `audit_investigation_note_added`, `audit_investigation_note_deleted`.
+-   **Evidence summary (Part K)** — `buildAuditEvidenceSummary` / `formatEvidenceSummaryText` produce a deterministic, internal, **copy-only** plain-text summary (Preview + Copy) assembled from on-screen data: event facts, rule-based risk signals, related event IDs, notes, linked case, review status. Explicitly labeled internal and **not** legal/compliance-certified. The Part K "should include" list is treated as the EXCLUSION list: no legal-grade vault, no automated containment/remediation, no external notification, no server RBAC. Restricted detail (flag reasons + free-form note on flagged events) is redacted with an explicit `[restricted …]` placeholder unless `view_restricted_audit_details` is granted — never silently dropped.
+-   **Duplicate support-case prevention (Part J)** — `createCaseFromEvent` reads FRESH persisted cases from storage (`readPersistedCases`, not React state) and holds a synchronous `useRef` re-entrancy lock, so a double-click / stale render cannot create two linked cases for the same audit event. Created cases still open the Support Tools case detail.
+
+### Command Center click-through + non-regression (Milestone 5)
+
+-   Command Center high-risk audit/security signals now deep-link to the exact event: both the Needs Attention queue items and the High-risk audit stream widget rows link to `/owner/audit-security?event=<id>`, which opens that event's investigation drawer (Detail tab). The Tenant 360 quick link continues to deep-link `/owner/audit-security?tenant=<id>`.
+-   The Audit & Security page reads `?event`, `?tenant`, and (optional, validated) `?lens` on mount. Applied params become a **visible, clearable chip** (tenant / lens) or an opened drawer (event) — never an invisible filter — and the URL is cleared afterward so the deep-link is not sticky on refresh. The deep-linked event is resolved once async-loaded rows are available. A stale/invalid `?event` id **fails loudly**: if it can't be resolved shortly after rows load, a dismissible notice is shown and the pending id is cleared, so it never lingers or auto-opens a drawer later.
+-   **Non-regression** — Command Center Intelligence, Support Queue / SLA / Macro Maturity, the escalation operating model + `isActiveEscalation` single source of truth, permission dependency auto-sync, Add-on Governance, Shipping, Store Permissions Matrix, tenant provisioning, paid override invoice workflow, and server PII logging rules are all untouched. Permission enforcement remains UI-only this phase.

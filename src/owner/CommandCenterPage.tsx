@@ -541,7 +541,7 @@ const CommandCenterPage: React.FC = () => {
         tenantId: a.tenantId || null,
         tenant: a.tenantId ? tenantById.get(a.tenantId) || a.tenantId : null,
         title: a.action, reason: `${a.target} · ${a.severity}`, age: a.date,
-        href: '/owner/audit-security',
+        href: `/owner/audit-security?event=${encodeURIComponent(a.id)}`,
       });
     } else if (flag === 'high_risk') {
       attention.push({
@@ -549,7 +549,7 @@ const CommandCenterPage: React.FC = () => {
         tenantId: a.tenantId || null,
         tenant: a.tenantId ? tenantById.get(a.tenantId) || a.tenantId : null,
         title: a.action, reason: `${a.target}`, age: a.date,
-        href: '/owner/audit-security',
+        href: `/owner/audit-security?event=${encodeURIComponent(a.id)}`,
       });
     }
   });
@@ -1205,7 +1205,7 @@ const CommandCenterPage: React.FC = () => {
             {highRiskStream.map(({ a, flag }) => (
               <li key={a.id} className="py-2 first:pt-0 last:pb-0 border-b border-slate-100 last:border-0 flex items-start justify-between gap-2">
                 <div className="min-w-0">
-                  <p className="text-xs font-bold text-slate-800 truncate">{a.action}</p>
+                  <Link to={`/owner/audit-security?event=${encodeURIComponent(a.id)}`} className="text-xs font-bold text-slate-800 hover:text-primary truncate block">{a.action}</Link>
                   <p className="text-[11px] text-slate-500 truncate">
                     {a.target}{a.tenantId ? ` · ${tenantById.get(a.tenantId) || a.tenantId}` : ''}
                   </p>

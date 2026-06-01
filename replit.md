@@ -12,9 +12,9 @@ Do not make changes to the file `Y`.
 
 # Current Project State
 
--   **Current accepted checkpoint**: Phase 1.1.3B — Advanced Command Center Intelligence is **accepted**, including the **Duplicate Escalated Badge UI Correction**.
--   **Latest completed phase**: Phase 1.1.3C (Support Queue / SLA / Macro Maturity) — implemented including a **Focused Correction pass** (high-value queue cards + Queue Mode banner, handler-level SLA gating everywhere, case-level Queue Memberships, macro placeholder resolution for `{{token}}` and `{token}`, gated Macro Management with localStorage persistence + audit, and a truthful "Future" Bulk Triage panel) plus an **SLA Visibility Permission Enforcement correction** (`view_support_sla` is the single source of truth for ALL SLA visibility in Support Tools; SLA is all-or-nothing for SLA-specific fields) — pending acceptance.
--   **Next planned phase**: Phase 1.1.3D — Audit Investigation Center.
+-   **Current accepted checkpoint**: Phase 1.1.3C (Support Queue / SLA / Macro Maturity, incl. the Focused Correction pass and the SLA Visibility Permission Enforcement correction) is **accepted**.
+-   **Latest completed phase**: Phase 1.1.3D (Audit Investigation Center) — a deterministic, rule-based investigation workspace on the Audit & Security page: investigation lenses/saved views with no-drift counts and visible/clearable filter chips; an event drawer with rule-based risk signals, actor profile, related entity timeline, and day-window correlated event groups; a review-status overlay (`needs_review`/`reviewed`/`dismissed`) plus internal append-only investigation notes (overlay only — audit rows are never mutated); an internal copy-only evidence summary with restricted-detail redaction; duplicate-safe create-support-case-from-audit; and Command Center deep-link click-through to the exact event drawer. NO AI/SIEM/realtime/prediction/legal-grade claims. **Pending acceptance.**
+-   **Next planned phase**: Phase 1.2 — Domains + Platform Settings Maturity.
 -   **Detailed history**: Full long-form implementation notes and correction sequences for all completed Platform Operations & Security phases live in [`docs/platform-operations-security-history.md`](docs/platform-operations-security-history.md). `replit.md` keeps only the high-level overview, locked rules, and roadmap.
 
 # System Architecture
@@ -97,6 +97,16 @@ These are accepted, no-regression rules. Do not change behavior without explicit
 -   **No invisible filters** — any active filter must show a visible chip, the matching items, or a truthful empty state.
 -   **Source / confidence / truth labels are required** on every intelligence surface.
 
+## Audit Investigation Center
+
+-   **Deterministic, rule-based only** — no AI/ML, SIEM, realtime listeners, prediction, immutable/legal-grade/compliance-certified claims, external notification, or server-side RBAC/PIM/PAM. Derivations live in `platformOpsInvestigation.ts` (separate from the locked `platformOpsDerive.ts`) and reuse `deriveHighRiskFlag`.
+-   **Audit rows are never mutated.** Review status (`needs_review`/`reviewed`/`dismissed`) and investigation notes are an append-only session **overlay** keyed by event id, separate from both audit rows and global `SecurityNote`s.
+-   **No new permission keys** — review-status + note-add reuse `add_security_note`; note-delete reuses `delete_security_note`. `view_restricted_audit_details` still gates restricted detail (redacted with an explicit placeholder, never silently dropped).
+-   **No drift / no invisible filters** — lens counts and the visible list derive from one predicate over one event set; every active filter and the active lens render as visible, clearable chips with truthful empty states.
+-   **Date-granular truth** — audit rows have no sub-day timestamp, recorded actor role, or recorded source surface; correlation windows are whole-day, and `sourceSurface` is labeled derived.
+-   **No audit spam** — only real review-status transitions emit an audit row; handlers read fresh persisted state before writing. Create-case-from-audit is duplicate-safe (fresh storage read + re-entrancy lock).
+-   The **evidence summary is internal, copy-only**, and explicitly not legal/compliance-certified.
+
 ## Non-Regression Locked Areas
 
 Do not change behavior in these areas as a side effect of other work:
@@ -111,8 +121,8 @@ Do not change behavior in these areas as a side effect of other work:
 
 # Active Roadmap
 
--   **Phase 1.1.3C** — Support Queue / SLA / Macro Maturity **(done — pending acceptance)**
--   **Phase 1.1.3D** — Audit Investigation Center **(next)**
+-   **Phase 1.1.3C** — Support Queue / SLA / Macro Maturity **(accepted)**
+-   **Phase 1.1.3D** — Audit Investigation Center **(done — pending acceptance)**
 -   **Phase 1.2** — Domains + Platform Settings Maturity
 -   **Phase 1.3** — Platform Team Governance (server-side RBAC / PIM / PAM)
 -   **Phase 1.4** — Automation + Alerts

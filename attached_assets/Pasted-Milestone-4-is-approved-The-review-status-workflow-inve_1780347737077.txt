@@ -1,0 +1,65 @@
+Milestone 4 is approved.
+
+The review-status workflow, investigation notes, duplicate create-case prevention, and internal evidence summary are acceptable.
+
+Confirmed acceptable:
+
+1. Review status overlay is correct.
+
+* Original audit rows must not be mutated.
+* Review status can live in a separate session/local overlay.
+* Needs Review / Reviewed / Dismissed is sufficient for this phase.
+
+2. Investigation notes are acceptable.
+
+* Internal-only notes are correct.
+* Append-only notes are preferred.
+* Delete with confirmation is acceptable when gated by `delete_security_note`.
+
+3. Permission reuse is acceptable.
+
+* `add_security_note` can control review status updates and note creation in this phase.
+* `delete_security_note` can control investigation note deletion.
+* Do not add new permission keys in this phase.
+
+4. Evidence summary is acceptable.
+
+* Copy-only internal summary is enough.
+* It must remain clearly labeled as internal and not legal/compliance-certified.
+* Restricted details must remain redacted unless `view_restricted_audit_details` is granted.
+
+5. Duplicate support-case prevention is acceptable.
+
+* Fresh storage read + submit lock is the correct fix.
+* Continue preventing duplicate linked cases for the same audit event.
+
+6. Audit behavior is acceptable.
+
+* Real transitions should audit once.
+* Re-selecting the same status should remain a no-op.
+* No audit spam.
+
+Please proceed to Milestone 5 — Command Center click-through verification + documentation updates.
+
+For Milestone 5:
+
+* Think step by step before implementing.
+* Keep scope limited to Command Center audit/security click-through verification, final documentation, and final non-regression verification.
+* Do not reopen Milestones 1–4 unless directly required for click-through or documentation consistency.
+* Confirm Command Center high-risk audit/security signals open the correct Audit & Security lens/drawer where practical.
+* Confirm no invisible filters are introduced.
+* Confirm Audit Investigation Center truth labels remain clear.
+* Update `replit.md` concisely.
+* Update `docs/platform-operations-security-history.md` with detailed Phase 1.1.3D history.
+* Preserve all locked accepted areas:
+
+  * Command Center Intelligence
+  * Support Queue / SLA / Macro Maturity
+  * Escalation operating model
+  * Permission dependency auto-sync
+  * Add-on Governance
+  * Shipping
+  * Store Permissions Matrix
+  * Tenant provisioning
+  * server PII logging rules
+* Provide the final Phase 1.1.3D report before manual QA.

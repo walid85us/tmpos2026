@@ -36,5 +36,10 @@ Per-event review status (`needs_review`/`reviewed`/`dismissed`) and investigatio
 **Why:** architect flagged the state-only guard as race-prone; duplicate-prevention is an explicit acceptance criterion.
 **How to apply:** any "prevent duplicate from persisted collection" guard in this codebase should read storage fresh + hold a ref lock, then release after persist.
 
+## Command Center → audit deep-link click-through
+CC high-risk audit/security signals deep-link `/owner/audit-security?event=<id>` (opens that event's drawer, Detail tab); Tenant 360 link uses `?tenant=<id>`. `AuditSecurityPage` reads `?event`/`?tenant`/optional-validated `?lens` ONCE on mount (guarded by a `useRef`), applies them (tenant→`patchQuery` visible chip, lens→`setActiveLens`, event→`pendingEventId`), then clears the URL via `setSearchParams(..,{replace:true})`. A second effect resolves `pendingEventId` via `rowById` once async rows load; a stale/invalid id fails loudly via a 2.5s timeout → dismissible notice + clears pending (never lingers/auto-opens later). CC and the audit page read the SAME `audit_logs` session store so ids match.
+**Why:** CC previously linked to the bare page and the page ignored URL params (broken click-through). Architect flagged silent no-op for unresolved ids → added the bounded notice.
+**How to apply:** keep `selected` resolution going through `rowById` (never setSelected on a raw param id); applied params must become visible chips/drawer, not invisible filters; clear the URL so deep-links aren't sticky on refresh.
+
 ## Milestone discipline for this phase
 User wants Phase 1.1.3D built milestone-by-milestone with a STOP for review after each (order: helpers → layout/search/lenses → drawer/actor/timeline/correlation → review-notes/case/evidence → command-center/docs). Do not implement future milestones early; do not mark the full phase complete until all milestones are accepted.

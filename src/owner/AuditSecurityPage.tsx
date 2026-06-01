@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo, useRef } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   auditLogs,
@@ -231,6 +231,35 @@ const AuditSecurityPage: React.FC = () => {
     };
   }, []);
 
+  // Phase 1.1.3D — Command Center click-through. CC high-risk audit signals
+  // deep-link `?event=<id>` (open that exact event's investigation drawer) and
+  // the Tenant 360 quick link deep-links `?tenant=<id>` (filter to one tenant).
+  // Applied params become VISIBLE, clearable chips / a selected drawer — never
+  // an invisible filter — and the URL is then cleared so the deep-link is not
+  // sticky on refresh.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const ccParamsAppliedRef = useRef(false);
+  const [pendingEventId, setPendingEventId] = useState<string | null>(null);
+  useEffect(() => {
+    if (ccParamsAppliedRef.current) return;
+    ccParamsAppliedRef.current = true;
+    const tenantParam = searchParams.get('tenant');
+    const lensParam = searchParams.get('lens');
+    const eventParam = searchParams.get('event');
+    let touched = false;
+    if (tenantParam) { patchQuery({ tenantId: tenantParam }); touched = true; }
+    if (lensParam && AUDIT_INVESTIGATION_LENSES.some(l => l.id === lensParam)) { setActiveLens(lensParam); touched = true; }
+    if (eventParam) { setPendingEventId(eventParam); touched = true; }
+    if (touched) {
+      const next = new URLSearchParams(searchParams);
+      next.delete('tenant');
+      next.delete('lens');
+      next.delete('event');
+      setSearchParams(next, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const allRows = useMemo<AuditRow[]>(() => {
     const seedIds = new Set(auditLogs.map(l => l.id));
     const merged: AuditRow[] = [
@@ -257,6 +286,29 @@ const AuditSecurityPage: React.FC = () => {
     allRows.forEach(r => m.set(r.id, r));
     return m;
   }, [allRows]);
+
+  // Resolve a Command Center deep-linked event to its row once rows have loaded
+  // (mirrored audit data arrives async), then open its investigation drawer.
+  // If the id can't be resolved shortly after rows are available, surface a
+  // dismissible notice and clear the pending id so a stale/invalid deep-link
+  // fails loudly instead of lingering and auto-opening later.
+  const [deepLinkNotice, setDeepLinkNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (!pendingEventId) return;
+    const row = rowById.get(pendingEventId);
+    if (row) {
+      setSelected(row);
+      setDrawerTab('detail');
+      setPendingEventId(null);
+      setDeepLinkNotice(null);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setDeepLinkNotice('That linked event could not be found — it may be from a different session or no longer available.');
+      setPendingEventId(null);
+    }, 2500);
+    return () => window.clearTimeout(timer);
+  }, [pendingEventId, rowById]);
 
   // The selected event as a normalized investigation event — drives actor
   // profile, entity timeline, and rule-based risk signals.
@@ -694,6 +746,23 @@ const AuditSecurityPage: React.FC = () => {
           Sensitive actions are gated by the Global Permissions Matrix.
         </p>
       </div>
+
+      {deepLinkNotice && (
+        <div
+          className="flex items-start justify-between gap-3 bg-amber-400/10 border border-amber-400/30 text-amber-800 rounded-2xl px-4 py-3"
+          role="status"
+          data-testid="audit-deeplink-notice"
+        >
+          <p className="text-xs font-semibold">{deepLinkNotice}</p>
+          <button
+            type="button"
+            onClick={() => setDeepLinkNotice(null)}
+            className="text-[10px] font-black uppercase tracking-widest text-amber-700 hover:text-amber-900"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* Posture cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
