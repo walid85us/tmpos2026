@@ -30,11 +30,19 @@ import {
   getAuditLens,
   isDefaultAuditQuery,
   readAuditReviewState,
+  deriveAuditRiskSignals,
+  deriveAuditActorProfile,
+  deriveEntityTimeline,
+  deriveCorrelatedGroups,
   AUDIT_INVESTIGATION_LENSES,
   AUDIT_INVESTIGATION_TRUTH_LABEL,
+  AUDIT_CORRELATION_TRUTH_LABEL,
   AUDIT_REVIEW_STATUS_LABEL,
   EMPTY_AUDIT_SEARCH_QUERY,
   type AuditInvestigationEvent,
+  type AuditActorProfile,
+  type AuditEntityTimeline,
+  type AuditRelatedEventGroup,
   type AuditSearchQueryState,
   type AuditSearchContext,
   type AuditSourceSurface,
@@ -151,7 +159,9 @@ const AuditSecurityPage: React.FC = () => {
   const patchQuery = (patch: Partial<AuditSearchQueryState>) => setQuery(q => ({ ...q, ...patch }));
   const [selected, setSelected] = useState<AuditRow | null>(null);
   const [newNoteBody, setNewNoteBody] = useState('');
-  const [drawerTab, setDrawerTab] = useState<'detail' | 'related' | 'actor'>('detail');
+  const [drawerTab, setDrawerTab] = useState<'detail' | 'related' | 'timeline' | 'actor'>('detail');
+  // Expanded correlated-event group (page-level Correlated Event Groups panel).
+  const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
   const [showCreateCase, setShowCreateCase] = useState(false);
   const [linkedNoteEventId, setLinkedNoteEventId] = useState<string | null>(null);
   const [pendingDeleteNoteId, setPendingDeleteNoteId] = useState<string | null>(null);
@@ -215,6 +225,21 @@ const AuditSecurityPage: React.FC = () => {
   const investigationEvents = useMemo<AuditInvestigationEvent[]>(
     () => allRows.map(toInvestigationEvent),
     [allRows]
+  );
+
+  // Map id → raw row so derived investigation events can resolve back to the
+  // AuditRow the drawer/table use as their selection unit.
+  const rowById = useMemo(() => {
+    const m = new Map<string, AuditRow>();
+    allRows.forEach(r => m.set(r.id, r));
+    return m;
+  }, [allRows]);
+
+  // The selected event as a normalized investigation event — drives actor
+  // profile, entity timeline, and rule-based risk signals.
+  const selectedInvEvent = useMemo<AuditInvestigationEvent | null>(
+    () => (selected ? investigationEvents.find(e => e.id === selected.id) ?? toInvestigationEvent(selected) : null),
+    [selected, investigationEvents]
   );
 
   const linkedCaseEventIds = useMemo(
@@ -332,24 +357,32 @@ const AuditSecurityPage: React.FC = () => {
       .slice(0, 12);
   }, [allRows, selected]);
 
-  // Actor profile — derived from currently mirrored + seed events.
-  const actorProfile = useMemo(() => {
-    if (!selected) return null;
-    const own = allRows.filter(r => r.actor === selected.actor);
-    const sevBreakdown: Record<Severity, number> = { info: 0, notice: 0, warning: 0, critical: 0 };
-    const catBreakdown = new Map<string, number>();
-    own.forEach(r => {
-      sevBreakdown[normalizeSeverity(r.severity)]++;
-      const c = r.category || 'other';
-      catBreakdown.set(c, (catBreakdown.get(c) || 0) + 1);
-    });
-    return {
-      total: own.length,
-      sevBreakdown,
-      cats: Array.from(catBreakdown.entries()).sort((a, b) => b[1] - a[1]).slice(0, 6),
-      recent: own.slice(0, 6),
-    };
-  }, [allRows, selected]);
+  // Actor profile — rule-based derivation over the normalized investigation
+  // events so the actor tab and the detail actor-context block share one source.
+  const actorProfile = useMemo<AuditActorProfile | null>(() => {
+    if (!selectedInvEvent) return null;
+    return deriveAuditActorProfile(selectedInvEvent.actor, investigationEvents, selectedInvEvent);
+  }, [investigationEvents, selectedInvEvent]);
+
+  // Rule-based "why this matters" signals for the selected event.
+  const selectedRiskSignals = useMemo(
+    () => (selectedInvEvent ? deriveAuditRiskSignals(selectedInvEvent, investigationEvents) : []),
+    [selectedInvEvent, investigationEvents]
+  );
+
+  // Related entity timeline (same tenant/target) sorted chronologically with the
+  // selected event highlighted. UI gated by view_related_event_timeline.
+  const entityTimeline = useMemo<AuditEntityTimeline | null>(
+    () => (selectedInvEvent ? deriveEntityTimeline(selectedInvEvent, investigationEvents, tenantNameById) : null),
+    [selectedInvEvent, investigationEvents, tenantNameById]
+  );
+
+  // Rule-based correlated event groups across the current audit data. Each
+  // group's count and member list both derive from group.eventIds (no drift).
+  const correlatedGroups = useMemo<AuditRelatedEventGroup[]>(
+    () => deriveCorrelatedGroups(investigationEvents),
+    [investigationEvents]
+  );
 
   // Create-from-event modal draft state.
   const [caseDraft, setCaseDraft] = useState({
@@ -922,6 +955,83 @@ const AuditSecurityPage: React.FC = () => {
         </div>
       </div>
 
+      {/* Phase 1.1.3D — Correlated Event Groups (Part H). Rule-based grouping of
+          the current audit data. Each group's count and member list both derive
+          from group.eventIds so they cannot drift. */}
+      <div className="rounded-3xl border border-slate-200 bg-white p-6 mb-6" data-testid="audit-correlated-groups">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <h2 className="text-sm font-black uppercase tracking-widest text-primary">Correlated Event Groups</h2>
+            <p className="text-[10px] text-slate-400 font-semibold mt-0.5">{AUDIT_CORRELATION_TRUTH_LABEL}</p>
+          </div>
+          <span className="px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg bg-slate-100 text-slate-600 border border-slate-200">
+            {correlatedGroups.length} group{correlatedGroups.length === 1 ? '' : 's'}
+          </span>
+        </div>
+        {correlatedGroups.length === 0 ? (
+          <p className="text-xs text-slate-400 font-bold py-8 text-center bg-slate-50 rounded-2xl mt-4">
+            No correlated event groups in the current audit data under the present rules.
+          </p>
+        ) : (
+          <div className="grid gap-3 mt-4 md:grid-cols-2">
+            {correlatedGroups.map(g => {
+              const isOpen = expandedGroup === g.id;
+              return (
+                <div key={g.id} data-testid={`audit-corr-group-${g.kind}`} className="rounded-2xl border border-slate-100 bg-slate-50/60 p-4">
+                  <p className="text-sm font-bold text-slate-800">{g.title}</p>
+                  <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                    <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border ${SEVERITY_STYLES[g.severity]}`}>{g.severity}</span>
+                    <span className="px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border bg-white text-slate-500 border-slate-200">Confidence · {g.confidence}</span>
+                    <span className="px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border bg-white text-slate-500 border-slate-200">{g.count} events</span>
+                  </div>
+                  <p className="text-xs text-slate-600 mt-2"><span className="font-bold text-slate-700">Why grouped:</span> {g.reason}</p>
+                  <p className="text-[11px] text-slate-500 mt-1">
+                    {g.actor && <span>Actor: <span className="font-bold text-slate-700">{g.actor}</span>{g.tenantId ? ' · ' : ''}</span>}
+                    {g.tenantId && <span>Tenant: <span className="font-bold text-slate-700">{tenantNameById.get(g.tenantId) || g.tenantId}</span></span>}
+                    {!g.actor && !g.tenantId && <span>Platform-wide</span>}
+                  </p>
+                  <p className="text-[11px] text-slate-500 mt-1"><span className="font-bold text-slate-700">Recommended:</span> {g.recommendedAction}</p>
+                  <button
+                    onClick={() => setExpandedGroup(isOpen ? null : g.id)}
+                    data-testid={`audit-corr-group-toggle-${g.kind}`}
+                    className="mt-3 text-[10px] font-black uppercase tracking-widest text-primary hover:underline"
+                  >
+                    {isOpen ? 'Hide events' : `Show ${g.count} events`}
+                  </button>
+                  {isOpen && (
+                    <div className="mt-3 space-y-2" data-testid={`audit-corr-group-events-${g.kind}`}>
+                      {g.eventIds.map(id => {
+                        const row = rowById.get(id);
+                        if (!row) return null;
+                        const { flag } = deriveHighRiskFlag(row);
+                        return (
+                          <button
+                            key={id}
+                            onClick={() => { setSelected(row); setDrawerTab('detail'); }}
+                            className="w-full text-left p-2.5 bg-white hover:bg-slate-100 rounded-xl border border-slate-100 transition-colors"
+                          >
+                            <div className="flex justify-between items-start gap-2">
+                              <div className="flex-1 min-w-0">
+                                <p className="text-xs font-bold text-slate-700 truncate">{row.action}</p>
+                                <p className="text-[10px] text-slate-500 mt-0.5 truncate">{row.target} · {row.actor} · {row.date}</p>
+                              </div>
+                              <div className="flex flex-col items-end gap-1 shrink-0">
+                                <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border ${SEVERITY_STYLES[normalizeSeverity(row.severity)]}`}>{normalizeSeverity(row.severity)}</span>
+                                {flag && <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border ${HIGH_RISK_FLAG_STYLES[flag]}`}>{HIGH_RISK_FLAG_LABEL[flag]}</span>}
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
       {/* Detail drawer */}
       <AnimatePresence>
         {selected && (
@@ -964,9 +1074,10 @@ const AuditSecurityPage: React.FC = () => {
                   view_related_event_timeline, 'actor' tab gated by
                   view_actor_profile (separate sub-permissions per spec). */}
               <div className="px-7 pt-4 flex gap-2 border-b border-slate-100">
-                {(['detail', 'related', 'actor'] as const)
+                {(['detail', 'related', 'timeline', 'actor'] as const)
                   .filter(t => t === 'detail'
                     || (t === 'related' && viewRelatedEventTimelineGate.allowed)
+                    || (t === 'timeline' && viewRelatedEventTimelineGate.allowed)
                     || (t === 'actor' && viewActorProfileGate.allowed))
                   .map(t => (
                   <button
@@ -975,7 +1086,7 @@ const AuditSecurityPage: React.FC = () => {
                     data-testid={`audit-drawer-tab-${t}`}
                     className={`px-3 pb-3 text-[10px] font-black uppercase tracking-widest border-b-2 ${drawerTab === t ? 'border-primary text-primary' : 'border-transparent text-slate-400 hover:text-slate-600'}`}
                   >
-                    {t === 'detail' ? 'Detail' : t === 'related' ? `Related (${relatedEvents.length})` : 'Actor profile'}
+                    {t === 'detail' ? 'Detail' : t === 'related' ? `Related (${relatedEvents.length})` : t === 'timeline' ? `Timeline${entityTimeline ? ` (${entityTimeline.events.length})` : ''}` : 'Actor profile'}
                   </button>
                 ))}
               </div>
@@ -998,8 +1109,8 @@ const AuditSecurityPage: React.FC = () => {
                         <p className="text-sm font-bold text-slate-800 truncate">{selected.actor}</p>
                         <p className="text-[10px] text-slate-500 font-bold mt-0.5">
                           {actorProfile.total} recent action{actorProfile.total === 1 ? '' : 's'}
-                          {actorProfile.sevBreakdown.critical > 0 && <span className="text-red-700"> · {actorProfile.sevBreakdown.critical} critical</span>}
-                          {actorProfile.sevBreakdown.warning > 0 && <span className="text-amber-700"> · {actorProfile.sevBreakdown.warning} warning</span>}
+                          {actorProfile.severityBreakdown.critical > 0 && <span className="text-red-700"> · {actorProfile.severityBreakdown.critical} critical</span>}
+                          {actorProfile.severityBreakdown.warning > 0 && <span className="text-amber-700"> · {actorProfile.severityBreakdown.warning} warning</span>}
                         </p>
                       </div>
                       <button
@@ -1094,6 +1205,26 @@ const AuditSecurityPage: React.FC = () => {
                       </div>
                     );
                   })()}
+                  {/* Phase 1.1.3D — "Why this matters": rule-based investigation
+                      signals derived from the event + current audit data. These
+                      are categorical explanations (not sensitive bodies), so they
+                      are visible to anyone with audit access. */}
+                  <div data-testid="audit-drawer-why-matters">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Why this matters</p>
+                    {selectedRiskSignals.length === 0 ? (
+                      <p className="text-xs text-slate-500 italic bg-slate-50 p-3 rounded-2xl">No additional risk signal from current rules.</p>
+                    ) : (
+                      <ul className="space-y-1.5">
+                        {selectedRiskSignals.map(s => (
+                          <li key={s.code} className="flex items-start gap-2 text-xs text-slate-600">
+                            <span className={`mt-0.5 shrink-0 px-1.5 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border ${SEVERITY_STYLES[s.severity]}`}>{s.severity}</span>
+                            <span><span className="font-bold text-slate-700">{s.label}.</span> {s.detail}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <p className="text-[10px] text-slate-400 italic mt-2">{AUDIT_INVESTIGATION_TRUTH_LABEL}</p>
+                  </div>
                   <div className="flex flex-wrap gap-2 pt-3 border-t border-slate-100">
                     {!linkedCaseByEvent.get(selected.id) && (
                       <button
@@ -1190,20 +1321,91 @@ const AuditSecurityPage: React.FC = () => {
                 </div>
               )}
 
-              {drawerTab === 'actor' && actorProfile && (
-                <div className="p-7 space-y-4">
+              {/* Phase 1.1.3D — Related Entity Timeline (Part G). Same
+                  tenant/target, sorted chronologically, selected highlighted.
+                  Gated by view_related_event_timeline. */}
+              {drawerTab === 'timeline' && viewRelatedEventTimelineGate.allowed && entityTimeline && (
+                <div className="p-7 space-y-3" data-testid="audit-drawer-timeline">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                    Related entity timeline · {entityTimeline.entityLabel}
+                  </p>
+                  {entityTimeline.events.length === 0 ? (
+                    <p className="text-xs text-slate-400 font-bold py-6 text-center bg-slate-50 rounded-2xl">No related entity events.</p>
+                  ) : (
+                    <div className="relative pl-4 space-y-2 before:absolute before:left-1 before:top-1 before:bottom-1 before:w-px before:bg-slate-200">
+                      {entityTimeline.events.map(e => {
+                        const isSel = e.id === selected.id;
+                        const row = rowById.get(e.id);
+                        return (
+                          <button
+                            key={e.id}
+                            onClick={() => { if (row) { setSelected(row); setDrawerTab('detail'); } }}
+                            data-testid={`audit-timeline-event${isSel ? '-selected' : ''}`}
+                            className={`relative w-full text-left p-3 rounded-xl border transition-colors ${isSel ? 'bg-primary/5 border-primary/30 ring-1 ring-primary/20' : 'bg-slate-50 hover:bg-slate-100 border-slate-100'}`}
+                          >
+                            <span className={`absolute -left-[13px] top-4 w-2 h-2 rounded-full ${isSel ? 'bg-primary' : 'bg-slate-300'}`} />
+                            <div className="flex justify-between items-start gap-2">
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-bold text-slate-700 truncate">
+                                  {e.action}
+                                  {isSel && <span className="ml-2 text-[9px] font-black uppercase tracking-widest text-primary">Selected</span>}
+                                </p>
+                                <p className="text-[10px] text-slate-500 font-bold mt-0.5 truncate">{e.target || '—'}</p>
+                                {row && (row.oldValue != null || row.newValue != null) && (
+                                  <p className="text-[10px] text-slate-400 mt-1">
+                                    <span className="font-mono">{row.oldValue != null ? String(row.oldValue) : '—'}</span>
+                                    <span className="mx-1">→</span>
+                                    <span className="font-mono">{row.newValue != null ? String(row.newValue) : '—'}</span>
+                                  </p>
+                                )}
+                              </div>
+                              <span className={`shrink-0 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded border ${SEVERITY_STYLES[e.severity]}`}>{e.severity}</span>
+                            </div>
+                            <p className="text-[10px] text-slate-400 mt-1">{e.actor} · {e.date}</p>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  <p className="text-[10px] text-slate-400 italic">{AUDIT_INVESTIGATION_TRUTH_LABEL} Sorted oldest → newest.</p>
+                </div>
+              )}
+
+              {drawerTab === 'actor' && viewActorProfileGate.allowed && actorProfile && (
+                <div className="p-7 space-y-4" data-testid="audit-drawer-actor">
                   <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Actor profile · {selected.actor}</p>
                   <div className="grid grid-cols-2 gap-3">
                     <ProfileStat label="Total events" value={actorProfile.total} />
-                    <ProfileStat label="Critical" value={actorProfile.sevBreakdown.critical} />
-                    <ProfileStat label="Warning" value={actorProfile.sevBreakdown.warning} />
-                    <ProfileStat label="Notice" value={actorProfile.sevBreakdown.notice} />
+                    <ProfileStat label="High-risk" value={actorProfile.highRiskCount} />
+                    <ProfileStat label="Critical" value={actorProfile.severityBreakdown.critical} />
+                    <ProfileStat label="Warning" value={actorProfile.severityBreakdown.warning} />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="p-3 bg-slate-50 rounded-2xl border border-slate-100">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Tenants touched</p>
+                      <p className="text-sm font-bold text-slate-700 mt-0.5">{actorProfile.tenantsTouched.length}</p>
+                    </div>
+                    <div className="p-3 bg-slate-50 rounded-2xl border border-slate-100">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Last activity</p>
+                      <p className="text-sm font-bold text-slate-700 mt-0.5">{actorProfile.lastActivity || '—'}</p>
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Activity signals</p>
+                    <ul className="space-y-1" data-testid="audit-actor-signals">
+                      {actorProfile.signals.map((s, i) => (
+                        <li key={i} className="text-xs text-slate-600 flex items-start gap-2">
+                          <span className="mt-1 w-1.5 h-1.5 rounded-full bg-slate-300 shrink-0" />
+                          <span>{s}</span>
+                        </li>
+                      ))}
+                    </ul>
                   </div>
                   <div>
                     <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Top categories</p>
                     <div className="flex flex-wrap gap-2">
-                      {actorProfile.cats.length === 0 && <span className="text-xs text-slate-400">—</span>}
-                      {actorProfile.cats.map(([c, n]) => (
+                      {actorProfile.categoryBreakdown.length === 0 && <span className="text-xs text-slate-400">—</span>}
+                      {actorProfile.categoryBreakdown.map(([c, n]) => (
                         <span key={c} className="px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg bg-slate-100 text-slate-600 border border-slate-200">
                           {c} · {n}
                         </span>
@@ -1213,18 +1415,19 @@ const AuditSecurityPage: React.FC = () => {
                   <div>
                     <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Recent activity</p>
                     <div className="space-y-2">
-                      {actorProfile.recent.map(r => (
+                      {actorProfile.recent.map(e => (
                         <button
-                          key={r.id}
-                          onClick={() => { setSelected(r); setDrawerTab('detail'); }}
+                          key={e.id}
+                          onClick={() => { const row = rowById.get(e.id); if (row) { setSelected(row); setDrawerTab('detail'); } }}
                           className="w-full text-left p-2.5 bg-slate-50 hover:bg-slate-100 rounded-xl border border-slate-100 transition-colors"
                         >
-                          <p className="text-xs font-bold text-slate-700">{r.action}</p>
-                          <p className="text-[10px] text-slate-500 mt-0.5">{r.target} · {r.date}</p>
+                          <p className="text-xs font-bold text-slate-700">{e.action}</p>
+                          <p className="text-[10px] text-slate-500 mt-0.5">{e.target || '—'} · {e.date}</p>
                         </button>
                       ))}
                     </div>
                   </div>
+                  <p className="text-[10px] text-slate-400 italic">{AUDIT_INVESTIGATION_TRUTH_LABEL}</p>
                 </div>
               )}
             </motion.div>

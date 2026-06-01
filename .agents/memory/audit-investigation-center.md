@@ -18,5 +18,10 @@ The audit search/filter/lens layer uses a single `matchesAuditSearch(event, quer
 **Why:** the locked Command Center rule "count and list derive from one source and cannot drift" + "no invisible filters" applies here too. Forking count vs list logic is the classic QA failure.
 **How to apply:** never add a filter that only affects the list or only the count. Add the field to `AuditSearchQueryState` + `matchesAuditSearch` and surface it as a removable chip in the command bar. Review status is read-only until the review milestone (events default to `needs_review`).
 
+## Drawer selection unit is the raw AuditRow; derivations run on investigation events
+`AuditSecurityPage` keeps `selected: AuditRow | null` as the single selection unit (table, drawer tabs, create-case all rely on it). The investigation derivations (actor profile, entity timeline, correlation, risk signals) operate on normalized `AuditInvestigationEvent`s. Bridge with `rowById = Map<id, AuditRow>` and `selectedInvEvent = investigationEvents.find(id) ?? toInvestigationEvent(selected)`. Any clickable derived item must `rowById.get(e.id)` before `setSelected`.
+**Why:** migrating the whole page to investigation events would ripple through create-case, CSV, linked-case logic. Keeping AuditRow as the selection unit and mapping by id is the minimal, no-regression bridge.
+**How to apply:** never call `setSelected` with an `AuditInvestigationEvent`; always resolve to the row first. Correlated-group cards render count + members both from `group.eventIds` (one source).
+
 ## Milestone discipline for this phase
 User wants Phase 1.1.3D built milestone-by-milestone with a STOP for review after each (order: helpers → layout/search/lenses → drawer/actor/timeline/correlation → review-notes/case/evidence → command-center/docs). Do not implement future milestones early; do not mark the full phase complete until all milestones are accepted.
