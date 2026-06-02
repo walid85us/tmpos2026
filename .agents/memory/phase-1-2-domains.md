@@ -26,5 +26,10 @@ For any surface with summary cards/tabs + a filtered list, every count must be c
 Disable/re-enable (and similar destructive state changes) must be explicit confirmed actions, never an option inside an onChange `<select>`. Exclude the destructive value from the select's options and render a static badge when already in that state; restore via an explicit button.
 **Why:** a select `onChange` mutates immediately with no confirmation, bypassing the in-app confirm-modal requirement.
 
+## Page-visibility gate ≠ child view_* sub-permission
+An owner page's in-component view gate must use `hasEffectiveFeatureAccess(role, <featureKey>)` (parent level OR any child sub-permission ≥ view), NOT `hasPlatformPermission(role,'view_<feature>')`. Action/edit gating still uses the exact child sub-permission (e.g. `edit_platform_settings`).
+**Why:** the locked Global Permissions Matrix rule says sidebar/page visibility = effective access; using the child `view_*` wrongly denies valid configs (parent grants but child view explicit none; or child edit granted but view not). A code review failed M3 on exactly this. The route's `<AccessGuard feature=...>` already uses effective access, so the in-page gate must match it.
+**How to apply:** `const canView = hasEffectiveFeatureAccess(role, 'platform_settings');` for the No-access panel; keep `edit_*` for mutation gating. (Note: M2 DomainsPage used `view_domains` for its page gate and was already user-approved — left as-is; new pages should use effective access.)
+
 ## Milestone discipline for Phase 1.2
 Built milestone-by-milestone with a STOP for review after each. Order: M1 Domains foundation (helpers/model, minimal UI) → M2 Domain lifecycle/DNS/SSL readiness UX → M3 Platform Settings governance model → M4 Settings change review/impact/audit UX → M5 cross-surface integration + docs + non-regression. Do not implement future milestones early; the existing domain audit actions (`domain_created`/`domain_status_changed`/`domain_ssl_changed`/`domain_disabled`/`domain_reenabled`/`domain_deleted`) and `view_domains`/`manage_domain_lifecycle` permissions already exist.

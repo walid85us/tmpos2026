@@ -1,16 +1,42 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { platformDefaults, type PlatformDefaults } from './mockData';
 import { pushPlatformAudit } from './platformOpsAudit';
+import { useAccess } from '../context/AccessContext';
+import { hasPlatformPermission, hasEffectiveFeatureAccess } from './platformPermissionsConfig';
+import type { Role } from '../context/accessConfig';
+import {
+  SETTINGS_GROUP_ORDER,
+  SETTINGS_GROUP_LABELS,
+  SETTINGS_GROUP_DESCRIPTIONS,
+  SETTING_ENFORCEMENT_LABELS,
+  SETTING_RISK_LABELS,
+  SETTINGS_TRUTH_LABELS,
+  getSettingsForGroup,
+  getSettingValue,
+  getSettingDefault,
+  isSettingModified,
+  formatSettingValue,
+  deriveSettingsPosture,
+  type SettingsGroup,
+  type SettingDefinition,
+  type SettingEnforcement,
+  type SettingRisk,
+  type SettingPrimitive,
+} from './platformOpsSettings';
 
 const STORAGE_KEY = 'platform_settings_v1';
 
-type SettingsGroup = 'branding' | 'maintenance' | 'security' | 'support';
+const ENFORCEMENT_STYLES: Record<SettingEnforcement, string> = {
+  enforced: 'bg-teal-400/10 text-teal-700 border-teal-400/20',
+  advisory: 'bg-blue-400/10 text-blue-700 border-blue-400/20',
+  display_only: 'bg-slate-100 text-slate-500 border-slate-200',
+  documentation_only: 'bg-amber-400/10 text-amber-700 border-amber-400/20',
+};
 
-const GROUP_LABELS: Record<SettingsGroup, string> = {
-  branding: 'Branding',
-  maintenance: 'Maintenance',
-  security: 'Security Defaults',
-  support: 'Support Contacts',
+const RISK_STYLES: Record<SettingRisk, string> = {
+  low: 'bg-slate-100 text-slate-500 border-slate-200',
+  medium: 'bg-amber-400/10 text-amber-700 border-amber-400/20',
+  high: 'bg-red-500/10 text-red-700 border-red-500/30',
 };
 
 const loadSettings = (): PlatformDefaults => {
@@ -38,39 +64,63 @@ const saveSettings = (s: PlatformDefaults) => {
   } catch { /* noop */ }
 };
 
-const diffGroup = <T extends Record<string, unknown>>(prev: T, next: T): string => {
+const setDraftValue = (settings: PlatformDefaults, def: SettingDefinition, value: SettingPrimitive): PlatformDefaults => ({
+  ...settings,
+  [def.group]: { ...(settings[def.group] as Record<string, SettingPrimitive>), [def.field]: value },
+} as PlatformDefaults);
+
+// Per-group change summary, registry-driven so the audit note matches the
+// governance keys exactly.
+const groupChangeSummary = (group: SettingsGroup, prev: PlatformDefaults, next: PlatformDefaults): string => {
   const changes: string[] = [];
-  Object.keys(next).forEach(k => {
-    const a = prev[k];
-    const b = next[k];
+  getSettingsForGroup(group).forEach(def => {
+    const a = getSettingValue(prev, def);
+    const b = getSettingValue(next, def);
     if (JSON.stringify(a) !== JSON.stringify(b)) {
-      changes.push(`${k}: ${JSON.stringify(a)} → ${JSON.stringify(b)}`);
+      changes.push(`${def.key}: ${formatSettingValue(def, a)} → ${formatSettingValue(def, b)}`);
     }
   });
   return changes.join('; ');
 };
 
 const PlatformSettingsPage: React.FC = () => {
+  const { session } = useAccess();
+  const sessionRole = (session?.role as Role | undefined) || null;
+  // Page visibility follows EFFECTIVE feature access (parent level OR any child
+  // sub-permission >= view), per the locked Global Permissions Matrix rule.
+  // Editing is gated separately by the exact child sub-permission.
+  const canView = hasEffectiveFeatureAccess(sessionRole, 'platform_settings');
+  const editGate = hasPlatformPermission(sessionRole, 'edit_platform_settings');
+  const canEdit = editGate.allowed;
+
   const [persisted, setPersisted] = useState<PlatformDefaults>(() => loadSettings());
   const [draft, setDraft] = useState<PlatformDefaults>(persisted);
   const [savedAt, setSavedAt] = useState<string | null>(null);
   const [savingGroup, setSavingGroup] = useState<SettingsGroup | null>(null);
 
-  useEffect(() => {
-    setDraft(persisted);
-  }, [persisted]);
+  useEffect(() => { setDraft(persisted); }, [persisted]);
 
-  const dirtyGroups = useMemo<Record<SettingsGroup, boolean>>(() => ({
-    branding: JSON.stringify(persisted.branding) !== JSON.stringify(draft.branding),
-    maintenance: JSON.stringify(persisted.maintenance) !== JSON.stringify(draft.maintenance),
-    security: JSON.stringify(persisted.security) !== JSON.stringify(draft.security),
-    support: JSON.stringify(persisted.support) !== JSON.stringify(draft.support),
-  }), [persisted, draft]);
+  // Governance posture reflects the PERSISTED (in-effect) settings.
+  const posture = useMemo(() => deriveSettingsPosture(persisted), [persisted]);
+
+  const dirtyGroups = useMemo<Record<SettingsGroup, boolean>>(() => {
+    const out = {} as Record<SettingsGroup, boolean>;
+    SETTINGS_GROUP_ORDER.forEach(g => {
+      out[g] = JSON.stringify(persisted[g]) !== JSON.stringify(draft[g]);
+    });
+    return out;
+  }, [persisted, draft]);
+
+  const updateField = (def: SettingDefinition, value: SettingPrimitive) => {
+    if (!canEdit) return;
+    setDraft(d => setDraftValue(d, def, value));
+  };
 
   const persistGroup = (group: SettingsGroup) => {
-    const next: PlatformDefaults = { ...persisted, [group]: draft[group] } as PlatformDefaults;
-    const summary = diffGroup(persisted[group] as any, draft[group] as any);
+    if (!canEdit) return;
+    const summary = groupChangeSummary(group, persisted, draft);
     if (!summary) return;
+    const next: PlatformDefaults = { ...persisted, [group]: draft[group] } as PlatformDefaults;
     saveSettings(next);
     setPersisted(next);
     setSavedAt(new Date().toLocaleString());
@@ -79,83 +129,95 @@ const PlatformSettingsPage: React.FC = () => {
     pushPlatformAudit({
       actor: 'System Owner',
       action: 'platform_setting_updated',
-      target: GROUP_LABELS[group],
+      target: SETTINGS_GROUP_LABELS[group],
       category: 'configuration',
       severity: 'notice',
       note: summary,
     });
   };
 
+  if (!canView) {
+    return (
+      <div className="space-y-8">
+        <h2 className="text-2xl font-black text-primary tracking-tight">Platform Settings</h2>
+        <div className="bg-white/80 backdrop-blur-xl rounded-[2rem] border border-slate-200 p-12 text-center shadow-sm">
+          <span className="material-symbols-outlined text-4xl text-slate-300">lock</span>
+          <p className="mt-3 text-sm font-black text-slate-600 uppercase tracking-widest">No access</p>
+          <p className="mt-1 text-xs font-bold text-slate-400">You do not have permission to view Platform Settings.</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-8">
-      <div>
-        <h2 className="text-2xl font-black text-primary tracking-tight">Platform Settings</h2>
-        <p className="text-slate-500 font-medium">Global defaults consumed across the System Owner control panel.{savedAt && <span className="ml-2 text-xs text-slate-400">Last saved: {savedAt}</span>}</p>
+      {/* Command header */}
+      <div className="flex items-end justify-between flex-wrap gap-4">
+        <div className="max-w-2xl">
+          <h2 className="text-2xl font-black text-primary tracking-tight">Platform Settings</h2>
+          <p className="text-slate-500 font-medium">Governed platform-wide configuration with enforcement, risk, and ownership metadata.{savedAt && <span className="ml-2 text-xs text-slate-400">Last saved: {savedAt}</span>}</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <TruthLabel text={SETTINGS_TRUTH_LABELS.governance} tone="slate" />
+            <TruthLabel text={SETTINGS_TRUTH_LABELS.notEnforced} tone="amber" />
+            <TruthLabel text={SETTINGS_TRUTH_LABELS.future} tone="slate" />
+          </div>
+        </div>
+        {!canEdit && (
+          <span className="px-4 py-2 text-[10px] font-black uppercase tracking-widest text-slate-400 bg-slate-100 border border-slate-200 rounded-xl">Read-only — Edit Platform Settings required</span>
+        )}
       </div>
 
-      {/* Branding */}
-      <SectionCard title="Branding" subtitle="Display name and logo used across owner-facing surfaces.">
-        <Field label="Platform Name">
-          <input value={draft.branding.name} onChange={e => setDraft(d => ({ ...d, branding: { ...d.branding, name: e.target.value } }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700" />
-        </Field>
-        <Field label="Public Support Email">
-          <input value={draft.branding.supportEmail} onChange={e => setDraft(d => ({ ...d, branding: { ...d.branding, supportEmail: e.target.value } }))} type="email" className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700" />
-        </Field>
-        <Field label="Logo URL">
-          <input value={draft.branding.logoUrl} onChange={e => setDraft(d => ({ ...d, branding: { ...d.branding, logoUrl: e.target.value } }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700" />
-        </Field>
-        <SaveRow group="branding" dirty={dirtyGroups.branding} saving={savingGroup === 'branding'} onSave={persistGroup} />
-      </SectionCard>
+      {/* Governance posture */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+        <PostureCard label="Total Settings" value={posture.total} />
+        <PostureCard label="Modified" value={posture.modified} tint="amber" />
+        <PostureCard label="High Risk" value={posture.highRisk} tint="red" />
+        <PostureCard label="High Risk · Modified" value={posture.highRiskModified} tint="red" />
+        <PostureCard label="Documentation Only" value={posture.documentationOnly} tint="amber" />
+      </div>
 
-      {/* Maintenance */}
-      <SectionCard title="Maintenance" subtitle="Maintenance flag is consumed by display banners only — the app does NOT block traffic when enabled.">
-        <Field label="">
-          <label className="flex items-center gap-3 cursor-pointer">
-            <input type="checkbox" checked={draft.maintenance.enabled} onChange={e => setDraft(d => ({ ...d, maintenance: { ...d.maintenance, enabled: e.target.checked } }))} className="w-5 h-5 rounded-lg border-slate-300 text-primary focus:ring-primary" />
-            <span className="text-sm font-bold text-slate-700">Enable Maintenance Mode <span className="text-[10px] uppercase tracking-widest text-amber-600 font-black ml-2">Banner only — not enforced</span></span>
-          </label>
-        </Field>
-        <Field label="Maintenance Message">
-          <textarea value={draft.maintenance.message} onChange={e => setDraft(d => ({ ...d, maintenance: { ...d.maintenance, message: e.target.value } }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm text-slate-700 h-20 resize-none" placeholder="Optional message displayed to tenants." />
-        </Field>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <Field label="Scheduled Start">
-            <input type="datetime-local" value={draft.maintenance.scheduledStart} onChange={e => setDraft(d => ({ ...d, maintenance: { ...d.maintenance, scheduledStart: e.target.value } }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700" />
-          </Field>
-          <Field label="Scheduled End">
-            <input type="datetime-local" value={draft.maintenance.scheduledEnd} onChange={e => setDraft(d => ({ ...d, maintenance: { ...d.maintenance, scheduledEnd: e.target.value } }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700" />
-          </Field>
-        </div>
-        <SaveRow group="maintenance" dirty={dirtyGroups.maintenance} saving={savingGroup === 'maintenance'} onSave={persistGroup} />
-      </SectionCard>
+      {/* Registry-driven group sections */}
+      {SETTINGS_GROUP_ORDER.map(group => (
+        <SectionCard key={group} title={SETTINGS_GROUP_LABELS[group]} subtitle={SETTINGS_GROUP_DESCRIPTIONS[group]}>
+          <div className="space-y-4">
+            {getSettingsForGroup(group).map(def => (
+              <SettingRow
+                key={def.key}
+                def={def}
+                value={getSettingValue(draft, def)}
+                defaultValue={getSettingDefault(def)}
+                modified={isSettingModified(draft, def)}
+                canEdit={canEdit}
+                onChange={v => updateField(def, v)}
+              />
+            ))}
+          </div>
+          {canEdit && (
+            <SaveRow group={group} dirty={dirtyGroups[group]} saving={savingGroup === group} onSave={persistGroup} />
+          )}
+        </SectionCard>
+      ))}
+    </div>
+  );
+};
 
-      {/* Security */}
-      <SectionCard title="Security Defaults" subtitle="These values are documentation only — no runtime auth/MFA enforcement is wired today.">
-        <Field label="Session Timeout (minutes) — Documentation only">
-          <input type="number" min={5} max={1440} value={draft.security.sessionTimeoutMinutes} onChange={e => setDraft(d => ({ ...d, security: { ...d.security, sessionTimeoutMinutes: Number(e.target.value) || 60 } }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700" />
-        </Field>
-        <Field label="">
-          <label className="flex items-center gap-3 cursor-pointer">
-            <input type="checkbox" checked={draft.security.requireMfaForPlatformAdmins} onChange={e => setDraft(d => ({ ...d, security: { ...d.security, requireMfaForPlatformAdmins: e.target.checked } }))} className="w-5 h-5 rounded-lg border-slate-300 text-primary focus:ring-primary" />
-            <span className="text-sm font-bold text-slate-700">Require MFA for Platform Admins <span className="text-[10px] uppercase tracking-widest text-amber-600 font-black ml-2">Documentation only — not enforced</span></span>
-          </label>
-        </Field>
-        <SaveRow group="security" dirty={dirtyGroups.security} saving={savingGroup === 'security'} onSave={persistGroup} />
-      </SectionCard>
+// =============================================================================
+// Presentational components
+// =============================================================================
 
-      {/* Support */}
-      <SectionCard title="Support Contacts" subtitle="Internal operations directory — surfaced in tenant Help footers and ops runbooks.">
-        <Field label="Support Email">
-          <input value={draft.support.supportEmail} onChange={e => setDraft(d => ({ ...d, support: { ...d.support, supportEmail: e.target.value } }))} type="email" className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700" />
-        </Field>
-        <Field label="On-Call Phone">
-          <input value={draft.support.onCallPhone} onChange={e => setDraft(d => ({ ...d, support: { ...d.support, onCallPhone: e.target.value } }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700" placeholder="+1 555 000 0000" />
-        </Field>
-        <Field label="Status Page URL">
-          <input value={draft.support.statusPageUrl} onChange={e => setDraft(d => ({ ...d, support: { ...d.support, statusPageUrl: e.target.value } }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700" />
-        </Field>
-        <SaveRow group="support" dirty={dirtyGroups.support} saving={savingGroup === 'support'} onSave={persistGroup} />
-      </SectionCard>
+const TruthLabel: React.FC<{ text: string; tone: 'amber' | 'slate' }> = ({ text, tone }) => (
+  <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold border ${tone === 'amber' ? 'bg-amber-400/10 text-amber-700 border-amber-400/20' : 'bg-slate-100 text-slate-500 border-slate-200'}`}>
+    <span className="material-symbols-outlined text-[12px]">info</span>
+    {text}
+  </span>
+);
+
+const PostureCard: React.FC<{ label: string; value: number; tint?: 'amber' | 'red' }> = ({ label, value, tint }) => {
+  const tintCls = tint === 'amber' ? 'text-amber-700' : tint === 'red' ? 'text-red-700' : 'text-primary';
+  return (
+    <div className="bg-white/80 backdrop-blur-xl p-5 rounded-3xl border border-slate-200 shadow-sm">
+      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">{label}</p>
+      <p className={`text-2xl font-black mt-1 ${tintCls}`}>{value}</p>
     </div>
   );
 };
@@ -170,10 +232,74 @@ const SectionCard: React.FC<{ title: string; subtitle?: string; children: React.
   </div>
 );
 
-const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
-  <div>
-    {label && <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">{label}</label>}
-    {children}
+const Badge: React.FC<{ text: string; className: string }> = ({ text, className }) => (
+  <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${className}`}>{text}</span>
+);
+
+const SettingControl: React.FC<{ def: SettingDefinition; value: SettingPrimitive; canEdit: boolean; onChange: (v: SettingPrimitive) => void }> = ({ def, value, canEdit, onChange }) => {
+  const base = 'w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700 disabled:opacity-60';
+  switch (def.valueType) {
+    case 'boolean':
+      return (
+        <label className="flex items-center gap-3 cursor-pointer">
+          <input type="checkbox" disabled={!canEdit} checked={Boolean(value)} onChange={e => onChange(e.target.checked)} className="w-5 h-5 rounded-lg border-slate-300 text-primary focus:ring-primary disabled:opacity-60" />
+          <span className="text-sm font-bold text-slate-700">{Boolean(value) ? 'On' : 'Off'}</span>
+        </label>
+      );
+    case 'multiline':
+      return <textarea disabled={!canEdit} value={String(value)} onChange={e => onChange(e.target.value)} className={`${base} h-20 resize-none`} placeholder={def.placeholder} />;
+    case 'number':
+      return <input type="number" min={def.min} max={def.max} disabled={!canEdit} value={Number(value)} onChange={e => onChange(Number(e.target.value) || 0)} className={base} placeholder={def.placeholder} />;
+    case 'datetime':
+      return <input type="datetime-local" disabled={!canEdit} value={String(value)} onChange={e => onChange(e.target.value)} className={base} />;
+    case 'email':
+      return <input type="email" disabled={!canEdit} value={String(value)} onChange={e => onChange(e.target.value)} className={base} placeholder={def.placeholder} />;
+    case 'url':
+    case 'text':
+    default:
+      return <input type="text" disabled={!canEdit} value={String(value)} onChange={e => onChange(e.target.value)} className={base} placeholder={def.placeholder} />;
+  }
+};
+
+const SettingRow: React.FC<{
+  def: SettingDefinition;
+  value: SettingPrimitive;
+  defaultValue: SettingPrimitive;
+  modified: boolean;
+  canEdit: boolean;
+  onChange: (v: SettingPrimitive) => void;
+}> = ({ def, value, defaultValue, modified, canEdit, onChange }) => (
+  <div className="border border-slate-100 rounded-3xl p-5 bg-white/60 space-y-3">
+    <div className="flex items-start justify-between gap-3 flex-wrap">
+      <div className="flex-1 min-w-[200px]">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-sm font-black text-slate-800">{def.label}</span>
+          {modified && <Badge text="Modified" className="bg-amber-400/10 text-amber-700 border-amber-400/20" />}
+        </div>
+        <p className="text-xs text-slate-500 font-medium mt-0.5">{def.description}</p>
+      </div>
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <Badge text={SETTING_ENFORCEMENT_LABELS[def.enforcement]} className={ENFORCEMENT_STYLES[def.enforcement]} />
+        <Badge text={`${SETTING_RISK_LABELS[def.risk]} Risk`} className={RISK_STYLES[def.risk]} />
+      </div>
+    </div>
+
+    <SettingControl def={def} value={value} canEdit={canEdit} onChange={onChange} />
+
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-1.5 pt-1">
+      <Meta label="Owner" value={def.owner} />
+      <Meta label="Default" value={formatSettingValue(def, defaultValue)} />
+      <Meta label="Impact" value={def.impactSummary} full />
+      <Meta label="Truth" value={def.truthLabel} full muted />
+    </div>
+    <p className="text-[10px] font-mono text-slate-300">key: {def.key}</p>
+  </div>
+);
+
+const Meta: React.FC<{ label: string; value: string; full?: boolean; muted?: boolean }> = ({ label, value, full, muted }) => (
+  <div className={full ? 'md:col-span-2' : ''}>
+    <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">{label}: </span>
+    <span className={`text-[11px] font-${muted ? 'medium' : 'bold'} ${muted ? 'text-slate-400' : 'text-slate-600'}`}>{value}</span>
   </div>
 );
 
@@ -184,7 +310,7 @@ const SaveRow: React.FC<{ group: SettingsGroup; dirty: boolean; saving: boolean;
       disabled={!dirty || saving}
       className={`px-6 py-2.5 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all ${saving ? 'bg-emerald-500 text-white' : dirty ? 'bg-primary text-white shadow-lg shadow-primary/20 hover:bg-primary/90' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`}
     >
-      {saving ? 'Saved!' : dirty ? `Save ${GROUP_LABELS[group]}` : 'No Changes'}
+      {saving ? 'Saved!' : dirty ? `Save ${SETTINGS_GROUP_LABELS[group]}` : 'No Changes'}
     </button>
   </div>
 );

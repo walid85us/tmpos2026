@@ -1,0 +1,67 @@
+Milestone 2 is approved.
+
+The Domains Lifecycle / DNS / SSL Readiness UX implementation is acceptable and properly scoped.
+
+Confirmed acceptable:
+
+1. DomainsPage is now correctly gated:
+
+* `view_domains` controls page access.
+* `manage_domain_lifecycle` controls create/status/SSL/disable/re-enable actions.
+* Read-only behavior is clear for users without manage rights.
+
+2. The no-drift fix is approved:
+
+* Posture cards, lifecycle tabs, and filtered lists now use the same `matchesDomain` / `countWith` logic.
+* Counts should match the visible list when clicked.
+
+3. Disable protection is approved:
+
+* Disable cannot be triggered through the status dropdown.
+* Disable uses the explicit confirmation modal.
+* Re-enable remains explicit.
+
+4. History correction is approved:
+
+* History dedupe by stable event id is better than same-day dedupe.
+* Exact domain matching is safer than substring matching.
+
+5. Truth labels are correct:
+
+* Manual verification only.
+* Rule-based from current app/session data.
+* Provider integrations are future Phase 2.
+
+6. Scope discipline is acceptable:
+
+* No real DNS lookup.
+* No real SSL automation.
+* No provider integration.
+* No notification behavior.
+* Command Center intelligence was not modified.
+* Raw status/SSL remain persisted source of truth.
+
+Please proceed to Milestone 3 — Platform Settings Governance Model.
+
+For Milestone 3:
+
+* Think step by step before implementing.
+* Keep scope limited to Platform Settings governance model only.
+* Do not implement settings change review/save confirmation yet; that belongs to Milestone 4.
+* Do not implement real notifications, real SSO/SCIM, real external integrations, or provider calls.
+* Inspect the current PlatformSettingsPage and existing platform settings data model.
+* Create or extend a settings registry/governance model with:
+
+  * setting key
+  * label
+  * description
+  * group
+  * current/default value
+  * enforcement state
+  * risk level
+  * owner
+  * impact summary
+  * truth label
+* Keep replit.md concise.
+* Put detailed notes in docs/platform-operations-security-history.md only when appropriate.
+* Stop after Milestone 3 and provide a milestone report before moving to Milestone 4.
