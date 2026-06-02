@@ -1,3 +1,2 @@
-- [Command Center intelligence reconciliation](command-center-intelligence.md) — ribbon card count MUST match its drawer's kind filter exactly; tenant_risk drawer is synthesized from tenantHealth; bind UI to CommandSignal.reason/.category and RibbonCard.reason.
-- [Support queue no-drift](support-queue-no-drift.md) — count & drilldown must share one predicate AND one render-time `now`; gate all SLA indicators on view_support_sla; truth labels required.
-- [Audit Investigation Center](audit-investigation-center.md) — Phase 1.1.3D helpers live in platformOpsInvestigation.ts (not the 3.2k-line derive file); audit rows are date-granular so correlation windows are whole days.
+- [Audit Investigation Center](audit-investigation-center.md) — Phase 1.1.3D: where audit-investigation derivations live, date-granular truth, no-drift counts, overlay/permissions reuse, deep-link click-through.
+- [Phase 1.2 Domains + Platform Settings](phase-1-2-domains.md) — domain lifecycle/readiness helpers live in their own module; raw status stays source of truth; manual-only DNS/SSL truth constraints; milestone discipline.

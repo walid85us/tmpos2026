@@ -1,0 +1,661 @@
+Platform Operations & Security — Phase 1.2 Domains + Platform Settings Maturity
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is Phase 1.2 of the Platform Operations & Security roadmap.
+
+Implement Phase 1.2 using a milestone-by-milestone approach.
+
+Do not implement the whole phase in one pass.
+Stop after each milestone and wait for review before continuing.
+
+Milestones:
+
+1. Domains Maturity Foundation
+2. Domain Lifecycle / DNS / SSL Readiness UX
+3. Platform Settings Governance Model
+4. Platform Settings Change Review / Impact / Audit UX
+5. Cross-surface integration, documentation, and final non-regression verification
+
+Do not implement:
+
+* Phase 1.3 Platform Team Governance
+* Phase 1.4 Automation + Alerts
+* Phase 2 Real Integrations
+* Phase 3 Compliance + Evidence
+* Phase 4 Predictive / AI Operations
+* real DNS lookups
+* real SSL certificate issuance
+* real domain provisioning
+* real SSO / SCIM
+* real notification delivery
+* real email/SMS/Slack/Teams/PagerDuty
+* server-side RBAC
+* PIM/PAM
+* access reviews
+* external provider APIs
+* Firestore realtime migration
+* fake automation
+* fake live checks
+* fake security validation
+
+This phase must mature the Domains and Platform Settings surfaces while remaining truthful that DNS/SSL/identity/notification integrations are not real yet.
+
+==================================================
+WORKING STYLE — THINK STEP BY STEP
+==================================
+
+Before answering, implementing, correcting, or fixing anything, think step by step.
+
+Do not rush to code.
+
+Before each milestone:
+
+1. Inspect the current relevant files.
+2. Identify current accepted behavior.
+3. Identify what must remain locked.
+4. Identify which data is real, mock, session-based, or derived.
+5. Identify what is safe to implement in this milestone.
+6. Implement only the current milestone.
+7. Verify no accepted workstream regressed.
+8. Stop and provide a milestone report.
+
+Do not proceed to the next milestone without approval.
+
+==================================================
+ROLE STACK — ADD TO PROJECT KNOWLEDGE / SKILLS
+==============================================
+
+Before implementation, add this Phase 1.2 role model to project knowledge / skills and act on it.
+
+Primary roles:
+
+* Senior Domains Engineer
+* Senior Platform Settings Architect
+* Senior Platform Operations Architect
+* Senior DNS / SSL Lifecycle Architect
+* Senior SaaS Admin Console Architect
+* Senior Security-by-Default Architect
+* Senior Configuration Governance Lead
+* Senior Audit & Security Engineer
+* Senior Integrations / Identity / DNS / SSL / Notification Systems Architect
+* Command Center Analyst
+* Command and Control Specialist
+* Identity and Access Management Specialist
+* Access Analyst
+* Senior React/TypeScript Engineer
+* QA Gatekeeper
+* Systems Thinker
+* Side Auditor
+
+Responsibilities to apply:
+
+* domain lifecycle clarity
+* DNS record readiness
+* SSL/TLS readiness
+* tenant-domain association
+* configuration governance
+* settings ownership and impact review
+* auditability of platform configuration
+* safe settings editing
+* truthful provider limitations
+* future integration readiness
+* no fake automation
+* no unverified claims
+
+==================================================
+BENCHMARK / COMPETITOR RESEARCH REQUIREMENT
+===========================================
+
+Before coding Milestone 1, perform a short benchmark review using public patterns if browsing is available.
+
+Review patterns from:
+
+* Cloudflare domain/DNS/SSL management
+* Okta custom domain and certificate setup
+* Vercel / Netlify custom domain verification if useful
+* AWS Route 53 / ACM domain validation patterns if useful
+* Atlassian admin settings and audit patterns
+* Stripe / Shopify / enterprise SaaS settings governance patterns if useful
+
+Extract product patterns only:
+
+* domain lifecycle
+* DNS record checklist
+* SSL/TLS status
+* verification instructions
+* manual vs automated truth labels
+* configuration impact preview
+* settings change audit
+* admin ownership
+* readiness scoring
+* provider status placeholders
+* troubleshooting guidance
+
+Do not copy external code.
+
+If browsing is unavailable:
+
+* state browsing unavailable
+* proceed using SaaS/admin/DNS/SSL best-practice patterns
+* document assumptions.
+
+Use the documentation pattern:
+
+* keep replit.md concise
+* put detailed Phase 1.2 implementation narrative in docs/platform-operations-security-history.md
+
+==================================================
+CURRENT ACCEPTED STATE
+======================
+
+Accepted and locked:
+
+* Phase 1.1 Foundation
+* Phase 1.1.1 Interactive Command Center UX
+* Phase 1.1.2 Competitive Ops Console Maturity
+* Phase 1.1.3A Operating Model + Permission-Aware Escalation
+* Phase 1.1.3B Advanced Command Center Intelligence
+* Phase 1.1.3C Support Queue / SLA / Macro Maturity
+* Phase 1.1.3D Audit Investigation Center
+* Platform Team Permissions Matrix corrections
+* Effective permission resolver hardening
+* Permission dependency auto-sync
+* Request De-escalation pending review workflow
+* Escalation signal consistency
+* Documentation organization pattern
+
+Do not reopen those corrections.
+
+Phase 1.2 should build on them.
+
+==================================================
+LOCKED / DO-NOT-TOUCH AREAS
+===========================
+
+Do not modify or regress:
+
+* Shipping Module / Shipping Center behavior
+* Add-on Governance rules
+* Plans & Features Matrix source-of-truth behavior
+* Tenant Features commercial-entitlement rules
+* Store Permissions Matrix
+* Platform Team Permissions Matrix
+* Effective permission resolver
+* Permission dependency auto-sync
+* Request De-escalation workflow
+* Escalation operating model
+* Advanced Command Center Intelligence
+* Support Queue / SLA / Macro Maturity
+* Audit Investigation Center
+* POS
+* Repairs
+* Inventory
+* Customers
+* Invoices
+* Services
+* tenant provisioning behavior
+* paid override invoice workflow
+* server PII log-scrubbing
+
+Any interaction with those areas must be read-only unless explicitly scoped as a Domains / Platform Settings signal.
+
+==================================================
+PRIMARY GOAL
+============
+
+Transform Domains and Platform Settings from simple admin surfaces into mature platform-governance workspaces.
+
+The System Owner should understand:
+
+Domains:
+
+* Which tenant domains exist?
+* Which domains are verified, pending, failed, disabled, or at risk?
+* What DNS records are required?
+* What SSL/TLS readiness state exists?
+* What is manual vs future automated?
+* What changed recently?
+* Which tenant/domain needs action?
+* Which domains are blocking tenant readiness or brand launch?
+* What exact records should be copied?
+* What is safe to do now vs future real provider integration?
+
+Platform Settings:
+
+* Which settings are documentation-only vs currently applied?
+* Who changed a setting and when?
+* What is the impact of a setting before saving?
+* Which settings are risky or sensitive?
+* Which settings are grouped by branding, security defaults, maintenance, support contacts, notifications, and future integrations?
+* Which settings require audit visibility?
+* Which settings are future placeholders and not enforced?
+* What is the current platform configuration posture?
+
+Use deterministic, explainable, session/app-state logic.
+Do not add fake real-time provider checks.
+
+==================================================
+MILESTONE 1 — DOMAINS MATURITY FOUNDATION
+=========================================
+
+Implement only foundational domain data/model/helpers and low-risk UI scaffolding.
+
+Goals:
+
+* consolidate domain lifecycle logic
+* add clear domain status model
+* add domain readiness model
+* avoid touching real DNS/SSL integrations
+
+Inspect:
+
+* DomainsPage
+* tenantDomains mock/session data
+* platformOpsDerive if any domain helpers exist
+* Command Center domain signal usage
+* Audit & Security domain/config event patterns
+* permissions for Domains
+
+Create or extend helpers:
+
+* DomainLifecycleStatus
+* DomainKind
+* DomainReadinessSignal
+* DomainRequiredRecord
+* DomainSslReadiness
+* DomainRiskReason
+* deriveDomainReadiness
+* deriveDomainRequiredRecords
+* deriveDomainPosture
+* getDomainActionLabel
+* getDomainTruthLabel
+
+Expected domain lifecycle states:
+
+* Draft
+* Pending DNS
+* Pending Verification
+* Verified
+* SSL Pending
+* SSL Ready
+* Failed
+* Disabled
+
+Use current app terms if they already exist, but normalize display.
+
+Domain readiness should include:
+
+* status
+* tenant
+* hostname
+* kind
+* required DNS records
+* SSL/TLS readiness
+* issue count
+* next action
+* source/truth label
+
+Truth labels:
+
+* “Manual verification only — no real DNS lookup or SSL automation.”
+* “DNS/SSL readiness is rule-based from current app/session records.”
+* “Provider integrations are future Phase 2.”
+
+Milestone 1 output:
+
+* helper/model added
+* minimal or no visible UI change
+* no route/behavior regression
+* milestone report only
+
+Stop after Milestone 1.
+
+==================================================
+MILESTONE 2 — DOMAIN LIFECYCLE / DNS / SSL READINESS UX
+=======================================================
+
+Proceed only after Milestone 1 approval.
+
+Improve DomainsPage.
+
+Add:
+
+* Domain Command Header
+* domain posture cards
+* domain lifecycle board or clear status tabs
+* tenant/domain search
+* kind filter
+* status filter
+* SSL readiness filter
+* risk filter
+* visible active filters
+* no invisible filters
+* domain detail drawer
+
+Domain detail drawer should show:
+
+* tenant
+* hostname
+* kind
+* lifecycle status
+* DNS required records
+* copyable DNS instructions
+* TXT/CNAME record values if available
+* SSL/TLS readiness
+* issue reasons
+* next recommended action
+* manual status workflow
+* audit/history if available
+* truth labels
+
+Domain actions:
+
+* Add domain
+* Mark Pending
+* Mark Verified
+* Mark Failed
+* Disable
+* Re-enable
+* Update SSL status manually if current app supports it
+
+All actions:
+
+* permission-gated
+* confirmation for destructive/disable actions
+* audited
+* no real DNS/SSL calls
+
+Domain list/count no-drift rule:
+
+* card counts and filtered lists must use the same predicates
+* no invisible filters
+* active filters visible/clearable
+
+Command Center:
+
+* domain issue signals should remain accurate
+* do not overbuild Command Center in this milestone
+
+Stop after Milestone 2.
+
+==================================================
+MILESTONE 3 — PLATFORM SETTINGS GOVERNANCE MODEL
+================================================
+
+Proceed only after Milestone 2 approval.
+
+Focus on PlatformSettingsPage and settings model.
+
+Create/extend settings registry concepts:
+
+* PlatformSettingDefinition
+* PlatformSettingGroup
+* PlatformSettingRiskLevel
+* PlatformSettingEnforcementState
+* PlatformSettingImpact
+* PlatformSettingOwner
+* PlatformSettingAuditSummary
+* PlatformSettingTruthLabel
+
+Setting groups:
+
+* Branding
+* Maintenance
+* Security Defaults
+* Support Contacts
+* Notifications
+* Domains / URLs
+* Integrations Readiness
+* Tenant Defaults
+* Future Identity / SSO placeholders if already present
+
+For each setting, define:
+
+* key
+* label
+* description
+* group
+* current value
+* default value
+* enforcement state:
+
+  * Enforced
+  * UI Only
+  * Documentation Only
+  * Banner Only
+  * Future Integration
+* risk level:
+
+  * Low
+  * Medium
+  * High
+  * Critical
+* owner
+* last changed if available
+* impact summary
+* truth label
+
+Do not change behavior of settings yet beyond organizing/governance display.
+
+Stop after Milestone 3.
+
+==================================================
+MILESTONE 4 — PLATFORM SETTINGS CHANGE REVIEW / IMPACT / AUDIT UX
+=================================================================
+
+Proceed only after Milestone 3 approval.
+
+Improve Platform Settings editing.
+
+Add:
+
+* settings search
+* group tabs/cards
+* sensitive settings badges
+* enforcement-state labels
+* impact preview before save
+* change diff summary
+* save confirmation for high-risk settings
+* reset to default confirmation
+* unsaved changes guard if practical
+* last changed by/at display if available
+* audit row for saves/resets
+
+Save behavior:
+
+* preserve existing localStorage/session pattern
+* no external integrations
+* no fake enforcement
+* no real notifications
+* no server changes
+* no tenant-impact changes unless already current behavior
+
+Permissions:
+
+* view_platform_settings controls visibility
+* edit_platform_settings or existing equivalent controls edits
+* high-risk setting save may require Manage/Full Access if current permission model supports thresholds
+* no broad permission architecture changes
+
+Truth labels:
+
+* “Documentation only — not enforced”
+* “Banner only — not enforced”
+* “Future integration — not active”
+* “Current app/session setting”
+
+Stop after Milestone 4.
+
+==================================================
+MILESTONE 5 — CROSS-SURFACE INTEGRATION + FINAL DOCUMENTATION
+=============================================================
+
+Proceed only after Milestone 4 approval.
+
+Connect light read-only signals.
+
+Command Center:
+
+* domain readiness/domain issues still accurate
+* platform settings risk signals if safe and useful
+* no invisible filters
+* no fake provider health
+
+Audit & Security:
+
+* domain/config changes remain visible as audit/config events if already audited
+* no new investigation scope unless necessary
+
+Documentation:
+
+* replit.md concise update
+* docs/platform-operations-security-history.md detailed Phase 1.2 narrative
+* next phase after acceptance: Phase 1.3 Platform Team Governance
+
+Final non-regression:
+
+* Command Center intelligence
+* Support Queue/SLA/Macro
+* Audit Investigation Center
+* escalation operating model
+* permissions
+* Add-on Governance
+* Shipping
+* Store Permissions Matrix
+* tenant provisioning
+* server PII logs
+
+Stop and provide final Phase 1.2 report before manual QA.
+
+==================================================
+PERMISSIONS
+===========
+
+Respect existing Global Permissions Matrix.
+
+Expected:
+
+* Domains page requires Domains View Only+
+* domain create/edit/status actions require appropriate Domains permission
+* Platform Settings page requires Platform Settings View Only+
+* setting changes require edit/manage/full threshold according to existing matrix
+* high-risk actions should not be available to view-only roles
+* do not add new permission keys unless absolutely necessary
+* if new sub-permissions are needed, report and stop for approval before adding them
+
+Do not change permission resolver.
+
+==================================================
+AUDITABILITY
+============
+
+Audit meaningful actions:
+
+* domain created
+* domain status changed
+* domain disabled/re-enabled
+* SSL status manually changed if implemented
+* platform setting saved
+* platform setting reset
+* high-risk setting confirmed
+
+Avoid audit spam:
+
+* no hover audits
+* no every-filter-click audits unless existing pattern demands it
+* no duplicate audit rows
+
+No server PII logging.
+
+==================================================
+TRUTH LABELS / LIMITATIONS
+==========================
+
+Required labels:
+
+* “Manual verification only — no real DNS lookup or SSL automation.”
+* “DNS/SSL readiness is rule-based from current app/session records.”
+* “Provider integrations are future Phase 2.”
+* “Settings may be documentation-only, banner-only, UI-only, or future integration.”
+* “No external notifications or provider calls are active in this phase.”
+* “No real SSO/SCIM/DNS/SSL automation in this phase.”
+
+==================================================
+OUT OF SCOPE
+============
+
+Do NOT implement:
+
+* real DNS lookup
+* real SSL issuance
+* real certificate upload/management
+* real provider integrations
+* real notifications
+* real SSO/SCIM
+* real platform backend config service
+* server RBAC
+* PIM/PAM
+* access reviews
+* Phase 1.3+
+* tenant provisioning modernization
+* Store Permissions Matrix dependency auto-sync
+
+Future notes to preserve, not implement:
+
+* Store Permissions Matrix dependency auto-sync — future enhancement
+* Tenant provisioning modernization — future tenant onboarding/provisioning workstream
+* Deeper Support Queue Center UX tuning — possible later improvement
+
+==================================================
+DOCUMENTATION PATTERN
+=====================
+
+Keep replit.md concise.
+
+Update replit.md only with:
+
+* current phase summary
+* locked rules added by Phase 1.2
+* next phase after acceptance
+
+Put detailed narrative in:
+docs/platform-operations-security-history.md
+
+Do not make replit.md large again.
+
+==================================================
+MILESTONE REPORT FORMAT
+=======================
+
+After each milestone, stop and reply ONLY in this structure:
+
+1. Milestone Status
+2. What Was Implemented
+3. Files Changed
+4. Permissions / Auditability
+5. Truth Labels / Limitations
+6. Non-Regression Notes
+7. Risks / Review Notes
+8. Recommendation Before Next Milestone
+
+==================================================
+FINAL PHASE 1.2 REPORT FORMAT
+=============================
+
+After Milestone 5, reply ONLY in this structure:
+
+1. Implementation Status
+2. Benchmark / Patterns Considered
+3. Domains Maturity Model
+4. Domain Lifecycle / DNS / SSL Readiness UX
+5. Platform Settings Governance Model
+6. Platform Settings Change Review / Impact UX
+7. Permissions / Auditability
+8. Command Center / Audit Integration
+9. Files Changed
+10. Documentation Updated
+11. Non-Regression Notes
+12. Recommendation Before Manual QA
