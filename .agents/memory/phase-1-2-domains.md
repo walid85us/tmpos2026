@@ -31,5 +31,11 @@ An owner page's in-component view gate must use `hasEffectiveFeatureAccess(role,
 **Why:** the locked Global Permissions Matrix rule says sidebar/page visibility = effective access; using the child `view_*` wrongly denies valid configs (parent grants but child view explicit none; or child edit granted but view not). A code review failed M3 on exactly this. The route's `<AccessGuard feature=...>` already uses effective access, so the in-page gate must match it.
 **How to apply:** `const canView = hasEffectiveFeatureAccess(role, 'platform_settings');` for the No-access panel; keep `edit_*` for mutation gating. (Note: M2 DomainsPage used `view_domains` for its page gate and was already user-approved — left as-is; new pages should use effective access.)
 
+## Every mutation entrypoint must self-gate on canEdit
+A `canEdit`-hidden button is not enough — each handler that mutates state (update/review/save/reset AND discard) must start with `if (!canEdit) return;`. A code review failed M4 because `discardGroup` relied only on the button being hidden. Also enforce confirmation gates (e.g. high-risk acknowledgment) inside the confirm handler, not only via the disabled-button state, to avoid UI-bypass edge cases.
+
+## Save-review modal must derive from the unfiltered change set
+When a page has search/group filters AND a per-group "Review & Save" flow, the review modal must list changes from the unfiltered `changedByGroup[group]`, never from the filtered/rendered subset — otherwise an active filter could hide a pending change that is about to be persisted. One predicate (`isChangedFromPersisted`) feeds dirty counts, badges, review list, and the audit note so they cannot drift.
+
 ## Milestone discipline for Phase 1.2
 Built milestone-by-milestone with a STOP for review after each. Order: M1 Domains foundation (helpers/model, minimal UI) → M2 Domain lifecycle/DNS/SSL readiness UX → M3 Platform Settings governance model → M4 Settings change review/impact/audit UX → M5 cross-surface integration + docs + non-regression. Do not implement future milestones early; the existing domain audit actions (`domain_created`/`domain_status_changed`/`domain_ssl_changed`/`domain_disabled`/`domain_reenabled`/`domain_deleted`) and `view_domains`/`manage_domain_lifecycle` permissions already exist.

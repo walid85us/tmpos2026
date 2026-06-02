@@ -1,0 +1,78 @@
+Milestone 3 is approved.
+
+The Platform Settings Governance Model is acceptable and properly scoped.
+
+Confirmed acceptable:
+
+1. `platformOpsSettings.ts` as a pure governance registry is approved.
+
+* It keeps setting metadata centralized.
+* It avoids drift between posture cards, rows, defaults, risk, enforcement, owner, and truth labels.
+
+2. Registry fields are acceptable:
+
+* key
+* label
+* description
+* group
+* value type
+* default value
+* enforcement state
+* risk level
+* owner
+* impact summary
+* truth label
+
+3. Enforcement labeling is acceptable with one condition:
+
+* The `enforced` vocabulary may exist in the type system for future use.
+* But current settings must not be presented as actually enforced unless they truly are.
+* Branding/support = display-only, maintenance = advisory/banner-only, security = documentation-only is acceptable.
+
+4. The page visibility correction is approved:
+
+* Using `hasEffectiveFeatureAccess('platform_settings')` matches the locked Global Permissions Matrix rule.
+* Editing remains separately gated by `edit_platform_settings`.
+
+5. Existing behavior preservation is approved:
+
+* Same `platform_settings_v1` localStorage key.
+* Same save semantics.
+* Same audit pattern for platform_setting_updated.
+* No change-review confirmation or impact-preview save flow yet, because that belongs to Milestone 4.
+
+6. Scope discipline is acceptable:
+
+* No notifications.
+* No SSO/SCIM.
+* No provider calls.
+* No runtime enforcement.
+* No external integrations.
+* Domains and Command Center were not touched.
+
+Please proceed to Milestone 4 — Platform Settings Change Review / Impact / Audit UX.
+
+For Milestone 4:
+
+* Think step by step before implementing.
+* Keep scope limited to Platform Settings change review, impact preview, confirmation, reset/default flow, audit UX, and safe editing.
+* Do not implement real enforcement, real notifications, real SSO/SCIM, external provider calls, backend config service, server RBAC, PIM/PAM, access reviews, or Phase 1.3+ behavior.
+* Use the `platformOpsSettings.ts` registry as the source of truth for:
+
+  * setting labels
+  * risk level
+  * enforcement state
+  * owner
+  * impact summary
+  * default values
+  * truth labels
+* Add settings search and group navigation if not already clear.
+* Add change diff preview before save.
+* Add impact preview before save.
+* Add confirmation for high-risk setting changes.
+* Add reset-to-default confirmation.
+* Add unsaved-changes indication or guard if practical.
+* Preserve existing localStorage/session persistence.
+* Keep audit rows meaningful and not duplicated.
+* Do not make `replit.md` large; documentation can wait for Milestone 5 unless a short note is necessary.
+* Stop after Milestone 4 and provide a milestone report before moving to Milestone 5.
