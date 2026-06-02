@@ -559,14 +559,14 @@ const CommandCenterPage: React.FC = () => {
         id: `df_${d.id}`, priority: 'high', type: 'Failed domain verification',
         tenantId: d.tenantId, tenant: tenantById.get(d.tenantId) || d.tenantId,
         title: d.hostname, reason: 'Verification failed', age: d.createdAt,
-        href: '/owner/domains',
+        href: `/owner/domains?domain=${d.id}`,
       });
     } else if (d.status === 'pending' || d.status === 'verifying') {
       attention.push({
         id: `dp_${d.id}`, priority: 'medium', type: 'Pending domain verification',
         tenantId: d.tenantId, tenant: tenantById.get(d.tenantId) || d.tenantId,
         title: d.hostname, reason: `Status: ${d.status}`, age: d.createdAt,
-        href: '/owner/domains',
+        href: `/owner/domains?domain=${d.id}`,
       });
     }
   });

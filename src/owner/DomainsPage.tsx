@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   tenants,
@@ -9,6 +10,7 @@ import {
   type DomainStatus,
   type DomainSslStatus,
   type DomainKind,
+  type DomainRole,
 } from './mockData';
 import { pushPlatformAudit, readMirroredAuditRows } from './platformOpsAudit';
 import { useAccess } from '../context/AccessContext';
@@ -16,14 +18,25 @@ import { hasPlatformPermission } from './platformPermissionsConfig';
 import type { Role } from '../context/accessConfig';
 import {
   deriveDomainReadinessList,
+  deriveDomainRole,
+  deriveParentRootHostname,
   formatDnsRecord,
   DOMAIN_LIFECYCLE_LABELS,
+  DOMAIN_ROLE_LABELS,
   DOMAIN_SSL_READINESS_LABELS,
   DOMAIN_TRUTH_LABELS,
+  PLATFORM_ROOT_SUFFIX,
   type DomainLifecycleStatus,
   type DomainSslReadiness,
   type DomainReadinessSignal,
 } from './platformOpsDomains';
+
+// Validation patterns for the Add Domain flow (Phase 1.2 acceptance correction).
+const DNS_LABEL_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
+const ROOT_DOMAIN_RE = /^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/;
+
+// The three ways an operator can add a domain record.
+type DomainCreateType = 'root' | 'subdomain' | 'platform_subdomain';
 
 const DOMAINS_KEY = 'tenant_domains_v1';
 
@@ -91,6 +104,10 @@ type RiskFilter = 'all' | 'needs_action' | 'at_risk';
 type KindFilter = 'all' | DomainKind;
 type SslFilter = 'all' | DomainSslReadiness;
 type LifecycleFilter = 'all' | DomainLifecycleStatus;
+// Raw persisted status filter — set only via Command Center deep-links
+// (?status=...). It has no dropdown control of its own, but it ALWAYS renders a
+// visible, clearable chip, so it never becomes an invisible filter.
+type RawStatusFilter = 'all' | DomainStatus;
 
 interface DomainFilters {
   search: string;
@@ -98,6 +115,7 @@ interface DomainFilters {
   kind: KindFilter;
   ssl: SslFilter;
   risk: RiskFilter;
+  rawStatus: RawStatusFilter;
 }
 
 const EMPTY_FILTERS: DomainFilters = {
@@ -106,12 +124,14 @@ const EMPTY_FILTERS: DomainFilters = {
   kind: 'all',
   ssl: 'all',
   risk: 'all',
+  rawStatus: 'all',
 };
 
 // Single predicate — used for BOTH the visible list and every count, so card /
 // tab counts can never drift from the filtered list (locked no-drift rule).
 const matchesDomain = (s: DomainReadinessSignal, f: DomainFilters, tenantName: string): boolean => {
   if (f.lifecycle !== 'all' && s.lifecycle !== f.lifecycle) return false;
+  if (f.rawStatus !== 'all' && s.rawStatus !== f.rawStatus) return false;
   if (f.kind !== 'all' && s.kind !== f.kind) return false;
   if (f.ssl !== 'all' && s.sslReadiness !== f.ssl) return false;
   if (f.risk === 'needs_action' && !s.needsAction) return false;
@@ -135,8 +155,12 @@ const DomainsPage: React.FC = () => {
   const [showCreate, setShowCreate] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [filters, setFilters] = useState<DomainFilters>(EMPTY_FILTERS);
-  const [draft, setDraft] = useState({ tenantId: '', hostname: '', kind: 'subdomain' as DomainKind });
+  const [draft, setDraft] = useState<{ tenantId: string; type: DomainCreateType; label: string; hostname: string; parentDomainId: string }>(
+    { tenantId: '', type: 'root', label: '', hostname: '', parentDomainId: '' }
+  );
   const [createError, setCreateError] = useState<string | null>(null);
+  const [deepLinkNotice, setDeepLinkNotice] = useState<string | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
   const [copied, setCopied] = useState<string | null>(null);
   const [confirmDisable, setConfirmDisable] = useState<TenantDomainRecord | null>(null);
   const [auditTick, setAuditTick] = useState(0);
@@ -148,6 +172,35 @@ const DomainsPage: React.FC = () => {
     window.addEventListener('audit_logs:changed', h);
     return () => window.removeEventListener('audit_logs:changed', h);
   }, []);
+
+  // Command Center deep-linking (item F). `?domain=<id>` opens the matching
+  // record drawer (or shows a dismissible stale notice if it no longer exists);
+  // `?status=<rawStatus>` applies a visible, clearable raw-status filter. After
+  // applying, the params are stripped so refresh / back never re-triggers them.
+  useEffect(() => {
+    const domainParam = searchParams.get('domain');
+    const statusParam = searchParams.get('status');
+    if (!domainParam && !statusParam) return;
+
+    if (statusParam) {
+      const validStatuses: DomainStatus[] = ['pending', 'verifying', 'verified', 'failed', 'disabled'];
+      if ((validStatuses as string[]).includes(statusParam)) {
+        setFilters(f => ({ ...f, rawStatus: statusParam as DomainStatus }));
+      }
+    }
+    if (domainParam) {
+      if (domains.some(d => d.id === domainParam)) {
+        setSelectedId(domainParam);
+        setDeepLinkNotice(null);
+      } else {
+        setDeepLinkNotice(`Domain "${domainParam}" was not found — it may have been deleted or belongs to a different record set.`);
+      }
+    }
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete('domain');
+    nextParams.delete('status');
+    setSearchParams(nextParams, { replace: true });
+  }, [searchParams, domains, setSearchParams]);
 
   const tenantById = useMemo(() => {
     const m = new Map<string, string>();
@@ -212,27 +265,76 @@ const DomainsPage: React.FC = () => {
       .sort((a, b) => b.date.localeCompare(a.date));
   }, [selected, auditTick]);
 
+  // Managed root domains the operator can attach a new subdomain to. Scoped to
+  // the selected tenant (a subdomain lives under its own tenant's root) and
+  // excludes disabled roots.
+  const rootDomainsForTenant = useMemo(
+    () => domains.filter(d => deriveDomainRole(d) === 'root' && d.status !== 'disabled' && d.tenantId === draft.tenantId),
+    [domains, draft.tenantId]
+  );
+  const draftParentRoot = rootDomainsForTenant.find(d => d.id === draft.parentDomainId) || null;
+
+  // Live hostname preview, mirrors exactly what handleCreate will persist.
+  const draftLabel = draft.label.trim().toLowerCase();
+  const computedHostname = (() => {
+    if (draft.type === 'root') return draft.hostname.trim().toLowerCase();
+    if (draft.type === 'platform_subdomain') return draftLabel ? `${draftLabel}.${PLATFORM_ROOT_SUFFIX}` : '';
+    return draftLabel && draftParentRoot ? `${draftLabel}.${draftParentRoot.hostname}` : '';
+  })();
+
+  const resetDraft = () => setDraft({ tenantId: '', type: 'root', label: '', hostname: '', parentDomainId: '' });
+
   const handleCreate = () => {
     if (!canManage) return;
-    if (!draft.tenantId || !draft.hostname.trim()) return;
-    const hostname = draft.hostname.trim().toLowerCase();
+    if (!draft.tenantId) { setCreateError('Select a tenant first.'); return; }
+
+    let hostname = '';
+    let kind: DomainKind;
+    let role: DomainRole;
+    let parentDomainId: string | null = null;
+
+    if (draft.type === 'root') {
+      hostname = draft.hostname.trim().toLowerCase();
+      if (!hostname) { setCreateError('Enter the root domain (e.g. example.com).'); return; }
+      if (!ROOT_DOMAIN_RE.test(hostname)) { setCreateError('Enter a valid root domain, e.g. example.com.'); return; }
+      kind = 'custom'; role = 'root';
+    } else if (draft.type === 'subdomain') {
+      if (!draft.parentDomainId || !draftParentRoot) { setCreateError('Select a parent root domain.'); return; }
+      if (!draftLabel) { setCreateError('Enter the subdomain label.'); return; }
+      if (!DNS_LABEL_RE.test(draftLabel)) { setCreateError('Subdomain label may use a–z, 0–9 and hyphens only (no leading/trailing hyphen).'); return; }
+      hostname = `${draftLabel}.${draftParentRoot.hostname}`;
+      kind = 'custom'; role = 'subdomain'; parentDomainId = draftParentRoot.id;
+    } else {
+      if (!draftLabel) { setCreateError('Enter the subdomain label.'); return; }
+      if (!DNS_LABEL_RE.test(draftLabel)) { setCreateError('Subdomain label may use a–z, 0–9 and hyphens only (no leading/trailing hyphen).'); return; }
+      hostname = `${draftLabel}.${PLATFORM_ROOT_SUFFIX}`;
+      kind = 'subdomain'; role = 'subdomain'; parentDomainId = null;
+    }
+
     if (domains.some(d => d.hostname === hostname)) {
       setCreateError('A domain record with that hostname already exists.');
       return;
     }
+
+    // Platform subdomains are auto-provisioned (verified + active SSL); custom
+    // roots and custom subdomains start pending and require manual verification.
+    const isPlatform = draft.type === 'platform_subdomain';
     const next: TenantDomainRecord = {
       id: `dom_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       tenantId: draft.tenantId,
       hostname,
-      kind: draft.kind,
-      status: draft.kind === 'subdomain' ? 'verified' : 'pending',
-      ssl: draft.kind === 'subdomain' ? 'active' : 'none',
+      kind,
+      domainRole: role,
+      parentDomainId,
+      status: isPlatform ? 'verified' : 'pending',
+      ssl: isPlatform ? 'active' : 'none',
       createdAt: today,
-      verifiedAt: draft.kind === 'subdomain' ? today : null,
+      verifiedAt: isPlatform ? today : null,
       lastCheckedAt: today,
       notes: '',
     };
     setDomains(prev => [next, ...prev]);
+    const typeLabel = draft.type === 'root' ? 'root domain' : isPlatform ? 'platform subdomain' : 'subdomain';
     pushPlatformAudit({
       actor: 'System Owner',
       action: 'domain_created',
@@ -241,9 +343,9 @@ const DomainsPage: React.FC = () => {
       tenantId: draft.tenantId,
       severity: 'info',
       newValue: hostname,
-      note: `Kind: ${draft.kind}; initial status: ${next.status}`,
+      note: `Type: ${typeLabel}${parentDomainId && draftParentRoot ? ` (parent ${draftParentRoot.hostname})` : ''}; initial status: ${next.status}`,
     });
-    setDraft({ tenantId: '', hostname: '', kind: 'subdomain' });
+    resetDraft();
     setCreateError(null);
     setShowCreate(false);
     setSelectedId(next.id);
@@ -314,6 +416,7 @@ const DomainsPage: React.FC = () => {
 
   const activeChips: { key: keyof DomainFilters; label: string }[] = [];
   if (filters.search.trim()) activeChips.push({ key: 'search', label: `Search: "${filters.search.trim()}"` });
+  if (filters.rawStatus !== 'all') activeChips.push({ key: 'rawStatus', label: `Status: ${STATUS_LABELS[filters.rawStatus]}` });
   if (filters.lifecycle !== 'all') activeChips.push({ key: 'lifecycle', label: `Lifecycle: ${DOMAIN_LIFECYCLE_LABELS[filters.lifecycle]}` });
   if (filters.kind !== 'all') activeChips.push({ key: 'kind', label: `Kind: ${filters.kind}` });
   if (filters.ssl !== 'all') activeChips.push({ key: 'ssl', label: `SSL: ${DOMAIN_SSL_READINESS_LABELS[filters.ssl]}` });
@@ -353,7 +456,7 @@ const DomainsPage: React.FC = () => {
           </div>
         </div>
         {canManage ? (
-          <button onClick={() => { setCreateError(null); setShowCreate(true); }} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl uppercase tracking-widest shadow-lg shadow-primary/20 hover:bg-primary/90 transition-all">+ Add Domain</button>
+          <button onClick={() => { setCreateError(null); resetDraft(); setShowCreate(true); }} className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl uppercase tracking-widest shadow-lg shadow-primary/20 hover:bg-primary/90 transition-all cursor-pointer active:scale-95">+ Add Domain</button>
         ) : (
           <span className="px-4 py-2 text-[10px] font-black uppercase tracking-widest text-slate-400 bg-slate-100 border border-slate-200 rounded-xl">Read-only — Manage Domain Lifecycle required</span>
         )}
@@ -369,6 +472,17 @@ const DomainsPage: React.FC = () => {
         <PostureCard label="Failed" value={countWith({ lifecycle: 'failed', risk: 'all' })} tint="red" active={filters.lifecycle === 'failed'} onClick={() => patchFilter({ lifecycle: 'failed', risk: 'all' })} />
         <PostureCard label="Disabled" value={countWith({ lifecycle: 'disabled', risk: 'all' })} active={filters.lifecycle === 'disabled'} onClick={() => patchFilter({ lifecycle: 'disabled', risk: 'all' })} />
       </div>
+
+      {/* Deep-link stale-id notice (item F) */}
+      {deepLinkNotice && (
+        <div className="flex items-start gap-3 px-5 py-4 bg-amber-50 border border-amber-200 rounded-2xl">
+          <span className="material-symbols-outlined text-amber-600 text-lg">link_off</span>
+          <p className="flex-1 text-[12px] font-bold text-amber-800">{deepLinkNotice}</p>
+          <button onClick={() => setDeepLinkNotice(null)} className="text-amber-500 hover:text-amber-700 transition-colors cursor-pointer">
+            <span className="material-symbols-outlined text-base">close</span>
+          </button>
+        </div>
+      )}
 
       <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
         {/* Toolbar: search + filters */}
@@ -401,12 +515,12 @@ const DomainsPage: React.FC = () => {
             <div className="flex flex-wrap items-center gap-2 pt-1">
               <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Active:</span>
               {activeChips.map(c => (
-                <button key={c.key} onClick={() => clearChip(c.key)} className="group inline-flex items-center gap-1.5 px-3 py-1 bg-primary/10 text-primary border border-primary/20 rounded-full text-[10px] font-black uppercase tracking-widest hover:bg-primary/20 transition-all">
+                <button key={c.key} onClick={() => clearChip(c.key)} className="group inline-flex items-center gap-1.5 px-3 py-1 bg-primary/10 text-primary border border-primary/20 rounded-full text-[10px] font-black uppercase tracking-widest hover:bg-primary/20 transition-all cursor-pointer">
                   {c.label}
                   <span className="material-symbols-outlined text-[13px] group-hover:scale-110 transition-transform">close</span>
                 </button>
               ))}
-              <button onClick={clearAll} className="text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-slate-600 underline">Clear all</button>
+              <button onClick={clearAll} className="text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-slate-600 underline cursor-pointer">Clear all</button>
             </div>
           )}
         </div>
@@ -416,6 +530,7 @@ const DomainsPage: React.FC = () => {
             <tr className="border-b border-slate-100 bg-slate-50/50">
               <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Hostname</th>
               <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Tenant</th>
+              <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Role</th>
               <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Kind</th>
               <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Lifecycle</th>
               <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">SSL</th>
@@ -432,6 +547,7 @@ const DomainsPage: React.FC = () => {
                   </div>
                 </td>
                 <td className="px-6 py-3.5 text-sm font-bold text-slate-700">{tenantName(s.tenantId)}</td>
+                <td className="px-6 py-3.5"><span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${s.role === 'root' ? 'bg-indigo-500/10 text-indigo-700 border-indigo-500/20' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>{DOMAIN_ROLE_LABELS[s.role]}</span></td>
                 <td className="px-6 py-3.5"><span className="px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg bg-slate-100 text-slate-600 border border-slate-200">{s.kind}</span></td>
                 <td className="px-6 py-3.5"><span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${LIFECYCLE_STYLES[s.lifecycle]}`}>{s.lifecycleLabel}</span></td>
                 <td className="px-6 py-3.5"><span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${SSL_READINESS_STYLES[s.sslReadiness]}`}>{s.sslReadinessLabel}</span></td>
@@ -439,7 +555,7 @@ const DomainsPage: React.FC = () => {
               </tr>
             ))}
             {visible.length === 0 && (
-              <tr><td colSpan={6} className="px-8 py-12 text-center text-slate-400 text-sm font-bold">
+              <tr><td colSpan={7} className="px-8 py-12 text-center text-slate-400 text-sm font-bold">
                 {signals.length === 0 ? 'No domain records yet.' : 'No domain records match the active filters.'}
               </td></tr>
             )}
@@ -459,31 +575,94 @@ const DomainsPage: React.FC = () => {
                   <span className="material-symbols-outlined text-base">close</span>
                 </button>
               </div>
-              <div className="p-7 space-y-4">
+              <div className="p-7 space-y-4 max-h-[70vh] overflow-y-auto">
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Tenant</label>
-                  <select value={draft.tenantId} onChange={e => setDraft(d => ({ ...d, tenantId: e.target.value }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700">
+                  <select value={draft.tenantId} onChange={e => { setDraft(d => ({ ...d, tenantId: e.target.value, parentDomainId: '' })); setCreateError(null); }} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700 cursor-pointer">
                     <option value="">Select tenant…</option>
                     {tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                   </select>
                 </div>
+
+                {/* Create type — root vs subdomain vs platform subdomain */}
                 <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Kind</label>
-                  <select value={draft.kind} onChange={e => setDraft(d => ({ ...d, kind: e.target.value as DomainKind }))} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700">
-                    <option value="subdomain">Platform Subdomain</option>
-                    <option value="custom">Custom Domain</option>
-                  </select>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5 block">Domain Type</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {([
+                      ['root', 'Root', 'Custom apex (example.com)'],
+                      ['subdomain', 'Subdomain', 'Under a managed root'],
+                      ['platform_subdomain', 'Platform', `*.${PLATFORM_ROOT_SUFFIX}`],
+                    ] as [DomainCreateType, string, string][]).map(([val, title, hint]) => (
+                      <button
+                        key={val}
+                        type="button"
+                        onClick={() => { setDraft(d => ({ ...d, type: val, label: '', hostname: '', parentDomainId: '' })); setCreateError(null); }}
+                        className={`text-left p-3 rounded-2xl border transition-all cursor-pointer active:scale-[0.98] ${draft.type === val ? 'border-primary ring-2 ring-primary/20 bg-primary/5' : 'border-slate-200 hover:border-slate-300 bg-white'}`}
+                      >
+                        <p className={`text-[11px] font-black uppercase tracking-widest ${draft.type === val ? 'text-primary' : 'text-slate-600'}`}>{title}</p>
+                        <p className="text-[9px] font-bold text-slate-400 mt-0.5 leading-tight">{hint}</p>
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Hostname</label>
-                  <input value={draft.hostname} onChange={e => { setDraft(d => ({ ...d, hostname: e.target.value })); setCreateError(null); }} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700" placeholder={draft.kind === 'subdomain' ? 'tenant.repairplatform.com' : 'shop.example.com'} />
+
+                {/* Root: full apex hostname */}
+                {draft.type === 'root' && (
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Root Domain</label>
+                    <input value={draft.hostname} onChange={e => { setDraft(d => ({ ...d, hostname: e.target.value })); setCreateError(null); }} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700" placeholder="example.com" />
+                    <p className="text-[10px] text-slate-400 font-bold mt-1">Apex/root domain the tenant owns. Subdomains can later be attached under it.</p>
+                  </div>
+                )}
+
+                {/* Subdomain: parent root dropdown + label */}
+                {draft.type === 'subdomain' && (
+                  <>
+                    <div>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Parent Root Domain</label>
+                      {!draft.tenantId ? (
+                        <div className="px-4 py-3 bg-slate-50 border border-dashed border-slate-200 rounded-2xl text-[11px] font-bold text-slate-400">Select a tenant first.</div>
+                      ) : rootDomainsForTenant.length === 0 ? (
+                        <div className="px-4 py-3 bg-amber-50 border border-dashed border-amber-200 rounded-2xl text-[11px] font-bold text-amber-700">No managed root domain for this tenant yet. Add a <span className="underline cursor-pointer" onClick={() => { setDraft(d => ({ ...d, type: 'root', label: '', hostname: '', parentDomainId: '' })); setCreateError(null); }}>Root domain</span> first, or use a Platform subdomain.</div>
+                      ) : (
+                        <select value={draft.parentDomainId} onChange={e => { setDraft(d => ({ ...d, parentDomainId: e.target.value })); setCreateError(null); }} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700 cursor-pointer">
+                          <option value="">Select parent root…</option>
+                          {rootDomainsForTenant.map(r => <option key={r.id} value={r.id}>{r.hostname}</option>)}
+                        </select>
+                      )}
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Subdomain Label</label>
+                      <input value={draft.label} onChange={e => { setDraft(d => ({ ...d, label: e.target.value })); setCreateError(null); }} disabled={!draftParentRoot} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700 disabled:opacity-50" placeholder="shop" />
+                    </div>
+                  </>
+                )}
+
+                {/* Platform subdomain: label only */}
+                {draft.type === 'platform_subdomain' && (
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Subdomain Label</label>
+                    <input value={draft.label} onChange={e => { setDraft(d => ({ ...d, label: e.target.value })); setCreateError(null); }} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700" placeholder="tenant" />
+                    <p className="text-[10px] text-slate-400 font-bold mt-1">Auto-provisioned under the shared platform root — starts Verified with active SSL.</p>
+                  </div>
+                )}
+
+                {/* Live hostname preview */}
+                <div className="px-4 py-3 bg-slate-900/90 rounded-2xl">
+                  <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Full Hostname Preview</p>
+                  <p className="text-sm font-black text-lime-300 mt-1 break-all font-mono">{computedHostname || <span className="text-slate-500 font-bold">…</span>}</p>
                 </div>
+
                 {createError && <p className="text-[11px] font-bold text-red-600">{createError}</p>}
-                <p className="text-[10px] text-slate-500 font-bold">Custom domains start as <span className="text-amber-700">Pending DNS</span> and require manual verification using the DNS instructions in the detail view. {DOMAIN_TRUTH_LABELS.manual}</p>
+                <p className="text-[10px] text-slate-500 font-bold">
+                  {draft.type === 'platform_subdomain'
+                    ? <>Platform subdomains are provisioned immediately. {DOMAIN_TRUTH_LABELS.manual}</>
+                    : <>Custom roots and subdomains start as <span className="text-amber-700">Pending DNS</span> and require manual verification using the DNS instructions in the detail view. {DOMAIN_TRUTH_LABELS.manual}</>}
+                </p>
               </div>
               <div className="p-7 border-t border-slate-100 bg-slate-50/40 flex justify-end gap-2">
-                <button onClick={() => setShowCreate(false)} className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-white transition-all">Cancel</button>
-                <button onClick={handleCreate} disabled={!draft.tenantId || !draft.hostname.trim()} className="px-6 py-2.5 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl shadow-lg shadow-primary/20 hover:bg-primary/90 disabled:opacity-40 transition-all">Add Domain</button>
+                <button onClick={() => setShowCreate(false)} className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-white transition-all cursor-pointer">Cancel</button>
+                <button onClick={handleCreate} disabled={!draft.tenantId || !computedHostname} className="px-6 py-2.5 bg-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl shadow-lg shadow-primary/20 hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed transition-all cursor-pointer">Add Domain</button>
               </div>
             </motion.div>
           </div>
@@ -524,6 +703,7 @@ const DomainsPage: React.FC = () => {
                   <h3 className="text-lg font-black text-primary mt-1 break-all">{selected.hostname}</h3>
                   <p className="text-xs text-slate-500 font-bold mt-1">{tenantName(selected.tenantId)} · {selected.kind}</p>
                   <div className="mt-2 flex flex-wrap gap-1.5">
+                    <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${selectedSignal.role === 'root' ? 'bg-indigo-500/10 text-indigo-700 border-indigo-500/20' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>{DOMAIN_ROLE_LABELS[selectedSignal.role]}</span>
                     <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${LIFECYCLE_STYLES[selectedSignal.lifecycle]}`}>{selectedSignal.lifecycleLabel}</span>
                     <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${SSL_READINESS_STYLES[selectedSignal.sslReadiness]}`}>SSL: {selectedSignal.sslReadinessLabel}</span>
                   </div>
@@ -538,6 +718,53 @@ const DomainsPage: React.FC = () => {
                 <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Next recommended action</p>
                   <p className="text-sm font-black text-slate-800">{selectedSignal.nextAction}</p>
+                </div>
+
+                {/* Hierarchy — root shows its managed children; subdomain shows its parent */}
+                <div>
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Hierarchy</p>
+                  {selectedSignal.role === 'root' ? (
+                    (() => {
+                      const children = domains.filter(c => c.parentDomainId === selected.id);
+                      if (children.length === 0) {
+                        return <p className="text-[11px] font-bold text-slate-400 px-3 py-2 bg-slate-50 border border-dashed border-slate-200 rounded-xl">No subdomains attached under this root yet.</p>;
+                      }
+                      return (
+                        <div className="space-y-1.5">
+                          <p className="text-[10px] font-bold text-slate-500">{children.length} managed subdomain{children.length === 1 ? '' : 's'}:</p>
+                          {children.map(c => (
+                            <button key={c.id} onClick={() => setSelectedId(c.id)} className="w-full text-left flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 bg-white hover:border-primary/40 hover:bg-primary/5 transition-all cursor-pointer">
+                              <span className="material-symbols-outlined text-sm text-slate-400">subdirectory_arrow_right</span>
+                              <span className="text-[11px] font-bold text-slate-700 break-all flex-1">{c.hostname}</span>
+                              <span className="material-symbols-outlined text-sm text-slate-300">chevron_right</span>
+                            </button>
+                          ))}
+                        </div>
+                      );
+                    })()
+                  ) : (() => {
+                    const managedParent = selected.parentDomainId ? domains.find(p => p.id === selected.parentDomainId) || null : null;
+                    if (managedParent) {
+                      return (
+                        <button onClick={() => setSelectedId(managedParent.id)} className="w-full text-left flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 bg-white hover:border-primary/40 hover:bg-primary/5 transition-all cursor-pointer">
+                          <span className="material-symbols-outlined text-sm text-indigo-500">arrow_upward</span>
+                          <span className="text-[11px] font-bold text-slate-700 break-all flex-1">Parent root: {managedParent.hostname}</span>
+                          <span className="material-symbols-outlined text-sm text-slate-300">chevron_right</span>
+                        </button>
+                      );
+                    }
+                    const platformRoot = deriveParentRootHostname(selected);
+                    if (platformRoot) {
+                      return (
+                        <div className="flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 bg-slate-50">
+                          <span className="material-symbols-outlined text-sm text-slate-400">arrow_upward</span>
+                          <span className="text-[11px] font-bold text-slate-600 break-all flex-1">Platform root: {platformRoot}</span>
+                          <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">Shared</span>
+                        </div>
+                      );
+                    }
+                    return <p className="text-[11px] font-bold text-slate-400 px-3 py-2 bg-slate-50 border border-dashed border-slate-200 rounded-xl">No managed parent root on record for this subdomain.</p>;
+                  })()}
                 </div>
 
                 {/* Risk reasons */}
@@ -656,7 +883,7 @@ const TruthLabel: React.FC<{ text: string; tone: 'amber' | 'slate' }> = ({ text,
 const PostureCard: React.FC<{ label: string; value: number; tint?: 'lime' | 'amber' | 'red'; active?: boolean; onClick?: () => void }> = ({ label, value, tint, active, onClick }) => {
   const tintCls = tint === 'lime' ? 'text-lime-700' : tint === 'amber' ? 'text-amber-700' : tint === 'red' ? 'text-red-700' : 'text-primary';
   return (
-    <button onClick={onClick} className={`text-left bg-white/80 backdrop-blur-xl p-5 rounded-3xl border shadow-sm transition-all hover:shadow-md ${active ? 'border-primary ring-2 ring-primary/20' : 'border-slate-200'}`}>
+    <button onClick={onClick} className={`text-left bg-white/80 backdrop-blur-xl p-5 rounded-3xl border shadow-sm transition-all cursor-pointer hover:shadow-md hover:-translate-y-0.5 active:scale-[0.98] ${active ? 'border-primary ring-2 ring-primary/20' : 'border-slate-200 hover:border-slate-300'}`}>
       <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">{label}</p>
       <p className={`text-2xl font-black mt-1 ${tintCls}`}>{value}</p>
     </button>
@@ -664,7 +891,7 @@ const PostureCard: React.FC<{ label: string; value: number; tint?: 'lime' | 'amb
 };
 
 const Tab: React.FC<{ label: string; count: number; active: boolean; onClick: () => void }> = ({ label, count, active, onClick }) => (
-  <button onClick={onClick} className={`px-3 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all inline-flex items-center gap-1.5 ${active ? 'bg-primary text-white' : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-50'}`}>
+  <button onClick={onClick} className={`px-3 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all cursor-pointer inline-flex items-center gap-1.5 active:scale-95 ${active ? 'bg-primary text-white shadow-sm shadow-primary/20' : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-700'}`}>
     {label}
     <span className={`px-1.5 py-0.5 rounded-md text-[9px] ${active ? 'bg-white/20' : 'bg-slate-100 text-slate-500'}`}>{count}</span>
   </button>

@@ -1,0 +1,352 @@
+Phase 1.2 — Focused Acceptance Correction: Domains UX Logic + Platform Default Baseline + Deep-Linking
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict focused correction pass for Phase 1.2.
+
+Do not reopen the whole phase.
+Do not repeat already-passed QA areas.
+Do not implement Phase 1.3, Phase 1.4, Phase 2, Phase 3, or Phase 4.
+Do not implement real DNS lookup, auto verification, SSL automation, provider integration, notifications, SSO/SCIM, server RBAC, PIM/PAM, or realtime listeners.
+
+Fix only the Phase 1.2 QA HOLD items:
+
+1. Domain lifecycle tabs are not clickable.
+2. Add Domain needs better subdomain/root-domain handling.
+3. Main/root domain should be manageable inside Domains.
+4. Platform Settings needs a process to maintain default settings/baseline.
+5. Command Center domain click-through should land on the specific domain issue/domain record, not only the generic Domains page.
+6. Keep modern UI improvement as a small polish only; do not do a full redesign in this correction.
+
+==================================================
+WORKING STYLE — THINK STEP BY STEP
+==================================
+
+Before changing code, think step by step.
+
+First inspect:
+
+1. DomainsPage lifecycle tab click handlers.
+2. Domain filters and count predicates.
+3. Add Domain modal fields and domain kind logic.
+4. Existing tenant domain data model.
+5. Whether root/main domains can be represented safely without breaking current records.
+6. Command Center domain signal link targets.
+7. Platform Settings registry/default-value logic.
+8. Reset-to-default flow and how default values are currently derived.
+9. Existing permissions and audit actions.
+10. Accepted locked areas that must not regress.
+
+Then implement the smallest correct fix.
+
+==================================================
+ROLE STACK — ACT UPON IT
+========================
+
+Act as:
+
+* Senior Domains Engineer
+* Senior DNS / SSL Lifecycle Architect
+* Senior Platform Settings Architect
+* Senior Platform Operations Architect
+* Senior SaaS Admin Console UX Architect
+* Senior Configuration Governance Lead
+* Senior Audit & Security Engineer
+* Identity and Access Management Specialist
+* Access Analyst
+* Senior React/TypeScript Engineer
+* QA Gatekeeper
+* Systems Thinker
+* Side Auditor
+
+Focus on:
+
+* domain hierarchy clarity
+* root domain vs subdomain logic
+* safe manual lifecycle management
+* settings default-baseline governance
+* specific deep-linking
+* no fake automation
+* no regression
+
+==================================================
+CURRENT QA HOLD ITEMS
+=====================
+
+A) Domains design / UI
+User feedback:
+
+* Domains works but does not yet meet the desired modern SaaS UI vision.
+
+Correction scope:
+
+* Do a small polish only:
+
+  * improve visual hierarchy where simple
+  * make lifecycle tabs/cards feel more clickable
+  * clarify active states
+  * improve empty/help text
+* Do not do a full redesign now.
+* Full modern SaaS UI redesign can be a separate design-system / Figma-led future pass.
+
+B) Domain lifecycle tabs not clickable
+Observed:
+
+* Lifecycle tabs show but are not clickable.
+
+Expected:
+
+* Every lifecycle tab should be clickable.
+* Clicking a lifecycle tab applies the corresponding lifecycle filter.
+* The selected tab is visibly active.
+* The visible list count matches the selected tab count.
+* Clear All resets the lifecycle tab to All.
+* No invisible filters.
+
+C) Add Domain subdomain/root domain logic
+Observed:
+
+* Add Domain works, but subdomain handling is too generic.
+* User expects the subdomain name to be editable while the main/root domain is locked/selected.
+
+Expected:
+When Kind = Root/Main Domain:
+
+* User enters root domain, e.g. storename.com.
+* This root domain becomes manageable in Domains.
+* It can be used as the base for subdomains.
+* It should have its own lifecycle/readiness/SSL status.
+
+When Kind = Subdomain:
+
+* User selects an existing root/main domain from a dropdown.
+* Root/main domain field is locked/read-only.
+* User enters only the subdomain label, e.g. portal, app, support.
+* The full hostname is generated as:
+  subdomainLabel + "." + selectedRootDomain
+  Example:
+  portal + storename.com = portal.storename.com
+* User should not manually edit the locked root domain in the subdomain flow.
+* Validate duplicate full hostname.
+* Validate subdomain label format.
+* Show live preview of full hostname before save.
+
+If no root/main domain exists:
+
+* Show helpful empty state:
+  “Create a root domain first before adding subdomains.”
+* Disable subdomain save until root domain is available.
+
+D) Main/root domain management inside Domains
+Expected:
+
+* Domains page should clearly distinguish:
+
+  * Root/Main Domains
+  * Subdomains
+* Root domains should be visible/manageable in the same Domains page.
+* Detail drawer should show whether the domain is root/main or subdomain.
+* Subdomain detail should show parent/root domain.
+* Root domain detail should show related subdomains if available.
+* No real DNS/SSL automation.
+
+Use the existing data model if possible.
+If a new optional field is needed, keep it backward-compatible:
+
+* parentDomainId?
+* rootDomain?
+* domainRole?: root | subdomain
+  or equivalent.
+
+Do not break existing domain records.
+
+E) Platform Settings default-baseline maintenance
+Observed:
+
+* Reset to default works, but there is no place/process to maintain default settings.
+
+Expected:
+Add a safe “Default Baseline” governance process.
+
+Preferred implementation:
+
+* Add a “Default Baseline” panel or mode inside Platform Settings.
+* It shows registry default values.
+* It explains:
+  “Defaults are the baseline used by Reset to Default.”
+* Allow authorized users to update default baseline values only if safe and low-risk.
+
+If editable:
+
+* Gate by edit_platform_settings or Manage/Full threshold if available.
+* Show Review Default Change modal.
+* Show old default → new default diff.
+* Require high-risk acknowledgment if the setting is high-risk.
+* Audit:
+  platform_setting_default_updated
+  or existing safe equivalent.
+* Store default overrides separately from current settings, e.g.
+  platform_settings_defaults_v1
+* Reset to Default should use the maintained default baseline:
+  default override if present, otherwise registry default.
+
+If this is too large/risky:
+
+* Implement read-only Default Baseline panel now.
+* Add visible “Default baseline editing is future” explanation.
+* But preferred is a lightweight editable baseline if safe.
+
+Do not change runtime enforcement.
+Do not claim defaults are externally enforced.
+
+F) Command Center domain deep-linking
+Observed:
+
+* Command Center domain issue click opens Domains page only.
+  Expected:
+* It should open the relevant domain record or at least a visible filtered domain context.
+
+Required:
+
+* Command Center domain signal should deep-link to Domains with:
+
+  * domain id, or
+  * tenant id + domain filter, or
+  * issue filter if exact domain id is unavailable
+* DomainsPage should read URL params once, apply visible filter/open drawer, then clear sticky URL if that is the app pattern.
+* If domain id is invalid/stale:
+
+  * show dismissible not-found notice
+  * do not silently open wrong domain
+* No invisible filters.
+
+==================================================
+PERMISSIONS
+===========
+
+Respect existing permissions:
+
+* view_domains controls Domains page access.
+* manage_domain_lifecycle controls domain creation/status/SSL/disable/re-enable/delete/root/subdomain management.
+* view_platform_settings controls Platform Settings visibility through effective feature access.
+* edit_platform_settings controls current setting edits and default baseline edits if implemented.
+
+Do not change the permission resolver.
+Do not add new permission keys unless absolutely required.
+If you believe a new permission key is required, stop and report before adding it.
+
+==================================================
+AUDITABILITY
+============
+
+Audit meaningful actions:
+
+* root domain created
+* subdomain created
+* domain status changed
+* domain SSL status changed
+* domain disabled/re-enabled
+* domain deleted if delete exists
+* platform setting saved
+* platform setting default baseline updated if implemented
+
+Avoid duplicate audits.
+Do not audit passive filter clicks.
+No server PII logging.
+
+==================================================
+TRUTH LABELS / LIMITATIONS
+==========================
+
+Keep these clear:
+
+* Manual verification only — no real DNS lookup or SSL automation.
+* DNS/SSL readiness is rule-based from current app/session records.
+* Provider integrations are future Phase 2.
+* Defaults are governance baseline values; they do not create runtime enforcement.
+* No real notifications, SSO/SCIM, DNS/SSL automation, provider integrations, or realtime listeners are active.
+
+==================================================
+DOCUMENTATION
+=============
+
+Keep replit.md concise:
+
+* short correction note only.
+
+Update docs/platform-operations-security-history.md:
+
+* lifecycle tab clickability correction
+* root/subdomain management logic
+* default baseline process
+* Command Center domain deep-link correction
+* future automation limitations
+
+Do not make replit.md large again.
+
+==================================================
+NON-REGRESSION
+==============
+
+Do not regress:
+
+* Command Center Intelligence
+* Support Queue / SLA / Macro Maturity
+* Audit Investigation Center
+* Escalation operating model
+* Permission dependency auto-sync
+* Add-on Governance
+* Shipping
+* Store Permissions Matrix
+* Tenant provisioning
+* paid override invoice workflow
+* server PII logging rules
+
+==================================================
+ACCEPTANCE CRITERIA
+===================
+
+Acceptance is literal:
+
+1. Domain lifecycle tabs are clickable.
+2. Selected lifecycle tab visibly filters the list.
+3. Tab/card counts match visible filtered list.
+4. Clear All resets lifecycle tab/filter.
+5. Add Root/Main Domain flow exists.
+6. Add Subdomain flow uses editable subdomain label + locked selected root domain.
+7. Full hostname preview appears for subdomain.
+8. Duplicate full hostname validation works.
+9. Subdomain cannot be created without a root/main domain.
+10. Root/main domains are manageable inside Domains.
+11. Root domain detail shows related subdomains if available.
+12. Subdomain detail shows parent/root domain.
+13. Domain actions remain permission-gated and audited.
+14. Command Center domain issue opens specific domain drawer or visible domain-filter context.
+15. Invalid/stale domain deep-link is handled safely.
+16. Platform Settings has Default Baseline panel/process.
+17. Reset to Default uses maintained default baseline if default overrides are implemented.
+18. Default baseline changes are permission-gated and audited if editable.
+19. Defaults remain truthfully labeled as governance baseline, not runtime enforcement.
+20. Real DNS/SSL/provider automation remains out of scope.
+21. Existing accepted behavior remains intact.
+22. replit.md remains concise.
+23. History documentation is updated.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+======================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Root Cause / QA HOLD Items
+3. Domain Lifecycle Tabs Correction
+4. Root Domain / Subdomain Management
+5. Platform Settings Default Baseline Process
+6. Command Center Domain Deep-Linking
+7. Permissions / Auditability
+8. Files Changed
+9. Documentation Updated
+10. Non-Regression Notes

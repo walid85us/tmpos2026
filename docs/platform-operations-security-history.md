@@ -318,3 +318,32 @@ A deterministic, rule-based maturity pass over the System Owner **Domains** and 
 -   **Platform-settings risk is read-only and truthful**: Command Center does NOT read `platformOpsSettings` / `platform_settings_v1` / `platformDefaults`; the only "risk" surfacing for settings is the Platform Settings page's own posture (high-risk / high-risk-modified), explicitly labeled not-enforced. No fake runtime enforcement anywhere.
 -   **Audit & Security coverage confirmed**: the page's category filter includes `domains` and `configuration`, so domain lifecycle rows and `platform_setting_updated` rows surface where emitted.
 -   **Non-regression**: Command Center Intelligence, Support Queue / SLA / Macro Maturity, the Audit Investigation Center, the escalation operating model + `isActiveEscalation` single source of truth, permission dependency auto-sync, Add-on Governance, Shipping, Store Permissions Matrix, tenant provisioning, paid override invoice workflow, and server PII logging rules are all untouched. Permission enforcement remains UI-only this phase. Typecheck baseline unchanged (only pre-existing errors in untouched non-owner files).
+
+## Phase 1.2 — Focused Acceptance Correction
+
+A scoped pass over six QA HOLD items raised against the Phase 1.2 deliverable. No phase reopen, no scope beyond the six items, and none of the locked rules above were relaxed. Still **no real DNS/SSL/provider/notifications/SSO/SCIM/server-RBAC/realtime**, and **no new permission keys** (reuses `view_domains` / `manage_domain_lifecycle` / `edit_platform_settings`).
+
+### A/B — Lifecycle tab / posture clickability affordance
+
+-   Tailwind v4 no longer applies `cursor: pointer` to `<button>` by default, which made the Domains lifecycle tabs, posture cards, filter chips, "Clear all", and "+ Add" controls feel unclickable. Added explicit `cursor-pointer` plus an `active:` press feel to those affordances. The existing filter/clear behavior was verified working — this was purely a missing affordance, not a broken handler.
+
+### C — Add Domain three-mode create flow
+
+-   The Add-Domain modal now supports three explicit create modes: **root** (custom apex domain), **subdomain** (under a tenant's existing managed root), and **platform subdomain** (under the platform root suffix). Subdomain mode offers a parent dropdown sourced from the tenant's existing root domains with a truthful empty state when none exist. Each mode shows a live composed-hostname preview and mode-appropriate validation (`DNS_LABEL_RE` for labels, `ROOT_DOMAIN_RE` for apex domains). `handleCreate` records `domainRole` and `parentDomainId` accordingly.
+
+### D — Root vs subdomain distinction (list + drawer)
+
+-   Domain role is derived (`deriveDomainRole`) and surfaced as a Role column in the list and a role badge in the drawer. The drawer adds a Hierarchy section: a root shows its child subdomains; a subdomain shows its managed parent (or the platform root for platform subdomains). The raw `status`/`ssl`/`kind` fields remain the source of truth — role/hierarchy are a derived presentation layer.
+
+### E — Platform Settings Default Baseline (editable override store)
+
+-   A second **Default Baseline** mode on the Platform Settings page edits the registry default baseline through a separate override store (`platform_settings_defaults_v1` localStorage key), distinct from the in-effect settings store (`platform_settings_v1`). Helpers `getRegistryDefault` / `getEffectiveDefault(def, overrides?)` / `isDefaultOverridden` and an override-aware `isSettingModified` / `deriveSettingsPosture` (optional param, backward compatible) keep both surfaces consistent.
+-   Baseline edits flow through the same review-before-save discipline: per-group review modal with registry-default → new diff, high-risk acknowledgment (re-checked inside the handler), and exactly one `platform_setting_default_updated` audit row (category `configuration`) per confirmed group save. Saving drops an override key when its value equals the registry default (no-noise store). Baseline reset stages the registry default into the draft and flows through the same review/save path. The in-effect **Settings** mode now resets to and compares against the **effective** default (registry ± baseline override), so the two surfaces never disagree.
+
+### F — Command Center domain deep-linking
+
+-   Per-domain Command Center attention items, next-best-action items, and `failed_domain` / `pending_domain` operational signals now link to `/owner/domains?domain=<id>` instead of the bare page. Generic domain-bucket drilldowns keep their existing `?status=<key>` behavior. The Domains page reads `?domain` and `?status` via `useSearchParams`: a valid `?domain` opens that domain's drawer, a stale id shows a truthful "domain no longer exists" notice, `?status` pre-applies the raw-status filter (with a visible clearable chip), and the params are stripped (`replace: true`) after being honored so a refresh/back doesn't re-trigger.
+
+### Verification
+
+-   Typecheck baseline unchanged at 12 pre-existing errors, all in untouched non-owner files (server adapters/event-processor, Dashboard/Login/POS/ShippingCenter/TemplateEditor, Owner/Tenant layouts, BillingPage). All files touched in this correction (`mockData.ts`, `platformOpsDomains.ts`, `platformOpsSettings.ts`, `platformOpsAudit.ts`, `DomainsPage.tsx`, `PlatformSettingsPage.tsx`, `CommandCenterPage.tsx`, `platformOpsDerive.ts`) typecheck clean.

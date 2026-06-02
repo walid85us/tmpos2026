@@ -297,13 +297,54 @@ const readField = (settings: PlatformDefaults, def: SettingDefinition): SettingP
 export const getSettingValue = (settings: PlatformDefaults, def: SettingDefinition): SettingPrimitive =>
   readField(settings, def);
 
-/** Default (seed) value of a setting. */
+/** Registry (seed/code) default value of a setting — the immutable baseline. */
 export const getSettingDefault = (def: SettingDefinition): SettingPrimitive =>
   readField(platformDefaults, def);
 
-/** Whether the current value differs from its registry default. */
-export const isSettingModified = (settings: PlatformDefaults, def: SettingDefinition): boolean =>
-  JSON.stringify(getSettingValue(settings, def)) !== JSON.stringify(getSettingDefault(def));
+/** Alias of {@link getSettingDefault} for call sites that want the explicit name. */
+export const getRegistryDefault = (def: SettingDefinition): SettingPrimitive =>
+  getSettingDefault(def);
+
+// ---------------------------------------------------------------------------
+// Default Baseline overrides (Phase 1.2 acceptance correction).
+// A System Owner may maintain an org-specific "default baseline" that overrides
+// the registry default for selected settings. This is a separate, persisted
+// overlay keyed by setting key — it never mutates the registry and is purely a
+// governance reference (still nothing enforced at runtime). `getEffectiveDefault`
+// returns the maintained baseline when present, otherwise the registry default.
+// ---------------------------------------------------------------------------
+
+export type SettingsDefaultsOverride = Record<string, SettingPrimitive>;
+
+const hasOverride = (overrides: SettingsDefaultsOverride | undefined, def: SettingDefinition): boolean =>
+  !!overrides && Object.prototype.hasOwnProperty.call(overrides, def.key);
+
+/** Effective default = maintained baseline override (if any) else registry default. */
+export const getEffectiveDefault = (
+  def: SettingDefinition,
+  overrides?: SettingsDefaultsOverride,
+): SettingPrimitive =>
+  hasOverride(overrides, def) ? (overrides as SettingsDefaultsOverride)[def.key] : getSettingDefault(def);
+
+/** Whether a maintained baseline override exists AND differs from the registry default. */
+export const isDefaultOverridden = (
+  def: SettingDefinition,
+  overrides?: SettingsDefaultsOverride,
+): boolean =>
+  hasOverride(overrides, def) &&
+  JSON.stringify((overrides as SettingsDefaultsOverride)[def.key]) !== JSON.stringify(getSettingDefault(def));
+
+/**
+ * Whether the current value differs from its EFFECTIVE default (maintained
+ * baseline if present, else registry default). `overrides` is optional and
+ * defaults to the registry default — fully backward compatible.
+ */
+export const isSettingModified = (
+  settings: PlatformDefaults,
+  def: SettingDefinition,
+  overrides?: SettingsDefaultsOverride,
+): boolean =>
+  JSON.stringify(getSettingValue(settings, def)) !== JSON.stringify(getEffectiveDefault(def, overrides));
 
 /** Human-readable rendering of a setting value (for summaries / chips). */
 export const formatSettingValue = (def: SettingDefinition, value: SettingPrimitive): string => {
@@ -329,8 +370,16 @@ export interface SettingsPosture {
   byEnforcement: Record<SettingEnforcement, number>;
 }
 
-/** Rule-based governance posture derived from the live settings object. */
-export const deriveSettingsPosture = (settings: PlatformDefaults): SettingsPosture => {
+/**
+ * Rule-based governance posture derived from the live settings object. When a
+ * maintained baseline `overrides` map is supplied, "modified" is measured
+ * against the effective default (baseline) rather than the registry default —
+ * keeping posture honest with the Default Baseline panel. Backward compatible.
+ */
+export const deriveSettingsPosture = (
+  settings: PlatformDefaults,
+  overrides?: SettingsDefaultsOverride,
+): SettingsPosture => {
   const byGroup: Record<SettingsGroup, number> = { branding: 0, maintenance: 0, security: 0, support: 0 };
   const byRisk: Record<SettingRisk, number> = { low: 0, medium: 0, high: 0 };
   const byEnforcement: Record<SettingEnforcement, number> = {
@@ -347,7 +396,7 @@ export const deriveSettingsPosture = (settings: PlatformDefaults): SettingsPostu
     byGroup[def.group] += 1;
     byRisk[def.risk] += 1;
     byEnforcement[def.enforcement] += 1;
-    const isMod = isSettingModified(settings, def);
+    const isMod = isSettingModified(settings, def, overrides);
     if (isMod) modified += 1;
     if (def.risk === 'high') {
       highRisk += 1;

@@ -30,9 +30,47 @@ import type {
   DomainStatus,
   DomainSslStatus,
   DomainKind,
+  DomainRole,
 } from './mockData';
 
-export type { DomainStatus, DomainSslStatus, DomainKind };
+export type { DomainStatus, DomainSslStatus, DomainKind, DomainRole };
+
+// ---------------------------------------------------------------------------
+// Hierarchy role — root/apex vs subdomain. Derived, never replacing the raw
+// persisted fields. `domainRole`/`parentDomainId` (when present) win; legacy
+// records fall back to `kind` (a platform `subdomain` is a subdomain of the
+// platform apex; a `custom` record with no parent is treated as a root).
+// ---------------------------------------------------------------------------
+
+export const DOMAIN_ROLE_LABELS: Record<DomainRole, string> = {
+  root: 'Root / Main',
+  subdomain: 'Subdomain',
+};
+
+// The platform apex that auto-provisioned `kind: 'subdomain'` records live
+// under. There is NO managed record for this apex — it is the platform's own
+// root, shown as the (non-clickable) parent of platform subdomains.
+export const PLATFORM_ROOT_SUFFIX = 'repairplatform.com';
+
+export function deriveDomainRole(d: TenantDomainRecord): DomainRole {
+  if (d.domainRole) return d.domainRole;
+  if (d.parentDomainId) return 'subdomain';
+  // Platform-provisioned subdomains are subdomains of the platform apex.
+  if (d.kind === 'subdomain') return 'subdomain';
+  // A custom record with no parent is an apex/root domain.
+  return 'root';
+}
+
+// For a subdomain, returns the parent root hostname DERIVED from the hostname
+// (everything after the first DNS label). Used as a display fallback when the
+// parent is the platform apex (no managed record) or the managed parent is
+// missing. Returns null when the hostname has no parent label.
+export function deriveParentRootHostname(d: TenantDomainRecord): string | null {
+  const parts = d.hostname.split('.');
+  // <=2 labels means it is itself an apex (e.g. techrepair.pro) — no parent.
+  if (parts.length <= 2) return null;
+  return parts.slice(1).join('.');
+}
 
 // ---------------------------------------------------------------------------
 // Normalized lifecycle — a DISPLAY-LEVEL view derived from the raw
@@ -250,6 +288,8 @@ export interface DomainReadinessSignal {
   tenantId: string;
   hostname: string;
   kind: DomainKind;
+  role: DomainRole;
+  parentDomainId: string | null;
   rawStatus: DomainStatus;
   rawSsl: DomainSslStatus;
   lifecycle: DomainLifecycleStatus;
@@ -278,6 +318,8 @@ export function deriveDomainReadiness(d: TenantDomainRecord): DomainReadinessSig
     tenantId: d.tenantId,
     hostname: d.hostname,
     kind: d.kind,
+    role: deriveDomainRole(d),
+    parentDomainId: d.parentDomainId ?? null,
     rawStatus: d.status,
     rawSsl: d.ssl,
     lifecycle,

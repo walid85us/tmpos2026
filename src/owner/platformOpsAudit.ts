@@ -24,6 +24,7 @@ export type PlatformAuditCategory =
 
 export type PlatformAuditAction =
   | 'platform_setting_updated'
+  | 'platform_setting_default_updated'
   | 'support_case_created'
   | 'support_case_status_changed'
   | 'support_case_severity_changed'
@@ -141,6 +142,7 @@ function safeSet(key: string, value: unknown): void {
 
 const DEFAULT_SEVERITY_BY_ACTION: Partial<Record<PlatformAuditAction, PlatformAuditSeverity>> = {
   platform_setting_updated: 'notice',
+  platform_setting_default_updated: 'notice',
   support_case_created: 'info',
   support_case_status_changed: 'info',
   support_case_severity_changed: 'notice',

@@ -721,6 +721,12 @@ export type PlatformAuditSeverity = 'info' | 'notice' | 'warning' | 'critical';
 export type DomainStatus = 'pending' | 'verifying' | 'verified' | 'failed' | 'disabled';
 export type DomainSslStatus = 'none' | 'pending' | 'active' | 'failed';
 export type DomainKind = 'subdomain' | 'custom';
+// Phase 1.2 acceptance correction — hierarchy role, orthogonal to `kind`.
+// `kind` describes provisioning (platform subdomain vs custom domain); `domainRole`
+// describes the hostname hierarchy (a root/apex domain vs a subdomain that lives
+// under a managed root). Both fields are optional/back-compatible: existing
+// records derive their role from `kind`/`parentDomainId` (see deriveDomainRole).
+export type DomainRole = 'root' | 'subdomain';
 
 export interface TenantDomainRecord {
   id: string;
@@ -733,6 +739,13 @@ export interface TenantDomainRecord {
   verifiedAt: string | null;
   lastCheckedAt: string | null;
   notes: string;
+  // Optional hierarchy fields (Phase 1.2 acceptance correction). Absent on
+  // legacy records — derivation falls back to kind/parentDomainId.
+  domainRole?: DomainRole;
+  // Set when this record is a subdomain that lives under another MANAGED root
+  // record in this store. Null/absent for roots and for platform subdomains
+  // (whose root is the platform apex, not a managed record).
+  parentDomainId?: string | null;
 }
 
 export const tenantDomains: TenantDomainRecord[] = [
@@ -743,6 +756,10 @@ export const tenantDomains: TenantDomainRecord[] = [
   { id: 'dom5', tenantId: 't4', hostname: 'quickfix.repairplatform.com', kind: 'subdomain', status: 'verified', ssl: 'active', createdAt: '2025-09-05', verifiedAt: '2025-09-05', lastCheckedAt: '2026-04-25', notes: '' },
   { id: 'dom6', tenantId: 't4', hostname: 'quickfixelec.com', kind: 'custom', status: 'verified', ssl: 'active', createdAt: '2025-09-06', verifiedAt: '2025-09-07', lastCheckedAt: '2026-04-26', notes: 'Verified after CNAME confirmed.' },
   { id: 'dom7', tenantId: 't5', hostname: 'oldparts.repairplatform.com', kind: 'subdomain', status: 'disabled', ssl: 'none', createdAt: '2025-06-20', verifiedAt: '2025-06-20', lastCheckedAt: '2026-02-15', notes: 'Disabled when tenant suspended for non-payment.' },
+  // Phase 1.2 acceptance correction — demonstrates a subdomain managed UNDER a
+  // custom root (dom2 = techrepair.pro). Shows parent/child hierarchy in the
+  // list and Tenant 360 drawer.
+  { id: 'dom8', tenantId: 't1', hostname: 'portal.techrepair.pro', kind: 'custom', domainRole: 'subdomain', parentDomainId: 'dom2', status: 'pending', ssl: 'none', createdAt: '2026-04-28', verifiedAt: null, lastCheckedAt: null, notes: 'Customer portal subdomain under techrepair.pro — awaiting CNAME.' },
 ];
 
 export type SupportCaseStatus = 'open' | 'in_progress' | 'waiting_customer' | 'resolved' | 'closed';

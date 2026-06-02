@@ -806,7 +806,7 @@ export function deriveNextBestActions(input: NbaInputs): NextBestAction[] {
     reason: 'Verification failed. Domain operations are manual.',
     tenant: input.tenantNameById.get(d.tenantId) || d.tenantId,
     ctaLabel: 'Open domains',
-    href: '/owner/domains',
+    href: `/owner/domains?domain=${d.id}`,
   }));
 
   // 5) At-risk SLAs (not already overdue / urgent).
@@ -2086,7 +2086,7 @@ export function deriveCommandSignals(input: CommandSignalInput): CommandSignal[]
         at: null,
         label: `Failed domain · ${d.hostname}`,
         reason: 'Domain verification failed.',
-        href: '/owner/domains',
+        href: `/owner/domains?domain=${d.id}`,
         confidence: 'High',
       });
     } else if (d.status === 'pending' || d.status === 'verifying') {
@@ -2101,7 +2101,7 @@ export function deriveCommandSignals(input: CommandSignalInput): CommandSignal[]
         at: null,
         label: `Pending domain · ${d.hostname}`,
         reason: `Domain status: ${d.status}.`,
-        href: '/owner/domains',
+        href: `/owner/domains?domain=${d.id}`,
         confidence: 'Medium',
       });
     }
