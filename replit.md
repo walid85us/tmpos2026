@@ -12,9 +12,9 @@ Do not make changes to the file `Y`.
 
 # Current Project State
 
--   **Current accepted checkpoint**: Phase 1.1.3C (Support Queue / SLA / Macro Maturity, incl. the Focused Correction pass and the SLA Visibility Permission Enforcement correction) is **accepted**.
--   **Latest completed phase**: Phase 1.1.3D (Audit Investigation Center) — a deterministic, rule-based investigation workspace on the Audit & Security page: investigation lenses/saved views with no-drift counts and visible/clearable filter chips; an event drawer with rule-based risk signals, actor profile, related entity timeline, and day-window correlated event groups; a review-status overlay (`needs_review`/`reviewed`/`dismissed`) plus internal append-only investigation notes (overlay only — audit rows are never mutated); an internal copy-only evidence summary with restricted-detail redaction; duplicate-safe create-support-case-from-audit; and Command Center deep-link click-through to the exact event drawer. NO AI/SIEM/realtime/prediction/legal-grade claims. **Pending acceptance.**
--   **Next planned phase**: Phase 1.2 — Domains + Platform Settings Maturity.
+-   **Current accepted checkpoint**: Phase 1.1.3D (Audit Investigation Center) is **accepted**.
+-   **Latest completed phase**: Phase 1.2 (Domains + Platform Settings Maturity) — a deterministic, rule-based maturity pass over the System Owner Domains and Platform Settings surfaces. Domains: a derived lifecycle/readiness model (`platformOpsDomains.ts`) over the shared `tenant_domains_v1` store, with explicit confirmed-and-audited lifecycle actions and manual DNS/SSL guidance (no real DNS/SSL). Platform Settings: a pure governance registry (`platformOpsSettings.ts`, one entry per default field carrying enforcement/risk/owner/impact/truth) and a change-review UX — review-before-save diff, impact preview, high-risk acknowledgment, reset-to-default, search/group nav, and unsaved guard — with one audit row per group save and nothing enforced at runtime. M5 verified Command Center domain signals and Audit coverage remain accurate. NO real DNS/SSL/provisioning/SSO/SCIM/notifications/server-RBAC/realtime/enforcement. **Pending acceptance.**
+-   **Next planned phase**: Phase 1.3 — Platform Team Governance (server-side RBAC / PIM / PAM).
 -   **Detailed history**: Full long-form implementation notes and correction sequences for all completed Platform Operations & Security phases live in [`docs/platform-operations-security-history.md`](docs/platform-operations-security-history.md). `replit.md` keeps only the high-level overview, locked rules, and roadmap.
 
 # System Architecture
@@ -107,6 +107,20 @@ These are accepted, no-regression rules. Do not change behavior without explicit
 -   **No audit spam** — only real review-status transitions emit an audit row; handlers read fresh persisted state before writing. Create-case-from-audit is duplicate-safe (fresh storage read + re-entrancy lock).
 -   The **evidence summary is internal, copy-only**, and explicitly not legal/compliance-certified.
 
+## Domains
+
+-   **Deterministic, rule-based only** — no real DNS lookups, SSL issuance/automation, or provider/registrar integrations. DNS/SSL readiness is derived guidance with manual operator verification, clearly truth-labeled.
+-   Domain derivations live in `platformOpsDomains.ts` (separate from `platformOpsDerive.ts`). The raw `status`/`ssl`/`kind` fields on `TenantDomainRecord` are the source of truth; `DomainLifecycleStatus` is a **derived presentation layer** and must not replace them.
+-   **Single domain store** — Domains page, Command Center, Support Tools, and Dashboard all read `tenant_domains_v1`; counts/signals cannot diverge.
+-   Lifecycle actions (create / status change / SSL state / disable / re-enable / delete) are **explicit, confirmed, and audited** (`domain_*` actions, category `domains`). Destructive transitions never go through a silent `<select>`. Page visibility uses `view_domains`; mutation uses `manage_domain_lifecycle`.
+
+## Platform Settings
+
+-   **Registry is the single source of truth** — `platformOpsSettings.ts` (`SETTINGS_REGISTRY`, one entry per `platformDefaults` field) drives every label, default, risk, enforcement, owner, impact, and truth label; posture cards, rows, review diffs, and the audit note all derive from it (no drift).
+-   **Nothing is enforced at runtime** — the `enforced` enforcement value exists in the type for future use but is assigned to nothing today (branding/support `display_only`, maintenance `advisory`, security `documentation_only`). Standing truth labels say so.
+-   **Review before save** — per-group "Review & Save" shows the old→new diff, impact, and risk for the **unfiltered** change set (search/filters can never hide a pending change). High-risk batches require an acknowledgment checkbox, re-checked inside the save handler. Reset-to-default stages the default into the draft and flows through the same review/save path (no separate reset audit row).
+-   **Persistence + audit unchanged** — `platform_settings_v1` localStorage key; exactly one `platform_setting_updated` row (category `configuration`) per confirmed group save (severity `warning` if any high-risk, else `notice`). Page visibility uses `hasEffectiveFeatureAccess('platform_settings')`; editing uses `edit_platform_settings`. All mutation entrypoints self-gate on `canEdit`.
+
 ## Non-Regression Locked Areas
 
 Do not change behavior in these areas as a side effect of other work:
@@ -118,13 +132,15 @@ Do not change behavior in these areas as a side effect of other work:
 -   Tenant provisioning
 -   Paid override invoice workflow
 -   Server PII logging rules
+-   Domains (lifecycle model + shared store)
+-   Platform Settings (governance registry + change-review UX)
 
 # Active Roadmap
 
 -   **Phase 1.1.3C** — Support Queue / SLA / Macro Maturity **(accepted)**
--   **Phase 1.1.3D** — Audit Investigation Center **(done — pending acceptance)**
--   **Phase 1.2** — Domains + Platform Settings Maturity
--   **Phase 1.3** — Platform Team Governance (server-side RBAC / PIM / PAM)
+-   **Phase 1.1.3D** — Audit Investigation Center **(accepted)**
+-   **Phase 1.2** — Domains + Platform Settings Maturity **(done — pending acceptance)**
+-   **Phase 1.3** — Platform Team Governance (server-side RBAC / PIM / PAM) **(next)**
 -   **Phase 1.4** — Automation + Alerts
 -   **Phase 2** — Real Integrations
 -   **Phase 3** — Compliance + Evidence
@@ -132,7 +148,7 @@ Do not change behavior in these areas as a side effect of other work:
 
 # Documentation Links
 
--   [`docs/platform-operations-security-history.md`](docs/platform-operations-security-history.md) — detailed long-form implementation history for all completed Platform Operations & Security phases (Phase 1.1, 1.1.1, 1.1.2, 1.1.3A, 1.1.3B) and their correction passes.
+-   [`docs/platform-operations-security-history.md`](docs/platform-operations-security-history.md) — detailed long-form implementation history for all completed Platform Operations & Security phases (Phase 1.1 through 1.1.3D, and Phase 1.2 — Domains + Platform Settings Maturity) and their correction passes.
 
 # External Dependencies
 
