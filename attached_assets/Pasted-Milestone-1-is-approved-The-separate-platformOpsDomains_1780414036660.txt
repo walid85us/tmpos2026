@@ -1,0 +1,32 @@
+Milestone 1 is approved.
+
+The separate `platformOpsDomains.ts` helper module is acceptable because it keeps domain lifecycle/readiness logic isolated from the already-locked Command Center derivation logic in `platformOpsDerive.ts`.
+
+Confirmed acceptable:
+
+1. Raw `DomainStatus` and `DomainSslStatus` remain the persisted source of truth.
+2. The new domain lifecycle model is derived/display-only and does not mutate existing data.
+3. `Draft` may remain in the vocabulary for completeness, but it should not appear in the UI unless a real draft domain state is later implemented.
+4. Truth labels are correctly preserved:
+
+   * Manual verification only — no real DNS lookup or SSL automation.
+   * DNS/SSL readiness is rule-based from current app/session records.
+   * Provider integrations are future Phase 2.
+5. No existing file was modified, so no manual QA is required for Milestone 1.
+6. Locked areas remain untouched.
+
+Please proceed to Milestone 2 — Domain Lifecycle / DNS / SSL Readiness UX.
+
+For Milestone 2:
+
+* Think step by step before implementing.
+* Keep scope limited to DomainsPage UX/readiness only.
+* Do not implement real DNS lookup, real SSL automation, provider integration, notifications, or Phase 2 behavior.
+* Do not modify Command Center intelligence except read-only compatibility if absolutely required.
+* Use the new `platformOpsDomains.ts` helpers as the single derived source for domain readiness, lifecycle labels, required records, risk reasons, next action, and truth labels.
+* Add a stronger Domains command header, posture cards, lifecycle board/status tabs, search, kind/status/SSL/risk filters, visible active filter chips, no invisible filters, and an enriched domain detail drawer.
+* Domain count cards and filtered lists must use the same predicates.
+* Domain detail drawer should show copyable DNS records, SSL readiness, risk reasons, next action, manual status workflow, audit/history if already available, and truth labels.
+* Domain actions must remain permission-gated and audited.
+* Destructive/disable actions should use in-app confirmation.
+* Stop after Milestone 2 and provide a milestone report before moving to Milestone 3.

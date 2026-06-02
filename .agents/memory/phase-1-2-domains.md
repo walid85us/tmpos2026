@@ -17,5 +17,14 @@ The persisted model is `TenantDomainRecord` with `DomainStatus` ('pending'|'veri
 No real DNS lookup, no real SSL issuance, no real provisioning, no provider API. Verification is MANUAL — the operator flips status/SSL after confirming propagation out-of-band. Required DNS records are copy templates (CNAME→`proxy.repairplatform.com`, TXT `_repairplatform.<host>`=`verify=<id>`), centralized in `platformOpsDomains.ts` so the page and helpers can't drift. Three truth labels: manual-only, rule-based readiness, provider integrations are future Phase 2.
 **How to apply:** any "readiness"/"check" wording must stay rule-based-from-session; never imply a live check happened.
 
+## No-drift counts = faceted counts from ONE predicate
+For any surface with summary cards/tabs + a filtered list, every count must be computed from the SAME predicate as the list — merge each control's own dimension override onto the currently-active filters (`countWith(overrides) = items.filter(matches({...filters, ...overrides}))`). Do NOT compute card counts from a separate global posture deriver or count tabs by a single dimension only — that drifts the moment any other filter is active.
+**Why:** the locked rule is "count cards and filtered lists must use the same predicate." A code review failed M2 because tab counts ignored non-lifecycle filters and cards used `deriveDomainPosture` (global), both of which drift under active search/kind/ssl filters.
+**How to apply:** one `matchesX` predicate; the visible list and all counts call it. The number on any control then always equals what the list shows when that control is selected.
+
+## Destructive transitions never go through a silent select
+Disable/re-enable (and similar destructive state changes) must be explicit confirmed actions, never an option inside an onChange `<select>`. Exclude the destructive value from the select's options and render a static badge when already in that state; restore via an explicit button.
+**Why:** a select `onChange` mutates immediately with no confirmation, bypassing the in-app confirm-modal requirement.
+
 ## Milestone discipline for Phase 1.2
 Built milestone-by-milestone with a STOP for review after each. Order: M1 Domains foundation (helpers/model, minimal UI) → M2 Domain lifecycle/DNS/SSL readiness UX → M3 Platform Settings governance model → M4 Settings change review/impact/audit UX → M5 cross-surface integration + docs + non-regression. Do not implement future milestones early; the existing domain audit actions (`domain_created`/`domain_status_changed`/`domain_ssl_changed`/`domain_disabled`/`domain_reenabled`/`domain_deleted`) and `view_domains`/`manage_domain_lifecycle` permissions already exist.
