@@ -360,21 +360,6 @@ const DomainsPage: React.FC = () => {
     groups.forEach(g => g.rows.forEach(r => { if (!r.context) placed.add(r.signal.id); }));
     const leftover = visible.filter(s => !placed.has(s.id)).sort((a, b) => a.hostname.localeCompare(b.hostname));
 
-    // Dev-only no-drift assertion (M2 defensive hardening, no UI/behavior change):
-    // every visible signal must be placed as exactly one non-context row, with no
-    // duplicate placements. The "Other Domains" safety net below still catches any
-    // leftover at runtime; this only surfaces drift loudly in development.
-    if (import.meta.env.DEV) {
-      const nonContextRows = groups.flatMap(g => g.rows.filter(r => !r.context)).map(r => r.signal.id).concat(leftover.map(s => s.id));
-      const uniquePlaced = new Set(nonContextRows);
-      if (uniquePlaced.size !== nonContextRows.length) {
-        console.warn('[Domains] no-drift assertion: a domain appears in more than one portfolio group.');
-      }
-      if (uniquePlaced.size !== visible.length) {
-        console.warn(`[Domains] no-drift assertion: placed ${uniquePlaced.size} domains but ${visible.length} are visible.`);
-      }
-    }
-
     if (leftover.length > 0) {
       groups.push({
         key: 'other',

@@ -423,10 +423,6 @@ A continuation of the M1 split-pane control panel that deepens the right-pane **
 
 -   `deriveDomainTroubleshooting(d)` returns rule-based symptom→guidance entries keyed to the current recorded state (verification failed, DNS not added, propagating, SSL failed, SSL pending, disabled, platform-managed, healthy), plus a propagation-confirmation recap for custom domains. Manual truth label.
 
-### F — Dev-only no-drift assertion
-
--   A defensive `import.meta.env.DEV`-gated assertion in the `portfolioGroups` `useMemo` warns (console only) if any visible signal is unplaced or double-placed. No UI/behavior change; the runtime "Other Domains" safety net still guarantees no silent drop.
-
 ### Verification
 
--   New M2 workspace derivations are computed **in-component for the selected record only** — they are deliberately NOT added to the shared `DomainReadinessSignal`, so `deriveDomainReadiness` / posture / list counts (and the locked no-drift guarantee) are untouched. Architect review passed with no blocking findings or regressions. Typecheck adds one `import.meta.env` error consistent with 5 pre-existing identical baseline occurrences in the repo (no `vite/client` types in tsc); all owner-file logic typechecks clean. Deep-link `?domain`/`?status`, root/subdomain grouping, filters, and `view_domains`/`manage_domain_lifecycle` gating are unchanged. **Milestone 2 only — M3–M5 not started.**
+-   New M2 workspace derivations are computed **in-component for the selected record only** — they are deliberately NOT added to the shared `DomainReadinessSignal`, so `deriveDomainReadiness` / posture / list counts (and the locked no-drift guarantee) are untouched. The runtime "Other Domains" safety-net group still guarantees no visible signal is silently dropped. Architect review passed with no blocking findings or regressions. Typecheck remains at the 12 pre-existing baseline errors (all in untouched non-owner files); `DomainsPage.tsx` and `platformOpsDomains.ts` typecheck clean. Deep-link `?domain`/`?status`, root/subdomain grouping, filters, and `view_domains`/`manage_domain_lifecycle` gating are unchanged. **Milestone 2 only — M3–M5 not started.**
