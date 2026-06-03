@@ -426,3 +426,23 @@ A continuation of the M1 split-pane control panel that deepens the right-pane **
 ### Verification
 
 -   New M2 workspace derivations are computed **in-component for the selected record only** — they are deliberately NOT added to the shared `DomainReadinessSignal`, so `deriveDomainReadiness` / posture / list counts (and the locked no-drift guarantee) are untouched. The runtime "Other Domains" safety-net group still guarantees no visible signal is silently dropped. Architect review passed with no blocking findings or regressions. Typecheck remains at the 12 pre-existing baseline errors (all in untouched non-owner files); `DomainsPage.tsx` and `platformOpsDomains.ts` typecheck clean. Deep-link `?domain`/`?status`, root/subdomain grouping, filters, and `view_domains`/`manage_domain_lifecycle` gating are unchanged. **Milestone 2 only — M3–M5 not started.**
+
+## Phase 1.2E — Domains Control Center UX Maturity — Milestone 3 (Platform Settings Control Center Layout)
+
+A layout/workflow maturity pass over the System Owner **Platform Settings** page (`PlatformSettingsPage.tsx`). **Pure presentation/navigation** — every save / default / audit / review / reset / permission behavior is preserved unchanged. No real enforcement, notifications, SSO/SCIM, provider integrations, backend config service, server RBAC, new permission keys, approval workflows, version history, new audit categories, or new storage keys.
+
+### A — Three-workspace Control Center
+
+-   The 2-way `mode` (`settings` | `baseline`) state was replaced with a 3-way `workspace` (`overview` | `registry` | `baseline`) plus a `registryView` (`grouped` | `table`). `workspace==='registry'` is the old settings editing flow; `workspace==='baseline'` is the old baseline flow; `overview` is a new read-only landing surface. Default workspace is `overview`.
+
+### B — Overview workspace (read-only Configuration Center)
+
+-   Clickable metric tiles (Total / Modified / High Risk / High Risk·Modified / Documentation Only / Customized Defaults) each navigate into the registry table with a single visible, clearable filter chip applied. By-Group, By-Enforcement, and Unsaved-Work breakdown cards drill the same way. A **Default Baseline Manager** entry card (customized + high-risk-customized counts) opens the baseline workspace. An informational **Future Integration Readiness** panel sets honest expectations (notifications / SSO·SCIM / providers / runtime enforcement / backend config service / compliance evidence) — all labeled Future / No runtime enforcement.
+
+### C — Registry table (governance) view + lens filters
+
+-   The registry workspace adds a scannable governance **table** view alongside the grouped editing view (toggle via `ViewTab`). Columns: setting (label/key/impact/truth), group, owner, risk, enforcement, current (persisted), baseline, registry default, modified/customized status, and an **Open** action that jumps to the grouped view for editing (table never mutates). New lens filters (risk, enforcement, modified-only, customized-defaults) join search + group, each rendered as a visible clearable chip.
+
+### Verification
+
+-   **No drift**: a single `matchesFilters` predicate drives both the grouped `renderPlan` and the flat `registryRows` table; overview/posture counts derive from `deriveSettingsPosture(persisted, baselineOverrides)`. The `modified`/`customized` lenses measure against **persisted + baselineOverrides** (matching overview/posture truth), while editing rows still bind to `draft`. **Locked review/save rule preserved**: review/save derive from the unfiltered `changedByGroup` / `baselineChangedByGroup`, so active filters can never hide a pending change. Storage keys (`platform_settings_v1`, `platform_settings_defaults_v1`), audit actions/categories (`platform_setting_updated` / `platform_setting_default_updated`, category `configuration`, one row per confirmed group save), and permission gating (`platform_settings` visibility, `edit_platform_settings` mutation — no new keys) are unchanged. Architect review passed with no blocking findings. Typecheck remains at the 12 pre-existing baseline errors (all in untouched non-owner files); `PlatformSettingsPage.tsx` typechecks clean. **Milestone 3 only — M4–M5 not started.**

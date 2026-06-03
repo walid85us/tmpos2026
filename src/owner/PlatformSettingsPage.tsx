@@ -11,7 +11,9 @@ import {
   SETTINGS_GROUP_LABELS,
   SETTINGS_GROUP_DESCRIPTIONS,
   SETTING_ENFORCEMENT_LABELS,
+  SETTING_ENFORCEMENT_ORDER,
   SETTING_RISK_LABELS,
+  SETTING_RISK_ORDER,
   SETTINGS_TRUTH_LABELS,
   getSettingsForGroup,
   getSettingValue,
@@ -48,6 +50,18 @@ const RISK_STYLES: Record<SettingRisk, string> = {
   medium: 'bg-amber-400/10 text-amber-700 border-amber-400/20',
   high: 'bg-red-500/10 text-red-700 border-red-500/30',
 };
+
+// Read-only, informational summary of capability areas that are NOT active in
+// this phase. Nothing here is wired to runtime behavior — the panel exists to
+// set honest expectations about what Platform Settings does and does not do.
+const FUTURE_READINESS: { icon: string; title: string; detail: string }[] = [
+  { icon: 'notifications', title: 'Notifications & alerts', detail: 'No email, SMS, or webhook delivery. Maintenance/support fields are display-only.' },
+  { icon: 'badge', title: 'SSO / SCIM provisioning', detail: 'No identity-provider sign-in or directory sync. MFA expectations are recorded, not enforced.' },
+  { icon: 'cloud_sync', title: 'Provider / external calls', detail: 'No outbound integration calls. Status page and logo URLs are referenced for display only.' },
+  { icon: 'gavel', title: 'Runtime policy enforcement', detail: 'No setting changes platform behavior at runtime. Session timeout / MFA are documentation only.' },
+  { icon: 'dns', title: 'Backend configuration service', detail: 'Values persist to local browser storage only. There is no server-side config service yet.' },
+  { icon: 'verified', title: 'Audit / compliance evidence', detail: 'Saves emit governance audit rows in-app. No legal-grade or compliance-certified evidence pipeline.' },
+];
 
 const loadSettings = (): PlatformDefaults => {
   try {
@@ -147,8 +161,11 @@ const PlatformSettingsPage: React.FC = () => {
   const editGate = hasPlatformPermission(sessionRole, 'edit_platform_settings');
   const canEdit = editGate.allowed;
 
-  // Top-level surface: in-effect settings vs the default baseline registry.
-  const [mode, setMode] = useState<'settings' | 'baseline'>('settings');
+  // Top-level Control Center workspace. `registry` is the in-effect settings
+  // editing/governance surface (grouped or table view); `baseline` edits the
+  // default baseline; `overview` is the read-only Configuration Center summary.
+  const [workspace, setWorkspace] = useState<'overview' | 'registry' | 'baseline'>('overview');
+  const [registryView, setRegistryView] = useState<'grouped' | 'table'>('grouped');
 
   const [persisted, setPersisted] = useState<PlatformDefaults>(() => loadSettings());
   const [draft, setDraft] = useState<PlatformDefaults>(persisted);
@@ -167,6 +184,10 @@ const PlatformSettingsPage: React.FC = () => {
   // Navigation / review UX state.
   const [query, setQuery] = useState('');
   const [groupFilter, setGroupFilter] = useState<SettingsGroup | 'all'>('all');
+  const [riskFilter, setRiskFilter] = useState<SettingRisk | 'all'>('all');
+  const [enforcementFilter, setEnforcementFilter] = useState<SettingEnforcement | 'all'>('all');
+  const [modifiedOnly, setModifiedOnly] = useState(false);
+  const [customizedOnly, setCustomizedOnly] = useState(false);
   const [reviewGroup, setReviewGroup] = useState<SettingsGroup | null>(null);
   const [ackHighRisk, setAckHighRisk] = useState(false);
   const [resetTarget, setResetTarget] = useState<SettingDefinition | null>(null);
@@ -191,6 +212,51 @@ const PlatformSettingsPage: React.FC = () => {
     const q = query.trim().toLowerCase();
     if (!q) return true;
     return [def.label, def.description, def.key, def.owner, def.impactSummary].some(s => s.toLowerCase().includes(q));
+  };
+
+  // Single predicate shared by the registry list, the grouped sections, and the
+  // active-filter chips so a count and the visible rows can never drift. The
+  // `modified` / `customized` lenses are measured against the PERSISTED
+  // (in-effect) settings and the maintained baseline — identical to the
+  // Configuration Center overview counts, so a card and its filtered list match.
+  const matchesFilters = (def: SettingDefinition): boolean => {
+    if (!matchesQuery(def)) return false;
+    if (groupFilter !== 'all' && def.group !== groupFilter) return false;
+    if (riskFilter !== 'all' && def.risk !== riskFilter) return false;
+    if (enforcementFilter !== 'all' && def.enforcement !== enforcementFilter) return false;
+    if (modifiedOnly && !isSettingModified(persisted, def, baselineOverrides)) return false;
+    if (customizedOnly && !isDefaultOverridden(def, baselineOverrides)) return false;
+    return true;
+  };
+
+  const hasActiveFilters =
+    !!query.trim() ||
+    groupFilter !== 'all' ||
+    riskFilter !== 'all' ||
+    enforcementFilter !== 'all' ||
+    modifiedOnly ||
+    customizedOnly;
+
+  const clearAllFilters = () => {
+    setQuery('');
+    setGroupFilter('all');
+    setRiskFilter('all');
+    setEnforcementFilter('all');
+    setModifiedOnly(false);
+    setCustomizedOnly(false);
+  };
+
+  // Navigate from an overview lens into the registry workspace with a single
+  // visible filter applied (table view = governance browsing). Never hides a
+  // filter — every applied lens shows as a clearable chip.
+  const openRegistryWith = (
+    apply: () => void,
+    view: 'grouped' | 'table' = 'table',
+  ) => {
+    clearAllFilters();
+    apply();
+    setRegistryView(view);
+    setWorkspace('registry');
   };
 
   const updateField = (def: SettingDefinition, value: SettingPrimitive) => {
@@ -252,6 +318,7 @@ const PlatformSettingsPage: React.FC = () => {
   const baselineTotalDirty = useMemo(() => SETTINGS_GROUP_ORDER.reduce((n, g) => n + baselineChangedByGroup[g].length, 0), [baselineChangedByGroup]);
   const baselineDirtyGroupCount = useMemo(() => SETTINGS_GROUP_ORDER.filter(g => baselineChangedByGroup[g].length > 0).length, [baselineChangedByGroup]);
   const overriddenCount = useMemo(() => SETTINGS_REGISTRY.filter(def => isDefaultOverridden(def, baselineOverrides)).length, [baselineOverrides]);
+  const highRiskOverriddenCount = useMemo(() => SETTINGS_REGISTRY.filter(def => def.risk === 'high' && isDefaultOverridden(def, baselineOverrides)).length, [baselineOverrides]);
 
   // Unsaved-changes guard for full page/browser navigation (either surface).
   useEffect(() => {
@@ -336,8 +403,12 @@ const PlatformSettingsPage: React.FC = () => {
 
   const groupsToRender = groupFilter === 'all' ? SETTINGS_GROUP_ORDER : [groupFilter];
   const renderPlan = groupsToRender
-    .map(group => ({ group, defs: getSettingsForGroup(group).filter(matchesQuery) }))
+    .map(group => ({ group, defs: getSettingsForGroup(group).filter(matchesFilters) }))
     .filter(g => g.defs.length > 0);
+
+  // Flat, filtered registry list for the governance table view — same predicate
+  // as the grouped sections, so the table and the grouped view never disagree.
+  const registryRows = SETTINGS_REGISTRY.filter(matchesFilters);
 
   const reviewDefs = reviewGroup ? changedByGroup[reviewGroup] : [];
   const reviewHasHighRisk = reviewDefs.some(d => d.risk === 'high');
@@ -350,11 +421,13 @@ const PlatformSettingsPage: React.FC = () => {
       {/* Command header */}
       <div className="flex items-end justify-between flex-wrap gap-4">
         <div className="max-w-2xl">
-          <h2 className="text-2xl font-black text-primary tracking-tight">Platform Settings</h2>
+          <h2 className="text-2xl font-black text-primary tracking-tight">Platform Settings Control Center</h2>
           <p className="text-slate-500 font-medium">
-            {mode === 'settings'
-              ? <>Governed platform-wide configuration with change review, impact preview, and audit.{savedAt && <span className="ml-2 text-xs text-slate-400">Last saved: {savedAt}</span>}</>
-              : <>Edit the registry <span className="font-bold text-slate-600">default baseline</span> — governance reference only, enforced by nothing at runtime.{baselineSavedAt && <span className="ml-2 text-xs text-slate-400">Last saved: {baselineSavedAt}</span>}</>}
+            {workspace === 'overview'
+              ? <>A governed view of every platform setting — registry, risk, enforcement, and maintained defaults. Nothing here is enforced at runtime.</>
+              : workspace === 'registry'
+                ? <>Governed platform-wide configuration with change review, impact preview, and audit.{savedAt && <span className="ml-2 text-xs text-slate-400">Last saved: {savedAt}</span>}</>
+                : <>Edit the registry <span className="font-bold text-slate-600">default baseline</span> — governance reference only, enforced by nothing at runtime.{baselineSavedAt && <span className="ml-2 text-xs text-slate-400">Last saved: {baselineSavedAt}</span>}</>}
           </p>
           <div className="mt-2 flex flex-wrap gap-2">
             <TruthLabel text={SETTINGS_TRUTH_LABELS.governance} tone="slate" />
@@ -366,13 +439,13 @@ const PlatformSettingsPage: React.FC = () => {
           {!canEdit && (
             <span className="px-4 py-2 text-[10px] font-black uppercase tracking-widest text-slate-400 bg-slate-100 border border-slate-200 rounded-xl">Read-only — Edit Platform Settings required</span>
           )}
-          {canEdit && mode === 'settings' && totalDirty > 0 && (
+          {canEdit && workspace !== 'baseline' && totalDirty > 0 && (
             <span className="inline-flex items-center gap-1.5 px-4 py-2 text-[10px] font-black uppercase tracking-widest text-amber-700 bg-amber-400/10 border border-amber-400/30 rounded-xl">
               <span className="material-symbols-outlined text-[14px]">edit_note</span>
               {totalDirty} unsaved change{totalDirty === 1 ? '' : 's'} · {dirtyGroupCount} group{dirtyGroupCount === 1 ? '' : 's'}
             </span>
           )}
-          {canEdit && mode === 'baseline' && baselineTotalDirty > 0 && (
+          {canEdit && workspace === 'baseline' && baselineTotalDirty > 0 && (
             <span className="inline-flex items-center gap-1.5 px-4 py-2 text-[10px] font-black uppercase tracking-widest text-amber-700 bg-amber-400/10 border border-amber-400/30 rounded-xl">
               <span className="material-symbols-outlined text-[14px]">edit_note</span>
               {baselineTotalDirty} unsaved baseline change{baselineTotalDirty === 1 ? '' : 's'} · {baselineDirtyGroupCount} group{baselineDirtyGroupCount === 1 ? '' : 's'}
@@ -381,134 +454,335 @@ const PlatformSettingsPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Mode toggle — in-effect settings vs default baseline */}
+      {/* Workspace navigation — Overview / Settings Registry / Default Baseline */}
       <div className="inline-flex items-center gap-1 p-1 bg-slate-100 border border-slate-200 rounded-2xl">
-        <ModeTab label="Settings" icon="tune" active={mode === 'settings'} dirty={totalDirty > 0} onClick={() => setMode('settings')} />
-        <ModeTab label="Default Baseline" icon="rule_settings" active={mode === 'baseline'} dirty={baselineTotalDirty > 0} onClick={() => setMode('baseline')} />
+        <ModeTab label="Overview" icon="dashboard" active={workspace === 'overview'} onClick={() => setWorkspace('overview')} />
+        <ModeTab label="Settings Registry" icon="tune" active={workspace === 'registry'} dirty={totalDirty > 0} onClick={() => setWorkspace('registry')} />
+        <ModeTab label="Default Baseline" icon="rule_settings" active={workspace === 'baseline'} dirty={baselineTotalDirty > 0} onClick={() => setWorkspace('baseline')} />
       </div>
 
-      {/* Governance posture */}
-      {mode === 'settings' ? (
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
-          <PostureCard label="Total Settings" value={posture.total} />
-          <PostureCard label="Modified" value={posture.modified} tint="amber" />
-          <PostureCard label="High Risk" value={posture.highRisk} tint="red" />
-          <PostureCard label="High Risk · Modified" value={posture.highRiskModified} tint="red" />
-          <PostureCard label="Documentation Only" value={posture.documentationOnly} tint="amber" />
-        </div>
-      ) : (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <PostureCard label="Total Settings" value={posture.total} />
-          <PostureCard label="Defaults Overridden" value={overriddenCount} tint="amber" />
-          <PostureCard label="High Risk" value={posture.highRisk} tint="red" />
-          <PostureCard label="Unsaved Baseline" value={baselineTotalDirty} tint="amber" />
-        </div>
-      )}
+      {/* ============ OVERVIEW WORKSPACE — read-only Configuration Center ============ */}
+      {workspace === 'overview' && (
+        <div className="space-y-6">
+          <div>
+            <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+              <div>
+                <h3 className="text-lg font-black text-primary tracking-tight">Configuration Center</h3>
+                <p className="text-xs font-bold text-slate-400">Live governance snapshot of the settings registry. Select any tile to open the matching settings.</p>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+              <MetricCard label="Total Settings" value={posture.total} onClick={() => openRegistryWith(() => {})} />
+              <MetricCard label="Modified" value={posture.modified} tint="amber" onClick={() => openRegistryWith(() => setModifiedOnly(true))} />
+              <MetricCard label="High Risk" value={posture.highRisk} tint="red" onClick={() => openRegistryWith(() => setRiskFilter('high'))} />
+              <MetricCard label="High Risk · Modified" value={posture.highRiskModified} tint="red" onClick={() => openRegistryWith(() => { setRiskFilter('high'); setModifiedOnly(true); })} />
+              <MetricCard label="Documentation Only" value={posture.documentationOnly} tint="amber" onClick={() => openRegistryWith(() => setEnforcementFilter('documentation_only'))} />
+              <MetricCard label="Customized Defaults" value={overriddenCount} tint="amber" onClick={() => openRegistryWith(() => setCustomizedOnly(true))} />
+            </div>
+          </div>
 
-      {/* Default Baseline explanation — concise, plain-language framing */}
-      {mode === 'baseline' && (
-        <div className="bg-white/80 backdrop-blur-xl p-5 rounded-3xl border border-slate-200 shadow-sm">
-          <p className="text-sm font-black text-slate-800">What the Default Baseline does</p>
-          <p className="text-xs font-medium text-slate-500 mt-1 max-w-3xl">
-            The baseline is the value each setting falls back to when you choose <span className="font-bold text-slate-600">Reset to default</span> on the Settings tab. Editing it here changes that fallback — it never changes the in-effect setting and is <span className="font-bold text-slate-600">enforced by nothing at runtime</span>. Each row below shows the current baseline, the built-in registry default, whether the baseline is customized, and its risk and enforcement.
-          </p>
-          <ol className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] font-bold text-slate-500">
-            <li className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200">1 · Edit a baseline value</li>
-            <span className="material-symbols-outlined text-slate-300 text-[14px]">arrow_forward</span>
-            <li className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200">2 · Review &amp; Save the group</li>
-            <span className="material-symbols-outlined text-slate-300 text-[14px]">arrow_forward</span>
-            <li className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200">3 · Reset any row to the registry default</li>
-          </ol>
-        </div>
-      )}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <BreakdownCard title="By Group" icon="category">
+              {SETTINGS_GROUP_ORDER.map(g => (
+                <BreakdownRow key={g} label={SETTINGS_GROUP_LABELS[g]} value={posture.byGroup[g]} dirty={changedByGroup[g].length} onClick={() => openRegistryWith(() => setGroupFilter(g))} />
+              ))}
+            </BreakdownCard>
+            <BreakdownCard title="By Enforcement" icon="policy">
+              {SETTING_ENFORCEMENT_ORDER.filter(e => posture.byEnforcement[e] > 0).map(e => (
+                <BreakdownRow key={e} label={SETTING_ENFORCEMENT_LABELS[e]} value={posture.byEnforcement[e]} onClick={() => openRegistryWith(() => setEnforcementFilter(e))} />
+              ))}
+            </BreakdownCard>
+            <BreakdownCard title="Unsaved Work" icon="edit_note">
+              <BreakdownRow label="Settings — unsaved" value={totalDirty} dirty={totalDirty} muted={totalDirty === 0} onClick={() => { setRegistryView('grouped'); setWorkspace('registry'); }} />
+              <BreakdownRow label="Settings — groups affected" value={dirtyGroupCount} muted />
+              <BreakdownRow label="Baseline — unsaved" value={baselineTotalDirty} dirty={baselineTotalDirty} muted={baselineTotalDirty === 0} onClick={() => setWorkspace('baseline')} />
+            </BreakdownCard>
+          </div>
 
-      {/* Search + group navigation */}
-      <div className="bg-white/80 backdrop-blur-xl p-4 rounded-3xl border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-center gap-3">
-        <div className="relative flex-1">
-          <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-[18px]">search</span>
-          <input
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-            placeholder="Search settings by label, key, owner, or impact…"
-            className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700"
-          />
-        </div>
-        <div className="flex flex-wrap gap-1.5">
-          <GroupPill label="All" active={groupFilter === 'all'} onClick={() => setGroupFilter('all')} />
-          {SETTINGS_GROUP_ORDER.map(g => (
-            <GroupPill key={g} label={SETTINGS_GROUP_LABELS[g]} active={groupFilter === g} dirty={(mode === 'settings' ? changedByGroup[g] : baselineChangedByGroup[g]).length > 0} onClick={() => setGroupFilter(g)} />
-          ))}
-        </div>
-      </div>
+          {/* Default Baseline Manager entry */}
+          <div className="bg-white/80 backdrop-blur-xl p-6 rounded-[2rem] border border-slate-200 shadow-sm">
+            <div className="flex items-start justify-between gap-4 flex-wrap">
+              <div className="max-w-2xl">
+                <div className="flex items-center gap-2">
+                  <span className="material-symbols-outlined text-primary">rule_settings</span>
+                  <h3 className="text-lg font-black text-primary tracking-tight">Default Baseline Manager</h3>
+                </div>
+                <p className="text-xs font-medium text-slate-500 mt-1">
+                  The baseline is the value each setting falls back to when you choose <span className="font-bold text-slate-600">Reset to default</span> on the Settings Registry. Editing it changes that fallback only — it never changes an in-effect setting and is <span className="font-bold text-slate-600">enforced by nothing at runtime</span>.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <StatPill label="Customized defaults" value={overriddenCount} tint={overriddenCount ? 'amber' : 'slate'} />
+                  <StatPill label="High-risk customized" value={highRiskOverriddenCount} tint={highRiskOverriddenCount ? 'red' : 'slate'} />
+                </div>
+              </div>
+              <button
+                onClick={() => setWorkspace('baseline')}
+                className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-2xl bg-primary text-white text-xs font-black uppercase tracking-widest hover:opacity-90 cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[16px]">tune</span> Open Default Baseline
+              </button>
+            </div>
+          </div>
 
-      {/* Active filter chips */}
-      {(query.trim() || groupFilter !== 'all') && (
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Filters:</span>
-          {groupFilter !== 'all' && (
-            <FilterChip label={`Group: ${SETTINGS_GROUP_LABELS[groupFilter]}`} onClear={() => setGroupFilter('all')} />
-          )}
-          {query.trim() && <FilterChip label={`Search: "${query.trim()}"`} onClear={() => setQuery('')} />}
-          <button onClick={() => { setQuery(''); setGroupFilter('all'); }} className="text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-slate-600">Clear all</button>
-        </div>
-      )}
-
-      {/* Registry-driven group sections */}
-      {renderPlan.length === 0 ? (
-        <div className="bg-white/80 backdrop-blur-xl rounded-[2rem] border border-slate-200 p-12 text-center shadow-sm">
-          <span className="material-symbols-outlined text-4xl text-slate-300">search_off</span>
-          <p className="mt-3 text-sm font-black text-slate-600 uppercase tracking-widest">No settings match</p>
-          <p className="mt-1 text-xs font-bold text-slate-400">Adjust your search or group filter.</p>
-        </div>
-      ) : renderPlan.map(({ group, defs }) => {
-        const changedCount = (mode === 'settings' ? changedByGroup[group] : baselineChangedByGroup[group]).length;
-        return (
-          <SectionCard
-            key={group}
-            title={SETTINGS_GROUP_LABELS[group]}
-            subtitle={SETTINGS_GROUP_DESCRIPTIONS[group]}
-            badge={changedCount > 0 ? `${changedCount} unsaved` : undefined}
-          >
-            <div className="space-y-4">
-              {defs.map(def => mode === 'settings' ? (
-                <SettingRow
-                  key={def.key}
-                  def={def}
-                  value={getSettingValue(draft, def)}
-                  defaultValue={getEffectiveDefault(def, baselineOverrides)}
-                  modified={isSettingModified(draft, def, baselineOverrides)}
-                  changed={isChangedFromPersisted(def, persisted, draft)}
-                  canEdit={canEdit}
-                  onChange={v => updateField(def, v)}
-                  onReset={() => setResetTarget(def)}
-                />
-              ) : (
-                <SettingRow
-                  key={def.key}
-                  def={def}
-                  value={baselineDraft[def.key]}
-                  defaultValue={getRegistryDefault(def)}
-                  modified={JSON.stringify(baselineDraft[def.key]) !== JSON.stringify(getRegistryDefault(def))}
-                  changed={JSON.stringify(baselineDraft[def.key]) !== JSON.stringify(getEffectiveDefault(def, baselineOverrides))}
-                  canEdit={canEdit}
-                  baseline
-                  onChange={v => updateBaselineField(def, v)}
-                  onReset={() => setBaselineResetTarget(def)}
-                />
+          {/* Future Integration Readiness — informational only */}
+          <div className="bg-white/80 backdrop-blur-xl p-6 rounded-[2rem] border border-slate-200 shadow-sm">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div className="flex items-center gap-2">
+                <span className="material-symbols-outlined text-slate-400">schedule</span>
+                <h3 className="text-lg font-black text-primary tracking-tight">Future Integration Readiness</h3>
+              </div>
+              <TruthLabel text="Informational only — not active in this phase." tone="slate" />
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mt-4">
+              {FUTURE_READINESS.map(item => (
+                <div key={item.title} className="border border-slate-100 rounded-2xl p-4 bg-slate-50/60">
+                  <div className="flex items-center gap-2">
+                    <span className="material-symbols-outlined text-slate-400 text-[18px]">{item.icon}</span>
+                    <span className="text-sm font-black text-slate-700">{item.title}</span>
+                  </div>
+                  <p className="text-[11px] font-medium text-slate-500 mt-1.5">{item.detail}</p>
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    <Badge text="Future" className="bg-slate-100 text-slate-500 border-slate-200" />
+                    <Badge text="No runtime enforcement" className="bg-slate-100 text-slate-500 border-slate-200" />
+                  </div>
+                </div>
               ))}
             </div>
-            {canEdit && (
-              <SaveRow
-                group={group}
-                changedCount={changedCount}
-                saving={(mode === 'settings' ? savingGroup : baselineSavingGroup) === group}
-                onReview={() => mode === 'settings' ? openReview(group) : openBaselineReview(group)}
-                onDiscard={() => mode === 'settings' ? discardGroup(group) : discardBaselineGroup(group)}
+          </div>
+        </div>
+      )}
+
+      {/* ============ REGISTRY + BASELINE WORKSPACES — editing surfaces ============ */}
+      {workspace !== 'overview' && (
+        <>
+          {/* Governance posture */}
+          {workspace === 'registry' ? (
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+              <PostureCard label="Total Settings" value={posture.total} />
+              <PostureCard label="Modified" value={posture.modified} tint="amber" />
+              <PostureCard label="High Risk" value={posture.highRisk} tint="red" />
+              <PostureCard label="High Risk · Modified" value={posture.highRiskModified} tint="red" />
+              <PostureCard label="Documentation Only" value={posture.documentationOnly} tint="amber" />
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <PostureCard label="Total Settings" value={posture.total} />
+              <PostureCard label="Defaults Overridden" value={overriddenCount} tint="amber" />
+              <PostureCard label="High Risk" value={posture.highRisk} tint="red" />
+              <PostureCard label="Unsaved Baseline" value={baselineTotalDirty} tint="amber" />
+            </div>
+          )}
+
+          {/* Default Baseline explanation — concise, plain-language framing */}
+          {workspace === 'baseline' && (
+            <div className="bg-white/80 backdrop-blur-xl p-5 rounded-3xl border border-slate-200 shadow-sm">
+              <p className="text-sm font-black text-slate-800">What the Default Baseline does</p>
+              <p className="text-xs font-medium text-slate-500 mt-1 max-w-3xl">
+                The baseline is the value each setting falls back to when you choose <span className="font-bold text-slate-600">Reset to default</span> on the Settings Registry. Editing it here changes that fallback — it never changes the in-effect setting and is <span className="font-bold text-slate-600">enforced by nothing at runtime</span>. Each row below shows the current baseline, the built-in registry default, whether the baseline is customized, and its risk and enforcement.
+              </p>
+              <ol className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] font-bold text-slate-500">
+                <li className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200">1 · Edit a baseline value</li>
+                <span className="material-symbols-outlined text-slate-300 text-[14px]">arrow_forward</span>
+                <li className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200">2 · Review &amp; Save the group</li>
+                <span className="material-symbols-outlined text-slate-300 text-[14px]">arrow_forward</span>
+                <li className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200">3 · Reset any row to the registry default</li>
+              </ol>
+            </div>
+          )}
+
+          {/* Registry view toggle — grouped editing vs governance table */}
+          {workspace === 'registry' && (
+            <div className="flex items-center justify-between flex-wrap gap-3">
+              <div className="inline-flex items-center gap-1 p-1 bg-slate-100 border border-slate-200 rounded-2xl">
+                <ViewTab label="Grouped" icon="view_agenda" active={registryView === 'grouped'} onClick={() => setRegistryView('grouped')} />
+                <ViewTab label="Registry Table" icon="table_rows" active={registryView === 'table'} onClick={() => setRegistryView('table')} />
+              </div>
+              <p className="text-[11px] font-bold text-slate-400">{registryView === 'grouped' ? 'Edit settings grouped by area, with review & save.' : 'Scannable governance table — open a row to edit it in Grouped view.'}</p>
+            </div>
+          )}
+
+          {/* Search + group navigation + lens filters */}
+          <div className="bg-white/80 backdrop-blur-xl p-4 rounded-3xl border border-slate-200 shadow-sm flex flex-col gap-3">
+            <div className="flex flex-col md:flex-row md:items-center gap-3">
+              <div className="relative flex-1">
+                <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-[18px]">search</span>
+                <input
+                  value={query}
+                  onChange={e => setQuery(e.target.value)}
+                  placeholder="Search settings by label, key, owner, or impact…"
+                  className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700"
+                />
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                <GroupPill label="All" active={groupFilter === 'all'} onClick={() => setGroupFilter('all')} />
+                {SETTINGS_GROUP_ORDER.map(g => (
+                  <GroupPill key={g} label={SETTINGS_GROUP_LABELS[g]} active={groupFilter === g} dirty={(workspace === 'baseline' ? baselineChangedByGroup[g] : changedByGroup[g]).length > 0} onClick={() => setGroupFilter(g)} />
+                ))}
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-slate-100">
+              <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 mt-2">Lenses:</span>
+              <FilterSelect
+                label="Risk"
+                value={riskFilter}
+                onChange={v => setRiskFilter(v as SettingRisk | 'all')}
+                options={[{ value: 'all', label: 'All risk' }, ...SETTING_RISK_ORDER.map(r => ({ value: r, label: SETTING_RISK_LABELS[r] }))]}
               />
-            )}
-          </SectionCard>
-        );
-      })}
+              <FilterSelect
+                label="Enforcement"
+                value={enforcementFilter}
+                onChange={v => setEnforcementFilter(v as SettingEnforcement | 'all')}
+                options={[{ value: 'all', label: 'All enforcement' }, ...SETTING_ENFORCEMENT_ORDER.map(e => ({ value: e, label: SETTING_ENFORCEMENT_LABELS[e] }))]}
+              />
+              <ToggleChip label="Modified only" active={modifiedOnly} onClick={() => setModifiedOnly(v => !v)} />
+              <ToggleChip label="Customized defaults" active={customizedOnly} onClick={() => setCustomizedOnly(v => !v)} />
+            </div>
+          </div>
+
+          {/* Active filter chips */}
+          {hasActiveFilters && (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Filters:</span>
+              {groupFilter !== 'all' && <FilterChip label={`Group: ${SETTINGS_GROUP_LABELS[groupFilter]}`} onClear={() => setGroupFilter('all')} />}
+              {riskFilter !== 'all' && <FilterChip label={`Risk: ${SETTING_RISK_LABELS[riskFilter]}`} onClear={() => setRiskFilter('all')} />}
+              {enforcementFilter !== 'all' && <FilterChip label={`Enforcement: ${SETTING_ENFORCEMENT_LABELS[enforcementFilter]}`} onClear={() => setEnforcementFilter('all')} />}
+              {modifiedOnly && <FilterChip label="Modified only" onClear={() => setModifiedOnly(false)} />}
+              {customizedOnly && <FilterChip label="Customized defaults" onClear={() => setCustomizedOnly(false)} />}
+              {query.trim() && <FilterChip label={`Search: "${query.trim()}"`} onClear={() => setQuery('')} />}
+              <button onClick={clearAllFilters} className="text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-slate-600 cursor-pointer">Clear all</button>
+            </div>
+          )}
+
+          {/* Content — grouped editing sections OR registry governance table */}
+          {(workspace === 'baseline' || registryView === 'grouped') ? (
+            renderPlan.length === 0 ? (
+              <div className="bg-white/80 backdrop-blur-xl rounded-[2rem] border border-slate-200 p-12 text-center shadow-sm">
+                <span className="material-symbols-outlined text-4xl text-slate-300">search_off</span>
+                <p className="mt-3 text-sm font-black text-slate-600 uppercase tracking-widest">No settings match</p>
+                <p className="mt-1 text-xs font-bold text-slate-400">Adjust your search or filters.</p>
+              </div>
+            ) : renderPlan.map(({ group, defs }) => {
+              const changedCount = (workspace === 'baseline' ? baselineChangedByGroup[group] : changedByGroup[group]).length;
+              return (
+                <SectionCard
+                  key={group}
+                  title={SETTINGS_GROUP_LABELS[group]}
+                  subtitle={SETTINGS_GROUP_DESCRIPTIONS[group]}
+                  badge={changedCount > 0 ? `${changedCount} unsaved` : undefined}
+                >
+                  <div className="space-y-4">
+                    {defs.map(def => workspace === 'registry' ? (
+                      <SettingRow
+                        key={def.key}
+                        def={def}
+                        value={getSettingValue(draft, def)}
+                        defaultValue={getEffectiveDefault(def, baselineOverrides)}
+                        modified={isSettingModified(draft, def, baselineOverrides)}
+                        changed={isChangedFromPersisted(def, persisted, draft)}
+                        canEdit={canEdit}
+                        onChange={v => updateField(def, v)}
+                        onReset={() => setResetTarget(def)}
+                      />
+                    ) : (
+                      <SettingRow
+                        key={def.key}
+                        def={def}
+                        value={baselineDraft[def.key]}
+                        defaultValue={getRegistryDefault(def)}
+                        modified={JSON.stringify(baselineDraft[def.key]) !== JSON.stringify(getRegistryDefault(def))}
+                        changed={JSON.stringify(baselineDraft[def.key]) !== JSON.stringify(getEffectiveDefault(def, baselineOverrides))}
+                        canEdit={canEdit}
+                        baseline
+                        onChange={v => updateBaselineField(def, v)}
+                        onReset={() => setBaselineResetTarget(def)}
+                      />
+                    ))}
+                  </div>
+                  {canEdit && (
+                    <SaveRow
+                      group={group}
+                      changedCount={changedCount}
+                      saving={(workspace === 'baseline' ? baselineSavingGroup : savingGroup) === group}
+                      onReview={() => workspace === 'baseline' ? openBaselineReview(group) : openReview(group)}
+                      onDiscard={() => workspace === 'baseline' ? discardBaselineGroup(group) : discardGroup(group)}
+                    />
+                  )}
+                </SectionCard>
+              );
+            })
+          ) : (
+            registryRows.length === 0 ? (
+              <div className="bg-white/80 backdrop-blur-xl rounded-[2rem] border border-slate-200 p-12 text-center shadow-sm">
+                <span className="material-symbols-outlined text-4xl text-slate-300">search_off</span>
+                <p className="mt-3 text-sm font-black text-slate-600 uppercase tracking-widest">No settings match</p>
+                <p className="mt-1 text-xs font-bold text-slate-400">Adjust your search or filters.</p>
+              </div>
+            ) : (
+              <div className="bg-white/80 backdrop-blur-xl rounded-[2rem] border border-slate-200 shadow-sm overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-slate-50/80 border-b border-slate-200 text-[10px] font-black uppercase tracking-widest text-slate-400">
+                        <th className="px-4 py-3">Setting</th>
+                        <th className="px-4 py-3">Group</th>
+                        <th className="px-4 py-3">Owner</th>
+                        <th className="px-4 py-3">Risk</th>
+                        <th className="px-4 py-3">Enforcement</th>
+                        <th className="px-4 py-3">Current</th>
+                        <th className="px-4 py-3">Baseline</th>
+                        <th className="px-4 py-3">Registry</th>
+                        <th className="px-4 py-3">Status</th>
+                        <th className="px-4 py-3 text-right">Edit</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {registryRows.map(def => {
+                        const isMod = isSettingModified(persisted, def, baselineOverrides);
+                        const isCustom = isDefaultOverridden(def, baselineOverrides);
+                        return (
+                          <tr key={def.key} className="border-b border-slate-100 last:border-0 align-top hover:bg-slate-50/50">
+                            <td className="px-4 py-3 max-w-[18rem]">
+                              <div className="text-sm font-black text-slate-700">{def.label}</div>
+                              <div className="text-[10px] font-mono text-slate-400">{def.key}</div>
+                              <div className="text-[11px] font-medium text-slate-500 mt-1">{def.impactSummary}</div>
+                              <div className="text-[10px] font-bold text-slate-400 mt-1 uppercase tracking-wide">{def.truthLabel}</div>
+                            </td>
+                            <td className="px-4 py-3 text-xs font-bold text-slate-600 whitespace-nowrap">{SETTINGS_GROUP_LABELS[def.group]}</td>
+                            <td className="px-4 py-3 text-xs font-bold text-slate-600 whitespace-nowrap">{def.owner}</td>
+                            <td className="px-4 py-3 whitespace-nowrap"><Badge text={SETTING_RISK_LABELS[def.risk]} className={RISK_STYLES[def.risk]} /></td>
+                            <td className="px-4 py-3 whitespace-nowrap"><Badge text={SETTING_ENFORCEMENT_LABELS[def.enforcement]} className={ENFORCEMENT_STYLES[def.enforcement]} /></td>
+                            <td className="px-4 py-3 text-xs font-bold text-slate-700 max-w-[12rem] break-words">{formatSettingValue(def, getSettingValue(persisted, def))}</td>
+                            <td className="px-4 py-3 text-xs font-medium text-slate-500 max-w-[12rem] break-words">{formatSettingValue(def, getEffectiveDefault(def, baselineOverrides))}</td>
+                            <td className="px-4 py-3 text-xs font-medium text-slate-400 max-w-[12rem] break-words">{formatSettingValue(def, getRegistryDefault(def))}</td>
+                            <td className="px-4 py-3 whitespace-nowrap">
+                              <div className="flex flex-col gap-1">
+                                {isMod && <Badge text="Modified" className="bg-amber-400/10 text-amber-700 border-amber-400/20" />}
+                                {isCustom && <Badge text="Custom default" className="bg-blue-400/10 text-blue-700 border-blue-400/20" />}
+                                {!isMod && !isCustom && <span className="text-[11px] font-bold text-slate-300">—</span>}
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 text-right whitespace-nowrap">
+                              <button
+                                onClick={() => { setGroupFilter(def.group); setRegistryView('grouped'); }}
+                                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-slate-100 border border-slate-200 text-[10px] font-black uppercase tracking-widest text-slate-500 hover:text-slate-700 hover:bg-slate-200 cursor-pointer"
+                              >
+                                <span className="material-symbols-outlined text-[14px]">open_in_new</span> Open
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="px-4 py-3 border-t border-slate-100 bg-slate-50/50 text-[11px] font-bold text-slate-400">
+                  Showing {registryRows.length} of {SETTINGS_REGISTRY.length} settings · Current values reflect persisted (in-effect) settings. Editing happens in Grouped view.
+                </div>
+              </div>
+            )
+          )}
+        </>
+      )}
 
       {/* ---- Change review / impact / confirmation modal ---- */}
       <AnimatePresence>
@@ -698,6 +972,90 @@ const PostureCard: React.FC<{ label: string; value: number; tint?: 'amber' | 're
     </div>
   );
 };
+
+const MetricCard: React.FC<{ label: string; value: number; tint?: 'amber' | 'red'; onClick: () => void }> = ({ label, value, tint, onClick }) => {
+  const tintCls = tint === 'amber' ? 'text-amber-700' : tint === 'red' ? 'text-red-700' : 'text-primary';
+  return (
+    <button
+      onClick={onClick}
+      className="text-left bg-white/80 backdrop-blur-xl p-5 rounded-3xl border border-slate-200 shadow-sm hover:border-primary/40 hover:shadow-md transition-all cursor-pointer group"
+    >
+      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">{label}</p>
+      <p className={`text-2xl font-black mt-1 ${tintCls}`}>{value}</p>
+      <span className="mt-1 inline-flex items-center gap-0.5 text-[10px] font-black uppercase tracking-widest text-slate-300 group-hover:text-primary/60">
+        View <span className="material-symbols-outlined text-[12px]">arrow_forward</span>
+      </span>
+    </button>
+  );
+};
+
+const BreakdownCard: React.FC<{ title: string; icon: string; children: React.ReactNode }> = ({ title, icon, children }) => (
+  <div className="bg-white/80 backdrop-blur-xl p-5 rounded-3xl border border-slate-200 shadow-sm">
+    <div className="flex items-center gap-2 mb-3">
+      <span className="material-symbols-outlined text-slate-400 text-[18px]">{icon}</span>
+      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">{title}</p>
+    </div>
+    <div className="space-y-1">{children}</div>
+  </div>
+);
+
+const BreakdownRow: React.FC<{ label: string; value: number; dirty?: number; muted?: boolean; onClick?: () => void }> = ({ label, value, dirty, muted, onClick }) => {
+  const inner = (
+    <>
+      <span className="text-xs font-bold text-slate-600 flex items-center gap-1.5">
+        {label}
+        {!!dirty && dirty > 0 && <span className="inline-flex items-center px-1.5 py-0.5 rounded-md bg-amber-400/10 text-amber-700 border border-amber-400/20 text-[9px] font-black uppercase tracking-widest">{dirty} unsaved</span>}
+      </span>
+      <span className={`text-sm font-black ${muted ? 'text-slate-300' : 'text-slate-700'}`}>{value}</span>
+    </>
+  );
+  if (!onClick) return <div className="flex items-center justify-between px-2 py-1.5 rounded-lg">{inner}</div>;
+  return (
+    <button onClick={onClick} className="w-full flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-slate-50 cursor-pointer transition-colors">{inner}</button>
+  );
+};
+
+const StatPill: React.FC<{ label: string; value: number; tint?: 'amber' | 'red' | 'slate' }> = ({ label, value, tint = 'slate' }) => {
+  const cls = tint === 'red' ? 'bg-red-500/10 text-red-700 border-red-500/20' : tint === 'amber' ? 'bg-amber-400/10 text-amber-700 border-amber-400/20' : 'bg-slate-100 text-slate-500 border-slate-200';
+  return (
+    <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-[10px] font-black uppercase tracking-widest ${cls}`}>
+      {label}<span className="font-black">{value}</span>
+    </span>
+  );
+};
+
+const ViewTab: React.FC<{ label: string; icon: string; active: boolean; onClick: () => void }> = ({ label, icon, active, onClick }) => (
+  <button
+    onClick={onClick}
+    className={`inline-flex items-center gap-1.5 px-4 py-2 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all cursor-pointer ${active ? 'bg-white text-primary shadow-sm border border-slate-200' : 'text-slate-500 hover:text-slate-700'}`}
+  >
+    <span className="material-symbols-outlined text-[16px]">{icon}</span>
+    {label}
+  </button>
+);
+
+const FilterSelect: React.FC<{ label: string; value: string; onChange: (v: string) => void; options: { value: string; label: string }[] }> = ({ label, value, onChange, options }) => (
+  <label className="inline-flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest text-slate-400">
+    {label}
+    <select
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] font-bold text-slate-600 cursor-pointer"
+    >
+      {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+    </select>
+  </label>
+);
+
+const ToggleChip: React.FC<{ label: string; active: boolean; onClick: () => void }> = ({ label, active, onClick }) => (
+  <button
+    onClick={onClick}
+    className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-xl border transition-all cursor-pointer ${active ? 'bg-primary text-white border-primary' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'}`}
+  >
+    <span className="material-symbols-outlined text-[14px]">{active ? 'check_box' : 'check_box_outline_blank'}</span>
+    {label}
+  </button>
+);
 
 const GroupPill: React.FC<{ label: string; active: boolean; dirty?: boolean; onClick: () => void }> = ({ label, active, dirty, onClick }) => (
   <button
