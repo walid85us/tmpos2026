@@ -379,3 +379,21 @@ A second focused, presentation-layer correction over the same surfaces. No phase
 ### Verification
 
 -   Typecheck baseline unchanged at 12 pre-existing errors, all in untouched non-owner files. The files touched in this correction (`platformOpsDomains.ts`, `DomainsPage.tsx`, `PlatformSettingsPage.tsx`) typecheck clean.
+
+## Phase 1.2E — Domains Control Center UX Maturity (Milestone 1: Split-Pane Control Panel)
+
+A presentation-layer restructuring of the System Owner **Domains** surface from a single table + slide-over drawer into a persistent **split-pane control panel**. No new derivations, permission keys, persistence, audit behavior, or Platform Settings changes — purely a layout/component refactor over the existing `platformOpsDomains.ts` signals and `tenant_domains_v1` store.
+
+### A — Domain Portfolio (left pane)
+
+-   The flat table is replaced by a grouped, scrollable **Domain Portfolio**. Grouping derives in a `portfolioGroups` `useMemo` over the existing `signals`/`visible` sets: managed **root** domains render as parents with their matching subdomains nested beneath; a **Platform Domains** group collects role-subdomain + kind-subdomain records; an **Unlinked / Legacy Subdomains** group collects custom subdomains with no resolvable parent root; and an **Other Domains** safety-net group guarantees every visible signal is placed (no silent drop / no count drift).
+-   A root that is filtered out but still has a matching child is shown as a muted, dashed **"Context"** row so the parent/child relationship stays legible without counting toward matches (`context` rows are excluded from the placed-set). Each `PortfolioRow` shows hostname, issue-count badge, role/lifecycle/SSL badges, a needs-action chip, tenant, and the next recommended action.
+
+### B — Domain Control Panel (right pane)
+
+-   The drawer body is extracted into a reusable `DomainControlPanel` component rendering the full operator surface (next action, Root Domain Management / Subdomain Management relationships, readiness signals, security & readiness, manual action checklist, registrar/DNS note, manual status + SSL workflow, required DNS records, quick actions, history, metadata).
+-   On desktop (`lg`) it renders as a **persistent, sticky right pane** with a strong empty state ("No domain selected") when nothing is selected. On mobile (`lg:hidden`) the same component renders inside the existing animated slide-over, so behavior is preserved on small screens.
+
+### Verification
+
+-   Typecheck baseline unchanged at 12 pre-existing errors, all in untouched non-owner files; `DomainsPage.tsx` typechecks clean. Deep-link `?domain`/`?status` selection, no-drift counts, audit behavior (no audit on selection/filter), and `view_domains`/`manage_domain_lifecycle` gating are all unchanged. **Milestone 1 only — M2–M5 not started.**

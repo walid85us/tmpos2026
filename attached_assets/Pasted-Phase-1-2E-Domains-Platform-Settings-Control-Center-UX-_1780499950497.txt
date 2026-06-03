@@ -1,0 +1,425 @@
+Phase 1.2E — Domains + Platform Settings Control Center UX Maturity
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+This is a focused Phase 1.2 acceptance-maturity workstream.
+
+Phase 1.2 is currently PASS / HOLD because the core functionality works, but the Domains and Platform Settings surfaces do not yet feel like mature enterprise SaaS control centers.
+
+Proceed milestone-by-milestone.
+
+Do not implement all milestones at once.
+Stop after each milestone and wait for review.
+
+Milestones:
+
+1. Domains Control Panel Layout
+2. Domains DNS / SSL / Security Workspaces
+3. Platform Settings Control Center Layout
+4. Platform Settings Default Baseline Manager + Change Review Center polish
+5. Documentation + final non-regression verification
+
+For this pass, implement Milestone 1 only.
+
+==================================================
+WORKING STYLE — THINK STEP BY STEP
+==================================
+
+Before implementing, think step by step.
+
+First inspect:
+
+1. DomainsPage.tsx
+2. platformOpsDomains.ts
+3. current root/main domain logic
+4. current subdomain logic
+5. current domain filters, cards, and tabs
+6. current domain detail drawer
+7. Command Center domain deep-linking
+8. existing permissions and audit actions
+9. accepted locked behavior that must not regress
+
+Then implement only Milestone 1.
+
+Do not rush into code.
+Do not implement Milestone 2, 3, 4, or 5 early.
+
+==================================================
+ROLE STACK — ACT UPON IT
+========================
+
+Act as:
+
+* Domain Administrator
+* DNS Administrator
+* Domain Manager
+* Network Administrator
+* Senior Domains Engineer
+* Senior DNS / SSL Lifecycle Architect
+* Senior Platform Operations Architect
+* Senior SaaS Admin Console UX Architect
+* Senior Audit & Security Engineer
+* Identity and Access Management Specialist
+* Access Analyst
+* Senior React/TypeScript Engineer
+* QA Gatekeeper
+* Systems Thinker
+* Side Auditor
+
+Apply these responsibilities:
+
+* domain portfolio management
+* root/main domain ownership clarity
+* subdomain hierarchy management
+* DNS configuration awareness for A, CNAME, MX, TXT, SPF, DKIM as future/manual-readiness records
+* SSL/TLS readiness awareness
+* registrar ownership vs backend infrastructure configuration clarity
+* DNS troubleshooting / propagation awareness
+* no fake automation
+* no fake provider integration
+
+==================================================
+BENCHMARK / REPORT CONTEXT
+==========================
+
+Use the Phase 1.2 UX Architecture Report as the product direction.
+
+Important findings from the report:
+
+* Current data/derivation layer is strong.
+* Current gap is mostly presentation/layout.
+* Domains is too table-first.
+* Root domain management is not first-class enough.
+* DNS records are drawer-buried.
+* SSL readiness has no dedicated surface yet.
+* Security readiness is minimal.
+* Drawer overload is becoming a problem.
+* Recommended future state is a split-pane control panel:
+
+  * left = domain portfolio/navigation
+  * right = selected domain control panel
+
+Do not copy competitor designs.
+Use product patterns only.
+
+==================================================
+CURRENT LOCKED / ACCEPTED BEHAVIOR TO PRESERVE
+==============================================
+
+Do not regress:
+
+* domain lifecycle tabs and filters
+* single no-drift filter predicate behavior
+* root/main domain creation
+* subdomain locked-root behavior
+* duplicate hostname validation
+* Command Center domain deep-linking
+* stale domain deep-link notice
+* domain audit rows
+* manual verification truth labels
+* no real DNS lookup
+* no real SSL automation
+* no provider integrations
+* Platform Settings Review & Save
+* Platform Settings Default Baseline
+* Command Center Intelligence
+* Support Queue / SLA / Macro Maturity
+* Audit Investigation Center
+* Escalation operating model
+* Permission dependency auto-sync
+* Add-on Governance
+* Shipping
+* Store Permissions Matrix
+* Tenant provisioning
+* paid override invoice workflow
+* server PII logging rules
+
+==================================================
+MILESTONE 1 — DOMAINS CONTROL PANEL LAYOUT ONLY
+===============================================
+
+Goal:
+Make Domains feel like a professional Domain Control Panel, not a basic table plus drawer.
+
+Implement only layout/control-panel maturity.
+
+Do not implement:
+
+* real DNS lookup
+* real verification
+* real SSL automation
+* real registrar integration
+* DNSSEC activation
+* domain lock integration
+* transfer protection integration
+* Phase 2 provider behavior
+* Platform Settings changes
+* broad app redesign
+
+==================================================
+PART A — SPLIT-PANE DOMAIN CONTROL PANEL
+========================================
+
+Transform DomainsPage into a more professional split-pane control panel.
+
+Recommended layout:
+
+* top command header remains
+* posture cards remain
+* filters remain
+* main area becomes:
+
+  * left pane: Domain Portfolio
+  * right pane: Domain Control Panel for selected domain
+
+Left pane:
+
+* grouped domain portfolio
+* root/main domains shown as parent records
+* related subdomains nested under their root domain
+* platform subdomains grouped clearly if applicable
+* each domain row/card should show:
+
+  * hostname
+  * role badge: Root/Main Domain or Subdomain
+  * tenant
+  * lifecycle/readiness badge
+  * SSL badge
+  * risk badge
+  * concise next action
+* clicking a row selects the domain and opens/updates the right control panel
+* keep existing list/filter logic and no-drift counts
+
+Right pane:
+
+* persistent selected domain control panel
+* if no domain selected, show strong empty state:
+  “Select a domain to manage DNS readiness, SSL readiness, relationships, checklist, and history.”
+
+On small screens:
+
+* it may collapse to current list → drawer behavior if easier
+* do not break responsive behavior
+
+==================================================
+PART B — ROOT DOMAIN CONTROL PANEL VISIBILITY
+=============================================
+
+Root/main domains must be first-class.
+
+When selected domain is a root/main domain, the right panel must clearly show:
+
+Section title:
+“Root Domain Management”
+
+Show:
+
+* root hostname
+* tenant
+* lifecycle status
+* DNS readiness
+* SSL readiness
+* next recommended action
+* risk reasons
+* related subdomains count
+* related subdomain list
+* manual action checklist
+* registrar/DNS provider external note
+* history/audit summary if already available
+
+Related subdomains:
+
+* show child hostname
+* tenant if different/applicable
+* readiness/SSL/status
+* click child to select it
+
+If no related subdomains:
+
+* show:
+  “No subdomains attached to this root domain yet.”
+
+==================================================
+PART C — SUBDOMAIN CONTROL PANEL VISIBILITY
+===========================================
+
+When selected domain is a subdomain, the right panel must clearly show:
+
+Section title:
+“Subdomain Management”
+
+Show:
+
+* full hostname
+* editable label + locked root relationship explanation
+* parent/root domain
+* link/click action to open parent root domain
+* lifecycle status
+* DNS readiness
+* SSL readiness
+* next recommended action
+* risk reasons
+* manual action checklist
+* history/audit summary if already available
+
+Required explanation:
+“Subdomain hostname is generated from an editable label plus a locked root domain.”
+
+==================================================
+PART D — PORTFOLIO GROUPING
+===========================
+
+Implement root/subdomain grouping.
+
+Requirements:
+
+* root/main domains are visually grouped
+* subdomains appear under their parent root when possible
+* orphan/legacy subdomains that cannot resolve a root should appear in an “Unlinked / Legacy Subdomains” group with a truthful note
+* platform/internal subdomains should appear in a “Platform Domains” or equivalent group if applicable
+* grouping should not break filters
+
+When filters are active:
+
+* filtered results should remain clear
+* if a root is hidden but a child matches, still show enough parent context so the child relationship is understandable
+
+==================================================
+PART E — MODERN CONTROL-PANEL POLISH
+====================================
+
+Improve visual hierarchy without a full redesign.
+
+Add or improve:
+
+* clear selected row state
+* stronger section titles
+* compact badges
+* readiness mini-cards in the right panel
+* action checklist preview
+* empty states
+* consistent spacing
+* concise explanatory text
+* visible active filters
+
+Do not introduce a new design system.
+Use the existing app style.
+
+==================================================
+PART F — COMMAND CENTER DOMAIN DEEP-LINK PRESERVATION
+=====================================================
+
+Preserve:
+
+* Command Center domain issue opens specific domain drawer/control panel or visible filtered context
+* invalid/stale domain id shows dismissible not-found notice
+* no invisible filters
+
+If the UI changes from drawer to right panel:
+
+* deep-link should select the correct domain in the right control panel
+* if deep-link points to a subdomain, portfolio should show enough parent context
+
+==================================================
+PERMISSIONS
+===========
+
+Preserve:
+
+* view_domains controls page access
+* manage_domain_lifecycle controls actions
+* read-only users can view the control panel but cannot mutate
+* no new permission keys
+
+Do not change permission resolver.
+
+==================================================
+AUDITABILITY
+============
+
+Do not change audit semantics unless required.
+Existing domain actions should remain audited.
+
+Do not audit passive selection, filters, or view-only interactions.
+
+==================================================
+TRUTH LABELS / LIMITATIONS
+==========================
+
+Keep these labels visible:
+
+* Manual verification only — no real DNS lookup or SSL automation.
+* DNS/SSL readiness is rule-based from current app/session records.
+* Provider integrations are future Phase 2.
+* Registrar ownership and DNS provider configuration are external in this phase.
+
+==================================================
+DOCUMENTATION
+=============
+
+Do not update documentation heavily yet.
+
+If needed, add only a small note to docs/platform-operations-security-history.md.
+Keep replit.md concise.
+Documentation can be completed in Milestone 5.
+
+==================================================
+NON-REGRESSION
+==============
+
+Do not touch:
+
+* Platform Settings
+* Command Center except domain deep-link compatibility if required
+* Audit Investigation Center
+* Support Queue / SLA / Macro
+* Escalation operating model
+* Add-on Governance
+* Shipping
+* Store Permissions Matrix
+* Tenant provisioning
+* paid override invoice workflow
+* server PII logging
+
+==================================================
+ACCEPTANCE CRITERIA
+===================
+
+Acceptance is literal:
+
+1. Domains page feels like a Domain Control Panel, not only a table/drawer.
+2. Split-pane or equivalent control-panel layout exists.
+3. Domain Portfolio area exists.
+4. Root/main domains are visually first-class.
+5. Subdomains are visually connected to their parent root.
+6. Root Domain Management section is clearly visible when root is selected.
+7. Subdomain Management section is clearly visible when subdomain is selected.
+8. Related subdomains are visible and clickable under root domain.
+9. Parent/root domain is visible and clickable from subdomain detail.
+10. Selected domain state is clear.
+11. Empty state is clear when no domain is selected.
+12. Existing filters/cards/tabs still work.
+13. Counts still match visible lists.
+14. Command Center domain deep-link selects/opens the correct domain context.
+15. Read-only domain role still cannot mutate.
+16. No fake DNS/SSL/provider automation is introduced.
+17. Existing accepted behavior remains intact.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+======================
+
+Reply ONLY in this structure:
+
+1. Milestone Status
+2. What Was Implemented
+3. Domain Portfolio / Split-Pane Layout
+4. Root Domain Management
+5. Subdomain Management
+6. Command Center Deep-Link Preservation
+7. Permissions / Auditability
+8. Files Changed
+9. Non-Regression Notes
+10. Recommendation Before Next Milestone

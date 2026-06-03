@@ -185,6 +185,26 @@ const matchesDomain = (s: DomainReadinessSignal, f: DomainFilters, tenantName: s
   return true;
 };
 
+// Portfolio grouping (Milestone 1 — Domains Control Panel layout). Roots act as
+// parent records with their subdomains nested beneath; platform-provisioned and
+// orphan/legacy subdomains get their own groups. A root may be shown as muted
+// "context" when it does not itself match the filters but one of its children
+// does, so the relationship stays understandable without an invisible filter.
+type PortfolioGroupKind = 'root' | 'platform' | 'unlinked';
+interface PortfolioRowData {
+  signal: DomainReadinessSignal;
+  nested: boolean;
+  context: boolean;
+}
+interface PortfolioGroupData {
+  key: string;
+  kind: PortfolioGroupKind;
+  title?: string;
+  icon?: string;
+  note?: string;
+  rows: PortfolioRowData[];
+}
+
 const DomainsPage: React.FC = () => {
   const { session } = useAccess();
   const sessionRole = (session?.role as Role | undefined) || null;
@@ -272,6 +292,80 @@ const DomainsPage: React.FC = () => {
 
   const selected = useMemo(() => domains.find(d => d.id === selectedId) || null, [domains, selectedId]);
   const selectedSignal = selectedId ? signalById.get(selectedId) || null : null;
+
+  // Grouped portfolio (root → nested subdomains, platform, unlinked/legacy).
+  // Built from the SAME filtered `visible` set, so the leaf (non-context) rows
+  // sum exactly to `visible.length` (no-drift); context roots are clearly muted.
+  const portfolioGroups = useMemo<PortfolioGroupData[]>(() => {
+    const visibleSet = new Set(visible.map(s => s.id));
+    const groups: PortfolioGroupData[] = [];
+
+    const roots = signals.filter(s => s.role === 'root').sort((a, b) => a.hostname.localeCompare(b.hostname));
+    const rootIds = new Set(roots.map(r => r.id));
+
+    roots.forEach(root => {
+      const children = signals
+        .filter(s => s.role === 'subdomain' && s.parentDomainId === root.id)
+        .sort((a, b) => a.hostname.localeCompare(b.hostname));
+      const matchingChildren = children.filter(c => visibleSet.has(c.id));
+      const rootVisible = visibleSet.has(root.id);
+      if (!rootVisible && matchingChildren.length === 0) return;
+      const rows: PortfolioRowData[] = [{ signal: root, nested: false, context: !rootVisible }];
+      matchingChildren.forEach(c => rows.push({ signal: c, nested: true, context: false }));
+      const hidden = children.length - matchingChildren.length;
+      groups.push({
+        key: `root_${root.id}`,
+        kind: 'root',
+        note: hidden > 0 ? `${hidden} subdomain${hidden === 1 ? '' : 's'} hidden by active filters` : undefined,
+        rows,
+      });
+    });
+
+    const platform = signals
+      .filter(s => s.role === 'subdomain' && s.kind === 'subdomain' && visibleSet.has(s.id))
+      .sort((a, b) => a.hostname.localeCompare(b.hostname));
+    if (platform.length > 0) {
+      groups.push({
+        key: 'platform',
+        kind: 'platform',
+        title: 'Platform Domains',
+        icon: 'dns',
+        note: `Auto-provisioned under ${PLATFORM_ROOT_SUFFIX}.`,
+        rows: platform.map(s => ({ signal: s, nested: false, context: false })),
+      });
+    }
+
+    const unlinked = signals
+      .filter(s => s.role === 'subdomain' && s.kind === 'custom' && (!s.parentDomainId || !rootIds.has(s.parentDomainId)) && visibleSet.has(s.id))
+      .sort((a, b) => a.hostname.localeCompare(b.hostname));
+    if (unlinked.length > 0) {
+      groups.push({
+        key: 'unlinked',
+        kind: 'unlinked',
+        title: 'Unlinked / Legacy Subdomains',
+        icon: 'link_off',
+        note: 'No resolvable parent root on record.',
+        rows: unlinked.map(s => ({ signal: s, nested: false, context: false })),
+      });
+    }
+
+    // Safety net — any matching signal not yet placed (defensive against unusual
+    // role/kind combinations) so a match can never be silently dropped.
+    const placed = new Set<string>();
+    groups.forEach(g => g.rows.forEach(r => { if (!r.context) placed.add(r.signal.id); }));
+    const leftover = visible.filter(s => !placed.has(s.id)).sort((a, b) => a.hostname.localeCompare(b.hostname));
+    if (leftover.length > 0) {
+      groups.push({
+        key: 'other',
+        kind: 'unlinked',
+        title: 'Other Domains',
+        icon: 'help',
+        rows: leftover.map(s => ({ signal: s, nested: false, context: false })),
+      });
+    }
+
+    return groups;
+  }, [signals, visible]);
 
   const today = new Date().toISOString().slice(0, 10);
 
@@ -525,83 +619,125 @@ const DomainsPage: React.FC = () => {
         </div>
       )}
 
-      <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
-        {/* Toolbar: search + filters */}
-        <div className="px-6 py-5 border-b border-slate-100 space-y-4">
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="relative flex-1 min-w-[200px]">
-              <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-lg">search</span>
-              <input
-                value={filters.search}
-                onChange={e => patchFilter({ search: e.target.value })}
-                placeholder="Search hostname or tenant…"
-                className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700 placeholder:text-slate-400 placeholder:font-medium"
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+        {/* Left — Domain Portfolio */}
+        <div className="lg:col-span-7 bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
+          {/* Toolbar: search + filters */}
+          <div className="px-6 py-5 border-b border-slate-100 space-y-4">
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="relative flex-1 min-w-[200px]">
+                <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-lg">search</span>
+                <input
+                  value={filters.search}
+                  onChange={e => patchFilter({ search: e.target.value })}
+                  placeholder="Search hostname or tenant…"
+                  className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700 placeholder:text-slate-400 placeholder:font-medium"
+                />
+              </div>
+              <FilterSelect label="Kind" value={filters.kind} onChange={v => patchFilter({ kind: v as KindFilter })} options={[['all', 'All kinds'], ['subdomain', 'Subdomain'], ['custom', 'Custom']]} />
+              <FilterSelect label="SSL" value={filters.ssl} onChange={v => patchFilter({ ssl: v as SslFilter })} options={[['all', 'All SSL'], ...(Object.keys(DOMAIN_SSL_READINESS_LABELS) as DomainSslReadiness[]).map(k => [k, DOMAIN_SSL_READINESS_LABELS[k]] as [string, string])]} />
+              <FilterSelect label="Risk" value={filters.risk} onChange={v => patchFilter({ risk: v as RiskFilter })} options={[['all', 'All'], ['needs_action', 'Needs action'], ['at_risk', 'At risk']]} />
+            </div>
+
+            {/* Lifecycle tabs */}
+            <div className="flex flex-wrap gap-2">
+              <Tab label="All" count={countWith({ lifecycle: 'all' })} active={filters.lifecycle === 'all'} onClick={() => patchFilter({ lifecycle: 'all' })} />
+              {LIFECYCLE_TABS.map(lc => (
+                <Tab key={lc} label={DOMAIN_LIFECYCLE_LABELS[lc]} count={countWith({ lifecycle: lc })} active={filters.lifecycle === lc} onClick={() => patchFilter({ lifecycle: lc })} />
+              ))}
+            </div>
+
+            {/* Active filter chips — no invisible filters */}
+            {activeChips.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Active:</span>
+                {activeChips.map(c => (
+                  <button key={c.key} onClick={() => clearChip(c.key)} className="group inline-flex items-center gap-1.5 px-3 py-1 bg-primary/10 text-primary border border-primary/20 rounded-full text-[10px] font-black uppercase tracking-widest hover:bg-primary/20 transition-all cursor-pointer">
+                    {c.label}
+                    <span className="material-symbols-outlined text-[13px] group-hover:scale-110 transition-transform">close</span>
+                  </button>
+                ))}
+                <button onClick={clearAll} className="text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-slate-600 underline cursor-pointer">Clear all</button>
+              </div>
+            )}
+          </div>
+
+          {/* Grouped portfolio — roots as parents, subdomains nested */}
+          <div className="px-4 py-4">
+            <div className="flex items-center justify-between px-2 pb-3">
+              <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Domain Portfolio</span>
+              <span className="text-[10px] font-bold text-slate-400">{visible.length} matching</span>
+            </div>
+            {portfolioGroups.length === 0 ? (
+              <div className="px-8 py-12 text-center text-slate-400 text-sm font-bold">
+                {signals.length === 0 ? 'No domain records yet.' : 'No domain records match the active filters.'}
+              </div>
+            ) : (
+              <div className="space-y-5 max-h-[calc(100vh-22rem)] overflow-y-auto pr-1">
+                {portfolioGroups.map(group => (
+                  <div key={group.key} className="space-y-2">
+                    {group.title && (
+                      <div className="flex items-center gap-2 px-1">
+                        <span className="material-symbols-outlined text-sm text-slate-400">{group.icon}</span>
+                        <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">{group.title}</span>
+                        {group.note && <span className="text-[10px] font-medium text-slate-400">· {group.note}</span>}
+                      </div>
+                    )}
+                    <div className="space-y-2">
+                      {group.rows.map(r => (
+                        <PortfolioRow
+                          key={r.signal.id}
+                          s={r.signal}
+                          tenant={tenantName(r.signal.tenantId)}
+                          selected={selectedId === r.signal.id}
+                          nested={r.nested}
+                          context={r.context}
+                          onSelect={() => setSelectedId(r.signal.id)}
+                        />
+                      ))}
+                      {/* Note renders in exactly one slot by construction: the
+                          header above when the group is titled, here when it is
+                          not (root groups have no title) — never both. */}
+                      {!group.title && group.note && (
+                        <p className="ml-5 px-2 text-[10px] font-medium text-slate-400">{group.note}</p>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Right — Domain Control Panel (desktop persistent pane) */}
+        <div className="hidden lg:block lg:col-span-5 lg:sticky lg:top-6 self-start">
+          {selected && selectedSignal ? (
+            <div className="bg-white rounded-[2.5rem] border border-slate-200 shadow-sm overflow-hidden max-h-[calc(100vh-6rem)] overflow-y-auto">
+              <DomainControlPanel
+                selected={selected}
+                signal={selectedSignal}
+                domains={domains}
+                canManage={canManage}
+                tenantName={tenantName}
+                history={selectedHistory}
+                copied={copied}
+                onCopy={copy}
+                onSelect={setSelectedId}
+                onSetStatus={setStatus}
+                onSetSsl={setSsl}
+                onReenable={reenable}
+                onConfirmDisable={setConfirmDisable}
+                onClose={() => setSelectedId(null)}
               />
             </div>
-            <FilterSelect label="Kind" value={filters.kind} onChange={v => patchFilter({ kind: v as KindFilter })} options={[['all', 'All kinds'], ['subdomain', 'Subdomain'], ['custom', 'Custom']]} />
-            <FilterSelect label="SSL" value={filters.ssl} onChange={v => patchFilter({ ssl: v as SslFilter })} options={[['all', 'All SSL'], ...(Object.keys(DOMAIN_SSL_READINESS_LABELS) as DomainSslReadiness[]).map(k => [k, DOMAIN_SSL_READINESS_LABELS[k]] as [string, string])]} />
-            <FilterSelect label="Risk" value={filters.risk} onChange={v => patchFilter({ risk: v as RiskFilter })} options={[['all', 'All'], ['needs_action', 'Needs action'], ['at_risk', 'At risk']]} />
-          </div>
-
-          {/* Lifecycle tabs */}
-          <div className="flex flex-wrap gap-2">
-            <Tab label="All" count={countWith({ lifecycle: 'all' })} active={filters.lifecycle === 'all'} onClick={() => patchFilter({ lifecycle: 'all' })} />
-            {LIFECYCLE_TABS.map(lc => (
-              <Tab key={lc} label={DOMAIN_LIFECYCLE_LABELS[lc]} count={countWith({ lifecycle: lc })} active={filters.lifecycle === lc} onClick={() => patchFilter({ lifecycle: lc })} />
-            ))}
-          </div>
-
-          {/* Active filter chips — no invisible filters */}
-          {activeChips.length > 0 && (
-            <div className="flex flex-wrap items-center gap-2 pt-1">
-              <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Active:</span>
-              {activeChips.map(c => (
-                <button key={c.key} onClick={() => clearChip(c.key)} className="group inline-flex items-center gap-1.5 px-3 py-1 bg-primary/10 text-primary border border-primary/20 rounded-full text-[10px] font-black uppercase tracking-widest hover:bg-primary/20 transition-all cursor-pointer">
-                  {c.label}
-                  <span className="material-symbols-outlined text-[13px] group-hover:scale-110 transition-transform">close</span>
-                </button>
-              ))}
-              <button onClick={clearAll} className="text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-slate-600 underline cursor-pointer">Clear all</button>
+          ) : (
+            <div className="bg-white/60 backdrop-blur-xl rounded-[2.5rem] border border-dashed border-slate-300 p-12 text-center shadow-sm">
+              <span className="material-symbols-outlined text-4xl text-slate-300">dns</span>
+              <p className="mt-3 text-sm font-black text-slate-600 uppercase tracking-widest">No domain selected</p>
+              <p className="mt-2 text-xs font-bold text-slate-400 max-w-xs mx-auto">Select a domain to manage DNS readiness, SSL readiness, relationships, checklist, and history.</p>
             </div>
           )}
         </div>
-
-        <table className="w-full text-left border-collapse">
-          <thead>
-            <tr className="border-b border-slate-100 bg-slate-50/50">
-              <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Hostname</th>
-              <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Tenant</th>
-              <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Role</th>
-              <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Kind</th>
-              <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Lifecycle</th>
-              <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">SSL</th>
-              <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Next action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {visible.map(s => (
-              <tr key={s.id} onClick={() => setSelectedId(s.id)} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/70 transition-colors cursor-pointer">
-                <td className="px-6 py-3.5 text-sm font-bold text-slate-900">
-                  <div className="flex items-center gap-2">
-                    {s.hostname}
-                    {s.issueCount > 0 && <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500/15 text-red-700 text-[9px] font-black">{s.issueCount}</span>}
-                  </div>
-                </td>
-                <td className="px-6 py-3.5 text-sm font-bold text-slate-700">{tenantName(s.tenantId)}</td>
-                <td className="px-6 py-3.5"><span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${s.role === 'root' ? 'bg-indigo-500/10 text-indigo-700 border-indigo-500/20' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>{DOMAIN_ROLE_LABELS[s.role]}</span></td>
-                <td className="px-6 py-3.5"><span className="px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg bg-slate-100 text-slate-600 border border-slate-200">{s.kind}</span></td>
-                <td className="px-6 py-3.5"><span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${LIFECYCLE_STYLES[s.lifecycle]}`}>{s.lifecycleLabel}</span></td>
-                <td className="px-6 py-3.5"><span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${SSL_READINESS_STYLES[s.sslReadiness]}`}>{s.sslReadinessLabel}</span></td>
-                <td className="px-6 py-3.5 text-xs font-bold text-slate-500">{s.nextAction}</td>
-              </tr>
-            ))}
-            {visible.length === 0 && (
-              <tr><td colSpan={7} className="px-8 py-12 text-center text-slate-400 text-sm font-bold">
-                {signals.length === 0 ? 'No domain records yet.' : 'No domain records match the active filters.'}
-              </td></tr>
-            )}
-          </tbody>
-        </table>
       </div>
 
       {/* Add modal */}
@@ -732,231 +868,28 @@ const DomainsPage: React.FC = () => {
         )}
       </AnimatePresence>
 
-      {/* Detail drawer */}
+      {/* Detail control panel — mobile slide-over (desktop uses the right pane) */}
       <AnimatePresence>
         {selected && selectedSignal && (
-          <div className="fixed inset-0 z-50 flex justify-end">
+          <div className="fixed inset-0 z-50 flex justify-end lg:hidden">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setSelectedId(null)} className="absolute inset-0 bg-slate-900/30 backdrop-blur-sm" />
             <motion.div initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }} transition={{ type: 'spring', damping: 28, stiffness: 280 }} className="relative w-full max-w-md h-full bg-white shadow-2xl border-l border-slate-200 overflow-y-auto">
-              <div className="p-7 border-b border-slate-100 flex justify-between items-start">
-                <div className="flex-1 pr-4">
-                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Domain</p>
-                  <h3 className="text-lg font-black text-primary mt-1 break-all">{selected.hostname}</h3>
-                  <p className="text-xs text-slate-500 font-bold mt-1">{tenantName(selected.tenantId)} · {selected.kind}</p>
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${selectedSignal.role === 'root' ? 'bg-indigo-500/10 text-indigo-700 border-indigo-500/20' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>{DOMAIN_ROLE_LABELS[selectedSignal.role]}</span>
-                    <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${LIFECYCLE_STYLES[selectedSignal.lifecycle]}`}>{selectedSignal.lifecycleLabel}</span>
-                    <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${SSL_READINESS_STYLES[selectedSignal.sslReadiness]}`}>SSL: {selectedSignal.sslReadinessLabel}</span>
-                  </div>
-                </div>
-                <button onClick={() => setSelectedId(null)} className="w-9 h-9 rounded-full hover:bg-slate-100 flex items-center justify-center text-slate-400">
-                  <span className="material-symbols-outlined text-base">close</span>
-                </button>
-              </div>
-
-              <div className="p-7 space-y-6">
-                {/* Next action */}
-                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Next recommended action</p>
-                  <p className="text-sm font-black text-slate-800">{selectedSignal.nextAction}</p>
-                </div>
-
-                {/* Root Domain Management / Subdomain Details — root shows its managed
-                    children; subdomain shows its parent + the inherited relationship. */}
-                <div>
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">{selectedSignal.role === 'root' ? 'Root domain management' : 'Subdomain details'}</p>
-                  {selectedSignal.role === 'subdomain' && (
-                    <div className="mb-2 px-3 py-2.5 rounded-xl bg-indigo-500/5 border border-indigo-500/15">
-                      <p className="text-[11px] font-bold text-indigo-700">This subdomain's hostname is generated from its editable label plus its locked root domain.</p>
-                      <p className="text-[10px] font-medium text-slate-500 mt-1">It inherits routing and SSL handling from its root — the root domain cannot be edited here.</p>
-                    </div>
-                  )}
-                  {selectedSignal.role === 'root' ? (
-                    (() => {
-                      const children = domains.filter(c => c.parentDomainId === selected.id);
-                      if (children.length === 0) {
-                        return <p className="text-[11px] font-bold text-slate-400 px-3 py-2 bg-slate-50 border border-dashed border-slate-200 rounded-xl">No subdomains attached under this root yet.</p>;
-                      }
-                      return (
-                        <div className="space-y-1.5">
-                          <p className="text-[10px] font-bold text-slate-500">{children.length} managed subdomain{children.length === 1 ? '' : 's'}:</p>
-                          {children.map(c => (
-                            <button key={c.id} onClick={() => setSelectedId(c.id)} className="w-full text-left flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 bg-white hover:border-primary/40 hover:bg-primary/5 transition-all cursor-pointer">
-                              <span className="material-symbols-outlined text-sm text-slate-400">subdirectory_arrow_right</span>
-                              <span className="text-[11px] font-bold text-slate-700 break-all flex-1">{c.hostname}</span>
-                              <span className="material-symbols-outlined text-sm text-slate-300">chevron_right</span>
-                            </button>
-                          ))}
-                        </div>
-                      );
-                    })()
-                  ) : (() => {
-                    const managedParent = selected.parentDomainId ? domains.find(p => p.id === selected.parentDomainId) || null : null;
-                    if (managedParent) {
-                      return (
-                        <button onClick={() => setSelectedId(managedParent.id)} className="w-full text-left flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 bg-white hover:border-primary/40 hover:bg-primary/5 transition-all cursor-pointer">
-                          <span className="material-symbols-outlined text-sm text-indigo-500">arrow_upward</span>
-                          <span className="text-[11px] font-bold text-slate-700 break-all flex-1">Parent root: {managedParent.hostname}</span>
-                          <span className="material-symbols-outlined text-sm text-slate-300">chevron_right</span>
-                        </button>
-                      );
-                    }
-                    const platformRoot = deriveParentRootHostname(selected);
-                    if (platformRoot) {
-                      return (
-                        <div className="flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 bg-slate-50">
-                          <span className="material-symbols-outlined text-sm text-slate-400">arrow_upward</span>
-                          <span className="text-[11px] font-bold text-slate-600 break-all flex-1">Platform root: {platformRoot}</span>
-                          <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">Shared</span>
-                        </div>
-                      );
-                    }
-                    return <p className="text-[11px] font-bold text-slate-400 px-3 py-2 bg-slate-50 border border-dashed border-slate-200 rounded-xl">No managed parent root on record for this subdomain.</p>;
-                  })()}
-                </div>
-
-                {/* Risk reasons */}
-                {selectedSignal.riskReasons.length > 0 && (
-                  <div>
-                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Readiness signals</p>
-                    <div className="space-y-1.5">
-                      {selectedSignal.riskReasons.map(r => (
-                        <div key={r.code} className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-[11px] font-bold ${r.tone === 'critical' ? 'bg-red-500/10 text-red-700 border-red-500/20' : r.tone === 'warn' ? 'bg-amber-400/10 text-amber-700 border-amber-400/20' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
-                          <span className="material-symbols-outlined text-sm">{r.tone === 'critical' ? 'error' : r.tone === 'warn' ? 'warning' : 'info'}</span>
-                          {r.label}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Security & readiness — DNS readiness + SSL (live), plus future
-                    registrar-level indicators shown as placeholders only. */}
-                <div>
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Security &amp; readiness</p>
-                  <div className="space-y-1.5">
-                    <ReadinessRow label="DNS configuration" state={DNS_READINESS_TONE[selectedSignal.dnsReadiness]} valueLabel={selectedSignal.dnsReadinessLabel} />
-                    {selectedSignal.securityIndicators.map(ind => (
-                      <ReadinessRow
-                        key={ind.key}
-                        label={ind.label}
-                        state={SECURITY_STATE_TONE[ind.state]}
-                        valueLabel={SECURITY_READINESS_LABELS[ind.state]}
-                        detail={ind.detail}
-                        future={ind.future}
-                      />
-                    ))}
-                  </div>
-                  <p className="text-[10px] text-slate-400 font-medium mt-2">{DOMAIN_TRUTH_LABELS.futureSecurity}</p>
-                </div>
-
-                {/* Manual action checklist — read-only guidance, no automation */}
-                <div>
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Action checklist</p>
-                  <div className="space-y-1.5">
-                    {selectedSignal.checklist.map(item => (
-                      <div key={item.key} className="flex items-start gap-2.5 px-3 py-2 rounded-xl border border-slate-100 bg-slate-50/60">
-                        <span className={`material-symbols-outlined text-base mt-px ${CHECKLIST_TONE[item.state].icon}`}>{CHECKLIST_TONE[item.state].symbol}</span>
-                        <div className="flex-1">
-                          <p className={`text-[11px] font-bold ${item.state === 'done' ? 'text-slate-400 line-through' : 'text-slate-700'}`}>{item.label}</p>
-                          {item.hint && <p className="text-[10px] font-medium text-slate-400 mt-0.5">{item.hint}</p>}
-                        </div>
-                        {item.state === 'current' && <span className="text-[9px] font-black uppercase tracking-widest text-primary shrink-0 mt-0.5">Now</span>}
-                      </div>
-                    ))}
-                  </div>
-                  <p className="text-[10px] text-slate-400 font-medium mt-2">{DOMAIN_TRUTH_LABELS.manual}</p>
-                </div>
-
-                {/* Registrar vs. app configuration explanation */}
-                <div className="px-3 py-2.5 rounded-xl bg-amber-400/5 border border-amber-400/20">
-                  <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest mb-1 flex items-center gap-1"><span className="material-symbols-outlined text-[13px]">dns</span> Registrar &amp; DNS provider</p>
-                  <p className="text-[11px] font-bold text-slate-600">{DOMAIN_TRUTH_LABELS.registrarExternal}</p>
-                </div>
-
-                {/* Manual status workflow */}
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Status</label>
-                    {selected.status === 'disabled' ? (
-                      // Disabling and re-enabling are confirmed/explicit actions, never a
-                      // silent select change — so a disabled record shows a static badge
-                      // and is restored only via the Re-enable quick action.
-                      <div className="w-full px-3 py-2 bg-slate-100 border border-slate-200 rounded-xl text-xs font-black uppercase tracking-widest text-slate-500">Disabled</div>
-                    ) : (
-                      <select disabled={!canManage} value={selected.status} onChange={e => setStatus(selected, e.target.value as DomainStatus)} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 disabled:opacity-50">
-                        {(['pending', 'verifying', 'verified', 'failed'] as DomainStatus[]).map(s => (
-                          <option key={s} value={s}>{STATUS_LABELS[s]}</option>
-                        ))}
-                      </select>
-                    )}
-                  </div>
-                  <div>
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">SSL</label>
-                    <select disabled={!canManage} value={selected.ssl} onChange={e => setSsl(selected, e.target.value as DomainSslStatus)} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 disabled:opacity-50">
-                      {(['none', 'pending', 'active', 'failed'] as DomainSslStatus[]).map(s => <option key={s} value={s}>{s}</option>)}
-                    </select>
-                  </div>
-                </div>
-
-                {/* Required DNS records */}
-                {selectedSignal.requiredRecords.length > 0 && (
-                  <div>
-                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Required DNS records</p>
-                    <p className="text-[11px] text-amber-700 font-bold mb-3">Configure these at the customer's DNS provider, then mark this record verified once you've manually confirmed propagation. <span className="font-medium text-slate-500">{DOMAIN_TRUTH_LABELS.manual}</span></p>
-                    <div className="space-y-2">
-                      {selectedSignal.requiredRecords.map((rec, i) => (
-                        <DnsBlock key={i} type={rec.type} host={rec.host} value={rec.value} purpose={rec.purpose} onCopy={() => copy(formatDnsRecord(rec), `rec${i}`)} copied={copied === `rec${i}`} />
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Quick actions */}
-                {canManage && (
-                  <div className="space-y-2 pt-2 border-t border-slate-100">
-                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Quick actions</p>
-                    <div className="flex flex-wrap gap-2">
-                      <button onClick={() => setStatus(selected, 'verified')} disabled={selected.status === 'verified'} className="px-3 py-2 text-[10px] font-black uppercase tracking-widest bg-lime-400/10 text-lime-700 border border-lime-400/20 rounded-xl disabled:opacity-40 hover:bg-lime-400/20 transition-all">Mark Verified</button>
-                      <button onClick={() => setStatus(selected, 'verifying')} disabled={selected.status === 'verifying'} className="px-3 py-2 text-[10px] font-black uppercase tracking-widest bg-blue-400/10 text-blue-700 border border-blue-400/20 rounded-xl disabled:opacity-40 hover:bg-blue-400/20 transition-all">Mark Pending</button>
-                      <button onClick={() => setStatus(selected, 'failed')} disabled={selected.status === 'failed'} className="px-3 py-2 text-[10px] font-black uppercase tracking-widest bg-red-500/10 text-red-700 border border-red-500/30 rounded-xl disabled:opacity-40 hover:bg-red-500/20 transition-all">Mark Failed</button>
-                      {selected.status !== 'disabled' ? (
-                        <button onClick={() => setConfirmDisable(selected)} className="px-3 py-2 text-[10px] font-black uppercase tracking-widest bg-slate-100 text-slate-600 border border-slate-200 rounded-xl hover:bg-slate-200 transition-all">Disable</button>
-                      ) : (
-                        <button onClick={() => reenable(selected)} className="px-3 py-2 text-[10px] font-black uppercase tracking-widest bg-blue-400/10 text-blue-700 border border-blue-400/20 rounded-xl hover:bg-blue-400/20 transition-all">Re-enable</button>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {/* History */}
-                <div className="pt-2 border-t border-slate-100">
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">History</p>
-                  {selectedHistory.length === 0 ? (
-                    <p className="text-[11px] font-bold text-slate-400">No recorded history for this domain.</p>
-                  ) : (
-                    <div className="space-y-2">
-                      {selectedHistory.map((e, i) => (
-                        <div key={i} className="flex items-start gap-2 text-[11px]">
-                          <span className="font-mono text-slate-400 whitespace-nowrap">{e.date}</span>
-                          <div>
-                            <span className="font-black text-slate-700">{e.action}</span>
-                            <span className="text-slate-400"> · {e.actor}</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                <div className="text-[10px] text-slate-400 grid grid-cols-2 gap-2 pt-4 border-t border-slate-100">
-                  <div>Created: <span className="font-bold text-slate-600">{selected.createdAt}</span></div>
-                  <div>Verified: <span className="font-bold text-slate-600">{selected.verifiedAt || '—'}</span></div>
-                  <div className="col-span-2">Last checked: <span className="font-bold text-slate-600">{selected.lastCheckedAt || '—'}</span></div>
-                  <div className="col-span-2 font-mono">id: {selected.id}</div>
-                  <div className="col-span-2 text-slate-400 font-medium">{selectedSignal.truthLabel}</div>
-                </div>
-              </div>
+              <DomainControlPanel
+                selected={selected}
+                signal={selectedSignal}
+                domains={domains}
+                canManage={canManage}
+                tenantName={tenantName}
+                history={selectedHistory}
+                copied={copied}
+                onCopy={copy}
+                onSelect={setSelectedId}
+                onSetStatus={setStatus}
+                onSetSsl={setSsl}
+                onReenable={reenable}
+                onConfirmDisable={setConfirmDisable}
+                onClose={() => setSelectedId(null)}
+              />
             </motion.div>
           </div>
         )}
@@ -964,6 +897,294 @@ const DomainsPage: React.FC = () => {
     </div>
   );
 };
+
+// Left-pane portfolio row — compact summary of one domain (hostname, role,
+// lifecycle, SSL, risk, next action). `context` renders a muted parent root that
+// is only shown to keep a matching child's relationship understandable.
+const PortfolioRow: React.FC<{
+  s: DomainReadinessSignal;
+  tenant: string;
+  selected: boolean;
+  nested: boolean;
+  context: boolean;
+  onSelect: () => void;
+}> = ({ s, tenant, selected, nested, context, onSelect }) => (
+  <button
+    onClick={onSelect}
+    className={`w-full text-left rounded-2xl border px-4 py-3 transition-all cursor-pointer active:scale-[0.99] ${nested ? 'ml-5' : ''} ${
+      selected
+        ? 'border-primary ring-2 ring-primary/20 bg-primary/5'
+        : context
+        ? 'border-dashed border-slate-200 bg-slate-50/50 opacity-70 hover:opacity-100'
+        : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50/70'
+    }`}
+  >
+    <div className="flex items-center gap-2">
+      {nested && <span className="material-symbols-outlined text-sm text-slate-300">subdirectory_arrow_right</span>}
+      <span className="text-sm font-bold text-slate-900 break-all flex-1">{s.hostname}</span>
+      {context && <span className="px-1.5 py-0.5 rounded-md text-[8px] font-black uppercase tracking-widest bg-slate-200 text-slate-500">Context</span>}
+      {s.issueCount > 0 && <span className="inline-flex items-center justify-center min-w-[16px] h-4 px-1 rounded-full bg-red-500/15 text-red-700 text-[9px] font-black">{s.issueCount}</span>}
+    </div>
+    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+      <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${s.role === 'root' ? 'bg-indigo-500/10 text-indigo-700 border-indigo-500/20' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>{DOMAIN_ROLE_LABELS[s.role]}</span>
+      <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${LIFECYCLE_STYLES[s.lifecycle]}`}>{s.lifecycleLabel}</span>
+      <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${SSL_READINESS_STYLES[s.sslReadiness]}`}>SSL: {s.sslReadinessLabel}</span>
+      {s.needsAction && <span className="px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border bg-amber-400/10 text-amber-700 border-amber-400/20">Needs action</span>}
+      <span className="text-[10px] font-bold text-slate-400">· {tenant}</span>
+    </div>
+    <p className="mt-1 text-[10px] font-bold text-slate-400 truncate">{s.nextAction}</p>
+  </button>
+);
+
+// Right-pane (and mobile slide-over) control panel for the selected domain.
+// Renders the full operator surface: next action, root/subdomain relationships,
+// readiness signals, security, checklist, registrar note, manual status/SSL
+// workflow, required DNS records, quick actions, history, and metadata.
+interface DomainControlPanelProps {
+  selected: TenantDomainRecord;
+  signal: DomainReadinessSignal;
+  domains: TenantDomainRecord[];
+  canManage: boolean;
+  tenantName: (id: string) => string;
+  history: { id: string; date: string; actor: string; action: string }[];
+  copied: string | null;
+  onCopy: (text: string, key: string) => void;
+  onSelect: (id: string) => void;
+  onSetStatus: (d: TenantDomainRecord, next: DomainStatus) => void;
+  onSetSsl: (d: TenantDomainRecord, next: DomainSslStatus) => void;
+  onReenable: (d: TenantDomainRecord) => void;
+  onConfirmDisable: (d: TenantDomainRecord) => void;
+  onClose?: () => void;
+}
+
+const DomainControlPanel: React.FC<DomainControlPanelProps> = ({
+  selected, signal, domains, canManage, tenantName, history, copied,
+  onCopy, onSelect, onSetStatus, onSetSsl, onReenable, onConfirmDisable, onClose,
+}) => (
+  <>
+    <div className="p-7 border-b border-slate-100 flex justify-between items-start">
+      <div className="flex-1 pr-4">
+        <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Domain</p>
+        <h3 className="text-lg font-black text-primary mt-1 break-all">{selected.hostname}</h3>
+        <p className="text-xs text-slate-500 font-bold mt-1">{tenantName(selected.tenantId)} · {selected.kind}</p>
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${signal.role === 'root' ? 'bg-indigo-500/10 text-indigo-700 border-indigo-500/20' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>{DOMAIN_ROLE_LABELS[signal.role]}</span>
+          <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${LIFECYCLE_STYLES[signal.lifecycle]}`}>{signal.lifecycleLabel}</span>
+          <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${SSL_READINESS_STYLES[signal.sslReadiness]}`}>SSL: {signal.sslReadinessLabel}</span>
+        </div>
+      </div>
+      {onClose && (
+        <button onClick={onClose} className="w-9 h-9 rounded-full hover:bg-slate-100 flex items-center justify-center text-slate-400 shrink-0 cursor-pointer">
+          <span className="material-symbols-outlined text-base">close</span>
+        </button>
+      )}
+    </div>
+
+    <div className="p-7 space-y-6">
+      {/* Next action */}
+      <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
+        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Next recommended action</p>
+        <p className="text-sm font-black text-slate-800">{signal.nextAction}</p>
+      </div>
+
+      {/* Root Domain Management / Subdomain Management — root shows its managed
+          children; subdomain shows its parent + the inherited relationship. */}
+      <div>
+        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">{signal.role === 'root' ? 'Root Domain Management' : 'Subdomain Management'}</p>
+        {signal.role === 'subdomain' && (
+          <div className="mb-2 px-3 py-2.5 rounded-xl bg-indigo-500/5 border border-indigo-500/15">
+            <p className="text-[11px] font-bold text-indigo-700">Subdomain hostname is generated from an editable label plus a locked root domain.</p>
+            <p className="text-[10px] font-medium text-slate-500 mt-1">It inherits routing and SSL handling from its root — the root domain cannot be edited here.</p>
+          </div>
+        )}
+        {signal.role === 'root' ? (
+          (() => {
+            const children = domains.filter(c => c.parentDomainId === selected.id);
+            if (children.length === 0) {
+              return <p className="text-[11px] font-bold text-slate-400 px-3 py-2 bg-slate-50 border border-dashed border-slate-200 rounded-xl">No subdomains attached to this root domain yet.</p>;
+            }
+            return (
+              <div className="space-y-1.5">
+                <p className="text-[10px] font-bold text-slate-500">{children.length} managed subdomain{children.length === 1 ? '' : 's'}:</p>
+                {children.map(c => (
+                  <button key={c.id} onClick={() => onSelect(c.id)} className="w-full text-left flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 bg-white hover:border-primary/40 hover:bg-primary/5 transition-all cursor-pointer">
+                    <span className="material-symbols-outlined text-sm text-slate-400">subdirectory_arrow_right</span>
+                    <span className="text-[11px] font-bold text-slate-700 break-all flex-1">{c.hostname}</span>
+                    <span className="material-symbols-outlined text-sm text-slate-300">chevron_right</span>
+                  </button>
+                ))}
+              </div>
+            );
+          })()
+        ) : (() => {
+          const managedParent = selected.parentDomainId ? domains.find(p => p.id === selected.parentDomainId) || null : null;
+          if (managedParent) {
+            return (
+              <button onClick={() => onSelect(managedParent.id)} className="w-full text-left flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 bg-white hover:border-primary/40 hover:bg-primary/5 transition-all cursor-pointer">
+                <span className="material-symbols-outlined text-sm text-indigo-500">arrow_upward</span>
+                <span className="text-[11px] font-bold text-slate-700 break-all flex-1">Parent root: {managedParent.hostname}</span>
+                <span className="material-symbols-outlined text-sm text-slate-300">chevron_right</span>
+              </button>
+            );
+          }
+          const platformRoot = deriveParentRootHostname(selected);
+          if (platformRoot) {
+            return (
+              <div className="flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 bg-slate-50">
+                <span className="material-symbols-outlined text-sm text-slate-400">arrow_upward</span>
+                <span className="text-[11px] font-bold text-slate-600 break-all flex-1">Platform root: {platformRoot}</span>
+                <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">Shared</span>
+              </div>
+            );
+          }
+          return <p className="text-[11px] font-bold text-slate-400 px-3 py-2 bg-slate-50 border border-dashed border-slate-200 rounded-xl">No managed parent root on record for this subdomain.</p>;
+        })()}
+      </div>
+
+      {/* Risk reasons */}
+      {signal.riskReasons.length > 0 && (
+        <div>
+          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Readiness signals</p>
+          <div className="space-y-1.5">
+            {signal.riskReasons.map(r => (
+              <div key={r.code} className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-[11px] font-bold ${r.tone === 'critical' ? 'bg-red-500/10 text-red-700 border-red-500/20' : r.tone === 'warn' ? 'bg-amber-400/10 text-amber-700 border-amber-400/20' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
+                <span className="material-symbols-outlined text-sm">{r.tone === 'critical' ? 'error' : r.tone === 'warn' ? 'warning' : 'info'}</span>
+                {r.label}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Security & readiness — DNS readiness + SSL (live), plus future
+          registrar-level indicators shown as placeholders only. */}
+      <div>
+        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Security &amp; readiness</p>
+        <div className="space-y-1.5">
+          <ReadinessRow label="DNS configuration" state={DNS_READINESS_TONE[signal.dnsReadiness]} valueLabel={signal.dnsReadinessLabel} />
+          {signal.securityIndicators.map(ind => (
+            <ReadinessRow
+              key={ind.key}
+              label={ind.label}
+              state={SECURITY_STATE_TONE[ind.state]}
+              valueLabel={SECURITY_READINESS_LABELS[ind.state]}
+              detail={ind.detail}
+              future={ind.future}
+            />
+          ))}
+        </div>
+        <p className="text-[10px] text-slate-400 font-medium mt-2">{DOMAIN_TRUTH_LABELS.futureSecurity}</p>
+      </div>
+
+      {/* Manual action checklist — read-only guidance, no automation */}
+      <div>
+        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Action checklist</p>
+        <div className="space-y-1.5">
+          {signal.checklist.map(item => (
+            <div key={item.key} className="flex items-start gap-2.5 px-3 py-2 rounded-xl border border-slate-100 bg-slate-50/60">
+              <span className={`material-symbols-outlined text-base mt-px ${CHECKLIST_TONE[item.state].icon}`}>{CHECKLIST_TONE[item.state].symbol}</span>
+              <div className="flex-1">
+                <p className={`text-[11px] font-bold ${item.state === 'done' ? 'text-slate-400 line-through' : 'text-slate-700'}`}>{item.label}</p>
+                {item.hint && <p className="text-[10px] font-medium text-slate-400 mt-0.5">{item.hint}</p>}
+              </div>
+              {item.state === 'current' && <span className="text-[9px] font-black uppercase tracking-widest text-primary shrink-0 mt-0.5">Now</span>}
+            </div>
+          ))}
+        </div>
+        <p className="text-[10px] text-slate-400 font-medium mt-2">{DOMAIN_TRUTH_LABELS.manual}</p>
+      </div>
+
+      {/* Registrar vs. app configuration explanation */}
+      <div className="px-3 py-2.5 rounded-xl bg-amber-400/5 border border-amber-400/20">
+        <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest mb-1 flex items-center gap-1"><span className="material-symbols-outlined text-[13px]">dns</span> Registrar &amp; DNS provider</p>
+        <p className="text-[11px] font-bold text-slate-600">{DOMAIN_TRUTH_LABELS.registrarExternal}</p>
+      </div>
+
+      {/* Manual status workflow */}
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Status</label>
+          {selected.status === 'disabled' ? (
+            // Disabling and re-enabling are confirmed/explicit actions, never a
+            // silent select change — so a disabled record shows a static badge
+            // and is restored only via the Re-enable quick action.
+            <div className="w-full px-3 py-2 bg-slate-100 border border-slate-200 rounded-xl text-xs font-black uppercase tracking-widest text-slate-500">Disabled</div>
+          ) : (
+            <select disabled={!canManage} value={selected.status} onChange={e => onSetStatus(selected, e.target.value as DomainStatus)} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 disabled:opacity-50">
+              {(['pending', 'verifying', 'verified', 'failed'] as DomainStatus[]).map(s => (
+                <option key={s} value={s}>{STATUS_LABELS[s]}</option>
+              ))}
+            </select>
+          )}
+        </div>
+        <div>
+          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">SSL</label>
+          <select disabled={!canManage} value={selected.ssl} onChange={e => onSetSsl(selected, e.target.value as DomainSslStatus)} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 disabled:opacity-50">
+            {(['none', 'pending', 'active', 'failed'] as DomainSslStatus[]).map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {/* Required DNS records */}
+      {signal.requiredRecords.length > 0 && (
+        <div>
+          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Required DNS records</p>
+          <p className="text-[11px] text-amber-700 font-bold mb-3">Configure these at the customer's DNS provider, then mark this record verified once you've manually confirmed propagation. <span className="font-medium text-slate-500">{DOMAIN_TRUTH_LABELS.manual}</span></p>
+          <div className="space-y-2">
+            {signal.requiredRecords.map((rec, i) => (
+              <DnsBlock key={i} type={rec.type} host={rec.host} value={rec.value} purpose={rec.purpose} onCopy={() => onCopy(formatDnsRecord(rec), `rec${i}`)} copied={copied === `rec${i}`} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Quick actions */}
+      {canManage && (
+        <div className="space-y-2 pt-2 border-t border-slate-100">
+          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Quick actions</p>
+          <div className="flex flex-wrap gap-2">
+            <button onClick={() => onSetStatus(selected, 'verified')} disabled={selected.status === 'verified'} className="px-3 py-2 text-[10px] font-black uppercase tracking-widest bg-lime-400/10 text-lime-700 border border-lime-400/20 rounded-xl disabled:opacity-40 hover:bg-lime-400/20 transition-all cursor-pointer">Mark Verified</button>
+            <button onClick={() => onSetStatus(selected, 'verifying')} disabled={selected.status === 'verifying'} className="px-3 py-2 text-[10px] font-black uppercase tracking-widest bg-blue-400/10 text-blue-700 border border-blue-400/20 rounded-xl disabled:opacity-40 hover:bg-blue-400/20 transition-all cursor-pointer">Mark Pending</button>
+            <button onClick={() => onSetStatus(selected, 'failed')} disabled={selected.status === 'failed'} className="px-3 py-2 text-[10px] font-black uppercase tracking-widest bg-red-500/10 text-red-700 border border-red-500/30 rounded-xl disabled:opacity-40 hover:bg-red-500/20 transition-all cursor-pointer">Mark Failed</button>
+            {selected.status !== 'disabled' ? (
+              <button onClick={() => onConfirmDisable(selected)} className="px-3 py-2 text-[10px] font-black uppercase tracking-widest bg-slate-100 text-slate-600 border border-slate-200 rounded-xl hover:bg-slate-200 transition-all cursor-pointer">Disable</button>
+            ) : (
+              <button onClick={() => onReenable(selected)} className="px-3 py-2 text-[10px] font-black uppercase tracking-widest bg-blue-400/10 text-blue-700 border border-blue-400/20 rounded-xl hover:bg-blue-400/20 transition-all cursor-pointer">Re-enable</button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* History */}
+      <div className="pt-2 border-t border-slate-100">
+        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">History</p>
+        {history.length === 0 ? (
+          <p className="text-[11px] font-bold text-slate-400">No recorded history for this domain.</p>
+        ) : (
+          <div className="space-y-2">
+            {history.map((e, i) => (
+              <div key={i} className="flex items-start gap-2 text-[11px]">
+                <span className="font-mono text-slate-400 whitespace-nowrap">{e.date}</span>
+                <div>
+                  <span className="font-black text-slate-700">{e.action}</span>
+                  <span className="text-slate-400"> · {e.actor}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="text-[10px] text-slate-400 grid grid-cols-2 gap-2 pt-4 border-t border-slate-100">
+        <div>Created: <span className="font-bold text-slate-600">{selected.createdAt}</span></div>
+        <div>Verified: <span className="font-bold text-slate-600">{selected.verifiedAt || '—'}</span></div>
+        <div className="col-span-2">Last checked: <span className="font-bold text-slate-600">{selected.lastCheckedAt || '—'}</span></div>
+        <div className="col-span-2 font-mono">id: {selected.id}</div>
+        <div className="col-span-2 text-slate-400 font-medium">{signal.truthLabel}</div>
+      </div>
+    </div>
+  </>
+);
 
 const TruthLabel: React.FC<{ text: string; tone: 'amber' | 'slate' }> = ({ text, tone }) => (
   <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold border ${tone === 'amber' ? 'bg-amber-400/10 text-amber-700 border-amber-400/20' : 'bg-slate-100 text-slate-500 border-slate-200'}`}>
