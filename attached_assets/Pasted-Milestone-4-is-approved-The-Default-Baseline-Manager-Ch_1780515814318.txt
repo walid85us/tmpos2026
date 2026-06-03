@@ -1,0 +1,92 @@
+Milestone 4 is approved.
+
+The Default Baseline Manager + Change Review Center polish is acceptable and properly scoped.
+
+Confirmed acceptable:
+
+1. Customized Defaults card is accepted.
+
+* It makes maintained baseline overrides visible.
+* It clearly shows registry default → saved baseline diff.
+* High-risk customized defaults are clearly flagged.
+
+2. Change Review Center is accepted.
+
+* It summarizes all unsaved changes across groups.
+* It includes current settings and baseline changes.
+* It derives from unfiltered change sets, so search/lens filters cannot hide pending changes.
+* It correctly routes saving back through the existing group review modals.
+
+3. Configuration History / Audit entry point is accepted.
+
+* Recent Configuration Changes is read-only.
+* It uses mirrored audit rows.
+* It links to Audit & Security.
+* It does not emit new audit rows.
+
+4. Locked behavior is preserved.
+
+* Storage keys are unchanged.
+* Review & Save behavior is unchanged.
+* Reset-to-default behavior is unchanged.
+* High-risk acknowledgment remains enforced.
+* One audit row per confirmed group save remains unchanged.
+* edit_platform_settings still gates mutation.
+* No new permission keys were added.
+
+5. Scope discipline is accepted.
+
+* No runtime enforcement.
+* No notifications.
+* No SSO/SCIM.
+* No provider integrations.
+* No backend config service.
+* No server RBAC / PIM / PAM.
+* No Phase 1.3+ behavior.
+
+Please proceed to Milestone 5 — Documentation + Final Non-Regression Verification.
+
+For Milestone 5:
+
+* Think step by step before implementing.
+* Keep scope limited to documentation, final cross-surface verification, and final Phase 1.2E report.
+* Do not change Domains or Platform Settings behavior unless a small documentation-consistency or non-regression issue is found.
+* Do not implement new features.
+* Do not implement Phase 1.3, Phase 1.4, Phase 2, Phase 3, or Phase 4.
+* Keep replit.md concise.
+* Add the detailed Phase 1.2E M1–M5 history to docs/platform-operations-security-history.md.
+* Mark Phase 1.2E as done/pending acceptance.
+* Set next phase after acceptance as Phase 1.3 — Platform Team Governance.
+* Confirm no regressions to:
+
+  * Domains Control Panel
+  * Domains DNS / SSL / Security workspaces
+  * Platform Settings Control Center
+  * Default Baseline Manager
+  * Change Review Center
+  * Command Center Intelligence
+  * Support Queue / SLA / Macro Maturity
+  * Audit Investigation Center
+  * Escalation operating model
+  * Permission dependency auto-sync
+  * Add-on Governance
+  * Shipping
+  * Store Permissions Matrix
+  * Tenant provisioning
+  * paid override invoice workflow
+  * server PII logging rules
+
+Final report must use this structure:
+
+1. Implementation Status
+2. Phase 1.2E Milestone Summary
+3. Domains Control Panel Final State
+4. Domains DNS / SSL / Security Workspaces Final State
+5. Platform Settings Control Center Final State
+6. Default Baseline + Change Review Final State
+7. Documentation Updated
+8. Non-Regression Verification
+9. Files Changed
+10. Recommendation Before Manual QA
+
+Stop after the report and wait for manual QA.
