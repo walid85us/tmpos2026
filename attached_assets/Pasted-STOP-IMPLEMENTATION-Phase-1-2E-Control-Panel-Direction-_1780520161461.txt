@@ -1,0 +1,455 @@
+STOP IMPLEMENTATION — Phase 1.2E Control Panel Direction Is Not Accepted
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Status:
+Do not proceed with QA.
+Do not proceed to Phase 1.3.
+Do not continue coding Phase 1.2E yet.
+
+The current Phase 1.2E output is not accepted because it mainly split the Domains screen into a left/right layout. That is not enough. The user asked for a professional domain control panel and management experience comparable in concept to tools such as cPanel, Plesk, Spaceship, CentralNic, Openprovider, Cloudflare, and ClouDNS.
+
+This is now a product architecture / UX workflow redesign problem, not a small layout correction.
+
+==================================================
+IMMEDIATE INSTRUCTION
+=====================
+
+Do not write code.
+Do not modify files.
+Do not update documentation.
+Do not mark Phase 1.2E accepted.
+Do not start Phase 1.3.
+
+Produce a serious product-design blueprint first.
+
+Think step by step before answering.
+
+==================================================
+ROLE STACK — ACT UPON IT
+========================
+
+Act as:
+
+* Senior Domain Control Panel Product Architect
+* Domain Administrator
+* DNS Administrator
+* Domain Manager
+* Network Administrator
+* Senior DNS / SSL Lifecycle Architect
+* Senior Registrar / Domain Portfolio Architect
+* Senior SaaS Admin Console UX Architect
+* Senior Platform Settings Architect
+* Platform Administrator
+* Configuration Manager / Analyst
+* Platform Engineer
+* Specialized Platform Developer
+* Senior UI/UX Product Designer
+* Senior React/TypeScript Engineer
+* QA Gatekeeper
+* Systems Thinker
+* Side Auditor
+
+Apply real domain-management thinking:
+
+* domain portfolio management
+* root domain ownership
+* subdomain management
+* DNS records: A, AAAA, CNAME, TXT, MX, SPF, DKIM, DMARC, CAA
+* DNS zone editor
+* email routing records
+* SSL/TLS certificate lifecycle
+* DNSSEC readiness
+* domain lock / transfer protection
+* registrar vs DNS provider vs backend app configuration
+* renewal / expiry / ownership placeholders
+* troubleshooting and DNS propagation
+* audit/history
+* bulk actions as future
+* no fake automation
+
+Apply real platform-settings thinking:
+
+* platform configuration governance
+* default baseline management
+* settings registry
+* configuration profiles
+* change review
+* impact analysis
+* audit/history
+* future integrations readiness
+* no fake runtime enforcement
+
+==================================================
+BENCHMARK REQUIREMENT
+=====================
+
+Research and compare patterns from:
+
+Domain control panels:
+
+* cPanel Domains and Zone Editor
+* Plesk Domains / DNS / SSL
+* Cloudflare DNS and SSL/TLS
+* ClouDNS DNS management
+* Spaceship domain management
+* CentralNic Reseller
+* Openprovider
+* GoDaddy / Namecheap portfolio management
+* AWS Route 53 / ACM
+* Vercel / Netlify custom domains
+* Okta custom domains
+
+Platform settings / admin consoles:
+
+* Shopify admin settings
+* Stripe dashboard settings
+* Atlassian admin settings
+* ServiceNow / Salesforce setup
+* Okta admin
+* Cloudflare / Vercel account settings
+
+Do not copy code.
+Extract product patterns, information architecture, workflows, and screen structure.
+
+==================================================
+WHAT WAS WRONG WITH CURRENT OUTPUT
+==================================
+
+The current Domains implementation is not accepted because:
+
+1. It feels like a screen split, not a control panel.
+2. It does not provide a full domain-management workspace.
+3. Root Domain Management is not strong enough.
+4. DNS records are still not a true Zone Editor experience.
+5. SSL/TLS is not a real workspace concept.
+6. Domain portfolio management is not deep enough.
+7. Registrar/domain ownership concepts are not operationally clear.
+8. Platform Settings still feels like a table/settings page, not a platform configuration center.
+9. Future Integration Readiness is acceptable, but the rest needs stronger product design.
+
+==================================================
+DELIVERABLE 1 — DOMAIN CONTROL PANEL BLUEPRINT
+==============================================
+
+Design the future Domain Control Panel as a serious control panel.
+
+Required modules/screens:
+
+1. Domain Portfolio Dashboard
+
+* total domains
+* root domains
+* subdomains
+* failed/pending/verified
+* SSL ready/pending/failed
+* registrar/security readiness
+* expiring/renewal placeholder
+* domain search
+* bulk action placeholder
+* tenant filter
+* risk filter
+
+2. Domain Portfolio Table
+   Columns:
+
+* domain
+* role: root / subdomain / platform / legacy
+* tenant
+* registrar / ownership note
+* DNS status
+* SSL status
+* email DNS status
+* security status
+* renewal / expiry placeholder
+* risk
+* next action
+* actions
+
+3. Root Domain Control Panel
+   Tabs:
+
+* Overview
+* DNS Zone
+* SSL/TLS
+* Email DNS
+* Security
+* Subdomains
+* Registrar / Ownership
+* Troubleshooting
+* History / Audit
+
+4. Subdomain Control Panel
+   Tabs:
+
+* Overview
+* DNS Records
+* SSL/TLS
+* Parent Root
+* Routing / App Binding
+* Troubleshooting
+* History / Audit
+
+5. DNS Zone Editor
+   Must feel like cPanel/Cloudflare-style DNS management.
+   Fields:
+
+* Type
+* Name / Host
+* Value / Target
+* TTL
+* Priority if MX
+* Status
+* Purpose
+* Copy
+* Future Edit/Add/Delete placeholders
+
+Record types:
+
+* A
+* AAAA
+* CNAME
+* TXT
+* MX
+* SPF
+* DKIM
+* DMARC
+* CAA
+
+Important:
+In Phase 1.2 this remains manual/readiness only.
+No real DNS lookup.
+No real DNS editing.
+But the UX should be designed as the future-ready Zone Editor.
+
+6. SSL/TLS Workspace
+   Show:
+
+* certificate status
+* validation method
+* issue reason
+* expiry placeholder
+* certificate authority placeholder
+* auto-renew placeholder
+* manual mark-ready action
+* future automation note
+
+7. Email DNS Workspace
+   Show:
+
+* MX readiness
+* SPF readiness
+* DKIM readiness
+* DMARC readiness
+* copyable records
+* future email routing note
+
+8. Security Workspace
+   Show:
+
+* DNSSEC future
+* domain lock future
+* transfer protection future
+* CAA readiness
+* SSL readiness current/manual
+* registrar security note
+
+9. Troubleshooting Workspace
+   Show:
+
+* pending DNS
+* failed verification
+* propagation guidance
+* common DNS mistakes
+* registrar vs DNS provider vs app config explanation
+* recommended next action
+
+10. History / Audit
+    Show:
+
+* domain created
+* status changed
+* DNS readiness changed
+* SSL status changed
+* disabled/re-enabled
+* audit link
+
+==================================================
+DELIVERABLE 2 — PLATFORM SETTINGS CONTROL CENTER BLUEPRINT
+==========================================================
+
+Design a real Platform Settings Control Center.
+
+Required modules/screens:
+
+1. Configuration Center Dashboard
+
+* total settings
+* modified settings
+* high-risk settings
+* customized defaults
+* documentation-only settings
+* future integrations
+* last changed
+* pending changes
+* recent configuration events
+
+2. Settings Registry
+   Columns:
+
+* key
+* label
+* group
+* owner
+* risk
+* enforcement
+* current value
+* default baseline
+* registry default
+* impact
+* last changed
+* audit link
+
+3. Default Baseline Manager
+
+* baseline vs registry default
+* customized indicators
+* high-risk customized defaults
+* edit baseline
+* review baseline change
+* reset baseline to registry default
+* audit baseline changes
+
+4. Change Review Center
+
+* all pending changes across groups
+* old → new diff
+* risk
+* impact
+* enforcement truth
+* high-risk acknowledgment
+* save per group or future batch-save note
+
+5. Configuration Profiles — future concept
+
+* default platform profile
+* tenant onboarding default profile
+* strict security profile
+* sandbox/demo profile
+* future only unless explicitly implemented later
+
+6. Future Integration Readiness
+
+* notifications
+* SSO/SCIM
+* provider calls
+* runtime enforcement
+* backend config service
+* compliance evidence
+* all marked future/not active
+
+7. Configuration History / Audit
+
+* recent changes
+* actor
+* timestamp
+* changed setting
+* old/new summary
+* link to Audit Investigation Center
+
+==================================================
+DELIVERABLE 3 — SCREEN-BY-SCREEN WIREFRAME DESCRIPTION
+======================================================
+
+For Domains:
+Provide a screen-by-screen textual wireframe:
+
+* main dashboard layout
+* table layout
+* root domain control panel
+* subdomain control panel
+* DNS Zone Editor
+* SSL/TLS
+* Email DNS
+* Security
+* Troubleshooting
+* History
+
+For Platform Settings:
+Provide a screen-by-screen textual wireframe:
+
+* configuration dashboard
+* registry table
+* default baseline manager
+* change review center
+* future integration readiness
+* history/audit
+
+Each screen must describe:
+
+* sections
+* cards
+* tables
+* primary actions
+* secondary actions
+* empty states
+* permission behavior
+* audit behavior
+* future labels
+
+==================================================
+DELIVERABLE 4 — IMPLEMENTATION PLAN
+===================================
+
+Break implementation into small milestones.
+
+Recommended:
+A) Domains Portfolio Dashboard + Table
+B) Root Domain Control Panel
+C) DNS Zone Editor workspace
+D) SSL/TLS + Email DNS + Security workspaces
+E) Troubleshooting + History/Audit
+F) Platform Settings Configuration Dashboard
+G) Settings Registry + Default Baseline Manager
+H) Change Review Center + Config History
+I) Final documentation + non-regression
+
+For each milestone include:
+
+* goal
+* files likely touched
+* risk
+* test points
+* out-of-scope reminders
+
+==================================================
+DELIVERABLE 5 — RECOMMENDATION
+==============================
+
+Give a clear recommendation:
+
+Should we:
+
+1. pause Replit implementation and use Figma Make / v0 first to design the control panels,
+   or
+2. implement the blueprint directly in Replit milestone-by-milestone?
+
+Be honest. If a visual design tool is better before more coding, say so.
+
+==================================================
+OUTPUT FORMAT
+=============
+
+Reply only in this structure:
+
+1. Executive Assessment
+2. Benchmark Findings
+3. Why Current Phase 1.2E Is Not Enough
+4. Domain Control Panel Blueprint
+5. Platform Settings Control Center Blueprint
+6. Screen-by-Screen Wireframe Description
+7. AI UI Design Tool Recommendation
+8. Implementation Milestones
+9. Risks / Guardrails
+10. Recommendation Before Coding
