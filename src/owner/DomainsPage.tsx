@@ -25,11 +25,52 @@ import {
   DOMAIN_ROLE_LABELS,
   DOMAIN_SSL_READINESS_LABELS,
   DOMAIN_TRUTH_LABELS,
+  SECURITY_READINESS_LABELS,
   PLATFORM_ROOT_SUFFIX,
   type DomainLifecycleStatus,
   type DomainSslReadiness,
+  type DomainDnsReadiness,
+  type SecurityReadinessState,
+  type DomainChecklistState,
   type DomainReadinessSignal,
 } from './platformOpsDomains';
+
+// Tone vocabulary shared by the Domain Control Panel readiness rows.
+type ReadinessTone = 'ready' | 'pending' | 'failed' | 'neutral' | 'future';
+
+const READINESS_TONE_STYLES: Record<ReadinessTone, string> = {
+  ready: 'bg-lime-400/10 text-lime-700 border-lime-400/20',
+  pending: 'bg-blue-400/10 text-blue-700 border-blue-400/20',
+  failed: 'bg-red-500/10 text-red-700 border-red-500/30',
+  neutral: 'bg-slate-100 text-slate-500 border-slate-200',
+  future: 'bg-violet-400/10 text-violet-700 border-violet-400/20',
+};
+
+const DNS_READINESS_TONE: Record<DomainDnsReadiness, ReadinessTone> = {
+  managed: 'ready',
+  confirmed: 'ready',
+  propagating: 'pending',
+  not_configured: 'neutral',
+  failed: 'failed',
+  not_applicable: 'neutral',
+};
+
+const SECURITY_STATE_TONE: Record<SecurityReadinessState, ReadinessTone> = {
+  ready: 'ready',
+  pending: 'pending',
+  failed: 'failed',
+  not_started: 'neutral',
+  not_applicable: 'neutral',
+  future: 'future',
+};
+
+const CHECKLIST_TONE: Record<DomainChecklistState, { symbol: string; icon: string }> = {
+  done: { symbol: 'check_circle', icon: 'text-lime-600' },
+  current: { symbol: 'radio_button_checked', icon: 'text-primary' },
+  todo: { symbol: 'radio_button_unchecked', icon: 'text-slate-300' },
+  future: { symbol: 'schedule', icon: 'text-violet-500' },
+  not_applicable: { symbol: 'remove_circle_outline', icon: 'text-slate-300' },
+};
 
 // Validation patterns for the Add Domain flow (Phase 1.2 acceptance correction).
 const DNS_LABEL_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
@@ -720,9 +761,16 @@ const DomainsPage: React.FC = () => {
                   <p className="text-sm font-black text-slate-800">{selectedSignal.nextAction}</p>
                 </div>
 
-                {/* Hierarchy — root shows its managed children; subdomain shows its parent */}
+                {/* Root Domain Management / Subdomain Details — root shows its managed
+                    children; subdomain shows its parent + the inherited relationship. */}
                 <div>
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Hierarchy</p>
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">{selectedSignal.role === 'root' ? 'Root domain management' : 'Subdomain details'}</p>
+                  {selectedSignal.role === 'subdomain' && (
+                    <div className="mb-2 px-3 py-2.5 rounded-xl bg-indigo-500/5 border border-indigo-500/15">
+                      <p className="text-[11px] font-bold text-indigo-700">This subdomain's hostname is generated from its editable label plus its locked root domain.</p>
+                      <p className="text-[10px] font-medium text-slate-500 mt-1">It inherits routing and SSL handling from its root — the root domain cannot be edited here.</p>
+                    </div>
+                  )}
                   {selectedSignal.role === 'root' ? (
                     (() => {
                       const children = domains.filter(c => c.parentDomainId === selected.id);
@@ -781,6 +829,50 @@ const DomainsPage: React.FC = () => {
                     </div>
                   </div>
                 )}
+
+                {/* Security & readiness — DNS readiness + SSL (live), plus future
+                    registrar-level indicators shown as placeholders only. */}
+                <div>
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Security &amp; readiness</p>
+                  <div className="space-y-1.5">
+                    <ReadinessRow label="DNS configuration" state={DNS_READINESS_TONE[selectedSignal.dnsReadiness]} valueLabel={selectedSignal.dnsReadinessLabel} />
+                    {selectedSignal.securityIndicators.map(ind => (
+                      <ReadinessRow
+                        key={ind.key}
+                        label={ind.label}
+                        state={SECURITY_STATE_TONE[ind.state]}
+                        valueLabel={SECURITY_READINESS_LABELS[ind.state]}
+                        detail={ind.detail}
+                        future={ind.future}
+                      />
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-slate-400 font-medium mt-2">{DOMAIN_TRUTH_LABELS.futureSecurity}</p>
+                </div>
+
+                {/* Manual action checklist — read-only guidance, no automation */}
+                <div>
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Action checklist</p>
+                  <div className="space-y-1.5">
+                    {selectedSignal.checklist.map(item => (
+                      <div key={item.key} className="flex items-start gap-2.5 px-3 py-2 rounded-xl border border-slate-100 bg-slate-50/60">
+                        <span className={`material-symbols-outlined text-base mt-px ${CHECKLIST_TONE[item.state].icon}`}>{CHECKLIST_TONE[item.state].symbol}</span>
+                        <div className="flex-1">
+                          <p className={`text-[11px] font-bold ${item.state === 'done' ? 'text-slate-400 line-through' : 'text-slate-700'}`}>{item.label}</p>
+                          {item.hint && <p className="text-[10px] font-medium text-slate-400 mt-0.5">{item.hint}</p>}
+                        </div>
+                        {item.state === 'current' && <span className="text-[9px] font-black uppercase tracking-widest text-primary shrink-0 mt-0.5">Now</span>}
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-slate-400 font-medium mt-2">{DOMAIN_TRUTH_LABELS.manual}</p>
+                </div>
+
+                {/* Registrar vs. app configuration explanation */}
+                <div className="px-3 py-2.5 rounded-xl bg-amber-400/5 border border-amber-400/20">
+                  <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest mb-1 flex items-center gap-1"><span className="material-symbols-outlined text-[13px]">dns</span> Registrar &amp; DNS provider</p>
+                  <p className="text-[11px] font-bold text-slate-600">{DOMAIN_TRUTH_LABELS.registrarExternal}</p>
+                </div>
 
                 {/* Manual status workflow */}
                 <div className="grid grid-cols-2 gap-3">
@@ -903,6 +995,19 @@ const FilterSelect: React.FC<{ label: string; value: string; onChange: (v: strin
     <select value={value} onChange={e => onChange(e.target.value)} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700">
       {options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
     </select>
+  </div>
+);
+
+const ReadinessRow: React.FC<{ label: string; state: ReadinessTone; valueLabel: string; detail?: string; future?: boolean }> = ({ label, state, valueLabel, detail, future }) => (
+  <div className="flex items-start justify-between gap-3 px-3 py-2 rounded-xl border border-slate-100 bg-slate-50/60">
+    <div className="flex-1">
+      <div className="flex items-center gap-1.5">
+        <span className="text-[11px] font-bold text-slate-700">{label}</span>
+        {future && <span className="px-1.5 py-0.5 rounded-md text-[8px] font-black uppercase tracking-widest bg-violet-400/10 text-violet-700 border border-violet-400/20">Future</span>}
+      </div>
+      {detail && <p className="text-[10px] font-medium text-slate-400 mt-0.5">{detail}</p>}
+    </div>
+    <span className={`shrink-0 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${READINESS_TONE_STYLES[state]}`}>{valueLabel}</span>
   </div>
 );
 

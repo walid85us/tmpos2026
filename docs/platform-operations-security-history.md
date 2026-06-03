@@ -347,3 +347,35 @@ A scoped pass over six QA HOLD items raised against the Phase 1.2 deliverable. N
 ### Verification
 
 -   Typecheck baseline unchanged at 12 pre-existing errors, all in untouched non-owner files (server adapters/event-processor, Dashboard/Login/POS/ShippingCenter/TemplateEditor, Owner/Tenant layouts, BillingPage). All files touched in this correction (`mockData.ts`, `platformOpsDomains.ts`, `platformOpsSettings.ts`, `platformOpsAudit.ts`, `DomainsPage.tsx`, `PlatformSettingsPage.tsx`, `CommandCenterPage.tsx`, `platformOpsDerive.ts`) typecheck clean.
+
+## Phase 1.2 — Domain Control Panel + Default Baseline UX Correction
+
+A second focused, presentation-layer correction over the same surfaces. No phase reopen, no new permission keys (reuses `view_domains` / `manage_domain_lifecycle` / `view_platform_settings` / `edit_platform_settings`), no real DNS/SSL/DNSSEC/registrar/provider/notification work. All additions are deterministic, rule-based derivations over the existing `tenant_domains_v1` store and registry; the raw `status`/`ssl`/`kind` fields remain the source of truth.
+
+### A — Domain Control Panel model (drawer)
+
+-   The domain drawer now reads like an operator control panel. New derivations live in `platformOpsDomains.ts` (the separate, non-locked module): `deriveDomainDnsReadiness` (a DNS-configuration concept distinct from SSL — `managed` for platform subdomains, `not_configured` → `propagating` → `confirmed` for custom domains, plus `failed` / `not_applicable`), and `deriveDomainSecurityIndicators` returning SSL (mapped from the live recorded readiness) plus **DNSSEC, domain lock, and transfer protection** as `future` registrar-level placeholders. All are surfaced in a "Security & readiness" section with truth labels (`DOMAIN_TRUTH_LABELS.futureSecurity`). A registrar/DNS-provider explanation note (`DOMAIN_TRUTH_LABELS.registrarExternal`) makes explicit that registrar ownership and DNS provider configuration are managed outside the app this phase.
+
+### B — Root Domain Management section
+
+-   For root domains the drawer section is titled "Root domain management" and lists the related (child) subdomains with a truthful empty state, alongside the existing required DNS records, security/readiness, action checklist, and risk reasons.
+
+### C — Subdomain management clarity
+
+-   For subdomains the section is titled "Subdomain details" and adds an inherited-relationship explanation: the hostname is generated from the editable label plus the locked root domain, and routing/SSL handling is inherited from the root. The parent root (or shared platform root) link is retained.
+
+### D — Manual action checklist
+
+-   `deriveDomainChecklist` produces a read-only, lifecycle-derived checklist of manual operator steps (add DNS records → confirm propagation externally → mark verified → review SSL → mark SSL ready; with `failed`/`disabled`/platform-subdomain variants). Each step carries a `done`/`current`/`todo`/`future` state and an optional hint; the section is truth-labeled as manual (`DOMAIN_TRUTH_LABELS.manual`) and performs no automation, DNS lookup, or provider call.
+
+### E — Default Baseline UX simplification
+
+-   The Platform Settings Default Baseline mode gains a concise, plain-language explanation card: what the baseline does (the fallback used by Settings-tab "Reset to default"), that editing it never changes the in-effect setting and is enforced by nothing at runtime, and a three-step edit → review & save → reset flow summary. The existing baseline rows already expose current baseline, registry default, customized/overridden badge, risk, and enforcement — no change to the override store, review/diff, high-risk acknowledgment, audit (`platform_setting_default_updated`), or reset path.
+
+### F — Command Center deep-linking (verified)
+
+-   Per-domain Command Center hrefs (`/owner/domains?domain=<id>`) and the Domains page `?domain`/`?status` reader remain intact and unchanged.
+
+### Verification
+
+-   Typecheck baseline unchanged at 12 pre-existing errors, all in untouched non-owner files. The files touched in this correction (`platformOpsDomains.ts`, `DomainsPage.tsx`, `PlatformSettingsPage.tsx`) typecheck clean.

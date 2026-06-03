@@ -405,6 +405,23 @@ const PlatformSettingsPage: React.FC = () => {
         </div>
       )}
 
+      {/* Default Baseline explanation — concise, plain-language framing */}
+      {mode === 'baseline' && (
+        <div className="bg-white/80 backdrop-blur-xl p-5 rounded-3xl border border-slate-200 shadow-sm">
+          <p className="text-sm font-black text-slate-800">What the Default Baseline does</p>
+          <p className="text-xs font-medium text-slate-500 mt-1 max-w-3xl">
+            The baseline is the value each setting falls back to when you choose <span className="font-bold text-slate-600">Reset to default</span> on the Settings tab. Editing it here changes that fallback — it never changes the in-effect setting and is <span className="font-bold text-slate-600">enforced by nothing at runtime</span>. Each row below shows the current baseline, the built-in registry default, whether the baseline is customized, and its risk and enforcement.
+          </p>
+          <ol className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] font-bold text-slate-500">
+            <li className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200">1 · Edit a baseline value</li>
+            <span className="material-symbols-outlined text-slate-300 text-[14px]">arrow_forward</span>
+            <li className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200">2 · Review &amp; Save the group</li>
+            <span className="material-symbols-outlined text-slate-300 text-[14px]">arrow_forward</span>
+            <li className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200">3 · Reset any row to the registry default</li>
+          </ol>
+        </div>
+      )}
+
       {/* Search + group navigation */}
       <div className="bg-white/80 backdrop-blur-xl p-4 rounded-3xl border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-center gap-3">
         <div className="relative flex-1">

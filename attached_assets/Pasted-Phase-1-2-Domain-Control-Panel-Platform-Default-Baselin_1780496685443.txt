@@ -1,0 +1,371 @@
+Phase 1.2 — Domain Control Panel + Platform Default Baseline UX Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Strict focused correction pass for Phase 1.2 PASS/HOLD items.
+
+Do not reopen the entire phase.
+Do not repeat already-passed QA items.
+Do not implement Phase 1.3, Phase 1.4, Phase 2, Phase 3, or Phase 4.
+Do not implement real DNS lookup, auto-verification, SSL automation, provider integrations, notifications, SSO/SCIM, server RBAC, PIM/PAM, realtime listeners, or runtime enforcement.
+
+Fix only the remaining acceptance notes from:
+Manual QA — Phase 1.2 Focused Acceptance Correction Review
+
+Remaining notes:
+
+1. Root/main domain management works but needs to be more professional.
+2. Domains needs a more mature Domain Control Panel model.
+3. Platform Settings Default Baseline exists but should be simpler and more flexible.
+4. Preserve Command Center specific-domain deep-linking.
+5. Full modern SaaS UI redesign should be planned but not overbuilt in this correction.
+
+==================================================
+WORKING STYLE — THINK STEP BY STEP
+==================================
+
+Before correcting anything, think step by step.
+
+First inspect:
+
+1. Current DomainsPage root/main domain flow.
+2. Current subdomain flow and parent/root relation.
+3. Domain detail drawer and whether it can support a control-panel model.
+4. Domain helper model in platformOpsDomains.ts.
+5. Current Platform Settings Default Baseline process.
+6. How reset-to-default currently uses maintained baseline.
+7. Existing permission and audit patterns.
+8. Command Center domain deep-link behavior.
+9. Accepted locked areas that must not regress.
+
+Then implement the smallest professional correction.
+
+==================================================
+ROLE STACK — ACT UPON IT
+========================
+
+Act as:
+
+* Domain Administrator
+* DNS Administrator
+* Domain Manager
+* Network Administrator
+* Senior Domains Engineer
+* Senior DNS / SSL Lifecycle Architect
+* Senior Platform Settings Architect
+* Platform Administrator
+* Configuration Manager / Analyst
+* Platform Engineer
+* Senior Platform Operations Architect
+* Senior SaaS Admin Console UX Architect
+* Senior Audit & Security Engineer
+* Identity and Access Management Specialist
+* Access Analyst
+* Senior React/TypeScript Engineer
+* QA Gatekeeper
+* Systems Thinker
+* Side Auditor
+
+Domain-role responsibilities to apply:
+
+* domain portfolio management
+* root/main domain ownership clarity
+* DNS record management for A, CNAME, MX, TXT, SPF, DKIM where relevant
+* security/optimization concepts such as domain lock, DNSSEC, SSL certificates, and transfer protection as future/readiness indicators only
+* troubleshooting and maintenance
+* DNS propagation/verification readiness
+* clear distinction between registrar/domain ownership and backend infrastructure configuration
+
+Platform-role responsibilities to apply:
+
+* platform configuration governance
+* default baseline management
+* configuration change tracking
+* documentation/compliance clarity
+* settings impact review
+* safe reset/default behavior
+* no fake runtime enforcement
+
+==================================================
+DESIGN DIRECTION
+================
+
+The user wants a more modern SaaS UI over time.
+
+For this correction:
+
+* Improve layout and clarity where low-risk.
+* Do not do a full visual redesign.
+* Make Domains feel more like a professional control panel.
+* Make Platform Settings Default Baseline easier to understand and use.
+
+Recommended future design workflow:
+
+* Figma / Figma Make for final visual design direction.
+* v0 for quick React/Tailwind UI exploration.
+* Replit implements carefully inside the real app, preserving accepted behavior.
+
+Do not introduce a new design system now.
+Do not break current layout patterns.
+
+==================================================
+PART A — PROFESSIONAL DOMAIN CONTROL PANEL MODEL
+================================================
+
+Upgrade Domains from simple root/subdomain creation into a more professional control-panel experience.
+
+Add or improve a “Domain Control Panel” concept inside DomainsPage.
+
+For each domain, especially root/main domains, show:
+
+* domain role:
+
+  * Root/Main Domain
+  * Subdomain
+* parent/root relationship
+* lifecycle status
+* SSL readiness
+* DNS readiness
+* next action
+* risk reasons
+* related subdomains
+* DNS records
+* security readiness indicators:
+
+  * SSL readiness
+  * DNSSEC readiness placeholder/future
+  * domain lock / transfer protection placeholder/future
+* registrar vs app configuration explanation:
+  “Registrar ownership and DNS provider configuration are managed outside this app in this phase.”
+* truth labels:
+  manual verification only
+  no real DNS lookup
+  no SSL automation
+  provider integrations future Phase 2
+
+Do not implement real DNSSEC, transfer lock, registrar integration, SSL issuance, or provider calls.
+These are readiness/future indicators only.
+
+==================================================
+PART B — ROOT/MAIN DOMAIN MANAGEMENT
+====================================
+
+Make root/main domain management clearer after creation.
+
+Requirements:
+
+* Root/main domains must appear as first-class records.
+* Root domain detail should show a “Root Domain Management” section.
+* It should show:
+
+  * root hostname
+  * tenant
+  * lifecycle status
+  * SSL readiness
+  * required DNS records
+  * related subdomains
+  * action checklist
+  * risk/readiness reasons
+  * manual workflow actions
+* If root domain has related subdomains:
+
+  * list them in the detail drawer/control panel
+  * click a subdomain to open its detail
+* If no subdomains:
+
+  * show empty state:
+    “No subdomains attached to this root domain yet.”
+* Preserve current root/subdomain add flow and validation.
+* Do not break existing domain records.
+
+==================================================
+PART C — SUBDOMAIN MANAGEMENT CLARITY
+=====================================
+
+Enhance subdomain details.
+
+Requirements:
+
+* Subdomain detail should show:
+
+  * subdomain label
+  * parent/root domain
+  * full hostname
+  * inherited relationship explanation
+  * specific DNS records needed
+  * SSL readiness
+  * next action
+* User should clearly understand:
+  “Subdomain hostname is generated from editable label + locked root domain.”
+* Keep duplicate full-hostname validation.
+
+==================================================
+PART D — DOMAIN ACTION CHECKLIST
+================================
+
+Add a simple manual action checklist.
+
+For each domain, derive checklist steps such as:
+
+* Add required DNS record
+* Confirm DNS has propagated externally
+* Mark Pending Verification
+* Mark Verified
+* Review SSL readiness
+* Mark SSL Ready when certificate is active
+* Resolve failed readiness issue
+* Disable/Re-enable if needed
+
+Each checklist item should be:
+
+* read-only guidance unless it maps to an existing manual action
+* truth-labeled as manual
+* not fake automation
+
+No real checking.
+No provider calls.
+
+==================================================
+PART E — PLATFORM SETTINGS DEFAULT BASELINE UX SIMPLIFICATION
+=============================================================
+
+Improve the Default Baseline process.
+
+Current issue:
+
+* Default Baseline exists and works, but feels not flexible/simple enough.
+
+Requirements:
+
+* Make Default Baseline easier to understand.
+* Add a concise explanation:
+  “Default Baseline values are the values used by Reset to Default. They are governance defaults, not runtime enforcement.”
+* Add a simple baseline panel/table grouped by setting group.
+* Show:
+
+  * setting label
+  * current default baseline
+  * registry default
+  * whether baseline is customized
+  * risk
+  * enforcement state
+* Make editing default baseline simple:
+
+  * Edit baseline
+  * Review baseline change
+  * Save baseline
+  * Reset baseline to registry default
+* If editing exists, keep it permission-gated by edit_platform_settings or stronger existing threshold.
+* High-risk default baseline changes require acknowledgment.
+* Audit default baseline changes once.
+* Reset to Default must use the maintained default baseline.
+
+Do not overbuild versioning/approval workflows yet.
+No runtime enforcement.
+
+==================================================
+PART F — COMMAND CENTER DOMAIN DEEP-LINK PRESERVATION
+=====================================================
+
+Preserve and verify:
+
+* Command Center domain issue opens specific domain drawer or visible filtered context.
+* Invalid domain id shows dismissible not-found notice.
+* No invisible filters.
+* No regression.
+
+Do not expand Command Center in this correction.
+
+==================================================
+PART G — DOCUMENTATION
+======================
+
+Keep replit.md concise:
+
+* short note that Phase 1.2 received a Domain Control Panel / Default Baseline UX correction.
+
+Update docs/platform-operations-security-history.md:
+
+* domain control panel correction
+* root/main domain management
+* subdomain management
+* manual action checklist
+* default baseline UX simplification
+* future design direction note:
+
+  * Figma/Figma Make for visual direction
+  * v0 for code-oriented UI exploration
+  * Replit for app implementation
+
+Do not make replit.md large again.
+
+==================================================
+NON-REGRESSION
+==============
+
+Do not regress:
+
+* domain lifecycle tabs
+* root/main creation
+* subdomain locked-root behavior
+* duplicate validation
+* Command Center domain deep-linking
+* Platform Settings save/review
+* Default Baseline reset behavior
+* Command Center Intelligence
+* Support Queue / SLA / Macro Maturity
+* Audit Investigation Center
+* Escalation operating model
+* Permission dependency auto-sync
+* Add-on Governance
+* Shipping
+* Store Permissions Matrix
+* Tenant provisioning
+* paid override invoice workflow
+* server PII logging rules
+
+==================================================
+ACCEPTANCE CRITERIA
+===================
+
+Acceptance is literal:
+
+1. Domains page has a clearer Domain Control Panel experience.
+2. Root/main domains are first-class manageable records.
+3. Root domain detail shows Root Domain Management section.
+4. Root domain detail shows related subdomains.
+5. Subdomain detail clearly shows parent/root domain.
+6. Domain detail shows action checklist.
+7. Domain detail explains registrar/DNS provider config is external in this phase.
+8. DNSSEC/domain lock/transfer/registrar concepts are future/readiness indicators only, not fake integrations.
+9. Existing root/subdomain creation and validation remain intact.
+10. Command Center domain deep-link remains intact.
+11. Platform Settings Default Baseline is easier to understand.
+12. Default Baseline panel/table shows registry default vs maintained baseline.
+13. Default baseline editing is permission-gated and audited if editable.
+14. Reset to Default uses maintained baseline.
+15. Defaults remain truthfully labeled as governance baseline, not runtime enforcement.
+16. Real DNS/SSL/provider automation remains out of scope.
+17. Existing accepted behavior remains intact.
+18. replit.md remains concise.
+19. History documentation is updated.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+======================
+
+Reply ONLY in this structure:
+
+1. Implementation Status
+2. Domain Control Panel UX
+3. Root/Main Domain Management
+4. Subdomain Management
+5. Manual Action Checklist
+6. Platform Settings Default Baseline UX
+7. Command Center Domain Deep-Link Preservation
+8. Permissions / Auditability
+9. Files Changed
+10. Documentation Updated
+11. Non-Regression Notes
