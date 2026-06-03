@@ -1,0 +1,412 @@
+Phase 1.2 — Domain Control Panel + Platform Settings Control Center UX Architecture Report
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Scope:
+Research, analyze, and propose only.
+
+Do not implement code yet.
+Do not modify files.
+Do not change routes.
+Do not change permissions.
+Do not change behavior.
+Do not update documentation yet.
+Do not mark Phase 1.2 accepted.
+
+The user’s Phase 1.2 QA is PASS / HOLD because the functionality mostly works, but the Domains and Platform Settings surfaces do not yet meet the desired standard for a modern enterprise SaaS control panel.
+
+Current failed/held items:
+
+1. Domain Control Panel still feels like a basic table/drawer, not a professional domain management workspace.
+2. Root Domain Management is not clear or visible enough.
+3. Platform Settings Default Baseline works, but the Platform Settings area still feels too simple and not flexible enough.
+4. The user wants Domains and Platform Settings to be improved thoughtfully over time, not randomly redesigned.
+
+==================================================
+WORKING STYLE — THINK STEP BY STEP
+==================================
+
+Think step by step before answering.
+
+Do not jump to implementation.
+
+First:
+
+1. Inspect the current DomainsPage.
+2. Inspect platformOpsDomains.ts.
+3. Inspect the current PlatformSettingsPage.
+4. Inspect platformOpsSettings.ts.
+5. Identify what currently works and must be preserved.
+6. Identify what is missing from a professional Domain Control Panel.
+7. Identify what is missing from a professional Platform Settings Control Center.
+8. Benchmark public SaaS/admin-console patterns.
+9. Produce a clear UX/product architecture recommendation.
+10. Stop for review.
+
+==================================================
+ROLE STACK — ACT UPON IT
+========================
+
+Act as:
+
+* Domain Administrator
+* DNS Administrator
+* Domain Manager
+* Network Administrator
+* Senior Domains Engineer
+* Senior DNS / SSL Lifecycle Architect
+* Senior Platform Settings Architect
+* Platform Administrator
+* Configuration Manager / Analyst
+* Platform Engineer
+* Specialized Platform Developer
+* Senior SaaS Admin Console UX Architect
+* Senior Platform Operations Architect
+* Senior Audit & Security Engineer
+* Identity and Access Management Specialist
+* Access Analyst
+* Senior React/TypeScript Engineer
+* QA Gatekeeper
+* Systems Thinker
+* Side Auditor
+
+Domain responsibilities to apply:
+
+* Domain portfolio management
+* Root/main domain ownership
+* Subdomain management
+* DNS configuration for A, CNAME, MX, TXT, SPF, DKIM
+* SSL certificate readiness
+* DNSSEC readiness as future/readiness only
+* Domain locking / transfer protection as future/readiness only
+* DNS troubleshooting
+* Propagation guidance
+* Registrar ownership vs backend infrastructure configuration clarity
+* CompTIA Network+, Cisco CCNA, and Microsoft DNS-style thinking
+
+Platform responsibilities to apply:
+
+* Platform configuration governance
+* Settings ownership
+* Access control awareness
+* System/module/integration/preference settings
+* Configuration change tracking
+* Default baseline management
+* Documentation/compliance clarity
+* Maintenance/update/backup concepts
+* Safe customization of pre-built SaaS modules
+* No fake runtime enforcement
+
+==================================================
+BENCHMARK / COMPETITOR RESEARCH REQUIRED
+========================================
+
+Search/review public examples and product patterns from:
+
+Domains / DNS / SSL:
+
+* Cloudflare DNS/domain management
+* Vercel custom domains
+* Netlify custom domains
+* AWS Route 53 / ACM validation
+* GoDaddy / Namecheap domain portfolio concepts
+* Okta custom domain / certificate readiness
+* Microsoft DNS / enterprise DNS admin patterns
+
+Platform Settings / Admin Configuration:
+
+* Atlassian admin settings
+* Shopify admin settings
+* Stripe dashboard settings
+* ServiceNow configuration / platform admin patterns
+* Salesforce setup/admin console
+* Okta admin configuration
+* Vercel / Cloudflare account settings
+* Enterprise SaaS settings governance patterns
+
+AI UI / UX tools to consider for future design workflow:
+
+* Figma / Figma Make for visual design direction
+* v0 for React/Tailwind-style UI concept exploration
+* UX Pilot for UX ideation/wireframes
+* Replit for final implementation inside the existing app
+
+Do not copy proprietary designs or code.
+Extract product patterns only.
+
+==================================================
+CURRENT LOCKED / ACCEPTED BEHAVIOR TO PRESERVE
+==============================================
+
+Do not propose changes that would break:
+
+* Domain lifecycle tabs and filters
+* Root/main domain creation
+* Subdomain locked-root behavior
+* Duplicate hostname validation
+* Command Center domain deep-linking
+* Domain audit rows
+* Platform Settings Review & Save
+* Platform Settings Default Baseline
+* Platform Settings high-risk acknowledgment
+* Platform setting audit rows
+* Command Center Intelligence
+* Support Queue / SLA / Macro Maturity
+* Audit Investigation Center
+* Escalation operating model
+* Permission dependency auto-sync
+* Add-on Governance
+* Shipping
+* Store Permissions Matrix
+* Tenant provisioning
+* paid override invoice workflow
+* server PII logging rules
+
+==================================================
+WHAT THE REPORT SHOULD ANSWER
+=============================
+
+A) Domains — What should a professional Domain Control Panel include?
+
+Please analyze and recommend a future-state structure such as:
+
+1. Domain Portfolio Overview
+
+* all root domains
+* all subdomains
+* tenant association
+* verification state
+* SSL state
+* risk state
+* ownership / registrar note
+* renewal / expiry placeholder if future
+
+2. Root Domain Control Panel
+
+* root domain identity
+* tenant association
+* related subdomains
+* required DNS records
+* domain verification readiness
+* SSL/TLS readiness
+* email/DNS records readiness where relevant
+* registrar/security readiness:
+
+  * DNSSEC future
+  * domain lock future
+  * transfer protection future
+* action checklist
+* history/audit
+* troubleshooting guide
+
+3. Subdomain Control Panel
+
+* parent/root domain
+* generated hostname
+* inherited relationship explanation
+* DNS record requirements
+* SSL readiness
+* related tenant/app surface
+* lifecycle actions
+* audit/history
+
+4. DNS Records Workspace
+
+* records table:
+
+  * Type
+  * Host/Name
+  * Value/Target
+  * TTL
+  * Purpose
+  * Status
+  * Copy action
+* support A, CNAME, TXT, MX, SPF, DKIM as manual/readiness records
+* no real DNS lookup in Phase 1.2
+
+5. SSL/TLS Readiness Workspace
+
+* status
+* certificate readiness
+* expiry placeholder/future
+* issue reason
+* next action
+* manual status workflow
+* no real certificate issuance yet
+
+6. Troubleshooting / Propagation
+
+* propagation guidance
+* common errors
+* failed/pending explanation
+* registrar vs DNS provider explanation
+
+7. Security Readiness
+
+* DNSSEC future
+* domain lock future
+* transfer protection future
+* SSL readiness current/manual
+* no fake security integration
+
+B) Platform Settings — What should a professional Platform Settings Control Center include?
+
+Please analyze and recommend a future-state structure such as:
+
+1. Configuration Center Overview
+
+* setting groups
+* modified settings
+* high-risk settings
+* documentation-only settings
+* default baseline status
+* last changes
+* owner/risk/enforcement posture
+
+2. Settings Registry Workspace
+
+* setting key
+* label
+* group
+* owner
+* risk
+* enforcement state
+* current value
+* default baseline
+* registry default
+* impact summary
+* last changed
+* audit link
+
+3. Default Baseline Manager
+
+* simpler default baseline UX
+* baseline vs registry default
+* customized default indicators
+* review baseline changes
+* reset baseline to registry default
+* audit default changes
+* no runtime enforcement claims
+
+4. Change Review Center
+
+* pending changes
+* old → new diff
+* risk impact
+* enforcement truth label
+* high-risk acknowledgment
+* save confirmation
+* audit row
+
+5. Configuration History / Audit
+
+* setting changed by
+* setting changed at
+* impact summary
+* link to Audit Investigation Center
+
+6. Future Integration Readiness
+
+* notifications future
+* SSO/SCIM future
+* external provider calls future
+* runtime enforcement future
+* no fake current behavior
+
+C) Modern UI / UX design direction
+
+Recommend how to improve these modules visually without redesigning the entire project:
+
+* page command header
+* left-side section navigation
+* right-side detail/control panel
+* status/readiness cards
+* action checklist
+* record table
+* split-pane layout
+* contextual drawers
+* clear hierarchy
+* compact but readable badges
+* strong empty states
+* visible active filters
+* no hidden filters
+* dashboard/control-panel feel
+
+D) Implementation plan
+
+Provide an implementation plan broken into small safe phases:
+
+Phase A:
+Domain Control Panel layout refinement
+
+Phase B:
+Root/subdomain management workspace
+
+Phase C:
+DNS records workspace
+
+Phase D:
+SSL/TLS readiness workspace
+
+Phase E:
+Platform Settings Control Center layout refinement
+
+Phase F:
+Default Baseline Manager simplification
+
+Phase G:
+Configuration History / audit drilldowns
+
+Each phase should list:
+
+* files likely touched
+* risk level
+* what must be tested
+* what remains out of scope
+
+E) Recommendation
+
+Tell us whether to:
+
+1. implement a small focused correction now to close Phase 1.2, or
+2. keep Phase 1.2 functionally accepted and create a separate future UI/control-panel maturity workstream.
+
+Given the user’s current feedback, recommend the best path.
+
+==================================================
+IMPORTANT OUT-OF-SCOPE
+======================
+
+Do not implement:
+
+* real DNS lookup
+* real auto-verification
+* real SSL automation
+* real provider integrations
+* real registrar integrations
+* real DNSSEC
+* real domain locking
+* real transfer protection
+* notifications
+* SSO/SCIM
+* server RBAC
+* Phase 1.3+
+* broad app redesign
+
+==================================================
+OUTPUT FORMAT REQUIRED
+======================
+
+Reply ONLY in this structure:
+
+1. Research / Benchmark Summary
+2. Current Domains Gaps
+3. Recommended Domain Control Panel Future State
+4. Current Platform Settings Gaps
+5. Recommended Platform Settings Control Center Future State
+6. Modern SaaS UI Direction
+7. Recommended AI Design Tool Workflow
+8. Suggested Implementation Phases
+9. Risk / Non-Regression Notes
+10. Recommendation Before Coding
