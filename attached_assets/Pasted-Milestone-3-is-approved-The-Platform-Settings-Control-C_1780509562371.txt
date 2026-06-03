@@ -1,0 +1,109 @@
+Milestone 3 is approved.
+
+The Platform Settings Control Center Layout is acceptable and properly scoped.
+
+Confirmed acceptable:
+
+1. Platform Settings now has a stronger Control Center structure.
+2. The new Overview workspace is accepted.
+3. The metric tiles and drilldowns are accepted as long as all active filters remain visible and clearable.
+4. The Settings Registry table is accepted as a read-only governance view.
+5. The Open action into grouped editing view is accepted.
+6. The Default Baseline Manager entry card is accepted.
+7. The Future Integration Readiness panel is accepted as read-only / future / no runtime enforcement.
+8. Review & Save, Default Baseline, high-risk acknowledgment, reset-to-default, audit behavior, localStorage keys, and permissions were preserved.
+9. No real enforcement, notifications, SSO/SCIM, provider calls, backend config service, server RBAC, approval workflow, or Phase 1.3+ behavior was added.
+10. Locked accepted areas were not touched.
+
+Please proceed to Milestone 4 — Platform Settings Default Baseline Manager + Change Review Center Polish.
+
+For Milestone 4:
+
+* Think step by step before implementing.
+* Keep scope limited to Platform Settings Default Baseline Manager polish and Change Review Center polish.
+* Do not touch Domains unless absolutely required for non-regression verification.
+* Do not implement real runtime enforcement, notifications, SSO/SCIM, provider integrations, backend config service, server RBAC, PIM/PAM, access reviews, approval workflows, or Phase 1.3+ behavior.
+* Preserve existing save/default/audit semantics unless the UX polish can improve clarity without changing behavior.
+* Keep the existing storage keys:
+
+  * platform_settings_v1
+  * platform_settings_defaults_v1
+* Preserve one audit row per confirmed group save.
+* Preserve high-risk acknowledgment behavior.
+* Preserve reset-to-default through maintained baseline.
+* Preserve edit_platform_settings gating.
+
+Milestone 4 goals:
+
+1. Default Baseline Manager polish
+
+* Make baseline mode feel like a real manager, not just another settings view.
+* Show baseline vs registry default clearly.
+* Show customized baseline indicators.
+* Show high-risk customized defaults clearly.
+* Make edit baseline / review baseline change / save baseline / reset baseline to registry default easy to understand.
+* Keep the explanation that Default Baseline values are governance defaults used by Reset to Default and do not create runtime enforcement.
+* Do not add runtime enforcement.
+
+2. Change Review Center polish
+
+* Add or improve a consolidated pending-changes view if safe.
+* It should show pending changes across groups:
+
+  * setting label/key
+  * group
+  * old → new diff
+  * risk
+  * enforcement state
+  * impact summary
+  * truth label
+* It may still save per group using the existing behavior, but the user should clearly understand pending change impact across the full page.
+* High-risk changes must still require acknowledgment.
+* Filters/search must never hide unsaved changes from review.
+
+3. Configuration History / Audit entry point
+
+* Add a lightweight recent changes / audit link section if safe.
+* It can show recent platform_setting_updated / platform_setting_default_updated rows if available.
+* It should deep-link to Audit Investigation Center if current routing supports it.
+* Do not build a full history engine.
+
+4. Keep UI focused
+
+* Use existing app style.
+* No broad redesign.
+* No new design system.
+* Improve clarity, hierarchy, and workflow confidence.
+
+Acceptance criteria:
+
+1. Default Baseline Manager is easier to understand.
+2. Baseline vs registry default is visually clear.
+3. Customized baseline values are clearly marked.
+4. High-risk customized defaults are clearly marked.
+5. Baseline edit/review/save/reset remains permission-gated.
+6. Baseline changes remain audited.
+7. Reset to Default continues to use maintained baseline.
+8. Change Review Center or equivalent pending-change summary exists.
+9. Pending changes across groups are clear.
+10. Review cannot hide changes behind filters/search.
+11. High-risk acknowledgment remains enforced.
+12. Configuration history/audit entry point exists if safely available.
+13. No runtime enforcement or fake integrations are introduced.
+14. Existing accepted Platform Settings behavior remains intact.
+15. Existing accepted Domains behavior remains intact.
+16. Existing locked areas remain untouched.
+
+Output only in this structure:
+
+1. Milestone Status
+2. What Was Implemented
+3. Default Baseline Manager Polish
+4. Change Review Center Polish
+5. Configuration History / Audit Entry Point
+6. Permissions / Auditability
+7. Files Changed
+8. Non-Regression Notes
+9. Recommendation Before Next Milestone
+
+Stop after Milestone 4. Do not proceed to Milestone 5 until I review and approve.

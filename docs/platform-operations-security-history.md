@@ -446,3 +446,25 @@ A layout/workflow maturity pass over the System Owner **Platform Settings** page
 ### Verification
 
 -   **No drift**: a single `matchesFilters` predicate drives both the grouped `renderPlan` and the flat `registryRows` table; overview/posture counts derive from `deriveSettingsPosture(persisted, baselineOverrides)`. The `modified`/`customized` lenses measure against **persisted + baselineOverrides** (matching overview/posture truth), while editing rows still bind to `draft`. **Locked review/save rule preserved**: review/save derive from the unfiltered `changedByGroup` / `baselineChangedByGroup`, so active filters can never hide a pending change. Storage keys (`platform_settings_v1`, `platform_settings_defaults_v1`), audit actions/categories (`platform_setting_updated` / `platform_setting_default_updated`, category `configuration`, one row per confirmed group save), and permission gating (`platform_settings` visibility, `edit_platform_settings` mutation — no new keys) are unchanged. Architect review passed with no blocking findings. Typecheck remains at the 12 pre-existing baseline errors (all in untouched non-owner files); `PlatformSettingsPage.tsx` typechecks clean. **Milestone 3 only — M4–M5 not started.**
+
+## Phase 1.2E — Milestone 4 (Default Baseline Manager + Change Review Center Polish)
+
+A focused presentation/navigation pass over the System Owner **Platform Settings** page that consolidates pending-change review and surfaces baseline customization and recent configuration history. **No semantic change** to storage, audit, gating, or save flow.
+
+### Default Baseline Manager Polish
+
+-   A new **Customized Defaults** card renders in the Default Baseline workspace whenever the saved baseline (`platform_settings_defaults_v1` overlay) differs from the built-in **registry** default for any field. It lists each customized default with its group, risk, the **registry default → saved baseline** value diff (truth-labeled), and an inline **Edit** affordance that jumps to the field's group.
+-   Two summary pills (**Customized**, **High-risk**) and a high-risk callout make it explicit when high-risk fallbacks have been changed. Copy reiterates that the baseline is the fallback Reset-to-default restores and is **enforced by nothing at runtime**.
+
+### Change Review Center Polish
+
+-   A header **Review Center** button and an Overview **Open Change Review Center** CTA open a consolidated modal listing **every** unsaved change across **all** groups — both in-effect settings (`platform_settings_v1` draft vs persisted) and baseline draft vs saved baseline — with label, `key`, group, **old → new**, risk, enforcement, impact, and truth label per change.
+-   Critical locked rule preserved: the consolidated view derives from the **unfiltered** `changedByGroup` / `baselineChangedByGroup` change sets, so search/lens filters can **never** hide a pending change. Saving still happens **per group** via the existing review/save handlers (`reviewSettingsGroupFromCenter` / `reviewBaselineGroupFromCenter` simply open the existing per-group review modals), so the high-risk acknowledgment and the **one audit row per confirmed group save** invariants are untouched.
+
+### Configuration History / Audit Entry Point
+
+-   A lightweight **Recent Configuration Changes** card on the Overview reads mirrored audit rows via `readMirroredAuditRows()`, filters to `platform setting updated` / `platform setting default updated`, and re-reads on the `audit_logs:changed` event. Each row shows the action, target group, severity, note, and date. A **Audit Investigation Center** link deep-links to `/owner/audit-security` for full history/investigation. Read-only; records nothing.
+
+### Verification
+
+-   Storage keys (`platform_settings_v1`, `platform_settings_defaults_v1`), audit actions/categories (`platform_setting_updated` / `platform_setting_default_updated`, category `configuration`, one row per confirmed group save), high-risk acknowledgment, reset-to-default via baseline, and permission gating (`platform_settings` visibility, `edit_platform_settings` mutation — no new keys) are all unchanged. Typecheck remains at the 12 pre-existing baseline errors (all in untouched non-owner files); `PlatformSettingsPage.tsx` typechecks clean. NO real enforcement / notifications / SSO / SCIM / providers / backend / server RBAC. **Milestone 4 only — M5 not started.**

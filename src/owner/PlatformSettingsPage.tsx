@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { Link } from 'react-router-dom';
 import { platformDefaults, type PlatformDefaults } from './mockData';
-import { pushPlatformAudit } from './platformOpsAudit';
+import { pushPlatformAudit, readMirroredAuditRows } from './platformOpsAudit';
 import { useAccess } from '../context/AccessContext';
 import { hasPlatformPermission, hasEffectiveFeatureAccess } from './platformPermissionsConfig';
 import type { Role } from '../context/accessConfig';
@@ -49,6 +50,13 @@ const RISK_STYLES: Record<SettingRisk, string> = {
   low: 'bg-slate-100 text-slate-500 border-slate-200',
   medium: 'bg-amber-400/10 text-amber-700 border-amber-400/20',
   high: 'bg-red-500/10 text-red-700 border-red-500/30',
+};
+
+const AUDIT_SEVERITY_STYLES: Record<string, string> = {
+  info: 'bg-slate-100 text-slate-500 border-slate-200',
+  notice: 'bg-sky-500/10 text-sky-700 border-sky-500/20',
+  warning: 'bg-amber-400/10 text-amber-700 border-amber-400/20',
+  critical: 'bg-red-500/10 text-red-700 border-red-500/20',
 };
 
 // Read-only, informational summary of capability areas that are NOT active in
@@ -180,6 +188,8 @@ const PlatformSettingsPage: React.FC = () => {
   const [baselineReviewGroup, setBaselineReviewGroup] = useState<SettingsGroup | null>(null);
   const [baselineAck, setBaselineAck] = useState(false);
   const [baselineResetTarget, setBaselineResetTarget] = useState<SettingDefinition | null>(null);
+  const [reviewCenterOpen, setReviewCenterOpen] = useState(false);
+  const [recentConfigAudit, setRecentConfigAudit] = useState<ReturnType<typeof readMirroredAuditRows>>([]);
 
   // Navigation / review UX state.
   const [query, setQuery] = useState('');
@@ -320,6 +330,26 @@ const PlatformSettingsPage: React.FC = () => {
   const overriddenCount = useMemo(() => SETTINGS_REGISTRY.filter(def => isDefaultOverridden(def, baselineOverrides)).length, [baselineOverrides]);
   const highRiskOverriddenCount = useMemo(() => SETTINGS_REGISTRY.filter(def => def.risk === 'high' && isDefaultOverridden(def, baselineOverrides)).length, [baselineOverrides]);
 
+  // Currently-customized (persisted) baselines — baseline ≠ registry default. Drives
+  // the Default Baseline Manager's "Customized Defaults" panel. Reads the saved
+  // overrides (not the draft) so it reflects what is actually in effect as the
+  // governance baseline.
+  const overriddenDefs = useMemo(() => SETTINGS_REGISTRY.filter(def => isDefaultOverridden(def, baselineOverrides)), [baselineOverrides]);
+
+  // Consolidated, UNFILTERED pending changes for the Change Review Center. These
+  // derive from changedByGroup / baselineChangedByGroup (the full registry), never
+  // from the filtered renderPlan — so search/lens filters can never hide an unsaved
+  // change from review.
+  const pendingSettingsByGroup = useMemo(
+    () => SETTINGS_GROUP_ORDER.map(group => ({ group, defs: changedByGroup[group] })).filter(g => g.defs.length > 0),
+    [changedByGroup]
+  );
+  const pendingBaselineByGroup = useMemo(
+    () => SETTINGS_GROUP_ORDER.map(group => ({ group, defs: baselineChangedByGroup[group] })).filter(g => g.defs.length > 0),
+    [baselineChangedByGroup]
+  );
+  const hasAnyPending = totalDirty > 0 || baselineTotalDirty > 0;
+
   // Unsaved-changes guard for full page/browser navigation (either surface).
   useEffect(() => {
     if (totalDirty === 0 && baselineTotalDirty === 0) return;
@@ -327,6 +357,24 @@ const PlatformSettingsPage: React.FC = () => {
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
   }, [totalDirty, baselineTotalDirty]);
+
+  // Lightweight configuration history — mirrors recent platform_setting_updated /
+  // platform_setting_default_updated audit rows from the shared audit store. This is
+  // a read-only entry point, NOT a history engine; full authority lives in the Audit
+  // Investigation Center. Refreshes on the shared 'audit_logs:changed' event so a
+  // group save (which pushes an audit row) updates the list immediately.
+  useEffect(() => {
+    const read = () => {
+      const rows = readMirroredAuditRows().filter(
+        r => r.category === 'configuration' &&
+          (r.action === 'platform setting updated' || r.action === 'platform setting default updated')
+      );
+      setRecentConfigAudit(rows.slice(0, 6));
+    };
+    read();
+    window.addEventListener('audit_logs:changed', read);
+    return () => window.removeEventListener('audit_logs:changed', read);
+  }, []);
 
   const updateBaselineField = (def: SettingDefinition, value: SettingPrimitive) => {
     if (!canEdit) return;
@@ -387,6 +435,13 @@ const PlatformSettingsPage: React.FC = () => {
     setBaselineDraft(d => ({ ...d, [baselineResetTarget.key]: getRegistryDefault(baselineResetTarget) }));
     setBaselineResetTarget(null);
   };
+
+  // Launch the per-group save flow from the consolidated Change Review Center. The
+  // actual save still happens per group through the existing review modal — same
+  // high-risk acknowledgment, same single audit row per group save — so behavior is
+  // unchanged; the Center is only a consolidated, filter-proof launchpad.
+  const reviewSettingsGroupFromCenter = (group: SettingsGroup) => { setReviewCenterOpen(false); openReview(group); };
+  const reviewBaselineGroupFromCenter = (group: SettingsGroup) => { setReviewCenterOpen(false); openBaselineReview(group); };
 
   if (!canView) {
     return (
@@ -451,6 +506,15 @@ const PlatformSettingsPage: React.FC = () => {
               {baselineTotalDirty} unsaved baseline change{baselineTotalDirty === 1 ? '' : 's'} · {baselineDirtyGroupCount} group{baselineDirtyGroupCount === 1 ? '' : 's'}
             </span>
           )}
+          {canEdit && hasAnyPending && (
+            <button
+              onClick={() => setReviewCenterOpen(true)}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-[10px] font-black uppercase tracking-widest rounded-xl bg-primary text-white shadow-lg shadow-primary/20 hover:bg-primary/90 transition-all cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-[14px]">fact_check</span>
+              Review Center · {totalDirty + baselineTotalDirty}
+            </button>
+          )}
         </div>
       </div>
 
@@ -496,6 +560,11 @@ const PlatformSettingsPage: React.FC = () => {
               <BreakdownRow label="Settings — unsaved" value={totalDirty} dirty={totalDirty} muted={totalDirty === 0} onClick={() => { setRegistryView('grouped'); setWorkspace('registry'); }} />
               <BreakdownRow label="Settings — groups affected" value={dirtyGroupCount} muted />
               <BreakdownRow label="Baseline — unsaved" value={baselineTotalDirty} dirty={baselineTotalDirty} muted={baselineTotalDirty === 0} onClick={() => setWorkspace('baseline')} />
+              {canEdit && hasAnyPending && (
+                <button onClick={() => setReviewCenterOpen(true)} className="mt-2 w-full inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-2xl bg-primary text-white text-[10px] font-black uppercase tracking-widest hover:bg-primary/90 cursor-pointer">
+                  <span className="material-symbols-outlined text-[14px]">fact_check</span> Open Change Review Center
+                </button>
+              )}
             </BreakdownCard>
           </div>
 
@@ -522,6 +591,48 @@ const PlatformSettingsPage: React.FC = () => {
                 <span className="material-symbols-outlined text-[16px]">tune</span> Open Default Baseline
               </button>
             </div>
+          </div>
+
+          {/* Recent configuration changes — lightweight history entry point */}
+          <div className="bg-white/80 backdrop-blur-xl p-6 rounded-[2rem] border border-slate-200 shadow-sm">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div className="flex items-center gap-2">
+                <span className="material-symbols-outlined text-primary">history</span>
+                <h3 className="text-lg font-black text-primary tracking-tight">Recent Configuration Changes</h3>
+              </div>
+              <Link
+                to="/owner/audit-security"
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-2xl border border-slate-200 text-slate-600 text-[10px] font-black uppercase tracking-widest hover:bg-slate-50 cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[16px]">open_in_new</span> Audit Investigation Center
+              </Link>
+            </div>
+            <div className="mt-2">
+              <TruthLabel text="Recent settings & baseline audit rows from this session. Full history and investigation live in the Audit Investigation Center." tone="slate" />
+            </div>
+            {recentConfigAudit.length === 0 ? (
+              <div className="mt-4 border border-slate-100 rounded-2xl p-8 text-center bg-slate-50/60">
+                <span className="material-symbols-outlined text-3xl text-slate-300">history_toggle_off</span>
+                <p className="mt-2 text-xs font-black text-slate-500 uppercase tracking-widest">No configuration changes recorded yet</p>
+                <p className="mt-1 text-[11px] font-bold text-slate-400">Saving a settings or baseline group records an audit row that will appear here.</p>
+              </div>
+            ) : (
+              <ul className="mt-4 space-y-2">
+                {recentConfigAudit.map(row => (
+                  <li key={row.id} className="flex items-start justify-between gap-3 border border-slate-100 rounded-2xl px-4 py-3 bg-white/60">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-black text-slate-800">{row.action === 'platform setting default updated' ? 'Default baseline updated' : 'Settings updated'}</span>
+                        <Badge text={row.target} className="bg-slate-100 text-slate-500 border-slate-200" />
+                        <Badge text={row.severity} className={AUDIT_SEVERITY_STYLES[row.severity] ?? AUDIT_SEVERITY_STYLES.info} />
+                      </div>
+                      {row.note && <p className="text-[11px] font-medium text-slate-500 mt-1 truncate">{row.note}</p>}
+                    </div>
+                    <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 shrink-0">{row.date}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
 
           {/* Future Integration Readiness — informational only */}
@@ -587,6 +698,54 @@ const PlatformSettingsPage: React.FC = () => {
                 <span className="material-symbols-outlined text-slate-300 text-[14px]">arrow_forward</span>
                 <li className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200">3 · Reset any row to the registry default</li>
               </ol>
+            </div>
+          )}
+
+          {/* Default Baseline Manager — currently-customized defaults overview */}
+          {workspace === 'baseline' && overriddenDefs.length > 0 && (
+            <div className="bg-white/80 backdrop-blur-xl p-6 rounded-[2rem] border border-slate-200 shadow-sm">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <span className="material-symbols-outlined text-primary">rule_settings</span>
+                  <h3 className="text-lg font-black text-primary tracking-tight">Customized Defaults</h3>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <StatPill label="Customized" value={overriddenCount} tint="amber" />
+                  <StatPill label="High-risk" value={highRiskOverriddenCount} tint={highRiskOverriddenCount ? 'red' : 'slate'} />
+                </div>
+              </div>
+              <p className="text-[11px] font-medium text-slate-500 mt-1">Defaults whose saved baseline differs from the built-in registry default. These are the fallback values Reset-to-default restores — governance reference only, enforced by nothing at runtime.</p>
+              {highRiskOverriddenCount > 0 && (
+                <div className="mt-3 bg-red-500/5 border border-red-500/20 rounded-2xl p-3">
+                  <p className="text-[11px] font-black text-red-700 uppercase tracking-widest flex items-center gap-1.5"><span className="material-symbols-outlined text-[14px]">warning</span> {highRiskOverriddenCount} high-risk default{highRiskOverriddenCount === 1 ? '' : 's'} customized</p>
+                  <p className="text-[11px] font-bold text-slate-600 mt-0.5">These change the fallback for high-risk settings — review them carefully.</p>
+                </div>
+              )}
+              <ul className="mt-4 space-y-2">
+                {overriddenDefs.map(def => (
+                  <li key={def.key} className="flex items-start justify-between gap-3 border border-slate-100 rounded-2xl px-4 py-3 bg-white/60">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-black text-slate-800">{def.label}</span>
+                        <Badge text={SETTINGS_GROUP_LABELS[def.group]} className="bg-slate-100 text-slate-500 border-slate-200" />
+                        <Badge text={`${SETTING_RISK_LABELS[def.risk]} Risk`} className={RISK_STYLES[def.risk]} />
+                      </div>
+                      <div className="flex items-center gap-2 mt-1.5 text-[11px] font-bold flex-wrap">
+                        <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Registry</span>
+                        <span className="px-2 py-0.5 rounded-lg bg-white border border-slate-200 text-slate-400 line-through">{formatSettingValue(def, getRegistryDefault(def))}</span>
+                        <span className="material-symbols-outlined text-slate-400 text-[14px]">arrow_forward</span>
+                        <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Baseline</span>
+                        <span className="px-2 py-0.5 rounded-lg bg-primary/5 border border-primary/20 text-primary">{formatSettingValue(def, getEffectiveDefault(def, baselineOverrides))}</span>
+                      </div>
+                    </div>
+                    {canEdit && (
+                      <button onClick={() => setGroupFilter(def.group)} className="shrink-0 inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-primary transition-all cursor-pointer">
+                        <span className="material-symbols-outlined text-[14px]">edit</span> Edit
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
 
@@ -948,6 +1107,68 @@ const PlatformSettingsPage: React.FC = () => {
           </div>
         )}
       </AnimatePresence>
+
+      {/* ---- Change Review Center — consolidated, filter-proof pending changes ---- */}
+      <AnimatePresence>
+        {reviewCenterOpen && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setReviewCenterOpen(false)} className="absolute inset-0 bg-slate-900/50 backdrop-blur-md" />
+            <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="relative w-full max-w-2xl bg-white rounded-[2rem] shadow-2xl overflow-hidden max-h-[90vh] flex flex-col">
+              <div className="p-6 border-b border-slate-100">
+                <div className="flex items-center gap-2">
+                  <span className="material-symbols-outlined text-primary">fact_check</span>
+                  <h3 className="text-lg font-black text-primary tracking-tight">Change Review Center</h3>
+                </div>
+                <p className="text-xs font-bold text-slate-500 mt-1">{totalDirty} setting change{totalDirty === 1 ? '' : 's'} · {baselineTotalDirty} baseline change{baselineTotalDirty === 1 ? '' : 's'} across {pendingSettingsByGroup.length + pendingBaselineByGroup.length} group{(pendingSettingsByGroup.length + pendingBaselineByGroup.length) === 1 ? '' : 's'}. {SETTINGS_TRUTH_LABELS.notEnforced}</p>
+                <p className="text-[11px] font-medium text-slate-400 mt-1">Every unsaved change is listed here regardless of any active search or lens filter. Saving still happens per group — high-risk groups require acknowledgment, and each group save records one audit row.</p>
+              </div>
+              <div className="p-6 space-y-5 overflow-y-auto">
+                {!hasAnyPending && (
+                  <div className="border border-slate-100 rounded-2xl p-8 text-center bg-slate-50/60">
+                    <span className="material-symbols-outlined text-3xl text-slate-300">task_alt</span>
+                    <p className="mt-2 text-xs font-black text-slate-500 uppercase tracking-widest">No pending changes</p>
+                  </div>
+                )}
+                {pendingSettingsByGroup.length > 0 && (
+                  <div className="space-y-3">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">In-effect Settings</p>
+                    {pendingSettingsByGroup.map(({ group, defs }) => (
+                      <ReviewCenterGroup
+                        key={`s_${group}`}
+                        title={SETTINGS_GROUP_LABELS[group]}
+                        defs={defs}
+                        oldValue={def => formatSettingValue(def, getSettingValue(persisted, def))}
+                        newValue={def => formatSettingValue(def, getSettingValue(draft, def))}
+                        canEdit={canEdit}
+                        onSave={() => reviewSettingsGroupFromCenter(group)}
+                      />
+                    ))}
+                  </div>
+                )}
+                {pendingBaselineByGroup.length > 0 && (
+                  <div className="space-y-3">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Default Baseline</p>
+                    {pendingBaselineByGroup.map(({ group, defs }) => (
+                      <ReviewCenterGroup
+                        key={`b_${group}`}
+                        title={SETTINGS_GROUP_LABELS[group]}
+                        defs={defs}
+                        oldValue={def => formatSettingValue(def, getEffectiveDefault(def, baselineOverrides))}
+                        newValue={def => formatSettingValue(def, baselineDraft[def.key])}
+                        canEdit={canEdit}
+                        onSave={() => reviewBaselineGroupFromCenter(group)}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="p-6 border-t border-slate-100 flex justify-end gap-2">
+                <button onClick={() => setReviewCenterOpen(false)} className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 rounded-xl hover:bg-slate-50 transition-all cursor-pointer">Close</button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };
@@ -1101,6 +1322,56 @@ const SectionCard: React.FC<{ title: string; subtitle?: string; badge?: string; 
 const Badge: React.FC<{ text: string; className: string }> = ({ text, className }) => (
   <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${className}`}>{text}</span>
 );
+
+const ReviewCenterGroup: React.FC<{
+  title: string;
+  defs: SettingDefinition[];
+  oldValue: (def: SettingDefinition) => string;
+  newValue: (def: SettingDefinition) => string;
+  canEdit: boolean;
+  onSave: () => void;
+}> = ({ title, defs, oldValue, newValue, canEdit, onSave }) => {
+  const hasHighRisk = defs.some(d => d.risk === 'high');
+  return (
+    <div className="border border-slate-200 rounded-2xl overflow-hidden">
+      <div className="flex items-center justify-between gap-2 px-4 py-2.5 bg-slate-50 border-b border-slate-100 flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-sm font-black text-slate-800">{title}</span>
+          <Badge text={`${defs.length} change${defs.length === 1 ? '' : 's'}`} className="bg-amber-400/10 text-amber-700 border-amber-400/20" />
+          {hasHighRisk && <Badge text="High risk · ack required" className="bg-red-500/10 text-red-700 border-red-500/20" />}
+        </div>
+        {canEdit && (
+          <button onClick={onSave} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-xl bg-primary text-white hover:bg-primary/90 transition-all cursor-pointer">
+            <span className="material-symbols-outlined text-[14px]">save</span> Review &amp; Save
+          </button>
+        )}
+      </div>
+      <div className="p-3 space-y-2">
+        {defs.map(def => (
+          <div key={def.key} className="border border-slate-100 rounded-xl p-3 bg-white/60">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="min-w-0">
+                <span className="text-sm font-black text-slate-800">{def.label}</span>
+                <p className="text-[10px] font-mono text-slate-300">key: {def.key}</p>
+              </div>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <Badge text={SETTING_ENFORCEMENT_LABELS[def.enforcement]} className={ENFORCEMENT_STYLES[def.enforcement]} />
+                <Badge text={`${SETTING_RISK_LABELS[def.risk]} Risk`} className={RISK_STYLES[def.risk]} />
+              </div>
+            </div>
+            <div className="flex items-center gap-2 mt-2 text-sm font-bold flex-wrap">
+              <span className="px-2 py-1 rounded-lg bg-white border border-slate-200 text-slate-400 line-through">{oldValue(def)}</span>
+              <span className="material-symbols-outlined text-slate-400 text-[16px]">arrow_forward</span>
+              <span className="px-2 py-1 rounded-lg bg-primary/5 border border-primary/20 text-primary">{newValue(def)}</span>
+            </div>
+            <p className="text-[11px] font-bold text-slate-500 mt-2"><span className="text-slate-400 uppercase tracking-widest text-[10px] font-black">Impact: </span>{def.impactSummary}</p>
+            <p className="text-[11px] font-medium text-slate-400 mt-0.5">{def.truthLabel}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
 
 const SettingControl: React.FC<{ def: SettingDefinition; value: SettingPrimitive; canEdit: boolean; onChange: (v: SettingPrimitive) => void }> = ({ def, value, canEdit, onChange }) => {
   const base = 'w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700 disabled:opacity-60';
