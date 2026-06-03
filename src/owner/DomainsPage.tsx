@@ -20,10 +20,15 @@ import {
   deriveDomainReadinessList,
   deriveDomainRole,
   deriveParentRootHostname,
+  deriveDomainSslWorkspace,
+  deriveDomainTroubleshooting,
   formatDnsRecord,
+  formatAllDnsRecords,
   DOMAIN_LIFECYCLE_LABELS,
   DOMAIN_ROLE_LABELS,
   DOMAIN_SSL_READINESS_LABELS,
+  DOMAIN_DNS_READINESS_DETAIL,
+  DOMAIN_PROPAGATION_STEPS,
   DOMAIN_TRUTH_LABELS,
   SECURITY_READINESS_LABELS,
   PLATFORM_ROOT_SUFFIX,
@@ -354,6 +359,22 @@ const DomainsPage: React.FC = () => {
     const placed = new Set<string>();
     groups.forEach(g => g.rows.forEach(r => { if (!r.context) placed.add(r.signal.id); }));
     const leftover = visible.filter(s => !placed.has(s.id)).sort((a, b) => a.hostname.localeCompare(b.hostname));
+
+    // Dev-only no-drift assertion (M2 defensive hardening, no UI/behavior change):
+    // every visible signal must be placed as exactly one non-context row, with no
+    // duplicate placements. The "Other Domains" safety net below still catches any
+    // leftover at runtime; this only surfaces drift loudly in development.
+    if (import.meta.env.DEV) {
+      const nonContextRows = groups.flatMap(g => g.rows.filter(r => !r.context)).map(r => r.signal.id).concat(leftover.map(s => s.id));
+      const uniquePlaced = new Set(nonContextRows);
+      if (uniquePlaced.size !== nonContextRows.length) {
+        console.warn('[Domains] no-drift assertion: a domain appears in more than one portfolio group.');
+      }
+      if (uniquePlaced.size !== visible.length) {
+        console.warn(`[Domains] no-drift assertion: placed ${uniquePlaced.size} domains but ${visible.length} are visible.`);
+      }
+    }
+
     if (leftover.length > 0) {
       groups.push({
         key: 'other',
@@ -957,10 +978,32 @@ interface DomainControlPanelProps {
   onClose?: () => void;
 }
 
+type DomainWorkspaceTab = 'overview' | 'dns' | 'ssl' | 'security' | 'troubleshoot';
+
+const DOMAIN_WORKSPACE_TABS: { id: DomainWorkspaceTab; label: string; icon: string }[] = [
+  { id: 'overview', label: 'Overview', icon: 'dashboard' },
+  { id: 'dns', label: 'DNS', icon: 'dns' },
+  { id: 'ssl', label: 'SSL/TLS', icon: 'lock' },
+  { id: 'security', label: 'Security', icon: 'security' },
+  { id: 'troubleshoot', label: 'Help', icon: 'help' },
+];
+
 const DomainControlPanel: React.FC<DomainControlPanelProps> = ({
   selected, signal, domains, canManage, tenantName, history, copied,
   onCopy, onSelect, onSetStatus, onSetSsl, onReenable, onConfirmDisable, onClose,
-}) => (
+}) => {
+  // Workspace tab is panel-local presentation state. It resets to Overview when
+  // a different domain is selected so the operator always lands on the summary.
+  const [activeTab, setActiveTab] = useState<DomainWorkspaceTab>('overview');
+  useEffect(() => { setActiveTab('overview'); }, [selected.id]);
+
+  // M2 workspace derivations — computed for the SELECTED domain only (kept out
+  // of the shared readiness signal so posture/list/no-drift stay untouched).
+  const sslWorkspace = deriveDomainSslWorkspace(selected);
+  const troubleshooting = deriveDomainTroubleshooting(selected);
+  const isCustom = selected.kind === 'custom';
+
+  return (
   <>
     <div className="p-7 border-b border-slate-100 flex justify-between items-start">
       <div className="flex-1 pr-4">
@@ -980,6 +1023,24 @@ const DomainControlPanel: React.FC<DomainControlPanelProps> = ({
       )}
     </div>
 
+    {/* Workspace tab bar — Overview holds every mutation; the DNS / SSL /
+        Security / Help workspaces are informational, copy, and guidance only. */}
+    <div className="px-7 pt-4 border-b border-slate-100">
+      <div className="flex gap-1 overflow-x-auto -mb-px">
+        {DOMAIN_WORKSPACE_TABS.map(t => (
+          <button
+            key={t.id}
+            onClick={() => setActiveTab(t.id)}
+            className={`flex items-center gap-1.5 px-3 py-2.5 text-[11px] font-black uppercase tracking-widest border-b-2 whitespace-nowrap transition-colors cursor-pointer ${activeTab === t.id ? 'border-primary text-primary' : 'border-transparent text-slate-400 hover:text-slate-600'}`}
+          >
+            <span className="material-symbols-outlined text-base">{t.icon}</span>
+            {t.label}
+          </button>
+        ))}
+      </div>
+    </div>
+
+    {activeTab === 'overview' && (
     <div className="p-7 space-y-6">
       {/* Next action */}
       <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
@@ -1056,26 +1117,6 @@ const DomainControlPanel: React.FC<DomainControlPanelProps> = ({
         </div>
       )}
 
-      {/* Security & readiness — DNS readiness + SSL (live), plus future
-          registrar-level indicators shown as placeholders only. */}
-      <div>
-        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Security &amp; readiness</p>
-        <div className="space-y-1.5">
-          <ReadinessRow label="DNS configuration" state={DNS_READINESS_TONE[signal.dnsReadiness]} valueLabel={signal.dnsReadinessLabel} />
-          {signal.securityIndicators.map(ind => (
-            <ReadinessRow
-              key={ind.key}
-              label={ind.label}
-              state={SECURITY_STATE_TONE[ind.state]}
-              valueLabel={SECURITY_READINESS_LABELS[ind.state]}
-              detail={ind.detail}
-              future={ind.future}
-            />
-          ))}
-        </div>
-        <p className="text-[10px] text-slate-400 font-medium mt-2">{DOMAIN_TRUTH_LABELS.futureSecurity}</p>
-      </div>
-
       {/* Manual action checklist — read-only guidance, no automation */}
       <div>
         <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Action checklist</p>
@@ -1092,12 +1133,6 @@ const DomainControlPanel: React.FC<DomainControlPanelProps> = ({
           ))}
         </div>
         <p className="text-[10px] text-slate-400 font-medium mt-2">{DOMAIN_TRUTH_LABELS.manual}</p>
-      </div>
-
-      {/* Registrar vs. app configuration explanation */}
-      <div className="px-3 py-2.5 rounded-xl bg-amber-400/5 border border-amber-400/20">
-        <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest mb-1 flex items-center gap-1"><span className="material-symbols-outlined text-[13px]">dns</span> Registrar &amp; DNS provider</p>
-        <p className="text-[11px] font-bold text-slate-600">{DOMAIN_TRUTH_LABELS.registrarExternal}</p>
       </div>
 
       {/* Manual status workflow */}
@@ -1124,19 +1159,6 @@ const DomainControlPanel: React.FC<DomainControlPanelProps> = ({
           </select>
         </div>
       </div>
-
-      {/* Required DNS records */}
-      {signal.requiredRecords.length > 0 && (
-        <div>
-          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Required DNS records</p>
-          <p className="text-[11px] text-amber-700 font-bold mb-3">Configure these at the customer's DNS provider, then mark this record verified once you've manually confirmed propagation. <span className="font-medium text-slate-500">{DOMAIN_TRUTH_LABELS.manual}</span></p>
-          <div className="space-y-2">
-            {signal.requiredRecords.map((rec, i) => (
-              <DnsBlock key={i} type={rec.type} host={rec.host} value={rec.value} purpose={rec.purpose} onCopy={() => onCopy(formatDnsRecord(rec), `rec${i}`)} copied={copied === `rec${i}`} />
-            ))}
-          </div>
-        </div>
-      )}
 
       {/* Quick actions */}
       {canManage && (
@@ -1183,8 +1205,163 @@ const DomainControlPanel: React.FC<DomainControlPanelProps> = ({
         <div className="col-span-2 text-slate-400 font-medium">{signal.truthLabel}</div>
       </div>
     </div>
+    )}
+
+    {activeTab === 'dns' && (
+    <div className="p-7 space-y-6">
+      {/* DNS readiness banner */}
+      <div>
+        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">DNS readiness</p>
+        <div className="px-3 py-2.5 rounded-xl border border-slate-100 bg-slate-50/60 flex items-start justify-between gap-3">
+          <p className="text-[11px] font-medium text-slate-500 flex-1">{DOMAIN_DNS_READINESS_DETAIL[signal.dnsReadiness]}</p>
+          <span className={`shrink-0 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${READINESS_TONE_STYLES[DNS_READINESS_TONE[signal.dnsReadiness]]}`}>{signal.dnsReadinessLabel}</span>
+        </div>
+      </div>
+
+      {/* Required DNS records workspace */}
+      {signal.requiredRecords.length > 0 ? (
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Required DNS records</p>
+            <button onClick={() => onCopy(formatAllDnsRecords(signal.requiredRecords), 'dns-all')} className="text-[10px] font-black uppercase tracking-widest text-primary hover:opacity-80 transition-opacity cursor-pointer">{copied === 'dns-all' ? 'Copied!' : 'Copy all'}</button>
+          </div>
+          <p className="text-[11px] text-amber-700 font-bold mb-3">Configure these at the customer's DNS provider, then mark the domain verified from Overview once you've manually confirmed propagation. <span className="font-medium text-slate-500">{DOMAIN_TRUTH_LABELS.manual}</span></p>
+          <div className="space-y-2">
+            {signal.requiredRecords.map((rec, i) => (
+              <DnsBlock key={i} type={rec.type} host={rec.host} value={rec.value} purpose={rec.purpose} onCopy={() => onCopy(formatDnsRecord(rec), `rec${i}`)} copied={copied === `rec${i}`} />
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="px-3 py-3 rounded-xl bg-slate-50 border border-dashed border-slate-200">
+          <p className="text-[11px] font-bold text-slate-500">{selected.status === 'disabled' ? 'This domain is disabled — DNS configuration is not applicable.' : 'No customer DNS records are required. This subdomain is provisioned automatically under the platform apex.'}</p>
+        </div>
+      )}
+
+      {/* Propagation guidance (manual, custom domains only) */}
+      {isCustom && selected.status !== 'disabled' && (
+        <div>
+          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Propagation guidance</p>
+          <ol className="space-y-1.5">
+            {DOMAIN_PROPAGATION_STEPS.map((step, i) => (
+              <li key={i} className="flex items-start gap-2.5 px-3 py-2 rounded-xl border border-slate-100 bg-slate-50/60">
+                <span className="shrink-0 w-5 h-5 rounded-full bg-primary/10 text-primary text-[10px] font-black flex items-center justify-center">{i + 1}</span>
+                <span className="text-[11px] font-medium text-slate-600 flex-1">{step}</span>
+              </li>
+            ))}
+          </ol>
+          <p className="text-[10px] text-slate-400 font-medium mt-2">{DOMAIN_TRUTH_LABELS.ruleBased}</p>
+        </div>
+      )}
+
+      {/* Registrar vs. app configuration explanation */}
+      <div className="px-3 py-2.5 rounded-xl bg-amber-400/5 border border-amber-400/20">
+        <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest mb-1 flex items-center gap-1"><span className="material-symbols-outlined text-[13px]">dns</span> Registrar &amp; DNS provider</p>
+        <p className="text-[11px] font-bold text-slate-600">{DOMAIN_TRUTH_LABELS.registrarExternal}</p>
+      </div>
+    </div>
+    )}
+
+    {activeTab === 'ssl' && (
+    <div className="p-7 space-y-6">
+      {/* SSL/TLS readiness state */}
+      <div>
+        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">SSL / TLS readiness</p>
+        <div className="px-3 py-2.5 rounded-xl border border-slate-100 bg-slate-50/60 flex items-start justify-between gap-3">
+          <p className="text-[11px] font-medium text-slate-500 flex-1">{sslWorkspace.explanation}</p>
+          <span className={`shrink-0 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${SSL_READINESS_STYLES[sslWorkspace.readiness]}`}>{sslWorkspace.readinessLabel}</span>
+        </div>
+      </div>
+
+      {/* SSL/TLS manual steps */}
+      <div>
+        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Path to SSL ready</p>
+        <div className="space-y-1.5">
+          {sslWorkspace.steps.map(step => (
+            <div key={step.key} className="flex items-start gap-2.5 px-3 py-2 rounded-xl border border-slate-100 bg-slate-50/60">
+              <span className={`material-symbols-outlined text-base mt-px ${CHECKLIST_TONE[step.state].icon}`}>{CHECKLIST_TONE[step.state].symbol}</span>
+              <p className={`text-[11px] font-bold flex-1 ${step.state === 'done' ? 'text-slate-400 line-through' : 'text-slate-700'}`}>{step.label}</p>
+              {step.state === 'current' && <span className="text-[9px] font-black uppercase tracking-widest text-primary shrink-0 mt-0.5">Now</span>}
+            </div>
+          ))}
+        </div>
+        {canManage && selected.status !== 'disabled' && (
+          <p className="text-[10px] font-medium text-slate-400 mt-2">Set the SSL state from <span className="font-bold text-slate-500">Overview</span> once the certificate is confirmed.</p>
+        )}
+        <p className="text-[10px] text-slate-400 font-medium mt-1">{sslWorkspace.truthLabel}</p>
+      </div>
+    </div>
+    )}
+
+    {activeTab === 'security' && (
+    <div className="p-7 space-y-6">
+      {/* Security readiness panel — DNS readiness + SSL (live), plus future
+          registrar-level indicators shown as placeholders only. */}
+      <div>
+        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Security &amp; readiness</p>
+        <div className="space-y-1.5">
+          <ReadinessRow label="DNS configuration" state={DNS_READINESS_TONE[signal.dnsReadiness]} valueLabel={signal.dnsReadinessLabel} />
+          {signal.securityIndicators.map(ind => (
+            <ReadinessRow
+              key={ind.key}
+              label={ind.label}
+              state={SECURITY_STATE_TONE[ind.state]}
+              valueLabel={SECURITY_READINESS_LABELS[ind.state]}
+              detail={ind.detail}
+              future={ind.future}
+            />
+          ))}
+        </div>
+        <p className="text-[10px] text-slate-400 font-medium mt-2">{DOMAIN_TRUTH_LABELS.futureSecurity}</p>
+      </div>
+
+      {/* Registrar vs. app configuration explanation */}
+      <div className="px-3 py-2.5 rounded-xl bg-amber-400/5 border border-amber-400/20">
+        <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest mb-1 flex items-center gap-1"><span className="material-symbols-outlined text-[13px]">dns</span> Registrar &amp; DNS provider</p>
+        <p className="text-[11px] font-bold text-slate-600">{DOMAIN_TRUTH_LABELS.registrarExternal}</p>
+      </div>
+    </div>
+    )}
+
+    {activeTab === 'troubleshoot' && (
+    <div className="p-7 space-y-6">
+      {/* Troubleshooting — rule-based symptom/guidance for the current state */}
+      <div>
+        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Troubleshooting</p>
+        <div className="space-y-2">
+          {troubleshooting.map(item => (
+            <div key={item.key} className={`px-3 py-2.5 rounded-xl border ${item.tone === 'critical' ? 'bg-red-500/5 border-red-500/20' : item.tone === 'warn' ? 'bg-amber-400/5 border-amber-400/20' : 'bg-slate-50/60 border-slate-100'}`}>
+              <p className={`text-[11px] font-black flex items-center gap-1.5 ${item.tone === 'critical' ? 'text-red-700' : item.tone === 'warn' ? 'text-amber-700' : 'text-slate-700'}`}>
+                <span className="material-symbols-outlined text-sm">{item.tone === 'critical' ? 'error' : item.tone === 'warn' ? 'warning' : 'info'}</span>
+                {item.symptom}
+              </p>
+              <p className="text-[11px] font-medium text-slate-500 mt-1">{item.guidance}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Propagation guidance recap (manual, custom domains only) */}
+      {isCustom && selected.status !== 'disabled' && (
+        <div>
+          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">How to confirm propagation</p>
+          <ol className="space-y-1.5">
+            {DOMAIN_PROPAGATION_STEPS.map((step, i) => (
+              <li key={i} className="flex items-start gap-2.5 px-3 py-2 rounded-xl border border-slate-100 bg-slate-50/60">
+                <span className="shrink-0 w-5 h-5 rounded-full bg-primary/10 text-primary text-[10px] font-black flex items-center justify-center">{i + 1}</span>
+                <span className="text-[11px] font-medium text-slate-600 flex-1">{step}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+
+      <p className="text-[10px] text-slate-400 font-medium">{DOMAIN_TRUTH_LABELS.manual}</p>
+    </div>
+    )}
   </>
-);
+  );
+};
 
 const TruthLabel: React.FC<{ text: string; tone: 'amber' | 'slate' }> = ({ text, tone }) => (
   <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold border ${tone === 'amber' ? 'bg-amber-400/10 text-amber-700 border-amber-400/20' : 'bg-slate-100 text-slate-500 border-slate-200'}`}>

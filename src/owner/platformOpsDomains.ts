@@ -550,3 +550,137 @@ export function deriveDomainPosture(domains: TenantDomainRecord[]): DomainPostur
     totalIssues: signals.reduce((sum, s) => sum + s.issueCount, 0),
   };
 }
+
+// ===========================================================================
+// Phase 1.2E — Milestone 2: DNS / SSL / Security Workspaces (rule-based)
+// ===========================================================================
+//
+// Additional PURE, rule-based, truth-labeled helpers powering the Domain
+// Control Panel's DNS Records, SSL/TLS Readiness, Security Readiness, and
+// Troubleshooting workspaces. Like everything in this module these derive ONLY
+// from the persisted record — NO real DNS lookup, NO real SSL automation, NO
+// registrar/provider integration, NO DNSSEC/domain-lock/transfer activation.
+// ===========================================================================
+
+// Plain-language explanation of each DNS readiness state (DNS workspace banner).
+export const DOMAIN_DNS_READINESS_DETAIL: Record<DomainDnsReadiness, string> = {
+  managed: 'DNS is handled automatically by the platform apex — no customer DNS action is required.',
+  not_configured: 'The required DNS records have not been added at the customer\u2019s DNS provider yet.',
+  propagating: 'Records were added and are awaiting manual confirmation that they have propagated.',
+  confirmed: 'DNS was manually confirmed as propagated and the domain is verified.',
+  failed: 'Verification failed \u2014 re-check the records at the provider before retrying.',
+  not_applicable: 'The domain is disabled, so DNS configuration is not applicable.',
+};
+
+// Plain-language explanation of each SSL readiness state (SSL/TLS workspace).
+export const DOMAIN_SSL_READINESS_DETAIL: Record<DomainSslReadiness, string> = {
+  not_applicable: 'The domain is disabled, so SSL/TLS is not applicable.',
+  not_started: 'SSL has not been started. Verify the domain first, then begin certificate issuance.',
+  pending: 'SSL issuance or renewal is pending. Confirm the certificate is active, then mark SSL ready.',
+  failed: 'SSL is marked failed. Re-issue the certificate, then mark SSL active once confirmed.',
+  ready: 'SSL is active. The domain is ready to serve secure traffic.',
+};
+
+// SSL/TLS readiness workspace — the recorded state, its explanation, and the
+// manual, rule-based steps to reach "ready". Steps reflect the recorded
+// lifecycle only; this performs no real issuance or certificate check.
+export interface DomainSslWorkspaceStep {
+  key: string;
+  label: string;
+  state: DomainChecklistState;
+}
+
+export interface DomainSslWorkspace {
+  readiness: DomainSslReadiness;
+  readinessLabel: string;
+  explanation: string;
+  steps: DomainSslWorkspaceStep[];
+  truthLabel: string;
+}
+
+export function deriveDomainSslWorkspace(d: TenantDomainRecord): DomainSslWorkspace {
+  const readiness = deriveDomainSslReadiness(d);
+  const base = {
+    readiness,
+    readinessLabel: DOMAIN_SSL_READINESS_LABELS[readiness],
+    explanation: DOMAIN_SSL_READINESS_DETAIL[readiness],
+    truthLabel: DOMAIN_TRUTH_LABELS.manual,
+  };
+  if (d.status === 'disabled') {
+    return { ...base, steps: [{ key: 'na', label: 'SSL is not applicable while the domain is disabled', state: 'not_applicable' }] };
+  }
+  if (d.kind !== 'custom') {
+    return {
+      ...base,
+      steps: [
+        { key: 'shared', label: 'Served by the shared platform certificate', state: 'done' },
+        { key: 'active', label: 'SSL active on the platform certificate', state: d.ssl === 'active' ? 'done' : 'current' },
+      ],
+    };
+  }
+  const lifecycle = deriveDomainLifecycle(d);
+  const verified = lifecycle === 'verified' || lifecycle === 'ssl_pending' || lifecycle === 'ssl_ready';
+  const sslReady = readiness === 'ready';
+  const sslInProgress = readiness === 'pending' || readiness === 'failed';
+  return {
+    ...base,
+    steps: [
+      { key: 'verify', label: 'Verify the domain (DNS confirmed)', state: verified ? 'done' : 'current' },
+      { key: 'issue', label: 'Issue or renew the SSL/TLS certificate', state: sslReady ? 'done' : verified ? 'current' : 'todo' },
+      { key: 'mark_ready', label: 'Mark SSL active once the certificate is confirmed', state: sslReady ? 'done' : verified && sslInProgress ? 'current' : 'todo' },
+    ],
+  };
+}
+
+// Generic, manual propagation-check guidance (shown in the DNS + Troubleshooting
+// workspaces for custom domains). These are operator instructions, not steps the
+// app performs — this app never checks propagation automatically.
+export const DOMAIN_PROPAGATION_STEPS: string[] = [
+  'Confirm the CNAME and TXT records exist at the customer\u2019s DNS provider exactly as shown (host and value).',
+  'Use an external DNS lookup (dig / nslookup or a public propagation checker) to confirm the records resolve globally.',
+  'Allow time for propagation \u2014 DNS changes can take minutes to 48 hours depending on the record TTL.',
+  'Once the records resolve externally, mark the domain verified here.',
+];
+
+// Troubleshooting workspace — rule-based symptom/guidance entries keyed to the
+// domain\u2019s current recorded state. Manual guidance only; no live diagnostics.
+export interface DomainTroubleshootingItem {
+  key: string;
+  symptom: string;
+  guidance: string;
+  tone: 'critical' | 'warn' | 'info';
+}
+
+export function deriveDomainTroubleshooting(d: TenantDomainRecord): DomainTroubleshootingItem[] {
+  if (d.status === 'disabled') {
+    return [{ key: 'disabled', symptom: 'Domain is disabled', guidance: 'Re-enable the domain to resume routing. While disabled it is excluded from routing and SSL.', tone: 'info' }];
+  }
+  if (d.kind !== 'custom') {
+    return [{ key: 'managed', symptom: 'Platform subdomain', guidance: 'This subdomain is auto-provisioned under the platform apex; no customer DNS action is required. If SSL is not yet active, allow the shared certificate to finish provisioning.', tone: 'info' }];
+  }
+  const items: DomainTroubleshootingItem[] = [];
+  if (d.status === 'failed') {
+    items.push({ key: 'verify_failed', symptom: 'Verification failed', guidance: 'The expected DNS records were not found. Re-check the record host and value at the provider for typos or a wrong host, then re-attempt verification.', tone: 'critical' });
+  }
+  if (d.status === 'pending') {
+    items.push({ key: 'no_dns', symptom: 'DNS records not added', guidance: 'Add the required CNAME and TXT records at the customer\u2019s DNS provider, then confirm propagation before marking verified.', tone: 'warn' });
+  }
+  if (d.status === 'verifying') {
+    items.push({ key: 'propagating', symptom: 'Awaiting propagation / verification', guidance: 'Records were added but not yet confirmed. Confirm they resolve externally, then mark the domain verified.', tone: 'warn' });
+  }
+  if (d.ssl === 'failed') {
+    items.push({ key: 'ssl_failed', symptom: 'SSL marked failed', guidance: 'Re-issue the certificate after confirming the domain is verified and DNS resolves, then mark SSL active.', tone: 'critical' });
+  }
+  if (d.status === 'verified' && d.ssl === 'pending') {
+    items.push({ key: 'ssl_pending', symptom: 'SSL issuance pending', guidance: 'Confirm the certificate has been issued for this hostname, then mark SSL active.', tone: 'info' });
+  }
+  if (items.length === 0) {
+    items.push({ key: 'healthy', symptom: 'No known issues', guidance: 'This domain is verified and SSL is ready. No troubleshooting action is needed.', tone: 'info' });
+  }
+  return items;
+}
+
+// Joins all required DNS records into one copy-all block (DNS workspace).
+export function formatAllDnsRecords(records: DomainRequiredRecord[]): string {
+  return records.map(formatDnsRecord).join('\n');
+}
