@@ -563,3 +563,20 @@ A second focused, presentation-only pass (no M1 logic, columns, storage, permiss
 -   **Column widths rebalanced** to total 100% with the Domain column trimmed slightly to fund the wider Actions column (Domain 15, Type 7, Tenant 9, Registrar 11, DNS 7, SSL 7, Email 6, Security 7, Renewal 8, Risk 6, Next Action 10, Actions 7).
 
 All required columns remain present; rows stay at most two lines tall; no horizontal scroll on normal desktop width (sub-`xl` fallback retained). No-drift logic, search, saved views, chips, Clear All, empty state, Add-Domain, row click-through, deep-linking, and gating preserved. Typecheck stable at the 12 pre-existing baseline errors. **Readability correction done — pending re-QA / acceptance.**
+
+### Milestone 2 — Root / Subdomain Overview Workspace (UI-only over the M0 model)
+
+The selected-domain control panel's **Overview** workspace was rebuilt to run off the Milestone 0 object model (`deriveDomainControlPanelOverview(domain, ctx)`) instead of the legacy readiness signal. Because the Overview and the M1 portfolio row now share the same M0 sub-derivations (DNS / SSL / Email DNS / Security / Risk / Next Action) over the same `domains` store and the same context shape (seed DNS / registrar / security overlays), the panel can never describe a posture the portfolio row disagrees with — the **no-drift contract** extended from the table to the detail view.
+
+What the Overview now shows:
+
+-   **Header readiness summary** — domain role + portfolio type + lifecycle badges, plus a manual-readiness badge row (DNS / SSL / Email / Security) and the `noLiveDns` truth label.
+-   **Next recommended action** — derived by the M0 overview from the same posture the portfolio row reflects.
+-   **Manual readiness summary cards (×4)** — DNS, SSL/TLS, Email DNS, Security. Each card carries a status badge, a short explanation, a next action, and a per-dimension truth label (intended-state / manual SSL / future registrar controls).
+-   **Root / Subdomain relationships** — root domains list their managed subdomains (from `overview.relatedSubdomains`, each with a clickable row + lifecycle badge); subdomains show their managed parent root, a shared platform-root context row, or a truthful "no managed parent" empty state. All cross-links use the existing `onSelect(id)`.
+-   **Risk assessment** — overall readiness risk reasons from `overview.riskReasons` (with a clean "no outstanding risks" state).
+-   **Action checklist** — `overview.manualChecklist`, read-only manual guidance.
+-   **Recent activity** — recorded domain lifecycle events for the exact hostname (existing deduped `selectedHistory`, refreshed on `audit_logs:changed`), with a date-granular truth label.
+-   **Manual status / SSL workflow + quick actions** — unchanged; every mutation (status / SSL / disable / re-enable) still lives in Overview, gated on `canManage` (`manage_domain_lifecycle`).
+
+**Scope discipline:** UI-only. No new permission keys (`view_domains` = visibility, `manage_domain_lifecycle` = mutation), no model / storage / seed / audit changes, no real DNS lookups / SSL automation / registrar integration. The DNS / SSL / Security / Help workspace tabs retain their existing (pre-accepted) behavior — M3+ deep functionality is not built. Add-Domain, `?domain=` / `?status=` deep-linking, lifecycle/status/SSL/disable/re-enable, and all non-regression areas are preserved. Typecheck stable at the 12 pre-existing baseline errors (DomainsPage clean). **M2 done — pending acceptance.**

@@ -1,0 +1,546 @@
+Phase 1.2F — Domain Control Panel Architecture Reset
+Milestone 2 — Root/Subdomain Overview Workspace
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Status:
+Milestone 0 — Domain Object Model Foundation is accepted.
+Milestone 1 — Domain Portfolio Dashboard + Portfolio Table is accepted.
+Proceed to Milestone 2 only.
+
+Do not start Milestone 3.
+Do not implement the DNS Zone Editor.
+Do not implement full SSL/TLS workspace.
+Do not implement full Email DNS workspace.
+Do not implement Security / Troubleshooting / Audit workspace.
+Do not touch Platform Settings.
+Do not start Phase 1.3.
+
+==================================================
+MILESTONE 2 OBJECTIVE
+=====================
+
+Implement the selected-domain Overview Workspace for root domains, subdomains, platform domains, and legacy domains.
+
+This milestone replaces/improves the current existing domain detail experience with a professional selected-domain overview screen based on the accepted Stitch direction and the accepted Milestone 0 domain model helpers.
+
+The goal is to make clicking a domain from the Domain Portfolio table open a mature domain control overview, while keeping deeper tabs for future milestones.
+
+This milestone should implement:
+
+* selected domain header
+* domain identity and type
+* tenant and registrar summary
+* overview tab only
+* manual readiness cards
+* setup/operator checklist
+* risk assessment
+* related subdomains / parent root relationship
+* recent activity summary
+* truth labels
+* permission-aware actions
+* existing lifecycle/status actions preserved where appropriate
+
+==================================================
+WORKING STYLE — THINK STEP BY STEP
+==================================
+
+Think step by step before implementing.
+
+First inspect:
+
+1. accepted Milestone 0:
+
+   * platformOpsDomainModel.ts
+   * new DNS/registrar/security/mock data
+2. accepted Milestone 1:
+
+   * portfolioSignals
+   * portfolio table click-through
+   * current filter/no-drift logic
+3. current DomainsPage selected-domain/detail behavior
+4. current domain add/status/SSL/disable/re-enable flows
+5. current root/subdomain relationship handling
+6. current ?domain= deep-link behavior
+7. current permission gates:
+
+   * view_domains
+   * manage_domain_lifecycle
+8. current domain history/audit presentation
+9. existing detail tab overflow correction
+10. non-regression areas
+
+Then implement Milestone 2 only.
+
+==================================================
+ROLE STACK — ACT UPON IT
+========================
+
+Act as:
+
+* Senior Domain Control Panel Product Architect
+* Domain Administrator
+* DNS Administrator
+* Domain Manager
+* Network Administrator
+* Senior DNS / SSL Lifecycle Architect
+* Senior Registrar / Domain Portfolio Architect
+* Senior SaaS Admin Console UX Architect
+* Senior React/TypeScript Engineer
+* QA Gatekeeper
+* Systems Thinker
+* Side Auditor
+
+Apply real domain-management thinking:
+
+* root domain ownership
+* subdomain hierarchy
+* platform domain behavior
+* legacy domain handling
+* registrar/ownership context
+* DNS intended-state readiness
+* SSL manual readiness
+* email DNS readiness
+* security readiness
+* manual operator checklist
+* truthful future placeholders
+* no fake automation
+
+==================================================
+CRITICAL PRODUCT LIMITATIONS
+============================
+
+Do not implement or imply:
+
+* live DNS lookup
+* real DNS propagation checking
+* SSL automation
+* certificate issuance
+* registrar/provider API integration
+* DNSSEC activation
+* domain lock integration
+* transfer protection integration
+* traffic analytics
+* geolocation analytics
+* external notifications
+* SSO/SCIM
+* runtime enforcement
+* backend configuration service
+* formal approval workflow
+* Phase 1.3+
+
+Everything remains local/manual/readiness-only.
+
+Use only approved wording:
+
+* No live DNS lookup in this phase.
+* Manual readiness only.
+* Intended-state only.
+* SSL automation is future. Current SSL readiness is manually tracked.
+* Provider integrations future.
+* Registrar/provider configuration external in this phase.
+* Auto-renew: Future / Not active.
+* Future / Not active in this phase.
+* Operator manually marked verified.
+* Audit record.
+
+Do not use:
+
+* Live DNS lookup limitations may apply.
+* Verify Now.
+* Trigger verification.
+* System automatically verified.
+* Automatically provisioned.
+* Global propagation.
+* Latency.
+* Traffic snapshot with real numbers.
+* Top geographies.
+* Strict Enforcement.
+* Approve / Reject.
+* Immutable record.
+
+==================================================
+MILESTONE 2 SCOPE
+=================
+
+Implement only the selected-domain Overview Workspace.
+
+Required screens/states:
+
+1. Root Domain Overview
+2. Subdomain Overview
+3. Platform Domain Overview
+4. Legacy/Disabled Domain Overview
+5. Safe empty/missing-data states
+
+Do not implement deep functionality for these future tabs yet:
+
+* DNS Zone
+* SSL/TLS
+* Email DNS
+* Security
+* Subdomains
+* Registrar
+* Troubleshooting
+* History
+
+You may show the tab/navigation structure if useful, but only Overview is active in this milestone. Future tabs should either:
+
+* remain as existing behavior if already accepted, or
+* be disabled/placeholder-labeled for future milestones, or
+* route nowhere until implemented.
+
+Avoid fake incomplete tab content.
+
+==================================================
+SELECTED DOMAIN HEADER REQUIREMENTS
+===================================
+
+When a domain is selected from the portfolio table or via ?domain= deep-link, show a professional domain object header.
+
+Header must include:
+
+* hostname
+* domain type badge:
+
+  * Root
+  * Subdomain
+  * Platform
+  * Legacy
+* tenant
+* registrar
+* lifecycle/status state
+* DNS readiness summary
+* SSL readiness summary
+* Email DNS readiness summary
+* Security readiness summary
+* truth label:
+  “No live DNS lookup in this phase.”
+
+For root domains:
+
+* show root identity clearly.
+* show registrar/ownership context.
+
+For subdomains:
+
+* clearly show parent/root relationship.
+* explain:
+  “Subdomain hostname is generated from an editable label plus a locked root domain.”
+* show inherited/platform context where applicable.
+
+For platform domains:
+
+* clearly show platform-managed apex/root context.
+* avoid implying customer registrar ownership.
+
+For legacy/disabled domains:
+
+* show legacy/disabled state clearly.
+* avoid active readiness claims where not applicable.
+
+==================================================
+OVERVIEW CONTENT REQUIREMENTS
+=============================
+
+The Overview tab must show these sections:
+
+1. Manual Readiness Summary Cards
+
+Cards:
+
+* DNS Readiness
+* SSL Readiness
+* Email DNS Readiness
+* Security Readiness
+
+Each card must show:
+
+* status
+* short explanation
+* next action
+* source/truth label:
+
+  * Recorded manually
+  * Intended state
+  * Future integration
+  * Not applicable
+  * Current app/session data
+
+No live telemetry.
+
+2. Operator Checklist
+
+Show a practical checklist derived from DomainControlPanelOverview:
+
+Examples:
+
+* Domain record created
+* Intended DNS records generated
+* Records copied to DNS provider
+* Manual propagation checked
+* SSL readiness recorded
+* Email DNS records reviewed
+* Security posture reviewed
+
+Checklist must be manual/readiness-based.
+Do not imply automatic completion from external systems.
+
+3. Risk Assessment
+
+Show:
+
+* risk level
+* risk reasons
+* next recommended action
+
+Examples:
+
+* Missing DMARC policy
+* Pending manual SSL validation
+* DNS records need manual review
+* Legacy domain not actively managed
+* Registrar security placeholders are future
+
+4. Related Domain Relationships
+
+For root domains:
+
+* list related subdomains.
+* show count.
+* clicking a related subdomain should open that domain’s overview.
+
+For subdomains:
+
+* show parent root.
+* clicking parent root should open parent overview.
+* show inherited context.
+
+For platform domains:
+
+* show platform apex relationship or platform-managed context.
+
+5. Recent Activity Summary
+
+Show recent domain-related audit/history entries using DomainAuditSummary where available.
+
+Use language:
+
+* Audit record
+* Operator manually marked verified
+* Domain status changed
+* SSL status changed
+* Domain created
+* Domain disabled/re-enabled
+
+Do not say immutable unless immutable storage exists.
+
+==================================================
+ACTIONS
+=======
+
+Keep action behavior conservative.
+
+Allowed:
+
+* preserve existing status/SSL/disable/re-enable actions if already present and accepted.
+* preserve existing Add Domain flow.
+* preserve existing Manage/Open action from portfolio table.
+* allow navigation to related domains.
+* show future actions disabled/ghosted only if clearly labeled Future.
+
+Do not add:
+
+* live verification
+* real provider checks
+* automatic SSL issuance
+* registrar sync
+* DNSSEC activation
+* domain lock activation
+* telemetry actions
+
+Button wording:
+
+* Use “Record Manual Verification” only if this action already exists or is safe to add as local/manual state.
+* Use “Mark Records Reviewed” for local review actions.
+* Use “Open DNS Zone” only if it navigates to existing/future safe placeholder, not full M3 implementation.
+* Use “Future” labels for future actions.
+
+==================================================
+PERMISSION REQUIREMENTS
+=======================
+
+No new permission keys.
+
+Preserve:
+
+* view_domains controls visibility.
+* manage_domain_lifecycle controls mutation actions.
+
+View-only users:
+
+* can see overview and read-only readiness.
+* cannot mutate status/SSL/disable/re-enable.
+* see disabled or hidden actions with minimal explanation.
+
+Manage users:
+
+* can use existing accepted lifecycle actions.
+* can use existing accepted status/SSL controls if present.
+
+Filtering/navigation should not emit audit rows.
+
+==================================================
+NO-DRIFT / DATA INTEGRITY
+=========================
+
+Use Milestone 0 helpers as the data foundation.
+
+Recommended:
+
+* deriveDomainControlPanelOverview(domain, ctx)
+* deriveDomainPortfolioSignal(domain, ctx)
+* deriveDomainSecurityReadiness(domain, records, registrarInfo)
+* deriveEmailDnsReadiness(domain, records)
+* deriveSslCertificateView(domain, records)
+* deriveDomainAuditSummary(domain, ctx)
+
+Avoid duplicating readiness logic in the component.
+
+The selected overview should agree with the portfolio row for the same domain:
+
+* DNS status
+* SSL status
+* Email DNS status
+* Security status
+* Risk
+* Next action
+
+If a portfolio row says SSL needs attention, the overview should not say SSL is ready unless there is a clear reason.
+
+==================================================
+VISUAL / UX REQUIREMENTS
+========================
+
+The selected-domain overview should feel like a professional SaaS control panel.
+
+Use:
+
+* full-page workspace, not cramped drawer
+* strong domain object header
+* clean tab/navigation row without horizontal scrolling on desktop
+* readiness cards
+* checklist
+* relationship cards
+* risk card
+* recent activity
+* compact badges
+* clear manual/future truth labels
+* no decorative empty panels
+* no fake telemetry
+
+Do not copy Stitch navigation/sidebar exactly.
+Preserve existing System Owner shell/navigation.
+
+Avoid:
+
+* nested scroll containers
+* horizontal scrolling tabs
+* horizontal scrolling page content on desktop
+* very tall table-like cards
+* fake real-time data
+
+==================================================
+DEEP-LINKING REQUIREMENTS
+=========================
+
+Preserve:
+
+* portfolio table click-through
+* ?domain=<id> deep-linking
+* invalid/stale domain deep-link handling
+* Command Center domain deep-link behavior
+
+If current behavior opens a drawer, it should now open the selected-domain overview workspace/page state safely.
+
+Invalid/stale links must show a safe notice and not crash.
+
+==================================================
+DOCUMENTATION
+=============
+
+Keep replit.md concise.
+
+Add short note:
+Phase 1.2F Milestone 2 — Root/Subdomain Overview Workspace done/pending acceptance.
+
+Append details to:
+docs/platform-operations-security-history.md
+
+Do not make replit.md large.
+
+==================================================
+NON-REGRESSION REQUIREMENTS
+===========================
+
+Do not regress:
+
+* accepted M0 object model
+* accepted M1 portfolio dashboard/table
+* portfolio card counts
+* saved views
+* search
+* dimension filters
+* visible chips
+* Clear All
+* Add Domain
+* read-only role behavior
+* row click-through
+* root domain creation
+* subdomain locked-root behavior
+* existing domain status workflow
+* existing SSL status workflow
+* domain disable / re-enable behavior
+* domain history
+* Command Center domain signals
+* Command Center domain deep-linking
+* Platform Settings
+* Command Center Intelligence
+* Audit Investigation Center
+* Support Queue / SLA / Macro
+* Escalation operating model
+* Permission dependency auto-sync
+* Add-on Governance
+* Shipping
+* Store Permissions Matrix
+* Tenant provisioning
+* paid override invoice workflow
+* server PII logging
+
+==================================================
+OUTPUT FORMAT REQUIRED
+======================
+
+After Milestone 2, stop.
+
+Do not start Milestone 3.
+Do not implement DNS Zone Editor.
+Do not implement SSL/TLS workspace beyond overview/readiness summary.
+Do not implement Email DNS workspace beyond overview/readiness summary.
+Do not touch Platform Settings.
+Do not mark Phase 1.2 accepted.
+
+Reply only in this structure:
+
+1. Milestone Status
+2. What Was Implemented
+3. Root Domain Overview
+4. Subdomain / Platform / Legacy Overview
+5. Readiness Cards / Checklist / Risk / Relationships
+6. Data Source / No-Drift With Portfolio
+7. Permissions / Auditability
+8. Files Changed
+9. Typecheck / Runtime Result
+10. Non-Regression Notes
+11. Recommendation Before Milestone 3

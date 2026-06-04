@@ -42,6 +42,7 @@ import {
 } from './platformOpsDomains';
 import {
   deriveDomainPortfolioSignals,
+  deriveDomainControlPanelOverview,
   SSL_VIEW_STATUS_LABELS,
   DOMAIN_MODEL_TRUTH_LABELS,
   type DomainPortfolioSignal,
@@ -50,6 +51,7 @@ import {
   type SslViewStatus,
   type EmailDnsStatus,
   type SecurityReadinessLevel,
+  type DomainControlPanelOverview,
 } from './platformOpsDomainModel';
 
 // Tone vocabulary shared by the Domain Control Panel readiness rows.
@@ -503,6 +505,23 @@ const DomainsPage: React.FC = () => {
       })
       .sort((a, b) => b.date.localeCompare(a.date));
   }, [selected, auditTick]);
+
+  // Phase 1.2F M2 — the selected-domain Overview workspace runs off the SAME M0
+  // derivation that produces the portfolio row (`deriveDomainPortfolioSignal`),
+  // built from the SAME `domains` store and the SAME context shape (seed DNS /
+  // registrar / security overlays). This is the no-drift contract: the DNS, SSL,
+  // Email DNS, Security and Risk a row shows can never contradict the Overview it
+  // opens. `auditRows` (mirrored + seed, category `domains`) feed the recent
+  // activity / audit summary; the dependency on `auditTick` keeps it fresh after
+  // a lifecycle mutation writes a new audit row.
+  const selectedOverview = useMemo<DomainControlPanelOverview | null>(() => {
+    if (!selected) return null;
+    void auditTick;
+    const auditRows = [...readMirroredAuditRows(), ...auditLogs]
+      .filter(r => r.category === 'domains')
+      .map(r => ({ id: r.id, date: r.date, actor: r.actor, action: r.action, target: r.target, tenantId: r.tenantId ?? null }));
+    return deriveDomainControlPanelOverview(selected, { domains, tenantNameById: tenantNameRecord, auditRows });
+  }, [selected, domains, tenantNameRecord, auditTick]);
 
   // Managed root domains the operator can attach a new subdomain to. Scoped to
   // the selected tenant (a subdomain lives under its own tenant's root) and
@@ -1012,13 +1031,14 @@ const DomainsPage: React.FC = () => {
 
       {/* Detail control panel — slide-over opened from a portfolio row */}
       <AnimatePresence>
-        {selected && selectedSignal && (
+        {selected && selectedSignal && selectedOverview && (
           <div className="fixed inset-0 z-50 flex justify-end">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setSelectedId(null)} className="absolute inset-0 bg-slate-900/30 backdrop-blur-sm" />
             <motion.div initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }} transition={{ type: 'spring', damping: 28, stiffness: 280 }} className="relative w-full max-w-xl h-full bg-white shadow-2xl border-l border-slate-200 overflow-y-auto">
               <DomainControlPanel
                 selected={selected}
                 signal={selectedSignal}
+                overview={selectedOverview}
                 domains={domains}
                 canManage={canManage}
                 tenantName={tenantName}
@@ -1047,6 +1067,7 @@ const DomainsPage: React.FC = () => {
 interface DomainControlPanelProps {
   selected: TenantDomainRecord;
   signal: DomainReadinessSignal;
+  overview: DomainControlPanelOverview;
   domains: TenantDomainRecord[];
   canManage: boolean;
   tenantName: (id: string) => string;
@@ -1071,8 +1092,37 @@ const DOMAIN_WORKSPACE_TABS: { id: DomainWorkspaceTab; label: string; icon: stri
   { id: 'troubleshoot', label: 'Help', icon: 'help' },
 ];
 
+// Phase 1.2F M2 — a single manual-readiness summary card (DNS / SSL / Email DNS
+// / Security). Status, explanation, next action and the truth label all come
+// from the M0 overview derivation, so a card can never claim a posture the
+// portfolio row disagrees with.
+const OverviewReadinessCard: React.FC<{
+  icon: string;
+  title: string;
+  statusLabel: string;
+  tone: ReadinessTone;
+  explanation: string;
+  nextAction: string;
+  truthLabel: string;
+}> = ({ icon, title, statusLabel, tone, explanation, nextAction, truthLabel }) => (
+  <div className="rounded-2xl border border-slate-200 bg-white p-4 flex flex-col">
+    <div className="flex items-start justify-between gap-2">
+      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
+        <span className="material-symbols-outlined text-sm text-slate-400">{icon}</span>{title}
+      </p>
+      <span className={`shrink-0 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${READINESS_TONE_STYLES[tone]}`}>{statusLabel}</span>
+    </div>
+    <p className="mt-2 text-[11px] font-medium text-slate-600 leading-snug">{explanation}</p>
+    <div className="mt-2 pt-2 border-t border-slate-100">
+      <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Next action</p>
+      <p className="text-[11px] font-bold text-slate-700 leading-snug mt-0.5">{nextAction}</p>
+    </div>
+    <p className="mt-2 text-[9px] font-medium text-slate-400 leading-tight">{truthLabel}</p>
+  </div>
+);
+
 const DomainControlPanel: React.FC<DomainControlPanelProps> = ({
-  selected, signal, domains, canManage, tenantName, history, copied,
+  selected, signal, overview, domains, canManage, tenantName, history, copied,
   onCopy, onSelect, onSetStatus, onSetSsl, onReenable, onConfirmDisable, onClose,
 }) => {
   // Workspace tab is panel-local presentation state. It resets to Overview when
@@ -1095,9 +1145,18 @@ const DomainControlPanel: React.FC<DomainControlPanelProps> = ({
         <p className="text-xs text-slate-500 font-bold mt-1">{tenantName(selected.tenantId)} · {selected.kind}</p>
         <div className="mt-2 flex flex-wrap gap-1.5">
           <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${signal.role === 'root' ? 'bg-indigo-500/10 text-indigo-700 border-indigo-500/20' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>{DOMAIN_ROLE_LABELS[signal.role]}</span>
+          <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${PORTFOLIO_TYPE_TONE[overview.domainType]}`}>{PORTFOLIO_TYPE_LABELS[overview.domainType]}</span>
           <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${LIFECYCLE_STYLES[signal.lifecycle]}`}>{signal.lifecycleLabel}</span>
-          <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${SSL_READINESS_STYLES[signal.sslReadiness]}`}>SSL: {signal.sslReadinessLabel}</span>
         </div>
+        {/* Manual readiness summary — DNS / SSL / Email DNS / Security, derived
+            from the SAME M0 overview as the portfolio row (no drift). */}
+        <div className="mt-1.5 flex flex-wrap gap-1.5">
+          <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${READINESS_TONE_STYLES[DNS_READINESS_TONE[overview.dnsReadiness]]}`}>DNS: {overview.dnsReadinessLabel}</span>
+          <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${READINESS_TONE_STYLES[SSL_VIEW_TONE[overview.sslView.status]]}`}>SSL: {SSL_VIEW_STATUS_LABELS[overview.sslView.status]}</span>
+          <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${READINESS_TONE_STYLES[EMAIL_DNS_TONE[overview.emailDns.overall]]}`}>Email: {EMAIL_DNS_LABELS[overview.emailDns.overall]}</span>
+          <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${READINESS_TONE_STYLES[SECURITY_LEVEL_TONE[overview.security.overall]]}`}>Security: {SECURITY_LEVEL_LABELS[overview.security.overall]}</span>
+        </div>
+        <p className="mt-1.5 text-[9px] font-medium text-slate-400 leading-tight">{DOMAIN_MODEL_TRUTH_LABELS.noLiveDns}</p>
       </div>
       {onClose && (
         <button onClick={onClose} className="w-9 h-9 rounded-full hover:bg-slate-100 flex items-center justify-center text-slate-400 shrink-0 cursor-pointer">
@@ -1125,10 +1184,58 @@ const DomainControlPanel: React.FC<DomainControlPanelProps> = ({
 
     {activeTab === 'overview' && (
     <div className="p-7 space-y-6">
-      {/* Next action */}
+      {/* Next action — single recommended next step, derived by the M0 overview
+          from the same DNS / SSL / Email / Security / Risk posture the portfolio
+          row shows, so the two can never recommend contradictory actions. */}
       <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
         <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Next recommended action</p>
-        <p className="text-sm font-black text-slate-800">{signal.nextAction}</p>
+        <p className="text-sm font-black text-slate-800">{overview.nextAction}</p>
+      </div>
+
+      {/* Manual readiness summary cards — DNS / SSL / Email DNS / Security. Each
+          card's status, explanation, next action and truth label come from the
+          M0 overview derivation (intended-state / manual only; no live DNS, no
+          SSL automation, no registrar integration). */}
+      <div>
+        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Manual readiness summary</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <OverviewReadinessCard
+            icon="dns"
+            title="DNS"
+            statusLabel={overview.dnsReadinessLabel}
+            tone={DNS_READINESS_TONE[overview.dnsReadiness]}
+            explanation={DOMAIN_DNS_READINESS_DETAIL[overview.dnsReadiness]}
+            nextAction={overview.troubleshooting.recommendedNextAction}
+            truthLabel={DOMAIN_MODEL_TRUTH_LABELS.intendedState}
+          />
+          <OverviewReadinessCard
+            icon="lock"
+            title="SSL / TLS"
+            statusLabel={SSL_VIEW_STATUS_LABELS[overview.sslView.status]}
+            tone={SSL_VIEW_TONE[overview.sslView.status]}
+            explanation={overview.sslView.issueReason ?? 'Manual SSL readiness is tracked here. Certificate issuance and renewal automation are future.'}
+            nextAction={overview.sslView.nextAction}
+            truthLabel={overview.sslView.truthLabel}
+          />
+          <OverviewReadinessCard
+            icon="mail"
+            title="Email DNS"
+            statusLabel={EMAIL_DNS_LABELS[overview.emailDns.overall]}
+            tone={EMAIL_DNS_TONE[overview.emailDns.overall]}
+            explanation="Derived from the intended-state email records (MX / SPF / DKIM / DMARC). Sending and deliverability are not checked live."
+            nextAction={overview.emailDns.nextAction}
+            truthLabel={overview.emailDns.truthLabel}
+          />
+          <OverviewReadinessCard
+            icon="security"
+            title="Security"
+            statusLabel={SECURITY_LEVEL_LABELS[overview.security.overall]}
+            tone={SECURITY_LEVEL_TONE[overview.security.overall]}
+            explanation="Manual security posture (CAA + registrar controls). DNSSEC, domain lock and transfer protection are future / not active."
+            nextAction={overview.security.nextAction}
+            truthLabel={overview.security.truthLabel}
+          />
+        </div>
       </div>
 
       {/* Root Domain Management / Subdomain Management — root shows its managed
@@ -1143,7 +1250,9 @@ const DomainControlPanel: React.FC<DomainControlPanelProps> = ({
         )}
         {signal.role === 'root' ? (
           (() => {
-            const children = domains.filter(c => c.parentDomainId === selected.id);
+            // Related subdomains come from the M0 overview so the count and the
+            // lifecycle label per child match the portfolio view exactly.
+            const children = overview.relatedSubdomains;
             if (children.length === 0) {
               return <p className="text-[11px] font-bold text-slate-400 px-3 py-2 bg-slate-50 border border-dashed border-slate-200 rounded-xl">No subdomains attached to this root domain yet.</p>;
             }
@@ -1154,6 +1263,7 @@ const DomainControlPanel: React.FC<DomainControlPanelProps> = ({
                   <button key={c.id} onClick={() => onSelect(c.id)} className="w-full text-left flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 bg-white hover:border-primary/40 hover:bg-primary/5 transition-all cursor-pointer">
                     <span className="material-symbols-outlined text-sm text-slate-400">subdirectory_arrow_right</span>
                     <span className="text-[11px] font-bold text-slate-700 break-all flex-1">{c.hostname}</span>
+                    <span className={`shrink-0 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${LIFECYCLE_STYLES[c.lifecycle]}`}>{c.lifecycleLabel}</span>
                     <span className="material-symbols-outlined text-sm text-slate-300">chevron_right</span>
                   </button>
                 ))}
@@ -1185,26 +1295,32 @@ const DomainControlPanel: React.FC<DomainControlPanelProps> = ({
         })()}
       </div>
 
-      {/* Risk reasons */}
-      {signal.riskReasons.length > 0 && (
-        <div>
-          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Readiness signals</p>
+      {/* Risk assessment — overall risk plus the contributing readiness signals,
+          all from the M0 overview (same risk the portfolio row reflects). */}
+      <div>
+        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Risk assessment</p>
+        {overview.riskReasons.length === 0 ? (
+          <div className="flex items-center gap-2 px-3 py-2 rounded-xl border border-lime-400/20 bg-lime-400/10 text-[11px] font-bold text-lime-700">
+            <span className="material-symbols-outlined text-sm">check_circle</span>
+            No outstanding readiness risks for this domain.
+          </div>
+        ) : (
           <div className="space-y-1.5">
-            {signal.riskReasons.map(r => (
+            {overview.riskReasons.map(r => (
               <div key={r.code} className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-[11px] font-bold ${r.tone === 'critical' ? 'bg-red-500/10 text-red-700 border-red-500/20' : r.tone === 'warn' ? 'bg-amber-400/10 text-amber-700 border-amber-400/20' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
                 <span className="material-symbols-outlined text-sm">{r.tone === 'critical' ? 'error' : r.tone === 'warn' ? 'warning' : 'info'}</span>
                 {r.label}
               </div>
             ))}
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* Manual action checklist — read-only guidance, no automation */}
       <div>
         <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Action checklist</p>
         <div className="space-y-1.5">
-          {signal.checklist.map(item => (
+          {overview.manualChecklist.map(item => (
             <div key={item.key} className="flex items-start gap-2.5 px-3 py-2 rounded-xl border border-slate-100 bg-slate-50/60">
               <span className={`material-symbols-outlined text-base mt-px ${CHECKLIST_TONE[item.state].icon}`}>{CHECKLIST_TONE[item.state].symbol}</span>
               <div className="flex-1">
@@ -1260,11 +1376,11 @@ const DomainControlPanel: React.FC<DomainControlPanelProps> = ({
         </div>
       )}
 
-      {/* History */}
+      {/* Recent activity — recorded domain lifecycle events (date-granular) */}
       <div className="pt-2 border-t border-slate-100">
-        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">History</p>
+        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Recent activity</p>
         {history.length === 0 ? (
-          <p className="text-[11px] font-bold text-slate-400">No recorded history for this domain.</p>
+          <p className="text-[11px] font-bold text-slate-400">No recorded activity for this domain.</p>
         ) : (
           <div className="space-y-2">
             {history.map((e, i) => (
@@ -1278,6 +1394,7 @@ const DomainControlPanel: React.FC<DomainControlPanelProps> = ({
             ))}
           </div>
         )}
+        <p className="text-[9px] text-slate-400 font-medium mt-2 leading-tight">Recorded domain lifecycle events for this exact hostname. Audit is date-granular — no sub-day timestamp.</p>
       </div>
 
       <div className="text-[10px] text-slate-400 grid grid-cols-2 gap-2 pt-4 border-t border-slate-100">
