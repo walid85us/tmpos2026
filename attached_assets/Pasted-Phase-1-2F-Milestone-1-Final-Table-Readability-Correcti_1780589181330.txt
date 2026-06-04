@@ -1,0 +1,245 @@
+Phase 1.2F — Milestone 1 Final Table Readability Correction
+Domain Portfolio Table Density + Column Layout Polish
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Status:
+Phase 1.2F Milestone 1 is still on HOLD after the layout overflow correction.
+
+The overflow issues are mostly fixed:
+
+* No nested vertical table scrolling — PASS
+* No horizontal scrolling on normal desktop width — PASS
+* Domain row click-through still works — PASS
+* Detail tabs no longer horizontally scroll — PASS
+* M1 filters/cards/search/saved views still work — PASS
+
+Remaining issue:
+QA #3 is still PASS partially because the table technically fits, but the table readability and column layout are not professional enough.
+
+Do not start Milestone 2.
+Do not implement selected domain workspace.
+Do not implement DNS Zone Editor.
+Do not touch Platform Settings.
+This is a focused table presentation correction only.
+
+==================================================
+ISSUE TO FIX
+============
+
+The Domain Portfolio table no longer has bad scrollbars, but it still needs table-density and readability polish.
+
+Observed issues:
+
+1. Registrar column wraps too much, making rows too tall.
+2. Some cells feel cramped after removing horizontal scrolling.
+3. Actions column appears clipped/truncated at the far right.
+4. Renewal / Expiry repeats “AUTO-RENEW: FUTURE” in a way that consumes vertical space.
+5. The table fits technically, but it does not yet feel like a polished enterprise SaaS portfolio table.
+
+==================================================
+GOAL
+====
+
+Make the Domain Portfolio table feel professional, readable, compact, and fully usable on normal desktop width.
+
+The table should:
+
+* fit naturally without horizontal scroll
+* keep Actions visible
+* avoid awkward multi-line wrapping
+* keep rows reasonably compact
+* preserve all required information
+* feel like a mature SaaS portfolio table
+
+==================================================
+WORKING STYLE
+=============
+
+Think step by step before correcting.
+
+First inspect:
+
+1. Domain Portfolio table column widths
+2. table layout CSS
+3. Actions column width and clipping
+4. registrar cell rendering
+5. renewal/expiry cell rendering
+6. next-action wrapping
+7. badge sizing
+8. domain cell wrapping
+9. accepted M1 no-drift logic
+
+Then make the smallest safe presentation correction.
+
+==================================================
+SCOPE RULES
+===========
+
+Preserve all accepted M1 logic:
+
+* portfolioSignals
+* matchesPortfolioFilter
+* summary card counts
+* saved view counts
+* filters
+* search
+* visible filter chips
+* Clear All
+* empty state
+* Add Domain flow
+* read-only role behavior
+* row click-through
+* Command Center deep-linking
+
+Do not change:
+
+* object model
+* storage
+* permissions
+* audit behavior
+* domain lifecycle behavior
+* SSL lifecycle behavior
+* non-domain modules
+
+==================================================
+TABLE POLISH REQUIREMENTS
+=========================
+
+1. Actions column must always be fully visible.
+
+* Do not allow the Manage button to be clipped.
+* If needed, rename button to a shorter label such as “Open” or use a compact icon + “Open”.
+* Keep the action accessible and clear.
+
+2. Registrar column should be compact.
+   Current issue: “Amazon Route 53 — platform apex (repairplatform.com)” wraps into too many lines.
+
+Preferred rendering:
+
+* First line: registrar name
+* Second line: short muted context only if needed
+  Examples:
+
+  * Amazon Route 53
+    platform apex
+  * Cloudflare
+    root DNS
+  * GoDaddy
+    external registrar
+
+Avoid showing long parenthetical text like “(repairplatform.com)” if it makes the row too tall. Move detailed context to tooltip or future detail view if needed.
+
+3. Renewal / Expiry should be compact.
+   Preferred:
+
+* If no date: show “—”
+* Add small muted/future pill: “Auto-renew future”
+* Do not stack multiple lines unnecessarily.
+* If date exists, show date first, then small muted “Auto-renew future” below only if it remains readable.
+
+4. Next Action should wrap cleanly but not make rows excessive.
+
+* Keep it concise.
+* Examples:
+
+  * No action needed.
+  * Complete manual SSL readiness.
+  * Add missing email records.
+  * Review security posture.
+
+5. Badges should be compact and consistent.
+
+* Keep current truthful badge language.
+* Reduce padding/width if needed.
+* Avoid tall badge stacks.
+
+6. Row height should be professional.
+
+* Allow two-line cells where necessary.
+* Avoid five-line cells.
+* Use tooltips or detail view for long explanatory text.
+
+7. Keep required columns available:
+
+* Domain
+* Domain Type
+* Tenant
+* Registrar
+* DNS
+* SSL
+* Email DNS
+* Security
+* Renewal / Expiry
+* Risk
+* Next Action
+* Actions
+
+If space is tight, prioritize compact rendering instead of hiding required columns.
+
+==================================================
+VISUAL QUALITY TARGET
+=====================
+
+The corrected table should look closer to a professional portfolio manager:
+
+* dense but readable
+* clear row hierarchy
+* compact badges
+* no clipped action buttons
+* no awkward registrar wrapping
+* no unnecessary vertical expansion
+* no horizontal scroll on normal desktop width
+
+==================================================
+NON-REGRESSION
+==============
+
+Do not regress:
+
+* portfolio dashboard cards
+* card click filters
+* saved views
+* search
+* dimension filters
+* visible chips
+* Clear All
+* empty state
+* Add Domain
+* read-only role
+* row click-through
+* existing domain detail behavior
+* domain lifecycle behavior
+* Command Center domain deep-link
+* Platform Settings
+* Command Center Intelligence
+* Audit Investigation Center
+* Support Queue / SLA / Macro
+* Escalation operating model
+* Permission dependency auto-sync
+* Add-on Governance
+* Shipping
+* Store Permissions Matrix
+* Tenant provisioning
+* server PII logging
+
+==================================================
+OUTPUT FORMAT
+=============
+
+After this focused correction, stop.
+
+Do not start Milestone 2.
+
+Reply only with:
+
+1. Correction Status
+2. What Was Fixed
+3. Table Readability Improvements
+4. Actions Column Fix
+5. Preserved M1 Logic
+6. Files Changed
+7. Typecheck / Runtime Result
+8. Non-Regression Notes
+9. Recommendation Before Re-QA

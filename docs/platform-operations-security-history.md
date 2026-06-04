@@ -552,3 +552,14 @@ Manual QA held M1 acceptance on two overflow issues; this is a focused layout-on
 -   **Domain detail tab strip** — the existing `DomainControlPanel` workspace tab row changed from `overflow-x-auto` to `flex-wrap` with slightly more compact tabs, so tabs wrap cleanly instead of scrolling horizontally. Tab behavior and content are unchanged (Milestone 2 redesign not started).
 
 No-drift logic (`portfolioSignals` / `matchesPortfolioFilter` / `countWithFilters` / `countView`), search, saved views, chips, Clear All, empty state, Add-Domain, row click-through, deep-linking, and permission gating are all preserved. Typecheck stable at the 12 pre-existing baseline errors. **Layout correction done — pending re-QA / acceptance.**
+
+### M1 Table Readability / Density Correction (presentation-only, post-QA)
+
+A second focused, presentation-only pass (no M1 logic, columns, storage, permissions, or audit touched) addressing remaining QA readability notes on the Domain Portfolio table:
+
+-   **Registrar column** — long seed values like `Amazon Route 53 — platform apex (repairplatform.com)` were wrapping into tall multi-line cells. A presentation-only `splitRegistrar()` helper now renders the registrar **name** on the first line and a short **muted context** on the second (parenthetical host stripped), with the full original string preserved in the cell `title` tooltip. The underlying `signal.registrar` value is unchanged.
+-   **Actions column** — widened (5% → 7%) and the button relabeled "Manage" → compact **"Open"** with an `open_in_new` icon and `whitespace-nowrap`, so it is never clipped at the right edge.
+-   **Renewal / Expiry** — when a date exists it shows the date; otherwise an em-dash. The "Auto-renew future" note is now a single compact muted pill instead of an always-stacked uppercase line, reducing row height.
+-   **Column widths rebalanced** to total 100% with the Domain column trimmed slightly to fund the wider Actions column (Domain 15, Type 7, Tenant 9, Registrar 11, DNS 7, SSL 7, Email 6, Security 7, Renewal 8, Risk 6, Next Action 10, Actions 7).
+
+All required columns remain present; rows stay at most two lines tall; no horizontal scroll on normal desktop width (sub-`xl` fallback retained). No-drift logic, search, saved views, chips, Clear All, empty state, Add-Domain, row click-through, deep-linking, and gating preserved. Typecheck stable at the 12 pre-existing baseline errors. **Readability correction done — pending re-QA / acceptance.**

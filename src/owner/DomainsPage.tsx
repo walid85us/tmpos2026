@@ -232,6 +232,18 @@ const RISK_TONE: Record<PortfolioRisk, ReadinessTone> = {
   ok: 'ready',
 };
 
+// Presentation-only split of the registrar string into a primary name and a
+// short muted context, so the portfolio cell stays two lines tall instead of
+// wrapping a long " — platform apex (host)" tail across many rows. The full
+// string is preserved in a tooltip; the underlying signal value is unchanged.
+const splitRegistrar = (registrar: string): { name: string; context: string | null } => {
+  const [namePart, ...rest] = registrar.split('—');
+  const name = namePart.trim();
+  if (rest.length === 0) return { name, context: null };
+  const context = rest.join('—').replace(/\([^)]*\)/g, '').trim();
+  return { name, context: context || null };
+};
+
 type PortfolioSavedView =
   | 'all'
   | 'needs_action'
@@ -796,18 +808,18 @@ const DomainsPage: React.FC = () => {
           <div className="overflow-x-auto xl:overflow-x-visible">
             <table className="w-full text-left border-collapse table-fixed">
               <colgroup>
-                <col className="w-[17%]" />
-                <col className="w-[8%]" />
+                <col className="w-[15%]" />
+                <col className="w-[7%]" />
                 <col className="w-[9%]" />
-                <col className="w-[9%]" />
+                <col className="w-[11%]" />
                 <col className="w-[7%]" />
                 <col className="w-[7%]" />
-                <col className="w-[7%]" />
+                <col className="w-[6%]" />
                 <col className="w-[7%]" />
                 <col className="w-[8%]" />
                 <col className="w-[6%]" />
                 <col className="w-[10%]" />
-                <col className="w-[5%]" />
+                <col className="w-[7%]" />
               </colgroup>
               <thead className="bg-white">
                 <tr className="text-[9px] font-black uppercase tracking-widest text-slate-400 border-b border-slate-100 align-bottom">
@@ -833,19 +845,33 @@ const DomainsPage: React.FC = () => {
                       <td className="px-3 py-3"><span className="text-[12px] font-bold text-slate-900 break-words leading-tight">{s.hostname}</span></td>
                       <td className="px-2 py-3"><span className={`inline-flex px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${PORTFOLIO_TYPE_TONE[s.domainType]}`}>{PORTFOLIO_TYPE_LABELS[s.domainType]}</span></td>
                       <td className="px-2 py-3"><span className="text-[11px] font-bold text-slate-600 break-words leading-tight">{s.tenant}</span></td>
-                      <td className="px-2 py-3"><span className="text-[11px] font-bold text-slate-600 break-words leading-tight">{s.registrar}</span></td>
+                      <td className="px-2 py-3" title={s.registrar}>
+                        {(() => {
+                          const { name, context } = splitRegistrar(s.registrar);
+                          return (
+                            <>
+                              <span className="block text-[11px] font-bold text-slate-700 leading-tight truncate">{name}</span>
+                              {context && <span className="block text-[9px] font-bold text-slate-400 leading-tight truncate">{context}</span>}
+                            </>
+                          );
+                        })()}
+                      </td>
                       <td className="px-2 py-3"><PBadge tone={DNS_READINESS_TONE[s.dnsReadiness]}>{s.dnsReadinessLabel}</PBadge></td>
                       <td className="px-2 py-3"><PBadge tone={SSL_VIEW_TONE[s.sslReadiness]}>{SSL_VIEW_STATUS_LABELS[s.sslReadiness]}</PBadge></td>
                       <td className="px-2 py-3"><PBadge tone={EMAIL_DNS_TONE[s.emailDnsReadiness]}>{EMAIL_DNS_LABELS[s.emailDnsReadiness]}</PBadge></td>
                       <td className="px-2 py-3"><PBadge tone={SECURITY_LEVEL_TONE[s.securityReadiness]}>{SECURITY_LEVEL_LABELS[s.securityReadiness]}</PBadge></td>
                       <td className="px-2 py-3">
-                        <span className="text-[11px] font-bold text-slate-500 leading-tight">{s.renewalExpiryPlaceholder || '—'}</span>
-                        <span className="block text-[8px] font-bold text-slate-300 uppercase tracking-widest">Auto-renew: Future</span>
+                        {s.renewalExpiryPlaceholder
+                          ? <span className="block text-[11px] font-bold text-slate-600 leading-tight">{s.renewalExpiryPlaceholder}</span>
+                          : <span className="block text-[12px] font-bold text-slate-400 leading-tight">—</span>}
+                        <span className="mt-0.5 inline-flex px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest text-slate-400 bg-slate-100 rounded">Auto-renew future</span>
                       </td>
                       <td className="px-2 py-3"><PBadge tone={RISK_TONE[s.risk]}>{RISK_LABELS[s.risk]}</PBadge></td>
                       <td className="px-2 py-3"><span className="text-[11px] font-medium text-slate-500 break-words leading-tight">{s.nextAction}</span></td>
-                      <td className="px-3 py-3 text-right">
-                        <button onClick={e => { e.stopPropagation(); setSelectedId(s.domainId); }} className="px-2.5 py-1.5 text-[9px] font-black uppercase tracking-widest text-primary border border-primary/20 bg-primary/5 rounded-lg hover:bg-primary/10 transition-all cursor-pointer">Manage</button>
+                      <td className="px-2 py-3 text-right">
+                        <button onClick={e => { e.stopPropagation(); setSelectedId(s.domainId); }} className="inline-flex items-center gap-1 px-2 py-1.5 text-[9px] font-black uppercase tracking-widest text-primary border border-primary/20 bg-primary/5 rounded-lg hover:bg-primary/10 transition-all cursor-pointer whitespace-nowrap">
+                          <span className="material-symbols-outlined text-[13px] leading-none">open_in_new</span>Open
+                        </button>
                       </td>
                     </tr>
                   );
