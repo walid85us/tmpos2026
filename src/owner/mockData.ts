@@ -762,6 +762,173 @@ export const tenantDomains: TenantDomainRecord[] = [
   { id: 'dom8', tenantId: 't1', hostname: 'portal.techrepair.pro', kind: 'custom', domainRole: 'subdomain', parentDomainId: 'dom2', status: 'pending', ssl: 'none', createdAt: '2026-04-28', verifiedAt: null, lastCheckedAt: null, notes: 'Customer portal subdomain under techrepair.pro — awaiting CNAME.' },
 ];
 
+// ===========================================================================
+// Phase 1.2F — Milestone 0: Domain Object Model Foundation
+// ---------------------------------------------------------------------------
+// Richer LOCAL/MANUAL domain model that future Domain Control Panel screens
+// (DNS Zone Editor, SSL/TLS Workspace, Email DNS, Security/Troubleshooting,
+// Portfolio Dashboard) can consume. This is ADDITIVE — `TenantDomainRecord` /
+// `tenantDomains` stay the base domain source of truth and are NOT migrated.
+//
+// TRUTH CONSTRAINTS (do not violate):
+//   - These are an INTENDED-STATE zone mirror and LOCAL readiness placeholders,
+//     NOT a live DNS zone. There is no live DNS lookup, no real SSL automation,
+//     no certificate issuance, and no registrar/provider API integration in
+//     this phase. Registrar/security feature fields are local readiness/future
+//     placeholders only and are NOT runtime enforced.
+// ===========================================================================
+
+// --- Concept 1: DnsRecord (intended-state zone mirror, not a live zone) -----
+export type DnsRecordType =
+  | 'A' | 'AAAA' | 'CNAME' | 'TXT' | 'MX' | 'SPF' | 'DKIM' | 'DMARC' | 'CAA' | 'NS';
+
+export type DnsRecordSource =
+  | 'platform_required'   // required by the platform to route/verify the domain
+  | 'operator'            // operator-added record (intended state)
+  | 'email_required'      // required for email deliverability (MX/SPF/DKIM/DMARC)
+  | 'security_required'   // security posture (CAA, etc.)
+  | 'registrar_required'; // registrar/zone-level (NS, etc.)
+
+export type DnsRecordStatus =
+  | 'intended'              // declared intended state, not yet prepared
+  | 'manual_ready'          // operator has prepared it at the provider
+  | 'manually_verified'     // operator manually marked verified (no live check)
+  | 'conflict'              // conflicts with another record — needs manual review
+  | 'pending_manual_review' // awaiting manual review / verification
+  | 'not_applicable';       // not applicable (managed/disabled domain)
+
+export interface DnsRecord {
+  id: string;
+  domainId: string;
+  type: DnsRecordType;
+  host: string;            // host / name (e.g. '@', 'www', '_dmarc')
+  value: string;           // value / target
+  ttl: number;
+  priority?: number;       // optional (MX, etc.)
+  source: DnsRecordSource;
+  status: DnsRecordStatus;
+  purpose: string;
+  lastEditedAt: string;
+  notes?: string;
+}
+
+// --- Concept 2: DomainRegistrarInfo (local readiness/future placeholders) ---
+// Registrar feature states are LOCAL placeholders only — never a live check or
+// a runtime-enforced control.
+export type RegistrarFeatureState = 'unknown' | 'enabled' | 'disabled' | 'future';
+
+export interface DomainRegistrarInfo {
+  domainId: string;
+  registrarName: string;
+  ownershipNote: string;
+  nameservers?: string[];
+  expiryAt: string | null;            // placeholder — not tracked live
+  autoRenew: RegistrarFeatureState;
+  transferLock: RegistrarFeatureState;
+  domainLock: RegistrarFeatureState;
+  dnssec: RegistrarFeatureState;
+  providerNotes?: string;
+}
+
+// --- Manual SSL / security overlay (home for tenant_domain_security_v1) ------
+// Operator-tracked MANUAL SSL readiness + security notes, kept separate from
+// the raw `ssl` provisioning field on TenantDomainRecord so future screens can
+// record manual validation without overloading the base record. SSL automation
+// is future; current SSL readiness is manually tracked.
+export type DomainManualSslReadiness =
+  | 'not_started'
+  | 'pending_manual_validation'
+  | 'manual_ready'
+  | 'failed'
+  | 'not_applicable';
+
+export type DomainSslValidationMethod = 'dns_txt' | 'http_file' | 'unknown';
+
+export interface DomainSecurityRecord {
+  domainId: string;
+  manualSslReadiness: DomainManualSslReadiness;
+  sslValidationMethod: DomainSslValidationMethod;
+  securityNote?: string;
+  lastReviewedAt: string | null;
+}
+
+// Additional realistic registrars represented across the seed/examples below:
+// Cloudflare, Namecheap, GoDaddy, Amazon Route 53, MarkMonitor (enterprise).
+export const KNOWN_DOMAIN_REGISTRARS = [
+  'Cloudflare',
+  'Namecheap',
+  'GoDaddy',
+  'Amazon Route 53',
+  'MarkMonitor',
+] as const;
+
+// ---------------------------------------------------------------------------
+// SEED — intended-state DNS records (mixed manual/readiness states). These are
+// NOT live records and never imply a live check.
+// ---------------------------------------------------------------------------
+export const tenantDnsRecords: DnsRecord[] = [
+  // dom2 techrepair.pro — READY root domain, full zone (Cloudflare).
+  { id: 'dr_d2_a', domainId: 'dom2', type: 'A', host: '@', value: '192.0.2.10', ttl: 3600, source: 'operator', status: 'manually_verified', purpose: 'Root apex routing.', lastEditedAt: '2025-11-12' },
+  { id: 'dr_d2_www', domainId: 'dom2', type: 'CNAME', host: 'www', value: 'techrepair.pro', ttl: 3600, source: 'operator', status: 'manually_verified', purpose: 'WWW alias to apex.', lastEditedAt: '2025-11-12' },
+  { id: 'dr_d2_txt', domainId: 'dom2', type: 'TXT', host: '_repairplatform', value: 'verify=dom2', ttl: 300, source: 'platform_required', status: 'manually_verified', purpose: 'Platform ownership verification.', lastEditedAt: '2025-11-12' },
+  { id: 'dr_d2_mx', domainId: 'dom2', type: 'MX', host: '@', value: 'mail.techrepair.pro', ttl: 3600, priority: 10, source: 'email_required', status: 'manually_verified', purpose: 'Inbound mail routing.', lastEditedAt: '2025-11-13' },
+  { id: 'dr_d2_spf', domainId: 'dom2', type: 'SPF', host: '@', value: 'v=spf1 include:_spf.google.com ~all', ttl: 3600, source: 'email_required', status: 'manually_verified', purpose: 'SPF sender policy.', lastEditedAt: '2025-11-13' },
+  { id: 'dr_d2_dkim', domainId: 'dom2', type: 'DKIM', host: 'google._domainkey', value: 'v=DKIM1; k=rsa; p=MIIBIjANBgkqh...', ttl: 3600, source: 'email_required', status: 'manually_verified', purpose: 'DKIM signing key.', lastEditedAt: '2025-11-13' },
+  { id: 'dr_d2_dmarc', domainId: 'dom2', type: 'DMARC', host: '_dmarc', value: 'v=DMARC1; p=quarantine; rua=mailto:dmarc@techrepair.pro', ttl: 3600, source: 'email_required', status: 'manually_verified', purpose: 'DMARC policy.', lastEditedAt: '2025-11-13' },
+  { id: 'dr_d2_caa', domainId: 'dom2', type: 'CAA', host: '@', value: '0 issue "letsencrypt.org"', ttl: 3600, source: 'security_required', status: 'manually_verified', purpose: 'Restricts which CA may issue certificates.', lastEditedAt: '2025-11-13' },
+  { id: 'dr_d2_ns1', domainId: 'dom2', type: 'NS', host: '@', value: 'dana.ns.cloudflare.com', ttl: 86400, source: 'registrar_required', status: 'manually_verified', purpose: 'Authoritative nameserver (Cloudflare).', lastEditedAt: '2025-11-12' },
+  { id: 'dr_d2_ns2', domainId: 'dom2', type: 'NS', host: '@', value: 'rob.ns.cloudflare.com', ttl: 86400, source: 'registrar_required', status: 'manually_verified', purpose: 'Authoritative nameserver (Cloudflare).', lastEditedAt: '2025-11-12' },
+
+  // dom6 quickfixelec.com — routing READY, email PARTIAL (SPF only), no CAA (GoDaddy).
+  { id: 'dr_d6_a', domainId: 'dom6', type: 'A', host: '@', value: '198.51.100.20', ttl: 3600, source: 'operator', status: 'manually_verified', purpose: 'Root apex routing.', lastEditedAt: '2025-09-06' },
+  { id: 'dr_d6_www', domainId: 'dom6', type: 'CNAME', host: 'www', value: 'quickfixelec.com', ttl: 3600, source: 'operator', status: 'manually_verified', purpose: 'WWW alias to apex.', lastEditedAt: '2025-09-06' },
+  { id: 'dr_d6_txt', domainId: 'dom6', type: 'TXT', host: '_repairplatform', value: 'verify=dom6', ttl: 300, source: 'platform_required', status: 'manually_verified', purpose: 'Platform ownership verification.', lastEditedAt: '2025-09-07' },
+  { id: 'dr_d6_mx', domainId: 'dom6', type: 'MX', host: '@', value: 'mail.quickfixelec.com', ttl: 3600, priority: 10, source: 'email_required', status: 'manually_verified', purpose: 'Inbound mail routing.', lastEditedAt: '2025-09-07' },
+  { id: 'dr_d6_spf', domainId: 'dom6', type: 'SPF', host: '@', value: 'v=spf1 include:secureserver.net -all', ttl: 3600, source: 'email_required', status: 'manual_ready', purpose: 'SPF sender policy.', lastEditedAt: '2025-09-07' },
+  { id: 'dr_d6_ns1', domainId: 'dom6', type: 'NS', host: '@', value: 'ns01.domaincontrol.com', ttl: 86400, source: 'registrar_required', status: 'manually_verified', purpose: 'Authoritative nameserver (GoDaddy).', lastEditedAt: '2025-09-06' },
+  { id: 'dr_d6_ns2', domainId: 'dom6', type: 'NS', host: '@', value: 'ns02.domaincontrol.com', ttl: 86400, source: 'registrar_required', status: 'manually_verified', purpose: 'Authoritative nameserver (GoDaddy).', lastEditedAt: '2025-09-06' },
+
+  // dom8 portal.techrepair.pro — PENDING manual validation + a conflict to resolve.
+  { id: 'dr_d8_cname', domainId: 'dom8', type: 'CNAME', host: 'portal', value: 'proxy.repairplatform.com', ttl: 3600, source: 'platform_required', status: 'pending_manual_review', purpose: 'Routes the subdomain to the platform edge.', lastEditedAt: '2026-04-28' },
+  { id: 'dr_d8_txt', domainId: 'dom8', type: 'TXT', host: '_repairplatform.portal', value: 'verify=dom8', ttl: 300, source: 'platform_required', status: 'intended', purpose: 'Platform ownership verification.', lastEditedAt: '2026-04-28' },
+  { id: 'dr_d8_conflict', domainId: 'dom8', type: 'A', host: 'portal', value: '203.0.113.55', ttl: 3600, source: 'operator', status: 'conflict', purpose: 'Legacy A record conflicts with the required CNAME — remove before verification.', lastEditedAt: '2026-04-28', notes: 'Conflicts with dr_d8_cname.' },
+
+  // dom4 mobilefixhub.repairplatform.com — platform subdomain (managed), SSL pending.
+  { id: 'dr_d4_cname', domainId: 'dom4', type: 'CNAME', host: 'mobilefixhub', value: 'repairplatform.com', ttl: 3600, source: 'platform_required', status: 'manually_verified', purpose: 'Managed platform subdomain routing (handled by the apex).', lastEditedAt: '2026-03-14' },
+
+  // dom1 techrepair.repairplatform.com — platform subdomain (managed), representative.
+  { id: 'dr_d1_cname', domainId: 'dom1', type: 'CNAME', host: 'techrepair', value: 'repairplatform.com', ttl: 3600, source: 'platform_required', status: 'manually_verified', purpose: 'Managed platform subdomain routing (handled by the apex).', lastEditedAt: '2025-11-10' },
+
+  // dom7 oldparts.repairplatform.com — disabled/legacy, DNS not applicable.
+  { id: 'dr_d7_cname', domainId: 'dom7', type: 'CNAME', host: 'oldparts', value: 'repairplatform.com', ttl: 3600, source: 'platform_required', status: 'not_applicable', purpose: 'Domain disabled — DNS not applicable.', lastEditedAt: '2026-02-15' },
+];
+
+// ---------------------------------------------------------------------------
+// SEED — registrar / ownership info (local placeholders; external in this phase).
+// ---------------------------------------------------------------------------
+export const tenantDomainRegistrar: DomainRegistrarInfo[] = [
+  { domainId: 'dom2', registrarName: 'Cloudflare', ownershipNote: 'Owned by Tech Repair LLC; DNS managed at Cloudflare.', nameservers: ['dana.ns.cloudflare.com', 'rob.ns.cloudflare.com'], expiryAt: '2027-11-12', autoRenew: 'enabled', transferLock: 'enabled', domainLock: 'enabled', dnssec: 'enabled', providerNotes: 'Apex zone on Cloudflare. Registrar configuration is external in this phase.' },
+  { domainId: 'dom6', registrarName: 'GoDaddy', ownershipNote: 'Owned by QuickFix Electronics.', nameservers: ['ns01.domaincontrol.com', 'ns02.domaincontrol.com'], expiryAt: '2026-09-06', autoRenew: 'enabled', transferLock: 'enabled', domainLock: 'unknown', dnssec: 'unknown', providerNotes: 'DNSSEC not confirmed at registrar.' },
+  { domainId: 'dom8', registrarName: 'Cloudflare', ownershipNote: 'Subdomain under techrepair.pro — inherits the parent zone/registrar.', nameservers: [], expiryAt: null, autoRenew: 'future', transferLock: 'future', domainLock: 'future', dnssec: 'enabled', providerNotes: 'Inherits parent zone (techrepair.pro).' },
+  { domainId: 'dom1', registrarName: 'Amazon Route 53 — platform apex (repairplatform.com)', ownershipNote: 'Platform-managed subdomain; registrar/DNS owned by the platform apex.', nameservers: [], expiryAt: null, autoRenew: 'enabled', transferLock: 'enabled', domainLock: 'enabled', dnssec: 'future', providerNotes: 'Managed by the platform; tenant has no registrar action.' },
+  { domainId: 'dom3', registrarName: 'Amazon Route 53 — platform apex (repairplatform.com)', ownershipNote: 'Platform-managed subdomain; registrar/DNS owned by the platform apex.', nameservers: [], expiryAt: null, autoRenew: 'enabled', transferLock: 'enabled', domainLock: 'enabled', dnssec: 'future', providerNotes: 'Managed by the platform; tenant has no registrar action.' },
+  { domainId: 'dom4', registrarName: 'Amazon Route 53 — platform apex (repairplatform.com)', ownershipNote: 'Platform-managed subdomain; registrar/DNS owned by the platform apex.', nameservers: [], expiryAt: null, autoRenew: 'enabled', transferLock: 'enabled', domainLock: 'enabled', dnssec: 'future', providerNotes: 'Managed by the platform; tenant has no registrar action.' },
+  { domainId: 'dom5', registrarName: 'Amazon Route 53 — platform apex (repairplatform.com)', ownershipNote: 'Platform-managed subdomain; registrar/DNS owned by the platform apex.', nameservers: [], expiryAt: null, autoRenew: 'enabled', transferLock: 'enabled', domainLock: 'enabled', dnssec: 'future', providerNotes: 'Managed by the platform; tenant has no registrar action.' },
+  { domainId: 'dom7', registrarName: 'Amazon Route 53 — platform apex (repairplatform.com)', ownershipNote: 'Disabled/legacy platform subdomain; registrar owned by the platform apex.', nameservers: [], expiryAt: null, autoRenew: 'disabled', transferLock: 'unknown', domainLock: 'unknown', dnssec: 'future', providerNotes: 'Legacy/disabled. Enterprise portfolios may instead sit at MarkMonitor or Namecheap.' },
+];
+
+// ---------------------------------------------------------------------------
+// SEED — manual SSL / security overlay (manual readiness only; SSL automation
+// is future).
+// ---------------------------------------------------------------------------
+export const tenantDomainSecurity: DomainSecurityRecord[] = [
+  { domainId: 'dom2', manualSslReadiness: 'manual_ready', sslValidationMethod: 'dns_txt', securityNote: 'CAA pinned to Let\u2019s Encrypt; DNSSEC enabled at Cloudflare.', lastReviewedAt: '2026-04-26' },
+  { domainId: 'dom4', manualSslReadiness: 'pending_manual_validation', sslValidationMethod: 'dns_txt', securityNote: 'Awaiting manual SSL validation on the shared platform certificate.', lastReviewedAt: '2026-04-22' },
+  { domainId: 'dom6', manualSslReadiness: 'manual_ready', sslValidationMethod: 'http_file', securityNote: 'No CAA record yet \u2014 consider adding one to restrict issuance.', lastReviewedAt: '2026-04-26' },
+  { domainId: 'dom8', manualSslReadiness: 'not_started', sslValidationMethod: 'unknown', securityNote: 'Resolve the conflicting A record before starting SSL.', lastReviewedAt: null },
+  { domainId: 'dom7', manualSslReadiness: 'not_applicable', sslValidationMethod: 'unknown', securityNote: 'Domain disabled.', lastReviewedAt: null },
+];
+
 export type SupportCaseStatus = 'open' | 'in_progress' | 'waiting_customer' | 'resolved' | 'closed';
 export type SupportCaseSeverity = 'low' | 'normal' | 'high' | 'urgent';
 

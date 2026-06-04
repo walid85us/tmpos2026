@@ -492,3 +492,34 @@ The following surfaces were reviewed and confirmed **unchanged** by Phase 1.2E (
 -   **Permission dependency auto-sync** (write-time, direction-aware, least-privilege); **Add-on Governance**; **Shipping Module**; **Store Permissions Matrix** (tenant/store-only); **Tenant provisioning**; **paid override invoice workflow**; **server PII logging rules**.
 
 Typecheck remains at the 12 pre-existing baseline errors (none in the Phase 1.2E owner Platform Settings / Domains files, which typecheck clean). No runtime errors in the dev workflow. **Phase 1.2E is feature-complete — pending acceptance. Next phase: Phase 1.3 — Platform Team Governance (server-side RBAC / PIM / PAM).**
+
+---
+
+# Phase 1.2F — Domain Control Panel Architecture Reset
+
+## Context
+
+The Phase 1.2E "Domains Control Center" UX direction was **rejected** by the user — it read as a screen-split rather than a true operator control panel. Phase 1.2F resets the architecture. After a 10-section product-design blueprint and a Stitch design freeze, the agreed first step is a **richer domain object model** so future control-panel screens are not shallow tabs over a thin record.
+
+## Milestone 0 — Domain Object Model Foundation (model/helper/storage/seed only)
+
+**Scope discipline:** NO UI, NO Platform Settings changes, NO real integrations/automation. Phase 1.2 / 1.2E remain PASS/HOLD (not accepted). Milestone 1 (UI) not started.
+
+### Model added (`src/owner/mockData.ts`, additive — base record untouched)
+
+-   `DnsRecord` — **intended-state zone mirror**, not a live zone. Type union `A | AAAA | CNAME | TXT | MX | SPF | DKIM | DMARC | CAA | NS`; `source` (`platform_required | operator | email_required | security_required | registrar_required`); `status` (`intended | manual_ready | manually_verified | conflict | pending_manual_review | not_applicable`); host/value/ttl/priority/purpose/lastEditedAt/notes.
+-   `DomainRegistrarInfo` — registrar/ownership with **local readiness/future placeholders** (autoRenew/transferLock/domainLock/dnssec as `unknown | enabled | disabled | future`; expiry placeholder; nameservers).
+-   `DomainSecurityRecord` — manual SSL/security overlay (manual SSL readiness + validation method + note), kept separate from the raw `ssl` provisioning field so manual validation has a home without overloading the base record.
+-   Mixed-state seed: ready root w/ full zone (Cloudflare), partial-email root (GoDaddy), pending+conflict subdomain, managed platform subdomains (Route 53 apex), disabled/legacy. Registrars represented: Cloudflare, GoDaddy, Amazon Route 53 (+ Namecheap/MarkMonitor referenced via `KNOWN_DOMAIN_REGISTRARS` / notes).
+
+### Helpers + storage (`src/owner/platformOpsDomainModel.ts`, new module)
+
+-   Sibling **sessionStorage** stores (matching the existing `tenant_domains_v1` pattern, NO destructive migration): `tenant_dns_records_v1`, `tenant_domain_registrar_v1`, `tenant_domain_security_v1`, each with load/save + seed fallback.
+-   Deterministic, pure helpers (no network, no async, no mutation, no audit emission): `deriveDnsZoneRecords`, `deriveRequiredPlatformDnsRecords`, `deriveEmailDnsReadiness`, `deriveSslCertificateView`, `deriveRegistrarReadiness`, `deriveDomainSecurityReadiness`, `deriveDomainPortfolioSignal(s)`, `deriveDomainControlPanelOverview`, `deriveDomainTroubleshootingGuide` (renamed `...Guide` to avoid collision with the existing `deriveDomainTroubleshooting` in `platformOpsDomains.ts`, which is unchanged), `deriveDomainAuditSummary`.
+-   Reuses existing accepted derivations from `platformOpsDomains.ts` (role/lifecycle/DNS readiness/checklist/risk reasons) so labels/counts cannot drift.
+-   Strict design-freeze truth wording (`DOMAIN_MODEL_TRUTH_LABELS`): "No live DNS lookup in this phase.", "SSL automation is future. Current SSL readiness is manually tracked.", "Auto-renew: Future / Not active.", "Manual propagation confirmation.", "Policy Baseline — Not Runtime Enforced.", "Audit record (not an immutable record).", "Operator manually marked verified".
+-   Future audit-action constants **defined only** (`FUTURE_DOMAIN_MODEL_AUDIT_ACTIONS`) — NOT emitted in M0; `platformOpsAudit.ts` untouched.
+
+### Permissions / non-regression
+
+No new permission keys (`view_domains` / `manage_domain_lifecycle` preserved). The new module is **not imported by any consumer** in M0, so the existing Domains page, Command Center, Support Tools, Dashboard, and all locked areas are unaffected. Typecheck stable at the 12 pre-existing baseline errors (new files clean); dev workflow runs with no runtime errors. **M0 done — pending acceptance.**

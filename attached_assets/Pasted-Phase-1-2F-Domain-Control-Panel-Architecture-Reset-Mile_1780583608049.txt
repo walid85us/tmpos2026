@@ -1,0 +1,583 @@
+Phase 1.2F — Domain Control Panel Architecture Reset
+Milestone 0 — Domain Object Model Foundation
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Status:
+Phase 1.2 / 1.2E remains PASS / HOLD.
+Do not proceed with QA.
+Do not mark Phase 1.2 accepted.
+Do not start Phase 1.3.
+Do not implement the new UI yet.
+
+We completed the final UI/UX design-freeze process using Stitch. The final design direction is accepted for engineering planning, but this milestone is NOT UI implementation.
+
+The approved visual direction includes:
+
+* Domain Portfolio Dashboard
+* Root Domain Overview
+* DNS Zone Editor
+* SSL/TLS Workspace
+* Email DNS Workspace
+* Security / Troubleshooting / Audit Workspace
+* Platform Settings Configuration Dashboard
+* Settings Registry
+* Default Baseline Manager
+* Change Review Center
+* Future Integration Readiness
+* Configuration History / Audit
+
+For this milestone, use those screens only as future visual direction. Do not implement the screens yet.
+
+==================================================
+MILESTONE 0 OBJECTIVE
+=====================
+
+Create the local deterministic domain object model needed to support a professional domain control panel.
+
+The current domain model is too thin for the approved control-panel direction. We need a richer model before UI implementation so future screens do not become shallow tabs or fake dashboards.
+
+This milestone is:
+
+* model foundation
+* local/session data foundation
+* deterministic helper foundation
+* seed/mock data foundation
+* no broad UI changes
+* no real integrations
+* no automation
+* no Platform Settings changes
+
+Stop after Milestone 0 and report.
+
+==================================================
+WORKING STYLE — THINK STEP BY STEP
+==================================
+
+Before implementing, think step by step.
+
+First inspect:
+
+1. current TenantDomainRecord model
+2. current tenant_domains_v1 store
+3. current platformOpsDomains.ts
+4. current DomainsPage.tsx
+5. current root/subdomain logic
+6. current required DNS records logic
+7. current SSL readiness logic
+8. current domain history/audit actions
+9. current view_domains / manage_domain_lifecycle permissions
+10. current Command Center domain signal dependencies
+11. existing localStorage/session storage patterns
+12. accepted non-regression areas
+
+Do not rush to implementation.
+Do not implement Milestone 1 early.
+
+==================================================
+ROLE STACK — ACT UPON IT
+========================
+
+Act as:
+
+* Senior Domain Control Panel Product Architect
+* Domain Administrator
+* DNS Administrator
+* Domain Manager
+* Network Administrator
+* Senior DNS / SSL Lifecycle Architect
+* Senior Registrar / Domain Portfolio Architect
+* Senior SaaS Admin Console Architect
+* Senior React/TypeScript Engineer
+* QA Gatekeeper
+* Systems Thinker
+* Side Auditor
+
+Apply real domain-management thinking:
+
+* domain portfolio management
+* root domain ownership
+* subdomain hierarchy
+* DNS zone records
+* email DNS records
+* SSL/TLS certificate lifecycle
+* registrar/ownership metadata
+* domain security readiness
+* troubleshooting / propagation readiness
+* audit/history
+* manual readiness workflows
+* future integration placeholders
+* no fake automation
+
+==================================================
+CRITICAL PRODUCT LIMITATIONS
+============================
+
+Do not implement or imply:
+
+* live DNS lookup
+* real DNS propagation checking
+* SSL automation
+* certificate issuance
+* registrar/provider API integration
+* DNSSEC activation
+* domain lock integration
+* transfer protection integration
+* traffic analytics
+* real geolocation analytics
+* external notifications
+* SSO/SCIM
+* runtime enforcement
+* backend configuration service
+* formal approval workflow
+* Phase 1.3+
+
+Everything must stay local/manual/readiness-only.
+
+Truth labels and helper names must support this language:
+
+* Manual readiness only
+* Intended-state only
+* No live DNS lookup in this phase
+* No SSL automation
+* Provider integrations future
+* Registrar/provider configuration external in this phase
+* Future / Not active in this phase
+* Not runtime enforced
+
+==================================================
+APPROVED DESIGN-FREEZE RULES TO PRESERVE
+========================================
+
+When naming helpers, labels, statuses, seed data, and future UI copy, preserve these final wording rules:
+
+1. Use:
+   “No live DNS lookup in this phase.”
+
+Do not use:
+“Live DNS lookup limitations may apply.”
+
+2. Use:
+   “Record Manual Verification”
+   or:
+   “Mark Records Reviewed.”
+
+Do not use:
+“Verify Now”
+or:
+“Trigger verification.”
+
+3. Use:
+   “SSL automation is future. Current SSL readiness is manually tracked.”
+
+Do not imply active certificate issuance.
+
+4. Use:
+   “Auto-renew: Future / Not active.”
+
+5. Use:
+   “Manual propagation confirmation.”
+
+Do not use live propagation, global propagation %, latency, or nameserver telemetry unless clearly future-labeled.
+
+6. Use:
+   “Future telemetry — not active in this phase.”
+
+Do not show real-looking traffic, geolocation, request counts, or analytics as current functionality.
+
+7. Use:
+   “Governance Mode”
+   or:
+   “Policy Baseline — Not Runtime Enforced.”
+
+Do not use “Strict Enforcement” as a runtime claim.
+
+8. Use:
+   “Review / Discard / Save through group review.”
+
+Do not use “Approve / Reject” unless a future approval workflow is explicitly labeled.
+
+9. Use:
+   “Audit record.”
+
+Do not use “immutable record” unless immutable storage is actually implemented.
+
+10. Use:
+    “Operator manually marked verified.”
+
+Do not use:
+“System automatically verified.”
+
+==================================================
+OBJECT MODEL TO ADD OR EXTEND
+=============================
+
+Create or extend local-only domain models safely.
+
+Do not destructively migrate existing records.
+
+Preferred approach:
+Keep existing TenantDomainRecord and tenant_domains_v1 as the base domain source of truth.
+
+Add sibling local/session stores as needed:
+
+* tenant_dns_records_v1
+* tenant_domain_registrar_v1
+* tenant_domain_security_v1
+* tenant_domain_ssl_view_v1 if needed
+* tenant_domain_email_dns_v1 if needed
+
+Only add separate stores where helpful.
+Do not over-engineer if a derived helper is enough.
+
+Required concept 1 — DnsRecord
+
+Fields should support:
+
+* id
+* domainId
+* type: A | AAAA | CNAME | TXT | MX | SPF | DKIM | DMARC | CAA | NS
+* host / name
+* value / target
+* ttl
+* priority optional
+* source:
+
+  * platform_required
+  * operator
+  * email_required
+  * security_required
+  * registrar_required
+* status:
+
+  * intended
+  * manual_ready
+  * manually_verified
+  * conflict
+  * pending_manual_review
+  * not_applicable
+* purpose
+* lastEditedAt
+* notes optional
+
+Important:
+This is an intended-state zone mirror, not a live DNS zone.
+
+Required concept 2 — DomainRegistrarInfo
+
+Fields should support:
+
+* domainId
+* registrarName
+* ownershipNote
+* nameservers optional
+* expiryAt placeholder
+* autoRenew: unknown | enabled | disabled | future
+* transferLock: unknown | enabled | disabled | future
+* domainLock: unknown | enabled | disabled | future
+* dnssec: unknown | enabled | disabled | future
+* providerNotes optional
+
+Important:
+Registrar/security fields are local readiness/future placeholders only.
+
+Required concept 3 — EmailDnsReadiness
+
+Derived from DnsRecord records:
+
+* mx
+* spf
+* dkim
+* dmarc
+* overall
+* nextAction
+* missingRecords
+* requiredRecords
+* truthLabel
+
+Status vocabulary should be manual/readiness based:
+
+* ready
+* partial
+* missing
+* pending_manual_review
+* not_applicable
+
+Required concept 4 — SslCertificateView
+
+Derived/local:
+
+* status
+* validationMethod
+* issueReason
+* certificateAuthority placeholder
+* expiryAt placeholder
+* autoRenew placeholder
+* requiredValidationRecord optional
+* nextAction
+* manualChecklist
+* truthLabel
+
+Status vocabulary should be manual/readiness based:
+
+* not_started
+* pending_manual_validation
+* manual_ready
+* failed
+* not_applicable
+
+Required concept 5 — DomainSecurityReadiness
+
+Derived/local:
+
+* sslReadiness
+* caaReadiness
+* dnssecReadiness future/not active
+* domainLockReadiness future/not active
+* transferProtectionReadiness future/not active
+* registrarSecurityNote
+* overall
+* nextAction
+* riskReasons
+
+Required concept 6 — DomainPortfolioSignal
+
+Derived:
+
+* domainId
+* hostname
+* domainType: root | subdomain | platform | legacy
+* tenant
+* registrar
+* dnsReadiness
+* sslReadiness
+* emailDnsReadiness
+* securityReadiness
+* registrarReadiness
+* renewalExpiryPlaceholder
+* risk
+* nextAction
+* truthLabels
+
+This will later power the portfolio dashboard/table.
+
+Required concept 7 — DomainControlPanelOverview
+
+Derived helper that can later power the selected-domain overview:
+
+* domain identity
+* tenant
+* registrar
+* domain type
+* lifecycle state
+* DNS manual readiness
+* SSL manual readiness
+* Email DNS readiness
+* Security readiness
+* related subdomains
+* next recommended action
+* manual action checklist
+* risk reasons
+* recent activity summary
+* truth labels
+
+Required concept 8 — DomainTroubleshooting
+
+Derived helper that can later power troubleshooting:
+
+* pending DNS explanation
+* failed verification explanation
+* propagation guidance
+* common mistakes
+* registrar vs DNS provider vs app configuration explanation
+* recommended next action
+
+Required concept 9 — DomainAuditSummary
+
+Derived helper that can later power audit/history:
+
+* domain created
+* status changed
+* DNS readiness changed
+* SSL status changed
+* disabled/re-enabled
+* actor
+* timestamp
+* audit link/id where available
+* event type
+* details
+
+==================================================
+HELPERS TO ADD
+==============
+
+Add helpers in platformOpsDomains.ts or a new focused helper module if cleaner.
+
+Recommended helper names:
+
+* deriveDnsZoneRecords(domain, records)
+* deriveRequiredPlatformDnsRecords(domain)
+* deriveEmailDnsReadiness(domain, records)
+* deriveSslCertificateView(domain, records)
+* deriveRegistrarReadiness(domain, registrarInfo)
+* deriveDomainSecurityReadiness(domain, records, registrarInfo)
+* deriveDomainPortfolioSignal(domain, ctx)
+* deriveDomainPortfolioSignals(domains, ctx)
+* deriveDomainControlPanelOverview(domain, ctx)
+* deriveDomainTroubleshooting(domain, ctx)
+* deriveDomainAuditSummary(domain, ctx)
+
+Use deterministic logic only.
+No network calls.
+No async provider checks.
+
+==================================================
+SEED / MOCK DATA
+================
+
+Seed realistic local/mock records for existing sample domains.
+
+Include DNS record samples for:
+
+* root domain A record
+* www CNAME
+* verification TXT
+* MX records
+* SPF TXT
+* DKIM CNAME or TXT
+* DMARC TXT
+* CAA record
+* NS records
+
+Include registrar info samples:
+
+* Cloudflare
+* Namecheap
+* GoDaddy
+* Route53 / AWS
+* MarkMonitor if useful
+
+Include mixed states:
+
+* ready domain
+* pending manual validation
+* failed/manual review
+* legacy domain
+* platform domain
+* subdomain inheriting root behavior
+
+Do not make sample data imply live checks.
+Use statuses like:
+
+* intended
+* manual_ready
+* manually_verified
+* pending_manual_review
+* not_applicable
+
+==================================================
+AUDITABILITY
+============
+
+Do not add full UI mutation yet.
+
+If needed, define constants only for future audit actions:
+
+* dns_record_intended_added
+* dns_record_intended_updated
+* dns_record_intended_deleted
+* dns_record_manual_verification_recorded
+* registrar_info_updated
+* email_dns_readiness_updated
+* domain_security_readiness_updated
+* ssl_manual_readiness_updated
+
+Do not emit new audit rows in Milestone 0 unless an existing UI action is actually changed.
+
+==================================================
+PERMISSIONS
+===========
+
+Do not add new permission keys.
+
+Preserve:
+
+* view_domains for page visibility
+* manage_domain_lifecycle for domain mutation
+
+Future UI should later make:
+
+* view-only users read-only
+* manage users able to add intended records / record manual readiness
+* future actions disabled/ghosted
+
+But do not implement future UI in Milestone 0.
+
+==================================================
+NON-REGRESSION REQUIREMENTS
+===========================
+
+Do not regress:
+
+* existing Domains page
+* root domain creation
+* subdomain locked-root behavior
+* existing domain status workflow
+* existing SSL status workflow
+* domain disable / re-enable behavior
+* domain history
+* Command Center domain signals
+* Command Center domain deep-linking
+* Platform Settings
+* Command Center Intelligence
+* Audit Investigation Center
+* Support Queue / SLA / Macro
+* Escalation operating model
+* Permission dependency auto-sync
+* Add-on Governance
+* Shipping
+* Store Permissions Matrix
+* Tenant provisioning
+* paid override invoice workflow
+* server PII logging
+
+Do not touch locked unrelated modules unless absolutely required.
+
+==================================================
+DOCUMENTATION
+=============
+
+Keep replit.md concise.
+
+Add only a short note:
+Phase 1.2F Milestone 0 — Domain object model foundation in progress/done pending acceptance.
+
+If needed, add detailed notes to:
+docs/platform-operations-security-history.md
+
+Do not rewrite major documentation.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+======================
+
+After Milestone 0, stop.
+
+Do not start Milestone 1.
+Do not implement UI.
+Do not mark Phase 1.2 accepted.
+
+Reply only in this structure:
+
+1. Milestone Status
+2. Current Model Gap Confirmed
+3. Object Model Added
+4. Storage Approach
+5. Derived Helpers Added
+6. Seed / Mock Data Added
+7. Permissions / Auditability
+8. Files Changed
+9. Typecheck / Runtime Result
+10. Non-Regression Notes
+11. Recommendation Before Milestone 1
