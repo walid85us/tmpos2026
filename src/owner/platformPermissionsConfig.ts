@@ -209,11 +209,11 @@ export const PLATFORM_FEATURE_GROUPS: PlatformFeatureGroupDef[] = [
   },
   {
     key: 'domains',
-    label: 'Domains',
-    description: 'Custom domains, subdomains, DNS, SSL.',
+    label: 'Tenant Web Address',
+    description: 'Tenant platform URLs, customer-facing links, external redirect guidance.',
     subPermissions: [
-      { id: 'view_domains', label: 'View Domains', description: 'Open the domains directory.', threshold: 'view' },
-      { id: 'manage_domain_lifecycle', label: 'Manage Domain Lifecycle', description: 'Verify, provision, retire domains.', threshold: 'manage', sensitive: true },
+      { id: 'view_domains', label: 'View Tenant Web Address', description: 'Open the tenant web address directory.', threshold: 'view' },
+      { id: 'manage_domain_lifecycle', label: 'Manage Tenant Web Address', description: 'Create, update, disable / re-enable tenant web addresses.', threshold: 'manage', sensitive: true },
     ],
   },
   {

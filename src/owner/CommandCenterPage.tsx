@@ -1442,7 +1442,7 @@ const CommandCenterPage: React.FC = () => {
             { label: 'Create Support Case', path: '/owner/support-tools', target: 'create_support_case', highlight: true },
             { label: 'Open Audit & Security', path: '/owner/audit-security', target: 'view_audit_security', highlight: false },
             { label: 'Open Support Tools', path: '/owner/support-tools', target: 'view_support_tools', highlight: false },
-            { label: 'Open Domains', path: '/owner/domains', target: 'view_domains', highlight: false },
+            { label: 'Open Tenant Web Address', path: '/owner/domains', target: 'view_domains', highlight: false },
             { label: 'Open Platform Settings', path: '/owner/platform-settings', target: 'view_platform_settings', highlight: false },
             { label: 'Open Team Management', path: '/owner/team-management', target: 'view_team', highlight: false },
           ];

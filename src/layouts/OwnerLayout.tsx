@@ -12,7 +12,7 @@ const navItems = [
   { label: 'Subscriptions', path: '/owner/subscriptions', feature: 'subscriptions' },
   { label: 'Billing', path: '/owner/billing', feature: 'billing' },
   { label: 'Provisioning', path: '/owner/provisioning', feature: 'provisioning' },
-  { label: 'Domains', path: '/owner/domains', feature: 'domains' },
+  { label: 'Tenant Web Address', path: '/owner/domains', feature: 'domains' },
   { label: 'Usage', path: '/owner/usage', feature: 'usage' },
   { label: 'Support Tools', path: '/owner/support-tools', feature: 'support_tools' },
   { label: 'Platform Settings', path: '/owner/platform-settings', feature: 'platform_settings' },

@@ -580,3 +580,30 @@ What the Overview now shows:
 -   **Manual status / SSL workflow + quick actions** — unchanged; every mutation (status / SSL / disable / re-enable) still lives in Overview, gated on `canManage` (`manage_domain_lifecycle`).
 
 **Scope discipline:** UI-only. No new permission keys (`view_domains` = visibility, `manage_domain_lifecycle` = mutation), no model / storage / seed / audit changes, no real DNS lookups / SSL automation / registrar integration. The DNS / SSL / Security / Help workspace tabs retain their existing (pre-accepted) behavior — M3+ deep functionality is not built. Add-Domain, `?domain=` / `?status=` deep-linking, lifecycle/status/SSL/disable/re-enable, and all non-regression areas are preserved. Typecheck stable at the 12 pre-existing baseline errors (DomainsPage clean). **M2 done — pending acceptance.**
+
+### Strategic Replacement — "Domains" → "Tenant Web Address" (presentation/positioning + one new pure helper)
+
+A strategic repositioning of the user-facing System Owner module. Rather than presenting a registrar/DNS "Domains" control panel (which implied real DNS/SSL/registrar capability the platform does not have), the module is repositioned around the concrete, honest job-to-be-done: **managing each tenant's platform web address** — the `{tenant.subdomain}.repairplatform.com` address customers actually use. **Non-destructive**: the M0 object model, the `tenant_domains_v1` store, and the dormant DNS/SSL/registrar helpers are all retained untouched for future custom-domain work.
+
+#### New pure helper — `src/owner/tenantWebAddress.ts`
+
+Deterministic derivations over `tenant_domains_v1` + tenant slug (`tenant.subdomain`), with no model/store mutation and no real DNS/SSL:
+
+-   `deriveTenantWebAddress` / `deriveTenantWebAddresses` — each tenant's primary platform web address from slug + `PLATFORM_ROOT_SUFFIX` (`repairplatform.com`).
+-   `deriveCustomerFacingLinks` — the copyable customer-facing URLs for a web address.
+-   `deriveExternalRedirectGuidance` — manual guidance for tenants pointing an external/custom domain at the platform.
+-   `deriveTenantWebAddressStatus` (`active` / `reserved` / `needs_setup` / `disabled` / `external_only`) + `deriveTenantWebAddressNextAction` + setup checklist.
+-   Truth-label, status-label, and kind-label maps; `WEB_ADDRESS_LIVE_HOSTING=false` so **"Open" is disabled** (labeled Future / Not active) while **Copy is always allowed**.
+
+#### Rewritten `DomainsPage.tsx` UI
+
+A **Tenant Web Address** dashboard: 6 summary cards (Total / Active Platform Subdomains / Needs Setup / Disabled / External Redirects / Custom Domain Future), a web-address table (`table-fixed` with a `<colgroup>`, customer-link copy chips), saved views (`all` / `active_platform` / `needs_setup` / `disabled` / `external_redirects` / `custom_future`), Tenant / Status / External-redirect filters with visible clearable chips + Clear All + truthful empty state, a slide-over **Web Address Overview** (Primary / Customer Links / External Redirect Guidance / Setup Checklist / Manage / Recent Activity / collapsed **Advanced Custom Domain Support** still backed by the M0 `deriveDomainControlPanelOverview`), and a Help surface. **No-drift**: ONE `webAddresses` signal array + ONE `matchesWebAddressFilter` predicate drive the cards, table, and saved views.
+
+#### Relabels (display-only) and preserved behavior
+
+-   Sidebar (`OwnerLayout`) "Domains" → "Tenant Web Address".
+-   Permission **display** labels (`platformPermissionsConfig` — group label + View/Manage Tenant Web Address) with the permission **resolver, ids, and gating unchanged**.
+-   Command Center quick-link "Open Domains" → "Open Tenant Web Address" with the `/owner/domains?domain=` link preserved.
+-   Preserved: existing mutation handlers (create / status / SSL / re-enable) + audit, `?domain=` / `?status=` deep-linking, the Add flow (now defaulting to platform subdomain), `view_domains` page visibility and `manage_domain_lifecycle` mutation gating, the `tenant_domains_v1` store, and the dormant M0 DNS/SSL/registrar helpers.
+
+No real DNS/SSL/registrar/hosting. Typecheck stable at the 12 pre-existing baseline errors (DomainsPage clean). **Done — pending acceptance.**
