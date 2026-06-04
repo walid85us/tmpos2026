@@ -1,0 +1,416 @@
+Phase 1.2F — Domain Control Panel Architecture Reset
+Milestone 1 — Domain Portfolio Dashboard + Portfolio Table
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Status:
+Milestone 0 — Domain Object Model Foundation is accepted.
+Proceed to Milestone 1 only.
+Do not start Milestone 2.
+Do not implement Root Domain Overview, DNS Zone Editor, SSL/TLS Workspace, Email DNS Workspace, Security/Troubleshooting/Audit, or Platform Settings in this milestone.
+
+==================================================
+MILESTONE 1 OBJECTIVE
+=====================
+
+Implement the Domain Portfolio Dashboard + Portfolio Table using the accepted Milestone 0 domain model foundation.
+
+This milestone should turn the Domains landing page into a professional domain portfolio management surface while preserving existing domain lifecycle behavior.
+
+Use the final Stitch design direction as visual reference, especially the final corrected Domain Portfolio Dashboard.
+
+Important:
+Do not copy Stitch navigation exactly.
+Do not replace the existing app shell/sidebar.
+Adapt the portfolio dashboard inside the existing System Owner Domains module.
+
+==================================================
+WORKING STYLE — THINK STEP BY STEP
+==================================
+
+Think step by step before implementing.
+
+First inspect:
+
+1. accepted Milestone 0 files:
+
+   * src/owner/mockData.ts
+   * src/owner/platformOpsDomainModel.ts
+2. current DomainsPage.tsx
+3. current platformOpsDomains.ts
+4. current domain storage flow
+5. current permissions: view_domains / manage_domain_lifecycle
+6. current root/subdomain creation behavior
+7. current Command Center domain deep-linking
+8. current domain filters and status tabs
+9. current domain history behavior
+10. non-regression areas
+
+Then implement only Milestone 1.
+
+==================================================
+ROLE STACK — ACT UPON IT
+========================
+
+Act as:
+
+* Senior Domain Control Panel Product Architect
+* Domain Administrator
+* DNS Administrator
+* Domain Manager
+* Network Administrator
+* Senior DNS / SSL Lifecycle Architect
+* Senior Registrar / Domain Portfolio Architect
+* Senior SaaS Admin Console UX Architect
+* Senior React/TypeScript Engineer
+* QA Gatekeeper
+* Systems Thinker
+* Side Auditor
+
+==================================================
+CRITICAL LIMITATIONS
+====================
+
+Do not implement or imply:
+
+* live DNS lookup
+* real DNS propagation checking
+* SSL automation
+* certificate issuance
+* registrar/provider API integration
+* DNSSEC activation
+* domain lock integration
+* transfer protection integration
+* traffic analytics
+* geolocation analytics
+* external notifications
+* SSO/SCIM
+* runtime enforcement
+* backend configuration service
+* formal approval workflow
+* Phase 1.3+
+
+Everything remains local/manual/readiness-only.
+
+Use final approved wording:
+
+* No live DNS lookup in this phase.
+* Manual readiness only.
+* Intended-state only.
+* SSL automation is future. Current SSL readiness is manually tracked.
+* Future / Not active in this phase.
+* Operator manually marked verified.
+* Audit record.
+
+Do not use:
+
+* Live DNS lookup limitations may apply.
+* Verify Now.
+* Trigger verification.
+* System automatically verified.
+* Strict Enforcement.
+* Approve / Reject.
+* Immutable record.
+
+==================================================
+MILESTONE 1 SCOPE
+=================
+
+Implement only:
+
+1. Domain Portfolio Dashboard
+2. Portfolio summary cards
+3. Portfolio filters / saved views
+4. Portfolio table
+5. Visible filter chips / clear filters
+6. Permission-aware Add Domain access
+7. Click-through to existing domain detail behavior, without replacing detail UI yet
+8. No-drift count/list logic
+9. Light documentation update
+
+Do not implement:
+
+* selected root domain overview redesign
+* DNS Zone Editor
+* SSL/TLS workspace
+* Email DNS workspace
+* Security / Troubleshooting / Audit workspace
+* Platform Settings redesign
+* new real provider behavior
+
+==================================================
+PORTFOLIO DASHBOARD REQUIREMENTS
+================================
+
+The Domains landing page should feel like a real domain portfolio manager.
+
+Add a command/header area with:
+
+* title: Domain Portfolio
+* subtitle: Multi-tenant domain operations and manual readiness overview.
+* truth label:
+  “No live DNS lookup in this phase.”
+* optional secondary truth labels:
+  “Manual readiness only.”
+  “Provider integrations future.”
+
+Add portfolio summary cards derived from current app/session data using Milestone 0 helpers:
+
+Required cards:
+
+1. Total Managed Domains
+2. Root / Subdomains
+3. Pending / Failed Verification
+4. SSL Readiness
+5. Email DNS Incomplete
+6. Security Attention
+
+Optional, if safe:
+7) Legacy / Unlinked
+8) Needs Manual Review
+
+Important:
+Counts must come from `deriveDomainPortfolioSignals` or equivalent single derived source.
+Do not hardcode Stitch sample numbers like 1,204 unless they are derived from seed data.
+Do not show fake external totals.
+
+Cards should be clickable filters where useful.
+Every card-driven filter must produce a visible, clearable chip.
+No invisible filters.
+
+==================================================
+PORTFOLIO TABLE REQUIREMENTS
+============================
+
+Build a portfolio table driven by DomainPortfolioSignal.
+
+Columns:
+
+* Domain
+* Domain Type
+
+  * Root
+  * Subdomain
+  * Platform
+  * Legacy
+* Tenant
+* Registrar
+* DNS Readiness
+* SSL Readiness
+* Email DNS
+* Security Readiness
+* Renewal / Expiry
+
+  * show placeholder/future/manual label only
+* Risk
+* Next Action
+* Actions
+
+Table behavior:
+
+* Search by domain/tenant/registrar/next action.
+* Filter by:
+
+  * tenant
+  * domain type
+  * DNS readiness
+  * SSL readiness
+  * Email DNS readiness
+  * security readiness
+  * risk
+* Support saved operational views:
+
+  * All Domains
+  * Needs Action
+  * Failed Verification
+  * SSL Attention
+  * Email DNS Incomplete
+  * Security Review
+  * Legacy / Unlinked
+* Each saved view must show a visible active chip.
+* Clear All resets all filters and saved views.
+* Empty state must explain the active filters and how to clear them.
+* No hidden filter state.
+
+Visual requirements:
+
+* Use existing app visual style but move toward the final Stitch control-panel direction.
+* Dense but readable.
+* Professional enterprise SaaS.
+* Strong badges.
+* Clear table hierarchy.
+* No basic drawer-only experience.
+* No decorative empty panels.
+* Do not replace the entire System Owner shell.
+
+==================================================
+BADGE / STATUS TAXONOMY
+=======================
+
+Use consistent badge language:
+
+Green:
+
+* Ready
+* Recorded Ready
+* Manual Ready
+
+Amber:
+
+* Pending
+* Needs Manual Review
+* Pending Manual Verification
+
+Red:
+
+* Failed
+* High Risk
+* Conflict
+
+Gray:
+
+* Future
+* Not Active
+* Not Applicable
+* Legacy
+
+Blue:
+
+* Intended State
+* Policy / Informational
+
+Avoid wording that implies live checks or provider automation.
+
+==================================================
+ACTIONS
+=======
+
+Add Domain:
+
+* Continue to use existing add domain flow.
+* Preserve root/subdomain behavior from prior accepted correction.
+* Preserve locked root for subdomain creation.
+* Button visible/enabled only for users with manage_domain_lifecycle.
+* View-only users should see read-only state or disabled action with minimal explanation.
+
+Row click/action:
+
+* Clicking a domain should open the existing domain detail behavior for now.
+* If existing `?domain=<id>` deep-linking exists, preserve it.
+* Do not implement the new selected-domain overview yet.
+* Do not implement DNS Zone Editor yet.
+
+Future actions:
+
+* Do not add active future actions.
+* If a future action appears visually, it must be disabled/ghosted and labeled Future.
+
+==================================================
+NO-DRIFT / DATA INTEGRITY
+=========================
+
+Use one derived source for:
+
+* card counts
+* saved view counts
+* filtered table rows
+* active chips
+* empty state explanation
+
+Recommended:
+
+* Build a single `portfolioSignals` array from `deriveDomainPortfolioSignals`.
+* Build a single `matchesPortfolioFilter(signal, filters)` predicate.
+* Use that same predicate for table rows and counts.
+
+If you add helper functions, keep them pure/deterministic.
+
+Consider adding focused parity checks/tests as recommended in M0:
+
+* new helper lifecycle labels align with platformOpsDomains lifecycle/readiness labels
+* portfolio card counts equal the matching filtered row count
+* saved view counts equal visible rows after click
+
+Do not introduce import.meta.env type errors.
+
+==================================================
+PERMISSIONS / AUDITABILITY
+==========================
+
+No new permission keys.
+
+Preserve:
+
+* view_domains for visibility
+* manage_domain_lifecycle for Add Domain and mutation actions
+
+This milestone should not emit new audit rows unless existing add/update flows already do.
+Filtering, sorting, clicking cards, and view changes must not emit audit rows.
+
+==================================================
+DOCUMENTATION
+=============
+
+Keep replit.md concise.
+
+Add short note:
+Phase 1.2F Milestone 1 — Domain Portfolio Dashboard + Portfolio Table done/pending acceptance.
+
+Append details to:
+docs/platform-operations-security-history.md
+
+Do not let replit.md become long.
+If needed, move older details to history doc only.
+
+==================================================
+NON-REGRESSION REQUIREMENTS
+===========================
+
+Do not regress:
+
+* existing domain add flow
+* root domain creation
+* subdomain locked-root behavior
+* existing domain status workflow
+* existing SSL status workflow
+* domain disable / re-enable behavior
+* domain history
+* Command Center domain signals
+* Command Center domain deep-linking
+* Platform Settings
+* Command Center Intelligence
+* Audit Investigation Center
+* Support Queue / SLA / Macro
+* Escalation operating model
+* Permission dependency auto-sync
+* Add-on Governance
+* Shipping
+* Store Permissions Matrix
+* Tenant provisioning
+* paid override invoice workflow
+* server PII logging
+
+==================================================
+OUTPUT FORMAT REQUIRED
+======================
+
+After Milestone 1, stop.
+
+Do not start Milestone 2.
+Do not implement selected domain workspace yet.
+Do not implement DNS Zone Editor yet.
+Do not mark Phase 1.2 accepted.
+
+Reply only in this structure:
+
+1. Milestone Status
+2. What Was Implemented
+3. Portfolio Dashboard
+4. Portfolio Table / Filters / Saved Views
+5. Data Source / No-Drift Guarantee
+6. Permissions / Auditability
+7. Files Changed
+8. Typecheck / Runtime Result
+9. Non-Regression Notes
+10. Recommendation Before Milestone 2

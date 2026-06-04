@@ -523,3 +523,23 @@ The Phase 1.2E "Domains Control Center" UX direction was **rejected** by the use
 ### Permissions / non-regression
 
 No new permission keys (`view_domains` / `manage_domain_lifecycle` preserved). The new module is **not imported by any consumer** in M0, so the existing Domains page, Command Center, Support Tools, Dashboard, and all locked areas are unaffected. Typecheck stable at the 12 pre-existing baseline errors (new files clean); dev workflow runs with no runtime errors. **M0 done — pending acceptance.**
+
+## Milestone 1 — Domain Portfolio Dashboard + Portfolio Table (presentation/UI only)
+
+**Scope discipline:** UI-only over the M0 model. NO model/storage/audit/permission changes; NO real DNS/SSL/registrar lookups. The rejected 1.2E split-pane landing is replaced; the detail control panel (`DomainControlPanel`), Add-Domain flow, `?domain=` / `?status=` deep-linking, audit emission, and permission gating are preserved verbatim.
+
+### Landing (`src/owner/DomainsPage.tsx`)
+
+-   **Header** — "Domain Portfolio" + subtitle, with standing truth labels (no live DNS, manual SSL, registrar external) carried from `DOMAIN_MODEL_TRUTH_LABELS`.
+-   **Six summary cards** — Total Managed Domains (clickable → clear all), Root / Subdomains (informational pair), Pending / Failed (informational pair), SSL Needs Attention (clickable → `ssl_attention` saved view; readiness % shown as informational subtext), Email DNS Incomplete (clickable → `email_incomplete` saved view), Security Attention (clickable → `security: 'attention'`).
+-   **Portfolio table** — columns Domain, Type, Tenant, Registrar, DNS, SSL, Email DNS, Security, Renewal / Expiry (placeholder, "Auto-renew: Future"), Risk, Next Action, Actions. Row click (or the "Manage" action) opens the unchanged `DomainControlPanel` as a right-side slide-over.
+-   **Filtering** — search (hostname / tenant / registrar / next action) + per-dimension filters (tenant, type, DNS, SSL, email, security, risk) + saved views (e.g. All, SSL Attention, Email Incomplete). Every active filter — including the saved view and the deep-link raw-status — renders as a visible, clearable chip with a Clear All; truthful empty state distinguishes "no records yet" from "no matches".
+
+### Locked no-drift contract
+
+-   ONE signal source: `portfolioSignals = deriveDomainPortfolioSignals(domains, …)` over the same `tenant_domains_v1`-derived `domains` array.
+-   ONE predicate: `matchesPortfolioFilter(signal, filters, statusById)`. The visible table, `countWithFilters(partial)`, `countView(view) = countWithFilters({ savedView: view })`, and every clickable card count all flow through this single predicate, so a card's number always equals the rows revealed on click. Non-clickable paired metrics (Root/Sub, Pending/Failed) reveal no rows and carry no drift risk.
+
+### Permissions / non-regression
+
+No new permission keys (`view_domains` page visibility, `manage_domain_lifecycle` mutations preserved; mutation handlers still self-gate and audit). The dead split-pane components (`PortfolioRow`, `PostureCard`, `Tab`) were removed. Typecheck stable at the 12 pre-existing baseline errors (DomainsPage clean); dev workflow runs with no runtime errors. Architect review: PASS on the no-drift contract. **M1 done — pending acceptance. Phase 1.2 / 1.2E remain not accepted; Phase 1.3 not started.**

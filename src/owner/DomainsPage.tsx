@@ -28,6 +28,7 @@ import {
   DOMAIN_ROLE_LABELS,
   DOMAIN_SSL_READINESS_LABELS,
   DOMAIN_DNS_READINESS_DETAIL,
+  DOMAIN_DNS_READINESS_LABELS,
   DOMAIN_PROPAGATION_STEPS,
   DOMAIN_TRUTH_LABELS,
   SECURITY_READINESS_LABELS,
@@ -39,6 +40,17 @@ import {
   type DomainChecklistState,
   type DomainReadinessSignal,
 } from './platformOpsDomains';
+import {
+  deriveDomainPortfolioSignals,
+  SSL_VIEW_STATUS_LABELS,
+  DOMAIN_MODEL_TRUTH_LABELS,
+  type DomainPortfolioSignal,
+  type DomainPortfolioType,
+  type PortfolioRisk,
+  type SslViewStatus,
+  type EmailDnsStatus,
+  type SecurityReadinessLevel,
+} from './platformOpsDomainModel';
 
 // Tone vocabulary shared by the Domain Control Panel readiness rows.
 type ReadinessTone = 'ready' | 'pending' | 'failed' | 'neutral' | 'future';
@@ -146,69 +158,179 @@ const saveDomains = (d: TenantDomainRecord[]) => {
   } catch { /* noop */ }
 };
 
-type RiskFilter = 'all' | 'needs_action' | 'at_risk';
-type KindFilter = 'all' | DomainKind;
-type SslFilter = 'all' | DomainSslReadiness;
-type LifecycleFilter = 'all' | DomainLifecycleStatus;
-// Raw persisted status filter — set only via Command Center deep-links
-// (?status=...). It has no dropdown control of its own, but it ALWAYS renders a
-// visible, clearable chip, so it never becomes an invisible filter.
-type RawStatusFilter = 'all' | DomainStatus;
+// ---------------------------------------------------------------------------
+// Phase 1.2F Milestone 1 — Domain Portfolio dashboard + table model.
+// Every summary card, filter, saved view, chip and count derives from ONE
+// signal array (deriveDomainPortfolioSignals, from the M0 object model) and ONE
+// predicate (matchesPortfolioFilter), so a number can never drift from the rows
+// it represents (locked no-drift rule).
+// ---------------------------------------------------------------------------
 
-interface DomainFilters {
-  search: string;
-  lifecycle: LifecycleFilter;
-  kind: KindFilter;
-  ssl: SslFilter;
-  risk: RiskFilter;
-  rawStatus: RawStatusFilter;
-}
-
-const EMPTY_FILTERS: DomainFilters = {
-  search: '',
-  lifecycle: 'all',
-  kind: 'all',
-  ssl: 'all',
-  risk: 'all',
-  rawStatus: 'all',
+const PORTFOLIO_TYPE_LABELS: Record<DomainPortfolioType, string> = {
+  root: 'Root',
+  subdomain: 'Subdomain',
+  platform: 'Platform',
+  legacy: 'Legacy',
 };
 
-// Single predicate — used for BOTH the visible list and every count, so card /
-// tab counts can never drift from the filtered list (locked no-drift rule).
-const matchesDomain = (s: DomainReadinessSignal, f: DomainFilters, tenantName: string): boolean => {
-  if (f.lifecycle !== 'all' && s.lifecycle !== f.lifecycle) return false;
-  if (f.rawStatus !== 'all' && s.rawStatus !== f.rawStatus) return false;
-  if (f.kind !== 'all' && s.kind !== f.kind) return false;
-  if (f.ssl !== 'all' && s.sslReadiness !== f.ssl) return false;
-  if (f.risk === 'needs_action' && !s.needsAction) return false;
-  if (f.risk === 'at_risk' && !s.riskReasons.some(r => r.tone === 'critical')) return false;
+const PORTFOLIO_TYPE_TONE: Record<DomainPortfolioType, string> = {
+  root: 'bg-indigo-500/10 text-indigo-700 border-indigo-500/20',
+  subdomain: 'bg-slate-100 text-slate-600 border-slate-200',
+  platform: 'bg-violet-400/10 text-violet-700 border-violet-400/20',
+  legacy: 'bg-slate-200 text-slate-500 border-slate-300',
+};
+
+const SSL_VIEW_TONE: Record<SslViewStatus, ReadinessTone> = {
+  not_started: 'neutral',
+  pending_manual_validation: 'pending',
+  manual_ready: 'ready',
+  failed: 'failed',
+  not_applicable: 'neutral',
+};
+
+const EMAIL_DNS_LABELS: Record<EmailDnsStatus, string> = {
+  ready: 'Ready',
+  partial: 'Partial',
+  missing: 'Missing',
+  pending_manual_review: 'Needs manual review',
+  not_applicable: 'Not applicable',
+};
+
+const EMAIL_DNS_TONE: Record<EmailDnsStatus, ReadinessTone> = {
+  ready: 'ready',
+  partial: 'pending',
+  missing: 'failed',
+  pending_manual_review: 'pending',
+  not_applicable: 'neutral',
+};
+
+const SECURITY_LEVEL_LABELS: Record<SecurityReadinessLevel, string> = {
+  ready: 'Ready',
+  partial: 'Partial',
+  attention: 'Attention',
+  future: 'Future',
+  not_applicable: 'Not applicable',
+};
+
+const SECURITY_LEVEL_TONE: Record<SecurityReadinessLevel, ReadinessTone> = {
+  ready: 'ready',
+  partial: 'pending',
+  attention: 'failed',
+  future: 'future',
+  not_applicable: 'neutral',
+};
+
+const RISK_LABELS: Record<PortfolioRisk, string> = {
+  critical: 'High risk',
+  warn: 'Watch',
+  ok: 'OK',
+};
+
+const RISK_TONE: Record<PortfolioRisk, ReadinessTone> = {
+  critical: 'failed',
+  warn: 'pending',
+  ok: 'ready',
+};
+
+type PortfolioSavedView =
+  | 'all'
+  | 'needs_action'
+  | 'failed_verification'
+  | 'ssl_attention'
+  | 'email_incomplete'
+  | 'security_review'
+  | 'legacy_unlinked';
+
+const SAVED_VIEW_LABELS: Record<PortfolioSavedView, string> = {
+  all: 'All Domains',
+  needs_action: 'Needs Action',
+  failed_verification: 'Failed Verification',
+  ssl_attention: 'SSL Attention',
+  email_incomplete: 'Email DNS Incomplete',
+  security_review: 'Security Review',
+  legacy_unlinked: 'Legacy / Unlinked',
+};
+
+const SAVED_VIEW_ORDER: PortfolioSavedView[] = [
+  'all', 'needs_action', 'failed_verification', 'ssl_attention', 'email_incomplete', 'security_review', 'legacy_unlinked',
+];
+
+// Saved-view membership predicates (shared by the saved-view counts and the
+// table predicate so they cannot diverge).
+const portfolioNeedsAction = (s: DomainPortfolioSignal): boolean =>
+  s.risk !== 'ok'
+  || (s.sslReadiness !== 'manual_ready' && s.sslReadiness !== 'not_applicable')
+  || (s.emailDnsReadiness !== 'ready' && s.emailDnsReadiness !== 'not_applicable')
+  || s.securityReadiness === 'attention' || s.securityReadiness === 'partial';
+
+const portfolioSslAttention = (s: DomainPortfolioSignal): boolean =>
+  s.sslReadiness === 'failed' || s.sslReadiness === 'pending_manual_validation' || s.sslReadiness === 'not_started';
+
+const portfolioEmailIncomplete = (s: DomainPortfolioSignal): boolean =>
+  s.emailDnsReadiness === 'partial' || s.emailDnsReadiness === 'missing' || s.emailDnsReadiness === 'pending_manual_review';
+
+const portfolioSecurityReview = (s: DomainPortfolioSignal): boolean =>
+  s.securityReadiness === 'attention' || s.securityReadiness === 'partial';
+
+// `failed_verification` reads the underlying persisted DomainStatus (date-granular
+// truth from the base record), not a derived field.
+const matchesSavedView = (s: DomainPortfolioSignal, view: PortfolioSavedView, statusById: Map<string, DomainStatus>): boolean => {
+  switch (view) {
+    case 'all': return true;
+    case 'needs_action': return portfolioNeedsAction(s);
+    case 'failed_verification': return statusById.get(s.domainId) === 'failed';
+    case 'ssl_attention': return portfolioSslAttention(s);
+    case 'email_incomplete': return portfolioEmailIncomplete(s);
+    case 'security_review': return portfolioSecurityReview(s);
+    case 'legacy_unlinked': return s.domainType === 'legacy';
+    default: return true;
+  }
+};
+
+interface PortfolioFilters {
+  search: string;
+  tenantId: string;                       // 'all' or a tenant id
+  domainType: 'all' | DomainPortfolioType;
+  dnsReadiness: 'all' | DomainDnsReadiness;
+  sslReadiness: 'all' | SslViewStatus;
+  emailDns: 'all' | EmailDnsStatus;
+  security: 'all' | SecurityReadinessLevel;
+  risk: 'all' | PortfolioRisk;
+  // Raw persisted status — set only via Command Center deep-links (?status=...).
+  // It has no dropdown of its own but ALWAYS renders a visible, clearable chip.
+  rawStatus: 'all' | DomainStatus;
+  savedView: PortfolioSavedView;
+}
+
+const EMPTY_PORTFOLIO_FILTERS: PortfolioFilters = {
+  search: '', tenantId: 'all', domainType: 'all', dnsReadiness: 'all',
+  sslReadiness: 'all', emailDns: 'all', security: 'all', risk: 'all',
+  rawStatus: 'all', savedView: 'all',
+};
+
+// THE single predicate — drives the visible table, every card count, every
+// saved-view count and every chip. Counts and rows can never diverge.
+const matchesPortfolioFilter = (
+  s: DomainPortfolioSignal,
+  f: PortfolioFilters,
+  statusById: Map<string, DomainStatus>,
+): boolean => {
+  if (!matchesSavedView(s, f.savedView, statusById)) return false;
+  if (f.tenantId !== 'all' && s.tenantId !== f.tenantId) return false;
+  if (f.domainType !== 'all' && s.domainType !== f.domainType) return false;
+  if (f.dnsReadiness !== 'all' && s.dnsReadiness !== f.dnsReadiness) return false;
+  if (f.sslReadiness !== 'all' && s.sslReadiness !== f.sslReadiness) return false;
+  if (f.emailDns !== 'all' && s.emailDnsReadiness !== f.emailDns) return false;
+  if (f.security !== 'all' && s.securityReadiness !== f.security) return false;
+  if (f.risk !== 'all' && s.risk !== f.risk) return false;
+  if (f.rawStatus !== 'all' && statusById.get(s.domainId) !== f.rawStatus) return false;
   const q = f.search.trim().toLowerCase();
   if (q) {
-    const hay = `${s.hostname} ${tenantName}`.toLowerCase();
+    const hay = `${s.hostname} ${s.tenant} ${s.registrar} ${s.nextAction}`.toLowerCase();
     if (!hay.includes(q)) return false;
   }
   return true;
 };
-
-// Portfolio grouping (Milestone 1 — Domains Control Panel layout). Roots act as
-// parent records with their subdomains nested beneath; platform-provisioned and
-// orphan/legacy subdomains get their own groups. A root may be shown as muted
-// "context" when it does not itself match the filters but one of its children
-// does, so the relationship stays understandable without an invisible filter.
-type PortfolioGroupKind = 'root' | 'platform' | 'unlinked';
-interface PortfolioRowData {
-  signal: DomainReadinessSignal;
-  nested: boolean;
-  context: boolean;
-}
-interface PortfolioGroupData {
-  key: string;
-  kind: PortfolioGroupKind;
-  title?: string;
-  icon?: string;
-  note?: string;
-  rows: PortfolioRowData[];
-}
 
 const DomainsPage: React.FC = () => {
   const { session } = useAccess();
@@ -220,7 +342,7 @@ const DomainsPage: React.FC = () => {
   const [domains, setDomains] = useState<TenantDomainRecord[]>(() => loadDomains());
   const [showCreate, setShowCreate] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [filters, setFilters] = useState<DomainFilters>(EMPTY_FILTERS);
+  const [pFilters, setPFilters] = useState<PortfolioFilters>(EMPTY_PORTFOLIO_FILTERS);
   const [draft, setDraft] = useState<{ tenantId: string; type: DomainCreateType; label: string; hostname: string; parentDomainId: string }>(
     { tenantId: '', type: 'root', label: '', hostname: '', parentDomainId: '' }
   );
@@ -251,7 +373,7 @@ const DomainsPage: React.FC = () => {
     if (statusParam) {
       const validStatuses: DomainStatus[] = ['pending', 'verifying', 'verified', 'failed', 'disabled'];
       if ((validStatuses as string[]).includes(statusParam)) {
-        setFilters(f => ({ ...f, rawStatus: statusParam as DomainStatus }));
+        setPFilters(f => ({ ...f, rawStatus: statusParam as DomainStatus }));
       }
     }
     if (domainParam) {
@@ -275,6 +397,12 @@ const DomainsPage: React.FC = () => {
   }, []);
   const tenantName = (id: string) => tenantById.get(id) || id;
 
+  const tenantNameRecord = useMemo(() => {
+    const r: Record<string, string> = {};
+    tenants.forEach(t => { r[t.id] = t.name; });
+    return r;
+  }, []);
+
   const signals = useMemo(() => deriveDomainReadinessList(domains), [domains]);
 
   const signalById = useMemo(() => {
@@ -283,95 +411,53 @@ const DomainsPage: React.FC = () => {
     return m;
   }, [signals]);
 
-  const visible = useMemo(
-    () => signals.filter(s => matchesDomain(s, filters, tenantName(s.tenantId))),
-    [signals, filters, tenantById]
-  );
-
-  // Every tab / card count is computed from the SAME matchesDomain predicate as
-  // the visible list — merging the control's own dimension overrides onto the
-  // currently-active filters. This guarantees the number on any control always
-  // equals what the list shows when that control is selected (locked no-drift).
-  const countWith = (overrides: Partial<DomainFilters>) =>
-    signals.filter(s => matchesDomain(s, { ...filters, ...overrides }, tenantName(s.tenantId))).length;
-
   const selected = useMemo(() => domains.find(d => d.id === selectedId) || null, [domains, selectedId]);
   const selectedSignal = selectedId ? signalById.get(selectedId) || null : null;
 
-  // Grouped portfolio (root → nested subdomains, platform, unlinked/legacy).
-  // Built from the SAME filtered `visible` set, so the leaf (non-context) rows
-  // sum exactly to `visible.length` (no-drift); context roots are clearly muted.
-  const portfolioGroups = useMemo<PortfolioGroupData[]>(() => {
-    const visibleSet = new Set(visible.map(s => s.id));
-    const groups: PortfolioGroupData[] = [];
+  // Phase 1.2F M1 — the portfolio dashboard + table run off the richer M0
+  // portfolio signal. Built from the SAME `domains` store as the readiness
+  // signals above, so the two views can never describe different domains.
+  const portfolioSignals = useMemo(
+    () => deriveDomainPortfolioSignals(domains, { domains, tenantNameById: tenantNameRecord }),
+    [domains, tenantNameRecord],
+  );
 
-    const roots = signals.filter(s => s.role === 'root').sort((a, b) => a.hostname.localeCompare(b.hostname));
-    const rootIds = new Set(roots.map(r => r.id));
+  // Underlying persisted DomainStatus by id — used by the raw-status deep-link
+  // filter and the "Failed Verification" saved view (date-granular truth).
+  const statusById = useMemo(() => {
+    const m = new Map<string, DomainStatus>();
+    domains.forEach(d => m.set(d.id, d.status));
+    return m;
+  }, [domains]);
 
-    roots.forEach(root => {
-      const children = signals
-        .filter(s => s.role === 'subdomain' && s.parentDomainId === root.id)
-        .sort((a, b) => a.hostname.localeCompare(b.hostname));
-      const matchingChildren = children.filter(c => visibleSet.has(c.id));
-      const rootVisible = visibleSet.has(root.id);
-      if (!rootVisible && matchingChildren.length === 0) return;
-      const rows: PortfolioRowData[] = [{ signal: root, nested: false, context: !rootVisible }];
-      matchingChildren.forEach(c => rows.push({ signal: c, nested: true, context: false }));
-      const hidden = children.length - matchingChildren.length;
-      groups.push({
-        key: `root_${root.id}`,
-        kind: 'root',
-        note: hidden > 0 ? `${hidden} subdomain${hidden === 1 ? '' : 's'} hidden by active filters` : undefined,
-        rows,
-      });
-    });
+  const visiblePortfolio = useMemo(
+    () => portfolioSignals.filter(s => matchesPortfolioFilter(s, pFilters, statusById)),
+    [portfolioSignals, pFilters, statusById],
+  );
 
-    const platform = signals
-      .filter(s => s.role === 'subdomain' && s.kind === 'subdomain' && visibleSet.has(s.id))
-      .sort((a, b) => a.hostname.localeCompare(b.hostname));
-    if (platform.length > 0) {
-      groups.push({
-        key: 'platform',
-        kind: 'platform',
-        title: 'Platform Domains',
-        icon: 'dns',
-        note: `Auto-provisioned under ${PLATFORM_ROOT_SUFFIX}.`,
-        rows: platform.map(s => ({ signal: s, nested: false, context: false })),
-      });
-    }
+  // Locked no-drift contract: EVERY clickable card count, saved-view count and
+  // the visible table all flow through the one `matchesPortfolioFilter`
+  // predicate. `countWithFilters` counts the rows a given filter preset reveals,
+  // so a card's number can never disagree with the table it produces on click.
+  const countWithFilters = (partial: Partial<PortfolioFilters>) =>
+    portfolioSignals.filter(s => matchesPortfolioFilter(s, { ...EMPTY_PORTFOLIO_FILTERS, ...partial }, statusById)).length;
+  const countView = (view: PortfolioSavedView) => countWithFilters({ savedView: view });
 
-    const unlinked = signals
-      .filter(s => s.role === 'subdomain' && s.kind === 'custom' && (!s.parentDomainId || !rootIds.has(s.parentDomainId)) && visibleSet.has(s.id))
-      .sort((a, b) => a.hostname.localeCompare(b.hostname));
-    if (unlinked.length > 0) {
-      groups.push({
-        key: 'unlinked',
-        kind: 'unlinked',
-        title: 'Unlinked / Legacy Subdomains',
-        icon: 'link_off',
-        note: 'No resolvable parent root on record.',
-        rows: unlinked.map(s => ({ signal: s, nested: false, context: false })),
-      });
-    }
-
-    // Safety net — any matching signal not yet placed (defensive against unusual
-    // role/kind combinations) so a match can never be silently dropped.
-    const placed = new Set<string>();
-    groups.forEach(g => g.rows.forEach(r => { if (!r.context) placed.add(r.signal.id); }));
-    const leftover = visible.filter(s => !placed.has(s.id)).sort((a, b) => a.hostname.localeCompare(b.hostname));
-
-    if (leftover.length > 0) {
-      groups.push({
-        key: 'other',
-        kind: 'unlinked',
-        title: 'Other Domains',
-        icon: 'help',
-        rows: leftover.map(s => ({ signal: s, nested: false, context: false })),
-      });
-    }
-
-    return groups;
-  }, [signals, visible]);
+  // Dashboard summary metrics. Clickable cards derive from `countWithFilters`
+  // with the SAME preset they apply on click (Total, SSL Attention, Email DNS,
+  // Security). Paired metrics (Root/Sub, Pending/Failed) are informational only
+  // and never filter, so they carry no drift risk.
+  const totalCount = countWithFilters({});
+  const rootCount = countWithFilters({ domainType: 'root' });
+  const subCount = countWithFilters({ domainType: 'subdomain' });
+  const pendingCount = portfolioSignals.filter(s => { const st = statusById.get(s.domainId); return st === 'pending' || st === 'verifying'; }).length;
+  const failedCount = countWithFilters({ rawStatus: 'failed' });
+  const sslApplicable = portfolioSignals.filter(s => s.sslReadiness !== 'not_applicable');
+  const sslReadyCount = sslApplicable.filter(s => s.sslReadiness === 'manual_ready').length;
+  const sslReadyPct = sslApplicable.length === 0 ? 100 : Math.round((sslReadyCount / sslApplicable.length) * 100);
+  const sslAttentionCount = countView('ssl_attention');
+  const emailIncompleteCount = countView('email_incomplete');
+  const securityAttentionCount = countWithFilters({ security: 'attention' });
 
   const today = new Date().toISOString().slice(0, 10);
 
@@ -552,21 +638,30 @@ const DomainsPage: React.FC = () => {
     } catch { /* noop */ }
   };
 
-  const patchFilter = (patch: Partial<DomainFilters>) => setFilters(f => ({ ...f, ...patch }));
-  const clearAll = () => setFilters(EMPTY_FILTERS);
+  const patchFilter = (patch: Partial<PortfolioFilters>) => setPFilters(f => ({ ...f, ...patch }));
+  const clearAll = () => setPFilters(EMPTY_PORTFOLIO_FILTERS);
+  // Selecting a saved view resets the dimension filters so the view's standalone
+  // count equals exactly what the table then shows (no invisible carry-over).
+  const selectSavedView = (view: PortfolioSavedView) => setPFilters({ ...EMPTY_PORTFOLIO_FILTERS, savedView: view });
 
-  const activeChips: { key: keyof DomainFilters; label: string }[] = [];
-  if (filters.search.trim()) activeChips.push({ key: 'search', label: `Search: "${filters.search.trim()}"` });
-  if (filters.rawStatus !== 'all') activeChips.push({ key: 'rawStatus', label: `Status: ${STATUS_LABELS[filters.rawStatus]}` });
-  if (filters.lifecycle !== 'all') activeChips.push({ key: 'lifecycle', label: `Lifecycle: ${DOMAIN_LIFECYCLE_LABELS[filters.lifecycle]}` });
-  if (filters.kind !== 'all') activeChips.push({ key: 'kind', label: `Kind: ${filters.kind}` });
-  if (filters.ssl !== 'all') activeChips.push({ key: 'ssl', label: `SSL: ${DOMAIN_SSL_READINESS_LABELS[filters.ssl]}` });
-  if (filters.risk !== 'all') activeChips.push({ key: 'risk', label: filters.risk === 'at_risk' ? 'At risk' : 'Needs action' });
+  const isDefaultView =
+    pFilters.savedView === 'all' && !pFilters.search.trim() && pFilters.tenantId === 'all' &&
+    pFilters.domainType === 'all' && pFilters.dnsReadiness === 'all' && pFilters.sslReadiness === 'all' &&
+    pFilters.emailDns === 'all' && pFilters.security === 'all' && pFilters.risk === 'all' && pFilters.rawStatus === 'all';
 
-  const clearChip = (key: keyof DomainFilters) => {
-    if (key === 'search') patchFilter({ search: '' });
-    else patchFilter({ [key]: 'all' } as Partial<DomainFilters>);
-  };
+  // Every active filter renders as a visible, clearable chip — no invisible
+  // filters can ever hide rows (locked rule).
+  const activeChips: { key: string; label: string; clear: () => void }[] = [];
+  if (pFilters.savedView !== 'all') activeChips.push({ key: 'savedView', label: `View: ${SAVED_VIEW_LABELS[pFilters.savedView]}`, clear: () => patchFilter({ savedView: 'all' }) });
+  if (pFilters.search.trim()) activeChips.push({ key: 'search', label: `Search: "${pFilters.search.trim()}"`, clear: () => patchFilter({ search: '' }) });
+  if (pFilters.tenantId !== 'all') activeChips.push({ key: 'tenantId', label: `Tenant: ${tenantName(pFilters.tenantId)}`, clear: () => patchFilter({ tenantId: 'all' }) });
+  if (pFilters.domainType !== 'all') activeChips.push({ key: 'domainType', label: `Type: ${PORTFOLIO_TYPE_LABELS[pFilters.domainType]}`, clear: () => patchFilter({ domainType: 'all' }) });
+  if (pFilters.dnsReadiness !== 'all') activeChips.push({ key: 'dns', label: `DNS: ${DOMAIN_DNS_READINESS_LABELS[pFilters.dnsReadiness]}`, clear: () => patchFilter({ dnsReadiness: 'all' }) });
+  if (pFilters.sslReadiness !== 'all') activeChips.push({ key: 'ssl', label: `SSL: ${SSL_VIEW_STATUS_LABELS[pFilters.sslReadiness]}`, clear: () => patchFilter({ sslReadiness: 'all' }) });
+  if (pFilters.emailDns !== 'all') activeChips.push({ key: 'email', label: `Email DNS: ${EMAIL_DNS_LABELS[pFilters.emailDns]}`, clear: () => patchFilter({ emailDns: 'all' }) });
+  if (pFilters.security !== 'all') activeChips.push({ key: 'security', label: `Security: ${SECURITY_LEVEL_LABELS[pFilters.security]}`, clear: () => patchFilter({ security: 'all' }) });
+  if (pFilters.risk !== 'all') activeChips.push({ key: 'risk', label: `Risk: ${RISK_LABELS[pFilters.risk]}`, clear: () => patchFilter({ risk: 'all' }) });
+  if (pFilters.rawStatus !== 'all') activeChips.push({ key: 'rawStatus', label: `Status: ${STATUS_LABELS[pFilters.rawStatus]}`, clear: () => patchFilter({ rawStatus: 'all' }) });
 
   if (!viewGate.allowed) {
     return (
@@ -588,12 +683,12 @@ const DomainsPage: React.FC = () => {
       {/* Command header */}
       <div className="flex items-end justify-between flex-wrap gap-4">
         <div className="max-w-2xl">
-          <h2 className="text-2xl font-black text-primary tracking-tight">Domains</h2>
-          <p className="text-slate-500 font-medium">Tenant subdomains &amp; custom domains — lifecycle, DNS, and SSL readiness.</p>
+          <h2 className="text-2xl font-black text-primary tracking-tight">Domain Portfolio</h2>
+          <p className="text-slate-500 font-medium">Multi-tenant domain operations — registrar, DNS, SSL, email and security readiness at a glance.</p>
           <div className="mt-2 flex flex-wrap gap-2">
-            <TruthLabel text={DOMAIN_TRUTH_LABELS.manual} tone="amber" />
-            <TruthLabel text={DOMAIN_TRUTH_LABELS.ruleBased} tone="slate" />
-            <TruthLabel text={DOMAIN_TRUTH_LABELS.futureProvider} tone="slate" />
+            <TruthLabel text={DOMAIN_MODEL_TRUTH_LABELS.noLiveDns} tone="amber" />
+            <TruthLabel text={DOMAIN_MODEL_TRUTH_LABELS.sslManual} tone="slate" />
+            <TruthLabel text={DOMAIN_MODEL_TRUTH_LABELS.registrarExternal} tone="slate" />
           </div>
         </div>
         {canManage ? (
@@ -603,15 +698,15 @@ const DomainsPage: React.FC = () => {
         )}
       </div>
 
-      {/* Posture cards — each maps to one predicate, so the count equals the
-          filtered list when that card is active (no drift). */}
+      {/* Portfolio summary cards — clickable cards apply the matching filter so
+          a card's number always equals the rows it reveals (locked no-drift). */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-        <PostureCard label="Total" value={signals.length} active={filters.lifecycle === 'all' && filters.risk === 'all' && filters.kind === 'all' && filters.ssl === 'all' && !filters.search.trim()} onClick={clearAll} />
-        <PostureCard label="Needs Action" value={countWith({ risk: 'needs_action', lifecycle: 'all' })} tint="amber" active={filters.risk === 'needs_action'} onClick={() => patchFilter({ risk: 'needs_action', lifecycle: 'all' })} />
-        <PostureCard label="At Risk" value={countWith({ risk: 'at_risk', lifecycle: 'all' })} tint="red" active={filters.risk === 'at_risk'} onClick={() => patchFilter({ risk: 'at_risk', lifecycle: 'all' })} />
-        <PostureCard label="SSL Ready" value={countWith({ lifecycle: 'ssl_ready', risk: 'all' })} tint="lime" active={filters.lifecycle === 'ssl_ready'} onClick={() => patchFilter({ lifecycle: 'ssl_ready', risk: 'all' })} />
-        <PostureCard label="Failed" value={countWith({ lifecycle: 'failed', risk: 'all' })} tint="red" active={filters.lifecycle === 'failed'} onClick={() => patchFilter({ lifecycle: 'failed', risk: 'all' })} />
-        <PostureCard label="Disabled" value={countWith({ lifecycle: 'disabled', risk: 'all' })} active={filters.lifecycle === 'disabled'} onClick={() => patchFilter({ lifecycle: 'disabled', risk: 'all' })} />
+        <SummaryCard label="Total Managed Domains" value={totalCount} active={isDefaultView} onClick={clearAll} />
+        <SummaryCard label="Root / Subdomains" value={`${rootCount} / ${subCount}`} sub="Root / Subdomain" />
+        <SummaryCard label="Pending / Failed" value={`${pendingCount} / ${failedCount}`} sub="Verification status" tint="amber" />
+        <SummaryCard label="SSL Needs Attention" value={sslAttentionCount} sub={`${sslReadyPct}% manual ready (${sslReadyCount}/${sslApplicable.length})`} tint={sslAttentionCount > 0 ? 'amber' : 'lime'} active={pFilters.savedView === 'ssl_attention'} onClick={() => selectSavedView('ssl_attention')} />
+        <SummaryCard label="Email DNS Incomplete" value={emailIncompleteCount} tint="amber" active={pFilters.savedView === 'email_incomplete'} onClick={() => selectSavedView('email_incomplete')} />
+        <SummaryCard label="Security Attention" value={securityAttentionCount} tint="red" active={pFilters.security === 'attention'} onClick={() => setPFilters({ ...EMPTY_PORTFOLIO_FILTERS, security: 'attention' })} />
       </div>
 
       {/* Deep-link stale-id notice (item F) */}
@@ -625,125 +720,123 @@ const DomainsPage: React.FC = () => {
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* Left — Domain Portfolio */}
-        <div className="lg:col-span-7 bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
-          {/* Toolbar: search + filters */}
-          <div className="px-6 py-5 border-b border-slate-100 space-y-4">
-            <div className="flex flex-wrap items-center gap-3">
-              <div className="relative flex-1 min-w-[200px]">
-                <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-lg">search</span>
-                <input
-                  value={filters.search}
-                  onChange={e => patchFilter({ search: e.target.value })}
-                  placeholder="Search hostname or tenant…"
-                  className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700 placeholder:text-slate-400 placeholder:font-medium"
-                />
-              </div>
-              <FilterSelect label="Kind" value={filters.kind} onChange={v => patchFilter({ kind: v as KindFilter })} options={[['all', 'All kinds'], ['subdomain', 'Subdomain'], ['custom', 'Custom']]} />
-              <FilterSelect label="SSL" value={filters.ssl} onChange={v => patchFilter({ ssl: v as SslFilter })} options={[['all', 'All SSL'], ...(Object.keys(DOMAIN_SSL_READINESS_LABELS) as DomainSslReadiness[]).map(k => [k, DOMAIN_SSL_READINESS_LABELS[k]] as [string, string])]} />
-              <FilterSelect label="Risk" value={filters.risk} onChange={v => patchFilter({ risk: v as RiskFilter })} options={[['all', 'All'], ['needs_action', 'Needs action'], ['at_risk', 'At risk']]} />
-            </div>
-
-            {/* Lifecycle tabs */}
-            <div className="flex flex-wrap gap-2">
-              <Tab label="All" count={countWith({ lifecycle: 'all' })} active={filters.lifecycle === 'all'} onClick={() => patchFilter({ lifecycle: 'all' })} />
-              {LIFECYCLE_TABS.map(lc => (
-                <Tab key={lc} label={DOMAIN_LIFECYCLE_LABELS[lc]} count={countWith({ lifecycle: lc })} active={filters.lifecycle === lc} onClick={() => patchFilter({ lifecycle: lc })} />
-              ))}
-            </div>
-
-            {/* Active filter chips — no invisible filters */}
-            {activeChips.length > 0 && (
-              <div className="flex flex-wrap items-center gap-2 pt-1">
-                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Active:</span>
-                {activeChips.map(c => (
-                  <button key={c.key} onClick={() => clearChip(c.key)} className="group inline-flex items-center gap-1.5 px-3 py-1 bg-primary/10 text-primary border border-primary/20 rounded-full text-[10px] font-black uppercase tracking-widest hover:bg-primary/20 transition-all cursor-pointer">
-                    {c.label}
-                    <span className="material-symbols-outlined text-[13px] group-hover:scale-110 transition-transform">close</span>
-                  </button>
-                ))}
-                <button onClick={clearAll} className="text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-slate-600 underline cursor-pointer">Clear all</button>
-              </div>
-            )}
-          </div>
-
-          {/* Grouped portfolio — roots as parents, subdomains nested */}
-          <div className="px-4 py-4">
-            <div className="flex items-center justify-between px-2 pb-3">
-              <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Domain Portfolio</span>
-              <span className="text-[10px] font-bold text-slate-400">{visible.length} matching</span>
-            </div>
-            {portfolioGroups.length === 0 ? (
-              <div className="px-8 py-12 text-center text-slate-400 text-sm font-bold">
-                {signals.length === 0 ? 'No domain records yet.' : 'No domain records match the active filters.'}
-              </div>
-            ) : (
-              <div className="space-y-5 max-h-[calc(100vh-22rem)] overflow-y-auto pr-1">
-                {portfolioGroups.map(group => (
-                  <div key={group.key} className="space-y-2">
-                    {group.title && (
-                      <div className="flex items-center gap-2 px-1">
-                        <span className="material-symbols-outlined text-sm text-slate-400">{group.icon}</span>
-                        <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">{group.title}</span>
-                        {group.note && <span className="text-[10px] font-medium text-slate-400">· {group.note}</span>}
-                      </div>
-                    )}
-                    <div className="space-y-2">
-                      {group.rows.map(r => (
-                        <PortfolioRow
-                          key={r.signal.id}
-                          s={r.signal}
-                          tenant={tenantName(r.signal.tenantId)}
-                          selected={selectedId === r.signal.id}
-                          nested={r.nested}
-                          context={r.context}
-                          onSelect={() => setSelectedId(r.signal.id)}
-                        />
-                      ))}
-                      {/* Note renders in exactly one slot by construction: the
-                          header above when the group is titled, here when it is
-                          not (root groups have no title) — never both. */}
-                      {!group.title && group.note && (
-                        <p className="ml-5 px-2 text-[10px] font-medium text-slate-400">{group.note}</p>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+      {/* Portfolio table — saved views, search, filters and chips all derive
+          from ONE predicate over ONE signal array (locked no-drift). */}
+      <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
+        {/* Saved views */}
+        <div className="px-6 pt-5 flex flex-wrap gap-2">
+          {SAVED_VIEW_ORDER.map(v => {
+            const active = pFilters.savedView === v;
+            return (
+              <button key={v} onClick={() => selectSavedView(v)} className={`px-3 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all cursor-pointer inline-flex items-center gap-1.5 active:scale-95 ${active ? 'bg-primary text-white shadow-sm shadow-primary/20' : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-700'}`}>
+                {SAVED_VIEW_LABELS[v]}
+                <span className={`px-1.5 py-0.5 rounded-md text-[9px] ${active ? 'bg-white/20' : 'bg-slate-100 text-slate-500'}`}>{countView(v)}</span>
+              </button>
+            );
+          })}
         </div>
 
-        {/* Right — Domain Control Panel (desktop persistent pane) */}
-        <div className="hidden lg:block lg:col-span-5 lg:sticky lg:top-6 self-start">
-          {selected && selectedSignal ? (
-            <div className="bg-white rounded-[2.5rem] border border-slate-200 shadow-sm overflow-hidden max-h-[calc(100vh-6rem)] overflow-y-auto">
-              <DomainControlPanel
-                selected={selected}
-                signal={selectedSignal}
-                domains={domains}
-                canManage={canManage}
-                tenantName={tenantName}
-                history={selectedHistory}
-                copied={copied}
-                onCopy={copy}
-                onSelect={setSelectedId}
-                onSetStatus={setStatus}
-                onSetSsl={setSsl}
-                onReenable={reenable}
-                onConfirmDisable={setConfirmDisable}
-                onClose={() => setSelectedId(null)}
+        {/* Toolbar: search + filters */}
+        <div className="px-6 py-5 space-y-4 border-b border-slate-100">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="relative flex-1 min-w-[220px]">
+              <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-lg">search</span>
+              <input
+                value={pFilters.search}
+                onChange={e => patchFilter({ search: e.target.value })}
+                placeholder="Search hostname, tenant, registrar…"
+                className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-700 placeholder:text-slate-400 placeholder:font-medium"
               />
             </div>
-          ) : (
-            <div className="bg-white/60 backdrop-blur-xl rounded-[2.5rem] border border-dashed border-slate-300 p-12 text-center shadow-sm">
-              <span className="material-symbols-outlined text-4xl text-slate-300">dns</span>
-              <p className="mt-3 text-sm font-black text-slate-600 uppercase tracking-widest">No domain selected</p>
-              <p className="mt-2 text-xs font-bold text-slate-400 max-w-xs mx-auto">Select a domain to manage DNS readiness, SSL readiness, relationships, checklist, and history.</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <FilterSelect label="Tenant" value={pFilters.tenantId} onChange={v => patchFilter({ tenantId: v })} options={[['all', 'All tenants'], ...tenants.map(t => [t.id, t.name] as [string, string])]} />
+            <FilterSelect label="Type" value={pFilters.domainType} onChange={v => patchFilter({ domainType: v as PortfolioFilters['domainType'] })} options={[['all', 'All types'], ...(Object.keys(PORTFOLIO_TYPE_LABELS) as DomainPortfolioType[]).map(k => [k, PORTFOLIO_TYPE_LABELS[k]] as [string, string])]} />
+            <FilterSelect label="DNS" value={pFilters.dnsReadiness} onChange={v => patchFilter({ dnsReadiness: v as PortfolioFilters['dnsReadiness'] })} options={[['all', 'All DNS'], ...(Object.keys(DOMAIN_DNS_READINESS_LABELS) as DomainDnsReadiness[]).map(k => [k, DOMAIN_DNS_READINESS_LABELS[k]] as [string, string])]} />
+            <FilterSelect label="SSL" value={pFilters.sslReadiness} onChange={v => patchFilter({ sslReadiness: v as PortfolioFilters['sslReadiness'] })} options={[['all', 'All SSL'], ...(Object.keys(SSL_VIEW_STATUS_LABELS) as SslViewStatus[]).map(k => [k, SSL_VIEW_STATUS_LABELS[k]] as [string, string])]} />
+            <FilterSelect label="Email" value={pFilters.emailDns} onChange={v => patchFilter({ emailDns: v as PortfolioFilters['emailDns'] })} options={[['all', 'All email'], ...(Object.keys(EMAIL_DNS_LABELS) as EmailDnsStatus[]).map(k => [k, EMAIL_DNS_LABELS[k]] as [string, string])]} />
+            <FilterSelect label="Security" value={pFilters.security} onChange={v => patchFilter({ security: v as PortfolioFilters['security'] })} options={[['all', 'All security'], ...(Object.keys(SECURITY_LEVEL_LABELS) as SecurityReadinessLevel[]).map(k => [k, SECURITY_LEVEL_LABELS[k]] as [string, string])]} />
+            <FilterSelect label="Risk" value={pFilters.risk} onChange={v => patchFilter({ risk: v as PortfolioFilters['risk'] })} options={[['all', 'All risk'], ...(Object.keys(RISK_LABELS) as PortfolioRisk[]).map(k => [k, RISK_LABELS[k]] as [string, string])]} />
+          </div>
+
+          {/* Active filter chips — no invisible filters */}
+          {activeChips.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Active:</span>
+              {activeChips.map(c => (
+                <button key={c.key} onClick={c.clear} className="group inline-flex items-center gap-1.5 px-3 py-1 bg-primary/10 text-primary border border-primary/20 rounded-full text-[10px] font-black uppercase tracking-widest hover:bg-primary/20 transition-all cursor-pointer">
+                  {c.label}
+                  <span className="material-symbols-outlined text-[13px] group-hover:scale-110 transition-transform">close</span>
+                </button>
+              ))}
+              <button onClick={clearAll} className="text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-slate-600 underline cursor-pointer">Clear all</button>
             </div>
           )}
         </div>
+
+        {/* Table header strip */}
+        <div className="flex items-center justify-between px-6 py-3 border-b border-slate-100">
+          <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Domain Portfolio</span>
+          <span className="text-[10px] font-bold text-slate-400">{visiblePortfolio.length} matching</span>
+        </div>
+
+        {visiblePortfolio.length === 0 ? (
+          <div className="px-8 py-16 text-center">
+            <span className="material-symbols-outlined text-4xl text-slate-300">{portfolioSignals.length === 0 ? 'dns' : 'filter_alt_off'}</span>
+            <p className="mt-3 text-sm font-black text-slate-600 uppercase tracking-widest">{portfolioSignals.length === 0 ? 'No domain records yet' : 'No domains match the active filters'}</p>
+            <p className="mt-1 text-xs font-bold text-slate-400">{portfolioSignals.length === 0 ? 'Add a domain to start building the portfolio.' : 'Adjust or clear the filters above to widen the view.'}</p>
+            {portfolioSignals.length > 0 && (
+              <button onClick={clearAll} className="mt-4 px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-primary border border-primary/20 bg-primary/5 rounded-xl hover:bg-primary/10 transition-all cursor-pointer">Clear all filters</button>
+            )}
+          </div>
+        ) : (
+          <div className="overflow-x-auto max-h-[calc(100vh-22rem)] overflow-y-auto">
+            <table className="w-full text-left border-collapse">
+              <thead className="sticky top-0 bg-white/95 backdrop-blur-sm z-10">
+                <tr className="text-[9px] font-black uppercase tracking-widest text-slate-400 border-b border-slate-100">
+                  <th className="px-4 py-3">Domain</th>
+                  <th className="px-3 py-3">Type</th>
+                  <th className="px-3 py-3">Tenant</th>
+                  <th className="px-3 py-3">Registrar</th>
+                  <th className="px-3 py-3">DNS</th>
+                  <th className="px-3 py-3">SSL</th>
+                  <th className="px-3 py-3">Email DNS</th>
+                  <th className="px-3 py-3">Security</th>
+                  <th className="px-3 py-3">Renewal / Expiry</th>
+                  <th className="px-3 py-3">Risk</th>
+                  <th className="px-3 py-3 min-w-[160px]">Next Action</th>
+                  <th className="px-4 py-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {visiblePortfolio.map(s => {
+                  const isSel = selectedId === s.domainId;
+                  return (
+                    <tr key={s.domainId} onClick={() => setSelectedId(s.domainId)} className={`cursor-pointer transition-colors ${isSel ? 'bg-primary/5' : 'hover:bg-slate-50/70'}`}>
+                      <td className="px-4 py-3"><span className="text-[12px] font-bold text-slate-900 break-all">{s.hostname}</span></td>
+                      <td className="px-3 py-3"><span className={`inline-flex px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${PORTFOLIO_TYPE_TONE[s.domainType]}`}>{PORTFOLIO_TYPE_LABELS[s.domainType]}</span></td>
+                      <td className="px-3 py-3"><span className="text-[11px] font-bold text-slate-600">{s.tenant}</span></td>
+                      <td className="px-3 py-3"><span className="text-[11px] font-bold text-slate-600">{s.registrar}</span></td>
+                      <td className="px-3 py-3"><PBadge tone={DNS_READINESS_TONE[s.dnsReadiness]}>{s.dnsReadinessLabel}</PBadge></td>
+                      <td className="px-3 py-3"><PBadge tone={SSL_VIEW_TONE[s.sslReadiness]}>{SSL_VIEW_STATUS_LABELS[s.sslReadiness]}</PBadge></td>
+                      <td className="px-3 py-3"><PBadge tone={EMAIL_DNS_TONE[s.emailDnsReadiness]}>{EMAIL_DNS_LABELS[s.emailDnsReadiness]}</PBadge></td>
+                      <td className="px-3 py-3"><PBadge tone={SECURITY_LEVEL_TONE[s.securityReadiness]}>{SECURITY_LEVEL_LABELS[s.securityReadiness]}</PBadge></td>
+                      <td className="px-3 py-3">
+                        <span className="text-[11px] font-bold text-slate-500">{s.renewalExpiryPlaceholder || '—'}</span>
+                        <span className="block text-[9px] font-bold text-slate-300 uppercase tracking-widest">Auto-renew: Future</span>
+                      </td>
+                      <td className="px-3 py-3"><PBadge tone={RISK_TONE[s.risk]}>{RISK_LABELS[s.risk]}</PBadge></td>
+                      <td className="px-3 py-3"><span className="text-[11px] font-medium text-slate-500">{s.nextAction}</span></td>
+                      <td className="px-4 py-3 text-right">
+                        <button onClick={e => { e.stopPropagation(); setSelectedId(s.domainId); }} className="px-3 py-1.5 text-[9px] font-black uppercase tracking-widest text-primary border border-primary/20 bg-primary/5 rounded-lg hover:bg-primary/10 transition-all cursor-pointer">Manage</button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {/* Add modal */}
@@ -874,12 +967,12 @@ const DomainsPage: React.FC = () => {
         )}
       </AnimatePresence>
 
-      {/* Detail control panel — mobile slide-over (desktop uses the right pane) */}
+      {/* Detail control panel — slide-over opened from a portfolio row */}
       <AnimatePresence>
         {selected && selectedSignal && (
-          <div className="fixed inset-0 z-50 flex justify-end lg:hidden">
+          <div className="fixed inset-0 z-50 flex justify-end">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setSelectedId(null)} className="absolute inset-0 bg-slate-900/30 backdrop-blur-sm" />
-            <motion.div initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }} transition={{ type: 'spring', damping: 28, stiffness: 280 }} className="relative w-full max-w-md h-full bg-white shadow-2xl border-l border-slate-200 overflow-y-auto">
+            <motion.div initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }} transition={{ type: 'spring', damping: 28, stiffness: 280 }} className="relative w-full max-w-xl h-full bg-white shadow-2xl border-l border-slate-200 overflow-y-auto">
               <DomainControlPanel
                 selected={selected}
                 signal={selectedSignal}
@@ -904,45 +997,7 @@ const DomainsPage: React.FC = () => {
   );
 };
 
-// Left-pane portfolio row — compact summary of one domain (hostname, role,
-// lifecycle, SSL, risk, next action). `context` renders a muted parent root that
-// is only shown to keep a matching child's relationship understandable.
-const PortfolioRow: React.FC<{
-  s: DomainReadinessSignal;
-  tenant: string;
-  selected: boolean;
-  nested: boolean;
-  context: boolean;
-  onSelect: () => void;
-}> = ({ s, tenant, selected, nested, context, onSelect }) => (
-  <button
-    onClick={onSelect}
-    className={`w-full text-left rounded-2xl border px-4 py-3 transition-all cursor-pointer active:scale-[0.99] ${nested ? 'ml-5' : ''} ${
-      selected
-        ? 'border-primary ring-2 ring-primary/20 bg-primary/5'
-        : context
-        ? 'border-dashed border-slate-200 bg-slate-50/50 opacity-70 hover:opacity-100'
-        : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50/70'
-    }`}
-  >
-    <div className="flex items-center gap-2">
-      {nested && <span className="material-symbols-outlined text-sm text-slate-300">subdirectory_arrow_right</span>}
-      <span className="text-sm font-bold text-slate-900 break-all flex-1">{s.hostname}</span>
-      {context && <span className="px-1.5 py-0.5 rounded-md text-[8px] font-black uppercase tracking-widest bg-slate-200 text-slate-500">Context</span>}
-      {s.issueCount > 0 && <span className="inline-flex items-center justify-center min-w-[16px] h-4 px-1 rounded-full bg-red-500/15 text-red-700 text-[9px] font-black">{s.issueCount}</span>}
-    </div>
-    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-      <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${s.role === 'root' ? 'bg-indigo-500/10 text-indigo-700 border-indigo-500/20' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>{DOMAIN_ROLE_LABELS[s.role]}</span>
-      <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${LIFECYCLE_STYLES[s.lifecycle]}`}>{s.lifecycleLabel}</span>
-      <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${SSL_READINESS_STYLES[s.sslReadiness]}`}>SSL: {s.sslReadinessLabel}</span>
-      {s.needsAction && <span className="px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border bg-amber-400/10 text-amber-700 border-amber-400/20">Needs action</span>}
-      <span className="text-[10px] font-bold text-slate-400">· {tenant}</span>
-    </div>
-    <p className="mt-1 text-[10px] font-bold text-slate-400 truncate">{s.nextAction}</p>
-  </button>
-);
-
-// Right-pane (and mobile slide-over) control panel for the selected domain.
+// Control panel (slide-over) for the selected domain.
 // Renders the full operator surface: next action, root/subdomain relationships,
 // readiness signals, security, checklist, registrar note, manual status/SSL
 // workflow, required DNS records, quick actions, history, and metadata.
@@ -1355,21 +1410,23 @@ const TruthLabel: React.FC<{ text: string; tone: 'amber' | 'slate' }> = ({ text,
   </span>
 );
 
-const PostureCard: React.FC<{ label: string; value: number; tint?: 'lime' | 'amber' | 'red'; active?: boolean; onClick?: () => void }> = ({ label, value, tint, active, onClick }) => {
+// Phase 1.2F M1 — portfolio summary card (single or paired metric). Clickable
+// when an onClick is supplied; otherwise renders as a static metric.
+const SummaryCard: React.FC<{ label: string; value: React.ReactNode; sub?: string; tint?: 'lime' | 'amber' | 'red'; active?: boolean; onClick?: () => void }> = ({ label, value, sub, tint, active, onClick }) => {
   const tintCls = tint === 'lime' ? 'text-lime-700' : tint === 'amber' ? 'text-amber-700' : tint === 'red' ? 'text-red-700' : 'text-primary';
+  const clickable = !!onClick;
   return (
-    <button onClick={onClick} className={`text-left bg-white/80 backdrop-blur-xl p-5 rounded-3xl border shadow-sm transition-all cursor-pointer hover:shadow-md hover:-translate-y-0.5 active:scale-[0.98] ${active ? 'border-primary ring-2 ring-primary/20' : 'border-slate-200 hover:border-slate-300'}`}>
+    <button onClick={onClick} disabled={!clickable} className={`text-left bg-white/80 backdrop-blur-xl p-5 rounded-3xl border shadow-sm transition-all ${clickable ? 'cursor-pointer hover:shadow-md hover:-translate-y-0.5 active:scale-[0.98]' : 'cursor-default'} ${active ? 'border-primary ring-2 ring-primary/20' : 'border-slate-200'}`}>
       <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">{label}</p>
       <p className={`text-2xl font-black mt-1 ${tintCls}`}>{value}</p>
+      {sub && <p className="text-[10px] font-bold text-slate-400 mt-0.5">{sub}</p>}
     </button>
   );
 };
 
-const Tab: React.FC<{ label: string; count: number; active: boolean; onClick: () => void }> = ({ label, count, active, onClick }) => (
-  <button onClick={onClick} className={`px-3 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all cursor-pointer inline-flex items-center gap-1.5 active:scale-95 ${active ? 'bg-primary text-white shadow-sm shadow-primary/20' : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-700'}`}>
-    {label}
-    <span className={`px-1.5 py-0.5 rounded-md text-[9px] ${active ? 'bg-white/20' : 'bg-slate-100 text-slate-500'}`}>{count}</span>
-  </button>
+// Small readiness badge used across the portfolio table cells.
+const PBadge: React.FC<{ tone: ReadinessTone; children: React.ReactNode }> = ({ tone, children }) => (
+  <span className={`inline-flex px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${READINESS_TONE_STYLES[tone]}`}>{children}</span>
 );
 
 const FilterSelect: React.FC<{ label: string; value: string; onChange: (v: string) => void; options: [string, string][] }> = ({ label, value, onChange, options }) => (
