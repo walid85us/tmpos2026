@@ -639,28 +639,29 @@ const DomainsPage: React.FC = () => {
           <div className="overflow-x-auto xl:overflow-x-visible">
             <table className="w-full text-left border-collapse table-fixed">
               <colgroup>
+                <col className="w-[15%]" />
+                <col className="w-[19%]" />
+                <col className="w-[10%]" />
+                <col className="w-[16%]" />
+                <col className="w-[15%]" />
                 <col className="w-[13%]" />
-                <col className="w-[17%]" />
-                <col className="w-[17%]" />
-                <col className="w-[15%]" />
-                <col className="w-[9%]" />
-                <col className="w-[14%]" />
-                <col className="w-[15%]" />
+                <col className="w-[12%]" />
               </colgroup>
               <thead className="bg-white">
                 <tr className="text-[9px] font-black uppercase tracking-widest text-slate-400 border-b border-slate-100 align-bottom">
                   <th className="px-3 py-3">Tenant</th>
                   <th className="px-2 py-3">Platform Web Address</th>
-                  <th className="px-2 py-3">Main App URL</th>
-                  <th className="px-2 py-3">Customer Links</th>
                   <th className="px-2 py-3">Status</th>
                   <th className="px-2 py-3">External Website / Redirect</th>
-                  <th className="px-3 py-3 text-right">Next Action / Actions</th>
+                  <th className="px-2 py-3">Customer Links</th>
+                  <th className="px-2 py-3">Next Action</th>
+                  <th className="px-3 py-3 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {visible.map(w => {
                   const isSel = selectedId === w.domainId;
+                  const linkCount = w.customerLinks.length;
                   return (
                     <tr key={w.domainId} onClick={() => setSelectedId(w.domainId)} className={`cursor-pointer transition-colors align-top ${isSel ? 'bg-primary/5' : 'hover:bg-slate-50/70'}`}>
                       <td className="px-3 py-3">
@@ -668,52 +669,52 @@ const DomainsPage: React.FC = () => {
                         <span className={`mt-1 inline-flex px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${KIND_TONE[w.kind]}`}>{WEB_ADDRESS_KIND_LABELS[w.kind]}</span>
                       </td>
                       <td className="px-2 py-3">
-                        {w.platformWebAddress
-                          ? <span className="text-[12px] font-bold text-slate-700 break-all leading-tight">{w.platformWebAddress}</span>
-                          : <span className="text-[12px] font-bold text-slate-400">—</span>}
-                      </td>
-                      <td className="px-2 py-3">
-                        {w.mainAppUrl ? (
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-[11px] font-medium text-slate-500 break-all leading-tight">{w.mainAppUrl}</span>
-                            <button onClick={e => { e.stopPropagation(); copy(w.mainAppUrl, `${w.domainId}-main`); }} title="Copy main app URL" className="shrink-0 text-slate-400 hover:text-primary transition-colors cursor-pointer">
+                        {w.platformWebAddress ? (
+                          <div className="flex items-start gap-1.5">
+                            <span className="text-[12px] font-bold text-slate-700 break-all leading-tight">{w.platformWebAddress}</span>
+                            <button onClick={e => { e.stopPropagation(); copy(w.mainAppUrl, `${w.domainId}-main`); }} title="Copy main URL" className="shrink-0 mt-0.5 text-slate-400 hover:text-primary transition-colors cursor-pointer">
                               <span className="material-symbols-outlined text-[14px] leading-none">{copied === `${w.domainId}-main` ? 'check' : 'content_copy'}</span>
                             </button>
                           </div>
-                        ) : <span className="text-[11px] font-bold text-slate-400">—</span>}
-                      </td>
-                      <td className="px-2 py-3">
-                        {w.customerLinks.length === 0 ? (
-                          <span className="text-[10px] font-bold text-slate-400">—</span>
-                        ) : (
-                          <div className="flex flex-wrap gap-1">
-                            {w.customerLinks.map(link => (
-                              <button
-                                key={link.key}
-                                onClick={e => { e.stopPropagation(); copy(link.url, `${w.domainId}-${link.key}`); }}
-                                title={`${link.label} · ${link.statusLabel} — click to copy`}
-                                className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border border-slate-200 bg-slate-50 text-slate-500 hover:bg-primary/5 hover:text-primary hover:border-primary/30 transition-all cursor-pointer"
-                              >
-                                {copied === `${w.domainId}-${link.key}` ? 'Copied' : CUSTOMER_LINK_SHORT[link.key] ?? link.label}
-                              </button>
-                            ))}
-                          </div>
-                        )}
+                        ) : <span className="text-[12px] font-bold text-slate-400">—</span>}
                       </td>
                       <td className="px-2 py-3"><span className={`inline-flex px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${STATUS_TONE[w.status]}`}>{w.statusLabel}</span></td>
                       <td className="px-2 py-3">
                         {w.externalWebsite ? (
                           <>
                             <span className="block text-[11px] font-bold text-slate-700 break-all leading-tight">{w.externalWebsite}</span>
-                            {w.redirectTarget && <span className="block text-[9px] font-medium text-slate-400 leading-tight">→ {w.redirectTarget}</span>}
+                            {w.kind === 'external' && <span className="block text-[9px] font-medium text-slate-400 leading-tight mt-0.5">Future / Support-Assisted</span>}
                           </>
-                        ) : <span className="text-[11px] font-bold text-slate-400">None on file</span>}
+                        ) : <span className="text-[11px] font-bold text-slate-400">—</span>}
                       </td>
+                      <td className="px-2 py-3">
+                        {linkCount === 0 ? (
+                          <span className="text-[10px] font-bold text-slate-400">—</span>
+                        ) : (
+                          <div>
+                            <span className="block text-[10px] font-bold text-slate-500 leading-tight">{linkCount} link{linkCount === 1 ? '' : 's'} available</span>
+                            <div className="mt-1 flex flex-wrap gap-1">
+                              {w.customerLinks.map(link => (
+                                <span key={link.key} className="inline-flex px-1.5 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border border-slate-200 bg-slate-50 text-slate-500">
+                                  {CUSTOMER_LINK_SHORT[link.key] ?? link.label}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-2 py-3"><span className="block text-[10px] font-medium text-slate-500 leading-tight">{w.nextAction}</span></td>
                       <td className="px-3 py-3 text-right">
-                        <span className="block text-[10px] font-medium text-slate-500 leading-tight mb-1 text-left">{w.nextAction}</span>
-                        <button onClick={e => { e.stopPropagation(); setSelectedId(w.domainId); }} className="inline-flex items-center gap-1 px-2 py-1.5 text-[9px] font-black uppercase tracking-widest text-primary border border-primary/20 bg-primary/5 rounded-lg hover:bg-primary/10 transition-all cursor-pointer whitespace-nowrap">
-                          <span className="material-symbols-outlined text-[13px] leading-none">open_in_new</span>Open
-                        </button>
+                        <div className="inline-flex flex-col items-end gap-1.5">
+                          <button onClick={e => { e.stopPropagation(); setSelectedId(w.domainId); }} className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[9px] font-black uppercase tracking-widest text-primary border border-primary/20 bg-primary/5 rounded-lg hover:bg-primary/10 transition-all cursor-pointer whitespace-nowrap">
+                            <span className="material-symbols-outlined text-[13px] leading-none">open_in_new</span>Open Overview
+                          </button>
+                          {w.mainAppUrl && (
+                            <button onClick={e => { e.stopPropagation(); copy(w.mainAppUrl, `${w.domainId}-main`); }} className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[9px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 bg-white rounded-lg hover:bg-slate-50 transition-all cursor-pointer whitespace-nowrap">
+                              <span className="material-symbols-outlined text-[13px] leading-none">{copied === `${w.domainId}-main` ? 'check' : 'content_copy'}</span>{copied === `${w.domainId}-main` ? 'Copied' : 'Copy Main URL'}
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );

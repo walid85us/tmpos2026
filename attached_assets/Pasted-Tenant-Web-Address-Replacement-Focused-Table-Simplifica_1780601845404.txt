@@ -1,0 +1,293 @@
+Tenant Web Address Replacement — Focused Table Simplification Correction
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Status:
+Tenant Web Address Replacement / Reposition is functionally passing, but final acceptance is on HOLD due to QA #7.
+
+Manual QA result:
+
+* All major behavior passed.
+* Table remains readable and usable — PASS, partially.
+* User feedback: the table has too much detail/too many columns. Important details can be shown after clicking Actions/Open Overview. The list should show only important scan-level information.
+
+Do not start Phase 1.3.
+Do not start a new design exploration.
+Do not ask Stitch again.
+Do not reintroduce DNS/SSL/Registrar control-panel language.
+Do not modify the accepted data model unless absolutely necessary.
+
+==================================================
+OBJECTIVE
+=========
+
+Simplify the Tenant Web Address table so it feels like a clean SaaS management list.
+
+The table should support fast scanning:
+
+* Which tenant?
+* What is their platform web address?
+* Is it active?
+* Do they have an external redirect/custom website note?
+* Are customer links available?
+* What is the next action?
+* How do I open/manage/copy?
+
+Detailed URLs should live inside the selected overview/drawer, not as separate table columns.
+
+==================================================
+WORKING STYLE — THINK STEP BY STEP
+==================================
+
+Think step by step before correcting.
+
+First inspect:
+
+1. current Tenant Web Address table columns
+2. deriveTenantWebAddresses signal shape
+3. matchesWebAddressFilter predicate
+4. selected overview/drawer content
+5. copy/open actions currently in table
+6. no-drift card/table/saved-view logic
+7. table width and readability
+8. existing QA-passed behaviors
+
+Then make the smallest safe table presentation correction.
+
+==================================================
+TABLE SIMPLIFICATION REQUIREMENTS
+=================================
+
+Replace the current detailed table columns with a simpler list.
+
+Preferred table columns:
+
+1. Tenant
+
+* tenant name
+* optional small secondary store/plan text if already available
+
+2. Platform Web Address
+
+* tenant platform subdomain
+* compact copy action
+* optional open action only if safe
+* no long extra URL list in this cell
+
+3. Status
+
+* Active
+* Needs Setup
+* Disabled
+* Reserved
+* External Only if applicable
+
+4. External Website / Redirect
+
+* show external URL/domain if recorded
+* otherwise show “—”
+* if custom domain support is future, show small “Future / Support-Assisted” label only where relevant
+
+5. Customer Links
+
+* show a compact summary, not individual URL columns
+  Examples:
+
+  * “5 links available”
+  * small chips: Portal, Book, Track, Pay, Mail-In
+  * disabled/future chips only if needed
+* Do not show full URLs here.
+* Detailed link list belongs in the selected overview.
+
+6. Next Action
+
+* concise
+  Examples:
+
+  * No action needed.
+  * Complete setup.
+  * Review external redirect.
+  * Copy portal link.
+  * Custom domain support future.
+
+7. Actions
+
+* Open Overview
+* Copy Main URL
+* optional More menu if already consistent
+* action buttons must not be clipped
+
+Remove separate columns for:
+
+* Main App URL
+* Customer Portal URL
+* Booking URL
+* Tracking URL
+* Payment URL
+* Mail-In URL
+
+Those details must remain available in the selected overview/drawer.
+
+==================================================
+SELECTED OVERVIEW REQUIREMENTS
+==============================
+
+Preserve the selected Tenant Web Address overview.
+
+Ensure the detailed customer-facing links remain available there:
+
+* Main App URL
+* Customer Portal
+* Book Appointment
+* Track Repair
+* Pay Invoice
+* Mail-In Repair if applicable
+* Copy/Open actions
+* Future/Not active labels where needed
+
+Do not remove these details from the drawer/overview.
+
+==================================================
+NO-DRIFT REQUIREMENTS
+=====================
+
+Preserve the accepted no-drift behavior.
+
+Do not break:
+
+* dashboard cards
+* saved view counts
+* filtered rows
+* visible chips
+* Clear All
+* search
+* filters
+
+Use the same deriveTenantWebAddresses array and matchesWebAddressFilter predicate.
+
+If customer-link summary is added, derive it from the same source used by selected overview so the table and drawer agree.
+
+==================================================
+SAVED VIEWS / FILTERS
+=====================
+
+Preserve:
+
+* All Web Addresses
+* Active Platform URLs
+* Needs Setup
+* Disabled
+* External Redirects
+* Custom Domain Future / Support-Assisted
+
+Preserve filters:
+
+* Tenant
+* Status
+* External Redirect
+* Search
+
+No invisible filters.
+
+==================================================
+TRUTHFUL LANGUAGE
+=================
+
+Keep the accepted language:
+
+* Platform subdomain is managed by this app.
+* Tenant-owned domains are external in this phase.
+* Custom domain hosting is future / support-assisted.
+* No live DNS lookup in this phase.
+* No SSL automation in this phase.
+
+Do not reintroduce:
+
+* DNS Zone Editor
+* SSL/TLS control panel
+* registrar control
+* DNSSEC
+* domain lock
+* transfer lock
+* Verify Now
+* automatic verification
+
+==================================================
+PERMISSIONS / AUDITABILITY
+==========================
+
+No new permission keys.
+
+Preserve:
+
+* view_domains
+* manage_domain_lifecycle
+
+Copy/open/filter actions should not emit audit rows.
+Existing mutation audit behavior remains unchanged.
+
+==================================================
+NON-REGRESSION
+==============
+
+Do not regress:
+
+* module label Tenant Web Address
+* page purpose/truth labels
+* dashboard cards and counts
+* saved views
+* search/filters
+* Clear All
+* copy actions
+* open actions truthfulness
+* selected overview
+* customer-facing links section
+* external redirect guidance
+* advanced custom domain support label
+* Add flow relabeling
+* permissions
+* audit behavior
+* deep-linking
+* accepted M0–M2 foundation
+* Platform Settings
+* Command Center Intelligence
+* Audit Investigation Center
+* Support Queue / SLA / Macro
+* Escalation operating model
+* Add-on Governance
+* Shipping
+* Store Permissions Matrix
+* Tenant provisioning
+* server PII logging
+
+==================================================
+DOCUMENTATION
+=============
+
+Keep documentation minimal.
+
+Update replit.md only with a concise correction note.
+If detailed history is needed, append to docs/platform-operations-security-history.md.
+
+Do not mark Phase 1.2 accepted yet.
+Do not start Phase 1.3.
+
+==================================================
+OUTPUT FORMAT REQUIRED
+======================
+
+After this focused correction, stop.
+
+Reply only in this structure:
+
+1. Correction Status
+2. What Was Simplified
+3. New Table Columns
+4. Selected Overview Preservation
+5. No-Drift / Filters Preserved
+6. Permissions / Auditability
+7. Files Changed
+8. Typecheck / Runtime Result
+9. Non-Regression Notes
+10. Recommendation Before Re-QA
