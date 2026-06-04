@@ -543,3 +543,12 @@ No new permission keys (`view_domains` / `manage_domain_lifecycle` preserved). T
 ### Permissions / non-regression
 
 No new permission keys (`view_domains` page visibility, `manage_domain_lifecycle` mutations preserved; mutation handlers still self-gate and audit). The dead split-pane components (`PortfolioRow`, `PostureCard`, `Tab`) were removed. Typecheck stable at the 12 pre-existing baseline errors (DomainsPage clean); dev workflow runs with no runtime errors. Architect review: PASS on the no-drift contract. **M1 done — pending acceptance. Phase 1.2 / 1.2E remain not accepted; Phase 1.3 not started.**
+
+### M1 Layout Overflow Correction (layout-only, post-QA)
+
+Manual QA held M1 acceptance on two overflow issues; this is a focused layout-only correction (no M1 logic, columns, storage, permissions, or audit touched).
+
+-   **Portfolio table** — removed the nested scroll container (`max-h-[calc(...)] overflow-y-auto` + always-on `overflow-x-auto`) that trapped the table. The table now flows in the page and uses `table-fixed` with a percentage-based `<colgroup>` so the 12 columns fit on desktop without a horizontal scrollbar; cells compact and wrap (`break-words leading-tight`, reduced padding, smaller "Auto-renew: Future" subtext). Horizontal scroll is retained only as a graceful fallback below the `xl` breakpoint (`overflow-x-auto xl:overflow-x-visible`).
+-   **Domain detail tab strip** — the existing `DomainControlPanel` workspace tab row changed from `overflow-x-auto` to `flex-wrap` with slightly more compact tabs, so tabs wrap cleanly instead of scrolling horizontally. Tab behavior and content are unchanged (Milestone 2 redesign not started).
+
+No-drift logic (`portfolioSignals` / `matchesPortfolioFilter` / `countWithFilters` / `countView`), search, saved views, chips, Clear All, empty state, Add-Domain, row click-through, deep-linking, and permission gating are all preserved. Typecheck stable at the 12 pre-existing baseline errors. **Layout correction done — pending re-QA / acceptance.**

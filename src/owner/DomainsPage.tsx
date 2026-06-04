@@ -790,45 +790,62 @@ const DomainsPage: React.FC = () => {
             )}
           </div>
         ) : (
-          <div className="overflow-x-auto max-h-[calc(100vh-22rem)] overflow-y-auto">
-            <table className="w-full text-left border-collapse">
-              <thead className="sticky top-0 bg-white/95 backdrop-blur-sm z-10">
-                <tr className="text-[9px] font-black uppercase tracking-widest text-slate-400 border-b border-slate-100">
-                  <th className="px-4 py-3">Domain</th>
-                  <th className="px-3 py-3">Type</th>
-                  <th className="px-3 py-3">Tenant</th>
-                  <th className="px-3 py-3">Registrar</th>
-                  <th className="px-3 py-3">DNS</th>
-                  <th className="px-3 py-3">SSL</th>
-                  <th className="px-3 py-3">Email DNS</th>
-                  <th className="px-3 py-3">Security</th>
-                  <th className="px-3 py-3">Renewal / Expiry</th>
-                  <th className="px-3 py-3">Risk</th>
-                  <th className="px-3 py-3 min-w-[160px]">Next Action</th>
-                  <th className="px-4 py-3 text-right">Actions</th>
+          // The table flows in the page (no nested vertical scroll). Horizontal
+          // scroll is a graceful fallback only below the xl breakpoint; on desktop
+          // the compacted columns fit without a horizontal scrollbar.
+          <div className="overflow-x-auto xl:overflow-x-visible">
+            <table className="w-full text-left border-collapse table-fixed">
+              <colgroup>
+                <col className="w-[17%]" />
+                <col className="w-[8%]" />
+                <col className="w-[9%]" />
+                <col className="w-[9%]" />
+                <col className="w-[7%]" />
+                <col className="w-[7%]" />
+                <col className="w-[7%]" />
+                <col className="w-[7%]" />
+                <col className="w-[8%]" />
+                <col className="w-[6%]" />
+                <col className="w-[10%]" />
+                <col className="w-[5%]" />
+              </colgroup>
+              <thead className="bg-white">
+                <tr className="text-[9px] font-black uppercase tracking-widest text-slate-400 border-b border-slate-100 align-bottom">
+                  <th className="px-3 py-3">Domain</th>
+                  <th className="px-2 py-3">Type</th>
+                  <th className="px-2 py-3">Tenant</th>
+                  <th className="px-2 py-3">Registrar</th>
+                  <th className="px-2 py-3">DNS</th>
+                  <th className="px-2 py-3">SSL</th>
+                  <th className="px-2 py-3">Email</th>
+                  <th className="px-2 py-3">Security</th>
+                  <th className="px-2 py-3">Renewal</th>
+                  <th className="px-2 py-3">Risk</th>
+                  <th className="px-2 py-3">Next Action</th>
+                  <th className="px-3 py-3 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {visiblePortfolio.map(s => {
                   const isSel = selectedId === s.domainId;
                   return (
-                    <tr key={s.domainId} onClick={() => setSelectedId(s.domainId)} className={`cursor-pointer transition-colors ${isSel ? 'bg-primary/5' : 'hover:bg-slate-50/70'}`}>
-                      <td className="px-4 py-3"><span className="text-[12px] font-bold text-slate-900 break-all">{s.hostname}</span></td>
-                      <td className="px-3 py-3"><span className={`inline-flex px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${PORTFOLIO_TYPE_TONE[s.domainType]}`}>{PORTFOLIO_TYPE_LABELS[s.domainType]}</span></td>
-                      <td className="px-3 py-3"><span className="text-[11px] font-bold text-slate-600">{s.tenant}</span></td>
-                      <td className="px-3 py-3"><span className="text-[11px] font-bold text-slate-600">{s.registrar}</span></td>
-                      <td className="px-3 py-3"><PBadge tone={DNS_READINESS_TONE[s.dnsReadiness]}>{s.dnsReadinessLabel}</PBadge></td>
-                      <td className="px-3 py-3"><PBadge tone={SSL_VIEW_TONE[s.sslReadiness]}>{SSL_VIEW_STATUS_LABELS[s.sslReadiness]}</PBadge></td>
-                      <td className="px-3 py-3"><PBadge tone={EMAIL_DNS_TONE[s.emailDnsReadiness]}>{EMAIL_DNS_LABELS[s.emailDnsReadiness]}</PBadge></td>
-                      <td className="px-3 py-3"><PBadge tone={SECURITY_LEVEL_TONE[s.securityReadiness]}>{SECURITY_LEVEL_LABELS[s.securityReadiness]}</PBadge></td>
-                      <td className="px-3 py-3">
-                        <span className="text-[11px] font-bold text-slate-500">{s.renewalExpiryPlaceholder || '—'}</span>
-                        <span className="block text-[9px] font-bold text-slate-300 uppercase tracking-widest">Auto-renew: Future</span>
+                    <tr key={s.domainId} onClick={() => setSelectedId(s.domainId)} className={`cursor-pointer transition-colors align-top ${isSel ? 'bg-primary/5' : 'hover:bg-slate-50/70'}`}>
+                      <td className="px-3 py-3"><span className="text-[12px] font-bold text-slate-900 break-words leading-tight">{s.hostname}</span></td>
+                      <td className="px-2 py-3"><span className={`inline-flex px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${PORTFOLIO_TYPE_TONE[s.domainType]}`}>{PORTFOLIO_TYPE_LABELS[s.domainType]}</span></td>
+                      <td className="px-2 py-3"><span className="text-[11px] font-bold text-slate-600 break-words leading-tight">{s.tenant}</span></td>
+                      <td className="px-2 py-3"><span className="text-[11px] font-bold text-slate-600 break-words leading-tight">{s.registrar}</span></td>
+                      <td className="px-2 py-3"><PBadge tone={DNS_READINESS_TONE[s.dnsReadiness]}>{s.dnsReadinessLabel}</PBadge></td>
+                      <td className="px-2 py-3"><PBadge tone={SSL_VIEW_TONE[s.sslReadiness]}>{SSL_VIEW_STATUS_LABELS[s.sslReadiness]}</PBadge></td>
+                      <td className="px-2 py-3"><PBadge tone={EMAIL_DNS_TONE[s.emailDnsReadiness]}>{EMAIL_DNS_LABELS[s.emailDnsReadiness]}</PBadge></td>
+                      <td className="px-2 py-3"><PBadge tone={SECURITY_LEVEL_TONE[s.securityReadiness]}>{SECURITY_LEVEL_LABELS[s.securityReadiness]}</PBadge></td>
+                      <td className="px-2 py-3">
+                        <span className="text-[11px] font-bold text-slate-500 leading-tight">{s.renewalExpiryPlaceholder || '—'}</span>
+                        <span className="block text-[8px] font-bold text-slate-300 uppercase tracking-widest">Auto-renew: Future</span>
                       </td>
-                      <td className="px-3 py-3"><PBadge tone={RISK_TONE[s.risk]}>{RISK_LABELS[s.risk]}</PBadge></td>
-                      <td className="px-3 py-3"><span className="text-[11px] font-medium text-slate-500">{s.nextAction}</span></td>
-                      <td className="px-4 py-3 text-right">
-                        <button onClick={e => { e.stopPropagation(); setSelectedId(s.domainId); }} className="px-3 py-1.5 text-[9px] font-black uppercase tracking-widest text-primary border border-primary/20 bg-primary/5 rounded-lg hover:bg-primary/10 transition-all cursor-pointer">Manage</button>
+                      <td className="px-2 py-3"><PBadge tone={RISK_TONE[s.risk]}>{RISK_LABELS[s.risk]}</PBadge></td>
+                      <td className="px-2 py-3"><span className="text-[11px] font-medium text-slate-500 break-words leading-tight">{s.nextAction}</span></td>
+                      <td className="px-3 py-3 text-right">
+                        <button onClick={e => { e.stopPropagation(); setSelectedId(s.domainId); }} className="px-2.5 py-1.5 text-[9px] font-black uppercase tracking-widest text-primary border border-primary/20 bg-primary/5 rounded-lg hover:bg-primary/10 transition-all cursor-pointer">Manage</button>
                       </td>
                     </tr>
                   );
@@ -1066,14 +1083,14 @@ const DomainControlPanel: React.FC<DomainControlPanelProps> = ({
     {/* Workspace tab bar — Overview holds every mutation; the DNS / SSL /
         Security / Help workspaces are informational, copy, and guidance only. */}
     <div className="px-7 pt-4 border-b border-slate-100">
-      <div className="flex gap-1 overflow-x-auto -mb-px">
+      <div className="flex flex-wrap gap-x-1 gap-y-0 -mb-px">
         {DOMAIN_WORKSPACE_TABS.map(t => (
           <button
             key={t.id}
             onClick={() => setActiveTab(t.id)}
-            className={`flex items-center gap-1.5 px-3 py-2.5 text-[11px] font-black uppercase tracking-widest border-b-2 whitespace-nowrap transition-colors cursor-pointer ${activeTab === t.id ? 'border-primary text-primary' : 'border-transparent text-slate-400 hover:text-slate-600'}`}
+            className={`flex items-center gap-1.5 px-2.5 py-2.5 text-[10px] font-black uppercase tracking-widest border-b-2 whitespace-nowrap transition-colors cursor-pointer ${activeTab === t.id ? 'border-primary text-primary' : 'border-transparent text-slate-400 hover:text-slate-600'}`}
           >
-            <span className="material-symbols-outlined text-base">{t.icon}</span>
+            <span className="material-symbols-outlined text-sm">{t.icon}</span>
             {t.label}
           </button>
         ))}

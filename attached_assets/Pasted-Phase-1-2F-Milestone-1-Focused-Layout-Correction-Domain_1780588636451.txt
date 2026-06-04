@@ -1,0 +1,227 @@
+Phase 1.2F — Milestone 1 Focused Layout Correction
+Domain Portfolio Table + Existing Detail Tabs Overflow Fix
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Status:
+Phase 1.2F Milestone 1 is functionally passing, but final acceptance is on HOLD due to UI overflow issues found in manual QA.
+
+Do not start Milestone 2.
+Do not implement the new selected-domain workspace.
+Do not implement DNS Zone Editor.
+Do not implement SSL/TLS, Email DNS, Security/Troubleshooting/Audit workspaces.
+Do not touch Platform Settings.
+
+This is a focused layout correction only.
+
+==================================================
+MANUAL QA FAILURE TO FIX
+========================
+
+Manual QA found:
+
+1. Domain Portfolio table is not fitting naturally inside the page.
+   The dashboard no longer uses the rejected split-pane layout, but the portfolio table area has internal vertical scrolling and horizontal scrolling. It feels like the table is trapped inside a scroll container instead of being part of the page.
+
+2. Existing domain detail top tabs also show horizontal scrolling.
+   When a user clicks a domain row and opens the current existing domain detail view, the top tab row scrolls horizontally. This should be cleaned up enough for usability until Milestone 2 redesigns the selected-domain workspace.
+
+==================================================
+GOAL
+====
+
+Make the Milestone 1 Domain Portfolio Dashboard feel like one professional page.
+
+The user should not see:
+
+* nested vertical scrollbars inside the main portfolio table
+* horizontal scrollbar under the table
+* horizontal scrolling tab strip in the existing detail header
+
+The page itself may naturally scroll vertically if needed, but avoid internal scroll containers that make the UI feel broken.
+
+==================================================
+WORKING STYLE
+=============
+
+Think step by step before fixing.
+
+First inspect:
+
+1. DomainsPage.tsx layout containers
+2. table wrapper max-height / overflow classes
+3. table min-width / column sizing
+4. page shell/container width constraints
+5. existing domain detail tab row classes
+6. mobile vs desktop behavior
+7. current no-drift filter/count logic from Milestone 1
+
+Then make the smallest safe correction.
+
+==================================================
+IMPORTANT SCOPE RULES
+=====================
+
+Preserve all accepted Milestone 1 logic:
+
+* portfolioSignals
+* matchesPortfolioFilter
+* no-drift card/table/saved-view count logic
+* search
+* saved views
+* visible filter chips
+* Clear All
+* table columns
+* permission gating
+* Add Domain flow
+* row click-through
+* ?domain= deep-linking
+
+Do not rewrite the table logic.
+Do not change the object model.
+Do not change storage.
+Do not add new permissions.
+Do not emit audit rows for layout changes.
+
+==================================================
+PORTFOLIO TABLE LAYOUT REQUIREMENTS
+===================================
+
+Fix the table so it fits as a professional dashboard/table layout.
+
+Preferred approach:
+
+1. Remove nested vertical scrolling from the table container.
+   The portfolio table should expand naturally in the page. The browser/page can scroll if the list is long.
+
+2. Remove horizontal scrolling on normal desktop widths.
+   Use a better responsive table design:
+
+* reduce excessive min-widths
+* allow controlled column widths
+* wrap long domain names cleanly
+* use two-line cells where needed
+* use compact badges
+* combine related secondary text inside cells where useful
+* ensure Actions column remains visible
+
+3. Keep all required columns visible on desktop:
+
+* Domain
+* Domain Type
+* Tenant
+* Registrar
+* DNS Readiness
+* SSL Readiness
+* Email DNS
+* Security Readiness
+* Renewal / Expiry
+* Risk
+* Next Action
+* Actions
+
+4. If the table is still too dense, use professional cell compaction instead of horizontal scroll:
+
+* Domain cell can show hostname on first line and metadata on second line.
+* Renewal / Expiry can be compact.
+* Next Action can wrap.
+* Badges can be smaller but readable.
+
+5. Preserve a useful responsive fallback:
+
+* If a smaller screen truly cannot fit all columns, use a card/list layout or controlled responsive hiding.
+* Do not introduce a bad permanent horizontal scrollbar on desktop.
+
+==================================================
+DOMAIN DETAIL TAB OVERFLOW REQUIREMENTS
+=======================================
+
+The existing domain detail header tab row currently scrolls horizontally.
+
+Fix only the overflow/fit behavior, without redesigning the full detail page.
+
+Preferred:
+
+* Tabs should fit/wrap cleanly on desktop.
+* Use compact labels/icons if needed.
+* Avoid a horizontal scrollbar.
+* Preserve current tab behavior and current content.
+* Do not implement the future selected-domain workspace yet.
+
+==================================================
+VISUAL QUALITY EXPECTATION
+==========================
+
+The corrected dashboard should feel:
+
+* full-page
+* clean
+* enterprise SaaS
+* not trapped inside nested scroll panels
+* not horizontally broken
+* readable
+* professional
+
+Do not return to the rejected split-pane design.
+
+==================================================
+NON-REGRESSION
+==============
+
+Do not regress:
+
+* portfolio card counts
+* card click filters
+* saved views
+* search
+* dimension filters
+* visible chips
+* empty state
+* Add Domain
+* read-only role
+* row click-through
+* domain lifecycle behavior
+* Command Center deep-link
+* Platform Settings
+* Command Center Intelligence
+* Audit Investigation Center
+* Support Queue / SLA / Macro
+* Escalation operating model
+* Permission dependency auto-sync
+* Add-on Governance
+* Shipping
+* Store Permissions Matrix
+* Tenant provisioning
+* server PII logging
+
+==================================================
+DOCUMENTATION
+=============
+
+Keep documentation minimal.
+
+Update replit.md only with a short note:
+“Phase 1.2F M1 layout overflow correction done/pending acceptance.”
+
+If needed, append detail to docs/platform-operations-security-history.md.
+
+==================================================
+OUTPUT FORMAT
+=============
+
+After this focused correction, stop.
+
+Do not start Milestone 2.
+
+Reply only with:
+
+1. Correction Status
+2. What Was Fixed
+3. Portfolio Table Overflow Fix
+4. Detail Tab Overflow Fix
+5. Preserved M1 Logic
+6. Files Changed
+7. Typecheck / Runtime Result
+8. Non-Regression Notes
+9. Recommendation Before Re-QA
