@@ -1,0 +1,250 @@
+Tenant Web Address — Final Drawer Product-Language Cleanup
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Status:
+The Tenant Web Address Manage drawer polish is architect-reviewed and visually accepted in direction, but QA should not start yet.
+
+The drawer structure is good and should be preserved:
+
+* right-side Tenant Web Address Workspace
+* header with tenant name and platform web address
+* Copy Link / Open Site
+* Customer Access Points
+* External Presence
+* Configuration Progress
+* Manage Web Address
+* Recent Activity
+* Advanced Custom Domain Support collapsed panel
+
+This is a focused wording/product-language cleanup only.
+
+Do not start Phase 1.3.
+Do not change the data model.
+Do not change storage.
+Do not change permissions.
+Do not change table columns.
+Do not reintroduce DNS/SSL/Registrar control-panel behavior.
+Do not remove the drawer structure.
+
+==================================================
+OBJECTIVE
+=========
+
+Clean up the last old domain-control-panel language so the drawer fully reads as Tenant Web Address management, not DNS/domain verification management.
+
+The module should be simple, store-owner/SaaS friendly, and focused on:
+
+* platform web address
+* customer-facing access links
+* external website guidance
+* setup progress
+* support-assisted custom domain future
+
+==================================================
+ITEMS TO FIX
+============
+
+1. Status vocabulary
+
+Current issue:
+The drawer still shows domain-style status such as “Verified.”
+
+Replace user-facing status language with Tenant Web Address language:
+
+Preferred:
+
+* Active
+* Needs Setup
+* Disabled
+* Reserved
+* External Only
+* Future / Support-Assisted where relevant
+
+Mapping guidance:
+
+* verified → Active
+* pending / verifying → Needs Setup
+* failed → Needs Review or Needs Setup
+* disabled → Disabled
+
+Do not show “Verified” as the primary user-facing status.
+
+2. Manage Web Address controls
+
+Current issue:
+The controls still show old domain lifecycle language such as:
+
+* Mark Pending
+* Verified
+
+Change visible wording:
+
+* Status: Active / Needs Setup / Disabled
+* Mark Active
+* Mark Needs Setup
+* Disable
+
+Do not show:
+
+* Mark Pending
+* Mark Verified
+* Verify
+* Trigger verification
+
+Internal values may remain unchanged if needed for safe compatibility, but the visible UX should use Tenant Web Address vocabulary.
+
+3. Recent Activity wording
+
+Current issue:
+Recent Activity may show old labels such as:
+
+* Subdomain Created
+
+Replace display labels where safe:
+
+* Subdomain Created → Platform Web Address Created
+* Domain Created → Web Address Created
+* Domain Status Changed → Web Address Status Changed
+* Domain Disabled → Web Address Disabled
+* Domain Re-enabled → Web Address Re-enabled
+* External domain recorded → External Website Recorded
+
+Do not change audit storage or event IDs.
+This is a display-label mapping only.
+
+4. Metadata wording
+
+Current issue:
+Footer/metadata may show:
+
+* Verified
+* Last checked
+
+Replace with softer, truthful wording:
+
+* Created
+* Status reviewed
+* Last reviewed
+
+Do not use “Last checked” if there is no live DNS/provider check.
+Do not imply live verification.
+
+5. Advanced Custom Domain Support panel
+
+The architect flagged this as the only remaining place that may still contain DNS/SSL terminology.
+
+Make it stricter:
+
+Preferred label:
+Advanced Custom Domain Support
+Future / Support-Assisted
+
+Preferred copy:
+“Custom domain hosting is not self-serve in this phase. Tenant-owned websites and domains remain external. Support-assisted setup may be considered in a future phase.”
+
+Avoid default display of technical DNS/SSL details.
+
+If the panel currently contains DNS/SSL/registrar details, either:
+
+* hide those details behind a collapsed future-only disclosure, or
+* replace them with the simplified support-assisted language above.
+
+Do not show:
+
+* DNS Zone Editor
+* SSL automation
+* certificate provisioning
+* DNSSEC
+* domain lock
+* transfer lock
+* registrar control
+* provider API
+
+6. Configuration Progress visual polish
+
+Current issue:
+Completed checklist items appear visually crossed out.
+
+Completed items should use:
+
+* green check icon
+* normal readable text
+* subtle completed styling
+
+Do not use strikethrough text for completed checklist items because it looks like deleted/invalid text.
+
+==================================================
+PRESERVE
+========
+
+Preserve all accepted behavior:
+
+* minimal table columns
+* Manage button
+* platform URL copy icon
+* dashboard cards/counts
+* saved views
+* search
+* filters
+* chips
+* Clear All
+* selected drawer structure
+* Customer Access Points
+* External Presence
+* Configuration Progress
+* Recent Activity
+* permissions
+* audit behavior
+* deep-linking
+* accepted M0–M2 foundation
+* no-drift logic
+* non-regression locked modules
+
+==================================================
+TRUTHFUL LANGUAGE
+=================
+
+Keep:
+
+* Platform web address is managed by this app.
+* Tenant-owned websites are external in this phase.
+* Custom domain hosting is future / support-assisted.
+* No live DNS lookup in this phase.
+* No SSL automation in this phase.
+
+Do not use:
+
+* Verify Now
+* Trigger verification
+* System automatically verified
+* SSL auto-provision
+* Registrar control
+* DNS Zone Editor
+* DNSSEC
+* Domain lock
+* Transfer lock
+* Live DNS status
+* Global propagation
+* Last checked, unless it means a local app/session review and is labeled clearly as such
+
+==================================================
+OUTPUT FORMAT
+=============
+
+After this correction, stop.
+
+Reply only with:
+
+1. Correction Status
+2. Product-Language Fixes
+3. Status / Manage Controls Cleanup
+4. Recent Activity / Metadata Cleanup
+5. Advanced Custom Domain Support Cleanup
+6. Checklist Visual Cleanup
+7. Preserved Drawer Structure
+8. Files Changed
+9. Typecheck / Runtime Result
+10. Non-Regression Notes
+11. Recommendation Before QA

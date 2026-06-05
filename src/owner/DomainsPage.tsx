@@ -18,16 +18,8 @@ import { hasPlatformPermission } from './platformPermissionsConfig';
 import type { Role } from '../context/accessConfig';
 import {
   deriveDomainRole,
-  DOMAIN_DNS_READINESS_LABELS,
   PLATFORM_ROOT_SUFFIX,
 } from './platformOpsDomains';
-import {
-  deriveDomainControlPanelOverview,
-  SSL_VIEW_STATUS_LABELS,
-  type DomainControlPanelOverview,
-  type EmailDnsStatus,
-  type SecurityReadinessLevel,
-} from './platformOpsDomainModel';
 import {
   deriveTenantWebAddresses,
   WEB_ADDRESS_TRUTH_LABELS,
@@ -74,7 +66,7 @@ const CHECKLIST_TONE: Record<WebAddressChecklistState, { symbol: string; icon: s
   not_applicable: { symbol: 'remove_circle_outline', icon: 'text-slate-300' },
 };
 
-// Raw status labels (manual lifecycle workflow + deep-link chip).
+// Raw status labels — used only by the advanced "Raw status" deep-link filter chip.
 const RAW_STATUS_LABELS: Record<DomainStatus, string> = {
   pending: 'Pending',
   verifying: 'Verifying',
@@ -83,21 +75,34 @@ const RAW_STATUS_LABELS: Record<DomainStatus, string> = {
   disabled: 'Disabled',
 };
 
-// Minimal label maps for the read-only Advanced Custom Domain Support panel.
-const ADV_EMAIL_LABELS: Record<EmailDnsStatus, string> = {
-  ready: 'Ready',
-  partial: 'Partial',
-  missing: 'Missing',
-  pending_manual_review: 'Needs manual review',
-  not_applicable: 'Not applicable',
+// The Manage controls expose only the Tenant Web Address operator statuses
+// (Active / Needs Setup / Disabled). Raw lifecycle values are unchanged for safe
+// compatibility but map down to this set: anything not Active/Disabled reads as
+// "Needs Setup". `disabled` is handled by a separate read-only branch.
+const MANAGE_STATUS_OPTIONS: { value: DomainStatus; label: string }[] = [
+  { value: 'verified', label: 'Active' },
+  { value: 'pending', label: 'Needs Setup' },
+];
+const manageSelectValue = (s: DomainStatus): DomainStatus => (s === 'verified' ? 'verified' : 'pending');
+
+// Recent Activity display-label mapping (display only — audit storage and event
+// IDs are untouched). Covers both raw audit action keys and the legacy seeded
+// domain-history labels, mapped to Tenant Web Address vocabulary.
+const ACTIVITY_LABELS: Record<string, string> = {
+  domain_created: 'Web Address Created',
+  domain_status_changed: 'Web Address Status Changed',
+  domain_disabled: 'Web Address Disabled',
+  domain_reenabled: 'Web Address Re-enabled',
+  domain_ssl_changed: 'Security State Updated',
+  'Subdomain Created': 'Platform Web Address Created',
+  'Domain Created': 'Web Address Created',
+  'Custom Domain Added': 'External Website Recorded',
+  'External domain recorded': 'External Website Recorded',
+  'DNS Verified': 'External Website Reviewed',
+  'SSL Provisioned': 'Security State Updated',
+  'SSL Renewed': 'Security State Updated',
 };
-const ADV_SECURITY_LABELS: Record<SecurityReadinessLevel, string> = {
-  ready: 'Ready',
-  partial: 'Partial',
-  attention: 'Attention',
-  future: 'Future',
-  not_applicable: 'Not applicable',
-};
+const activityLabel = (action: string): string => ACTIVITY_LABELS[action] ?? action;
 
 // Validation patterns for the Add flow (carried over from Phase 1.2).
 const DNS_LABEL_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
@@ -380,17 +385,6 @@ const DomainsPage: React.FC = () => {
       .filter(e => { if (seen.has(e.id)) return false; seen.add(e.id); return true; })
       .sort((a, b) => b.date.localeCompare(a.date));
   }, [selected, auditTick]);
-
-  // Read-only advanced (DNS/SSL/email/security) reference — surfaced only inside
-  // the collapsed "Advanced Custom Domain Support" panel of the overview.
-  const selectedAdvanced = useMemo<DomainControlPanelOverview | null>(() => {
-    if (!selected) return null;
-    void auditTick;
-    const auditRows = [...readMirroredAuditRows(), ...auditLogs]
-      .filter(r => r.category === 'domains')
-      .map(r => ({ id: r.id, date: r.date, actor: r.actor, action: r.action, target: r.target, tenantId: r.tenantId ?? null }));
-    return deriveDomainControlPanelOverview(selected, { domains, tenantNameById: tenantNameRecord, auditRows });
-  }, [selected, domains, tenantNameRecord, auditTick]);
 
   // Add-flow helpers (unchanged persistence).
   const rootDomainsForTenant = useMemo(
@@ -881,7 +875,6 @@ const DomainsPage: React.FC = () => {
                 siblingExternals={selectedSiblingExternals}
                 onOpenWebAddress={setSelectedId}
                 selected={selected}
-                advanced={selectedAdvanced}
                 canManage={canManage}
                 history={selectedHistory}
                 copied={copied}
@@ -918,7 +911,6 @@ interface WebAddressOverviewProps {
   siblingExternals: TenantWebAddress[];
   onOpenWebAddress: (domainId: string) => void;
   selected: TenantDomainRecord;
-  advanced: DomainControlPanelOverview | null;
   canManage: boolean;
   history: { id: string; date: string; actor: string; action: string }[];
   copied: string | null;
@@ -931,7 +923,7 @@ interface WebAddressOverviewProps {
 }
 
 const WebAddressOverview: React.FC<WebAddressOverviewProps> = ({
-  wa, siblingExternals, onOpenWebAddress, selected, advanced, canManage, history, copied, onCopy, onSetStatus, onSetSsl, onReenable, onConfirmDisable, onClose,
+  wa, siblingExternals, onOpenWebAddress, selected, canManage, history, copied, onCopy, onSetStatus, onSetSsl, onReenable, onConfirmDisable, onClose,
 }) => {
   const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -1076,7 +1068,7 @@ const WebAddressOverview: React.FC<WebAddressOverviewProps> = ({
               <div key={item.key} className="flex items-start gap-2.5 px-3 py-2 rounded-xl border border-slate-100 bg-slate-50/60">
                 <span className={`material-symbols-outlined text-base mt-px ${CHECKLIST_TONE[item.state].icon}`}>{CHECKLIST_TONE[item.state].symbol}</span>
                 <div className="flex-1">
-                  <p className={`text-[11px] font-bold ${item.state === 'done' ? 'text-slate-400 line-through' : item.state === 'not_applicable' ? 'text-slate-400' : 'text-slate-700'}`}>{item.label}</p>
+                  <p className={`text-[11px] font-bold ${item.state === 'done' ? 'text-slate-500' : item.state === 'not_applicable' ? 'text-slate-400' : 'text-slate-700'}`}>{item.label}</p>
                   {item.hint && <p className="text-[10px] font-medium text-slate-400 mt-0.5">{item.hint}</p>}
                 </div>
               </div>
@@ -1093,16 +1085,16 @@ const WebAddressOverview: React.FC<WebAddressOverviewProps> = ({
               {selected.status === 'disabled' ? (
                 <div className="w-full px-3 py-2 bg-slate-100 border border-slate-200 rounded-xl text-xs font-black uppercase tracking-widest text-slate-500">Disabled</div>
               ) : (
-                <select value={selected.status} onChange={e => onSetStatus(selected, e.target.value as DomainStatus)} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700">
-                  {(['pending', 'verifying', 'verified', 'failed'] as DomainStatus[]).map(s => (
-                    <option key={s} value={s}>{RAW_STATUS_LABELS[s]}</option>
+                <select value={manageSelectValue(selected.status)} onChange={e => onSetStatus(selected, e.target.value as DomainStatus)} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700">
+                  {MANAGE_STATUS_OPTIONS.map(o => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
                   ))}
                 </select>
               )}
             </div>
             <div className="flex flex-wrap gap-2">
               <button onClick={() => onSetStatus(selected, 'verified')} disabled={selected.status === 'verified'} className="px-3 py-2 text-[10px] font-black uppercase tracking-widest bg-lime-400/10 text-lime-700 border border-lime-400/20 rounded-xl disabled:opacity-40 hover:bg-lime-400/20 transition-all cursor-pointer">Mark Active</button>
-              <button onClick={() => onSetStatus(selected, 'pending')} disabled={selected.status === 'pending'} className="px-3 py-2 text-[10px] font-black uppercase tracking-widest bg-blue-400/10 text-blue-700 border border-blue-400/20 rounded-xl disabled:opacity-40 hover:bg-blue-400/20 transition-all cursor-pointer">Mark Pending</button>
+              <button onClick={() => onSetStatus(selected, 'pending')} disabled={selected.status === 'pending'} className="px-3 py-2 text-[10px] font-black uppercase tracking-widest bg-blue-400/10 text-blue-700 border border-blue-400/20 rounded-xl disabled:opacity-40 hover:bg-blue-400/20 transition-all cursor-pointer">Mark Needs Setup</button>
               {selected.status !== 'disabled' ? (
                 <button onClick={() => onConfirmDisable(selected)} className="px-3 py-2 text-[10px] font-black uppercase tracking-widest bg-slate-100 text-slate-600 border border-slate-200 rounded-xl hover:bg-slate-200 transition-all cursor-pointer">Disable</button>
               ) : (
@@ -1122,7 +1114,7 @@ const WebAddressOverview: React.FC<WebAddressOverviewProps> = ({
               {history.map((e, i) => (
                 <div key={i} className="flex items-start gap-2 text-[11px]">
                   <span className="font-mono text-slate-400 whitespace-nowrap">{e.date}</span>
-                  <div><span className="font-black text-slate-700">{e.action}</span><span className="text-slate-400"> · {e.actor}</span></div>
+                  <div><span className="font-black text-slate-700">{activityLabel(e.action)}</span><span className="text-slate-400"> · {e.actor}</span></div>
                 </div>
               ))}
             </div>
@@ -1131,8 +1123,9 @@ const WebAddressOverview: React.FC<WebAddressOverviewProps> = ({
         </div>
 
         {/* Advanced Custom Domain Support — Future / Support-Assisted (collapsed).
-            The accepted DNS / SSL / Email / Security readiness derivations are
-            preserved here, read-only and de-emphasised per the strategic pivot. */}
+            De-technicalised per the strategic pivot: no DNS/SSL readiness grid is
+            shown; only a support-assisted explanation plus the manual,
+            support-assisted SSL-state control (gated + audited as before). */}
         <div className="pt-2 border-t border-slate-100">
           <button onClick={() => setShowAdvanced(s => !s)} className="w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl border border-slate-200 bg-slate-50/60 hover:bg-slate-100 transition-all cursor-pointer">
             <span className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500">
@@ -1142,15 +1135,10 @@ const WebAddressOverview: React.FC<WebAddressOverviewProps> = ({
             </span>
             <span className="material-symbols-outlined text-base text-slate-400">{showAdvanced ? 'expand_less' : 'expand_more'}</span>
           </button>
-          {showAdvanced && advanced && (
+          {showAdvanced && (
             <div className="mt-3 space-y-3">
-              <p className="text-[10px] font-medium text-slate-400 leading-relaxed">{WEB_ADDRESS_TRUTH_LABELS.noLiveDns} {WEB_ADDRESS_TRUTH_LABELS.externalConfig} These readiness signals are reference-only in this phase.</p>
-              <div className="grid grid-cols-2 gap-2">
-                <AdvCell label="DNS" value={DOMAIN_DNS_READINESS_LABELS[advanced.dnsReadiness]} />
-                <AdvCell label="SSL / TLS" value={SSL_VIEW_STATUS_LABELS[advanced.sslView.status]} />
-                <AdvCell label="Email DNS" value={ADV_EMAIL_LABELS[advanced.emailDns.overall]} />
-                <AdvCell label="Security" value={ADV_SECURITY_LABELS[advanced.security.overall]} />
-              </div>
+              <p className="text-[11px] font-medium text-slate-500 leading-relaxed">Custom domain hosting is not self-serve in this phase. Tenant-owned websites and domains remain external. Support-assisted setup may be considered in a future phase.</p>
+              <p className="text-[10px] font-medium text-slate-400 leading-relaxed">{WEB_ADDRESS_TRUTH_LABELS.noLiveDns} {WEB_ADDRESS_TRUTH_LABELS.externalConfig}</p>
               {canManage && selected.status !== 'disabled' && (
                 <div>
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">SSL state (manual / support-assisted)</label>
@@ -1165,8 +1153,8 @@ const WebAddressOverview: React.FC<WebAddressOverviewProps> = ({
 
         <div className="text-[10px] text-slate-400 grid grid-cols-2 gap-2 pt-4 border-t border-slate-100">
           <div>Created: <span className="font-bold text-slate-600">{selected.createdAt}</span></div>
-          <div>Verified: <span className="font-bold text-slate-600">{selected.verifiedAt || '—'}</span></div>
-          <div className="col-span-2">Last checked: <span className="font-bold text-slate-600">{selected.lastCheckedAt || '—'}</span></div>
+          <div>Status reviewed: <span className="font-bold text-slate-600">{selected.verifiedAt || '—'}</span></div>
+          <div className="col-span-2">Last reviewed: <span className="font-bold text-slate-600">{selected.lastCheckedAt || '—'}</span></div>
           <div className="col-span-2 font-mono">id: {selected.id}</div>
         </div>
       </div>
@@ -1178,13 +1166,6 @@ const Row: React.FC<{ label: string; value: string }> = ({ label, value }) => (
   <div>
     <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">{label}</p>
     <p className="text-[12px] font-bold text-slate-700 break-all">{value}</p>
-  </div>
-);
-
-const AdvCell: React.FC<{ label: string; value: string }> = ({ label, value }) => (
-  <div className="rounded-xl border border-slate-100 bg-slate-50/60 px-3 py-2">
-    <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">{label}</p>
-    <p className="text-[11px] font-bold text-slate-600 mt-0.5">{value}</p>
   </div>
 );
 
