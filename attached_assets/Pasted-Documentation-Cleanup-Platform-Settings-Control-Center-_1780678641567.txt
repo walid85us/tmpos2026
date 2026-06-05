@@ -1,0 +1,180 @@
+Documentation Cleanup + Platform Settings Control Center Current-State Review
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Current status:
+
+* Tenant Web Address Replacement / Reposition — ACCEPTED
+* Tenant Web Address final minimal table correction — ACCEPTED
+* Tenant Web Address Manage Drawer Product-Language Cleanup — ACCEPTED
+* Phase 1.2 / 1.2E are still not fully closed until documentation/current-state alignment is cleaned up
+* Phase 1.3 has NOT started
+
+Objective:
+Perform a small documentation cleanup and then provide a Platform Settings Control Center current-state report.
+
+This is a documentation/review task only.
+
+Do not implement Platform Settings changes.
+Do not modify Platform Settings code.
+Do not start Phase 1.3.
+Do not reopen Tenant Web Address.
+Do not change app behavior.
+Do not change permissions.
+Do not change data models.
+Do not change routes.
+
+==================================================
+PART A — replit.md CLEANUP
+==========================
+
+replit.md has grown too long due to many correction passes.
+
+Clean it up carefully.
+
+Goal:
+Keep replit.md concise and useful as the current project checkpoint file.
+
+Required cleanup:
+
+1. Keep only the current accepted state and latest checkpoint.
+2. Move or confirm detailed milestone/correction history is already preserved in:
+   docs/platform-operations-security-history.md
+3. Do not delete important locked rules.
+4. Do not delete current roadmap.
+5. Do not delete current non-regression constraints.
+6. Do not delete accepted status for:
+
+   * Tenant Web Address replacement/reposition
+   * Tenant Web Address minimal table correction
+   * Tenant Web Address manage drawer language cleanup
+7. Remove repetitive blow-by-blow correction bullets from replit.md if already captured in the history doc.
+8. Keep replit.md easy to scan.
+
+Important:
+Do not mark Phase 1.2 as fully accepted unless the documentation cleanup and Platform Settings status review clearly support that recommendation.
+Do not mark Phase 1.3 as started.
+
+==================================================
+PART B — PLATFORM SETTINGS CONTROL CENTER REVIEW ONLY
+=====================================================
+
+After documentation cleanup, inspect the current Platform Settings Control Center implementation.
+
+Do not edit Platform Settings code.
+
+Review:
+
+1. Current Platform Settings page structure
+2. Configuration Dashboard
+3. Settings Registry
+4. Default Baseline Manager
+5. Change Review Center
+6. Future Integration Readiness
+7. Configuration History / Audit entry
+8. Current truth labels
+9. Permission gating
+10. Audit behavior
+11. Whether any wording incorrectly implies runtime enforcement
+12. Whether any future capabilities are clearly marked as future
+13. Whether the page needs only UI polish or real implementation later
+
+Use the current project direction:
+
+Platform Settings should mean:
+
+* configuration governance
+* settings registry
+* default baseline management
+* change review visibility
+* future integration readiness
+* audit/history visibility
+
+Platform Settings should NOT imply current:
+
+* runtime enforcement
+* backend configuration service
+* SSO/SCIM implementation
+* provider integrations
+* notification engine
+* approval workflow engine
+* compliance evidence automation
+* server-side policy enforcement
+
+Those belong to future phases unless already explicitly implemented.
+
+==================================================
+WHAT TO CHECK FOR MISLEADING LANGUAGE
+=====================================
+
+Look for words/phrases that might be misleading if not actually implemented:
+
+* Strict Enforcement
+* Runtime Enforced
+* Sync Configurations
+* Apply Enforcement
+* Approve / Reject, if no real approval workflow exists
+* Automated Policy
+* Backend Config Service Active
+* SSO/SCIM Active
+* Notifications Active
+* Provider Calls Active
+
+Preferred truthful language:
+
+* Policy Baseline — Not Runtime Enforced
+* Governance metadata is rule-based
+* Future Integration Readiness
+* No runtime enforcement in this phase
+* Review changes before save
+* Change review is local/workflow visibility only, unless real approval exists
+
+==================================================
+NON-REGRESSION
+==============
+
+Do not regress:
+
+* Tenant Web Address accepted work
+* Platform Settings existing behavior
+* Command Center Intelligence
+* Audit Investigation Center
+* Support Queue / SLA / Macro
+* Escalation operating model
+* Permission dependency auto-sync
+* Add-on Governance
+* Shipping
+* Store Permissions Matrix
+* Tenant provisioning
+* paid override invoice workflow
+* server PII logging
+
+==================================================
+OUTPUT FORMAT REQUIRED
+======================
+
+After completing the documentation cleanup and review, stop.
+
+Reply only with:
+
+1. Documentation Cleanup Status
+2. What Changed in replit.md
+3. What Was Preserved in replit.md
+4. History Documentation Confirmation
+5. Platform Settings Current Structure
+6. Platform Settings Truthfulness Review
+7. Platform Settings Permissions / Audit Review
+8. Platform Settings Future Capabilities Review
+9. Risks / Warnings
+10. Recommendation:
+
+    * Accept Platform Settings as-is for now, OR
+    * Do one focused UI/UX polish before Phase 1.3, OR
+    * Defer deeper Platform Settings implementation to a future phase
+11. Files Changed
+12. Typecheck / Runtime Result, if applicable
+13. Non-Regression Notes
+
+Do not implement Platform Settings changes.
+Do not start Phase 1.3.
