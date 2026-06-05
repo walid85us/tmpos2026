@@ -33,11 +33,11 @@ import {
   WEB_ADDRESS_TRUTH_LABELS,
   WEB_ADDRESS_STATUS_LABELS,
   WEB_ADDRESS_KIND_LABELS,
+  WEB_ADDRESS_LIVE_HOSTING,
   type TenantWebAddress,
   type WebAddressStatus,
   type WebAddressKind,
   type WebAddressChecklistState,
-  type CustomerFacingLink,
 } from './tenantWebAddress';
 
 // ---------------------------------------------------------------------------
@@ -935,80 +935,108 @@ const WebAddressOverview: React.FC<WebAddressOverviewProps> = ({
 }) => {
   const [showAdvanced, setShowAdvanced] = useState(false);
 
+  // No live hosting this phase: Open stays disabled (Future / Not active) while
+  // Copy is always allowed. A disabled web address marks every access point off.
+  const isDisabled = wa.status === 'disabled';
+  const openLive = WEB_ADDRESS_LIVE_HOSTING && !isDisabled;
+  const accessPointStatus = isDisabled ? 'Disabled' : (WEB_ADDRESS_LIVE_HOSTING ? 'Active' : 'Future / Not active');
+
+  // Customer access points — the Main App plus the derived customer-facing links,
+  // shown as one clean, scannable list (no DNS/registrar/SSL anywhere).
+  const accessPoints = wa.platformWebAddress
+    ? [
+        { key: 'main', label: 'Main App', preview: '/', url: wa.mainAppUrl },
+        ...wa.customerLinks.map(l => ({ key: l.key, label: l.label, preview: l.path || '/', url: l.url })),
+      ]
+    : [];
+
   const CopyBtn: React.FC<{ text: string; k: string; label?: string }> = ({ text, k, label }) => (
     <button onClick={() => onCopy(text, k)} className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[9px] font-black uppercase tracking-widest text-primary border border-primary/20 bg-primary/5 rounded-lg hover:bg-primary/10 transition-all cursor-pointer whitespace-nowrap">
       <span className="material-symbols-outlined text-[13px] leading-none">{copied === k ? 'check' : 'content_copy'}</span>{copied === k ? 'Copied' : (label ?? 'Copy')}
     </button>
   );
-  const OpenBtn: React.FC<{ live: boolean }> = ({ live }) => (
-    <button disabled={!live} title={live ? 'Open' : 'Future / Not active'} className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[9px] font-black uppercase tracking-widest rounded-lg border border-slate-200 bg-slate-50 text-slate-400 disabled:cursor-not-allowed whitespace-nowrap">
-      <span className="material-symbols-outlined text-[13px] leading-none">open_in_new</span>{live ? 'Open' : 'Future'}
-    </button>
-  );
 
   return (
     <>
-      <div className="p-7 border-b border-slate-100 flex justify-between items-start">
-        <div className="flex-1 pr-4">
-          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Tenant Web Address</p>
-          <h3 className="text-lg font-black text-primary mt-1 break-all">{wa.platformWebAddress ?? wa.rawHostname}</h3>
-          <p className="text-xs text-slate-500 font-bold mt-1">{wa.tenant}</p>
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${KIND_TONE[wa.kind]}`}>{WEB_ADDRESS_KIND_LABELS[wa.kind]}</span>
-            <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${STATUS_TONE[wa.status]}`}>{wa.statusLabel}</span>
+      {/* 1 — Workspace header + primary actions */}
+      <div className="p-6 border-b border-slate-100 bg-gradient-to-br from-white to-slate-50/60">
+        <div className="flex justify-between items-start gap-3">
+          <div className="flex-1 min-w-0">
+            <p className="text-[10px] font-black uppercase tracking-widest text-primary/60">Tenant Web Address Workspace</p>
+            <h3 className="text-lg font-black text-primary mt-1 truncate">{wa.tenant}</h3>
+            <div className="mt-1.5 flex items-center gap-1.5 min-w-0">
+              <span className="material-symbols-outlined text-[15px] text-slate-400 shrink-0">language</span>
+              <p className="text-[12px] font-bold text-slate-600 break-all">{wa.platformWebAddress ?? wa.rawHostname}</p>
+              {wa.platformWebAddress && (
+                <button onClick={() => onCopy(wa.platformWebAddress!, 'hdr-host')} title="Copy platform web address" className="shrink-0 w-6 h-6 rounded-md flex items-center justify-center text-primary hover:bg-primary/10 transition-all cursor-pointer">
+                  <span className="material-symbols-outlined text-[14px]">{copied === 'hdr-host' ? 'check' : 'content_copy'}</span>
+                </button>
+              )}
+            </div>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${KIND_TONE[wa.kind]}`}>{WEB_ADDRESS_KIND_LABELS[wa.kind]}</span>
+              <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${STATUS_TONE[wa.status]}`}>{wa.statusLabel}</span>
+            </div>
           </div>
-          <p className="mt-1.5 text-[9px] font-medium text-slate-400 leading-tight">{wa.kind === 'external' ? WEB_ADDRESS_TRUTH_LABELS.externalSubdomain : WEB_ADDRESS_TRUTH_LABELS.platformSubdomain}</p>
+          {onClose && (
+            <button onClick={onClose} className="w-9 h-9 rounded-full hover:bg-slate-100 flex items-center justify-center text-slate-400 shrink-0 cursor-pointer">
+              <span className="material-symbols-outlined text-base">close</span>
+            </button>
+          )}
         </div>
-        {onClose && (
-          <button onClick={onClose} className="w-9 h-9 rounded-full hover:bg-slate-100 flex items-center justify-center text-slate-400 shrink-0 cursor-pointer">
-            <span className="material-symbols-outlined text-base">close</span>
+        <div className="mt-4 flex items-center gap-2">
+          <button
+            onClick={() => wa.mainAppUrl && onCopy(wa.mainAppUrl, 'hdr-link')}
+            disabled={!wa.mainAppUrl}
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-[10px] font-black uppercase tracking-widest text-white bg-primary rounded-xl shadow-sm shadow-primary/20 hover:bg-primary/90 transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+          >
+            <span className="material-symbols-outlined text-[15px] leading-none">{copied === 'hdr-link' ? 'check' : 'link'}</span>{copied === 'hdr-link' ? 'Copied' : 'Copy Link'}
           </button>
-        )}
+          <button
+            disabled={!openLive}
+            title={openLive ? 'Open site' : 'Future / Not active — no live hosting in this phase'}
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-[10px] font-black uppercase tracking-widest rounded-xl border border-slate-200 bg-white text-slate-400 disabled:cursor-not-allowed cursor-pointer"
+          >
+            <span className="material-symbols-outlined text-[15px] leading-none">open_in_new</span>{openLive ? 'Open Site' : 'Open Site (Future)'}
+          </button>
+        </div>
+        <p className="mt-2.5 text-[9px] font-medium text-slate-400 leading-tight">{wa.kind === 'external' ? WEB_ADDRESS_TRUTH_LABELS.externalSubdomain : WEB_ADDRESS_TRUTH_LABELS.platformSubdomain}</p>
       </div>
 
-      <div className="p-7 space-y-6">
-        {/* Next action */}
+      <div className="p-6 space-y-6">
+        {/* Next recommended action */}
         <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
           <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Next recommended action</p>
           <p className="text-sm font-black text-slate-800">{wa.nextAction}</p>
         </div>
 
-        {/* 1 — Primary Web Address */}
+        {/* 2 — Customer Access Points */}
         <div>
-          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Primary web address</p>
-          <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-3">
-            <Row label="Platform web address" value={wa.platformWebAddress ?? '—'} />
-            <Row label="Main app URL" value={wa.mainAppUrl || '—'} />
-            <div className="flex items-center justify-between gap-2">
-              <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${STATUS_TONE[wa.status]}`}>{wa.statusLabel}</span>
-              <div className="flex items-center gap-1.5">
-                {wa.mainAppUrl && <CopyBtn text={wa.mainAppUrl} k="ov-main" label="Copy main URL" />}
-                <OpenBtn live={false} />
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* 2 — Customer-Facing Links */}
-        <div>
-          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Customer-facing links</p>
-          {wa.customerLinks.length === 0 ? (
-            <p className="text-[11px] font-bold text-slate-400 px-3 py-2 bg-slate-50 border border-dashed border-slate-200 rounded-xl">No platform web address yet — customer links become available once it is set.</p>
+          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Customer access points</p>
+          {accessPoints.length === 0 ? (
+            <p className="text-[11px] font-bold text-slate-400 px-3 py-2.5 bg-slate-50 border border-dashed border-slate-200 rounded-xl">Not configured — set the platform web address to generate customer access points.</p>
           ) : (
             <div className="space-y-1.5">
-              {wa.customerLinks.map(link => (
-                <CustomerLinkRow key={link.key} link={link} copied={copied} onCopy={onCopy} />
+              {accessPoints.map(ap => (
+                <AccessPointRow key={ap.key} label={ap.label} preview={ap.preview} url={ap.url} statusLabel={accessPointStatus} live={openLive} copyKey={`ap-${ap.key}`} copied={copied} onCopy={onCopy} />
               ))}
             </div>
           )}
           <p className="text-[9px] font-medium text-slate-400 leading-tight mt-2">{WEB_ADDRESS_TRUTH_LABELS.pathsFuture}</p>
         </div>
 
-        {/* 3 — External Website / Redirect Guidance */}
+        {/* 3 — External Presence / Redirect Guidance */}
         <div>
-          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">External website / redirect guidance</p>
+          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">External presence</p>
           <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-3">
-            <Row label="External website" value={wa.redirectGuidance.externalWebsite ?? 'None on file'} />
+            {wa.redirectGuidance.externalWebsite ? (
+              <Row label="External website" value={wa.redirectGuidance.externalWebsite} />
+            ) : (
+              <div>
+                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">External website</p>
+                <p className="text-[12px] font-bold text-slate-400">No external website recorded.</p>
+              </div>
+            )}
             <div className="flex items-center justify-between gap-2">
               <div className="flex-1 min-w-0">
                 <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Redirect target</p>
@@ -1034,15 +1062,15 @@ const WebAddressOverview: React.FC<WebAddressOverviewProps> = ({
               </div>
             )}
             <div className="px-3 py-2 rounded-xl bg-violet-400/5 border border-violet-400/20">
-              <p className="text-[10px] font-black text-violet-700 uppercase tracking-widest">Custom domain hosting</p>
-              <p className="text-[11px] font-bold text-slate-600">{wa.redirectGuidance.customDomainSupport}</p>
+              <p className="text-[10px] font-black text-violet-700 uppercase tracking-widest">Custom domain support</p>
+              <p className="text-[11px] font-bold text-slate-600">Future / Support-Assisted</p>
             </div>
           </div>
         </div>
 
-        {/* 4 — Setup Checklist */}
+        {/* 4 — Configuration Progress */}
         <div>
-          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Setup checklist</p>
+          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Configuration progress</p>
           <div className="space-y-1.5">
             {wa.checklist.map(item => (
               <div key={item.key} className="flex items-start gap-2.5 px-3 py-2 rounded-xl border border-slate-100 bg-slate-50/60">
@@ -1160,21 +1188,34 @@ const AdvCell: React.FC<{ label: string; value: string }> = ({ label, value }) =
   </div>
 );
 
-const CustomerLinkRow: React.FC<{ link: CustomerFacingLink; copied: string | null; onCopy: (text: string, key: string) => void }> = ({ link, copied, onCopy }) => (
-  <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl border border-slate-100 bg-slate-50/60">
+const ACCESS_POINT_STATUS_TONE: Record<string, string> = {
+  Active: 'bg-lime-400/10 text-lime-700 border-lime-400/20',
+  'Future / Not active': 'bg-violet-400/10 text-violet-700 border-violet-400/20',
+  Disabled: 'bg-slate-200 text-slate-600 border-slate-300',
+};
+
+const AccessPointRow: React.FC<{
+  label: string;
+  preview: string;
+  url: string;
+  statusLabel: string;
+  live: boolean;
+  copyKey: string;
+  copied: string | null;
+  onCopy: (text: string, key: string) => void;
+}> = ({ label, preview, url, statusLabel, live, copyKey, copied, onCopy }) => (
+  <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 rounded-2xl border border-slate-100 bg-white hover:border-slate-200 transition-all">
     <div className="flex-1 min-w-0">
-      <div className="flex items-center gap-1.5">
-        <span className="text-[11px] font-bold text-slate-700">{link.label}</span>
-        {!link.live && <span className="px-1.5 py-0.5 rounded-md text-[8px] font-black uppercase tracking-widest bg-violet-400/10 text-violet-700 border border-violet-400/20">{link.statusLabel}</span>}
-      </div>
-      <p className="text-[10px] font-medium text-slate-400 break-all">{link.url}</p>
+      <p className="text-[12px] font-black text-slate-700 truncate">{label}</p>
+      <p className="text-[10px] font-mono text-slate-400 break-all mt-0.5">{preview}</p>
     </div>
     <div className="flex items-center gap-1.5 shrink-0">
-      <button onClick={() => onCopy(link.url, `link-${link.key}`)} className="inline-flex items-center gap-1 px-2 py-1 text-[9px] font-black uppercase tracking-widest text-primary border border-primary/20 bg-primary/5 rounded-lg hover:bg-primary/10 transition-all cursor-pointer">
-        <span className="material-symbols-outlined text-[12px] leading-none">{copied === `link-${link.key}` ? 'check' : 'content_copy'}</span>{copied === `link-${link.key}` ? 'Copied' : 'Copy'}
+      <span className={`hidden sm:inline px-2 py-0.5 rounded-md text-[8px] font-black uppercase tracking-widest border ${ACCESS_POINT_STATUS_TONE[statusLabel] ?? ACCESS_POINT_STATUS_TONE.Disabled}`}>{statusLabel}</span>
+      <button onClick={() => onCopy(url, copyKey)} title="Copy link" className="w-7 h-7 rounded-lg flex items-center justify-center text-primary border border-primary/20 bg-primary/5 hover:bg-primary/10 transition-all cursor-pointer">
+        <span className="material-symbols-outlined text-[14px] leading-none">{copied === copyKey ? 'check' : 'content_copy'}</span>
       </button>
-      <button disabled={!link.live} title={link.live ? 'Open' : 'Future / Not active'} className="inline-flex items-center gap-1 px-2 py-1 text-[9px] font-black uppercase tracking-widest rounded-lg border border-slate-200 bg-slate-50 text-slate-400 disabled:cursor-not-allowed">
-        <span className="material-symbols-outlined text-[12px] leading-none">open_in_new</span>{link.live ? 'Open' : 'Future'}
+      <button disabled={!live} title={live ? 'Open' : 'Future / Not active'} className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-400 border border-slate-200 bg-slate-50 disabled:cursor-not-allowed cursor-pointer">
+        <span className="material-symbols-outlined text-[14px] leading-none">open_in_new</span>
       </button>
     </div>
   </div>

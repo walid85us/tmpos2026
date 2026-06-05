@@ -1,0 +1,222 @@
+Tenant Web Address — Manage Drawer UX Polish
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Status:
+Tenant Web Address Replacement / Reposition is accepted after the final minimal table correction.
+
+Current accepted table:
+
+* Tenant
+* Platform Web Address
+* Status
+* Actions
+* Manage opens the selected Tenant Web Address overview
+
+Objective:
+Polish the Manage experience using the clean right-side workspace drawer direction from the Stitch concept.
+
+This is a focused UX polish only.
+
+Do not start Phase 1.3.
+Do not change the data model.
+Do not change storage.
+Do not change permissions.
+Do not reintroduce DNS/SSL/Registrar control-panel language.
+Do not expand the table again.
+Do not add new backend behavior.
+Do not add fake activation toggles unless the underlying behavior already exists.
+
+==================================================
+GOAL
+====
+
+When the user clicks Manage from the Tenant Web Address table, open a clean, professional right-side drawer/workspace titled:
+
+Tenant Web Address Workspace
+
+The drawer should feel simple, modern, and operational.
+
+It should help the system owner quickly manage:
+
+* the tenant platform web address
+* customer-facing access links
+* external website / redirect guidance
+* setup progress
+* recent activity
+
+==================================================
+DRAWER STRUCTURE
+================
+
+1. Drawer Header
+
+Show:
+
+* Tenant Web Address Workspace
+* tenant name
+* platform web address
+* status chip: Active / Needs Setup / Disabled / Reserved
+* close button
+
+Primary actions:
+
+* Copy Link
+* Open Site, if safe/active
+
+Use compact, polished buttons.
+
+2. Customer Access Points
+
+Show a clean list/card section for:
+
+* Main App
+* Customer Portal
+* Book Appointment
+* Track Repair
+* Pay Invoice
+* Mail-In Repair
+
+Each row should show:
+
+* link name
+* short URL/path preview
+* status:
+
+  * Active
+  * Future / Not active
+  * Disabled by plan
+  * Not configured
+* copy action
+* open action only if safe
+
+Do not use toggle switches unless enable/disable behavior already exists.
+
+3. External Presence
+
+Show:
+
+* external website URL if recorded
+* empty state if none recorded
+* redirect target: platform web address
+* guidance text:
+  “Tenant-owned websites and domains are configured outside this app. For now, redirect the tenant’s website to the platform web address.”
+* custom domain support label:
+  “Future / Support-Assisted”
+
+Do not show DNS setup, registrar setup, SSL verification, DNSSEC, domain lock, or transfer lock.
+
+4. Configuration Progress
+
+Show a simple progress/checklist section:
+
+* Tenant slug assigned
+* Platform web address generated
+* Customer portal available
+* Booking link available
+* Tracking/payment links available
+* External redirect guidance reviewed, if applicable
+
+Use truthful statuses only.
+Do not imply automatic external verification.
+
+5. Recent Activity
+
+Show a concise activity section using existing audit/history where available.
+
+Examples:
+
+* Platform web address generated
+* External website recorded
+* Status changed
+* Tenant web address disabled/re-enabled
+
+Do not audit passive copy/open actions.
+Do not say immutable record.
+
+==================================================
+VISUAL REQUIREMENTS
+===================
+
+The drawer should be:
+
+* right-side slide-over
+* clean and professional
+* easy to scan
+* no horizontal scrolling
+* no nested scroll problems except normal drawer body scroll if content exceeds height
+* compact but readable
+* not overloaded
+* visually closer to a modern SaaS workspace than a technical domain panel
+
+Keep the main table minimal.
+Do not add Customer Links or External Website columns back into the table.
+
+==================================================
+TRUTHFUL LANGUAGE
+=================
+
+Use:
+
+* Platform web address is managed by this app.
+* Tenant-owned websites are external in this phase.
+* Custom domain hosting is future / support-assisted.
+* No live DNS lookup in this phase.
+* No SSL automation in this phase.
+
+Do not use:
+
+* DNS Zone Editor
+* Verify Now
+* Trigger verification
+* SSL auto-provision
+* Registrar control
+* DNSSEC
+* Domain lock
+* Transfer lock
+* Live DNS status
+* Global propagation
+
+==================================================
+PRESERVE ACCEPTED BEHAVIOR
+==========================
+
+Preserve:
+
+* final minimal table columns
+* Manage button
+* platform URL copy icon
+* dashboard cards/counts
+* saved views
+* search
+* filters
+* chips
+* Clear All
+* permissions
+* audit behavior
+* deep-linking
+* accepted M0–M2 foundation
+* selected overview content, reorganized into drawer if needed
+* non-regression locked modules
+
+==================================================
+OUTPUT FORMAT
+=============
+
+After this drawer UX polish, stop.
+
+Reply only with:
+
+1. Polish Status
+2. What Was Improved
+3. Drawer Header / Primary Actions
+4. Customer Access Points
+5. External Presence / Redirect Guidance
+6. Configuration Progress / Recent Activity
+7. Preserved Minimal Table
+8. Permissions / Auditability
+9. Files Changed
+10. Typecheck / Runtime Result
+11. Non-Regression Notes
+12. Recommendation Before QA
