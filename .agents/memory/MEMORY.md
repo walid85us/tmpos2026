@@ -2,3 +2,4 @@
 - [Phase 1.2 Domains + Platform Settings](phase-1-2-domains.md) — domain lifecycle/readiness helpers live in their own module; raw status stays source of truth; manual-only DNS/SSL truth constraints; milestone discipline.
 - [Tailwind v4 button cursor](tailwind-v4-button-cursor.md) — v4 removed default cursor:pointer on <button>; add cursor-pointer to clickable tabs/cards/chips/modal buttons or they feel dead.
 - [screenshot tool auth isolation](screenshot-auth.md) — app_preview screenshot runs in a separate browser with no auth/dev session; gated /owner routes redirect to /login there, not a real failure.
+- [Tenant Web Address table](tenant-web-address-table.md) — DomainsPage.tsx: counts derive from flat webAddresses+predicate (not grouped table); never orphan grouped externals when removing a column.

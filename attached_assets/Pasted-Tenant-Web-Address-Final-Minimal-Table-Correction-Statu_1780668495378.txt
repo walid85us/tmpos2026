@@ -1,0 +1,145 @@
+Tenant Web Address — Final Minimal Table Correction
+
+Status:
+Do not start QA yet.
+The Tenant Web Address table is now much better, but it still shows too much detail at the list level.
+
+User decision:
+Remove the Customer Links column.
+Remove the External Website column.
+Rename the action button from “Open” to “Manage.”
+
+This is a focused presentation correction only.
+
+Do not start Phase 1.3.
+Do not change data model.
+Do not change storage.
+Do not change permissions.
+Do not remove customer link or external website details from the selected overview.
+Do not reintroduce DNS/SSL/Registrar control-panel language.
+
+==================================================
+OBJECTIVE
+==================================================
+
+Make the Tenant Web Address list extremely simple and SaaS-appropriate.
+
+The table should only show the most important scan-level information:
+
+1) Tenant
+2) Platform Web Address
+3) Status
+4) Actions
+
+The selected overview is where detailed information belongs.
+
+==================================================
+REQUIRED TABLE STRUCTURE
+==================================================
+
+Use this final table structure:
+
+1) Tenant
+- Tenant name only, or tenant name with minimal secondary text if already needed.
+
+2) Platform Web Address
+- Show the platform subdomain.
+- Keep the small inline copy icon beside the platform web address.
+
+3) Status
+- Active
+- Needs Setup
+- Disabled
+- Reserved
+- External Only, if applicable
+
+4) Actions
+- Rename the button from “Open” to “Manage.”
+- Keep the button compact and fully visible.
+- Do not stack actions.
+
+Remove these columns from the table:
+- Customer Links
+- External Website
+
+==================================================
+SELECTED OVERVIEW PRESERVATION
+==================================================
+
+Do not remove the detailed information from the selected overview.
+
+The selected overview should still show:
+- Main App URL
+- Customer Portal
+- Book Appointment
+- Track Repair
+- Pay Invoice
+- Mail-In Repair
+- Copy/Open actions
+- External Website / Redirect Guidance
+- Custom domain support as Future / Support-Assisted
+- Setup checklist
+- Recent activity
+
+The table is for scanning.
+The selected overview is for details and management.
+
+==================================================
+BEHAVIOR PRESERVATION
+==================================================
+
+Preserve:
+- dashboard cards/counts
+- saved views
+- search
+- filters
+- visible chips
+- Clear All
+- copy platform web address action
+- Manage button opening selected overview
+- selected overview content
+- permissions
+- audit behavior
+- deep-linking
+- accepted M0–M2 foundation
+- non-regression locked modules
+
+==================================================
+TRUTHFUL LANGUAGE
+==================================================
+
+Keep the accepted product language:
+- Platform subdomain is managed by this app.
+- Tenant-owned domains are external in this phase.
+- Custom domain hosting is future / support-assisted.
+- No live DNS lookup in this phase.
+- No SSL automation in this phase.
+
+Do not reintroduce:
+- DNS Zone Editor
+- SSL/TLS automation
+- Registrar controls
+- DNSSEC
+- domain lock
+- transfer lock
+- Verify Now
+- automatic verification
+
+==================================================
+OUTPUT FORMAT
+==================================================
+
+After this correction, stop.
+
+Reply only with:
+
+1. Correction Status
+2. What Was Simplified
+3. Final Table Columns
+4. Manage Button Rename
+5. Selected Overview Preservation
+6. No-Drift / Filters Preserved
+7. Files Changed
+8. Typecheck / Runtime Result
+9. Non-Regression Notes
+10. Recommendation Before QA
