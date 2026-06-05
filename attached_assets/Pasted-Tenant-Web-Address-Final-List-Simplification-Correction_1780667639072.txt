@@ -1,0 +1,195 @@
+Tenant Web Address — Final List Simplification Correction
+
+Status:
+Do not start QA yet.
+The Tenant Web Address table is improved, but the list is still too detailed and not simple enough for the final SaaS direction.
+
+Current issue from screenshot:
+- The same tenant can appear twice: once as Platform Web Address and once as External Website / Redirect.
+- Actions are stacked and make rows tall.
+- Next Action is too verbose and repeats obvious status information.
+- The table still feels like a detailed operations grid instead of a simple tenant web-address list.
+
+This is a focused presentation correction only.
+
+Do not start Phase 1.3.
+Do not change data model.
+Do not change storage.
+Do not change permissions.
+Do not reintroduce DNS/SSL/Registrar language.
+Do not break copy/open/detail behavior.
+
+==================================================
+OBJECTIVE
+==================================================
+
+Simplify the Tenant Web Address list into one clean row per tenant/platform web address.
+
+The table should answer quickly:
+
+- Which tenant?
+- What is their platform web address?
+- Which customer links are available?
+- Do they have an external website/redirect recorded?
+- Is the web address active or needs setup?
+- How do I open/manage it?
+
+==================================================
+REQUIRED TABLE STRUCTURE
+==================================================
+
+Use this simplified table structure:
+
+1) Tenant
+- Tenant name
+- Small secondary badge if needed:
+  - Platform Web Address
+  - External Redirect on File
+  - Needs Setup
+  - Disabled
+
+2) Platform Web Address
+- Show the platform subdomain.
+- Add small inline copy icon beside the URL.
+- Do not use a large “Copy Main URL” button in the Actions column.
+
+3) Customer Links
+- Compact summary only.
+- Example:
+  “5 links”
+  chips: Portal, Book, Track, Pay, Mail-In
+- Do not show full URLs in the table.
+
+4) External Website
+- Show external website/domain if recorded.
+- Example:
+  techrepair.pro
+  “Redirect externally to platform URL”
+- If none, show “—”.
+- Do not create a separate row only for the external website/redirect if it belongs to the same tenant.
+
+5) Status
+- Active
+- Needs Setup
+- Disabled
+- External Redirect on File
+- Future / Support-Assisted where relevant
+
+6) Actions
+- One primary action only:
+  “Open”
+  or “Overview”
+- Optional compact kebab/more menu if already consistent.
+- Do not stack large buttons.
+- Copy main URL belongs beside the URL, not as a large action button.
+
+==================================================
+GROUPING RULE
+==================================================
+
+If a tenant has both:
+- a platform web address
+- an external website/redirect record
+
+Show them in the same tenant row where possible.
+
+Do not show duplicate tenant rows unless they represent truly separate platform web addresses.
+
+If the underlying data still has separate records, group them visually by tenant/platform web address for the table while preserving the accepted data model underneath.
+
+==================================================
+REMOVE OR REDUCE NEXT ACTION
+==================================================
+
+Remove the Next Action column if possible.
+
+If it must remain, keep it extremely short:
+- No action needed
+- Complete setup
+- Review redirect
+- Disabled
+- Future support
+
+Do not use long sentences like:
+“No action needed — the platform web address is active.”
+
+That belongs in the selected overview, not the table.
+
+==================================================
+SELECTED OVERVIEW PRESERVATION
+==================================================
+
+Do not remove details from the selected overview.
+
+The selected overview should still show:
+- Main App URL
+- Customer Portal
+- Book Appointment
+- Track Repair
+- Pay Invoice
+- Mail-In Repair
+- Copy/Open actions
+- External redirect guidance
+- Setup checklist
+- Recent activity
+- Advanced custom domain support as Future / Support-Assisted
+
+The table is for scanning.
+The overview is for details.
+
+==================================================
+VISUAL QUALITY TARGET
+==================================================
+
+The table should feel:
+- simple
+- compact
+- one row per tenant/web address
+- no duplicated tenant rows for external redirect
+- no oversized stacked action buttons
+- no horizontal scroll
+- no nested vertical scroll
+- easy to scan
+
+==================================================
+PRESERVE ACCEPTED BEHAVIOR
+==================================================
+
+Preserve:
+- Tenant Web Address label
+- page purpose
+- truth labels
+- dashboard cards/counts
+- saved views
+- search
+- filters
+- chips
+- Clear All
+- copy actions
+- open actions truthfulness
+- selected overview
+- permissions
+- audit behavior
+- deep-linking
+- accepted M0–M2 foundation
+- non-regression locked modules
+
+==================================================
+OUTPUT FORMAT
+==================================================
+
+After this correction, stop.
+
+Reply only with:
+
+1. Correction Status
+2. What Was Simplified
+3. Duplicate Row / Grouping Fix
+4. Final Table Columns
+5. Actions Column Simplification
+6. Selected Overview Preservation
+7. No-Drift / Filters Preserved
+8. Files Changed
+9. Typecheck / Runtime Result
+10. Non-Regression Notes
+11. Recommendation Before QA

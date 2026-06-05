@@ -292,6 +292,40 @@ const DomainsPage: React.FC = () => {
     [webAddresses, filters],
   );
 
+  // Presentation-only grouping (no-drift safe): the cards and saved-view counts
+  // keep deriving from the flat `webAddresses` array; only the table collapses
+  // each tenant's platform web address + sibling external/redirect records into
+  // ONE visual row. A tenant with two distinct platform web addresses still
+  // gets two rows; an external-only tenant still appears as its own row.
+  const tableRows = useMemo(() => {
+    const rows: { primary: TenantWebAddress; externals: TenantWebAddress[] }[] = [];
+    const platformRowIndexByTenant: Record<string, number> = {};
+    const tenantsWithPlatform = new Set(visible.filter(w => w.kind === 'platform').map(w => w.tenantId));
+    // Pass 1 — one row per platform web address, in visible order.
+    for (const w of visible) {
+      if (w.kind !== 'platform') continue;
+      rows.push({ primary: w, externals: [] });
+      if (platformRowIndexByTenant[w.tenantId] === undefined) {
+        platformRowIndexByTenant[w.tenantId] = rows.length - 1;
+      }
+    }
+    // Pass 2 — attach externals to the tenant's first platform row, or group
+    // external-only tenants into their own single row.
+    const externalOnlyRowIndexByTenant: Record<string, number> = {};
+    for (const w of visible) {
+      if (w.kind !== 'external') continue;
+      if (tenantsWithPlatform.has(w.tenantId)) {
+        rows[platformRowIndexByTenant[w.tenantId]].externals.push(w);
+      } else if (externalOnlyRowIndexByTenant[w.tenantId] !== undefined) {
+        rows[externalOnlyRowIndexByTenant[w.tenantId]].externals.push(w);
+      } else {
+        rows.push({ primary: w, externals: [] });
+        externalOnlyRowIndexByTenant[w.tenantId] = rows.length - 1;
+      }
+    }
+    return rows;
+  }, [visible]);
+
   // Locked no-drift contract: every clickable card count and saved-view count
   // flows through the SAME predicate as the visible table.
   const countWith = (partial: Partial<WebAddressFilters>) =>
@@ -639,62 +673,59 @@ const DomainsPage: React.FC = () => {
           <div className="overflow-x-auto xl:overflow-x-visible">
             <table className="w-full text-left border-collapse table-fixed">
               <colgroup>
-                <col className="w-[15%]" />
+                <col className="w-[20%]" />
+                <col className="w-[22%]" />
+                <col className="w-[18%]" />
                 <col className="w-[19%]" />
-                <col className="w-[10%]" />
-                <col className="w-[16%]" />
-                <col className="w-[15%]" />
-                <col className="w-[13%]" />
                 <col className="w-[12%]" />
+                <col className="w-[9%]" />
               </colgroup>
               <thead className="bg-white">
                 <tr className="text-[9px] font-black uppercase tracking-widest text-slate-400 border-b border-slate-100 align-bottom">
                   <th className="px-3 py-3">Tenant</th>
                   <th className="px-2 py-3">Platform Web Address</th>
-                  <th className="px-2 py-3">Status</th>
-                  <th className="px-2 py-3">External Website / Redirect</th>
                   <th className="px-2 py-3">Customer Links</th>
-                  <th className="px-2 py-3">Next Action</th>
+                  <th className="px-2 py-3">External Website</th>
+                  <th className="px-2 py-3">Status</th>
                   <th className="px-3 py-3 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {visible.map(w => {
-                  const isSel = selectedId === w.domainId;
-                  const linkCount = w.customerLinks.length;
+                {tableRows.map(row => {
+                  const p = row.primary;
+                  const isExternalOnly = p.kind === 'external';
+                  const platformAddr = isExternalOnly ? null : p.platformWebAddress;
+                  const mainUrl = isExternalOnly ? '' : p.mainAppUrl;
+                  const links = isExternalOnly ? [] : p.customerLinks;
+                  const externals = isExternalOnly ? [p, ...row.externals] : row.externals;
+                  const ext = externals[0] ?? null;
+                  const extraExt = Math.max(0, externals.length - 1);
+                  const rowIds = [p.domainId, ...row.externals.map(e => e.domainId)];
+                  const isSel = selectedId !== null && rowIds.includes(selectedId);
                   return (
-                    <tr key={w.domainId} onClick={() => setSelectedId(w.domainId)} className={`cursor-pointer transition-colors align-top ${isSel ? 'bg-primary/5' : 'hover:bg-slate-50/70'}`}>
+                    <tr key={p.domainId} onClick={() => setSelectedId(p.domainId)} className={`cursor-pointer transition-colors align-top ${isSel ? 'bg-primary/5' : 'hover:bg-slate-50/70'}`}>
                       <td className="px-3 py-3">
-                        <span className="block text-[12px] font-bold text-slate-900 break-words leading-tight">{w.tenant}</span>
-                        <span className={`mt-1 inline-flex px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${KIND_TONE[w.kind]}`}>{WEB_ADDRESS_KIND_LABELS[w.kind]}</span>
+                        <span className="block text-[12px] font-bold text-slate-900 break-words leading-tight">{p.tenant}</span>
+                        {isExternalOnly && <span className="mt-1 inline-flex px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border border-slate-200 bg-slate-50 text-slate-500">External Only</span>}
                       </td>
                       <td className="px-2 py-3">
-                        {w.platformWebAddress ? (
+                        {platformAddr ? (
                           <div className="flex items-start gap-1.5">
-                            <span className="text-[12px] font-bold text-slate-700 break-all leading-tight">{w.platformWebAddress}</span>
-                            <button onClick={e => { e.stopPropagation(); copy(w.mainAppUrl, `${w.domainId}-main`); }} title="Copy main URL" className="shrink-0 mt-0.5 text-slate-400 hover:text-primary transition-colors cursor-pointer">
-                              <span className="material-symbols-outlined text-[14px] leading-none">{copied === `${w.domainId}-main` ? 'check' : 'content_copy'}</span>
+                            <span className="text-[12px] font-bold text-slate-700 break-all leading-tight">{platformAddr}</span>
+                            <button onClick={e => { e.stopPropagation(); copy(mainUrl, `${p.domainId}-main`); }} title="Copy main URL" className="shrink-0 mt-0.5 text-slate-400 hover:text-primary transition-colors cursor-pointer">
+                              <span className="material-symbols-outlined text-[14px] leading-none">{copied === `${p.domainId}-main` ? 'check' : 'content_copy'}</span>
                             </button>
                           </div>
                         ) : <span className="text-[12px] font-bold text-slate-400">—</span>}
                       </td>
-                      <td className="px-2 py-3"><span className={`inline-flex px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${STATUS_TONE[w.status]}`}>{w.statusLabel}</span></td>
                       <td className="px-2 py-3">
-                        {w.externalWebsite ? (
-                          <>
-                            <span className="block text-[11px] font-bold text-slate-700 break-all leading-tight">{w.externalWebsite}</span>
-                            {w.kind === 'external' && <span className="block text-[9px] font-medium text-slate-400 leading-tight mt-0.5">Future / Support-Assisted</span>}
-                          </>
-                        ) : <span className="text-[11px] font-bold text-slate-400">—</span>}
-                      </td>
-                      <td className="px-2 py-3">
-                        {linkCount === 0 ? (
+                        {links.length === 0 ? (
                           <span className="text-[10px] font-bold text-slate-400">—</span>
                         ) : (
                           <div>
-                            <span className="block text-[10px] font-bold text-slate-500 leading-tight">{linkCount} link{linkCount === 1 ? '' : 's'} available</span>
+                            <span className="block text-[10px] font-bold text-slate-500 leading-tight">{links.length} link{links.length === 1 ? '' : 's'}</span>
                             <div className="mt-1 flex flex-wrap gap-1">
-                              {w.customerLinks.map(link => (
+                              {links.map(link => (
                                 <span key={link.key} className="inline-flex px-1.5 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border border-slate-200 bg-slate-50 text-slate-500">
                                   {CUSTOMER_LINK_SHORT[link.key] ?? link.label}
                                 </span>
@@ -703,18 +734,26 @@ const DomainsPage: React.FC = () => {
                           </div>
                         )}
                       </td>
-                      <td className="px-2 py-3"><span className="block text-[10px] font-medium text-slate-500 leading-tight">{w.nextAction}</span></td>
+                      <td className="px-2 py-3">
+                        {ext ? (
+                          <div>
+                            <button onClick={e => { e.stopPropagation(); setSelectedId(ext.domainId); }} title="Open external redirect details" className="text-[11px] font-bold text-slate-700 hover:text-primary break-all leading-tight text-left transition-colors cursor-pointer">{ext.externalWebsite}</button>
+                            <span className="block text-[9px] font-medium text-slate-400 leading-tight mt-0.5">Redirect externally to platform URL</span>
+                            {extraExt > 0 && (
+                              <div className="mt-1 flex flex-wrap gap-1">
+                                {externals.slice(1).map(e2 => (
+                                  <button key={e2.domainId} onClick={ev => { ev.stopPropagation(); setSelectedId(e2.domainId); }} title="Open external redirect details" className="inline-flex px-1.5 py-0.5 text-[9px] font-bold text-slate-500 hover:text-primary border border-slate-200 bg-slate-50 rounded-md break-all transition-colors cursor-pointer">{e2.externalWebsite}</button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ) : <span className="text-[11px] font-bold text-slate-400">—</span>}
+                      </td>
+                      <td className="px-2 py-3"><span className={`inline-flex px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md border ${STATUS_TONE[p.status]}`}>{p.statusLabel}</span></td>
                       <td className="px-3 py-3 text-right">
-                        <div className="inline-flex flex-col items-end gap-1.5">
-                          <button onClick={e => { e.stopPropagation(); setSelectedId(w.domainId); }} className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[9px] font-black uppercase tracking-widest text-primary border border-primary/20 bg-primary/5 rounded-lg hover:bg-primary/10 transition-all cursor-pointer whitespace-nowrap">
-                            <span className="material-symbols-outlined text-[13px] leading-none">open_in_new</span>Open Overview
-                          </button>
-                          {w.mainAppUrl && (
-                            <button onClick={e => { e.stopPropagation(); copy(w.mainAppUrl, `${w.domainId}-main`); }} className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[9px] font-black uppercase tracking-widest text-slate-500 border border-slate-200 bg-white rounded-lg hover:bg-slate-50 transition-all cursor-pointer whitespace-nowrap">
-                              <span className="material-symbols-outlined text-[13px] leading-none">{copied === `${w.domainId}-main` ? 'check' : 'content_copy'}</span>{copied === `${w.domainId}-main` ? 'Copied' : 'Copy Main URL'}
-                            </button>
-                          )}
-                        </div>
+                        <button onClick={e => { e.stopPropagation(); setSelectedId(p.domainId); }} className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[9px] font-black uppercase tracking-widest text-primary border border-primary/20 bg-primary/5 rounded-lg hover:bg-primary/10 transition-all cursor-pointer whitespace-nowrap">
+                          <span className="material-symbols-outlined text-[13px] leading-none">open_in_new</span>Open
+                        </button>
                       </td>
                     </tr>
                   );
