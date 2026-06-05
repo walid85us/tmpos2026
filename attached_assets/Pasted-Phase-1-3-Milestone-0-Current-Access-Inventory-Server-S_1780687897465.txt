@@ -1,0 +1,347 @@
+Phase 1.3 — Milestone 0: Current Access Inventory / Server-Side Enforcement Classification
+
+Project:
+TM POS2026 — Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Current accepted checkpoint:
+
+* Phase 1.2 is finalized / accepted.
+* Tenant Web Address is accepted as the replacement for the old Domains direction.
+* Platform Settings Control Center is accepted as-is for now.
+* GitHub backup helper is installed and verified.
+* GitHub origin/main is up to date.
+* Phase 1.3 planning pass has been reviewed.
+* Phase 1.3 implementation has NOT started yet.
+
+Objective:
+Implement Phase 1.3 Milestone 0 only.
+
+This milestone is an access inventory and documentation milestone. It must establish the current platform permission/RBAC picture and classify future server-side enforcement needs before any governance implementation begins.
+
+Do not implement Milestone 1, 2, 3, 4, or 5 yet.
+
+Think step by step before making any changes.
+
+==================================================
+ROLE STACK — ACT UPON IT
+========================
+
+Act as:
+
+* Senior Platform Operations Architect
+* Senior Security Architect
+* Senior IAM Specialist
+* Access Governance Analyst
+* System Administrator
+* Compliance / Audit Readiness Architect
+* PIM / PAM Governance Specialist
+* SaaS Operations Specialist
+* Firebase / Firestore Security Rules Architect
+* Senior React / TypeScript Engineer
+* QA Gatekeeper
+* Systems Thinker
+* Side Auditor
+
+==================================================
+STRICT SCOPE — MILESTONE 0 ONLY
+===============================
+
+Milestone 0 is documentation / inventory only.
+
+Allowed work:
+
+1. Review the current platform permission model.
+2. Inventory current platform feature groups.
+3. Inventory current platform sub-permissions.
+4. Identify which sub-permissions are marked sensitive.
+5. Identify current role defaults.
+6. Identify current resolver behavior at a high level.
+7. Identify which areas are currently UI/client-gated only.
+8. Classify future server-side enforcement needs.
+9. Document non-regression guardrails.
+10. Add or update a planning documentation artifact.
+
+Preferred documentation target:
+
+* docs/platform-operations-security-history.md
+
+If the existing documentation structure would become too large, you may create a new focused file such as:
+
+* docs/phase-1.3-platform-access-inventory.md
+
+If you create a new file, cross-reference it from the existing platform operations/security documentation or replit.md only if appropriate.
+
+==================================================
+ABSOLUTE DO-NOT-CHANGE LIST
+===========================
+
+Do not change:
+
+* app behavior
+* permissions behavior
+* platformPermissionMeets behavior
+* explainAccessDecision behavior
+* hasPlatformPermission behavior
+* hasEffectiveFeatureAccess behavior
+* hasSectionAccess behavior
+* hasActionAccess behavior
+* AccessContext.canAccess behavior
+* platform role defaults
+* platform permission thresholds
+* dependency auto-sync logic
+* tenant/store accessConfig.ts behavior
+* Store Permissions Matrix
+* tenant provisioning
+* Tenant Web Address
+* Platform Settings Control Center
+* Command Center Intelligence
+* Audit Investigation Center
+* Support Queue / SLA / Macro
+* Escalation operating model
+* Add-on Governance
+* Shipping
+* paid override invoice workflow
+* server PII logging
+* routes
+* data models
+* mock data behavior
+* UI screens
+* Firestore rules
+* server/index.ts enforcement logic
+
+Do not add:
+
+* new roles
+* read_only_auditor implementation
+* temporary access/PIM implementation
+* access review implementation
+* reason prompts
+* new UI cards
+* new sessionStorage/localStorage stores
+* new approval flows
+* new server middleware
+* new Firestore security rules
+* fake server-side enforcement
+* fake automated expiration
+* fake PAM vault
+* fake SSO/SCIM
+* fake compliance evidence automation
+
+==================================================
+INVENTORY REQUIREMENTS
+======================
+
+Create a clear Phase 1.3 Milestone 0 inventory that includes:
+
+1. Current Platform Permission Architecture
+
+Document:
+
+* platformPermissionsConfig.ts as the platform permission source.
+* accessConfig.ts as the separate tenant/store permission source.
+* The ranked platform levels:
+  none / view / create / edit / approve / manage / full
+* The existence of platformPermissionMeets.
+* The fact that platform permissions and tenant/store permissions are separate systems.
+
+2. Current Platform Feature Groups
+
+Inventory all current platform feature groups found in the codebase.
+
+For each feature group, document:
+
+* key/id
+* readable name if available
+* current purpose
+* whether it contains sensitive sub-permissions
+* current UI/client-gated status
+* future server enforcement recommendation
+
+3. Current Platform Sub-Permissions
+
+Inventory all platform sub-permissions.
+
+For each sub-permission, document:
+
+* sub-permission key/id
+* parent feature group
+* threshold level
+* sensitive flag
+* likely action category
+* current enforcement state: UI/client-gated only
+* future enforcement tier:
+
+  * Tier 0 — UI-only acceptable for now
+  * Tier 1 — future server validation recommended
+  * Tier 2 — future server validation strongly required before production
+  * Tier 3 — future privileged/PIM-controlled server action
+
+4. Current Platform Roles
+
+Document the current platform roles found in the codebase.
+
+Include:
+
+* system_owner
+* support_admin
+* billing_admin
+* operations_admin
+* security_admin
+
+For each role, document:
+
+* role purpose
+* current access posture at a high level
+* whether it should be eligible for future temporary elevation
+* whether it should be included in future access review
+* whether it should remain protected from accidental downgrade, especially System Owner
+
+Do not change role behavior.
+
+5. Current Resolver Model
+
+Document the current resolver conceptually.
+
+Include:
+
+* system-owner allow
+* explicit sub-permission override
+* explicit feature override
+* role default
+* transitive prerequisite check
+* denied_prerequisite behavior
+* dependency auto-sync as write-time, direction-aware, least-privilege-preserving
+
+Do not alter the resolver.
+
+6. Current UI-Only / Client-Side Gating Finding
+
+Document clearly:
+
+* Current platform access is UI/client-gated.
+* Server-side platform RBAC enforcement is not implemented yet.
+* server/index.ts currently does not enforce platform RBAC boundaries.
+* Any future backend enforcement must not fork permission logic away from the resolver model.
+
+Use truthful wording such as:
+
+“Current enforcement state: UI/client-gated only. Future server-side enforcement is recommended before production-grade privileged operations.”
+
+7. Future Server-Side Enforcement Classification
+
+Create a future enforcement classification table.
+
+Classify these categories at minimum:
+
+* platform RBAC-mutating writes
+* platform role changes
+* sub-permission overrides
+* temporary access grants
+* access review records
+* privileged audit actions
+* tenant management mutations
+* billing/subscription mutations
+* add-on governance mutations
+* platform settings mutations
+* provisioning lifecycle changes
+* support/admin intervention actions
+* sensitive audit/security actions
+
+For each category, document:
+
+* current state
+* risk
+* future enforcement need
+* recommended enforcement tier
+* deferred implementation phase
+
+8. Non-Regression Guardrails
+
+Document that future Phase 1.3 milestones must protect:
+
+* Tenant Web Address
+* Platform Settings Control Center
+* Command Center Intelligence
+* Audit Investigation Center
+* Support Queue / SLA / Macro
+* Escalation operating model
+* Permission dependency auto-sync
+* Add-on Governance
+* Shipping
+* Store Permissions Matrix
+* Tenant provisioning
+* paid override invoice workflow
+* server PII logging
+
+9. Milestone 0 Acceptance Criteria
+
+Document acceptance criteria:
+
+* all current feature groups inventoried
+* all platform sub-permissions inventoried
+* sensitive flags captured
+* role defaults summarized without changing them
+* current UI-only enforcement truthfully stated
+* future server-side enforcement tiers classified
+* no code behavior changed
+* no route/model/permission/UI changes made
+* project compiles if applicable
+
+==================================================
+QUALITY BAR
+===========
+
+The documentation must be clear, professional, and useful for later milestones.
+
+Avoid vague statements like “secure this later.”
+
+Use precise labels:
+
+* UI/client-gated only
+* future server validation recommended
+* future server validation strongly required
+* future privileged/PIM-controlled server action
+* deferred
+* not implemented
+* no scheduler exists
+* no backend enforcement currently active
+
+Do not imply that backend enforcement, automated expiration, PAM, SSO/SCIM, or compliance automation is already active.
+
+==================================================
+VALIDATION
+==========
+
+After the documentation update:
+
+1. Run the safest available validation command, such as:
+   npm run check
+   or the project’s equivalent typecheck/build validation.
+
+2. Report:
+
+   * files changed
+   * what was documented
+   * confirmation that no behavior, permissions, routes, models, resolver logic, or UI changed
+   * validation command and result
+   * any risks or follow-up notes
+
+Do not run npm run backup:github yet unless I explicitly tell you after manual QA acceptance.
+
+==================================================
+OUTPUT FORMAT
+=============
+
+Reply with:
+
+1. Milestone 0 Summary
+2. Files Changed
+3. Inventory Coverage
+4. Future Enforcement Tiers Added
+5. Non-Regression Confirmation
+6. Validation Result
+7. Risks / Follow-Up Items
+8. Final Status
+
+Do not mark Phase 1.3 complete.
+Do not start Milestone 1.

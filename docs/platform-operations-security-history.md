@@ -635,3 +635,7 @@ Phase 1.2 (Domains + Platform Settings Maturity) is **finalized/accepted**. Clos
 -   *Tenant provisioning:* owner onboarding wizard; staff invitation / account activation; tenant slug reservation; platform web address generation during provisioning; customer portal link generation during provisioning.
 
 **Next:** Phase 1.3 — Platform Team Governance (server-side RBAC / PIM / PAM). **Not started.**
+
+## Phase 1.3 — Milestone 0: Current Access Inventory (documentation/inventory only)
+
+Phase 1.3 Milestone 0 is an **access-inventory / documentation** milestone — no code, behavior, permission, resolver, route, model, mock-data, UI, or server changes. It establishes the authoritative current platform permission/RBAC picture (11 feature groups, 71 sub-permissions, 22 sensitive, 5 platform roles, the resolver order, and the UI-only enforcement reality) and classifies future server-side enforcement needs into Tier 0–3 before any governance implementation (Milestones 1–5) begins. The full inventory lives in the focused artifact [`docs/phase-1.3-platform-access-inventory.md`](phase-1.3-platform-access-inventory.md). Milestones 1–5 remain **not started**.
