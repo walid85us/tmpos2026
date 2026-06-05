@@ -18,6 +18,7 @@ Do not make changes to the file `Y`.
 -   **Platform Settings**: the governance work (registry + change-review UX) is **accepted as-is for now** — truthful (nothing enforced at runtime), correctly gated, and audited. Deeper implementation (backend config service, runtime enforcement, SSO/SCIM, notifications, provider integrations, approval-workflow engine, compliance-evidence automation, server-side policy enforcement) is **deferred to future platform operations/security phases**.
 -   **Next planned phase**: Phase 1.3 — Platform Team Governance (server-side RBAC / PIM / PAM). **Not started.**
 -   **Detailed history**: full long-form implementation notes and the complete correction sequences (including every Tenant Web Address table/drawer correction) live in [`docs/platform-operations-security-history.md`](docs/platform-operations-security-history.md). `replit.md` keeps only the high-level overview, locked rules, and roadmap.
+-   **GitHub backup**: after each accepted milestone/phase, run `npm run backup:github` before starting the next phase. It safe-pushes `main` to GitHub (fast-forward only; never force pushes; refuses on a dirty tree or diverged remote).
 
 # System Architecture
 
