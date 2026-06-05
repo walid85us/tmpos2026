@@ -12,10 +12,10 @@ Do not make changes to the file `Y`.
 
 # Current Project State
 
--   **Current accepted checkpoint**: Phase 1.2F **Tenant Web Address** — the strategic replacement of the user-facing "Domains" module — is **accepted**, including its **final minimal-table correction** and its **Manage-drawer product-language cleanup**.
+-   **Current accepted checkpoint**: **Phase 1.2 is finalized/accepted.** Phase 1.2F **Tenant Web Address** — the strategic replacement of the user-facing "Domains" module — is **accepted** (including its final minimal-table correction and Manage-drawer product-language cleanup), and the **Platform Settings Control Center is accepted as-is for now**.
 -   **What "Tenant Web Address" is**: the System Owner module is repositioned away from a registrar/DNS "Domains" control panel toward honestly **managing each tenant's platform web address** (`{tenant.subdomain}.repairplatform.com`). It is presentation/positioning over a new pure helper (`src/owner/tenantWebAddress.ts`) and is **non-destructive over the M0 domain object model** — the `tenant_domains_v1` store and the dormant DNS/SSL/registrar helpers (`platformOpsDomainModel.ts`/`platformOpsDomains.ts`) are retained untouched for future custom-domain work. `WEB_ADDRESS_LIVE_HOSTING=false` (Copy always allowed; Open disabled/Future). No real DNS/SSL/registrar/hosting. No-drift: one `webAddresses` array + one `matchesWebAddressFilter` predicate drive all cards/saved-view counts. Permission resolver/ids/gating, audit, the Add flow, and `?domain=`/`?status=` deep-linking are unchanged.
 -   **Superseded**: the earlier Phase 1.2F domain-control-panel milestones (M0 Domain Object Model, M1 Portfolio Dashboard, M2 Overview Workspace) and the **rejected Phase 1.2E control-panel direction** were superseded by this Strategic Replacement. The M0 model itself remains in place underneath.
--   **Phase 1.2 (Domains + Platform Settings Maturity)**: the Platform Settings governance work (registry + change-review UX) is in place and stable; **not marked fully accepted** here pending its own review.
+-   **Platform Settings**: the governance work (registry + change-review UX) is **accepted as-is for now** — truthful (nothing enforced at runtime), correctly gated, and audited. Deeper implementation (backend config service, runtime enforcement, SSO/SCIM, notifications, provider integrations, approval-workflow engine, compliance-evidence automation, server-side policy enforcement) is **deferred to future platform operations/security phases**.
 -   **Next planned phase**: Phase 1.3 — Platform Team Governance (server-side RBAC / PIM / PAM). **Not started.**
 -   **Detailed history**: full long-form implementation notes and the complete correction sequences (including every Tenant Web Address table/drawer correction) live in [`docs/platform-operations-security-history.md`](docs/platform-operations-security-history.md). `replit.md` keeps only the high-level overview, locked rules, and roadmap.
 
@@ -141,7 +141,7 @@ Do not change behavior in these areas as a side effect of other work:
 
 -   **Phase 1.1.3C** — Support Queue / SLA / Macro Maturity **(accepted)**
 -   **Phase 1.1.3D** — Audit Investigation Center **(accepted)**
--   **Phase 1.2** — Domains + Platform Settings Maturity **(Platform Settings governance work in place; not marked fully accepted — pending review)**
+-   **Phase 1.2** — Domains + Platform Settings Maturity **(finalized/accepted — Tenant Web Address is the accepted replacement for Domains; Platform Settings accepted as-is for now, deeper implementation deferred)**
 -   **Phase 1.2E** — Domains Control Center UX Maturity **(direction REJECTED by user — superseded by Phase 1.2F)**
 -   **Phase 1.2F** — Strategic Replacement ("Domains" → "Tenant Web Address") **(accepted, incl. final minimal-table correction + Manage-drawer product-language cleanup)** — built non-destructively over the earlier (now superseded) M0/M1/M2 domain-control-panel milestones; full detail in the history doc.
 -   **Phase 1.3** — Platform Team Governance (server-side RBAC / PIM / PAM) **(next — not started)**

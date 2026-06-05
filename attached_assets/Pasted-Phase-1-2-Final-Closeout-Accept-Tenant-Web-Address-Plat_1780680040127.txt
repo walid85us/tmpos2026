@@ -1,0 +1,133 @@
+Phase 1.2 Final Closeout — Accept Tenant Web Address + Platform Settings Current State
+
+Project:
+Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Status:
+Tenant Web Address Replacement / Reposition — ACCEPTED
+Tenant Web Address final minimal table correction — ACCEPTED
+Tenant Web Address Manage Drawer Product-Language Cleanup — ACCEPTED
+Documentation Cleanup — ACCEPTED
+Platform Settings Control Center — ACCEPTED AS-IS FOR NOW
+Phase 1.3 has NOT started
+
+Objective:
+Finalize Phase 1.2 closeout documentation and checkpoint only.
+
+This is a documentation/status alignment task only.
+
+Do not change code.
+Do not change behavior.
+Do not change permissions.
+Do not change models.
+Do not change routes.
+Do not start Phase 1.3.
+
+==================================================
+FINAL PHASE 1.2 DECISION
+==================================================
+
+Record the final Phase 1.2 outcome:
+
+1) The previous Domains direction has been superseded.
+2) The accepted replacement is Tenant Web Address.
+3) Tenant Web Address is now the correct SaaS product direction:
+   - platform-managed tenant URL
+   - customer-facing access links
+   - external website / redirect guidance
+   - custom domain support future / support-assisted
+4) Full DNS/SSL/registrar control panel work is not active.
+5) Advanced DNS/SSL/registrar helpers remain dormant/future/support-assisted.
+6) Platform Settings Control Center is accepted as-is for now.
+7) Deeper Platform Settings implementation is deferred to future platform operations/security phases.
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==================================================
+
+Update replit.md concisely:
+
+- Mark Phase 1.2 / 1.2F as accepted/finalized.
+- State that Tenant Web Address is the accepted replacement for Domains.
+- State that Platform Settings is accepted as-is for now.
+- State that Phase 1.3 is next and not started yet.
+- Keep locked rules, roadmap, non-regression constraints, and user preferences intact.
+- Do not re-expand replit.md with detailed milestone history.
+
+Update docs/platform-operations-security-history.md if needed:
+
+- Add a concise final closeout note for Phase 1.2.
+- Confirm Tenant Web Address replacement acceptance.
+- Confirm Platform Settings current-state acceptance.
+- Confirm future/deferred items.
+
+==================================================
+FUTURE / DEFERRED ITEMS TO RECORD
+==================================================
+
+Tenant Web Address future items:
+- customer-facing route activation/readiness
+- deeper integration with tenant provisioning
+- staff/owner onboarding linkage
+- public portal/booking/tracking/payment route finalization
+- support-assisted custom domain support
+- real DNS/custom-domain verification only in a future enterprise/support phase
+
+Platform Settings future items:
+- backend configuration service
+- runtime enforcement
+- SSO/SCIM
+- notification engine
+- provider integrations
+- approval workflow engine
+- compliance evidence automation
+- server-side policy enforcement
+
+Tenant provisioning future items:
+- owner onboarding wizard
+- staff invitation/account activation
+- tenant slug reservation
+- platform web address generation during provisioning
+- customer portal link generation during provisioning
+
+==================================================
+NON-REGRESSION
+==================================================
+
+Do not regress or modify:
+
+- Tenant Web Address
+- Platform Settings
+- Command Center Intelligence
+- Audit Investigation Center
+- Support Queue / SLA / Macro
+- Escalation operating model
+- Permission dependency auto-sync
+- Add-on Governance
+- Shipping
+- Store Permissions Matrix
+- Tenant provisioning
+- paid override invoice workflow
+- server PII logging
+
+==================================================
+OUTPUT FORMAT REQUIRED
+==================================================
+
+After the closeout, stop.
+
+Reply only with:
+
+1. Closeout Status
+2. Phase 1.2 Final Accepted State
+3. Tenant Web Address Final State
+4. Platform Settings Final State
+5. Deferred / Future Items Recorded
+6. replit.md Changes
+7. History Documentation Changes
+8. Files Changed
+9. Typecheck / Runtime Result, if applicable
+10. Non-Regression Notes
+11. Recommendation Before Phase 1.3
+
+Do not start Phase 1.3.
