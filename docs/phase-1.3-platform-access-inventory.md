@@ -4,7 +4,7 @@
 >
 > **Truthful enforcement reality (today):** Current enforcement state is **UI/client-gated only**. Server-side platform RBAC enforcement is **not implemented**. There is **no scheduler**, **no backend enforcement currently active**, **no PIM/PAM**, **no SSO/SCIM**, and **no compliance-evidence automation**. Every "future" item below is a recommendation, not an existing capability.
 
-Cross-referenced from [`replit.md`](../replit.md) and [`docs/platform-operations-security-history.md`](platform-operations-security-history.md).
+Cross-referenced from [`replit.md`](../replit.md) and [`docs/platform-operations-security-history.md`](platform-operations-security-history.md). The additive, non-enforcing governance model built on this inventory is documented in [`docs/phase-1.3-platform-team-governance-model.md`](phase-1.3-platform-team-governance-model.md) (Milestone 1).
 
 ---
 

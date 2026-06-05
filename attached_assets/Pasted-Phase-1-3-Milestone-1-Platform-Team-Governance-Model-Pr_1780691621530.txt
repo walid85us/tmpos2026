@@ -1,0 +1,410 @@
+Phase 1.3 — Milestone 1: Platform Team Governance Model
+
+Project:
+TM POS2026 — Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Current accepted checkpoint:
+
+* Phase 1.2 finalized / accepted.
+* Tenant Web Address accepted.
+* Platform Settings Control Center accepted as-is for now.
+* Phase 1.3 Planning Pass completed.
+* Phase 1.3 Milestone 0 — Current Access Inventory / Server-Side Enforcement Classification completed and accepted.
+* GitHub backup after Milestone 0 completed successfully.
+* origin/main is up to date.
+* Phase 1.3 Milestone 1 is now the only authorized workstream.
+
+Objective:
+Implement Phase 1.3 Milestone 1 only: the Platform Team Governance Model.
+
+This milestone should create the foundational governance model, types, constants, and pure helper logic needed for later milestones.
+
+Do not build the Platform Team Directory UI yet.
+Do not build Temporary Access / PIM workflows yet.
+Do not build Access Review workflows yet.
+Do not build sensitive-action reason prompts yet.
+Do not build server-side enforcement yet.
+Do not change current permission behavior.
+
+Think step by step before implementing.
+
+==================================================
+ROLE STACK — ACT UPON IT
+========================
+
+Act as:
+
+* Senior Platform Operations Architect
+* Senior Security Architect
+* Senior IAM Specialist
+* Access Governance Analyst
+* System Administrator
+* Compliance / Audit Readiness Architect
+* PIM / PAM Governance Specialist
+* SaaS Operations Specialist
+* Firebase / Firestore Security Rules Architect
+* Senior React / TypeScript Engineer
+* QA Gatekeeper
+* Systems Thinker
+* Side Auditor
+
+==================================================
+STRICT SCOPE — MILESTONE 1 ONLY
+===============================
+
+Allowed work:
+
+1. Create a focused platform governance model helper/module.
+2. Define additive TypeScript types for future platform governance.
+3. Define role catalog metadata using current roles only, plus future-readiness labels where safe.
+4. Define sensitive / privileged action categories based on the Milestone 0 inventory.
+5. Define future temporary access grant types without implementing the workflow.
+6. Define future access review record types without implementing the workflow.
+7. Define pure helper functions for deriving governance labels, stale-access hints, temporary-access state, and role-review eligibility.
+8. Add documentation describing the Milestone 1 model.
+9. Add lightweight internal tests or type-safe validation only if the project already has a safe pattern for this.
+10. Run the safest validation command available.
+
+Preferred file:
+
+* src/owner/platformTeamGovernance.ts
+
+Documentation target:
+
+* docs/phase-1.3-platform-access-inventory.md
+
+or, if cleaner:
+
+* docs/phase-1.3-platform-team-governance-model.md
+
+If a new doc is created, cross-reference it from the existing Phase 1.3 inventory doc and/or platform operations/security history doc.
+
+==================================================
+ABSOLUTE DO-NOT-CHANGE LIST
+===========================
+
+Do not change:
+
+* app behavior
+* current permission behavior
+* platformPermissionMeets behavior
+* explainAccessDecision behavior
+* hasPlatformPermission behavior
+* hasEffectiveFeatureAccess behavior
+* hasSectionAccess behavior
+* hasActionAccess behavior
+* AccessContext.canAccess behavior
+* platform role defaults
+* platform permission thresholds
+* dependency auto-sync logic
+* tenant/store accessConfig.ts behavior
+* Store Permissions Matrix
+* tenant provisioning
+* Tenant Web Address
+* Platform Settings Control Center
+* Command Center Intelligence
+* Audit Investigation Center
+* Support Queue / SLA / Macro
+* Escalation operating model
+* Add-on Governance
+* Shipping
+* paid override invoice workflow
+* server PII logging
+* routes
+* Firestore rules
+* server/index.ts enforcement logic
+
+Do not add:
+
+* new UI screens
+* new cards
+* new buttons
+* new drawers
+* new route entries
+* new localStorage/sessionStorage persistence
+* real PIM workflow
+* real access review workflow
+* reason prompts
+* approval flows
+* server middleware
+* Firestore security rules
+* fake server-side enforcement
+* fake automated expiration
+* fake PAM vault
+* fake SSO/SCIM
+* fake compliance evidence automation
+
+==================================================
+MODEL REQUIREMENTS
+==================
+
+Create a governance model that is additive and future-safe.
+
+The model should support future milestones without changing current behavior.
+
+1. Current Role Catalog
+
+Define metadata for the current platform roles:
+
+* system_owner
+* support_admin
+* billing_admin
+* operations_admin
+* security_admin
+
+For each role, define:
+
+* role id
+* display label
+* plain-English purpose
+* governance category
+* whether it is system-protected
+* whether it should be included in access review
+* whether it may be eligible for future temporary elevation
+* recommended review cadence label
+* risk posture label
+* notes / warnings
+
+Important:
+System Owner must remain protected and must not become downgradeable through this milestone.
+
+Do not introduce active behavior for new roles.
+
+You may document future role concepts such as Read-only Auditor or Platform Admin only as future/deferred concepts, not active implemented roles.
+
+2. Governance Categories
+
+Define clear governance categories such as:
+
+* system_owner
+* platform_admin_ops
+* support_operations
+* billing_operations
+* security_audit
+* future_read_only_audit
+* future_temporary_elevation
+
+Use these as labels only.
+
+They must not alter access behavior.
+
+3. Privileged / Sensitive Action Categories
+
+Define a typed catalog of privileged action categories based on Milestone 0, such as:
+
+* platform_role_change
+* platform_sub_permission_override
+* platform_feature_level_override
+* temporary_access_grant
+* temporary_access_expiry
+* access_review_completion
+* tenant_lifecycle_change
+* billing_subscription_change
+* addon_governance_change
+* platform_settings_change
+* provisioning_lifecycle_change
+* support_admin_intervention
+* audit_security_sensitive_action
+* paid_override_action
+
+For each category, define:
+
+* display label
+* description
+* recommended future enforcement tier
+* reason required recommendation
+* audit recommended
+* PIM recommended
+* future server validation need
+* implementation status: future/deferred unless already real today
+
+Do not wire these to live behavior yet.
+
+4. Temporary Access Types
+
+Define types only for future use.
+
+Suggested shape:
+
+TemporaryAccessGrant:
+
+* id
+* subjectUserId
+* subjectName
+* subjectEmail
+* baseRoleId
+* elevatedRoleId or elevatedPermissionScope
+* requestedBy
+* approvedBy
+* reason
+* startsAt
+* expiresAt
+* status
+* createdAt
+* updatedAt
+* source
+* notes
+
+TemporaryAccessStatus:
+
+* requested
+* active
+* expired
+* revoked
+* denied
+* cancelled
+
+Add pure helper functions such as:
+
+* getTemporaryAccessStatus(grant, now)
+* isTemporaryAccessActive(grant, now)
+* isTemporaryAccessExpired(grant, now)
+* getTemporaryAccessDisplayLabel(grant, now)
+
+No persistence.
+No UI.
+No automatic revocation.
+No scheduler.
+Derived/lazy status only.
+
+5. Access Review Types
+
+Define types only for future use.
+
+Suggested shape:
+
+AccessReviewRecord:
+
+* id
+* reviewPeriod
+* reviewerId
+* reviewerName
+* reviewedSubjectId
+* reviewedSubjectName
+* reviewedRoleId
+* reviewStatus
+* reviewedAt
+* findings
+* actionRequired
+* notes
+* createdAt
+* updatedAt
+
+AccessReviewStatus:
+
+* pending
+* reviewed_no_change
+* reviewed_change_required
+* escalated
+* overdue
+* deferred
+
+Add pure helper functions such as:
+
+* isAccessReviewOverdue(record, now)
+* getAccessReviewStatusLabel(record, now)
+* shouldIncludeRoleInAccessReview(roleId)
+* getRecommendedReviewCadence(roleId)
+
+No workflow.
+No UI.
+No persistence.
+
+6. Stale Access / Risk Helpers
+
+Add pure helper functions only.
+
+Examples:
+
+* getRoleRiskPosture(roleId)
+* getRoleGovernanceSummary(roleId)
+* shouldRequireReasonForPrivilegedAction(actionCategory)
+* shouldAuditPrivilegedAction(actionCategory)
+* shouldRecommendPimForAction(actionCategory)
+* getFutureServerEnforcementRecommendation(actionCategory)
+
+These helpers should return labels/recommendations only.
+
+They must not block actions.
+They must not change current permissions.
+
+7. Server-Side Enforcement Boundary Labels
+
+Based on Milestone 0 tiers, define safe labels such as:
+
+* ui_only_currently
+* future_server_validation_recommended
+* future_server_validation_strongly_required
+* future_privileged_pim_controlled_server_action
+
+Use these labels for documentation and future planning only.
+
+Do not implement backend enforcement.
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==========================
+
+Update or create documentation that explains:
+
+1. What Milestone 1 added.
+2. That the governance model is additive and non-enforcing today.
+3. That current platform access remains UI/client-gated.
+4. That server-side enforcement remains future work.
+5. That PIM/access review workflows are not active yet.
+6. That no automated expiration exists.
+7. That helper outputs are advisory labels only.
+8. How this prepares Milestone 2, Milestone 3, and Milestone 4.
+
+Use truthful labels:
+
+* advisory
+* future/deferred
+* no active enforcement
+* no scheduler
+* no persistence
+* no workflow yet
+* UI/client-gated only
+
+==================================================
+VALIDATION
+==========
+
+After implementation:
+
+1. Run the safest validation command available, such as:
+   npm run check
+   or:
+   npm run lint
+
+2. If the same 12 baseline TypeScript errors remain, report clearly:
+
+   * whether they are pre-existing
+   * whether any new errors were introduced
+   * whether any errors are in the files touched by this milestone
+
+3. Report git diff summary.
+
+Do not run npm run backup:github yet.
+Backup happens only after manual QA acceptance.
+
+==================================================
+OUTPUT FORMAT
+=============
+
+Reply with:
+
+1. Milestone 1 Summary
+2. Files Changed
+3. Governance Model Added
+4. Temporary Access / PIM Types Added
+5. Access Review Types Added
+6. Helper Functions Added
+7. Documentation Updated
+8. Non-Regression Confirmation
+9. Validation Result
+10. Risks / Follow-Up Items
+11. Final Status
+
+Do not mark Phase 1.3 complete.
+Do not start Milestone 2.
