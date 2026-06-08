@@ -1,0 +1,386 @@
+Phase 1.3 — Milestone 2: Platform Team Directory + Role Matrix UI
+
+Project:
+TM POS2026 — Multi-Tenant Repair / POS SaaS in Replit with Firebase/Firestore
+
+Current accepted checkpoint:
+
+* Phase 1.2 finalized / accepted.
+* Tenant Web Address accepted.
+* Platform Settings Control Center accepted as-is for now.
+* Phase 1.3 Planning Pass completed.
+* Phase 1.3 Milestone 0 — Current Access Inventory / Server-Side Enforcement Classification completed, accepted, and backed up.
+* Phase 1.3 Milestone 1 — Platform Team Governance Model completed, accepted, and backed up.
+* GitHub origin/main is up to date at checkpoint 3d0820e.
+* Phase 1.3 Milestone 2 is now the only authorized workstream.
+
+Objective:
+Implement Phase 1.3 Milestone 2 only: mature the Platform Team Directory and Role Matrix UI using the advisory governance model created in Milestone 1.
+
+This milestone should improve visibility, explainability, and governance readiness for platform team access, while preserving the current permission resolver and current permission behavior.
+
+Think step by step before implementing.
+
+==================================================
+ROLE STACK — ACT UPON IT
+========================
+
+Act as:
+
+* Senior Platform Operations Architect
+* Senior Security Architect
+* Senior IAM Specialist
+* Access Governance Analyst
+* System Administrator
+* Compliance / Audit Readiness Architect
+* PIM / PAM Governance Specialist
+* SaaS Operations Specialist
+* Firebase / Firestore Security Rules Architect
+* Senior React / TypeScript Engineer
+* Senior UI/UX Engineer for SaaS Admin Consoles
+* QA Gatekeeper
+* Systems Thinker
+* Side Auditor
+
+==================================================
+STRICT SCOPE — MILESTONE 2 ONLY
+===============================
+
+Allowed work:
+
+1. Enhance the existing Platform Team / Team Management UI.
+2. Consume the Milestone 1 advisory governance model in the UI.
+3. Improve the Platform Team Directory with governance metadata.
+4. Improve role visibility and role explanation.
+5. Improve access-level summary display.
+6. Improve status and access posture readability.
+7. Add advisory labels for review cadence, risk posture, system protection, and future temporary-elevation eligibility.
+8. Improve or preserve the existing Global Permissions Matrix and Effective Access Preview.
+9. Add clear truth labels that current platform gating remains UI/client-side only.
+10. Update documentation for Milestone 2.
+11. Run the safest validation command available.
+
+Primary likely files:
+
+* src/pages/owner/TeamManagementPage.tsx
+* src/owner/platformTeamGovernance.ts only if a small helper export is needed
+* mock data/types only if strictly needed for additive optional display fields
+* docs/phase-1.3-platform-team-governance-model.md
+* docs/platform-operations-security-history.md
+
+Do not touch files outside this scope unless absolutely necessary, and explain why.
+
+==================================================
+ABSOLUTE DO-NOT-CHANGE LIST
+===========================
+
+Do not change:
+
+* current permission behavior
+* platformPermissionMeets behavior
+* explainAccessDecision behavior
+* hasPlatformPermission behavior
+* hasEffectiveFeatureAccess behavior
+* hasSectionAccess behavior
+* hasActionAccess behavior
+* AccessContext.canAccess behavior
+* platform role defaults
+* platform permission thresholds
+* dependency auto-sync logic
+* tenant/store accessConfig.ts behavior
+* Store Permissions Matrix behavior
+* tenant provisioning
+* Tenant Web Address
+* Platform Settings Control Center
+* Command Center Intelligence
+* Audit Investigation Center
+* Support Queue / SLA / Macro
+* Escalation operating model
+* Add-on Governance
+* Shipping
+* paid override invoice workflow
+* server PII logging
+* routes
+* Firestore rules
+* server/index.ts enforcement logic
+
+Do not add:
+
+* Temporary Access / PIM workflow
+* Access Review workflow
+* sensitive-action reason prompts
+* approval flows
+* server middleware
+* Firestore security rules
+* fake server-side enforcement
+* fake automated expiration
+* fake PAM vault
+* fake SSO/SCIM
+* fake compliance evidence automation
+* new route entries
+* new persistent storage
+* new localStorage/sessionStorage stores for governance workflows
+
+==================================================
+MILESTONE 2 PRODUCT INTENT
+==========================
+
+The user needs a more mature Platform Team Governance UI without overbuilding.
+
+This milestone should make the existing Team Management / Platform Team area feel like a professional SaaS owner governance console.
+
+It should help answer:
+
+* Who is on the platform team?
+* What role do they have?
+* What is their access posture?
+* Is the role protected?
+* Should the role be included in future access reviews?
+* What review cadence is recommended?
+* Is temporary elevation future-eligible?
+* Which permissions are sensitive?
+* Which access is UI/client-gated only today?
+* What is advisory/future versus active today?
+
+Do not imply server-side enforcement exists today.
+
+==================================================
+UI REQUIREMENTS
+===============
+
+1. Platform Team Directory Enhancements
+
+Enhance the existing platform team directory/table/cards.
+
+For each platform team member, display as available:
+
+* name
+* email
+* role label
+* status
+* last activity or fallback text such as “Not recorded”
+* governance category
+* risk posture
+* recommended review cadence
+* access review inclusion recommendation
+* system-protected badge where applicable
+* future temporary-elevation eligibility label
+* access-level summary
+
+Use clear SaaS language.
+
+Example labels:
+
+* System Protected
+* Included in Future Access Review
+* Temporary Elevation Eligible — Future Workflow
+* Advisory Only
+* UI-Gated Today
+* Server Enforcement Future
+
+If data is missing, use truthful fallback text, not fake data.
+
+Examples:
+
+* “Last activity not recorded”
+* “Review workflow not active yet”
+* “Temporary access workflow future/deferred”
+
+2. Role Summary / Governance Cards
+
+Add a concise role summary section if it improves clarity.
+
+For each current active role:
+
+* System Owner
+* Support Admin
+* Billing Admin
+* Operations Admin
+* Security Admin
+
+Show:
+
+* role label
+* purpose
+* governance category
+* risk posture
+* review cadence recommendation
+* system protection status
+* temporary elevation eligibility
+* notes/warnings
+
+Do not introduce active roles such as Read-only Auditor or Platform Admin.
+
+Future role concepts may be shown only in a clearly separated “Future / Deferred Role Concepts” area, if appropriate.
+
+3. Role Matrix UI Preservation
+
+Preserve the existing Global Permissions Matrix.
+
+You may improve readability with:
+
+* clearer section headings
+* sensitive sub-permission badges
+* advisory enforcement tier labels
+* helper text explaining thresholds
+* tooltip/copy explaining UI/client-gated status
+
+But do not change the underlying permission levels, thresholds, dependency auto-sync, or resolver logic.
+
+4. Effective Access Preview Preservation
+
+Preserve the existing Effective Access Preview.
+
+You may improve clarity with:
+
+* governance summary labels
+* source explanation
+* denied prerequisite explanation
+* sensitive access indicators
+* advisory-only labels
+
+But do not alter the resolver output or access decision behavior.
+
+5. Truthful Banner / Notice
+
+Add a clear notice in the Team Management / Platform Team Governance area:
+
+“Current platform access controls are UI/client-gated in this phase. Server-side enforcement, automated access review, and temporary access workflows are future/deferred.”
+
+Use professional wording.
+
+The notice should not be alarming, but it must be truthful.
+
+6. Empty / Missing Data States
+
+Handle missing data safely:
+
+* missing last activity
+* unknown role
+* missing governance catalog entry
+* missing review status
+* missing access summary
+
+Use graceful fallbacks and do not crash.
+
+7. Modern SaaS UI Quality
+
+Use a modern, clean SaaS admin-console layout consistent with the existing app.
+
+Prefer:
+
+* compact badges
+* clear cards
+* readable tables
+* section headers
+* short explanatory helper text
+* no clutter
+* no fake automation claims
+
+Preserve existing visual style.
+
+==================================================
+ROLE ASSIGNMENT GUARDRAIL
+=========================
+
+Do not implement live role assignment changes in this milestone unless an existing safe pattern already exists and can be preserved without changing permission behavior.
+
+If the current UI already has role assignment behavior, preserve it and add advisory context only.
+
+If role assignment does not already exist, do not add active role-changing behavior yet.
+
+You may show role assignment readiness labels or future/deferred notes only.
+
+No new role mutation workflow.
+No reason prompt yet.
+No PIM yet.
+No access review yet.
+
+==================================================
+GOVERNANCE MODEL USAGE
+======================
+
+Use the Milestone 1 module as advisory UI input.
+
+Use helpers such as:
+
+* getRoleRiskPosture
+* getRoleGovernanceSummary
+* shouldIncludeRoleInAccessReview
+* getRecommendedReviewCadence
+* shouldRequireReasonForPrivilegedAction
+* shouldAuditPrivilegedAction
+* shouldRecommendPimForAction
+* getFutureServerEnforcementRecommendation
+
+Only use these for display labels, badges, summaries, and helper text.
+
+Do not use these helpers to block or allow actions.
+
+==================================================
+DOCUMENTATION REQUIREMENTS
+==========================
+
+Update documentation to explain:
+
+1. What Milestone 2 added.
+2. That the UI consumes advisory governance labels only.
+3. That no permission behavior changed.
+4. That no PIM/access review workflow is active yet.
+5. That no server-side enforcement was added.
+6. That current platform gating remains UI/client-gated only.
+7. That role assignment remains unchanged or future/deferred, depending on current behavior.
+8. What remains for Milestone 3 and Milestone 4.
+
+Use truthful labels:
+
+* advisory
+* future/deferred
+* UI/client-gated only
+* no active workflow
+* no server-side enforcement
+* no scheduler
+* no persistence
+
+==================================================
+VALIDATION
+==========
+
+After implementation:
+
+1. Run the safest validation command available, such as:
+   npm run lint
+   or:
+   npm run check
+
+2. If the same 12 baseline TypeScript errors remain, report clearly:
+
+   * whether they are pre-existing
+   * whether any new errors were introduced
+   * whether any errors are in the files touched by this milestone
+
+3. Report git diff summary.
+
+Do not run npm run backup:github yet.
+Backup happens only after manual QA acceptance.
+
+==================================================
+OUTPUT FORMAT
+=============
+
+Reply with:
+
+1. Milestone 2 Summary
+2. Files Changed
+3. Platform Team Directory Enhancements
+4. Role Summary / Governance UI Added
+5. Role Matrix / Effective Access Preview Preservation
+6. Truthful Enforcement / Future-State Labels Added
+7. Documentation Updated
+8. Non-Regression Confirmation
+9. Validation Result
+10. Risks / Follow-Up Items
+11. Final Status
+
+Do not mark Phase 1.3 complete.
+Do not start Milestone 3.

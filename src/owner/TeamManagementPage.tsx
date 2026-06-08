@@ -6,6 +6,17 @@ import { platformTeamMembers, type PlatformTeamStatus } from './mockData';
 import { pushPlatformAudit } from './platformOpsAudit';
 import type { PermissionLevel } from '../types';
 import type { Role } from '../context/accessConfig';
+// Phase 1.3 — Milestone 2: consume the Milestone 1 ADVISORY governance model.
+// Everything imported below produces display LABELS / SUMMARIES only — it never
+// blocks or allows an action and does not touch the permission resolver.
+import {
+  PLATFORM_ROLE_CATALOG,
+  getRoleGovernanceSummary,
+  FUTURE_ROLE_CONCEPTS,
+  PLATFORM_GOVERNANCE_MODEL_STATUS,
+  isPlatformRoleId,
+  type PlatformRoleId,
+} from './platformTeamGovernance';
 import {
   PLATFORM_FEATURE_GROUPS,
   PLATFORM_PERMISSION_LEVELS,
@@ -39,7 +50,18 @@ const MATRIX_ROLES: Role[] = [
   'security_admin',
 ];
 
-type TeamMember = { id: string; name: string; email: string; role: string; status: PlatformTeamStatus };
+// `lastActiveAt` / `invitedAt` are ADDITIVE optional display fields carried
+// through from the mock directory. Members added in-session don't have them and
+// fall back to truthful "not recorded" copy — never fabricated activity.
+type TeamMember = {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+  status: PlatformTeamStatus;
+  lastActiveAt?: string | null;
+  invitedAt?: string;
+};
 
 const STATUS_BADGE_STYLES: Record<PlatformTeamStatus, string> = {
   invited: 'bg-amber-400/10 text-amber-700 border-amber-400/20',
@@ -47,6 +69,47 @@ const STATUS_BADGE_STYLES: Record<PlatformTeamStatus, string> = {
   suspended: 'bg-orange-400/10 text-orange-700 border-orange-400/20',
   disabled: 'bg-slate-200 text-slate-600 border-slate-300',
 };
+
+// ---------------------------------------------------------------------------
+// Phase 1.3 — Milestone 2 advisory-display helpers (LABELS ONLY).
+//
+// None of the helpers below change any access decision. They map a directory
+// member's role string onto the Milestone 1 governance catalog so the UI can
+// surface risk posture, review cadence, system protection, and future
+// temporary-elevation eligibility as advisory badges. Unknown / custom roles
+// resolve to `null` and render truthful fallbacks instead of fake data.
+// ---------------------------------------------------------------------------
+
+// Reverse lookup: governance-catalog display label (lowercased) -> platform role id.
+const PLATFORM_ROLE_ID_BY_LABEL: Record<string, PlatformRoleId> = (() => {
+  const map: Record<string, PlatformRoleId> = {};
+  (Object.keys(PLATFORM_ROLE_CATALOG) as PlatformRoleId[]).forEach(id => {
+    map[PLATFORM_ROLE_CATALOG[id].displayLabel.trim().toLowerCase()] = id;
+  });
+  return map;
+})();
+
+/** Resolve a stored role string (id OR display label) to a catalog role id, else null. */
+function resolvePlatformRoleId(role: string | null | undefined): PlatformRoleId | null {
+  if (!role) return null;
+  if (isPlatformRoleId(role)) return role;
+  return PLATFORM_ROLE_ID_BY_LABEL[role.trim().toLowerCase()] ?? null;
+}
+
+// Advisory risk-posture badge colors (display only; severity ordering matches
+// the governance catalog's RiskPosture labels).
+const RISK_POSTURE_BADGE_STYLE: Record<string, string> = {
+  Critical: 'bg-red-500/10 text-red-600 border-red-500/20',
+  High: 'bg-orange-400/10 text-orange-700 border-orange-400/20',
+  Elevated: 'bg-amber-400/10 text-amber-700 border-amber-400/20',
+  Moderate: 'bg-slate-100 text-slate-500 border-slate-200',
+};
+
+/** Truthful relative/explicit last-activity label. Never fabricates a value. */
+function formatLastActivity(lastActiveAt: string | null | undefined): string {
+  if (!lastActiveAt) return 'Last activity not recorded';
+  return lastActiveAt;
+}
 
 export default function TeamManagementPage() {
   const { session, platformRolesState = [], addPlatformRole, updatePlatformRole } = useAccess();
@@ -59,7 +122,15 @@ export default function TeamManagementPage() {
   const [newRole, setNewRole] = useState({ name: '', description: '', status: 'active' as string, permissions: [] as string[] });
 
   const [team, setTeam] = useState<TeamMember[]>(() =>
-    platformTeamMembers.map(m => ({ id: m.id, name: m.name, email: m.email, role: m.role, status: m.status }))
+    platformTeamMembers.map(m => ({
+      id: m.id,
+      name: m.name,
+      email: m.email,
+      role: m.role,
+      status: m.status,
+      lastActiveAt: m.lastActiveAt,
+      invitedAt: m.invitedAt,
+    }))
   );
 
   const [activityLogs, setActivityLogs] = useState([
@@ -122,13 +193,67 @@ export default function TeamManagementPage() {
     }));
   };
 
+  // Phase 1.3 — Milestone 2: advisory access-posture badge cluster for a member.
+  // Pure display. Unknown / custom roles get a truthful fallback, never fake data.
+  const renderAccessPostureBadges = (roleId: PlatformRoleId | null) => {
+    if (!roleId) {
+      return (
+        <div className="flex flex-wrap gap-1.5">
+          <span
+            title="This role is not part of the platform governance catalog (e.g. a custom role). Advisory governance metadata is unavailable for it."
+            className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border bg-slate-100 text-slate-500 border-slate-200"
+          >
+            Custom / non-catalog role — no governance metadata
+          </span>
+          <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border bg-indigo-400/10 text-indigo-700 border-indigo-400/20">
+            UI-Gated Today
+          </span>
+        </div>
+      );
+    }
+    const gov = getRoleGovernanceSummary(roleId);
+    return (
+      <div className="flex flex-wrap gap-1.5">
+        <span className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border ${RISK_POSTURE_BADGE_STYLE[gov.riskPostureLabel] || RISK_POSTURE_BADGE_STYLE.Moderate}`}>
+          Risk: {gov.riskPostureLabel}
+        </span>
+        <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border bg-slate-100 text-slate-500 border-slate-200">
+          Review: {gov.reviewCadenceLabel}
+        </span>
+        {gov.systemProtected && (
+          <span
+            title="System-protected role — locked at Full Access and never downgraded or reconciled by the resolver."
+            className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border bg-violet-400/10 text-violet-700 border-violet-400/20"
+          >
+            System Protected
+          </span>
+        )}
+        <span className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border ${gov.includeInAccessReview ? 'bg-sky-400/10 text-sky-700 border-sky-400/20' : 'bg-slate-100 text-slate-500 border-slate-200'}`}>
+          {gov.includeInAccessReview ? 'Included in Future Access Review' : 'Not in Access-Review Scope'}
+        </span>
+        <span
+          title="Future workflow — no temporary-elevation / PIM workflow exists today. Eligibility is an advisory planning label only."
+          className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border ${gov.eligibleForTemporaryElevation ? 'bg-teal-400/10 text-teal-700 border-teal-400/20' : 'bg-slate-100 text-slate-400 border-slate-200'}`}
+        >
+          {gov.eligibleForTemporaryElevation ? 'Temp Elevation Eligible — Future' : 'No Temp Elevation'}
+        </span>
+        <span
+          title="Current platform access is enforced in the UI/client only. Server-side enforcement is future/deferred."
+          className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border bg-indigo-400/10 text-indigo-700 border-indigo-400/20"
+        >
+          UI-Gated Today
+        </span>
+      </div>
+    );
+  };
+
   const renderTeam = () => (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <div className="relative">
           <span className="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 text-sm">search</span>
-          <input 
-            type="text" 
+          <input
+            type="text"
             placeholder="Search team members..."
             className="pl-11 pr-6 py-3 bg-white/80 backdrop-blur-xl rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 text-sm font-bold text-slate-900 w-64 shadow-sm"
             value={searchQuery}
@@ -136,7 +261,7 @@ export default function TeamManagementPage() {
           />
         </div>
         {session?.role === 'system_owner' && (
-          <button 
+          <button
             onClick={() => setShowAddModal(true)}
             className="px-6 py-3 bg-primary text-white font-black text-xs rounded-2xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2"
           >
@@ -146,27 +271,53 @@ export default function TeamManagementPage() {
         )}
       </div>
 
+      <p className="text-[11px] font-medium text-slate-500 leading-relaxed max-w-3xl -mt-2">
+        Governance posture below (risk, review cadence, system protection, temporary-elevation eligibility) is{' '}
+        <span className="font-black text-slate-600">advisory</span> and derived from the Phase 1.3 governance model. These
+        labels do not change any access decision — current platform access is UI/client-gated only.
+      </p>
+
       <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
-        <table className="w-full text-left border-collapse">
+        <div className="overflow-x-auto">
+        <table className="w-full text-left border-collapse min-w-[1040px]">
           <thead>
             <tr className="border-b border-slate-100 bg-slate-50/50">
-              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Name</th>
-              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Email</th>
-              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Role</th>
+              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Member</th>
+              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Role &amp; Governance</th>
+              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Access Posture <span className="text-slate-300 normal-case tracking-normal">(advisory)</span></th>
+              <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Last Activity</th>
               <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest">Status</th>
               <th className="px-8 py-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
-            {team.filter(u => u.name.toLowerCase().includes(searchQuery.toLowerCase()) || u.email.toLowerCase().includes(searchQuery.toLowerCase())).map((user) => (
-              <tr key={user.id} className="hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0">
+            {team.filter(u => u.name.toLowerCase().includes(searchQuery.toLowerCase()) || u.email.toLowerCase().includes(searchQuery.toLowerCase())).map((user) => {
+              const roleId = resolvePlatformRoleId(user.role);
+              const meta = roleId ? PLATFORM_ROLE_CATALOG[roleId] : null;
+              const gov = roleId ? getRoleGovernanceSummary(roleId) : null;
+              return (
+              <tr key={user.id} className="hover:bg-slate-50/50 transition-colors border-b border-slate-50 last:border-0 align-top">
                 <td className="px-8 py-6">
                   <p className="text-sm font-black text-primary">{user.name}</p>
+                  <p className="text-xs font-bold text-slate-500 mt-0.5">{user.email}</p>
                 </td>
-                <td className="px-8 py-6 text-sm font-bold text-slate-600">{user.email}</td>
                 <td className="px-8 py-6">
-                  <span className="px-3 py-1 bg-slate-100 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-lg">
+                  <span
+                    title={meta?.purpose || 'Role is not part of the platform governance catalog.'}
+                    className="inline-block px-3 py-1 bg-slate-100 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-lg"
+                  >
                     {user.role}
+                  </span>
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1.5">
+                    {gov ? gov.governanceCategoryLabel : 'Governance category not catalogued'}
+                  </p>
+                </td>
+                <td className="px-8 py-6">
+                  {renderAccessPostureBadges(roleId)}
+                </td>
+                <td className="px-8 py-6">
+                  <span className={`text-xs font-bold ${user.lastActiveAt ? 'text-slate-600' : 'text-slate-400 italic'}`}>
+                    {formatLastActivity(user.lastActiveAt)}
                   </span>
                 </td>
                 <td className="px-8 py-6">
@@ -175,7 +326,7 @@ export default function TeamManagementPage() {
                   </span>
                 </td>
                 <td className="px-8 py-6 text-right">
-                  <button 
+                  <button
                     onClick={() => setEditingMember(user)}
                     className="p-2 hover:bg-slate-100 text-slate-400 rounded-xl transition-colors"
                   >
@@ -183,15 +334,114 @@ export default function TeamManagementPage() {
                   </button>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   );
 
+  // Phase 1.3 — Milestone 2: read-only governance summary for the 5 CURRENT
+  // platform roles, plus a clearly separated Future / Deferred Role Concepts
+  // area. Advisory display only — introduces no new active roles and changes no
+  // role defaults, thresholds, or resolver behavior.
+  const renderRoleGovernanceCatalog = () => {
+    const catalogIds = Object.keys(PLATFORM_ROLE_CATALOG) as PlatformRoleId[];
+    return (
+      <div className="space-y-6" data-testid="role-governance-catalog">
+        <div>
+          <h2 className="text-2xl font-black text-primary tracking-tight">Platform Role Catalog — Governance</h2>
+          <p className="text-slate-500 text-sm font-medium mt-1 max-w-3xl">
+            Advisory governance summary for the five current platform roles. Risk posture, review cadence, system
+            protection, and temporary-elevation eligibility are <span className="font-black">advisory labels</span> from
+            the Phase 1.3 governance model — they do not change role defaults or permission decisions.
+          </p>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+          {catalogIds.map(id => {
+            const meta = PLATFORM_ROLE_CATALOG[id];
+            const gov = getRoleGovernanceSummary(id);
+            return (
+              <div key={id} className="bg-white/80 backdrop-blur-xl p-7 rounded-[2rem] border border-slate-200 shadow-sm flex flex-col">
+                <div className="flex items-start justify-between gap-3 mb-3">
+                  <h3 className="text-lg font-black text-primary leading-tight">{meta.displayLabel}</h3>
+                  {meta.systemProtected && (
+                    <span
+                      title="System-protected — locked at Full Access; never downgraded or reconciled."
+                      className="shrink-0 px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border bg-violet-400/10 text-violet-700 border-violet-400/20"
+                    >
+                      System Protected
+                    </span>
+                  )}
+                </div>
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">{gov.governanceCategoryLabel}</p>
+                <p className="text-xs font-medium text-slate-500 leading-relaxed mb-4">{meta.purpose}</p>
+                <div className="flex flex-wrap gap-1.5 mb-4">
+                  <span className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border ${RISK_POSTURE_BADGE_STYLE[gov.riskPostureLabel] || RISK_POSTURE_BADGE_STYLE.Moderate}`}>
+                    Risk: {gov.riskPostureLabel}
+                  </span>
+                  <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border bg-slate-100 text-slate-500 border-slate-200">
+                    Review: {gov.reviewCadenceLabel}
+                  </span>
+                  <span className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border ${gov.includeInAccessReview ? 'bg-sky-400/10 text-sky-700 border-sky-400/20' : 'bg-slate-100 text-slate-500 border-slate-200'}`}>
+                    {gov.includeInAccessReview ? 'In Future Access Review' : 'Not in Review Scope'}
+                  </span>
+                  <span
+                    title="Future workflow — no temporary-elevation / PIM workflow exists today."
+                    className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border ${gov.eligibleForTemporaryElevation ? 'bg-teal-400/10 text-teal-700 border-teal-400/20' : 'bg-slate-100 text-slate-400 border-slate-200'}`}
+                  >
+                    {gov.eligibleForTemporaryElevation ? 'Temp Elevation Eligible — Future' : 'No Temp Elevation'}
+                  </span>
+                </div>
+                {meta.notes && (
+                  <p className="text-[11px] font-medium text-amber-700 bg-amber-400/10 border border-amber-400/20 rounded-xl px-3 py-2 leading-relaxed mb-3">
+                    <span className="material-symbols-outlined text-[13px] align-middle mr-1">info</span>
+                    {meta.notes}
+                  </p>
+                )}
+                <p className="mt-auto text-[8px] font-black uppercase tracking-widest text-indigo-500">
+                  UI-Gated Today · Server Enforcement Future
+                </p>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="bg-slate-50/70 border border-slate-200 rounded-[2rem] p-7" data-testid="future-role-concepts">
+          <h3 className="text-sm font-black text-slate-700 uppercase tracking-widest flex items-center gap-2 mb-1">
+            <span className="material-symbols-outlined text-base text-slate-400">schedule</span>
+            Future / Deferred Role Concepts
+          </h3>
+          <p className="text-xs font-medium text-slate-500 mb-5 max-w-3xl">
+            These are documented concepts only. They are <span className="font-black">not active roles</span>, are not
+            wired into the resolver, defaults, or the permissions matrix, and cannot be assigned.
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {FUTURE_ROLE_CONCEPTS.map(concept => (
+              <div key={concept.id} className="bg-white/70 border border-dashed border-slate-300 rounded-2xl p-5">
+                <div className="flex items-center justify-between gap-2 mb-1.5">
+                  <h4 className="text-sm font-black text-slate-600">{concept.displayLabel}</h4>
+                  <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border bg-slate-100 text-slate-500 border-slate-200">
+                    Future / Deferred
+                  </span>
+                </div>
+                <p className="text-[11px] font-medium text-slate-500 leading-relaxed">{concept.purpose}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="border-t border-slate-100" />
+      </div>
+    );
+  };
+
   const renderRoles = () => (
-    <div className="space-y-6">
+    <div className="space-y-8">
+      {renderRoleGovernanceCatalog()}
+      <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-black text-primary tracking-tight">Platform Roles</h2>
         {session?.role === 'system_owner' && (
@@ -240,6 +490,7 @@ export default function TeamManagementPage() {
             )}
           </div>
         ))}
+      </div>
       </div>
     </div>
   );
@@ -468,6 +719,10 @@ export default function TeamManagementPage() {
   const renderPreviewPanel = () => {
     if (!previewRole) return null;
     const roleLabel = PLATFORM_ROLE_DISPLAY_LABEL[previewRole];
+    // Phase 1.3 — Milestone 2: advisory governance summary for the previewed
+    // role. Display only — the access grid below is still produced solely by the
+    // unchanged resolver (explainAccessDecision / getPlatformFeatureLevel).
+    const previewGov = isPlatformRoleId(previewRole) ? getRoleGovernanceSummary(previewRole) : null;
     return (
       <div className="bg-indigo-50/60 border border-indigo-200/60 rounded-2xl p-5 mb-6">
         <div className="flex items-center justify-between gap-3 mb-3">
@@ -479,6 +734,33 @@ export default function TeamManagementPage() {
             <span className="material-symbols-outlined text-sm">close</span>
           </button>
         </div>
+        {previewGov && (
+          <div className="mb-4" data-testid="preview-governance-summary">
+            <div className="flex flex-wrap gap-1.5 mb-2">
+              <span className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border ${RISK_POSTURE_BADGE_STYLE[previewGov.riskPostureLabel] || RISK_POSTURE_BADGE_STYLE.Moderate}`}>
+                Risk: {previewGov.riskPostureLabel}
+              </span>
+              <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border bg-white text-indigo-700 border-indigo-200">
+                {previewGov.governanceCategoryLabel}
+              </span>
+              <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border bg-white text-indigo-700 border-indigo-200">
+                Review: {previewGov.reviewCadenceLabel}
+              </span>
+              {previewGov.systemProtected && (
+                <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border bg-violet-400/10 text-violet-700 border-violet-400/20">
+                  System Protected
+                </span>
+              )}
+              <span className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border ${previewGov.eligibleForTemporaryElevation ? 'bg-teal-400/10 text-teal-700 border-teal-400/20' : 'bg-slate-100 text-slate-400 border-slate-200'}`}>
+                {previewGov.eligibleForTemporaryElevation ? 'Temp Elevation Eligible — Future' : 'No Temp Elevation'}
+              </span>
+            </div>
+            <p className="text-[10px] font-medium text-indigo-500 leading-relaxed">
+              Governance labels are <span className="font-black">advisory</span> and do not change the access decision
+              below. Access is resolved by the unchanged permissions matrix and is UI/client-gated only.
+            </p>
+          </div>
+        )}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
           {PLATFORM_FEATURE_GROUPS.map(g => {
             const lvl = previewRole === 'system_owner' ? 'full' as PermissionLevel : getPlatformFeatureLevel(previewRole, g.key, overrides);
@@ -542,6 +824,7 @@ export default function TeamManagementPage() {
         <div className="text-xs font-medium text-amber-900 leading-relaxed space-y-1">
           <p><span className="font-black uppercase tracking-widest">Scope:</span> these permissions control System Owner / platform staff access. Tenant / store employee access is governed separately by the Store Permissions Matrix.</p>
           <p><span className="font-black uppercase tracking-widest">Limitations:</span> permissions are UI-enforced only — there is no server-side RBAC, PIM, or PAM in this phase. Server-side enforcement is planned for Phase 1.3. System Owner is always Full Access and is intentionally not editable.</p>
+          <p><span className="font-black uppercase tracking-widest">Governance:</span> <span className="font-black">sensitive</span> sub-permissions are flagged, and risk-posture / review-cadence / enforcement-tier guidance comes from the Phase 1.3 advisory governance model. These are display labels only and never change a permission level, threshold, or access decision.</p>
         </div>
       </div>
 
@@ -810,6 +1093,19 @@ export default function TeamManagementPage() {
           <div>
             <p className="text-xs font-black text-amber-900 uppercase tracking-widest">Authentication & SSO not enforced</p>
             <p className="text-xs font-medium text-amber-800 mt-1">This directory governs the in-app role display only. The application does not currently enforce SSO, MFA, or session policies for platform team members.</p>
+          </div>
+        </div>
+
+        {/* Phase 1.3 — Milestone 2: truthful platform-governance posture notice. */}
+        <div className="bg-indigo-50/70 border border-indigo-200/60 rounded-2xl p-4 flex items-start gap-3" data-testid="platform-governance-notice">
+          <span className="material-symbols-outlined text-indigo-600 text-lg mt-0.5">shield</span>
+          <div>
+            <p className="text-xs font-black text-indigo-900 uppercase tracking-widest">Platform Access Governance — Current Phase</p>
+            <p className="text-xs font-medium text-indigo-800 mt-1">
+              Current platform access controls are UI/client-gated in this phase. Server-side enforcement, automated
+              access review, and temporary access workflows are future/deferred.
+            </p>
+            <p className="text-[11px] font-medium text-indigo-500 mt-1.5 leading-relaxed">{PLATFORM_GOVERNANCE_MODEL_STATUS}</p>
           </div>
         </div>
 
