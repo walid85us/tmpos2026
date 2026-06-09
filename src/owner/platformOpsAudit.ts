@@ -93,7 +93,15 @@ export type PlatformAuditAction =
   | 'audit_event_marked_needs_review'
   | 'audit_event_dismissed'
   | 'audit_investigation_note_added'
-  | 'audit_investigation_note_deleted';
+  | 'audit_investigation_note_deleted'
+  // Phase 1.3 — Milestone 3: Temporary Access / PIM Foundation lifecycle.
+  // Advisory/non-enforcing — these record reason-captured grant transitions;
+  // they do NOT change real permissions and there is no server enforcement.
+  | 'platform_temporary_access_requested'
+  | 'platform_temporary_access_approved'
+  | 'platform_temporary_access_denied'
+  | 'platform_temporary_access_revoked'
+  | 'platform_temporary_access_cancelled';
 
 export interface PushPlatformAuditInput {
   actor: string;
@@ -204,6 +212,12 @@ const DEFAULT_SEVERITY_BY_ACTION: Partial<Record<PlatformAuditAction, PlatformAu
   audit_event_dismissed: 'notice',
   audit_investigation_note_added: 'info',
   audit_investigation_note_deleted: 'notice',
+  // Phase 1.3 — Milestone 3: Temporary Access / PIM Foundation
+  platform_temporary_access_requested: 'notice',
+  platform_temporary_access_approved: 'warning',
+  platform_temporary_access_denied: 'notice',
+  platform_temporary_access_revoked: 'warning',
+  platform_temporary_access_cancelled: 'notice',
 };
 
 export function pushPlatformAudit(input: PushPlatformAuditInput): MirrorRow {

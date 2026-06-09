@@ -15,8 +15,30 @@ import {
   FUTURE_ROLE_CONCEPTS,
   PLATFORM_GOVERNANCE_MODEL_STATUS,
   isPlatformRoleId,
+  getTemporaryAccessStatus,
+  getTemporaryAccessDisplayLabel,
   type PlatformRoleId,
+  type TemporaryAccessStatus,
 } from './platformTeamGovernance';
+// Phase 1.3 — Milestone 3: Temporary Access / PIM Foundation (LOCAL / ADVISORY /
+// NON-ENFORCING). The store + lifecycle helpers below never touch the resolver
+// or real permissions — they record reason-captured, derived-expiry grants only.
+import {
+  TEMPORARY_ACCESS_CHANGED_EVENT,
+  TEMPORARY_ACCESS_MODEL_STATUS,
+  TEMPORARY_ACCESS_DURATION_PRESETS,
+  readTemporaryAccessGrants,
+  writeTemporaryAccessGrants,
+  createTemporaryAccessRequest,
+  approveTemporaryAccess,
+  denyTemporaryAccess,
+  revokeTemporaryAccess,
+  cancelTemporaryAccess,
+  availableTemporaryAccessActions,
+  summarizeTemporaryAccess,
+  type StoredTemporaryAccessGrant,
+  type TemporaryAccessLifecycleAction,
+} from './platformTemporaryAccess';
 import {
   PLATFORM_FEATURE_GROUPS,
   PLATFORM_PERMISSION_LEVELS,
@@ -111,9 +133,37 @@ function formatLastActivity(lastActiveAt: string | null | undefined): string {
   return lastActiveAt;
 }
 
+// Phase 1.3 — Milestone 3: derived temporary-access status badge colors
+// (display only; keyed by the Milestone 1 derived status).
+const TEMP_ACCESS_STATUS_BADGE_STYLE: Record<TemporaryAccessStatus, string> = {
+  requested: 'bg-amber-400/10 text-amber-700 border-amber-400/20',
+  active: 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20',
+  expired: 'bg-slate-200 text-slate-600 border-slate-300',
+  revoked: 'bg-red-500/10 text-red-600 border-red-500/20',
+  denied: 'bg-orange-400/10 text-orange-700 border-orange-400/20',
+  cancelled: 'bg-slate-100 text-slate-500 border-slate-200',
+};
+
+const TEMP_ACCESS_ACTION_VERB: Record<TemporaryAccessLifecycleAction, string> = {
+  request: 'Request',
+  approve: 'Approve / Grant',
+  deny: 'Deny',
+  revoke: 'Revoke',
+  cancel: 'Cancel',
+};
+
+// Short, honest copy shown in the reason-required action modal per action.
+const TEMP_ACCESS_ACTION_PROMPT: Record<TemporaryAccessLifecycleAction, string> = {
+  request: 'Describe why this temporary elevation is needed.',
+  approve: 'Why is this temporary elevation being approved? The time-box clock starts now.',
+  deny: 'Why is this temporary-access request being denied?',
+  revoke: 'Why is this active grant being revoked early? (Manual — there is no automatic revocation.)',
+  cancel: 'Why is this grant being cancelled/withdrawn?',
+};
+
 export default function TeamManagementPage() {
   const { session, platformRolesState = [], addPlatformRole, updatePlatformRole } = useAccess();
-  const [activeTab, setActiveTab] = useState<'team' | 'roles' | 'permissions' | 'activity'>('team');
+  const [activeTab, setActiveTab] = useState<'team' | 'roles' | 'temporary' | 'permissions' | 'activity'>('team');
   const [searchQuery, setSearchQuery] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
   const [showCreateRoleModal, setShowCreateRoleModal] = useState(false);
@@ -1056,6 +1106,324 @@ export default function TeamManagementPage() {
     </div>
   );
 
+  // =========================================================================
+  // Phase 1.3 — Milestone 3: Temporary Access / PIM Foundation
+  //
+  // A session-scoped store of temporary-access grants with reason-required
+  // lifecycle transitions and a per-grant audit-style trail. Everything here is
+  // ADVISORY / NON-ENFORCING: a grant never changes a member's real permissions
+  // (the resolver / matrix are untouched), expiry is DERIVED/LAZY (no scheduler,
+  // no automatic revocation), and gating mirrors the rest of this page
+  // (System Owner only — no new permission keys).
+  // =========================================================================
+  const [tempGrants, setTempGrants] = useState<StoredTemporaryAccessGrant[]>(() => readTemporaryAccessGrants());
+  // `nowTick` drives DERIVED status. There is NO scheduler — it only advances
+  // when the operator clicks "Refresh status" or performs a lifecycle action.
+  const [nowTick, setNowTick] = useState<number>(() => Date.now());
+  const [showTempRequestModal, setShowTempRequestModal] = useState(false);
+  const [tempForm, setTempForm] = useState<{ subjectId: string; elevatedRoleId: string; durationId: string; reason: string }>(
+    () => ({ subjectId: '', elevatedRoleId: '', durationId: TEMPORARY_ACCESS_DURATION_PRESETS[3].id, reason: '' })
+  );
+  const [tempActionTarget, setTempActionTarget] = useState<{ grant: StoredTemporaryAccessGrant; action: TemporaryAccessLifecycleAction } | null>(null);
+  const [tempActionReason, setTempActionReason] = useState('');
+  const [tempError, setTempError] = useState<string | null>(null);
+  const [expandedTempHistory, setExpandedTempHistory] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    const onChange = () => setTempGrants(readTemporaryAccessGrants());
+    window.addEventListener(TEMPORARY_ACCESS_CHANGED_EVENT, onChange);
+    window.addEventListener('storage', onChange);
+    return () => {
+      window.removeEventListener(TEMPORARY_ACCESS_CHANGED_EVENT, onChange);
+      window.removeEventListener('storage', onChange);
+    };
+  }, []);
+
+  // Lifecycle action → platform-audit action (additive, defined in platformOpsAudit).
+  const TEMP_AUDIT_ACTION = {
+    request: 'platform_temporary_access_requested',
+    approve: 'platform_temporary_access_approved',
+    deny: 'platform_temporary_access_denied',
+    revoke: 'platform_temporary_access_revoked',
+    cancel: 'platform_temporary_access_cancelled',
+  } as const;
+
+  const persistTempGrants = (next: StoredTemporaryAccessGrant[]) => {
+    writeTemporaryAccessGrants(next);
+    setTempGrants(next);
+    setNowTick(Date.now());
+  };
+
+  // Mirror each transition to BOTH the in-page Activity Log and the shared
+  // platform audit (same dual pattern used by role/permission changes above).
+  const auditTempAccess = (action: TemporaryAccessLifecycleAction, grant: StoredTemporaryAccessGrant, reason: string) => {
+    const actor = session?.user?.name || 'System Owner';
+    const subject = `${grant.subjectName} (${grant.subjectEmail})`;
+    const elevation = grant.elevatedRoleLabel || grant.elevatedPermissionScope || 'unspecified elevation';
+    logActivity(
+      `Temp Access ${TEMP_ACCESS_ACTION_VERB[action]}`,
+      `${TEMP_ACCESS_ACTION_VERB[action]} temporary elevation (${elevation}) for ${subject} — reason: ${reason}`
+    );
+    pushPlatformAudit({
+      actor,
+      action: TEMP_AUDIT_ACTION[action],
+      target: `${subject} · ${elevation}`,
+      category: 'team',
+      note: `Reason: ${reason}. Advisory/non-enforcing — no real permission change applied.`,
+    });
+  };
+
+  const handleRequestTempAccess = () => {
+    setTempError(null);
+    const member = team.find(m => m.id === tempForm.subjectId);
+    if (!member) { setTempError('Select a team member to elevate.'); return; }
+    const baseRoleId = resolvePlatformRoleId(member.role);
+    if (!baseRoleId) { setTempError('Selected member has a non-catalog/custom role and is not eligible for this foundation.'); return; }
+    const duration = TEMPORARY_ACCESS_DURATION_PRESETS.find(d => d.id === tempForm.durationId);
+    if (!duration) { setTempError('Select a duration.'); return; }
+    const elevatedRoleId = tempForm.elevatedRoleId ? (tempForm.elevatedRoleId as PlatformRoleId) : undefined;
+    const elevatedRoleLabel = elevatedRoleId ? PLATFORM_ROLE_CATALOG[elevatedRoleId].displayLabel : undefined;
+    const res = createTemporaryAccessRequest({
+      subjectUserId: member.id,
+      subjectName: member.name,
+      subjectEmail: member.email,
+      baseRoleId,
+      elevatedRoleId,
+      elevatedRoleLabel,
+      requestedBy: session?.user?.name || 'System Owner',
+      reason: tempForm.reason,
+      durationMs: duration.ms,
+      now: Date.now(),
+    });
+    if (!res.ok || !res.grant) { setTempError(res.error || 'Could not create the request.'); return; }
+    persistTempGrants([res.grant, ...tempGrants]);
+    auditTempAccess('request', res.grant, res.grant.reason);
+    setShowTempRequestModal(false);
+    setTempForm({ subjectId: '', elevatedRoleId: '', durationId: TEMPORARY_ACCESS_DURATION_PRESETS[3].id, reason: '' });
+  };
+
+  const handleTempAction = () => {
+    if (!tempActionTarget) return;
+    setTempError(null);
+    const { grant, action } = tempActionTarget;
+    const actor = session?.user?.name || 'System Owner';
+    const now = Date.now();
+    const res =
+      action === 'approve' ? approveTemporaryAccess(grant, actor, tempActionReason, now) :
+      action === 'deny' ? denyTemporaryAccess(grant, actor, tempActionReason, now) :
+      action === 'revoke' ? revokeTemporaryAccess(grant, actor, tempActionReason, now) :
+      action === 'cancel' ? cancelTemporaryAccess(grant, actor, tempActionReason, now) :
+      { ok: false as const, error: 'Unsupported action.' };
+    if (!res.ok || !res.grant) { setTempError(res.error || 'Action failed.'); return; }
+    const updated = res.grant;
+    persistTempGrants(tempGrants.map(g => (g.id === updated.id ? updated : g)));
+    auditTempAccess(action, updated, tempActionReason.trim());
+    setTempActionTarget(null);
+    setTempActionReason('');
+  };
+
+  // Catalog-role members eligible for temporary elevation (System Owner is
+  // system-protected and excluded). Shared by the tab + the request modal.
+  const tempEligibleSubjects = team
+    .map(m => ({ member: m, roleId: resolvePlatformRoleId(m.role) }))
+    .filter((x): x is { member: TeamMember; roleId: PlatformRoleId } =>
+      !!x.roleId && PLATFORM_ROLE_CATALOG[x.roleId].eligibleForTemporaryElevation);
+  const tempElevationTargets = (Object.keys(PLATFORM_ROLE_CATALOG) as PlatformRoleId[]).filter(id => id !== 'system_owner');
+
+  const renderTemporaryAccess = () => {
+    const summary = summarizeTemporaryAccess(tempGrants, nowTick);
+    const counts: { key: TemporaryAccessStatus | 'total'; label: string }[] = [
+      { key: 'total', label: 'Total' },
+      { key: 'requested', label: 'Requested' },
+      { key: 'active', label: 'Active' },
+      { key: 'expired', label: 'Expired' },
+      { key: 'revoked', label: 'Revoked' },
+      { key: 'denied', label: 'Denied' },
+      { key: 'cancelled', label: 'Cancelled' },
+    ];
+    return (
+      <div className="space-y-6" data-testid="temporary-access-tab">
+        {/* Truthful, standing non-enforcement banner. */}
+        <div className="bg-teal-50/70 border border-teal-200/70 rounded-2xl p-4 flex items-start gap-3" data-testid="temp-access-truth-banner">
+          <span className="material-symbols-outlined text-teal-700 text-lg mt-0.5">timer</span>
+          <div className="text-xs font-medium text-teal-900 leading-relaxed space-y-1">
+            <p className="font-black uppercase tracking-widest text-teal-800">Temporary Access / PIM — Foundation (Advisory)</p>
+            <p>{TEMPORARY_ACCESS_MODEL_STATUS}</p>
+            <p className="text-[11px] text-teal-600">
+              Every lifecycle action (request, approve/grant, deny, revoke, cancel) <span className="font-black">requires a reason</span> and is recorded in the grant's local trail and the platform Audit &amp; Security log.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h2 className="text-2xl font-black text-primary tracking-tight">Temporary Access</h2>
+            <p className="text-slate-500 text-sm font-medium mt-1 max-w-3xl">
+              Time-boxed elevation requests for platform team members. Granting a request does{' '}
+              <span className="font-black">not</span> change the member's real permissions — it records an advisory,
+              derived-expiry grant only.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setNowTick(Date.now())}
+              data-testid="temp-access-refresh"
+              title="Recompute derived statuses now. Expiry is lazy — there is no background scheduler."
+              className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all flex items-center gap-1.5"
+            >
+              <span className="material-symbols-outlined text-sm">refresh</span>
+              Refresh Status
+            </button>
+            {isOwner && (
+              <button
+                onClick={() => { setTempError(null); setShowTempRequestModal(true); }}
+                data-testid="temp-access-request-btn"
+                className="px-6 py-2.5 bg-primary text-white font-black text-[10px] rounded-xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2"
+              >
+                <span className="material-symbols-outlined text-sm">add_moderator</span>
+                Request Temporary Access
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Derived summary counts — single source (summarizeTemporaryAccess over
+            the same list/nowTick that drives the rows), so they cannot drift. */}
+        <div className="flex flex-wrap gap-2" data-testid="temp-access-summary">
+          {counts.map(c => (
+            <span
+              key={c.key}
+              className={`px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-xl border ${
+                c.key === 'total'
+                  ? 'bg-white text-slate-600 border-slate-200'
+                  : TEMP_ACCESS_STATUS_BADGE_STYLE[c.key as TemporaryAccessStatus]
+              }`}
+            >
+              {c.label}: {summary[c.key]}
+            </span>
+          ))}
+        </div>
+
+        {tempGrants.length === 0 ? (
+          <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-12 text-center shadow-sm" data-testid="temp-access-empty">
+            <span className="material-symbols-outlined text-4xl text-slate-300 mb-2 block">schedule</span>
+            <p className="text-sm font-bold text-slate-500">No temporary-access grants yet.</p>
+            <p className="text-xs font-medium text-slate-400 mt-1">
+              {isOwner ? 'Use “Request Temporary Access” to create an advisory, time-boxed elevation request.' : 'Only System Owner can create temporary-access requests.'}
+            </p>
+          </div>
+        ) : (
+          <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse min-w-[1080px]">
+                <thead>
+                  <tr className="border-b border-slate-100 bg-slate-50/50">
+                    <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Subject</th>
+                    <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Requested Elevation <span className="text-slate-300 normal-case tracking-normal">(advisory — not applied)</span></th>
+                    <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Window</th>
+                    <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Derived Status</th>
+                    <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tempGrants.map(grant => {
+                    const derived = getTemporaryAccessStatus(grant, nowTick);
+                    const actions = isOwner ? availableTemporaryAccessActions(grant, nowTick) : [];
+                    const historyOpen = !!expandedTempHistory[grant.id];
+                    return (
+                      <React.Fragment key={grant.id}>
+                        <tr className="border-b border-slate-50 last:border-0 align-top hover:bg-slate-50/50 transition-colors" data-testid={`temp-access-row-${grant.id}`}>
+                          <td className="px-6 py-5">
+                            <p className="text-sm font-black text-primary">{grant.subjectName}</p>
+                            <p className="text-xs font-bold text-slate-500 mt-0.5">{grant.subjectEmail}</p>
+                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">
+                              Base: {PLATFORM_ROLE_CATALOG[grant.baseRoleId]?.displayLabel || grant.baseRoleId}
+                            </p>
+                          </td>
+                          <td className="px-6 py-5">
+                            <span className="inline-block px-2.5 py-1 bg-teal-400/10 text-teal-700 border border-teal-400/20 text-[10px] font-black uppercase tracking-widest rounded-lg">
+                              {grant.elevatedRoleLabel || grant.elevatedPermissionScope || 'Unspecified'}
+                            </span>
+                            <p className="text-[10px] font-medium text-slate-400 mt-1.5 max-w-[240px]">Reason: {grant.reason}</p>
+                          </td>
+                          <td className="px-6 py-5">
+                            <p className="text-[11px] font-bold text-slate-600">Requested: {TEMPORARY_ACCESS_DURATION_PRESETS.find(d => d.ms === grant.requestedDurationMs)?.label || `${Math.round(grant.requestedDurationMs / 3600000)}h`}</p>
+                            <p className="text-[10px] font-medium text-slate-400 mt-0.5">Starts: {grant.startsAt.slice(0, 16).replace('T', ' ')}</p>
+                            <p className="text-[10px] font-medium text-slate-400">Expires: {grant.expiresAt.slice(0, 16).replace('T', ' ')}</p>
+                          </td>
+                          <td className="px-6 py-5">
+                            <span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${TEMP_ACCESS_STATUS_BADGE_STYLE[derived]}`}>
+                              {getTemporaryAccessDisplayLabel(grant, nowTick)}
+                            </span>
+                            <button
+                              onClick={() => setExpandedTempHistory(prev => ({ ...prev, [grant.id]: !prev[grant.id] }))}
+                              className="block mt-2 text-[9px] font-black uppercase tracking-widest text-indigo-500 hover:text-indigo-700"
+                              data-testid={`temp-access-history-toggle-${grant.id}`}
+                            >
+                              {historyOpen ? 'Hide trail' : `Trail (${grant.history.length})`}
+                            </button>
+                          </td>
+                          <td className="px-6 py-5 text-right">
+                            {actions.length === 0 ? (
+                              <span className="text-[10px] font-bold text-slate-300 uppercase tracking-widest">{isOwner ? 'No actions' : 'View only'}</span>
+                            ) : (
+                              <div className="flex flex-wrap gap-1.5 justify-end">
+                                {actions.map(action => (
+                                  <button
+                                    key={action}
+                                    onClick={() => { setTempError(null); setTempActionReason(''); setTempActionTarget({ grant, action }); }}
+                                    data-testid={`temp-access-action-${action}-${grant.id}`}
+                                    className={`px-3 py-1.5 text-[9px] font-black uppercase tracking-widest rounded-lg border transition-all ${
+                                      action === 'approve' ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100' :
+                                      action === 'revoke' ? 'bg-red-50 text-red-600 border-red-200 hover:bg-red-100' :
+                                      action === 'deny' ? 'bg-orange-50 text-orange-700 border-orange-200 hover:bg-orange-100' :
+                                      'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                                    }`}
+                                  >
+                                    {TEMP_ACCESS_ACTION_VERB[action]}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                        {historyOpen && (
+                          <tr className="bg-slate-50/60" data-testid={`temp-access-history-${grant.id}`}>
+                            <td colSpan={5} className="px-6 py-4">
+                              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Lifecycle Trail — reason captured per transition</p>
+                              <ul className="space-y-1.5">
+                                {grant.history.map(ev => (
+                                  <li key={ev.id} className="text-[11px] font-medium text-slate-600 flex flex-wrap items-baseline gap-x-2">
+                                    <span className="font-black text-slate-700">{TEMP_ACCESS_ACTION_VERB[ev.action]}</span>
+                                    <span className="text-slate-400">{ev.at.slice(0, 16).replace('T', ' ')}</span>
+                                    <span className="text-slate-400">by {ev.actor}</span>
+                                    {ev.fromStatus && <span className="text-slate-400">· {ev.fromStatus} → {ev.toStatus}</span>}
+                                    {!ev.fromStatus && <span className="text-slate-400">· → {ev.toStatus}</span>}
+                                    <span className="text-slate-500">— {ev.reason}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {tempEligibleSubjects.length === 0 && (
+          <p className="text-[11px] font-medium text-slate-400">
+            No catalog-role team members are currently eligible for temporary elevation (System Owner is system-protected and excluded).
+          </p>
+        )}
+      </div>
+    );
+  };
+
   const renderActivity = () => (
     <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
       <table className="w-full text-left border-collapse">
@@ -1113,6 +1481,7 @@ export default function TeamManagementPage() {
           {[
             { id: 'team', label: 'Team', icon: 'group' },
             { id: 'roles', label: 'Roles', icon: 'security' },
+            { id: 'temporary', label: 'Temporary Access', icon: 'timer' },
             { id: 'permissions', label: 'Permissions', icon: 'key' },
             { id: 'activity', label: 'Activity Log', icon: 'history' }
           ].map((tab) => (
@@ -1141,6 +1510,7 @@ export default function TeamManagementPage() {
           >
             {activeTab === 'team' && renderTeam()}
             {activeTab === 'roles' && renderRoles()}
+            {activeTab === 'temporary' && renderTemporaryAccess()}
             {activeTab === 'permissions' && renderPermissions()}
             {activeTab === 'activity' && renderActivity()}
           </motion.div>
@@ -1410,6 +1780,186 @@ export default function TeamManagementPage() {
                       className="flex-1 py-3 bg-amber-500 text-white font-black text-[10px] rounded-2xl shadow-lg shadow-amber-500/20 uppercase tracking-widest hover:bg-amber-600 transition-all"
                     >
                       Confirm Reset
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* Phase 1.3 — Milestone 3: Request Temporary Access modal (reason required). */}
+        <AnimatePresence>
+          {showTempRequestModal && (
+            <div key="temp-request-modal" className="fixed inset-0 z-50 flex items-center justify-center p-6">
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setShowTempRequestModal(false)}
+                className="absolute inset-0 bg-slate-900/40 backdrop-blur-md"
+              />
+              <motion.div
+                initial={{ opacity: 0, scale: 0.9, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.9, y: 20 }}
+                className="relative w-full max-w-xl bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[90vh]"
+              >
+                <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                  <div>
+                    <h3 className="text-2xl font-black text-primary tracking-tight">Request Temporary Access</h3>
+                    <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Advisory · time-boxed · non-enforcing</p>
+                  </div>
+                  <button onClick={() => setShowTempRequestModal(false)} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                    <span className="material-symbols-outlined text-slate-400">close</span>
+                  </button>
+                </div>
+
+                <div className="p-8 overflow-y-auto flex-1 space-y-5">
+                  <div className="bg-teal-50/70 border border-teal-200/60 rounded-2xl p-3 text-[11px] font-medium text-teal-800 leading-relaxed">
+                    This records an <span className="font-black">advisory</span> elevation request. It does not change the member's real permissions, and there is no automatic activation, escalation, or revocation.
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Subject (catalog-role member)</label>
+                    <select
+                      value={tempForm.subjectId}
+                      onChange={e => setTempForm(prev => ({ ...prev, subjectId: e.target.value }))}
+                      data-testid="temp-request-subject"
+                      className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700"
+                    >
+                      <option value="">Select a member…</option>
+                      {tempEligibleSubjects.map(({ member, roleId }) => (
+                        <option key={member.id} value={member.id}>
+                          {member.name} — {PLATFORM_ROLE_CATALOG[roleId].displayLabel}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-[10px] font-medium text-slate-400 ml-4">System Owner and custom/non-catalog roles are excluded (system-protected / not modelled).</p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Requested elevation target (advisory — not applied)</label>
+                    <select
+                      value={tempForm.elevatedRoleId}
+                      onChange={e => setTempForm(prev => ({ ...prev, elevatedRoleId: e.target.value }))}
+                      data-testid="temp-request-elevation"
+                      className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700"
+                    >
+                      <option value="">(Unspecified)</option>
+                      {tempElevationTargets.map(id => (
+                        <option key={id} value={id}>{PLATFORM_ROLE_CATALOG[id].displayLabel}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Duration (time-box; clock starts on approval)</label>
+                    <select
+                      value={tempForm.durationId}
+                      onChange={e => setTempForm(prev => ({ ...prev, durationId: e.target.value }))}
+                      data-testid="temp-request-duration"
+                      className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700"
+                    >
+                      {TEMPORARY_ACCESS_DURATION_PRESETS.map(d => (
+                        <option key={d.id} value={d.id}>{d.label}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Reason (required)</label>
+                    <textarea
+                      value={tempForm.reason}
+                      onChange={e => setTempForm(prev => ({ ...prev, reason: e.target.value }))}
+                      data-testid="temp-request-reason"
+                      className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700 resize-none h-20"
+                      placeholder="Why is this temporary elevation needed?"
+                    />
+                  </div>
+
+                  {tempError && (
+                    <p className="text-[11px] font-bold text-red-600 bg-red-50 border border-red-200 rounded-xl px-3 py-2" data-testid="temp-request-error">{tempError}</p>
+                  )}
+                </div>
+
+                <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-4">
+                  <button
+                    onClick={() => setShowTempRequestModal(false)}
+                    className="flex-1 py-4 bg-white text-slate-600 font-black text-sm rounded-2xl border border-slate-200 hover:bg-slate-50 transition-all uppercase tracking-widest"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleRequestTempAccess}
+                    disabled={!tempForm.subjectId || tempForm.reason.trim().length < 3}
+                    data-testid="temp-request-submit"
+                    className="flex-1 py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Submit Request
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* Phase 1.3 — Milestone 3: reason-required lifecycle action modal. */}
+        <AnimatePresence>
+          {tempActionTarget && (
+            <div key="temp-action-modal" className="fixed inset-0 z-50 flex items-center justify-center p-6">
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => { setTempActionTarget(null); setTempActionReason(''); }}
+                className="absolute inset-0 bg-slate-900/40 backdrop-blur-md"
+              />
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95, y: 10 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 10 }}
+                transition={{ duration: 0.2 }}
+                className="relative w-full max-w-md bg-white rounded-3xl shadow-2xl border border-slate-200 overflow-hidden"
+              >
+                <div className="p-8">
+                  <h3 className="text-xl font-black text-slate-900 tracking-tight mb-1">
+                    {TEMP_ACCESS_ACTION_VERB[tempActionTarget.action]} Temporary Access
+                  </h3>
+                  <p className="text-xs font-bold text-slate-500 mb-1">
+                    {tempActionTarget.grant.subjectName} ({tempActionTarget.grant.subjectEmail})
+                  </p>
+                  <p className="text-[11px] font-medium text-slate-500 mb-4">{TEMP_ACCESS_ACTION_PROMPT[tempActionTarget.action]}</p>
+                  <textarea
+                    value={tempActionReason}
+                    onChange={e => setTempActionReason(e.target.value)}
+                    data-testid="temp-action-reason"
+                    autoFocus
+                    className="w-full px-4 py-3 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700 resize-none h-24 text-sm"
+                    placeholder="Reason (required)…"
+                  />
+                  {tempError && (
+                    <p className="text-[11px] font-bold text-red-600 bg-red-50 border border-red-200 rounded-xl px-3 py-2 mt-3" data-testid="temp-action-error">{tempError}</p>
+                  )}
+                  <div className="flex gap-3 mt-5">
+                    <button
+                      onClick={() => { setTempActionTarget(null); setTempActionReason(''); }}
+                      className="flex-1 py-3 bg-white text-slate-600 font-black text-[10px] rounded-2xl border border-slate-200 hover:bg-slate-50 transition-all uppercase tracking-widest"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleTempAction}
+                      disabled={tempActionReason.trim().length < 3}
+                      data-testid="temp-action-confirm"
+                      className={`flex-1 py-3 text-white font-black text-[10px] rounded-2xl shadow-lg uppercase tracking-widest transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
+                        tempActionTarget.action === 'approve' ? 'bg-emerald-500 hover:bg-emerald-600 shadow-emerald-500/20' :
+                        tempActionTarget.action === 'revoke' ? 'bg-red-500 hover:bg-red-600 shadow-red-500/20' :
+                        tempActionTarget.action === 'deny' ? 'bg-orange-500 hover:bg-orange-600 shadow-orange-500/20' :
+                        'bg-slate-600 hover:bg-slate-700 shadow-slate-500/20'
+                      }`}
+                    >
+                      Confirm {TEMP_ACCESS_ACTION_VERB[tempActionTarget.action]}
                     </button>
                   </div>
                 </div>
