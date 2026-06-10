@@ -17,9 +17,39 @@ import {
   isPlatformRoleId,
   getTemporaryAccessStatus,
   getTemporaryAccessDisplayLabel,
+  ACCESS_REVIEW_STATUS_LABEL,
+  getRecommendedReviewCadence,
   type PlatformRoleId,
   type TemporaryAccessStatus,
+  type AccessReviewStatus,
 } from './platformTeamGovernance';
+// Phase 1.3 — Milestone 4: Access Review + Sensitive Action Reason Capture
+// (LOCAL / ADVISORY / NON-ENFORCING). The store + helpers below never touch the
+// resolver or real permissions — they record reason-captured review outcomes
+// (with derived overdue/stale labels) and reason-captured sensitive actions only.
+import {
+  ACCESS_REVIEW_CHANGED_EVENT,
+  ACCESS_REVIEW_MODEL_STATUS,
+  ACCESS_REVIEW_OUTCOMES,
+  ACCESS_REVIEW_OUTCOME_LABEL,
+  SENSITIVE_ACTION_REASON_CHANGED_EVENT,
+  SENSITIVE_ACTION_REASON_MODEL_STATUS,
+  SENSITIVE_ACTION_REASON_ADVISORY_LABEL,
+  readAccessReviewRecords,
+  writeAccessReviewRecords,
+  createAccessReviewRecord,
+  completeAccessReview,
+  captureSensitiveActionReason,
+  readSensitiveActionReasons,
+  writeSensitiveActionReasons,
+  deriveAccessReviewStatus,
+  availableAccessReviewActions,
+  summarizeAccessReviews,
+  type StoredAccessReviewRecord,
+  type AccessReviewOutcome,
+  type SensitiveActionReasonCapture,
+  type SensitiveActionCaptureInput,
+} from './platformAccessReview';
 // Phase 1.3 — Milestone 3: Temporary Access / PIM Foundation (LOCAL / ADVISORY /
 // NON-ENFORCING). The store + lifecycle helpers below never touch the resolver
 // or real permissions — they record reason-captured, derived-expiry grants only.
@@ -161,9 +191,37 @@ const TEMP_ACCESS_ACTION_PROMPT: Record<TemporaryAccessLifecycleAction, string> 
   cancel: 'Why is this grant being cancelled/withdrawn?',
 };
 
+// Phase 1.3 — Milestone 4: derived access-review status badge colors
+// (display only; keyed by the Milestone 1 derived AccessReviewStatus). `overdue`
+// is a DERIVED label only — never a stored, reviewer-selected outcome.
+const ACCESS_REVIEW_STATUS_BADGE_STYLE: Record<AccessReviewStatus, string> = {
+  pending: 'bg-amber-400/10 text-amber-700 border-amber-400/20',
+  reviewed_no_change: 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20',
+  reviewed_change_required: 'bg-orange-400/10 text-orange-700 border-orange-400/20',
+  escalated: 'bg-red-500/10 text-red-600 border-red-500/20',
+  overdue: 'bg-rose-500/10 text-rose-700 border-rose-500/20',
+  deferred: 'bg-slate-100 text-slate-500 border-slate-200',
+};
+
+// Honest copy shown in the reason-required outcome modal, per outcome.
+const ACCESS_REVIEW_OUTCOME_PROMPT: Record<AccessReviewOutcome, string> = {
+  reviewed_no_change: 'Confirm the access was reviewed and no change is needed. A reason is required.',
+  reviewed_change_required:
+    'A change is required. This is advisory only — no permission change is applied automatically. A reason is required.',
+  escalated: 'Escalate this review for further attention. A reason is required.',
+  deferred: 'Defer this review to a later period. A reason is required.',
+};
+
+/** Suggests a default review period like "Q2 2026" from a timestamp (display default only). */
+function defaultReviewPeriod(now: number = Date.now()): string {
+  const d = new Date(now);
+  const quarter = Math.floor(d.getMonth() / 3) + 1;
+  return `Q${quarter} ${d.getFullYear()}`;
+}
+
 export default function TeamManagementPage() {
   const { session, platformRolesState = [], addPlatformRole, updatePlatformRole } = useAccess();
-  const [activeTab, setActiveTab] = useState<'team' | 'roles' | 'temporary' | 'permissions' | 'activity'>('team');
+  const [activeTab, setActiveTab] = useState<'team' | 'roles' | 'temporary' | 'review' | 'permissions' | 'activity'>('team');
   const [searchQuery, setSearchQuery] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
   const [showCreateRoleModal, setShowCreateRoleModal] = useState(false);
@@ -189,6 +247,10 @@ export default function TeamManagementPage() {
   ]);
 
   const [showResetConfirm, setShowResetConfirm] = useState(false);
+  // Phase 1.3 — Milestone 4: reason required to capture the sensitive "reset
+  // permissions to defaults" governance action (advisory reason capture only —
+  // the reset behavior + its existing audit row are unchanged).
+  const [resetReason, setResetReason] = useState('');
 
   const platformFeatures = [
     { id: 'tenants', name: 'Manage Tenants' },
@@ -736,13 +798,19 @@ export default function TeamManagementPage() {
   };
 
   const resetToDefaults = () => {
+    setResetReason('');
     setShowResetConfirm(true);
   };
 
   const confirmReset = () => {
+    // Defence in depth — the confirm button is also disabled until a reason is
+    // entered. This is sensitive-action REASON CAPTURE only: the reset behavior
+    // and its existing audit row are unchanged; no resolver/permission logic moves.
+    if (resetReason.trim().length < 3) return;
+    const overrideRoleCount = Object.keys(overrides).length;
     writePlatformPermissionsOverrides({});
     setOverrides({});
-    logActivity('Reset Permissions', 'All overrides cleared — reverted to default levels');
+    logActivity('Reset Permissions', `All overrides cleared — reverted to default levels. Reason: ${resetReason.trim()}`);
     pushPlatformAudit({
       actor: session?.user?.name || 'System Owner',
       action: 'platform_permissions_reset',
@@ -751,7 +819,18 @@ export default function TeamManagementPage() {
       severity: 'warning',
       note: 'All overrides cleared to defaults',
     });
+    // Phase 1.3 — Milestone 4: capture the reason for this sensitive action
+    // (advisory/local — does NOT change the permission result or add enforcement).
+    captureAndLogSensitiveAction({
+      actionCategory: 'platform_sub_permission_override',
+      actionLabel: 'Reset Global Permissions Matrix to defaults (all overrides cleared)',
+      reason: resetReason.trim(),
+      targetPermission: 'All platform roles · all overrides',
+      beforeSummary: `${overrideRoleCount} role(s) had session overrides`,
+      afterSummary: 'All overrides cleared to role defaults',
+    });
     setShowResetConfirm(false);
+    setResetReason('');
   };
 
   const filteredGroups = useMemo(() => {
@@ -1424,6 +1503,492 @@ export default function TeamManagementPage() {
     );
   };
 
+  // =========================================================================
+  // Phase 1.3 — Milestone 4: Access Review + Sensitive Action Reason Capture
+  //
+  // A session-scoped store of access-review records with reason-required
+  // completion outcomes (reviewed_no_change / reviewed_change_required /
+  // escalated / deferred), derived overdue/stale labels, a per-record trail,
+  // and a parallel log of reason-captured sensitive governance actions.
+  // Everything here is ADVISORY / NON-ENFORCING: an outcome NEVER changes a
+  // role, a permission, the resolver, defaults, thresholds, or dependency
+  // auto-sync; overdue is DERIVED/LAZY (no scheduler, no reminders, no
+  // automatic revocation); gating mirrors the rest of this page (System Owner
+  // only — no new permission keys). The shared `nowTick` drives derived status.
+  // =========================================================================
+  const [accessReviews, setAccessReviews] = useState<StoredAccessReviewRecord[]>(() => readAccessReviewRecords());
+  const [sensitiveReasons, setSensitiveReasons] = useState<SensitiveActionReasonCapture[]>(() => readSensitiveActionReasons());
+  const [showReviewCreateModal, setShowReviewCreateModal] = useState(false);
+  const [reviewForm, setReviewForm] = useState<{ subjectId: string; reviewPeriod: string; findings: string; notes: string }>(
+    () => ({ subjectId: '', reviewPeriod: defaultReviewPeriod(), findings: '', notes: '' })
+  );
+  const [reviewActionTarget, setReviewActionTarget] = useState<StoredAccessReviewRecord | null>(null);
+  const [reviewOutcome, setReviewOutcome] = useState<AccessReviewOutcome>('reviewed_no_change');
+  const [reviewActionReason, setReviewActionReason] = useState('');
+  const [reviewActionFindings, setReviewActionFindings] = useState('');
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [expandedReviewHistory, setExpandedReviewHistory] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    const onChange = () => {
+      setAccessReviews(readAccessReviewRecords());
+      setSensitiveReasons(readSensitiveActionReasons());
+    };
+    window.addEventListener(ACCESS_REVIEW_CHANGED_EVENT, onChange);
+    window.addEventListener(SENSITIVE_ACTION_REASON_CHANGED_EVENT, onChange);
+    window.addEventListener('storage', onChange);
+    return () => {
+      window.removeEventListener(ACCESS_REVIEW_CHANGED_EVENT, onChange);
+      window.removeEventListener(SENSITIVE_ACTION_REASON_CHANGED_EVENT, onChange);
+      window.removeEventListener('storage', onChange);
+    };
+  }, []);
+
+  // Outcome → additive platform-audit action (defined in platformOpsAudit).
+  const REVIEW_AUDIT_ACTION = {
+    reviewed_no_change: 'access_review_completed',
+    reviewed_change_required: 'access_review_change_required',
+    escalated: 'access_review_escalated',
+    deferred: 'access_review_deferred',
+  } as const;
+
+  const persistReviews = (next: StoredAccessReviewRecord[]) => {
+    writeAccessReviewRecords(next);
+    setAccessReviews(next);
+    setNowTick(Date.now());
+  };
+
+  // Sensitive Action Reason Capture: write the reason to the local advisory log
+  // (visible in the M4 panel) + the in-page Activity Log. The shared
+  // `sensitive_action_reason_captured` audit row is pushed by default; callers
+  // that already emit their own action row (e.g. access-review outcomes, which
+  // emit an `access_review_*` row) pass `pushAuditRow: false` to avoid spam.
+  const captureAndLogSensitiveAction = (
+    input: Omit<SensitiveActionCaptureInput, 'actor' | 'now'>,
+    options?: { pushAuditRow?: boolean }
+  ): boolean => {
+    const actor = session?.user?.name || 'System Owner';
+    const res = captureSensitiveActionReason({ ...input, actor, now: Date.now() });
+    if (!res.ok || !res.record) return false;
+    const next = [res.record, ...readSensitiveActionReasons()];
+    writeSensitiveActionReasons(next);
+    setSensitiveReasons(next);
+    logActivity('Sensitive Action Reason', `${input.actionLabel} — reason: ${input.reason}`);
+    if (options?.pushAuditRow !== false) {
+      pushPlatformAudit({
+        actor,
+        action: 'sensitive_action_reason_captured',
+        target: input.targetSubject || input.targetPermission || input.actionLabel,
+        category: 'team',
+        note: `${input.actionLabel}. Reason: ${input.reason}. ${SENSITIVE_ACTION_REASON_ADVISORY_LABEL}`,
+      });
+    }
+    return true;
+  };
+
+  const auditAccessReview = (outcome: AccessReviewOutcome, record: StoredAccessReviewRecord, reason: string) => {
+    const actor = session?.user?.name || 'System Owner';
+    const subject = `${record.reviewedSubjectName} · ${record.reviewedRoleLabel}`;
+    logActivity(
+      `Access Review ${ACCESS_REVIEW_OUTCOME_LABEL[outcome]}`,
+      `${subject} [${record.reviewPeriod}] — reason: ${reason}`
+    );
+    pushPlatformAudit({
+      actor,
+      action: REVIEW_AUDIT_ACTION[outcome],
+      target: `${subject} · ${record.reviewPeriod}`,
+      category: 'team',
+      note:
+        `Reason: ${reason}. Advisory/non-enforcing — no role or permission change applied.` +
+        (record.systemProtected ? ' System Owner is system-protected (no downgrade).' : ''),
+    });
+  };
+
+  const handleCreateReview = () => {
+    setReviewError(null);
+    const member = team.find(m => m.id === reviewForm.subjectId);
+    if (!member) { setReviewError('Select a team member to review.'); return; }
+    const resolvedRoleId = resolvePlatformRoleId(member.role);
+    const actor = session?.user?.name || 'System Owner';
+    const res = createAccessReviewRecord({
+      reviewPeriod: reviewForm.reviewPeriod,
+      reviewedSubjectId: member.id,
+      reviewedSubjectName: member.name,
+      reviewedRoleId: resolvedRoleId,
+      reviewedRoleLabel: member.role,
+      reviewerId: actor,
+      reviewerName: actor,
+      createdBy: actor,
+      findings: reviewForm.findings || undefined,
+      notes: reviewForm.notes || undefined,
+      now: Date.now(),
+    });
+    if (!res.ok || !res.record) { setReviewError(res.error || 'Could not create the review record.'); return; }
+    const created = res.record;
+    persistReviews([created, ...accessReviews]);
+    logActivity('Access Review Created', `${created.reviewedSubjectName} · ${created.reviewedRoleLabel} [${created.reviewPeriod}]`);
+    pushPlatformAudit({
+      actor,
+      action: 'access_review_created',
+      target: `${created.reviewedSubjectName} · ${created.reviewedRoleLabel} · ${created.reviewPeriod}`,
+      category: 'team',
+      note:
+        'Pending access review created. Advisory/non-enforcing — no permission change applied.' +
+        (created.systemProtected ? ' System Owner is system-protected — review carefully; no downgrade.' : ''),
+    });
+    setShowReviewCreateModal(false);
+    setReviewForm({ subjectId: '', reviewPeriod: defaultReviewPeriod(), findings: '', notes: '' });
+  };
+
+  // Duplicate-safe seeding: one pending record per current team member for the
+  // default period, skipping members who already have a pending record for it.
+  const handleSeedReviews = () => {
+    const actor = session?.user?.name || 'System Owner';
+    const period = defaultReviewPeriod();
+    const existingPending = new Set(
+      accessReviews.filter(r => r.reviewStatus === 'pending' && r.reviewPeriod === period).map(r => r.reviewedSubjectId)
+    );
+    const created: StoredAccessReviewRecord[] = [];
+    team.forEach(member => {
+      if (existingPending.has(member.id)) return;
+      const resolvedRoleId = resolvePlatformRoleId(member.role);
+      const res = createAccessReviewRecord({
+        reviewPeriod: period,
+        reviewedSubjectId: member.id,
+        reviewedSubjectName: member.name,
+        reviewedRoleId: resolvedRoleId,
+        reviewedRoleLabel: member.role,
+        reviewerId: actor,
+        reviewerName: actor,
+        createdBy: actor,
+        now: Date.now(),
+      });
+      if (res.ok && res.record) created.push(res.record);
+    });
+    if (created.length === 0) { setReviewError(`Every current team member already has a pending review for ${period}.`); return; }
+    setReviewError(null);
+    persistReviews([...created, ...accessReviews]);
+    created.forEach(rec => {
+      pushPlatformAudit({
+        actor,
+        action: 'access_review_created',
+        target: `${rec.reviewedSubjectName} · ${rec.reviewedRoleLabel} · ${rec.reviewPeriod}`,
+        category: 'team',
+        note:
+          'Seeded pending access review. Advisory/non-enforcing — no permission change applied.' +
+          (rec.systemProtected ? ' System Owner is system-protected.' : ''),
+      });
+    });
+    logActivity('Access Review Seeded', `Created ${created.length} pending review(s) for ${period}`);
+  };
+
+  const handleCompleteReview = () => {
+    if (!reviewActionTarget) return;
+    setReviewError(null);
+    const actor = session?.user?.name || 'System Owner';
+    const res = completeAccessReview(reviewActionTarget, {
+      outcome: reviewOutcome,
+      actor,
+      reason: reviewActionReason,
+      findings: reviewActionFindings || undefined,
+      now: Date.now(),
+    });
+    if (!res.ok || !res.record) { setReviewError(res.error || 'Could not record the outcome.'); return; }
+    const updated = res.record;
+    persistReviews(accessReviews.map(r => (r.id === updated.id ? updated : r)));
+    auditAccessReview(reviewOutcome, updated, reviewActionReason.trim());
+    // The outcome is itself a sensitive governance action — log its reason to
+    // the shared sensitive-action log (no second audit row; auditAccessReview
+    // already emitted the access_review_* row).
+    captureAndLogSensitiveAction(
+      {
+        actionCategory: 'access_review_completion',
+        actionLabel: `Access review outcome: ${ACCESS_REVIEW_OUTCOME_LABEL[reviewOutcome]}`,
+        reason: reviewActionReason.trim(),
+        targetSubject: `${updated.reviewedSubjectName} · ${updated.reviewedRoleLabel}`,
+        beforeSummary: 'pending',
+        afterSummary: reviewOutcome + (updated.systemProtected ? ' (System Owner — no downgrade, no permission change)' : ''),
+      },
+      { pushAuditRow: false }
+    );
+    setReviewActionTarget(null);
+    setReviewActionReason('');
+    setReviewActionFindings('');
+  };
+
+  const renderAccessReview = () => {
+    const summary = summarizeAccessReviews(accessReviews, nowTick);
+    const counts: { key: AccessReviewStatus | 'total' | 'actionRequired'; label: string }[] = [
+      { key: 'total', label: 'Total' },
+      { key: 'pending', label: 'Pending' },
+      { key: 'overdue', label: 'Overdue (derived)' },
+      { key: 'reviewed_no_change', label: 'No Change' },
+      { key: 'reviewed_change_required', label: 'Change Required' },
+      { key: 'escalated', label: 'Escalated' },
+      { key: 'deferred', label: 'Deferred' },
+      { key: 'actionRequired', label: 'Action Required' },
+    ];
+    return (
+      <div className="space-y-6" data-testid="access-review-tab">
+        {/* Truthful, standing advisory notice (required verbatim copy). */}
+        <div className="bg-sky-50/70 border border-sky-200/70 rounded-2xl p-4 flex items-start gap-3" data-testid="access-review-truth-banner">
+          <span className="material-symbols-outlined text-sky-700 text-lg mt-0.5">fact_check</span>
+          <div className="text-xs font-medium text-sky-900 leading-relaxed space-y-1">
+            <p className="font-black uppercase tracking-widest text-sky-800">Access Review Foundation (Advisory)</p>
+            <p>
+              Access review records in this phase are local/advisory governance records. They help document review
+              decisions but do not automatically change roles, permissions, or server-side access. Backend enforcement
+              and compliance evidence automation are future/deferred.
+            </p>
+            <p className="text-[11px] text-sky-600">{ACCESS_REVIEW_MODEL_STATUS}</p>
+            <p className="text-[11px] text-sky-600">
+              Completing, escalating, deferring, or flagging a change as required <span className="font-black">requires a reason</span>; overdue/stale is a derived label (no scheduler, no automatic reminders or revocation).
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h2 className="text-2xl font-black text-primary tracking-tight">Access Review</h2>
+            <p className="text-slate-500 text-sm font-medium mt-1 max-w-3xl">
+              Document periodic access reviews for platform team members. Recording an outcome — including{' '}
+              <span className="font-black">change required</span> — does <span className="font-black">not</span> change the
+              member's real role or permissions; it records an advisory governance decision only.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setNowTick(Date.now())}
+              data-testid="access-review-refresh"
+              title="Recompute derived overdue/stale labels now. There is no background scheduler."
+              className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all flex items-center gap-1.5"
+            >
+              <span className="material-symbols-outlined text-sm">refresh</span>
+              Refresh Status
+            </button>
+            {isOwner && (
+              <>
+                <button
+                  onClick={handleSeedReviews}
+                  data-testid="access-review-seed-btn"
+                  title={`Create pending review records for current team members for ${defaultReviewPeriod()} (duplicate-safe).`}
+                  className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black text-[10px] rounded-xl uppercase tracking-widest transition-all flex items-center gap-1.5"
+                >
+                  <span className="material-symbols-outlined text-sm">playlist_add</span>
+                  Seed Team Reviews
+                </button>
+                <button
+                  onClick={() => { setReviewError(null); setReviewForm({ subjectId: '', reviewPeriod: defaultReviewPeriod(), findings: '', notes: '' }); setShowReviewCreateModal(true); }}
+                  data-testid="access-review-create-btn"
+                  className="px-6 py-2.5 bg-primary text-white font-black text-[10px] rounded-xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/20 uppercase tracking-widest flex items-center gap-2"
+                >
+                  <span className="material-symbols-outlined text-sm">add_task</span>
+                  Create Review Record
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+
+        {reviewError && !showReviewCreateModal && !reviewActionTarget && (
+          <p className="text-[11px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2" data-testid="access-review-inline-error">{reviewError}</p>
+        )}
+
+        {/* Single-source derived summary counts (summarizeAccessReviews over the
+            same list/nowTick that drives the rows) — counts cannot drift. */}
+        <div className="flex flex-wrap gap-2" data-testid="access-review-summary">
+          {counts.map(c => (
+            <span
+              key={c.key}
+              className={`px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-xl border ${
+                c.key === 'total' || c.key === 'actionRequired'
+                  ? 'bg-white text-slate-600 border-slate-200'
+                  : ACCESS_REVIEW_STATUS_BADGE_STYLE[c.key as AccessReviewStatus]
+              }`}
+            >
+              {c.label}: {summary[c.key]}
+            </span>
+          ))}
+        </div>
+
+        {accessReviews.length === 0 ? (
+          <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-12 text-center shadow-sm" data-testid="access-review-empty">
+            <span className="material-symbols-outlined text-4xl text-slate-300 mb-2 block">fact_check</span>
+            <p className="text-sm font-bold text-slate-500">No access review records yet.</p>
+            <p className="text-xs font-medium text-slate-400 mt-1">
+              {isOwner ? 'Use “Create Review Record” or “Seed Team Reviews” to start an advisory access review.' : 'Only System Owner can create access review records.'}
+            </p>
+          </div>
+        ) : (
+          <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse min-w-[1140px]">
+                <thead>
+                  <tr className="border-b border-slate-100 bg-slate-50/50">
+                    <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Reviewed Subject</th>
+                    <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Role &amp; Cadence</th>
+                    <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Period / Reviewer</th>
+                    <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Status <span className="text-slate-300 normal-case tracking-normal">(advisory)</span></th>
+                    <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Reviewed / Updated</th>
+                    <th className="px-6 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {accessReviews.map(record => {
+                    const derived = deriveAccessReviewStatus(record, nowTick);
+                    const actions = isOwner ? availableAccessReviewActions(record, nowTick) : [];
+                    const historyOpen = !!expandedReviewHistory[record.id];
+                    return (
+                      <React.Fragment key={record.id}>
+                        <tr className="border-b border-slate-50 last:border-0 align-top hover:bg-slate-50/50 transition-colors" data-testid={`access-review-row-${record.id}`}>
+                          <td className="px-6 py-5">
+                            <p className="text-sm font-black text-primary">{record.reviewedSubjectName}</p>
+                            {record.systemProtected && (
+                              <div className="flex flex-wrap gap-1 mt-1.5" data-testid={`access-review-sysowner-${record.id}`}>
+                                <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border bg-violet-400/10 text-violet-700 border-violet-400/20">System Protected</span>
+                                <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border bg-violet-400/10 text-violet-700 border-violet-400/20">Review Carefully</span>
+                                <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border bg-slate-100 text-slate-500 border-slate-200">No Automatic Downgrade</span>
+                                <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded border bg-slate-100 text-slate-500 border-slate-200">No Permission Change Applied</span>
+                              </div>
+                            )}
+                          </td>
+                          <td className="px-6 py-5">
+                            <span className="inline-block px-2.5 py-1 bg-slate-100 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-lg">
+                              {record.reviewedRoleLabel}
+                            </span>
+                            <p className="text-[10px] font-medium text-slate-400 mt-1.5">
+                              {record.reviewedRoleKnown
+                                ? `Recommended review: ${record.recommendedCadenceLabel}`
+                                : 'Custom / non-catalog role — advisory cadence (annual fallback)'}
+                            </p>
+                          </td>
+                          <td className="px-6 py-5">
+                            <p className="text-[11px] font-bold text-slate-600">{record.reviewPeriod}</p>
+                            <p className="text-[10px] font-medium text-slate-400 mt-0.5">Reviewer: {record.reviewerName}</p>
+                            <p className="text-[10px] font-medium text-slate-400">Created by: {record.createdBy}</p>
+                          </td>
+                          <td className="px-6 py-5">
+                            <span className={`px-3 py-1 text-[10px] font-black uppercase tracking-widest rounded-lg border ${ACCESS_REVIEW_STATUS_BADGE_STYLE[derived]}`} data-testid={`access-review-status-${record.id}`}>
+                              {ACCESS_REVIEW_STATUS_LABEL[derived]}
+                            </span>
+                            {record.actionRequired && (
+                              <p className="text-[9px] font-black uppercase tracking-widest text-orange-600 mt-1.5 max-w-[220px]">
+                                Action required — advisory only; no permission change applied.
+                              </p>
+                            )}
+                            {record.notes && (
+                              <p className="text-[10px] font-medium text-slate-500 mt-1.5 max-w-[240px]">Reason: {record.notes}</p>
+                            )}
+                            {record.findings && (
+                              <p className="text-[10px] font-medium text-slate-400 mt-1 max-w-[240px]">Findings: {record.findings}</p>
+                            )}
+                            <button
+                              onClick={() => setExpandedReviewHistory(prev => ({ ...prev, [record.id]: !prev[record.id] }))}
+                              className="block mt-2 text-[9px] font-black uppercase tracking-widest text-indigo-500 hover:text-indigo-700"
+                              data-testid={`access-review-history-toggle-${record.id}`}
+                            >
+                              {historyOpen ? 'Hide trail' : `Trail (${record.history.length})`}
+                            </button>
+                          </td>
+                          <td className="px-6 py-5">
+                            <p className="text-[10px] font-medium text-slate-500">
+                              Reviewed: {record.reviewedAt ? record.reviewedAt.slice(0, 16).replace('T', ' ') : '—'}
+                            </p>
+                            <p className="text-[10px] font-medium text-slate-400 mt-0.5">Updated: {record.updatedAt.slice(0, 16).replace('T', ' ')}</p>
+                          </td>
+                          <td className="px-6 py-5 text-right">
+                            {actions.length === 0 ? (
+                              <span className="text-[10px] font-bold text-slate-300 uppercase tracking-widest">{isOwner ? 'Terminal — no actions' : 'View only'}</span>
+                            ) : (
+                              <button
+                                onClick={() => { setReviewError(null); setReviewOutcome('reviewed_no_change'); setReviewActionReason(''); setReviewActionFindings(''); setReviewActionTarget(record); }}
+                                data-testid={`access-review-record-outcome-${record.id}`}
+                                className="px-3 py-1.5 text-[9px] font-black uppercase tracking-widest rounded-lg border bg-primary/5 text-primary border-primary/20 hover:bg-primary/10 transition-all"
+                              >
+                                Record Outcome
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                        {historyOpen && (
+                          <tr className="bg-slate-50/60" data-testid={`access-review-history-${record.id}`}>
+                            <td colSpan={6} className="px-6 py-4">
+                              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Review Trail — reason captured per transition</p>
+                              <ul className="space-y-1.5">
+                                {record.history.map(ev => (
+                                  <li key={ev.id} className="text-[11px] font-medium text-slate-600 flex flex-wrap items-baseline gap-x-2">
+                                    <span className="font-black text-slate-700">{ev.action === 'created' ? 'Created' : ACCESS_REVIEW_OUTCOME_LABEL[ev.action]}</span>
+                                    <span className="text-slate-400">{ev.at.slice(0, 16).replace('T', ' ')}</span>
+                                    <span className="text-slate-400">by {ev.actor}</span>
+                                    {ev.fromStatus && <span className="text-slate-400">· {ev.fromStatus} → {ev.toStatus}</span>}
+                                    {!ev.fromStatus && <span className="text-slate-400">· → {ev.toStatus}</span>}
+                                    <span className="text-slate-500">— {ev.reason}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* ---- Sensitive Action Reason Capture (local/advisory log) ---- */}
+        <div className="space-y-3" data-testid="sensitive-action-reason-panel">
+          <div className="bg-amber-400/10 border border-amber-400/30 rounded-2xl p-4 flex items-start gap-3" data-testid="sensitive-action-truth-banner">
+            <span className="material-symbols-outlined text-amber-700 text-lg mt-0.5">history_edu</span>
+            <div className="text-xs font-medium text-amber-900 leading-relaxed space-y-1">
+              <p className="font-black uppercase tracking-widest text-amber-800">Sensitive Action Reason Capture (Advisory)</p>
+              <p>{SENSITIVE_ACTION_REASON_MODEL_STATUS}</p>
+              <p className="text-[11px] text-amber-700">
+                Captured for: access review outcomes (above) and resetting the Global Permissions Matrix to defaults.
+                Per-cell matrix edits, member edits, and temporary-access actions keep their own existing audit trails.
+                Production compliance evidence is future/deferred · no server-side enforcement.
+              </p>
+            </div>
+          </div>
+
+          {sensitiveReasons.length === 0 ? (
+            <div className="bg-white/70 border border-slate-200 rounded-2xl p-6 text-center" data-testid="sensitive-action-empty">
+              <p className="text-xs font-bold text-slate-500">No sensitive-action reasons captured this session yet.</p>
+              <p className="text-[11px] font-medium text-slate-400 mt-1">Record an access review outcome, or reset the permissions matrix, to capture a reason here.</p>
+            </div>
+          ) : (
+            <div className="bg-white/80 backdrop-blur-xl rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
+              <ul className="divide-y divide-slate-100">
+                {sensitiveReasons.slice(0, 20).map(cap => (
+                  <li key={cap.id} className="px-5 py-4" data-testid={`sensitive-action-row-${cap.id}`}>
+                    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                      <span className="text-xs font-black text-slate-700">{cap.actionLabel}</span>
+                      <span className="px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest rounded bg-slate-100 text-slate-500 border border-slate-200">
+                        {cap.actionCategory.replace(/_/g, ' ')}
+                      </span>
+                      <span className="text-[10px] font-medium text-slate-400">{cap.at.slice(0, 16).replace('T', ' ')} · {cap.actor}</span>
+                    </div>
+                    {cap.targetSubject && <p className="text-[11px] font-medium text-slate-500 mt-1">Target: {cap.targetSubject}</p>}
+                    {cap.targetPermission && <p className="text-[11px] font-medium text-slate-500 mt-1">Target: {cap.targetPermission}</p>}
+                    {(cap.beforeSummary || cap.afterSummary) && (
+                      <p className="text-[10px] font-medium text-slate-400 mt-0.5">
+                        {cap.beforeSummary || '—'} → {cap.afterSummary || '—'}
+                      </p>
+                    )}
+                    <p className="text-[11px] font-medium text-slate-600 mt-1">Reason: {cap.reason}</p>
+                    <p className="text-[9px] font-black uppercase tracking-widest text-amber-600 mt-1">{cap.advisoryLabel}</p>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   const renderActivity = () => (
     <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
       <table className="w-full text-left border-collapse">
@@ -1482,6 +2047,7 @@ export default function TeamManagementPage() {
             { id: 'team', label: 'Team', icon: 'group' },
             { id: 'roles', label: 'Roles', icon: 'security' },
             { id: 'temporary', label: 'Temporary Access', icon: 'timer' },
+            { id: 'review', label: 'Access Review', icon: 'fact_check' },
             { id: 'permissions', label: 'Permissions', icon: 'key' },
             { id: 'activity', label: 'Activity Log', icon: 'history' }
           ].map((tab) => (
@@ -1511,6 +2077,7 @@ export default function TeamManagementPage() {
             {activeTab === 'team' && renderTeam()}
             {activeTab === 'roles' && renderRoles()}
             {activeTab === 'temporary' && renderTemporaryAccess()}
+            {activeTab === 'review' && renderAccessReview()}
             {activeTab === 'permissions' && renderPermissions()}
             {activeTab === 'activity' && renderActivity()}
           </motion.div>
@@ -1765,19 +2332,36 @@ export default function TeamManagementPage() {
                   <p className="text-sm text-slate-600 mb-2">
                     This will clear all permission overrides for every platform role and revert them to their default levels.
                   </p>
-                  <p className="text-xs text-slate-500 mb-6">
+                  <p className="text-xs text-slate-500 mb-4">
                     Affected roles: {MATRIX_ROLES.filter(r => r !== 'system_owner').map(r => PLATFORM_ROLE_DISPLAY_LABEL[r]).join(', ')}. System Owner remains locked at Full Access.
                   </p>
+                  {/* Phase 1.3 — Milestone 4: sensitive-action reason capture. The
+                      reset behavior is unchanged; a reason is captured (advisory/local). */}
+                  <div className="space-y-2 mb-5">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Reason (required — sensitive action)</label>
+                    <textarea
+                      value={resetReason}
+                      onChange={e => setResetReason(e.target.value)}
+                      data-testid="reset-reason"
+                      className="w-full px-4 py-3 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700 resize-none h-20 text-sm"
+                      placeholder="Why are all permission overrides being reset to defaults?"
+                    />
+                    <p className="text-[10px] font-medium text-slate-400 ml-1">
+                      {SENSITIVE_ACTION_REASON_ADVISORY_LABEL}
+                    </p>
+                  </div>
                   <div className="flex gap-3">
                     <button
-                      onClick={() => setShowResetConfirm(false)}
+                      onClick={() => { setShowResetConfirm(false); setResetReason(''); }}
                       className="flex-1 py-3 bg-white text-slate-600 font-black text-[10px] rounded-2xl border border-slate-200 hover:bg-slate-50 transition-all uppercase tracking-widest"
                     >
                       Cancel
                     </button>
                     <button
                       onClick={confirmReset}
-                      className="flex-1 py-3 bg-amber-500 text-white font-black text-[10px] rounded-2xl shadow-lg shadow-amber-500/20 uppercase tracking-widest hover:bg-amber-600 transition-all"
+                      disabled={resetReason.trim().length < 3}
+                      data-testid="reset-confirm"
+                      className="flex-1 py-3 bg-amber-500 text-white font-black text-[10px] rounded-2xl shadow-lg shadow-amber-500/20 uppercase tracking-widest hover:bg-amber-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       Confirm Reset
                     </button>
@@ -1960,6 +2544,222 @@ export default function TeamManagementPage() {
                       }`}
                     >
                       Confirm {TEMP_ACCESS_ACTION_VERB[tempActionTarget.action]}
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* Phase 1.3 — Milestone 4: Create Access Review record modal. */}
+        <AnimatePresence>
+          {showReviewCreateModal && (
+            <div key="review-create-modal" className="fixed inset-0 z-50 flex items-center justify-center p-6">
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setShowReviewCreateModal(false)}
+                className="absolute inset-0 bg-slate-900/40 backdrop-blur-md"
+              />
+              <motion.div
+                initial={{ opacity: 0, scale: 0.9, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.9, y: 20 }}
+                className="relative w-full max-w-xl bg-white rounded-[3rem] shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[90vh]"
+              >
+                <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                  <div>
+                    <h3 className="text-2xl font-black text-primary tracking-tight">Create Access Review Record</h3>
+                    <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Advisory · local · non-enforcing</p>
+                  </div>
+                  <button onClick={() => setShowReviewCreateModal(false)} className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors">
+                    <span className="material-symbols-outlined text-slate-400">close</span>
+                  </button>
+                </div>
+
+                <div className="p-8 overflow-y-auto flex-1 space-y-5">
+                  <div className="bg-sky-50/70 border border-sky-200/60 rounded-2xl p-3 text-[11px] font-medium text-sky-800 leading-relaxed">
+                    Creates a <span className="font-black">pending</span> advisory review record. It does not change the member's role or permissions, and there is no automatic completion, reminder, or revocation.
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Reviewed subject (team member)</label>
+                    <select
+                      value={reviewForm.subjectId}
+                      onChange={e => setReviewForm(prev => ({ ...prev, subjectId: e.target.value }))}
+                      data-testid="review-create-subject"
+                      className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700"
+                    >
+                      <option value="">Select a member…</option>
+                      {team.map(m => (
+                        <option key={m.id} value={m.id}>{m.name} — {m.role}</option>
+                      ))}
+                    </select>
+                    {(() => {
+                      const m = team.find(x => x.id === reviewForm.subjectId);
+                      if (!m) return <p className="text-[10px] font-medium text-slate-400 ml-4">All platform team members are in scope (including System Owner — reviewed for existence/ownership, never downgraded).</p>;
+                      const rid = resolvePlatformRoleId(m.role);
+                      const sysOwner = rid === 'system_owner';
+                      return (
+                        <p className="text-[10px] font-medium text-slate-400 ml-4">
+                          Reviewed role: <span className="font-black text-slate-500">{m.role}</span> ·{' '}
+                          {rid ? `recommended review ${getRecommendedReviewCadence(rid)}` : 'custom/non-catalog role (annual fallback)'}
+                          {sysOwner && <span className="text-violet-600 font-black"> · System Protected — review carefully; no downgrade.</span>}
+                        </p>
+                      );
+                    })()}
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Review period (required)</label>
+                    <input
+                      value={reviewForm.reviewPeriod}
+                      onChange={e => setReviewForm(prev => ({ ...prev, reviewPeriod: e.target.value }))}
+                      data-testid="review-create-period"
+                      className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700"
+                      placeholder="e.g. Q2 2026"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Reviewer / created by</label>
+                    <input
+                      value={session?.user?.name || 'System Owner'}
+                      readOnly
+                      className="w-full px-6 py-4 bg-slate-100 rounded-2xl border border-slate-200 font-bold text-slate-500"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Initial findings (optional)</label>
+                    <textarea
+                      value={reviewForm.findings}
+                      onChange={e => setReviewForm(prev => ({ ...prev, findings: e.target.value }))}
+                      data-testid="review-create-findings"
+                      className="w-full px-6 py-4 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700 resize-none h-16"
+                      placeholder="Context noted at creation (optional)…"
+                    />
+                  </div>
+
+                  {reviewError && (
+                    <p className="text-[11px] font-bold text-red-600 bg-red-50 border border-red-200 rounded-xl px-3 py-2" data-testid="review-create-error">{reviewError}</p>
+                  )}
+                </div>
+
+                <div className="p-8 border-t border-slate-100 bg-slate-50/50 flex gap-4">
+                  <button
+                    onClick={() => setShowReviewCreateModal(false)}
+                    className="flex-1 py-4 bg-white text-slate-600 font-black text-sm rounded-2xl border border-slate-200 hover:bg-slate-50 transition-all uppercase tracking-widest"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleCreateReview}
+                    disabled={!reviewForm.subjectId || reviewForm.reviewPeriod.trim().length === 0}
+                    data-testid="review-create-submit"
+                    className="flex-1 py-4 bg-primary text-white font-black text-sm rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Create Record
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* Phase 1.3 — Milestone 4: Record Access Review Outcome modal (reason required). */}
+        <AnimatePresence>
+          {reviewActionTarget && (
+            <div key="review-action-modal" className="fixed inset-0 z-50 flex items-center justify-center p-6">
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => { setReviewActionTarget(null); setReviewActionReason(''); setReviewActionFindings(''); }}
+                className="absolute inset-0 bg-slate-900/40 backdrop-blur-md"
+              />
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95, y: 10 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 10 }}
+                transition={{ duration: 0.2 }}
+                className="relative w-full max-w-md bg-white rounded-3xl shadow-2xl border border-slate-200 overflow-hidden"
+              >
+                <div className="p-8">
+                  <h3 className="text-xl font-black text-slate-900 tracking-tight mb-1">Record Access Review Outcome</h3>
+                  <p className="text-xs font-bold text-slate-500 mb-1">
+                    {reviewActionTarget.reviewedSubjectName} · {reviewActionTarget.reviewedRoleLabel} · {reviewActionTarget.reviewPeriod}
+                  </p>
+
+                  {reviewActionTarget.systemProtected && (
+                    <div className="bg-violet-50 border border-violet-200 rounded-xl px-3 py-2 my-3 text-[11px] font-medium text-violet-800 leading-relaxed" data-testid="review-action-sysowner-notice">
+                      <span className="font-black uppercase tracking-widest">System Protected:</span> System Owner is reviewed carefully for existence/ownership. No outcome downgrades it and no permission change is applied.
+                    </div>
+                  )}
+
+                  <div className="space-y-2 mt-3">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Outcome</label>
+                    <select
+                      value={reviewOutcome}
+                      onChange={e => setReviewOutcome(e.target.value as AccessReviewOutcome)}
+                      data-testid="review-action-outcome"
+                      className="w-full px-4 py-3 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700 text-sm"
+                    >
+                      {ACCESS_REVIEW_OUTCOMES.map(o => (
+                        <option key={o} value={o} data-testid={`review-action-outcome-${o}`}>{ACCESS_REVIEW_OUTCOME_LABEL[o]}</option>
+                      ))}
+                    </select>
+                    <p className="text-[11px] font-medium text-slate-500 ml-1">{ACCESS_REVIEW_OUTCOME_PROMPT[reviewOutcome]}</p>
+                    {reviewOutcome === 'reviewed_change_required' && (
+                      <p className="text-[10px] font-black uppercase tracking-widest text-orange-600 ml-1" data-testid="review-action-change-required-label">
+                        Action required — advisory only; no permission change applied.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="space-y-2 mt-4">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Findings (optional)</label>
+                    <textarea
+                      value={reviewActionFindings}
+                      onChange={e => setReviewActionFindings(e.target.value)}
+                      data-testid="review-action-findings"
+                      className="w-full px-4 py-3 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700 resize-none h-16 text-sm"
+                      placeholder="What was found (optional)…"
+                    />
+                  </div>
+
+                  <div className="space-y-2 mt-4">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Reason (required)</label>
+                    <textarea
+                      value={reviewActionReason}
+                      onChange={e => setReviewActionReason(e.target.value)}
+                      data-testid="review-action-reason"
+                      autoFocus
+                      className="w-full px-4 py-3 bg-slate-50 rounded-2xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700 resize-none h-20 text-sm"
+                      placeholder="Reason for this outcome (required)…"
+                    />
+                  </div>
+
+                  {reviewError && (
+                    <p className="text-[11px] font-bold text-red-600 bg-red-50 border border-red-200 rounded-xl px-3 py-2 mt-3" data-testid="review-action-error">{reviewError}</p>
+                  )}
+
+                  <div className="flex gap-3 mt-5">
+                    <button
+                      onClick={() => { setReviewActionTarget(null); setReviewActionReason(''); setReviewActionFindings(''); }}
+                      className="flex-1 py-3 bg-white text-slate-600 font-black text-[10px] rounded-2xl border border-slate-200 hover:bg-slate-50 transition-all uppercase tracking-widest"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleCompleteReview}
+                      disabled={reviewActionReason.trim().length < 3}
+                      data-testid="review-action-confirm"
+                      className="flex-1 py-3 bg-primary text-white font-black text-[10px] rounded-2xl shadow-lg shadow-primary/20 uppercase tracking-widest hover:bg-primary/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Record Outcome
                     </button>
                   </div>
                 </div>

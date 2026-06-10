@@ -101,7 +101,17 @@ export type PlatformAuditAction =
   | 'platform_temporary_access_approved'
   | 'platform_temporary_access_denied'
   | 'platform_temporary_access_revoked'
-  | 'platform_temporary_access_cancelled';
+  | 'platform_temporary_access_cancelled'
+  // Phase 1.3 — Milestone 4: Access Review + Sensitive Action Reason Capture.
+  // Advisory/non-enforcing — these record reason-captured review outcomes and
+  // sensitive-action reasons; they do NOT change real permissions, do NOT
+  // enforce server-side, and are NOT compliance certification evidence.
+  | 'access_review_created'
+  | 'access_review_completed'
+  | 'access_review_change_required'
+  | 'access_review_escalated'
+  | 'access_review_deferred'
+  | 'sensitive_action_reason_captured';
 
 export interface PushPlatformAuditInput {
   actor: string;
@@ -218,6 +228,13 @@ const DEFAULT_SEVERITY_BY_ACTION: Partial<Record<PlatformAuditAction, PlatformAu
   platform_temporary_access_denied: 'notice',
   platform_temporary_access_revoked: 'warning',
   platform_temporary_access_cancelled: 'notice',
+  // Phase 1.3 — Milestone 4: Access Review + Sensitive Action Reason Capture
+  access_review_created: 'notice',
+  access_review_completed: 'notice',
+  access_review_change_required: 'warning',
+  access_review_escalated: 'warning',
+  access_review_deferred: 'notice',
+  sensitive_action_reason_captured: 'notice',
 };
 
 export function pushPlatformAudit(input: PushPlatformAuditInput): MirrorRow {
