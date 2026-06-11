@@ -111,6 +111,26 @@ import {
   type AttentionPriority,
 } from './platformOpsDerive';
 import { pushPlatformAudit } from './platformOpsAudit';
+// Phase 1.3 — Milestone 5: read-only governance signal sources. These are the
+// LOCAL/ADVISORY Milestone 3 (temporary access) + Milestone 4 (access review +
+// sensitive-action reason capture) session stores. The Command Center only
+// READS + SUMMARIZES them — it never writes a grant/record, never calls the
+// resolver, and adds no server-side enforcement.
+import {
+  readTemporaryAccessGrants,
+  summarizeTemporaryAccess,
+  TEMPORARY_ACCESS_CHANGED_EVENT,
+  type StoredTemporaryAccessGrant,
+} from './platformTemporaryAccess';
+import {
+  readAccessReviewRecords,
+  summarizeAccessReviews,
+  readSensitiveActionReasons,
+  ACCESS_REVIEW_CHANGED_EVENT,
+  SENSITIVE_ACTION_REASON_CHANGED_EVENT,
+  type StoredAccessReviewRecord,
+  type SensitiveActionReasonCapture,
+} from './platformAccessReview';
 import { useAccess } from '../context/AccessContext';
 import {
   hasPlatformPermission,
@@ -272,10 +292,21 @@ const CommandCenterPage: React.FC = () => {
   // `view_nba_recommendations` still resolves via PLATFORM_SUB_PERMISSION_ALIASES.
   const viewNbaGate = hasPlatformPermission(sessionRole, 'view_next_best_actions');
   const actNbaGate = hasPlatformPermission(sessionRole, 'act_on_nba_recommendations');
+  // Phase 1.3 — Milestone 5 correction: the governance signals section is now
+  // additionally controlled by the Global Permissions Matrix. It requires BOTH
+  // Command Center access (view_command_center) AND the new view_governance_signals.
+  const viewGovSignalsGate = hasPlatformPermission(sessionRole, 'view_governance_signals');
+  // The Audit cross-link is only shown when the role can actually use the
+  // governance audit lens (view_governance_audit_lens) — no dead deep-links.
+  const viewGovAuditLensGate = hasPlatformPermission(sessionRole, 'view_governance_audit_lens');
   const [cases, setCases] = useState<SupportCaseRecord[]>([]);
   const [audits, setAudits] = useState<AuditEventLike[]>([]);
   const [domains, setDomains] = useState<typeof tenantDomains>([]);
   const [notes, setNotes] = useState<SecurityNote[]>([]);
+  // Phase 1.3 — Milestone 5: local/advisory governance signal stores (read-only).
+  const [tempAccessGrants, setTempAccessGrants] = useState<StoredTemporaryAccessGrant[]>([]);
+  const [accessReviews, setAccessReviews] = useState<StoredAccessReviewRecord[]>([]);
+  const [sensitiveReasons, setSensitiveReasons] = useState<SensitiveActionReasonCapture[]>([]);
 
   // Mission Control state. Default to 'all' so Needs Attention preserves
   // the Phase 1.1 baseline (no items hidden by an implicit 7-day window).
@@ -304,6 +335,11 @@ const CommandCenterPage: React.FC = () => {
     setAudits(readSession<AuditEventLike[]>('audit_logs', []));
     setDomains(readSession<typeof tenantDomains>(DOMAINS_KEY, tenantDomains));
     setNotes(readSession<SecurityNote[]>(NOTES_KEY, []));
+    // Phase 1.3 — Milestone 5: refresh the local/advisory governance stores so
+    // the manual Refresh button also recomputes the derived governance signals.
+    setTempAccessGrants(readTemporaryAccessGrants());
+    setAccessReviews(readAccessReviewRecords());
+    setSensitiveReasons(readSensitiveActionReasons());
     setLastRefreshed(new Date());
   }, []);
 
@@ -315,12 +351,19 @@ const CommandCenterPage: React.FC = () => {
     window.addEventListener('support_cases:changed', onAny);
     window.addEventListener('tenant_domains:changed', onAny);
     window.addEventListener('platform_security_notes:changed', onAny);
+    // Phase 1.3 — Milestone 5: refresh when a governance store changes.
+    window.addEventListener(TEMPORARY_ACCESS_CHANGED_EVENT, onAny);
+    window.addEventListener(ACCESS_REVIEW_CHANGED_EVENT, onAny);
+    window.addEventListener(SENSITIVE_ACTION_REASON_CHANGED_EVENT, onAny);
     return () => {
       window.removeEventListener('audit_logs:changed', onAny);
       window.removeEventListener('storage', onAny);
       window.removeEventListener('support_cases:changed', onAny);
       window.removeEventListener('tenant_domains:changed', onAny);
       window.removeEventListener('platform_security_notes:changed', onAny);
+      window.removeEventListener(TEMPORARY_ACCESS_CHANGED_EVENT, onAny);
+      window.removeEventListener(ACCESS_REVIEW_CHANGED_EVENT, onAny);
+      window.removeEventListener(SENSITIVE_ACTION_REASON_CHANGED_EVENT, onAny);
     };
   }, [reloadAll]);
 
@@ -905,6 +948,23 @@ const CommandCenterPage: React.FC = () => {
     };
     return commandSignals.filter(byDrawer[commandDrawer]);
   }, [commandDrawer, commandSignals, tenantHealth]);
+
+  // --- Phase 1.3 — Milestone 5: governance signals (LOCAL / ADVISORY) ----
+  // Single-source derived counts: each summary is computed once from the same
+  // store the Team Management governance tabs use, so a card count can never
+  // drift from the underlying records. Derived expired/overdue status is
+  // recomputed at load/refresh time (no scheduler, no background worker).
+  const tempAccessSummary = useMemo(
+    () => summarizeTemporaryAccess(tempAccessGrants),
+    [tempAccessGrants]
+  );
+  const accessReviewSummary = useMemo(
+    () => summarizeAccessReviews(accessReviews),
+    [accessReviews]
+  );
+  const sensitiveReasonCount = sensitiveReasons.length;
+  const hasAnyGovernanceRecords =
+    tempAccessSummary.total > 0 || accessReviewSummary.total > 0 || sensitiveReasonCount > 0;
 
   return (
     <div className="space-y-8">
@@ -1651,6 +1711,135 @@ const CommandCenterPage: React.FC = () => {
       </section>
       )}
 
+      {/* ============== PLATFORM TEAM GOVERNANCE — LOCAL / ADVISORY (Phase 1.3 · M5) ============== */}
+      {/* Section-level gate: requires Command Center access (view_command_center)
+          AND the matrix-controlled view_governance_signals permission (M5
+          correction). Every number is a single-source derived count over the
+          Milestone 3/4 session stores; these are advisory signals only (no
+          enforcement, no compliance evidence, no server-side monitoring). */}
+      {viewPageGate.allowed && viewGovSignalsGate.allowed && (
+      <section className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm" data-testid="governance-signals-section">
+        <div className="px-8 py-5 border-b border-slate-100 flex items-start justify-between flex-wrap gap-3">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="material-symbols-outlined text-primary text-xl">verified_user</span>
+              <h3 className="text-lg font-black text-primary tracking-tight">Platform Team Governance</h3>
+              <span className="px-2 py-0.5 rounded-md text-[9px] font-black uppercase tracking-widest bg-slate-100 text-slate-500 border border-slate-200">
+                Phase 1.3 · Local / Advisory
+              </span>
+            </div>
+            <p className="text-xs text-slate-500 font-medium mt-0.5">
+              Temporary access, access review, and sensitive-action reason signals — derived from this session's
+              advisory governance records. Not server-side enforcement or compliance monitoring.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Link
+              to="/owner/team-management"
+              data-testid="governance-link-team"
+              className="px-3 py-1.5 bg-white border border-slate-200 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/5 hover:text-primary transition-colors"
+            >
+              Team Management
+            </Link>
+            {viewGovAuditLensGate.allowed && (
+              <Link
+                to="/owner/audit-security?lens=governance_advisory"
+                data-testid="governance-link-audit"
+                className="px-3 py-1.5 bg-white border border-slate-200 text-slate-600 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-primary/5 hover:text-primary transition-colors"
+              >
+                Audit Investigation
+              </Link>
+            )}
+          </div>
+        </div>
+
+        {/* Standing truth notice (required, verbatim). */}
+        <div className="px-8 pt-5">
+          <div className="rounded-2xl border border-amber-200 bg-amber-50/70 px-4 py-3" data-testid="governance-advisory-notice">
+            <p className="text-[11px] font-bold text-amber-800 leading-relaxed">
+              Phase 1.3 governance signals are local/advisory in this phase. They do not represent server-side
+              enforcement, automated compliance evidence, or production PAM/IAM monitoring.
+            </p>
+          </div>
+        </div>
+
+        <div className="p-8 pt-5 space-y-6">
+          {/* --- Temporary Access (Milestone 3) --- */}
+          <div data-testid="governance-temporary-access">
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                Temporary Access — Advisory Grants
+              </p>
+              <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Source · Milestone 3 (session)</span>
+            </div>
+            {tempAccessSummary.total > 0 ? (
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <GovStat label="Pending Requests" value={tempAccessSummary.requested} tone={tempAccessSummary.requested > 0 ? 'warn' : 'muted'} />
+                <GovStat label="Active Advisory Grants" value={tempAccessSummary.active} tone={tempAccessSummary.active > 0 ? 'warn' : 'muted'} />
+                <GovStat label="Expired Advisory Grants" value={tempAccessSummary.expired} tone="muted" />
+                <GovStat label="Total Advisory Grants" value={tempAccessSummary.total} tone="info" />
+              </div>
+            ) : (
+              <p className="text-xs text-slate-400 font-semibold italic" data-testid="governance-temporary-access-empty">
+                No local advisory temporary access records in this session.
+              </p>
+            )}
+          </div>
+
+          {/* --- Access Review (Milestone 4) --- */}
+          <div data-testid="governance-access-review">
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                Access Reviews — Advisory Records
+              </p>
+              <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Source · Milestone 4 (session)</span>
+            </div>
+            {accessReviewSummary.total > 0 ? (
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <GovStat label="Pending" value={accessReviewSummary.pending} tone={accessReviewSummary.pending > 0 ? 'warn' : 'muted'} />
+                <GovStat label="Overdue (Derived)" value={accessReviewSummary.overdue} tone={accessReviewSummary.overdue > 0 ? 'critical' : 'muted'} />
+                <GovStat label="Escalated" value={accessReviewSummary.escalated} tone={accessReviewSummary.escalated > 0 ? 'critical' : 'muted'} />
+                <GovStat label="Change Required" value={accessReviewSummary.reviewed_change_required} tone={accessReviewSummary.reviewed_change_required > 0 ? 'warn' : 'muted'} />
+              </div>
+            ) : (
+              <p className="text-xs text-slate-400 font-semibold italic" data-testid="governance-access-review-empty">
+                No local advisory access review records in this session.
+              </p>
+            )}
+          </div>
+
+          {/* --- Sensitive Action Reason Capture (Milestone 4) --- */}
+          <div data-testid="governance-sensitive-actions">
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                Sensitive Actions — Captured Reasons
+              </p>
+              <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Source · Milestone 4 (session)</span>
+            </div>
+            {sensitiveReasonCount > 0 ? (
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <GovStat label="Reasons Captured" value={sensitiveReasonCount} tone="info" />
+              </div>
+            ) : (
+              <p className="text-xs text-slate-400 font-semibold italic" data-testid="governance-sensitive-actions-empty">
+                No sensitive-action reasons captured in this session.
+              </p>
+            )}
+          </div>
+
+          {/* Footer truth label — future-state boundary. */}
+          <div className="pt-1 border-t border-slate-100">
+            <p className="text-[10px] font-bold text-slate-400 leading-relaxed pt-3">
+              {hasAnyGovernanceRecords
+                ? 'Counts are derived from this session’s local governance records and recompute on Refresh (no scheduler, no background worker, no automatic revocation).'
+                : 'No governance records yet — create them on the Temporary Access and Access Review tabs in Team Management.'}{' '}
+              Server-side enforcement remains future/deferred. These signals are not production compliance evidence.
+            </p>
+          </div>
+        </div>
+      </section>
+      )}
+
       {/* ============== HOW RISK IS DERIVED (preserved) ============== */}
       {/* Section-level gate: explanatory legend lives with the page overview. */}
       {viewPageGate.allowed && (
@@ -2204,6 +2393,21 @@ const RiskRule: React.FC<{ label: string; body: string }> = ({ label, body }) =>
   <div>
     <p className="font-black text-slate-700">{label}</p>
     <p className="text-slate-500 mt-1 leading-relaxed">{body}</p>
+  </div>
+);
+
+// Phase 1.3 — Milestone 5: small derived-count stat card for the governance
+// signals section. Display only — the tone is a soft accent (no enforcement).
+const GOV_STAT_TONE: Record<'info' | 'warn' | 'critical' | 'muted', string> = {
+  info: 'bg-sky-50 border-sky-100 text-sky-700',
+  warn: 'bg-amber-50 border-amber-100 text-amber-700',
+  critical: 'bg-red-50 border-red-100 text-red-700',
+  muted: 'bg-slate-50 border-slate-100 text-slate-500',
+};
+const GovStat: React.FC<{ label: string; value: number; tone: 'info' | 'warn' | 'critical' | 'muted' }> = ({ label, value, tone }) => (
+  <div className={`p-4 rounded-2xl border ${GOV_STAT_TONE[tone]}`} data-testid={`gov-stat-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')}`}>
+    <p className="text-[10px] font-black uppercase tracking-widest opacity-80">{label}</p>
+    <p className="text-2xl font-black mt-1 tabular-nums">{value}</p>
   </div>
 );
 

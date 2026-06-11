@@ -129,6 +129,8 @@ export const PLATFORM_FEATURE_GROUPS: PlatformFeatureGroupDef[] = [
       { id: 'use_command_quick_actions', label: 'Use Quick Actions', description: 'Click Command Center quick action buttons (navigation only).', threshold: 'view' },
       { id: 'view_next_best_actions', label: 'View Next Best Actions', description: 'See Next Best Action recommendations list.', threshold: 'view' },
       { id: 'act_on_nba_recommendations', label: 'Act on NBA Recommendations', description: 'Click through NBA actions to take operational steps.', threshold: 'edit' },
+      // Phase 1.3 — Milestone 5 correction: governance signals section (local/advisory).
+      { id: 'view_governance_signals', label: 'View Governance Signals', description: 'See the Phase 1.3 Platform Team Governance signals section (temporary access, access review, and sensitive-action counts — local/advisory, derived from session records).', threshold: 'view' },
     ],
   },
   {
@@ -146,6 +148,8 @@ export const PLATFORM_FEATURE_GROUPS: PlatformFeatureGroupDef[] = [
       { id: 'create_support_case_from_audit', label: 'Create Case from Audit Event', description: 'Open the "Create Support Case from Event" modal in the audit drawer.', threshold: 'create' },
       { id: 'view_restricted_audit_details', label: 'View Restricted Audit Details', description: 'Access restricted/sensitive detail in the audit drawer.', threshold: 'approve' },
       { id: 'view_escalation_lifecycle_audit', label: 'View Escalation Lifecycle Audit', description: 'Access escalation lifecycle lens/detail in audit context.', threshold: 'view' },
+      // Phase 1.3 — Milestone 5 correction: governance advisory audit lens (local/advisory).
+      { id: 'view_governance_audit_lens', label: 'View Governance Audit Lens', description: 'See and use the "Governance Activity (Advisory)" investigation lens that groups Phase 1.3 temporary-access / access-review / sensitive-action audit events. Local advisory audit trail only — not compliance evidence.', threshold: 'view' },
     ],
   },
   {
@@ -224,6 +228,16 @@ export const PLATFORM_FEATURE_GROUPS: PlatformFeatureGroupDef[] = [
       { id: 'view_team', label: 'View Team', description: 'Open the team directory and roles list.', threshold: 'view' },
       { id: 'manage_team_members', label: 'Manage Team Members', description: 'Invite / suspend / disable platform team members.', threshold: 'manage', sensitive: true },
       { id: 'manage_platform_roles', label: 'Manage Platform Roles', description: 'Create / edit platform roles and the Global Permissions Matrix.', threshold: 'full', sensitive: true },
+      // Phase 1.3 — Milestone 5 correction: platform team GOVERNANCE controls
+      // (Temporary Access / PIM Foundation + Access Review + Sensitive Action
+      // Reason Capture). All LOCAL / ADVISORY / NON-ENFORCING — granting these
+      // controls who can VIEW or MANAGE the governance tabs/records; it does NOT
+      // change any real permission, role, or add server-side enforcement.
+      { id: 'view_temporary_access', label: 'View Temporary Access', description: 'Open the Temporary Access / PIM tab and read advisory temporary-access grants (local/advisory — no real elevation).', threshold: 'view' },
+      { id: 'manage_temporary_access', label: 'Manage Temporary Access', description: 'Request, approve/grant, deny, revoke, or cancel advisory temporary-access grants (reason required; no real permission change, no server-side enforcement).', threshold: 'manage', sensitive: true },
+      { id: 'view_access_reviews', label: 'View Access Reviews', description: 'Open the Access Review tab and read advisory access-review records and the sensitive-action reason log (local/advisory).', threshold: 'view' },
+      { id: 'manage_access_reviews', label: 'Manage Access Reviews', description: 'Create / seed access-review records and record reason-required review outcomes (no change required outcome ever alters a live role or permission).', threshold: 'manage', sensitive: true },
+      { id: 'capture_sensitive_action_reasons', label: 'Capture Sensitive Action Reasons', description: 'See the Sensitive Action Reason Capture panel/log of reasons recorded around existing sensitive governance actions (local/advisory; does not broaden who can perform those actions).', threshold: 'manage', sensitive: true },
     ],
   },
   {
@@ -362,6 +376,17 @@ export const PLATFORM_PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // Creating a support case FROM an audit event needs BOTH (Audit drawer
   // visibility + the right to create a support case in Support Tools).
   create_support_case_from_audit: ['view_audit_security', 'create_support_case'],
+
+  // Phase 1.3 — Milestone 5 correction: platform team governance controls.
+  // Every governance MANAGE/CAPTURE action depends on being able to VIEW the
+  // corresponding governance surface, and the two governance signal/lens views
+  // depend on being able to open their host page. Uses the SAME dependency
+  // auto-sync mechanism as every other entry (no resolver change).
+  manage_temporary_access: ['view_temporary_access'],
+  manage_access_reviews: ['view_access_reviews'],
+  capture_sensitive_action_reasons: ['view_access_reviews'],
+  view_governance_signals: ['view_command_center'],
+  view_governance_audit_lens: ['view_audit_security'],
 
   // Commercial Controls / Add-on Governance — every mutation depends on
   // being able to see the add-on catalog.

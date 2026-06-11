@@ -1054,7 +1054,12 @@ export type AuditLensId =
   | 'actor_activity'
   | 'linked_case'
   | 'unlinked_high_risk'
-  | 'restricted_details';
+  | 'restricted_details'
+  // Phase 1.3 — Milestone 5: grouped view for the LOCAL/ADVISORY platform team
+  // governance events (temporary access · access review · sensitive-action
+  // reason capture). Additive scoping lens only — it does NOT mark these events
+  // as compliance evidence and adds NO server-side enforcement.
+  | 'governance_advisory';
 
 export interface AuditInvestigationLens {
   id: AuditLensId;
@@ -1065,6 +1070,14 @@ export interface AuditInvestigationLens {
 }
 
 const FAILED_BLOCKED_RE = /(fail|failed|blocked|denied|rejected|error|revoked)/;
+
+// Phase 1.3 — Milestone 5: matches the LOCAL/ADVISORY platform team governance
+// actions emitted by Milestones 3 and 4. Audit rows store the action with
+// underscores replaced by spaces (see pushPlatformAudit), so these match the
+// space-separated forms of `platform_temporary_access_*`, `access_review_*`,
+// and `sensitive_action_reason_captured`. Deterministic substring match only —
+// no enforcement, no compliance-evidence claim.
+const GOVERNANCE_ADVISORY_RE = /(temporary access|access review|sensitive action reason)/;
 
 export const AUDIT_INVESTIGATION_LENSES: AuditInvestigationLens[] = [
   {
@@ -1151,6 +1164,14 @@ export const AUDIT_INVESTIGATION_LENSES: AuditInvestigationLens[] = [
     description: 'Events carrying restricted detail (require elevated permission to read).',
     icon: 'lock',
     predicate: e => isRestrictedEvent(e),
+  },
+  {
+    id: 'governance_advisory',
+    label: 'Governance Activity (Advisory)',
+    description:
+      'Phase 1.3 local/advisory governance events — temporary access, access review, and sensitive-action reason capture. Local advisory audit trail only; not server-side enforcement or production compliance evidence.',
+    icon: 'verified_user',
+    predicate: e => GOVERNANCE_ADVISORY_RE.test((e.action || '').toLowerCase()),
   },
 ];
 

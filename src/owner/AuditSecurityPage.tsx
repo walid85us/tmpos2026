@@ -128,6 +128,10 @@ const AuditSecurityPage: React.FC = () => {
   const viewRelatedEventTimelineGate = hasPlatformPermission(sessionRole, 'view_related_event_timeline');
   const viewRestrictedDetailsGate = hasPlatformPermission(sessionRole, 'view_restricted_audit_details');
   const viewEscalationLifecycleGate = hasPlatformPermission(sessionRole, 'view_escalation_lifecycle_audit');
+  // Phase 1.3 — Milestone 5 correction: the governance advisory lens is now
+  // controlled by the Global Permissions Matrix. Without this permission the
+  // lens card is hidden and the ?lens=governance_advisory deep-link is ignored.
+  const viewGovLensGate = hasPlatformPermission(sessionRole, 'view_governance_audit_lens');
 
   // Mirrored cross-cutting audit entries (commercial + platform ops).
   const [mirrored, setMirrored] = useState<AuditRow[]>([]);
@@ -248,7 +252,12 @@ const AuditSecurityPage: React.FC = () => {
     const eventParam = searchParams.get('event');
     let touched = false;
     if (tenantParam) { patchQuery({ tenantId: tenantParam }); touched = true; }
-    if (lensParam && AUDIT_INVESTIGATION_LENSES.some(l => l.id === lensParam)) { setActiveLens(lensParam); touched = true; }
+    if (
+      lensParam &&
+      AUDIT_INVESTIGATION_LENSES.some(l => l.id === lensParam) &&
+      // The governance lens deep-link is honored only with the matrix permission.
+      (lensParam !== 'governance_advisory' || viewGovLensGate.allowed)
+    ) { setActiveLens(lensParam); touched = true; }
     if (eventParam) { setPendingEventId(eventParam); touched = true; }
     if (touched) {
       const next = new URLSearchParams(searchParams);
@@ -338,7 +347,23 @@ const AuditSecurityPage: React.FC = () => {
     [linkedCaseEventIds, reviewState, actorEventCounts]
   );
 
-  const activeLensDef = useMemo(() => getAuditLens(activeLens), [activeLens]);
+  // Phase 1.3 — Milestone 5 correction: the governance advisory lens is matrix-
+  // controlled. Hide its card and fall back to "All Events" if it is ever the
+  // active lens without permission (e.g. a mid-session permission change).
+  const visibleLenses = useMemo(
+    () => AUDIT_INVESTIGATION_LENSES.filter(l => l.id !== 'governance_advisory' || viewGovLensGate.allowed),
+    [viewGovLensGate.allowed]
+  );
+  const activeLensDef = useMemo(() => {
+    const def = getAuditLens(activeLens);
+    if (def.id === 'governance_advisory' && !viewGovLensGate.allowed) return getAuditLens('all');
+    return def;
+  }, [activeLens, viewGovLensGate.allowed]);
+
+  // Keep state consistent if the active lens becomes disallowed at runtime.
+  useEffect(() => {
+    if (activeLens === 'governance_advisory' && !viewGovLensGate.allowed) setActiveLens('all');
+  }, [activeLens, viewGovLensGate.allowed]);
 
   // Single source of truth for the visible set: apply the search query, then
   // the active lens predicate. visibleRows maps back to raw rows by id so the
@@ -833,7 +858,7 @@ const AuditSecurityPage: React.FC = () => {
             <p className="text-[10px] font-bold text-slate-400">Tap a lens to scope the stream · counts and list use one predicate.</p>
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
-            {AUDIT_INVESTIGATION_LENSES.map(lens => {
+            {visibleLenses.map(lens => {
               const count = countForLens(lens, investigationEvents, searchCtx);
               const isActive = activeLens === lens.id;
               return (

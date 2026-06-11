@@ -86,6 +86,7 @@ import {
   platformPermissionMeets,
   getPlatformFeatureLevel,
   getPlatformSubPermissionLevel,
+  hasPlatformPermission,
   type PlatformFeatureKey,
   type PlatformPermissionsOverrides,
 } from './platformPermissionsConfig';
@@ -645,6 +646,31 @@ export default function TeamManagementPage() {
   }, []);
 
   const isOwner = session?.role === 'system_owner';
+
+  // Phase 1.3 — Milestone 5 correction: the M3/M4 governance tabs + actions are
+  // now controlled by the Platform Global Permissions Matrix (not hardcoded
+  // System-Owner gating). Gates resolve through the unchanged resolver with the
+  // page's live `overrides`, so matrix edits take effect immediately. System
+  // Owner resolves to `full` for every key, so it stays fully allowed.
+  const sessionRole = (session?.role as Role | undefined) ?? null;
+  const canViewTempAccess = hasPlatformPermission(sessionRole, 'view_temporary_access', overrides).allowed;
+  const canManageTempAccess = hasPlatformPermission(sessionRole, 'manage_temporary_access', overrides).allowed;
+  const canViewAccessReviews = hasPlatformPermission(sessionRole, 'view_access_reviews', overrides).allowed;
+  const canManageAccessReviews = hasPlatformPermission(sessionRole, 'manage_access_reviews', overrides).allowed;
+  const canCaptureSensitiveReasons = hasPlatformPermission(sessionRole, 'capture_sensitive_action_reasons', overrides).allowed;
+
+  // Truthful no-access panel for a governance tab the current role cannot view
+  // (consistent with the rest of the page; the tab itself is also hidden, so
+  // this is a defensive fallback for a mid-session permission change).
+  const renderGovNoAccess = (title: string, permLabel: string) => (
+    <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-slate-200 p-12 text-center shadow-sm" data-testid="governance-no-access">
+      <span className="material-symbols-outlined text-4xl text-slate-300 mb-2 block">lock</span>
+      <p className="text-sm font-bold text-slate-500">You don’t have access to {title}.</p>
+      <p className="text-xs font-medium text-slate-400 mt-1">
+        This governance surface is controlled by the Platform Global Permissions Matrix. Ask the System Owner to grant the “{permLabel}” permission for your role.
+      </p>
+    </div>
+  );
 
   const setFeatureLevel = (role: Role, featureKey: PlatformFeatureKey, level: PermissionLevel) => {
     if (!isOwner || role === 'system_owner') return;
@@ -1353,7 +1379,7 @@ export default function TeamManagementPage() {
               <span className="material-symbols-outlined text-sm">refresh</span>
               Refresh Status
             </button>
-            {isOwner && (
+            {canManageTempAccess && (
               <button
                 onClick={() => { setTempError(null); setShowTempRequestModal(true); }}
                 data-testid="temp-access-request-btn"
@@ -1365,6 +1391,12 @@ export default function TeamManagementPage() {
             )}
           </div>
         </div>
+
+        {canViewTempAccess && !canManageTempAccess && (
+          <p className="text-[11px] font-bold text-slate-500 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2" data-testid="temp-access-view-only-note">
+            View-only access — you can read advisory temporary-access grants but cannot request, approve, deny, revoke, or cancel them. Managing requires the “Manage Temporary Access” permission (granted by the System Owner in the Global Permissions Matrix).
+          </p>
+        )}
 
         {/* Derived summary counts — single source (summarizeTemporaryAccess over
             the same list/nowTick that drives the rows), so they cannot drift. */}
@@ -1388,7 +1420,7 @@ export default function TeamManagementPage() {
             <span className="material-symbols-outlined text-4xl text-slate-300 mb-2 block">schedule</span>
             <p className="text-sm font-bold text-slate-500">No temporary-access grants yet.</p>
             <p className="text-xs font-medium text-slate-400 mt-1">
-              {isOwner ? 'Use “Request Temporary Access” to create an advisory, time-boxed elevation request.' : 'Only System Owner can create temporary-access requests.'}
+              {canManageTempAccess ? 'Use “Request Temporary Access” to create an advisory, time-boxed elevation request.' : 'You have view-only access — managing temporary access requires the “Manage Temporary Access” permission.'}
             </p>
           </div>
         ) : (
@@ -1407,7 +1439,7 @@ export default function TeamManagementPage() {
                 <tbody>
                   {tempGrants.map(grant => {
                     const derived = getTemporaryAccessStatus(grant, nowTick);
-                    const actions = isOwner ? availableTemporaryAccessActions(grant, nowTick) : [];
+                    const actions = canManageTempAccess ? availableTemporaryAccessActions(grant, nowTick) : [];
                     const historyOpen = !!expandedTempHistory[grant.id];
                     return (
                       <React.Fragment key={grant.id}>
@@ -1444,7 +1476,7 @@ export default function TeamManagementPage() {
                           </td>
                           <td className="px-6 py-5 text-right">
                             {actions.length === 0 ? (
-                              <span className="text-[10px] font-bold text-slate-300 uppercase tracking-widest">{isOwner ? 'No actions' : 'View only'}</span>
+                              <span className="text-[10px] font-bold text-slate-300 uppercase tracking-widest">{canManageTempAccess ? 'No actions' : 'View only'}</span>
                             ) : (
                               <div className="flex flex-wrap gap-1.5 justify-end">
                                 {actions.map(action => (
@@ -1766,7 +1798,7 @@ export default function TeamManagementPage() {
               <span className="material-symbols-outlined text-sm">refresh</span>
               Refresh Status
             </button>
-            {isOwner && (
+            {canManageAccessReviews && (
               <>
                 <button
                   onClick={handleSeedReviews}
@@ -1794,6 +1826,12 @@ export default function TeamManagementPage() {
           <p className="text-[11px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2" data-testid="access-review-inline-error">{reviewError}</p>
         )}
 
+        {canViewAccessReviews && !canManageAccessReviews && (
+          <p className="text-[11px] font-bold text-slate-500 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2" data-testid="access-review-view-only-note">
+            View-only access — you can read advisory access-review records but cannot create, seed, or record outcomes. Managing requires the “Manage Access Reviews” permission (granted by the System Owner in the Global Permissions Matrix).
+          </p>
+        )}
+
         {/* Single-source derived summary counts (summarizeAccessReviews over the
             same list/nowTick that drives the rows) — counts cannot drift. */}
         <div className="flex flex-wrap gap-2" data-testid="access-review-summary">
@@ -1816,7 +1854,7 @@ export default function TeamManagementPage() {
             <span className="material-symbols-outlined text-4xl text-slate-300 mb-2 block">fact_check</span>
             <p className="text-sm font-bold text-slate-500">No access review records yet.</p>
             <p className="text-xs font-medium text-slate-400 mt-1">
-              {isOwner ? 'Use “Create Review Record” or “Seed Team Reviews” to start an advisory access review.' : 'Only System Owner can create access review records.'}
+              {canManageAccessReviews ? 'Use “Create Review Record” or “Seed Team Reviews” to start an advisory access review.' : 'You have view-only access — managing access reviews requires the “Manage Access Reviews” permission.'}
             </p>
           </div>
         ) : (
@@ -1836,7 +1874,7 @@ export default function TeamManagementPage() {
                 <tbody>
                   {accessReviews.map(record => {
                     const derived = deriveAccessReviewStatus(record, nowTick);
-                    const actions = isOwner ? availableAccessReviewActions(record, nowTick) : [];
+                    const actions = canManageAccessReviews ? availableAccessReviewActions(record, nowTick) : [];
                     const historyOpen = !!expandedReviewHistory[record.id];
                     return (
                       <React.Fragment key={record.id}>
@@ -1898,7 +1936,7 @@ export default function TeamManagementPage() {
                           </td>
                           <td className="px-6 py-5 text-right">
                             {actions.length === 0 ? (
-                              <span className="text-[10px] font-bold text-slate-300 uppercase tracking-widest">{isOwner ? 'Terminal — no actions' : 'View only'}</span>
+                              <span className="text-[10px] font-bold text-slate-300 uppercase tracking-widest">{canManageAccessReviews ? 'Terminal — no actions' : 'View only'}</span>
                             ) : (
                               <button
                                 onClick={() => { setReviewError(null); setReviewOutcome('reviewed_no_change'); setReviewActionReason(''); setReviewActionFindings(''); setReviewActionTarget(record); }}
@@ -1938,7 +1976,12 @@ export default function TeamManagementPage() {
           </div>
         )}
 
-        {/* ---- Sensitive Action Reason Capture (local/advisory log) ---- */}
+        {/* ---- Sensitive Action Reason Capture (local/advisory log) ----
+            Gated by `capture_sensitive_action_reasons`: the System Owner
+            controls (via the Global Permissions Matrix) who can see this
+            governance reason log. Capture itself still happens only inside the
+            already-gated review-outcome and reset-to-defaults actions. */}
+        {canCaptureSensitiveReasons && (
         <div className="space-y-3" data-testid="sensitive-action-reason-panel">
           <div className="bg-amber-400/10 border border-amber-400/30 rounded-2xl p-4 flex items-start gap-3" data-testid="sensitive-action-truth-banner">
             <span className="material-symbols-outlined text-amber-700 text-lg mt-0.5">history_edu</span>
@@ -1985,6 +2028,7 @@ export default function TeamManagementPage() {
             </div>
           )}
         </div>
+        )}
       </div>
     );
   };
@@ -2050,7 +2094,11 @@ export default function TeamManagementPage() {
             { id: 'review', label: 'Access Review', icon: 'fact_check' },
             { id: 'permissions', label: 'Permissions', icon: 'key' },
             { id: 'activity', label: 'Activity Log', icon: 'history' }
-          ].map((tab) => (
+          ].filter(tab =>
+            // Governance tab visibility follows the matrix view permissions.
+            (tab.id !== 'temporary' || canViewTempAccess) &&
+            (tab.id !== 'review' || canViewAccessReviews)
+          ).map((tab) => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id as any)}
@@ -2076,8 +2124,8 @@ export default function TeamManagementPage() {
           >
             {activeTab === 'team' && renderTeam()}
             {activeTab === 'roles' && renderRoles()}
-            {activeTab === 'temporary' && renderTemporaryAccess()}
-            {activeTab === 'review' && renderAccessReview()}
+            {activeTab === 'temporary' && (canViewTempAccess ? renderTemporaryAccess() : renderGovNoAccess('Temporary Access', 'View Temporary Access'))}
+            {activeTab === 'review' && (canViewAccessReviews ? renderAccessReview() : renderGovNoAccess('Access Review', 'View Access Reviews'))}
             {activeTab === 'permissions' && renderPermissions()}
             {activeTab === 'activity' && renderActivity()}
           </motion.div>
