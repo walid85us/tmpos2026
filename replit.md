@@ -35,7 +35,7 @@ The frontend is built using React 19, TypeScript, Vite 6, and Tailwind CSS v4.
 
 ## Technical Implementations & Feature Specifications
 
--   **Authentication & Access Control**: Implemented with Firebase Authentication and a 7-level hierarchical permission model.
+-   **Authentication & Access Control**: Firebase Authentication and a 7-level hierarchical permission model. Permission **enforcement is UI/client-gated** (no server-side or Firestore-rule enforcement today).
 -   **Tenant Management**: Full lifecycle management including provisioning, subscriptions, feature overrides, billing, and audit logging.
 -   **Business Management Modules**:
     -   **Point of Sale (POS)**: Cart management, diverse payment options, tax/discount calculations, customer management, repair intake, and robust refund/warranty workflows.
@@ -56,9 +56,9 @@ The frontend is built using React 19, TypeScript, Vite 6, and Tailwind CSS v4.
 
 -   **Routing**: Utilizes React Router v7.
 -   **State Management**: Primarily relies on React Context API and local component state.
--   **Firebase Integration**: Leverages Firestore for backend data persistence and Firebase Authentication for user management.
--   **AI Integration**: Integrates with the Gemini API for AI functionalities.
--   **Server-Side Shipping API**: An Express server handles all shipping provider operations with secure credential storage.
+-   **Firebase Integration**: Firebase **Authentication** for sign-in plus a **single `users/{uid}` Firestore read** to resolve the signed-in user's role/name. Firestore is **not** currently used for broad backend data persistence — there are no Firestore writes and no other collections read; application data is currently mock/in-memory/browser storage (see [`docs/phase-1.4-milestone-0-backend-persistence-readiness.md`](docs/phase-1.4-milestone-0-backend-persistence-readiness.md)).
+-   **AI Integration**: `@google/genai` is present as **scaffold/unused** — there are currently no Gemini call sites in the codebase. Treat as a future capability, not an active integration.
+-   **Server-Side Shipping API**: A **dev-only** Express server (`server/index.ts`, not part of the `static` production deploy) handles shipping provider operations. Provider credentials are held **in-memory (ephemeral, lost on restart), masked in responses, and redacted in logs** — this is not durable/production-grade secret storage. The server has no user/tenant/auth context.
 -   **Commercial Controls**: Implements a system for managing add-ons and feature entitlements with governance, tenant overrides, pricing rules, and a detailed audit trail, including an internal invoice workflow and activation modes for feature grants.
 -   **Add-on Governance**: Features three governance states (`active`, `disabled`, `archived`) and a separate PM `lifecycle`. Each add-on has a `readinessStatus` and runtime backing checklist to gate tenant grants and provide an implementation brief generator.
 -   **Production Logging & PII Redaction**: Server-side logs are restricted to operational metadata, with sensitive data redacted using `server/safe-log.ts` and `sanitizeError(err)`.
@@ -146,8 +146,8 @@ Do not change behavior in these areas as a side effect of other work:
 -   **Phase 1.2E** — Domains Control Center UX Maturity **(direction REJECTED by user — superseded by Phase 1.2F)**
 -   **Phase 1.2F** — Strategic Replacement ("Domains" → "Tenant Web Address") **(accepted, incl. final minimal-table correction + Manage-drawer product-language cleanup)** — built non-destructively over the earlier (now superseded) M0/M1/M2 domain-control-panel milestones; full detail in the history doc.
 -   **Phase 1.3** — Platform Team Governance (server-side RBAC / PIM / PAM) **(COMPLETE / ACCEPTED / BACKED UP — M0–M5 all complete, accepted & backed up; M3–M5 governance features controlled through the Platform Global Permissions Matrix; latest GitHub checkpoint `7ad9ed2595ff10f008414190542fdb4cfcf60bbe`; current enforcement UI/client-gated and local/advisory; server-side enforcement deferred; no new phase started)**
--   **Phase 1.4** — Automation + Alerts
--   **Phase 2** — Real Integrations
+-   **Phase 1.4** — **Backend & Persistence Readiness** (re-scoped) — docs/architecture/pure-helper readiness only. **Behavior-changing server-side enforcement, Firestore rules, and database migration are deferred** until after the production-database and deployment-topology decisions are ratified and the durable data model / request-context / auth / repository / audit boundaries are planned and accepted. M0 (docs/inventory) artifacts: [`docs/phase-1.4-milestone-0-backend-persistence-readiness.md`](docs/phase-1.4-milestone-0-backend-persistence-readiness.md), [`docs/phase-1.4-decision-record-production-database.md`](docs/phase-1.4-decision-record-production-database.md), [`docs/phase-1.4-decision-record-deployment-topology.md`](docs/phase-1.4-decision-record-deployment-topology.md).
+-   **Phase 2** — Real Integrations (incl. Automation + Alerts, re-sequenced from the former Phase 1.4)
 -   **Phase 3** — Compliance + Evidence
 -   **Phase 4** — Predictive / AI Operations
 
@@ -157,8 +157,8 @@ Do not change behavior in these areas as a side effect of other work:
 
 # External Dependencies
 
--   **Firebase**: Firestore and Authentication.
--   **Google AI Studio / Gemini API**: Integrated via `@google/genai`.
+-   **Firebase**: **Authentication** + a **single `users/{uid}` Firestore read** (no Firestore writes / no broad persistence today).
+-   **Google AI Studio / Gemini API**: `@google/genai` dependency present but **scaffold/unused** (no call sites today).
 -   **Recharts**: Used for charts and data visualizations.
 -   **Framer Motion**: Employed for UI animations and transitions.
 -   **EasyPost**: Shipping API for label generation and tracking.
