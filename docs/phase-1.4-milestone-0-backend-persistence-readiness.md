@@ -4,7 +4,7 @@
 >
 > **Truthful reality (today, verified by read-only inspection at checkpoint `9cb152e`):** The deployed artifact is a **static SPA** (`.replit → deploymentTarget = "static"`). There is **no production server runtime**, **no server-side actor/tenant identity**, **no durable application database**, and **no server-side or Firestore-rule enforcement**. Firebase is used **only** for Auth + a single `users/{uid}` role read. Almost all application data is **mock / in-memory / browser storage**. Every "future" item below is a recommendation, not an existing capability.
 >
-> **This milestone changes no behavior and is reversible** (delete these docs + revert the `replit.md` doc corrections). It must not be committed or backed up until manual QA acceptance.
+> **This milestone changes no behavior and is reversible** (delete these docs + revert the `replit.md` doc corrections). **Accepted / committed / backed up** at GitHub checkpoint `bb8a73530589ea4795a745802edf85d8049f22bf`; Phase 1.4 is consolidated and closed out in [M6](phase-1.4-milestone-6-backend-persistence-readiness-closeout.md).
 
 ---
 

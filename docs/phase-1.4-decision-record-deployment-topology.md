@@ -8,7 +8,9 @@
 >
 > **M4 note (2026-06-12, accepted/backed up):** M4 evaluates the database-provider and auth-provider criteria (several shared with this record's criteria table). The **server/API-tier requirement stays ratified and the specific runtime stays provisional** — M4 does not change topology status; it only sharpens the provider/auth direction the runtime will eventually connect to.
 >
-> **M5 note (2026-06-12, pending review):** [M5 — Provider Finalization Gate](phase-1.4-milestone-5-provider-finalization-gate.md) defines the gate that must be satisfied before backend implementation begins. **The specific runtime (VPS vs serverless/edge) and Hostinger's role (static-only vs static+API, input I18) remain PROVISIONAL until the M5 gate is satisfied.** M5 does not change the ratified server/API-tier requirement; it records that no runtime/topology implementation may begin before the gate inputs are answered (M5 §24–§26). When the runtime is decided alongside the provider, update this record per M5 §28.
+> **M5 note (2026-06-12, accepted/backed up):** [M5 — Provider Finalization Gate](phase-1.4-milestone-5-provider-finalization-gate.md) defines the gate that must be satisfied before backend implementation begins. **The specific runtime (VPS vs serverless/edge) and Hostinger's role (static-only vs static+API, input I18) remain PROVISIONAL until the M5 gate is satisfied.** M5 does not change the ratified server/API-tier requirement; it records that no runtime/topology implementation may begin before the gate inputs are answered (M5 §24–§26). When the runtime is decided alongside the provider, update this record per M5 §28.
+>
+> **M6 note (2026-06-12, pending review):** [M6 — Backend & Persistence Readiness Closeout](phase-1.4-milestone-6-backend-persistence-readiness-closeout.md) closes out Phase 1.4 (docs/architecture only). It **does not change topology status**: the server/API-tier requirement stays ratified, the specific runtime + Hostinger role stay provisional, and no runtime/topology implementation may begin before the M5 gate inputs are answered via Product Owner Input Collection.
 
 ---
 

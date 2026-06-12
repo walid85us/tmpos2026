@@ -2,7 +2,7 @@
 
 > **Status:** **Documentation / architecture only.** This milestone maps the current mock/in-memory/browser-storage system into a future PostgreSQL-ready, tenant-scoped, store-scoped, audit-aware **conceptual** domain model. **It is NOT a database implementation, NOT a migration, NOT a schema.** No runtime, source, UI, Firebase, Firestore-rules, schema, SQL, ORM, or dependency changes were made. All TypeScript-like and SQL-like fragments below are **documentation examples only**, embedded in Markdown; **nothing is wired into the app.**
 >
-> **Reversible** (delete the two M2 docs + revert the minimal `replit.md` status line). Not committed/pushed/backed up; awaiting review.
+> **Reversible** (delete the two M2 docs + revert the minimal `replit.md` status line). **Accepted / committed / backed up** at GitHub checkpoint `2b9d8b868899eef93fd3311f74cd03dd374b567d`; Phase 1.4 is consolidated and closed out in [M6](phase-1.4-milestone-6-backend-persistence-readiness-closeout.md).
 >
 > **Part of:** Phase 1.4 — Backend & Persistence Readiness. Builds on [`phase-1.4-milestone-0-backend-persistence-readiness.md`](phase-1.4-milestone-0-backend-persistence-readiness.md) and [`phase-1.4-milestone-1-auth-repository-boundary-plan.md`](phase-1.4-milestone-1-auth-repository-boundary-plan.md). Honors the ratified [production-database](phase-1.4-decision-record-production-database.md) (PostgreSQL) and [deployment-topology](phase-1.4-decision-record-deployment-topology.md) directions.
 >

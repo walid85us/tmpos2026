@@ -2,7 +2,7 @@
 
 > **Status:** **Documentation / architecture only.** This milestone **resolves and records decision criteria** for the remaining backend provider and auth-provider questions so future work has a clearer direction. **It implements nothing.** No Supabase/Neon/Railway/VPS/PostgreSQL implementation, no Firebase Auth change, no schema, no `.sql`, no ORM files, no middleware, no server guards, no dependency installs, no runtime wiring. Every code-like fragment below is a **documentation example only**; nothing is imported or wired into the app.
 >
-> **Reversible** (delete this doc + revert the minimal decision-record cross-references and the `replit.md` status line). **Not committed / not pushed / not backed up; awaiting review.**
+> **Reversible** (delete this doc + revert the minimal decision-record cross-references and the `replit.md` status line). **Accepted / committed / backed up** at GitHub checkpoint `ab8cbdecfaec21f3603798ef89279e84e7125970`; Phase 1.4 is consolidated and closed out in [M6](phase-1.4-milestone-6-backend-persistence-readiness-closeout.md).
 >
 > **Part of:** Phase 1.4 — Backend & Persistence Readiness. Builds on and consolidates the open *decision criteria* recorded in M0–M3 and the two decision records. See:
 > - [`phase-1.4-milestone-0-backend-persistence-readiness.md`](phase-1.4-milestone-0-backend-persistence-readiness.md) (enforcement boundary + persistence inventory)
@@ -372,7 +372,7 @@ The criteria below are the union of the open items in the two decision records, 
 
 ## 24. Non-Implementation Statement
 
-M4 **changes no runtime, source, UI, schema, config, or dependency.** It does **not** implement Supabase, Neon, Railway, Hostinger-VPS Postgres, or PostgreSQL; does **not** replace or modify Firebase Auth; creates **no** schema, SQL migration, or ORM file; installs **no** dependency; implements **no** middleware, server guard, repository runtime, or server/API runtime. It does **not** modify `src/`, `server/`, `firestore.rules`, `firebase.ts`, `AccessContext`, `platformPermissionsConfig`, `accessConfig`, tenant/store permission code, routing, UI, `.replit`, `package.json`, or lockfiles. All code-like fragments are documentation examples. The milestone is **reversible** (delete this doc + revert the decision-record cross-references and the `replit.md` status line). **Not committed / not pushed / not backed up; awaiting review.**
+M4 **changes no runtime, source, UI, schema, config, or dependency.** It does **not** implement Supabase, Neon, Railway, Hostinger-VPS Postgres, or PostgreSQL; does **not** replace or modify Firebase Auth; creates **no** schema, SQL migration, or ORM file; installs **no** dependency; implements **no** middleware, server guard, repository runtime, or server/API runtime. It does **not** modify `src/`, `server/`, `firestore.rules`, `firebase.ts`, `AccessContext`, `platformPermissionsConfig`, `accessConfig`, tenant/store permission code, routing, UI, `.replit`, `package.json`, or lockfiles. All code-like fragments are documentation examples. The milestone is **reversible** (delete this doc + revert the decision-record cross-references and the `replit.md` status line). **Accepted / committed / backed up** at GitHub checkpoint `ab8cbdecfaec21f3603798ef89279e84e7125970`.
 
 ---
 

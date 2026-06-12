@@ -2,7 +2,7 @@
 
 > **Status:** **Documentation / architecture only.** This milestone defines a **future, provider-agnostic enforcement contract** — request context, protected-action catalog, authorization-decision shape, audit-decision boundary, outcome labels, preview/demo rules, and evidence-truthfulness rules. **It is NOT server enforcement, NOT middleware, NOT authorization logic, NOT a runtime file.** All TypeScript-like and JSON-like fragments below are **documentation examples only**, embedded in Markdown; **nothing is wired into the app.**
 >
-> **Reversible** (delete this doc + revert the minimal `replit.md` status line). Not committed/pushed/backed up; awaiting review.
+> **Reversible** (delete this doc + revert the minimal `replit.md` status line). **Accepted / committed / backed up** at GitHub checkpoint `ed86283b252cbdb5664eac4b8e9d727566114ce5`; Phase 1.4 is consolidated and closed out in [M6](phase-1.4-milestone-6-backend-persistence-readiness-closeout.md).
 >
 > **Part of:** Phase 1.4 — Backend & Persistence Readiness. Builds on [`phase-1.4-milestone-0-backend-persistence-readiness.md`](phase-1.4-milestone-0-backend-persistence-readiness.md) (§7 request-context seed, §8 protected-action seed, §6 truthfulness labels), [`phase-1.4-milestone-1-auth-repository-boundary-plan.md`](phase-1.4-milestone-1-auth-repository-boundary-plan.md) (identity/auth boundary), and [`phase-1.4-milestone-2-durable-data-shape-domain-model.md`](phase-1.4-milestone-2-durable-data-shape-domain-model.md) (scopes, audit model, identity strategy). Honors the ratified [PostgreSQL](phase-1.4-decision-record-production-database.md) + [server/API-tier](phase-1.4-decision-record-deployment-topology.md) directions.
 

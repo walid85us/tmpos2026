@@ -4,7 +4,7 @@
 >
 > All interfaces below are embedded as fenced code blocks **inside this document** (the same convention as the M0 request-context contract). They are **not** placed in any runtime file and **nothing imports them**.
 >
-> **This milestone is reversible** (delete this doc + revert the decision-record wording edits). It must not be committed or backed up until the M1 report is reviewed and accepted.
+> **This milestone is reversible** (delete this doc + revert the decision-record wording edits). **Accepted / committed / backed up** at GitHub checkpoint `af3c6ec434a1bafd855c31e40104bb59ee85da14`; Phase 1.4 is consolidated and closed out in [M6](phase-1.4-milestone-6-backend-persistence-readiness-closeout.md).
 >
 > **Part of:** Phase 1.4 — Backend & Persistence Readiness. Builds on [`phase-1.4-milestone-0-backend-persistence-readiness.md`](phase-1.4-milestone-0-backend-persistence-readiness.md). Implements the ratification actions from the Phase 1.4 Decision Ratification Review.
 

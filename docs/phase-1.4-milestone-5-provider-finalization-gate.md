@@ -4,7 +4,7 @@
 >
 > **It does NOT** implement Supabase / Neon / Railway / Hostinger-VPS PostgreSQL / PostgreSQL; does **not** replace or modify Firebase Auth; creates **no** schema, `.sql`, migration, or ORM file; installs **no** dependency; implements **no** middleware, server guard, repository runtime, or server/API runtime; does **not** touch `src/`, `server/`, `firestore.rules`, `firebase.ts`, `AccessContext`, `platformPermissionsConfig`, `accessConfig`, tenant/store permission code, routing, UI, `.replit`, `package.json`, or lockfiles.
 >
-> **Reversible** (delete this doc + revert the minimal decision-record cross-references and the `replit.md` status line). **Not committed / not pushed / not backed up; awaiting review.**
+> **Reversible** (delete this doc + revert the minimal decision-record cross-references and the `replit.md` status line). **Accepted / committed / backed up** at GitHub checkpoint `cdd1c03aae19eebb7a857b62ee2ca4adc5c42c59`; Phase 1.4 is consolidated and closed out in [M6](phase-1.4-milestone-6-backend-persistence-readiness-closeout.md).
 >
 > **Part of:** Phase 1.4 — Backend & Persistence Readiness. M5 is the **finalization gate** that consolidates the open product-owner inputs and provider/auth criteria from M0–M4 into a single go/no-go contract. See:
 > - [`phase-1.4-milestone-0-backend-persistence-readiness.md`](phase-1.4-milestone-0-backend-persistence-readiness.md) (enforcement boundary + persistence inventory + truthfulness labels)
@@ -543,7 +543,7 @@ When inputs arrive and the gate is run:
 
 ## 30. Non-Implementation Statement
 
-M5 **changes no runtime, source, UI, schema, config, or dependency.** It does **not** implement Supabase, Neon, Railway, Hostinger-VPS Postgres, or PostgreSQL; does **not** replace or modify Firebase Auth; creates **no** schema, SQL migration, or ORM file; installs **no** dependency; implements **no** middleware, server guard, repository runtime, or server/API runtime; defines **no** RLS policy and persists **no** audit or secret. It does **not** modify `src/`, `server/`, `firestore.rules`, `firebase.ts`, `AccessContext`, `platformPermissionsConfig`, `accessConfig`, tenant/store permission code, routing, UI, `.replit`, `package.json`, or lockfiles. All code-like and table fragments are documentation artifacts. The milestone is **reversible** (delete this doc + revert the decision-record cross-references and the `replit.md` status line). **Not committed / not pushed / not backed up; awaiting review.**
+M5 **changes no runtime, source, UI, schema, config, or dependency.** It does **not** implement Supabase, Neon, Railway, Hostinger-VPS Postgres, or PostgreSQL; does **not** replace or modify Firebase Auth; creates **no** schema, SQL migration, or ORM file; installs **no** dependency; implements **no** middleware, server guard, repository runtime, or server/API runtime; defines **no** RLS policy and persists **no** audit or secret. It does **not** modify `src/`, `server/`, `firestore.rules`, `firebase.ts`, `AccessContext`, `platformPermissionsConfig`, `accessConfig`, tenant/store permission code, routing, UI, `.replit`, `package.json`, or lockfiles. All code-like and table fragments are documentation artifacts. The milestone is **reversible** (delete this doc + revert the decision-record cross-references and the `replit.md` status line). **Accepted / committed / backed up** at GitHub checkpoint `cdd1c03aae19eebb7a857b62ee2ca4adc5c42c59`.
 
 ---
 
