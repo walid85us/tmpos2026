@@ -1,8 +1,10 @@
 # Decision Record — Deployment Topology
 
-> **Status:** **RECOMMENDED / PROVISIONAL** — pending explicit ratification. **This record changes no deployment files, no `.replit`, no build config, and no code.** It documents the current topology truthfully and the future requirement that server-side enforcement implies a server runtime.
+> **Status:** **RATIFIED — WORKING DIRECTION.** Accepted: real enforcement for this project will require a future **server/API tier (managed API layer, serverless/edge functions, or VPS) or equivalent backend enforcement layer**. The **specific runtime** (VPS vs serverless/edge) remains **PROVISIONAL** pending the criteria below. **This record changes no deployment files, no `.replit`, no build config, and no code.**
 >
-> **Part of:** Phase 1.4 — Backend & Persistence Readiness, Milestone 0. See [`phase-1.4-milestone-0-backend-persistence-readiness.md`](phase-1.4-milestone-0-backend-persistence-readiness.md).
+> **Ratified:** 2026-06-12 (Phase 1.4 Decision Ratification Review). **Supersedes** the earlier "RECOMMENDED / PROVISIONAL" status for the requirement-of-a-server-tier conclusion; the specific runtime stays provisional.
+>
+> **Part of:** Phase 1.4 — Backend & Persistence Readiness, Milestone 0 (record) / Milestone 1 (this ratification + criteria + wording correction). See [`phase-1.4-milestone-0-backend-persistence-readiness.md`](phase-1.4-milestone-0-backend-persistence-readiness.md) and [`phase-1.4-milestone-1-auth-repository-boundary-plan.md`](phase-1.4-milestone-1-auth-repository-boundary-plan.md).
 
 ---
 
@@ -12,11 +14,11 @@
 - **Dev runtime:** `npm run dev` runs `tsx server/index.ts & vite`. The Express server (`server/index.ts`) is a **dev-only shipping sidecar** on port 5001, proxied via `/api/shipping`. Every route is `/api/shipping/*`. It has **no user/tenant/auth context** and **no Firebase**.
 - **Backend trust boundary today:** only **Firebase Auth + the `users/{uid}` read** (client-side). Shipping webhooks use HMAC verification; provider API keys live in server memory.
 
-**Implication:** Server-side enforcement, middleware, route guards, and Firestore/RLS rules **cannot run** in the current production topology. They are not "not yet wired" — there is **no server to wire them into.**
+**Implication (corrected/nuanced):** A *custom* server-side enforcement tier (your own middleware, route guards, Postgres RLS behind an API) **cannot run** in the current static-only production topology — there is no server to wire it into. **Nuance:** a static SPA is *not* incapable of all backend enforcement — **Firebase Firestore security rules** can enforce some access models directly from a static SPA without your own server. That path is **rejected for this project** because (a) this project's permission model (7-level hierarchy + dependency auto-sync + plan-envelope checks) is not practically expressible in Firestore rules, (b) it would require moving all data access into client-side Firestore queries (the coupling M0 warns against), and (c) it contradicts the ratified PostgreSQL/API direction. So: the chosen direction requires a server/API tier; "static hosting can enforce nothing" is *not* the claim.
 
-## Decision (provisional)
+## Decision
 
-When (and only when) behavior-changing server-side enforcement is approved for implementation, **introduce a dedicated server/API runtime tier**. The static SPA can remain static; the **enforcement tier requires a VPS or serverless/functions runtime**. Until then, the topology stays as-is and Phase 1.4 remains docs/architecture/pure-helper only.
+When (and only when) behavior-changing server-side enforcement is approved for implementation, **introduce a dedicated server/API runtime tier** (managed API layer, serverless/edge functions, or VPS). The static SPA can remain static; **for this project's chosen PostgreSQL/API direction, the enforcement tier requires a server runtime** (it is not achievable via Firestore-rules-from-static-SPA — see the nuance above). The specific runtime (VPS vs serverless/edge) is provisional. Until then, the topology stays as-is and Phase 1.4 remains docs/architecture/pure-helper only.
 
 ## Options for the future server tier
 
@@ -24,7 +26,7 @@ When (and only when) behavior-changing server-side enforcement is approved for i
 |---|---|---|
 | **VPS (e.g., Hostinger VPS) running the API/enforcement tier** | Strong if self-hosting | You own the runtime; SPA can be served static/shared; DB ideally managed (see DB decision record). |
 | **Serverless / edge functions (e.g., Supabase Edge Functions, or a functions host)** | Strong if managed | Pairs naturally with managed Postgres + RLS; less ops burden. |
-| **Static-only (no server tier)** | **Insufficient for enforcement** | Current state. Fine for the SPA; cannot enforce anything server-side. |
+| **Static-only (no server tier)** | **Insufficient for this project's chosen direction** | Current state. Fine for the SPA. Could in principle enforce *some* models via Firestore security rules, but not this project's permission model / PostgreSQL direction. |
 
 ## Hostinger compatibility notes
 
@@ -33,12 +35,18 @@ When (and only when) behavior-changing server-side enforcement is approved for i
 - **Managed Postgres (Supabase/Neon)** keeps the database off the Hostinger host (least ops burden). A Hostinger-VPS-hosted DB couples DB lifecycle to the VPS (more ops).
 - Keep the **auth boundary, repository boundary, request-context contract, and audit boundary database/host-agnostic** before go-live.
 
-## Must be clarified before ratifying a topology
+## Decision criteria (resolve before the specific runtime is finalized)
 
-1. Is a server/API/enforcement tier actually in scope (yes, if server enforcement is the goal)?
-2. VPS vs serverless for that tier?
-3. Where do the shipping server + provider secrets run in production?
-4. Is Firebase Auth retained or replaced (interacts with the DB decision record)?
+The *requirement of a server/API tier* is ratified. The *specific runtime* stays provisional until these are recorded (several overlap the [database decision criteria](phase-1.4-decision-record-production-database.md#decision-criteria-resolve-before-the-provider--auth-choices-are-finalized)):
+
+| # | Criterion | Why it matters | Status |
+|---|---|---|---|
+| 1 | **Runtime choice: VPS vs serverless/edge** | Ops burden, cold-start, cost, and how the API tier connects to managed Postgres. | Open |
+| 2 | **App host confirmation (Hostinger?)** | Whether the SPA + API co-locate, and region/latency to the DB. | Open |
+| 3 | **Region / latency** | App-tier ↔ DB-tier round-trip; user proximity. | Open (shared with DB §2) |
+| 4 | **Cost model for the API tier** | VPS flat cost vs per-invocation serverless; interacts with DB provider choice. | Open (shared with DB §1) |
+| 5 | **Shipping server + provider secret hosting** | Where the dev-only Express shipping logic + secrets run in production. | Open (shared with DB §9) |
+| 6 | **Firebase Auth retained vs replaced** | Token-verification mechanism on the API tier (Firebase Admin SDK vs Supabase JWT). | Open (shared with DB §4) |
 
 ## Explicit non-actions
 
