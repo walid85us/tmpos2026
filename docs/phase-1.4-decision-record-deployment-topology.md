@@ -4,7 +4,9 @@
 >
 > **Ratified:** 2026-06-12 (Phase 1.4 Decision Ratification Review). **Supersedes** the earlier "RECOMMENDED / PROVISIONAL" status for the requirement-of-a-server-tier conclusion; the specific runtime stays provisional.
 >
-> **Part of:** Phase 1.4 — Backend & Persistence Readiness, Milestone 0 (record) / Milestone 1 (this ratification + criteria + wording correction). See [`phase-1.4-milestone-0-backend-persistence-readiness.md`](phase-1.4-milestone-0-backend-persistence-readiness.md) and [`phase-1.4-milestone-1-auth-repository-boundary-plan.md`](phase-1.4-milestone-1-auth-repository-boundary-plan.md).
+> **Part of:** Phase 1.4 — Backend & Persistence Readiness, Milestone 0 (record) / Milestone 1 (this ratification + criteria + wording correction) / **Milestone 4 (provider/auth decision-criteria resolution — see [`phase-1.4-milestone-4-provider-auth-decision-criteria.md`](phase-1.4-milestone-4-provider-auth-decision-criteria.md))**. See also [`phase-1.4-milestone-0-backend-persistence-readiness.md`](phase-1.4-milestone-0-backend-persistence-readiness.md) and [`phase-1.4-milestone-1-auth-repository-boundary-plan.md`](phase-1.4-milestone-1-auth-repository-boundary-plan.md).
+>
+> **M4 note (2026-06-12, pending review):** M4 evaluates the database-provider and auth-provider criteria (several shared with this record's criteria table). The **server/API-tier requirement stays ratified and the specific runtime stays provisional** — M4 does not change topology status; it only sharpens the provider/auth direction the runtime will eventually connect to.
 
 ---
 

@@ -4,7 +4,9 @@
 >
 > **Ratified:** 2026-06-12 (Phase 1.4 Decision Ratification Review). **Supersedes** the earlier "RECOMMENDED / PROVISIONAL" status for the PostgreSQL direction only; provider + auth remain provisional.
 >
-> **Part of:** Phase 1.4 — Backend & Persistence Readiness, Milestone 0 (record) / Milestone 1 (this ratification + criteria). See [`phase-1.4-milestone-0-backend-persistence-readiness.md`](phase-1.4-milestone-0-backend-persistence-readiness.md) and [`phase-1.4-milestone-1-auth-repository-boundary-plan.md`](phase-1.4-milestone-1-auth-repository-boundary-plan.md).
+> **Part of:** Phase 1.4 — Backend & Persistence Readiness, Milestone 0 (record) / Milestone 1 (this ratification + criteria) / **Milestone 4 (decision-criteria resolution — see [`phase-1.4-milestone-4-provider-auth-decision-criteria.md`](phase-1.4-milestone-4-provider-auth-decision-criteria.md))**. See also [`phase-1.4-milestone-0-backend-persistence-readiness.md`](phase-1.4-milestone-0-backend-persistence-readiness.md) and [`phase-1.4-milestone-1-auth-repository-boundary-plan.md`](phase-1.4-milestone-1-auth-repository-boundary-plan.md).
+>
+> **M4 update (2026-06-12, pending review):** The criteria in §"Decision criteria" are now evaluated against every candidate in [M4](phase-1.4-milestone-4-provider-auth-decision-criteria.md). **Supabase is confirmed as the PREFERRED default *working* provider candidate (design target), but is NOT promoted to the final provider** — final provider + final auth stay **PROVISIONAL** pending product-owner inputs (budget band, region/residency, RPO/RTO, scale envelope) and a provider backup/restore plan. No status here is escalated.
 
 ---
 
@@ -72,3 +74,5 @@ The PostgreSQL *direction* is ratified. The *provider* (Supabase vs Neon/Railway
 | 9 | **Secret-management approach** | Where shipping/provider credentials live in production (currently in-memory, dev-only). | Open |
 
 **Confirm also:** Hostinger as the app host and whether a server/API tier (VPS/serverless) is in scope — see the [deployment-topology decision record](phase-1.4-decision-record-deployment-topology.md).
+
+**Status of these criteria after M4:** all are now **evaluated qualitatively** against Supabase / Neon / Railway / Hostinger-VPS in [M4 §13–§18](phase-1.4-milestone-4-provider-auth-decision-criteria.md#13-supabase-evaluation). Criteria #1 (cost band), #2 (region/residency), #3 (RPO/RTO targets), and #8 (scale envelope) remain **Open — product-owner inputs** required before the final provider/auth ratification. M4 records the recommended working decision (Supabase preferred; Firebase Auth for testing; auth-final tied to provider-final) without locking the final choice.
