@@ -6,7 +6,9 @@
 >
 > **Part of:** Phase 1.4 — Backend & Persistence Readiness, Milestone 0 (record) / Milestone 1 (this ratification + criteria + wording correction) / **Milestone 4 (provider/auth decision-criteria resolution — see [`phase-1.4-milestone-4-provider-auth-decision-criteria.md`](phase-1.4-milestone-4-provider-auth-decision-criteria.md))**. See also [`phase-1.4-milestone-0-backend-persistence-readiness.md`](phase-1.4-milestone-0-backend-persistence-readiness.md) and [`phase-1.4-milestone-1-auth-repository-boundary-plan.md`](phase-1.4-milestone-1-auth-repository-boundary-plan.md).
 >
-> **M4 note (2026-06-12, pending review):** M4 evaluates the database-provider and auth-provider criteria (several shared with this record's criteria table). The **server/API-tier requirement stays ratified and the specific runtime stays provisional** — M4 does not change topology status; it only sharpens the provider/auth direction the runtime will eventually connect to.
+> **M4 note (2026-06-12, accepted/backed up):** M4 evaluates the database-provider and auth-provider criteria (several shared with this record's criteria table). The **server/API-tier requirement stays ratified and the specific runtime stays provisional** — M4 does not change topology status; it only sharpens the provider/auth direction the runtime will eventually connect to.
+>
+> **M5 note (2026-06-12, pending review):** [M5 — Provider Finalization Gate](phase-1.4-milestone-5-provider-finalization-gate.md) defines the gate that must be satisfied before backend implementation begins. **The specific runtime (VPS vs serverless/edge) and Hostinger's role (static-only vs static+API, input I18) remain PROVISIONAL until the M5 gate is satisfied.** M5 does not change the ratified server/API-tier requirement; it records that no runtime/topology implementation may begin before the gate inputs are answered (M5 §24–§26). When the runtime is decided alongside the provider, update this record per M5 §28.
 
 ---
 
