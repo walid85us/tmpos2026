@@ -19,7 +19,11 @@ const AccessGuard: React.FC<AccessGuardProps> = ({ children, allowedUserTypes, r
     return <div className="min-h-screen flex items-center justify-center"><p className="text-slate-500">Loading...</p></div>;
   }
 
-  if (authError) {
+  // DEV-only dev session must win over a stale/residual Firebase authError.
+  // `isDevSession` can only ever be true through the DEV-gated DevSessionSwitcher
+  // (import.meta.env.DEV), so production Firebase Auth behavior is unchanged:
+  // when no dev session is active this is identical to `if (authError)`.
+  if (authError && !isDevSession) {
     console.log('[AccessGuard] Auth error detected:', authError, '— redirecting to /not-provisioned');
     return <Navigate to="/not-provisioned" replace />;
   }
