@@ -26,6 +26,7 @@ import {
 } from './config';
 import { findByProviderUid, upsertIdentity } from './identityRepository';
 import { getDb } from './db';
+import { withProtectedAction } from './protectedAction';
 
 export function createPlatformIdentityApp() {
   const app = express();
@@ -120,6 +121,28 @@ export function createPlatformIdentityApp() {
       res.status(500).json({ error: { code: 'LOOKUP_FAILED', message: 'Failed to look up identity.' } });
     }
   });
+
+  // --- Phase 1.5 M2: dev-only PROTECTED DIAGNOSTIC (no business effect) -------
+  // Exercises the server-side enforcement spine end-to-end:
+  //   request context → permission decision → advisory audit envelope.
+  // Requires BOTH ENABLE_SUPABASE_PLATFORM_IDENTITY=true AND
+  // PLATFORM_IDENTITY_DEV_DIAGNOSTICS=true (and a non-production process);
+  // returns 404 FEATURE_DISABLED otherwise. Reads/writes NO tenant/business
+  // data — the handler only echoes a safe, non-secret decision summary. The
+  // required permission is the platform key `team_management` at `view`.
+  app.post(
+    '/diagnostics/echo-decision',
+    withProtectedAction(
+      'platform.diagnostic.echo',
+      { kind: 'platform', featureKey: 'team_management', threshold: 'view' },
+      (ctx) => ({
+        internalUserId: ctx.actor.internalUserId,
+        actorType: ctx.actor.actorType,
+        scopeType: ctx.scope.scopeType,
+        identityResolution: ctx.identityResolution,
+      }),
+    ),
+  );
 
   return app;
 }
