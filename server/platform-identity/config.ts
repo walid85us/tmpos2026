@@ -19,6 +19,24 @@ export function isPlatformIdentityEnabled(): boolean {
   return process.env[FEATURE_FLAG] === 'true';
 }
 
+/**
+ * Phase 1.5 M3-Revised — verified-actor diagnostics flag. SEPARATE from the M2
+ * dev-asserted flag (PLATFORM_IDENTITY_DEV_DIAGNOSTICS) so the two diagnostic
+ * paths are independently gated. Default behaviour is OFF.
+ */
+export const VERIFIED_DIAGNOSTICS_FLAG = 'PLATFORM_IDENTITY_VERIFIED_DIAGNOSTICS';
+
+/**
+ * True ONLY when verified Supabase diagnostics are explicitly enabled AND the
+ * process is non-production. Conservative on purpose: NEVER rely on NODE_ENV
+ * alone, and never enable in production. The platform-identity feature flag is
+ * checked SEPARATELY by the endpoint (both must hold).
+ */
+export function isVerifiedDiagnosticsEnabled(): boolean {
+  if (process.env.NODE_ENV === 'production') return false;
+  return process.env[VERIFIED_DIAGNOSTICS_FLAG] === 'true';
+}
+
 /** Presence-only view of the relevant secrets. Booleans only — never values. */
 export interface ConfigPresence {
   supabaseUrl: boolean;

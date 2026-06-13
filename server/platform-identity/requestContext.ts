@@ -6,8 +6,13 @@
 // (docs/phase-1.4-milestone-3-request-context-protected-action-contract.md §3).
 //
 // SAFETY / TRUTHFULNESS (binding):
-//   - authState is only ever 'dev-asserted' or 'unauthenticated'. It is NEVER
-//     'authenticated' in M2 because no real auth token is verified.
+//   - In M2 authState is only ever 'dev-asserted' or 'unauthenticated' — no real
+//     auth token is verified, so it is NEVER 'authenticated'.
+//   - M3-Revised FAIL-CLOSED: a cryptographically VERIFIED Supabase token is only
+//     promoted to 'authenticated' once it ALSO resolves to a durable, app-owned
+//     internal_user_id. A verified token with no resolved id is honestly
+//     'token-verified' (token proven, but NOT yet an authenticated app actor) —
+//     never 'authenticated'. We never claim an authenticated actor with a null id.
 //   - The permission snapshot is DEV-ASSERTED (source 'dev_asserted_snapshot');
 //     it is NOT read from a durable, server-authoritative role store.
 //   - internal_user_id is resolved READ-ONLY via the existing M1 identity
@@ -46,24 +51,41 @@ export interface PermissionSnapshot {
 
 export type ActorType = 'platform_user' | 'tenant_user' | 'dev_actor';
 
-/** The dev-asserted actor the dev adapter produces (see authAdapter.ts). */
+/**
+ * The actor an adapter produces.
+ *   - M2 dev adapter  → authProvider 'firebase', verified omitted/false (dev-asserted).
+ *   - M3 Supabase adapter → authProvider 'supabase', verified=true (token-verified).
+ */
 export interface ActorAssertion {
-  authProvider: 'firebase';        // reference only; NOT verified in M2
+  authProvider: 'firebase' | 'supabase'; // 'firebase' = dev-asserted reference (M2); 'supabase' = M3 verified
   authProviderUid: string;
   email: string | null;
+  /** Verified display name (M3 verified actors only); null/omitted otherwise. */
+  displayName?: string | null;
   actorType: ActorType;
   scope: RequestScope;
   permissionSnapshot: PermissionSnapshot | null;
+  /**
+   * TRUE only for a cryptographically VERIFIED actor (M3 Supabase token).
+   * Dev-asserted M2 actors omit this (treated as false). A verified token is a
+   * NECESSARY but NOT sufficient condition for authState 'authenticated': the
+   * actor is only 'authenticated' once it ALSO resolves to a durable, app-owned
+   * internal_user_id. Otherwise it is 'token-verified' (see buildRequestContext).
+   */
+  verified?: boolean;
 }
 
 export interface RequestContext {
   requestId: string;
   source: 'dev-diagnostic';
   environment: 'dev';
-  authState: 'dev-asserted' | 'unauthenticated';
+  // 'authenticated'  → verified token AND resolved app-owned internal_user_id.
+  // 'token-verified' → verified token but NO resolved internal_user_id (fail-closed).
+  // 'dev-asserted'   → M2 dev-asserted actor (verified omitted/false).
+  authState: 'authenticated' | 'token-verified' | 'dev-asserted' | 'unauthenticated';
   actor: {
     internalUserId: string | null;
-    authProvider: 'firebase' | null;   // reference only
+    authProvider: 'firebase' | 'supabase' | null;   // 'supabase' only for an M3 verified actor
     authProviderUid: string | null;    // reference only
     email: string | null;
     actorType: ActorType | null;
@@ -110,10 +132,10 @@ export async function buildRequestContext(
 
   // Resolve the stable, app-owned internal_user_id from the M1 mapping.
   // READ-ONLY (findByProviderUid) — the diagnostic never creates identity rows.
-  // Best-effort: if Supabase config is absent or the DB is unreachable, the
-  // decision pipeline still runs off the dev-asserted snapshot (internalUserId
-  // simply stays null). To see a non-null id, the dev identity must already
-  // exist (create it via the M1 POST /identity/resolve endpoint).
+  // For a DEV-ASSERTED (M2) actor this is best-effort and diagnostic only: the
+  // dev-asserted snapshot drives permission decisions, so a null id simply stays
+  // null. For a VERIFIED (M3) actor it is LOAD-BEARING and FAIL-CLOSED: a null id
+  // means the actor is NOT 'authenticated' (it is 'token-verified'); see below.
   let internalUserId: string | null = null;
   let identityResolution: RequestContext['identityResolution'] = 'skipped_config_incomplete';
   if (isServerConfigComplete()) {
@@ -127,11 +149,21 @@ export async function buildRequestContext(
     }
   }
 
+  // FAIL-CLOSED authState. A verified Supabase token is 'authenticated' ONLY when
+  // it ALSO resolved to a durable, app-owned internal_user_id; a verified token
+  // with no id is honestly 'token-verified' (token proven, not an authenticated
+  // app actor). Dev-asserted M2 actors (verified omitted/false) stay
+  // 'dev-asserted'. This preserves the M2 truthfulness guarantee and never claims
+  // an authenticated actor with a null id.
+  const authState: RequestContext['authState'] = assertion.verified
+    ? (internalUserId ? 'authenticated' : 'token-verified')
+    : 'dev-asserted';
+
   return {
     requestId,
     source: 'dev-diagnostic',
     environment: 'dev',
-    authState: 'dev-asserted',
+    authState,
     actor: {
       internalUserId,
       authProvider: assertion.authProvider,

@@ -27,6 +27,7 @@ import {
 import { findByProviderUid, upsertIdentity } from './identityRepository';
 import { getDb } from './db';
 import { withProtectedAction } from './protectedAction';
+import { createSupabaseWhoamiHandler } from './verifiedWhoami';
 
 export function createPlatformIdentityApp() {
   const app = express();
@@ -143,6 +144,16 @@ export function createPlatformIdentityApp() {
       }),
     ),
   );
+
+  // --- Phase 1.5 M3-Revised: dev-only VERIFIED Supabase actor diagnostic -------
+  // Verifies a real Supabase Auth access token (JWKS via `jose`), derives the
+  // trusted actor, resolves/creates the app-owned internal_user_id
+  // (auth_provider='supabase'), and returns a safe whoami summary. Gated by BOTH
+  // ENABLE_SUPABASE_PLATFORM_IDENTITY=true AND
+  // PLATFORM_IDENTITY_VERIFIED_DIAGNOSTICS=true, and never served in production
+  // (404 otherwise). Distinct from the M2 dev-asserted /diagnostics/echo-decision
+  // path, which is unchanged. No durable roles, no business data, no RLS.
+  app.post('/diagnostics/supabase-whoami', createSupabaseWhoamiHandler());
 
   return app;
 }

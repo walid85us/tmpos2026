@@ -21,6 +21,9 @@ import type { RequestScope } from './requestContext';
 
 export const EVALUATED_BY = 'platform_rbac_guard@v0-dev';
 
+/** M3-Revised verified-actor diagnostic evaluator label. */
+export const VERIFIED_EVALUATED_BY = 'supabase_whoami_diagnostic@v0-dev';
+
 export interface AuditDecisionEnvelope {
   decisionId: string;
   requestId: string;
@@ -33,7 +36,8 @@ export interface AuditDecisionEnvelope {
   humanReadableReason: string;     // safe, non-leaking
   evaluatedAt: string;             // ISO-8601
   evaluatedBy: string;
-  sourceOfTruth: 'dev_asserted_snapshot';
+  // M2 dev-asserted snapshot OR M3 verified Supabase token. BOTH are advisory.
+  sourceOfTruth: 'dev_asserted_snapshot' | 'supabase_verified_token';
   evidenceLevel: 'dev_sidecar_log_advisory';
   previewHandling: 'n_a';
 }
@@ -47,6 +51,10 @@ export interface BuildAuditEnvelopeInput {
   decision: DecisionOutcome;
   reasonCode: string;
   humanReadableReason: string;
+  /** Defaults to the M2 dev-asserted label; M3 verified path passes the verified label. */
+  sourceOfTruth?: AuditDecisionEnvelope['sourceOfTruth'];
+  /** Defaults to EVALUATED_BY; M3 verified path passes VERIFIED_EVALUATED_BY. */
+  evaluatedBy?: string;
 }
 
 export function buildAuditEnvelope(input: BuildAuditEnvelopeInput): AuditDecisionEnvelope {
@@ -65,8 +73,8 @@ export function buildAuditEnvelope(input: BuildAuditEnvelopeInput): AuditDecisio
     reasonCode: input.reasonCode,
     humanReadableReason: input.humanReadableReason,
     evaluatedAt: new Date().toISOString(),
-    evaluatedBy: EVALUATED_BY,
-    sourceOfTruth: 'dev_asserted_snapshot',
+    evaluatedBy: input.evaluatedBy ?? EVALUATED_BY,
+    sourceOfTruth: input.sourceOfTruth ?? 'dev_asserted_snapshot',
     evidenceLevel: 'dev_sidecar_log_advisory',
     previewHandling: 'n_a',
   };
