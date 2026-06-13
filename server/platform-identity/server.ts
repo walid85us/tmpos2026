@@ -1,0 +1,138 @@
+// Phase 1.5 M1 — Thin Server/API boundary: Platform Identity.
+//
+// ISOLATION: This is a SEPARATE express app from the shipping sidecar
+// (server/index.ts). It has its own port, its own routes, and shares no state
+// or middleware with shipping. The shipping sidecar is left untouched.
+//
+// SAFETY:
+//   - The identity routes are DISABLED unless ENABLE_SUPABASE_PLATFORM_IDENTITY
+//     === 'true' (default OFF). With the flag OFF, only /health and /readiness
+//     respond, and the app does NOT open a DB connection.
+//   - This boundary does NOT replace login, does NOT touch Firebase Auth, and
+//     does NOT handle tenant/business data.
+//   - No secret value is ever logged or returned. Config is reported as
+//     presence booleans only.
+//
+// This file is NOT started by `npm run dev`; run it explicitly with
+// `npm run identity:api` so default app behaviour is unchanged.
+
+import express from 'express';
+import { sanitizeError, safeLog } from '../safe-log';
+import {
+  FEATURE_FLAG,
+  isPlatformIdentityEnabled,
+  getConfigPresence,
+  isServerConfigComplete,
+} from './config';
+import { findByProviderUid, upsertIdentity } from './identityRepository';
+import { getDb } from './db';
+
+export function createPlatformIdentityApp() {
+  const app = express();
+  app.use(express.json({ limit: '64kb' }));
+
+  // --- Always available: liveness + config presence (booleans only) ---------
+  app.get('/health', (_req, res) => {
+    res.json({
+      ok: true,
+      service: 'platform-identity',
+      featureFlag: FEATURE_FLAG,
+      featureEnabled: isPlatformIdentityEnabled(),
+      config: getConfigPresence(), // presence booleans only — never values
+    });
+  });
+
+  // --- Readiness: flag ON + config present + DB reachable -------------------
+  app.get('/readiness', async (_req, res) => {
+    if (!isPlatformIdentityEnabled()) {
+      res.status(503).json({ ready: false, reason: 'feature_flag_off' });
+      return;
+    }
+    if (!isServerConfigComplete()) {
+      res.status(503).json({ ready: false, reason: 'config_missing', config: getConfigPresence() });
+      return;
+    }
+    try {
+      const sql = getDb();
+      await sql`select 1`;
+      res.json({ ready: true });
+    } catch (err) {
+      safeLog.error('[platform-identity] readiness DB check failed', sanitizeError(err));
+      res.status(503).json({ ready: false, reason: 'db_unreachable' });
+    }
+  });
+
+  // --- Flag-gated identity resolution (dev-only foundation) -----------------
+  // Maps an external auth UID to a stable, app-owned internal_user_id. This is
+  // a FOUNDATION endpoint: it intentionally does NOT enforce production auth on
+  // the caller (deferred to a later milestone) and is therefore gated behind
+  // the default-OFF feature flag and intended for dev use only.
+  app.post('/identity/resolve', async (req, res) => {
+    if (!isPlatformIdentityEnabled()) {
+      res.status(404).json({ error: { code: 'FEATURE_DISABLED', message: 'Platform identity is disabled.' } });
+      return;
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const authProviderUid = typeof body.authProviderUid === 'string' ? body.authProviderUid.trim() : '';
+    const authProvider = typeof body.authProvider === 'string' && body.authProvider.trim()
+      ? body.authProvider.trim()
+      : 'firebase';
+    const email = typeof body.email === 'string' && body.email.trim() ? body.email.trim() : null;
+    const displayName = typeof body.displayName === 'string' && body.displayName.trim() ? body.displayName.trim() : null;
+
+    if (!authProviderUid) {
+      res.status(400).json({ error: { code: 'MISSING_UID', message: 'authProviderUid is required.' } });
+      return;
+    }
+
+    try {
+      const identity = await upsertIdentity({ authProvider, authProviderUid, email, displayName });
+      res.json({ success: true, identity }); // safe public fields only
+    } catch (err) {
+      safeLog.error('[platform-identity] upsert failed', sanitizeError(err));
+      res.status(500).json({ error: { code: 'UPSERT_FAILED', message: 'Failed to resolve identity.' } });
+    }
+  });
+
+  // --- Flag-gated lookup ----------------------------------------------------
+  app.get('/identity/by-uid', async (req, res) => {
+    if (!isPlatformIdentityEnabled()) {
+      res.status(404).json({ error: { code: 'FEATURE_DISABLED', message: 'Platform identity is disabled.' } });
+      return;
+    }
+    const authProviderUid = typeof req.query.authProviderUid === 'string' ? req.query.authProviderUid.trim() : '';
+    const authProvider = typeof req.query.authProvider === 'string' && req.query.authProvider.trim()
+      ? req.query.authProvider.trim()
+      : 'firebase';
+    if (!authProviderUid) {
+      res.status(400).json({ error: { code: 'MISSING_UID', message: 'authProviderUid is required.' } });
+      return;
+    }
+    try {
+      const identity = await findByProviderUid(authProvider, authProviderUid);
+      if (!identity) {
+        res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'No identity for that reference.' } });
+        return;
+      }
+      res.json({ success: true, identity });
+    } catch (err) {
+      safeLog.error('[platform-identity] lookup failed', sanitizeError(err));
+      res.status(500).json({ error: { code: 'LOOKUP_FAILED', message: 'Failed to look up identity.' } });
+    }
+  });
+
+  return app;
+}
+
+// Start only when run directly (e.g. `npm run identity:api`).
+const PORT = parseInt(process.env.PLATFORM_IDENTITY_API_PORT || '5002', 10);
+const app = createPlatformIdentityApp();
+app.listen(PORT, '0.0.0.0', () => {
+  const presence = getConfigPresence();
+  safeLog.info(
+    `[platform-identity] isolated API on port ${PORT} | featureEnabled=${isPlatformIdentityEnabled()} | ` +
+    `config present: url=${presence.supabaseUrl} db=${presence.databaseUrl} serviceRole=${presence.serviceRoleKey}`,
+  );
+});
+
+export default app;
