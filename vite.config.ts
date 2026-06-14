@@ -28,6 +28,15 @@ export default defineConfig(({mode}) => {
           target: 'http://localhost:5001',
           changeOrigin: true,
         },
+        // Phase 1.5 M4 — dev-only same-origin proxy to the isolated identity API
+        // (started via `npm run identity:api` on :5002). Lets the Supabase pilot
+        // call the UNCHANGED M3 whoami diagnostic without any backend CORS change.
+        // The `/__identity` prefix is stripped before forwarding.
+        '/__identity': {
+          target: 'http://localhost:5002',
+          changeOrigin: true,
+          rewrite: (p) => p.replace(/^\/__identity/, ''),
+        },
       },
     },
   };

@@ -52,6 +52,13 @@ import PageShell from './components/PageShell';
 
 import Login from './components/Login';
 import NotProvisioned from './components/NotProvisioned';
+
+// Phase 1.5 M4 — dev-only Supabase Auth pilot. Lazy-loaded and registered ONLY
+// when PILOT_ROUTE_ENABLED (Vite DEV build + explicit VITE_ENABLE_SUPABASE_PILOT
+// opt-in). It lives OUTSIDE the guarded '/' and '/owner' trees, is NOT wrapped by
+// AccessGuard, and does not affect any existing route.
+import { PILOT_ROUTE_ENABLED } from './pilot/pilotEnv';
+const SupabaseAuthPilot = React.lazy(() => import('./pilot/SupabaseAuthPilot'));
 // ...
 const router = createBrowserRouter([
   {
@@ -134,6 +141,18 @@ const router = createBrowserRouter([
       { path: '/owner/team-management', element: <AccessGuard feature="team_management"><TeamManagementPage /></AccessGuard> },
     ],
   },
+  // Phase 1.5 M4 — additive, dev-only pilot route (default OFF). Excluded entirely
+  // unless Vite DEV + VITE_ENABLE_SUPABASE_PILOT === 'true'.
+  ...(PILOT_ROUTE_ENABLED
+    ? [{
+        path: '/dev/supabase-pilot',
+        element: (
+          <React.Suspense fallback={<div className="min-h-screen flex items-center justify-center text-slate-500">Loading Supabase pilot…</div>}>
+            <SupabaseAuthPilot />
+          </React.Suspense>
+        ),
+      }]
+    : []),
 ]);
 
 export default function App() {
