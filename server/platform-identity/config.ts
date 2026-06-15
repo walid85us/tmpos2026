@@ -37,6 +37,25 @@ export function isVerifiedDiagnosticsEnabled(): boolean {
   return process.env[VERIFIED_DIAGNOSTICS_FLAG] === 'true';
 }
 
+/**
+ * Phase 1.5 M7 — session-resolve prototype flag. SEPARATE from the M3 diagnostics
+ * flag so the dev-only /auth/session/resolve route is independently gated.
+ * Default behaviour is OFF.
+ */
+export const SESSION_RESOLVE_FLAG = 'ENABLE_SESSION_RESOLVE';
+
+/**
+ * True ONLY when the session-resolve prototype is explicitly enabled AND the
+ * process is non-production. Conservative on purpose: NEVER rely on NODE_ENV
+ * alone, and NEVER enable in production. The platform-identity feature flag is
+ * checked SEPARATELY by the route (both must hold). This is a NON-SECRET flag, so
+ * it is intentionally NOT added to the secret-presence map below.
+ */
+export function isSessionResolveEnabled(): boolean {
+  if (process.env.NODE_ENV === 'production') return false;
+  return process.env[SESSION_RESOLVE_FLAG] === 'true';
+}
+
 /** Presence-only view of the relevant secrets. Booleans only — never values. */
 export interface ConfigPresence {
   supabaseUrl: boolean;

@@ -28,6 +28,7 @@ import { findByProviderUid, upsertIdentity } from './identityRepository';
 import { getDb } from './db';
 import { withProtectedAction } from './protectedAction';
 import { createSupabaseWhoamiHandler } from './verifiedWhoami';
+import { createSessionResolveHandler } from './sessionResolve';
 
 export function createPlatformIdentityApp() {
   const app = express();
@@ -154,6 +155,15 @@ export function createPlatformIdentityApp() {
   // (404 otherwise). Distinct from the M2 dev-asserted /diagnostics/echo-decision
   // path, which is unchanged. No durable roles, no business data, no RLS.
   app.post('/diagnostics/supabase-whoami', createSupabaseWhoamiHandler());
+
+  // --- Phase 1.5 M7: dev-only DEFAULT-OFF /auth/session/resolve prototype -------
+  // Production-safe-SHAPED session resolution, but NOT production-enabled. Verifies
+  // a Supabase token (M3 JWKS verifier), resolves the app-owned internal_user_id
+  // (M1, fail-closed), and returns the M6 contract DTO (authorization ALWAYS null).
+  // The handler self-gates on BOTH ENABLE_SUPABASE_PLATFORM_IDENTITY=true AND
+  // ENABLE_SESSION_RESOLVE=true, and is NEVER served in production (404 otherwise).
+  // No frontend adoption, no AccessContext change, no durable audit, no schema/RLS.
+  app.post('/auth/session/resolve', createSessionResolveHandler());
 
   return app;
 }
