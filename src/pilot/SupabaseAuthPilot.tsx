@@ -16,6 +16,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import { supabasePilot } from './supabaseClient';
 import { runWhoamiDiagnostic, type WhoamiResult } from './identityDiagnosticClient';
+import { runSessionResolve, type SessionResolveResult } from './sessionResolvePilotClient';
 
 const PILOT_LABEL = 'Diagnostic pilot only — proves Supabase identity, not app authorization.';
 
@@ -67,6 +68,8 @@ export default function SupabaseAuthPilot() {
   const [error, setError] = useState<string | null>(null);
   const [whoami, setWhoami] = useState<WhoamiResult | null>(null);
   const [whoamiLoading, setWhoamiLoading] = useState(false);
+  const [resolveResult, setResolveResult] = useState<SessionResolveResult | null>(null);
+  const [resolveLoading, setResolveLoading] = useState(false);
 
   useEffect(() => {
     if (!client) return;
@@ -90,6 +93,7 @@ export default function SupabaseAuthPilot() {
       setLoading(true);
       setError(null);
       setWhoami(null);
+      setResolveResult(null);
       const { error: signInError } = await client.auth.signInWithPassword({ email, password });
       if (signInError) setError(signInError.message);
       setPassword(''); // never keep the password around
@@ -103,6 +107,7 @@ export default function SupabaseAuthPilot() {
     setLoading(true);
     setError(null);
     setWhoami(null);
+    setResolveResult(null);
     await client.auth.signOut();
     setLoading(false);
   }, [client]);
@@ -123,6 +128,33 @@ export default function SupabaseAuthPilot() {
     const result = await runWhoamiDiagnostic(token);
     setWhoami(result);
     setWhoamiLoading(false);
+  }, [client]);
+
+  // M8: optional, manual-only "Resolve App Session" against the M7 prototype.
+  // The access token is read fresh at click time and handed straight to the
+  // client as the Bearer value — it is NEVER stored in React state, rendered,
+  // or logged. This is a dev diagnostic, NOT app authorization.
+  const handleResolveSession = useCallback(async () => {
+    if (!client) return;
+    setResolveLoading(true);
+    setResolveResult(null);
+    const { data } = await client.auth.getSession();
+    const token = data.session?.access_token;
+    if (!token) {
+      setResolveResult({
+        ok: false,
+        status: 0,
+        authorization: null,
+        message: 'No active Supabase session — sign in first.',
+      });
+      setResolveLoading(false);
+      return;
+    }
+    // `token` is passed straight to the session-resolve client as the Bearer
+    // header value only. It is never stored in component state or rendered.
+    const result = await runSessionResolve(token);
+    setResolveResult(result);
+    setResolveLoading(false);
   }, [client]);
 
   const signedIn = !!session;
@@ -205,6 +237,14 @@ export default function SupabaseAuthPilot() {
               </button>
             </div>
 
+            <button
+              onClick={handleResolveSession}
+              disabled={resolveLoading}
+              className="w-full py-3 bg-indigo-600 text-white font-bold rounded-2xl hover:bg-indigo-500 transition-all disabled:opacity-60"
+            >
+              {resolveLoading ? 'Resolving…' : 'Resolve App Session'}
+            </button>
+
             {whoami && (
               <div
                 className={`rounded-2xl border px-4 py-3 ${
@@ -226,6 +266,67 @@ export default function SupabaseAuthPilot() {
                 {whoami.requestId && <Row label="Request id" value={whoami.requestId} />}
                 {whoami.message && <Row label="Note" value={whoami.message} />}
                 {!whoami.ok && (
+                  <p className="mt-2 text-[12px] font-semibold text-rose-700">
+                    This is a diagnostic failure, not an app authorization decision.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {resolveResult && (
+              <div
+                className={`rounded-2xl border px-4 py-3 ${
+                  resolveResult.ok ? 'border-emerald-200 bg-emerald-50' : 'border-rose-200 bg-rose-50'
+                }`}
+              >
+                <p className="text-[11px] font-black uppercase tracking-widest text-slate-400 mb-1">
+                  Session resolve (M7) — dev diagnostic, not app authorization
+                </p>
+                <p className="text-[11px] font-semibold text-slate-500 mb-2">
+                  Dev-only diagnostic validation only — NOT app authorization. Firebase login and
+                  AccessContext are unchanged.
+                </p>
+                <Row label="HTTP status" value={String(resolveResult.status)} />
+                {resolveResult.authState && <Row label="Auth state" value={resolveResult.authState} />}
+                {resolveResult.decision && <Row label="Decision" value={resolveResult.decision} />}
+                {resolveResult.reasonCode && <Row label="Reason code" value={resolveResult.reasonCode} />}
+                {resolveResult.sourceOfTruth && (
+                  <Row label="Source of truth" value={resolveResult.sourceOfTruth} />
+                )}
+                {resolveResult.internalUserId && (
+                  <Row label="Internal user id" value={redactId(resolveResult.internalUserId)} />
+                )}
+                {resolveResult.authProviderUid && (
+                  <Row label="Auth provider uid" value={redactId(resolveResult.authProviderUid)} />
+                )}
+                {resolveResult.authProvider && (
+                  <Row label="Auth provider" value={resolveResult.authProvider} />
+                )}
+                {/* Prefer the already-visible signed-in email; otherwise show presence only. */}
+                <Row
+                  label="Email"
+                  value={session.user?.email ?? (resolveResult.email ? 'present' : '—')}
+                />
+                {resolveResult.displayName && (
+                  <Row label="Display name" value={resolveResult.displayName} />
+                )}
+                {resolveResult.errorCode && <Row label="Error code" value={resolveResult.errorCode} />}
+                {resolveResult.errorMessage && <Row label="Error message" value={resolveResult.errorMessage} />}
+                {resolveResult.requestId && <Row label="Request id" value={resolveResult.requestId} />}
+                <Row label="Authorization" value="null" />
+                <p className="mt-2 text-[12px] font-semibold text-slate-600">
+                  authorization: null — server-derived authorization is deferred.
+                </p>
+                {resolveResult.message && (
+                  <p className="mt-2 text-[12px] font-semibold text-slate-700">{resolveResult.message}</p>
+                )}
+                {resolveResult.authState === 'token-verified' &&
+                  resolveResult.reasonCode === 'identity_resolution_error' && (
+                    <p className="mt-2 text-[12px] font-semibold text-rose-700">
+                      Token proven, app identity not resolved — fail-closed.
+                    </p>
+                  )}
+                {!resolveResult.ok && (
                   <p className="mt-2 text-[12px] font-semibold text-rose-700">
                     This is a diagnostic failure, not an app authorization decision.
                   </p>
