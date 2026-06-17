@@ -14,9 +14,12 @@
 //     the M4 pilot, AccessContext, Login, AccessGuard, App routing, Firebase,
 //     Supabase, the DB, or any business/server-route module.
 //
-// SECURITY (binding): imports NOTHING (no Express, DB, Supabase, Firebase, jose).
-// Reads NO env. Parses NO token. Emits NO audit. Handles NO secret. References
-// NO service-role key, DB URL, JWT secret, raw token, JWKS, or connection string.
+// SECURITY (binding): imports ONLY an inert type (ServerDerivedAuthorizationV1,
+// erased at compile time) — no Express, DB, Supabase, Firebase, jose. Reads NO
+// env. Parses NO token. Emits NO audit. Handles NO secret. References NO
+// service-role key, DB URL, JWT secret, raw token, JWKS, or connection string.
+
+import type { ServerDerivedAuthorizationV1 } from './authorizationContract';
 //
 // BOUNDARY (binding):
 //   - IDENTITY is proven SERVER-SIDE only (a verified token mapped to an
@@ -172,11 +175,17 @@ export interface SessionResolveIdentity {
 }
 
 /**
- * Future, SERVER-DERIVED authorization. Its shape is reserved for a later,
- * separately-approved milestone. In THIS era the contract's `authorization` is
- * ALWAYS `null` — no authorization is ever produced or returned here.
+ * SERVER-DERIVED authorization, or `null`. As of M11.5 the wire `authorization`
+ * MAY be a non-null `ServerDerivedAuthorizationV1` — but ONLY when ALL of these
+ * hold: platform identity enabled, session resolve enabled, live session
+ * authorization enabled (`ENABLE_LIVE_SESSION_AUTHORIZATION=true`), the process is
+ * DEV/non-production, the server resolver returns `allow`, AND the durable audit
+ * write succeeds. In EVERY other case — flag default-off, deny, fail-closed audit
+ * failure, repository failure — it is `null`. It NEVER carries a token/JWT/auth
+ * header/cookie/raw-DB field/secret; its shape is exactly the inert M9 resolver
+ * DTO (`ServerDerivedAuthorizationV1`), which itself forbids those fields.
  */
-export type SessionResolveAuthorization = null;
+export type SessionResolveAuthorization = ServerDerivedAuthorizationV1 | null;
 
 // =============================================================================
 // Wire response DTO

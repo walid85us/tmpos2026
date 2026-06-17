@@ -141,11 +141,16 @@ const migrationHits = MIGRATION_EXEC.filter(([, re]) => re.test(artifacts)).map(
 check('C19 no migration/seed/rollback execution in M11.3 code', migrationHits.length === 0, migrationHits.join(',') || 'none');
 
 // =============================================================================
-// Writer NOT imported by /auth/session/resolve; resolve unchanged + authz null
+// Writer NOT imported directly by /auth/session/resolve (M11.5 wires only the
+// M11.4 service); flag-disabled route path returns authorization: null.
 // =============================================================================
 
-check('C20 sessionResolve does NOT import the writer', !/auditEventWriter/.test(sessionSrc), 'not wired');
-check('C21 /auth/session/resolve still returns authorization: null', /authorization:\s*null/.test(sessionSrc), 'authorization null present');
+check('C20 sessionResolve does NOT import the writer directly', !/auditEventWriter/.test(sessionSrc), 'not wired');
+check(
+  'C21 flag-disabled /auth/session/resolve path returns authorization: null',
+  /authorization:\s*null/.test(sessionSrc) && /isLiveSessionAuthorizationEnabled/.test(sessionSrc),
+  'null default + live-flag gate present',
+);
 
 // =============================================================================
 // Writer — no UID/email/secret printing (no console output at all)

@@ -56,6 +56,25 @@ export function isSessionResolveEnabled(): boolean {
   return process.env[SESSION_RESOLVE_FLAG] === 'true';
 }
 
+/**
+ * Phase 1.5 M11.5 — live server-derived authorization flag. SEPARATE from the M7
+ * session-resolve flag so live `/auth/session/resolve` authorization is
+ * independently gated. Default behaviour is OFF.
+ */
+export const LIVE_SESSION_AUTHORIZATION_FLAG = 'ENABLE_LIVE_SESSION_AUTHORIZATION';
+
+/**
+ * True ONLY when live session authorization is explicitly enabled AND the process
+ * is non-production. Conservative on purpose: NEVER rely on NODE_ENV alone, and
+ * NEVER enable in production. The platform-identity and session-resolve flags are
+ * checked SEPARATELY by the route (all must hold). Non-secret flag, so it is
+ * intentionally NOT added to the secret-presence map below.
+ */
+export function isLiveSessionAuthorizationEnabled(): boolean {
+  if (process.env.NODE_ENV === 'production') return false;
+  return process.env[LIVE_SESSION_AUTHORIZATION_FLAG] === 'true';
+}
+
 /** Presence-only view of the relevant secrets. Booleans only — never values. */
 export interface ConfigPresence {
   supabaseUrl: boolean;

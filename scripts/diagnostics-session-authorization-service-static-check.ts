@@ -161,9 +161,12 @@ check(
   'authorization null present',
 );
 check(
-  'C12 sessionResolveContract still pins SessionResolveAuthorization = null',
-  /SessionResolveAuthorization\s*=\s*null/.test(sessionResolveContractSrc),
-  'null contract present',
+  // M11.5 widened this contract intentionally; assert the new nullable live-authz
+  // type AND that `null` remains valid (the field is still nullable, never forced).
+  'C12 sessionResolveContract allows nullable live authorization (ServerDerivedAuthorizationV1 | null)',
+  /SessionResolveAuthorization\s*=\s*ServerDerivedAuthorizationV1\s*\|\s*null/.test(sessionResolveContractSrc) &&
+    /\|\s*null/.test(sessionResolveContractSrc),
+  'nullable live authz contract; null still valid',
 );
 check(
   'C13 M11 resolver still exposes the pure resolveAuthorization',

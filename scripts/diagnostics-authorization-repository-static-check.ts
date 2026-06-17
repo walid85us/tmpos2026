@@ -138,11 +138,16 @@ const migrationHits = MIGRATION_EXEC.filter(([, re]) => re.test(artifacts)).map(
 check('C18 no migration/seed/rollback execution in M11.2 code', migrationHits.length === 0, migrationHits.join(',') || 'none');
 
 // =============================================================================
-// /auth/session/resolve unchanged + still authorization: null
+// /auth/session/resolve: flag-disabled path returns authorization: null; the
+// repository is NOT wired directly into the route (M11.5 wires only the service).
 // =============================================================================
 
-check('C19 /auth/session/resolve still returns authorization: null', /authorization:\s*null/.test(sessionSrc), 'authorization null present');
-check('C20 sessionResolve does NOT import the new repository', !/authorizationRepository/.test(sessionSrc), 'not wired');
+check(
+  'C19 flag-disabled /auth/session/resolve path returns authorization: null',
+  /authorization:\s*null/.test(sessionSrc) && /isLiveSessionAuthorizationEnabled/.test(sessionSrc),
+  'null default + live-flag gate present',
+);
+check('C20 sessionResolve does NOT import the repository directly', !/authorizationRepository/.test(sessionSrc), 'not wired');
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n[authz-repo-static-check] ${results.length - failed.length}/${results.length} checks passed.`);

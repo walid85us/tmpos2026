@@ -7,13 +7,18 @@
 //   emit advisory audit envelope (M2) → return the M6 contract DTO.
 //
 // BINDING INVARIANTS:
-//   - `authorization` is ALWAYS null (server-derived authz deferred).
+//   - `authorization` is null UNLESS the M11.5 live flag is enabled
+//     (ENABLE_LIVE_SESSION_AUTHORIZATION=true, non-production) AND the M11.4 service
+//     returns an `allow` that it durably AUDITED. Default-off behaviour, deny,
+//     fail-closed audit failure, and any error all keep `authorization: null`.
 //   - A verified token with NO resolved internal_user_id is 'token-verified'
 //     (503 identity_resolution_error) — NEVER 'authenticated' (fail-closed).
 //   - The ONLY authority input is `Authorization: Bearer <token>`. The request
 //     body is NEVER read for authority — any role/tenant/store/permission/
-//     user_metadata/internalUserId on it is ignored entirely.
-//   - No Firebase verifier. No durable audit. No schema/RLS. No production path.
+//     user_metadata/internalUserId on it is ignored entirely. Live authorization is
+//     derived SERVER-SIDE from the durable identity key only.
+//   - No Firebase verifier. No schema/RLS. No production path. Durable audit is
+//     written ONLY by the M11.4 service when the live flag is enabled.
 //
 // SAFETY: never logs/returns the raw token, JWT payload, JWKS keys, DB URL,
 // service-role key, connection string, or raw DB errors (sanitized summaries
@@ -22,13 +27,24 @@
 
 import { randomUUID } from 'crypto';
 import type { Request, Response } from 'express';
-import { isPlatformIdentityEnabled, isSessionResolveEnabled, isServerConfigComplete } from './config';
+import {
+  isPlatformIdentityEnabled,
+  isSessionResolveEnabled,
+  isServerConfigComplete,
+  isLiveSessionAuthorizationEnabled,
+} from './config';
 import { safeLog, sanitizeError } from '../safe-log';
 import type { AuthAdapter } from './authAdapter';
 import type { ActorAssertion, RequestScope } from './requestContext';
 import { verifiedSupabaseAuthAdapter, SupabaseTokenError } from './supabaseAuthAdapter';
 import { upsertIdentity } from './identityRepository';
 import { buildAuditEnvelope, emitAuditEnvelope } from './auditEnvelope';
+// M11.5 — the ONLY composition seam the route uses for live authorization. The
+// route NEVER imports the repository, the audit writer, or the resolver directly.
+import {
+  resolveDefaultSessionAuthorization,
+  type SessionAuthorizationResult,
+} from './sessionAuthorizationService';
 import {
   SESSION_RESOLVE_ACTION_ID,
   SESSION_RESOLVE_EVALUATED_BY,
@@ -37,6 +53,7 @@ import {
   SESSION_RESOLVE_REASON_CODES,
   type SessionResolveResponseDTO,
   type SessionResolveReasonCode,
+  type SessionResolveAuthorization,
 } from './sessionResolveContract';
 
 const R = SESSION_RESOLVE_REASON_CODES;
@@ -45,6 +62,16 @@ const REQUIRED_PERMISSION = 'session:resolve';
 
 /** Resolves a verified actor to its durable, app-owned internal_user_id (or null). */
 export type ResolveIdentityFn = (assertion: ActorAssertion) => Promise<string | null>;
+
+/**
+ * M11.5 — resolves live, server-derived authorization for the durable identity key
+ * (platform-first default context). Defaults to the M11.4 service; injectable so
+ * the route diagnostic can prove fail-closed handling WITHOUT a real DB failure
+ * and WITHOUT modifying the M11.4 service.
+ */
+export type ResolveSessionAuthorizationFn = (
+  identityKey: { authProvider: string; authProviderUid: string },
+) => Promise<SessionAuthorizationResult>;
 
 /** Safe, non-leaking human-readable reason per code (never includes secrets). */
 const HUMAN_READABLE: Record<SessionResolveReasonCode, string> = {
@@ -87,6 +114,8 @@ export interface SessionResolveHandlerOptions {
   adapter?: AuthAdapter;
   /** Injectable resolver (QA harness simulates success / null / throw). */
   resolveIdentity?: ResolveIdentityFn;
+  /** Injectable live-authorization resolver (defaults to the M11.4 service). */
+  resolveSessionAuthorization?: ResolveSessionAuthorizationFn;
 }
 
 /** Emit the advisory audit envelope for a session-resolve decision. */
@@ -133,6 +162,8 @@ function failureDTO(requestId: string, reasonCode: SessionResolveReasonCode): Se
 export function createSessionResolveHandler(options: SessionResolveHandlerOptions = {}) {
   const adapter = options.adapter ?? verifiedSupabaseAuthAdapter;
   const resolveIdentity = options.resolveIdentity ?? defaultResolveIdentity;
+  const resolveSessionAuthorization =
+    options.resolveSessionAuthorization ?? resolveDefaultSessionAuthorization;
 
   return async (req: Request, res: Response): Promise<void> => {
     // --- Gate 1: platform-identity feature flag (default OFF) ---
@@ -192,6 +223,33 @@ export function createSessionResolveHandler(options: SessionResolveHandlerOption
         return;
       }
 
+      // --- Step 2.5: OPTIONAL live server-derived authorization (DEV-flagged) ---
+      // DEFAULT OFF. Only when ENABLE_LIVE_SESSION_AUTHORIZATION=true (and the
+      // process is non-production) do we derive authorization, via the M11.4 service
+      // using the SERVER-DERIVED platform-first default context. The verified token
+      // is identity proof ONLY — we pass the durable (auth_provider, auth_provider_uid)
+      // key and NEVER read the request body / user_metadata / any client-asserted
+      // role/tenant/store/permission. FAIL-CLOSED: authorization is returned ONLY for
+      // an `allow` that the service durably AUDITED. On any deny/forced-deny/audit
+      // failure/repository error we keep `authorization: null` and NEVER downgrade the
+      // authenticated identity. No token/JWT/auth header/cookie is read or logged.
+      let authorization: SessionResolveAuthorization = null;
+      if (isLiveSessionAuthorizationEnabled()) {
+        try {
+          const authzResult = await resolveSessionAuthorization({
+            authProvider: 'supabase',
+            authProviderUid: assertion.authProviderUid,
+          });
+          if (authzResult.decision === 'allow' && authzResult.audited && authzResult.authorization) {
+            authorization = authzResult.authorization;
+          }
+        } catch (err) {
+          // Sanitized summary only; never leak. Identity success is preserved.
+          safeLog.error('[platform-identity] M11.5 live authorization failed', sanitizeError(err));
+          authorization = null;
+        }
+      }
+
       // --- Step 3: authenticated app actor established ---
       emitSessionAudit(requestId, internalUserId, R.VERIFIED_SUPABASE);
       const dto: SessionResolveResponseDTO = {
@@ -213,7 +271,7 @@ export function createSessionResolveHandler(options: SessionResolveHandlerOption
           email: assertion.email,
           displayName: assertion.displayName ?? null,
         },
-        authorization: null, // SERVER-DERIVED authz deferred — never produced here
+        authorization, // live server-derived authz (DEV-flagged allow+audited) or null
       };
       res.status(200).json(dto);
     } catch (err) {
