@@ -98,7 +98,7 @@ Layered guarantees:
 
 1. **Code-level:** repository is SELECT-only; static check asserts no `insert/update/delete/upsert/on conflict/alter/drop/truncate/.unsafe` in comment-stripped executable code.
 2. **DB-level:** the live diagnostic runs every read inside one transaction that first issues `set transaction read only`.
-3. **Evidence-level:** `count(*)` for all six durable tables is captured **before** and **after**; equality is asserted, and `audit_event` is asserted to remain `0`.
+3. **Evidence-level:** `count(*)` for all six durable tables is captured **before** and **after**; equality is asserted for all six, including `audit_event`. After M11.3, `audit_event` may be `>= 1` (one redacted DEV test row); this diagnostic verifies `audit_event` count **stability** before/after, not that it equals `0`.
 
 ---
 
@@ -109,7 +109,7 @@ Layered guarantees:
 - **T1** tenant scope → `allow`, `roles.tenantRoleId='store_owner'`; **T2** entitlement count `= 2`; **T3** keys `shipping_provider_configuration` + `pickup_requests` present.
 - **S1** store scope → `allow`, `roles.tenantRoleId='store_owner'`; **S2** entitlement count `= 2`.
 - **N1** negative control (unseeded all-zero tenant id) → `deny` (`denied_tenant_missing` / `denied_scope_context_invalid`).
-- **M1** all durable row counts unchanged (before == after); **M2** `audit_event` remains `0`.
+- **M1** all durable row counts unchanged (before == after); **M2** `audit_event` count stable (before == after; not required to equal `0`).
 
 ---
 

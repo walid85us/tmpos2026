@@ -6,7 +6,8 @@
 // platform/tenant/store contexts SERVER-SIDE from the durable membership rows,
 // feeds the assembled snapshots to the pure resolveAuthorization(), asserts the
 // expected allow/deny decisions, and PROVES no mutation occurred (row counts
-// unchanged before vs after; audit_event stays 0).
+// unchanged before vs after, including audit_event — whose count may be 0 or
+// greater after M11.3, but must not change during this diagnostic).
 //
 // SAFETY (binding):
 //   - Refuses unless NODE_ENV!=production AND every gate below is set.
@@ -261,7 +262,11 @@ async function main(): Promise<void> {
     unchanged,
     tables.map((t) => `${t}:${before[t]}->${after[t]}`).join(' '),
   );
-  check('M2 audit_event remains 0', before.audit_event === 0 && after.audit_event === 0, `before=${before.audit_event} after=${after.audit_event}`);
+  check(
+    'M2 audit_event count stable (unchanged during diagnostic)',
+    before.audit_event === after.audit_event,
+    `before=${before.audit_event} after=${after.audit_event}`,
+  );
 
   finish();
 }
