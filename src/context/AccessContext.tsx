@@ -1,10 +1,14 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback, ReactNode } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
 import { auth, db } from '../firebase';
 import { Role, Plan, AccountStatus, platformRoles as initialPlatformRoles, tenantRoles as initialTenantRoles, planFeatures, adminPermissions, PERMISSION_HIERARCHY, meetsPermissionLevel, PERMISSION_DOMAINS, SUB_PERMISSIONS, isSubPermissionPlanAvailable } from './accessConfig';
 import { EmployeeRole, PermissionLevel } from '../types';
 import { NAV_FEATURE_TO_PLATFORM_KEY, NAV_FEATURE_SECONDARY_KEYS, hasEffectiveFeatureAccess } from '../owner/platformPermissionsConfig';
+// Phase 1.6 M8 — TYPE-ONLY import (erased at runtime; pulls NO module into the bundle).
+// Shape of the dormant, non-secret awareness record produced by the M7 helper. Used solely
+// to type a PRIVATE observer ref; it is NEVER added to the context value or any permission path.
+import type { AccessAwarenessRecord } from '../auth/supabaseAccessAwarenessTypes';
 
 interface Session {
   user: { id: string; name: string; email: string };
@@ -119,6 +123,12 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   const [posOperatorRole, setPosOperatorRole] = useState<string | null>(null);
   const [supervisorRefundAuth, setSupervisorRefundAuth] = useState<{ active: boolean; supervisorName: string } | null>(null);
 
+  // Phase 1.6 M8 — PRIVATE, non-authoritative observer ref (NOT React state, NOT in the
+  // provider value). Holds the latest dormant Supabase awareness record for DEV-only
+  // inspection. It is read by NOTHING — not session/tenant/role/plan/permissions/loading/
+  // routing/AccessGuard. Firebase remains the sole authoritative session source.
+  const supabaseAwarenessRef = useRef<AccessAwarenessRecord | null>(null);
+
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       console.log('[AccessContext] onAuthStateChanged fired, user:', user ? user.uid : 'null');
@@ -180,6 +190,44 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     });
     return unsubscribe;
   }, [platformRolesState]);
+
+  // Phase 1.6 M8 — DORMANT, DEV+flag-gated, one-shot Supabase awareness OBSERVER.
+  // This effect is SEPARATE from the Firebase listener above (which is unchanged) and is
+  // strictly observational: it never affects session/tenant/role/plan/permissions/loading/
+  // routing/AccessGuard, and its result lives ONLY in the private ref above.
+  //
+  // The DEV/flag guards are read through a narrow cast because this repo ships no
+  // `vite/client` env types (bare `import.meta.env` is a pre-existing typing gap). After
+  // TypeScript erases the cast, the JS is the EXACT `import.meta.env.DEV` /
+  // `import.meta.env.VITE_…` member access that Vite statically folds to `false`/`undefined`
+  // in production — so the dynamic import below becomes dead code and is tree-shaken OUT of
+  // the production bundle (proven by the bundle secret scan). Default behaviour is OFF:
+  // absent/false flag (and any production build) means no import, no call, no observation.
+  useEffect(() => {
+    if ((import.meta as unknown as { env: { DEV?: boolean } }).env.DEV !== true) return;
+    if ((import.meta as unknown as { env: { VITE_ENABLE_ACCESSCONTEXT_SUPABASE_AWARENESS?: string } }).env.VITE_ENABLE_ACCESSCONTEXT_SUPABASE_AWARENESS !== 'true') return;
+    // Run only AFTER Firebase initialization has completed (loading flipped to false).
+    // We only READ loading here; we never write it, so loading semantics are unchanged.
+    if (loading) return;
+
+    const controller = new AbortController();
+    // One-shot. The M7 helper self-gates, is no-throw, and is cancellation-safe; we pass the
+    // signal so StrictMode's mount→cleanup→remount aborts the first run cleanly. The catch is
+    // defensive only (the helper already never throws). No token/session payload is logged.
+    void (async () => {
+      try {
+        const mod = await import('../auth/supabaseAccessAwareness');
+        const record = await mod.runAccessContextSupabaseAwarenessObservation({ signal: controller.signal });
+        if (!controller.signal.aborted) {
+          supabaseAwarenessRef.current = record;
+        }
+      } catch {
+        /* no-op: never surface awareness detail; Firebase remains authoritative */
+      }
+    })();
+
+    return () => controller.abort();
+  }, [loading]);
 
   const session = isDevSession ? previewSession : realSession;
   const tenant = isDevSession ? previewTenant : realTenant;

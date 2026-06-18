@@ -96,10 +96,15 @@ check('2a dormant M5 foundation identifiers absent from emitted bundle (not reac
 const [bootCount, bootWhere] = scan(/supabaseSessionBootstrap|VITE_ENABLE_SUPABASE_SESSION_BOOTSTRAP/);
 check('2b dormant M6 session-bootstrap identifiers absent from emitted bundle (not reachable / tree-shaken)', bootCount === 0, bootCount === 0 ? 'absent' : `${bootCount} ref(s) in: ${bootWhere.join(', ')}`);
 
-// Phase 1.6 M7 — the dormant AccessContext awareness helper (and its flag) must also be
-// absent: nothing imports it, so it (and the bootstrap/foundation it reaches) is tree-shaken.
+// Phase 1.6 M8 — the AccessContext awareness helper (and its flag) is now imported by
+// AccessContext, but ONLY via a DEV+flag-gated DYNAMIC import. In a production build Vite
+// folds `import.meta.env.DEV` to `false`, so the guarded branch (and its dynamic import) is
+// dead-code-eliminated and the helper — plus the bootstrap/foundation it reaches and the
+// awareness flag name — is tree-shaken OUT of the emitted bundle. This is the HARD M8 gate:
+// the identifiers MUST be absent from production output even though AccessContext references
+// the helper in DEV-only source.
 const [awareCount, awareWhere] = scan(/supabaseAccessAwareness|VITE_ENABLE_ACCESSCONTEXT_SUPABASE_AWARENESS/);
-check('2c dormant M7 AccessContext awareness identifiers absent from emitted bundle (not reachable / tree-shaken)', awareCount === 0, awareCount === 0 ? 'absent' : `${awareCount} ref(s) in: ${awareWhere.join(', ')}`);
+check('2c M8 AccessContext awareness identifiers absent from emitted bundle (DEV-only dynamic import; production-excluded / tree-shaken)', awareCount === 0, awareCount === 0 ? 'absent' : `${awareCount} ref(s) in: ${awareWhere.join(', ')}`);
 
 // =============================================================================
 // 3) Out-of-scope NOTE: the pre-existing GEMINI_API_KEY Vite `define` (not an M5

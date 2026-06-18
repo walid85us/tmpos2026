@@ -1,12 +1,20 @@
 // Phase 1.6 M7 — STATIC (offline) OBSERVATIONAL check for the AccessContext Supabase
 // AWARENESS helper (`src/auth/supabaseAccessAwareness.ts`).
 //
+// Phase 1.6 M8 (owner-approved, controlled update): the helper is now wired into EXACTLY
+// ONE importer — `src/context/AccessContext.tsx` — via a DYNAMIC, DEV+awareness-flag-gated
+// import only. Section 10 therefore allows that single dynamic importer (and asserts there is
+// NO static helper import and NO other importer); section 12a allows the dynamic helper import
+// while still forbidding the Supabase SDK / M5 foundation / M6 bootstrap inside AccessContext.
+// ALL helper-internal checks (token/secret/mutation/session-resolve/server-authz/one-shot/
+// cancellation/flag-separation) stay strict and UNCHANGED — the helper file is not modified.
+//
 // PURE / OFFLINE: no DB, no network, no Supabase, no Firebase, no env values, no SQL,
 // no migration, no audit write, no Supabase MCP, no live/route call. It reads the
 // frontend (`src/**`) as TEXT only (read-only — NEVER imported, NEVER modified) and
-// PROVES the awareness helper is dormant, observational, token/secret-safe, mutation-free,
-// one-shot, cancellation-safe, and not reachable from any active app entrypoint — and that
-// AccessContext remains untouched and the M6 authority lock is intact.
+// PROVES the awareness helper stays observational, token/secret-safe, mutation-free,
+// one-shot, cancellation-safe, and reachable ONLY through the single approved dynamic
+// AccessContext importer — and that AccessContext stays Firebase-authoritative.
 //
 // Run:  npx tsx scripts/diagnostics-accesscontext-supabase-awareness-observational-check.ts
 
@@ -147,13 +155,24 @@ for (const s of ['disabled', 'no_session', 'cancelled', 'error']) {
 }
 
 // =============================================================================
-// 10) Dormancy — helper imported by NOTHING in src/** (no call site)
+// 10) Phase 1.6 M8 (controlled): the helper is wired into EXACTLY ONE importer —
+//     AccessContext — via a DYNAMIC, DEV+flag-gated import only. No static import, no
+//     other importer, and the other active entrypoints (Login/AccessGuard/App/main) stay
+//     clean. (`refsHelper` matches only the helper module path, never `…AwarenessTypes`.)
 // =============================================================================
+const ACCESS_CONTEXT = 'src/context/AccessContext.tsx';
 const refsHelper = (s: string) => /(?:from|import)\s*\(?\s*'[^']*\/supabaseAccessAwareness'/.test(s);
+const staticHelperImport = (s: string) => /import\s+[^()]*?from\s*'[^']*\/supabaseAccessAwareness'/.test(s);
+const dynamicHelperImport = (s: string) => /import\(\s*'[^']*\/supabaseAccessAwareness'\s*\)/.test(s);
 const importers = srcFiles.filter((f) => f !== HELPER && f !== HELPER_TYPES && refsHelper(text.get(f)!));
-check('10a helper is imported by NO active app entrypoint (Login/AccessContext/AccessGuard/App/main)', importers.filter((f) => ENTRYPOINTS.includes(f)).length === 0, importers.filter((f) => ENTRYPOINTS.includes(f)).join(', ') || 'dormant');
-check('10b helper is imported nowhere in src/** yet (no M7 call site added)', importers.length === 0, importers.join(', ') || 'no importers');
-check('10c AccessContext does NOT import the helper or the bootstrap', !refsHelper(text.get('src/context/AccessContext.tsx') ?? '') && !/supabaseSessionBootstrap/.test(text.get('src/context/AccessContext.tsx') ?? ''), 'AccessContext clean');
+const OTHER_ENTRYPOINTS = ENTRYPOINTS.filter((f) => f !== ACCESS_CONTEXT);
+const acText = text.get(ACCESS_CONTEXT) ?? '';
+const otherEntryImporters = OTHER_ENTRYPOINTS.filter((f) => refsHelper(text.get(f) ?? ''));
+check('10a helper is imported by NO active app entrypoint EXCEPT AccessContext (Login/AccessGuard/App/main stay clean)', otherEntryImporters.length === 0, otherEntryImporters.join(', ') || 'others clean');
+check('10b helper is imported by EXACTLY ONE file in src/** — AccessContext (no other call site)', importers.length === 1 && importers[0] === ACCESS_CONTEXT, importers.join(', ') || 'none');
+check('10c AccessContext imports the helper DYNAMICALLY only (no static runtime import)', dynamicHelperImport(acText) && !staticHelperImport(acText), dynamicHelperImport(acText) ? 'dynamic import()' : 'NOT dynamic');
+check('10d AccessContext still does NOT statically import the M6 bootstrap / M5 foundation', !/supabaseSessionBootstrap|supabaseAuthFoundation/.test(acText), 'no bootstrap/foundation import');
+check('10e AccessContext dynamic import is DEV-gated and awareness-flag-gated', /\.DEV\b/.test(acText) && /VITE_ENABLE_ACCESSCONTEXT_SUPABASE_AWARENESS/.test(acText), 'DEV + flag gate');
 
 // =============================================================================
 // 11) No barrel export
@@ -161,12 +180,12 @@ check('10c AccessContext does NOT import the helper or the bootstrap', !refsHelp
 check('11a no src/auth/index.ts barrel exists', !srcFiles.includes('src/auth/index.ts'), 'no barrel');
 
 // =============================================================================
-// 12) AccessContext untouched + M6 authority diagnostic intact (static proxy)
+// 12) AccessContext stays Firebase-authoritative + M6/M8 authority diagnostic intact
 // =============================================================================
 const ac = text.get('src/context/AccessContext.tsx') ?? '';
-check('12a AccessContext still Firebase-derived (onAuthStateChanged) and Supabase-free', /onAuthStateChanged/.test(ac) && !/@supabase\/supabase-js/.test(ac) && !/supabaseAuthFoundation|supabaseSessionBootstrap|supabaseAccessAwareness/.test(ac), 'firebase authority intact');
+check('12a AccessContext still Firebase-derived (onAuthStateChanged), with NO Supabase SDK / M5 foundation / M6 bootstrap (awareness helper is dynamic-only)', /onAuthStateChanged/.test(ac) && !/@supabase\/supabase-js/.test(ac) && !/supabaseAuthFoundation|supabaseSessionBootstrap/.test(ac), 'firebase authority intact; awareness dynamic-only');
 const authorityDiag = read('scripts/diagnostics-accesscontext-firebase-authority-check.ts');
-check('12b M6 AccessContext authority diagnostic still asserts AccessContext does NOT import the bootstrap', /AccessContext does NOT import the M6 bootstrap/.test(authorityDiag), 'authority check intact');
+check('12b AccessContext authority diagnostic still asserts AccessContext does NOT import the M6 bootstrap', /AccessContext does NOT import the M6 bootstrap/.test(authorityDiag), 'authority check intact');
 
 // =============================================================================
 // 13) Self-inertness (non-circular allowlist + read-only fs + no env)

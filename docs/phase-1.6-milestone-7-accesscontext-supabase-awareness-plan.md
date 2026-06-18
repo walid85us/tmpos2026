@@ -9,6 +9,11 @@ change, backend change, or production change occurred.
 **Accepted base checkpoint:** `1918b7e21c4bf5d4203f8ea8bc48d1905193a5b0`
 (Phase 1.6 M6 — add dormant Supabase session bootstrap).
 
+> **Superseded by M8 (wiring):** Phase 1.6 M8 wired this helper into `src/context/AccessContext.tsx`
+> as a private, DEV+flag-gated, one-shot dynamic-import observer (the "AccessContext is byte-for-byte
+> unchanged" statement below describes the M7 state only). See
+> [`docs/phase-1.6-milestone-8-accesscontext-one-shot-supabase-observer-plan.md`](phase-1.6-milestone-8-accesscontext-one-shot-supabase-observer-plan.md).
+
 **Design choice:** **Option C** from the accepted M7 planning pass — a clean, standalone,
 **dormant** awareness helper that imports the M6 bootstrap but is wired into nothing, with
 **one** owner-approved controlled update (bootstrap dormancy `check 10b`). AccessContext is
