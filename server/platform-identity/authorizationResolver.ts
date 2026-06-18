@@ -7,7 +7,8 @@
 // PURE / INERT (binding):
 //   - No DB, no env, no network, no Express, no Supabase, no Firebase, no audit,
 //     no side effects, no process.env. It imports ONLY inert M9 contract data/types
-//     (which themselves import nothing) — the same import style M9 already uses.
+//     and the inert Phase 1.6 M1 permission catalog (server-only; itself imports
+//     only the inert M9 constants + contract types) — the same import style M9 uses.
 //   - Imported by NOTHING at runtime. NOT imported by sessionResolve.ts, the M7
 //     route, the M8 pilot, or the client bundle. Consumed only by the M11 diagnostic
 //     and referenced by the M11 doc. `/auth/session/resolve` STILL returns
@@ -53,6 +54,10 @@ import type {
   ServerDerivedAuthorizationV1,
   FeatureEntitlements,
 } from './authorizationContract';
+// Phase 1.6 M1 — pure, inert, server-only permission/capability catalog. Fills
+// the effective permissions/subPermissions on an ALLOW decision (deny path is
+// untouched). The catalog performs no I/O and imports no frontend file.
+import { materializeCapabilities } from './permissionCatalog';
 
 // =============================================================================
 // Input model (server-assembled snapshot — never client-asserted)
@@ -161,8 +166,9 @@ export interface AuthorizationResolverResult {
   decision: ResolverDecision;
   reasonCode: AuthorizationResolverReasonCode;
   humanReadableReason: string;
-  /** Documents read-only limiting (read_only / overdue). Permission capping is
-   *  applied at materialization time (deferred to shared-catalog unification). */
+  /** Documents read-only limiting (read_only / overdue). Permission/sub-permission
+   *  capping for this limitation is applied by the M1 permission catalog during
+   *  materialization (write/manage/approve capped to view/false). */
   limitation: ResolverLimitation;
 }
 
@@ -219,6 +225,17 @@ interface AllowParams {
 }
 
 function allow(p: AllowParams): AuthorizationResolverResult {
+  // Phase 1.6 M1: materialize effective permissions/sub-permissions from the
+  // shared server permission catalog. Cap-only: role grants are intersected with
+  // plan/entitlement availability and read-only status — never expanded. Empty
+  // maps occur ONLY when no role resolved (never reached here — allow() always
+  // carries a resolved role), so an empty map is never interpreted as "full".
+  const { permissions, subPermissions } = materializeCapabilities({
+    platformRoleId: p.platformRoleId,
+    tenantRoleId: p.tenantRoleId,
+    entitlements: p.entitlements,
+    limited: p.limited,
+  });
   const authorization: ServerDerivedAuthorizationV1 = {
     authorizationVersion: AUTHORIZATION_CONTRACT_VERSION,
     userType: p.userType,
@@ -226,12 +243,8 @@ function allow(p: AllowParams): AuthorizationResolverResult {
     roles: { platformRoleId: p.platformRoleId, tenantRoleId: p.tenantRoleId },
     status: { user: p.userStatus, tenant: p.tenantStatus, store: p.storeStatus },
     entitlements: p.entitlements,
-    // DEFERRED: full permission/sub-permission materialization waits for the shared
-    // permission-catalog unification (M9 SHARED_PERMISSION_CATALOG_TARGET). Until
-    // then these are intentionally empty (roles + status + entitlements are the
-    // authoritative outputs this milestone proves).
-    permissions: {},
-    subPermissions: {},
+    permissions,
+    subPermissions,
     derivedBy: AUTHORIZATION_EVALUATED_BY,
   };
   return {

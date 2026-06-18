@@ -234,7 +234,11 @@ function stripTsComments(src: string): string {
   const code = stripTsComments(resolverSrc);
   const forbidden = /process\.env|getDb|from 'postgres'|postgres\(|from 'express'|fetch\(|createClient|firebase|supabase|https?:\/\/|require\(/i;
   const imports = [...code.matchAll(/from '([^']+)'/g)].map((m) => m[1]);
-  const allowedImports = new Set(['./authorizationConstants', './authorizationContract']);
+  // Phase 1.6 M1: the resolver now also imports the inert, server-only permission
+  // catalog to materialize permissions/subPermissions on allow. The catalog is
+  // itself inert (asserted by diagnostics-permission-catalog-static-check.ts), so
+  // the resolver's import graph stays I/O-free.
+  const allowedImports = new Set(['./authorizationConstants', './authorizationContract', './permissionCatalog']);
   const onlyInertImports = imports.length > 0 && imports.every((i) => allowedImports.has(i));
   check('24 resolver performs no DB/env/network/IO (code only)', !forbidden.test(code) && onlyInertImports, `imports=[${imports.join(', ')}]`);
 }
