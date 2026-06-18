@@ -9,6 +9,10 @@ change, or production change occurred.
 **Accepted base checkpoint:** `2624403fdb81beb3b7833f303f78d88061a5aba2`
 (Phase 1.6 M5 — add dormant Supabase auth foundation).
 
+**Follow-on:** Stage 3b (the dormant AccessContext awareness helper that imports this
+bootstrap) is implemented in **Phase 1.6 M7** — see
+[`docs/phase-1.6-milestone-7-accesscontext-supabase-awareness-plan.md`](phase-1.6-milestone-7-accesscontext-supabase-awareness-plan.md).
+
 **Design choice:** **Option C** from the accepted M6 planning pass — a clean, app-level,
 **dormant** Supabase session-bootstrap module that imports the M5 foundation but is wired
 into nothing, with two **owner-approved, controlled** allowlist updates to the M5

@@ -96,6 +96,11 @@ check('2a dormant M5 foundation identifiers absent from emitted bundle (not reac
 const [bootCount, bootWhere] = scan(/supabaseSessionBootstrap|VITE_ENABLE_SUPABASE_SESSION_BOOTSTRAP/);
 check('2b dormant M6 session-bootstrap identifiers absent from emitted bundle (not reachable / tree-shaken)', bootCount === 0, bootCount === 0 ? 'absent' : `${bootCount} ref(s) in: ${bootWhere.join(', ')}`);
 
+// Phase 1.6 M7 — the dormant AccessContext awareness helper (and its flag) must also be
+// absent: nothing imports it, so it (and the bootstrap/foundation it reaches) is tree-shaken.
+const [awareCount, awareWhere] = scan(/supabaseAccessAwareness|VITE_ENABLE_ACCESSCONTEXT_SUPABASE_AWARENESS/);
+check('2c dormant M7 AccessContext awareness identifiers absent from emitted bundle (not reachable / tree-shaken)', awareCount === 0, awareCount === 0 ? 'absent' : `${awareCount} ref(s) in: ${awareWhere.join(', ')}`);
+
 // =============================================================================
 // 3) Out-of-scope NOTE: the pre-existing GEMINI_API_KEY Vite `define` (not an M5
 //    concern). Report if its NAME survives; never print any value.

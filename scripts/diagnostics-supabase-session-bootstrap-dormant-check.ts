@@ -145,7 +145,14 @@ for (const s of ['disabled_not_dev', 'disabled_flag_off', 'foundation_unavailabl
 const refsBootstrap = (s: string) => /(?:from|import)\s*\(?\s*'[^']*\/supabaseSessionBootstrap'/.test(s);
 const importers = srcFiles.filter((f) => f !== BOOTSTRAP && f !== BOOTSTRAP_TYPES && refsBootstrap(text.get(f)!));
 check('10a bootstrap is imported by NO active app entrypoint', importers.filter((f) => ENTRYPOINTS.includes(f)).length === 0, importers.filter((f) => ENTRYPOINTS.includes(f)).join(', ') || 'dormant');
-check('10b bootstrap is imported nowhere in src/** yet (no M6 call site added)', importers.length === 0, importers.join(', ') || 'no importers');
+// Phase 1.6 M7 (owner-approved, controlled allowlist): the bootstrap may now be imported
+// by EXACTLY ONE file — the dormant M7 AccessContext awareness helper — and by no other
+// non-entrypoint file. Check 10a (entrypoints) stays strict and unchanged; token/mutation/
+// secret/session-resolve/server-authz checks are untouched. The helper's own dormancy is
+// proven separately by scripts/diagnostics-accesscontext-supabase-awareness-observational-check.ts.
+const M7_AWARENESS = 'src/auth/supabaseAccessAwareness.ts';
+const unexpectedImporters = importers.filter((f) => f !== M7_AWARENESS);
+check('10b bootstrap imported ONLY by the dormant M7 awareness helper (no other call site)', unexpectedImporters.length === 0, unexpectedImporters.join(', ') || `allowed: [${importers.join(', ') || 'none'}]`);
 
 // =============================================================================
 // 11) No barrel export
