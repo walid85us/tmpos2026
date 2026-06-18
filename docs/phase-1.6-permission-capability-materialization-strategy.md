@@ -100,16 +100,25 @@ all five (`system_owner`, `support_admin`, `billing_admin`, `operations_admin`,
 level and must additionally satisfy the platform **prerequisite/dependency** map
 (transitive, cycle-guarded) — mirroring `explainAccessDecision` with no overrides.
 
-**Platform-role vocabulary drift (still deferred):** the durable migration uses
-`platform_owner | platform_admin | platform_ops | platform_support |
-platform_readonly`; the contract/frontend use `system_owner | support_admin |
-billing_admin | operations_admin | security_admin`. The resolver's existing
-`PLATFORM_ROLE_COMPAT_MAP` only maps the **unambiguous** subset
-(`platform_owner→system_owner`, `platform_support→support_admin`,
-`platform_ops→operations_admin`). Ambiguous/unmapped durable roles
-(`platform_admin`, `platform_readonly`) **fail closed** (deny → `authorization:
-null`) and never reach materialization. No durable mapping was invented for
-`billing_admin`/`security_admin`.
+**Platform-role vocabulary (RECONCILED at the documentation/diagnostic level in
+Phase 1.6 M2 — see
+[`docs/phase-1.6-milestone-2-platform-role-feature-key-reconciliation.md`](phase-1.6-milestone-2-platform-role-feature-key-reconciliation.md)):**
+the CANONICAL durable platform-role vocabulary is already the contract/frontend
+vocabulary `system_owner | support_admin | billing_admin | operations_admin |
+security_admin`. Migration 003 aligned the DEV durable DB to it (applied to DEV;
+production untouched — see
+[`docs/phase-1.5-milestone-11.1.1-dev-003-applied.md`](phase-1.5-milestone-11.1.1-dev-003-applied.md)),
+so `billing_admin`/`security_admin` are **already first-class canonical** roles
+(admitted by the 003 CHECK, defined in `PLATFORM_ROLE_FEATURE_DEFAULTS`; no legacy
+id, no invented mapping). The legacy 002 vocabulary (`platform_owner |
+platform_admin | platform_ops | platform_support | platform_readonly`) is
+**superseded**; the resolver resolves canonical ids **directly** and keeps
+`PLATFORM_ROLE_COMPAT_MAP` only as a legacy-compat fallback for the **unambiguous**
+subset (`platform_owner→system_owner`, `platform_support→support_admin`,
+`platform_ops→operations_admin`) for environments not yet on 003. `platform_admin`
+(ambiguous) and `platform_readonly` (read-only is modeled by **status**, not a
+role) are **fail-closed by design** (deny → `authorization: null`) and never reach
+materialization.
 
 ---
 
@@ -135,11 +144,18 @@ keys against it.
 - **Platform side is not plan-gated** (platform staff have no tenant plan); the
   resolver passes `{}` entitlements for platform scope.
 
-**Documented drift:** the frontend `planFeatures` uses `supply-chain` (hyphen)
-while the domain id is `supply_chain` (underscore). The server domain gate uses
-the `planFeatures` key form (`supply-chain`) so entitlement rows assembled from
-durable state line up. Full reconciliation of durable feature-key conventions is
-deferred.
+**Feature-key naming split (FORMALIZED in Phase 1.6 M2 — see
+[`docs/phase-1.6-milestone-2-platform-role-feature-key-reconciliation.md`](phase-1.6-milestone-2-platform-role-feature-key-reconciliation.md)):**
+the frontend `planFeatures` uses `supply-chain` (hyphen) while the domain id is
+`supply_chain` (underscore). The server domain gate uses the canonical
+`planFeatures` key form (`supply-chain`). M2 added an explicit
+`FEATURE_KEY_ALIASES` + `normalizeFeatureKey` (deterministic, idempotent,
+many-to-one); the tenant materializers normalize entitlement keys to canonical
+before gate testing (cap-only), so a durable entitlement stored under the
+underscore alias lines up with its `supply-chain` gate. Unknown keys still
+normalize to themselves and stay fail-closed; durable `feature_key` values and
+frontend keys are unchanged (the durable column is free `text` with no CHECK and
+zero rows — nothing to migrate).
 
 Tenant sub-permission materialization precedence (mirrors
 `permissionDecision.requireSubPermission`):
@@ -240,10 +256,17 @@ used; no `audit_event` row was written.
 
 ## 12. Deferred items / follow-ups
 
-- Full durable↔contract platform-role vocabulary reconciliation (`platform_admin`,
-  `platform_readonly`, `billing_admin`, `security_admin`).
-- Durable feature-key convention reconciliation (e.g. `supply_chain` vs
-  `supply-chain`).
+- ~~Full durable↔contract platform-role vocabulary reconciliation (`platform_admin`,
+  `platform_readonly`, `billing_admin`, `security_admin`).~~ **Reconciled at the
+  documentation/diagnostic level by Phase 1.6 M2** (migration 003 already aligned
+  DEV durable vocabulary; `billing_admin`/`security_admin` are canonical;
+  `platform_admin`/`platform_readonly` fail closed by design). Remaining: removal of
+  the legacy compat map once all environments are on 003; applying 003 to
+  production.
+- ~~Durable feature-key convention reconciliation (e.g. `supply_chain` vs
+  `supply-chain`).~~ **Formalized by Phase 1.6 M2** (`FEATURE_KEY_ALIASES` +
+  `normalizeFeatureKey`, cap-only). Remaining (deferred): any durable `feature_key`
+  CHECK and plan→entitlement durable materialization.
 - Optional DEV-only live materialization route exposure (intentionally NOT added).
 - Future true single-source-of-truth catalog imported by BOTH `src/` and
   `server/` (this milestone keeps the server mirror; `src/` is untouched).

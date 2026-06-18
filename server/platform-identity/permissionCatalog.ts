@@ -146,9 +146,13 @@ export const TENANT_PERMISSION_DOMAINS: readonly string[] = [
  * domain to exist (cap-only). A `null` gate marks a CORE domain that is always
  * available (present even on the starter plan) and is NEVER plan-capped.
  *
- * ⚠ DRIFT (documented): the frontend planFeatures uses the hyphenated key
- * `supply-chain` while the domain id is `supply_chain`. The server gate uses the
- * planFeatures key form so entitlement rows assembled from durable state line up.
+ * ⚠ NAMING SPLIT (documented + formalized in Phase 1.6 M2): the frontend
+ * planFeatures uses the hyphenated key `supply-chain` while the domain id is
+ * `supply_chain`. The server gate uses the planFeatures (canonical) key form so
+ * entitlement rows assembled from durable state line up. The underscore form is a
+ * DECLARED alias normalized to the canonical hyphen form — see FEATURE_KEY_ALIASES
+ * / normalizeFeatureKey below; the tenant materializers normalize entitlement keys
+ * before gate testing (cap-only).
  */
 export const TENANT_DOMAIN_ENTITLEMENT: Readonly<Record<string, string | null>> = {
   // Core domains (starter plan) — never plan-capped.
@@ -377,6 +381,59 @@ export const KNOWN_TENANT_ENTITLEMENT_KEYS: ReadonlySet<string> = (() => {
   for (const f of Object.keys(TENANT_FEATURE_PERMISSION_DEPENDENCIES)) s.add(f);
   return s;
 })();
+
+// =============================================================================
+// Phase 1.6 M2 — feature-key normalization (deterministic, idempotent, many-to-one)
+// =============================================================================
+
+/**
+ * DECLARED feature-key aliases: `alias -> canonical`. Canonical form follows the
+ * FROZEN frontend `planFeatures` form (which the catalog gates already mirror), so
+ * a durable `tenant_feature_entitlement.feature_key` supplied under a synonym is
+ * lined up with the gate it should satisfy WITHOUT changing any frontend key or
+ * durable value.
+ *
+ * The SOLE known synonym today is the supply-chain naming split: the tenant DOMAIN
+ * id is `supply_chain` (underscore) while the `planFeatures`/entitlement gate key
+ * is `supply-chain` (hyphen) — see TENANT_DOMAIN_ENTITLEMENT above. This alias
+ * normalizes the underscore form to the canonical hyphen form.
+ *
+ * INVARIANTS (asserted by diagnostics-feature-key-canonicalization-check.ts):
+ *   - Every alias TARGET is itself canonical (not a key of this map) ⇒ idempotent.
+ *   - Every alias target is a KNOWN catalog gate key ⇒ aliases can only ever line
+ *     up with an EXISTING gate, never invent a new capability.
+ */
+export const FEATURE_KEY_ALIASES: Readonly<Record<string, string>> = {
+  supply_chain: 'supply-chain',
+};
+
+/**
+ * Normalize a feature key to its canonical form. Deterministic, idempotent
+ * (`normalizeFeatureKey(normalizeFeatureKey(k)) === normalizeFeatureKey(k)`), and
+ * many-to-one only for DECLARED aliases. An UNKNOWN key normalizes to ITSELF and
+ * therefore stays fail-closed — a non-canonical, non-alias key still matches no
+ * known gate, so it can never enable a capability.
+ */
+export function normalizeFeatureKey(key: string): string {
+  return FEATURE_KEY_ALIASES[key] ?? key;
+}
+
+/**
+ * Build a canonical-keyed VIEW of an enabled-entitlement map: every key is
+ * normalized, values OR-merged. CAP-ONLY and monotonic — an enabled alias OR an
+ * enabled canonical key both count as enabled; no key is ever invented and an
+ * absent/disabled gate stays absent. Used internally by the tenant materializers
+ * so a durable entitlement row stored under an alias still satisfies its canonical
+ * gate, while unknown keys remain inert.
+ */
+function normalizeEntitlements(ent: FeatureEntitlements): FeatureEntitlements {
+  const out: FeatureEntitlements = {};
+  for (const [k, v] of Object.entries(ent)) {
+    const ck = normalizeFeatureKey(k);
+    out[ck] = out[ck] === true || v === true;
+  }
+  return out;
+}
 
 // =============================================================================
 // TENANT / STORE role defaults (mirror tenantRoles in accessConfig)
@@ -748,9 +805,10 @@ function tenantEntitledDomainLevel(role: TenantRoleId, domain: string, ent: Feat
 
 /**
  * Materialize tenant/store DOMAIN permissions. Role defaults capped by
- * plan/entitlement (cap-only) then by read-only status. Returns a complete map
- * over every tenant domain (explicit `none` entries included — never empty on a
- * resolvable role).
+ * plan/entitlement (cap-only) then by read-only status. Entitlement keys are
+ * NORMALIZED to canonical first (cap-only — see normalizeEntitlements). Returns a
+ * complete map over every tenant domain (explicit `none` entries included — never
+ * empty on a resolvable role).
  */
 export function materializeTenantPermissions(
   role: TenantRoleId | string,
@@ -759,9 +817,10 @@ export function materializeTenantPermissions(
 ): EffectivePermissions {
   if (!TENANT_ROLE_IDS_SET.has(role)) return {}; // fail closed on unknown role
   const r = role as TenantRoleId;
+  const ent = normalizeEntitlements(entitlements);
   const out: EffectivePermissions = {};
   for (const domain of TENANT_PERMISSION_DOMAINS) {
-    let level = tenantEntitledDomainLevel(r, domain, entitlements);
+    let level = tenantEntitledDomainLevel(r, domain, ent);
     if (limited) level = capTenantLevelForReadOnly(level);
     out[domain] = level;
   }
@@ -769,7 +828,8 @@ export function materializeTenantPermissions(
 }
 
 /**
- * Materialize tenant/store SUB-permissions with the binding precedence:
+ * Materialize tenant/store SUB-permissions with the binding precedence (entitlement
+ * keys are NORMALIZED to canonical first — cap-only, see normalizeEntitlements):
  *   1. plan/entitlement availability (false if any required gate not entitled),
  *   2. owner short-circuit (store_owner) — ONLY after plan gating,
  *   3. parent-domain minModuleLevel,
@@ -784,6 +844,7 @@ export function materializeTenantSubPermissions(
 ): EffectiveSubPermissions {
   if (!TENANT_ROLE_IDS_SET.has(role)) return {}; // fail closed on unknown role
   const r = role as TenantRoleId;
+  const ent = normalizeEntitlements(entitlements);
   const explicitMap = (TENANT_ROLE_SUBPERMISSION_DEFAULTS as Record<string, Record<string, boolean>>)[r];
   const out: EffectiveSubPermissions = {};
 
@@ -791,14 +852,14 @@ export function materializeTenantSubPermissions(
     let granted: boolean;
     // 1) Plan/entitlement availability FIRST.
     const required = requiredEntitlementsForTenantSub(sub);
-    if (!required.every((k) => entitlements[k] === true)) {
+    if (!required.every((k) => ent[k] === true)) {
       granted = false;
     } else if (r === 'store_owner') {
       // 2) Owner short-circuit, AFTER plan gating.
       granted = true;
     } else {
       // 3) Parent-domain minimum module level.
-      const parent = tenantEntitledDomainLevel(r, sub.parentDomain, entitlements);
+      const parent = tenantEntitledDomainLevel(r, sub.parentDomain, ent);
       if (!meetsTenantPermissionLevel(parent, sub.minModuleLevel)) {
         granted = false;
       } else {

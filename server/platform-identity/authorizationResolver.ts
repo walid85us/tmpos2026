@@ -24,15 +24,23 @@
 // payload, JWKS, service-role key, DB URL, connection string, or password. None is
 // an input or an output of this resolver.
 //
-// ⚠ PLATFORM-ROLE VOCABULARY DRIFT (documented, NOT resolved here): the durable
-// migration (002) constrains platform `role_id` to
-//   platform_owner | platform_admin | platform_ops | platform_support | platform_readonly,
-// but the M9 contract + the live frontend engine use
+// PLATFORM-ROLE VOCABULARY (reconciled — Phase 1.5 M11.1 / Phase 1.6 M2): the
+// CANONICAL durable platform `role_id` vocabulary is the SAME as the M9 contract +
+// the live frontend engine:
 //   system_owner | support_admin | billing_admin | operations_admin | security_admin.
-// This resolver works in the CONTRACT vocabulary and offers a PROVISIONAL, documented
-// compatibility map for the UNAMBIGUOUS subset only (see PLATFORM_ROLE_COMPAT_MAP).
-// An unmapped platform role FAILS CLOSED (denied_unresolvable_role). LIVE WIRING MUST
-// RECONCILE THE TWO VOCABULARIES FIRST — this resolver does not paper over the gap.
+// Migration 003 (`003_platform_role_vocabulary_alignment`) aligned the durable DB
+// to this canonical vocabulary and is APPLIED TO DEV (production untouched; see
+// docs/phase-1.5-milestone-11.1.1-dev-003-applied.md). The LEGACY 002 placeholder
+// vocabulary (platform_owner | platform_admin | platform_ops | platform_support |
+// platform_readonly) is SUPERSEDED. This resolver resolves canonical ids DIRECTLY
+// (PLATFORM_ROLE_IDS) and keeps PLATFORM_ROLE_COMPAT_MAP only as a LEGACY-COMPAT
+// FALLBACK for environments not yet confirmed on 003. By design:
+//   - `platform_admin` / `platform_readonly` have NO honest canonical target
+//     (ambiguous / status-modeled) and FAIL CLOSED (denied_unresolvable_role);
+//   - `billing_admin` / `security_admin` are first-class canonical roles (no legacy
+//     id, no compat entry) and resolve directly.
+// An unresolvable platform role still FAILS CLOSED — the resolver never papers over
+// a role it cannot honestly reconcile.
 
 import {
   AUTHORIZATION_CONTRACT_VERSION,
@@ -177,10 +185,15 @@ export interface AuthorizationResolverResult {
 // =============================================================================
 
 /**
- * Maps the UNAMBIGUOUS durable platform role ids to the contract vocabulary. The
- * ambiguous ones (`platform_admin`) and the no-contract-equivalent one
- * (`platform_readonly`) are intentionally OMITTED so they FAIL CLOSED. This is a
- * provisional shim for mocked/diagnostic use — NOT an authoritative reconciliation.
+ * LEGACY-COMPAT FALLBACK only. Post-migration-003 the durable `role_id` IS already
+ * the canonical contract id, which `resolvePlatformRoleId` resolves DIRECTLY before
+ * ever consulting this map; this map exists purely to keep environments NOT YET
+ * confirmed on 003 (e.g. production, which 003 has not touched) resolving the three
+ * UNAMBIGUOUS legacy ids. The ambiguous `platform_admin` and the status-modeled
+ * `platform_readonly` are intentionally OMITTED so they FAIL CLOSED, and the
+ * canonical-only roles `billing_admin` / `security_admin` deliberately have NO
+ * legacy entry (none exists). Do NOT add mappings for any of those four. This map
+ * is slated for removal once all environments are confirmed on 003.
  */
 export const PLATFORM_ROLE_COMPAT_MAP: Readonly<Record<string, PlatformRoleId>> = {
   platform_owner: 'system_owner',

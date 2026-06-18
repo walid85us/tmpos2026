@@ -308,6 +308,85 @@ function platform(durableRoleId: string, userStatus: AppUserSnapshot['status'] =
 }
 
 // =============================================================================
+// 14) Phase 1.6 M2 — CANONICAL platform role ids resolve DIRECTLY (post-003),
+//     and billing_admin / security_admin materialize (no legacy compat id).
+// =============================================================================
+
+{
+  // Post-003 DEV durable role_id IS the canonical contract id — resolves directly
+  // (PLATFORM_ROLE_IDS branch), NOT via the legacy compat shim.
+  const a = resolveAuthorization(platform('system_owner'))!.authorization!;
+  const allFull = PLATFORM_FEATURE_KEYS.every((f) => a.permissions[f] === 'full');
+  check('14a canonical system_owner resolves directly → every feature full', a.roles.platformRoleId === 'system_owner' && allFull, String(a.roles.platformRoleId));
+}
+{
+  const a = resolveAuthorization(platform('support_admin'))!.authorization!;
+  const ok =
+    a.roles.platformRoleId === 'support_admin' &&
+    a.permissions.support_tools === 'full' &&
+    a.permissions.audit_security === 'view' &&
+    a.subPermissions.view_support_tools === true &&
+    a.subPermissions.export_audit_csv === false; // audit 'view' < approve threshold
+  check('14b canonical support_admin resolves directly → support full / audit view-only', ok, `support=${a.permissions.support_tools} export=${a.subPermissions.export_audit_csv}`);
+}
+{
+  const a = resolveAuthorization(platform('operations_admin'))!.authorization!;
+  const ok =
+    a.roles.platformRoleId === 'operations_admin' &&
+    a.permissions.tenant_management === 'full' &&
+    a.permissions.provisioning === 'full' &&
+    a.subPermissions.run_provisioning === true &&
+    a.subPermissions.manage_platform_roles === false; // team_management 'view' < full
+  check('14c canonical operations_admin resolves directly → tenant/provisioning full', ok, `tenants=${a.permissions.tenant_management} mpr=${a.subPermissions.manage_platform_roles}`);
+}
+{
+  // billing_admin — first-class CANONICAL role with NO legacy compat id. Untested
+  // before M2. Defaults: billing full; domains/provisioning none.
+  const a = resolveAuthorization(platform('billing_admin'))!.authorization!;
+  const ok =
+    a.roles.platformRoleId === 'billing_admin' &&
+    a.permissions.billing_subscriptions === 'full' &&
+    a.permissions.domains === 'none' &&
+    a.permissions.provisioning === 'none' &&
+    a.subPermissions.view_billing === true &&
+    a.subPermissions.edit_subscriptions === true &&
+    a.subPermissions.approve_billing_actions === true && // billing full ≥ approve
+    a.subPermissions.view_domains === false &&
+    a.subPermissions.view_provisioning === false;
+  check('14d billing_admin materializes: billing full, domains/provisioning none', ok, `billing=${a.permissions.billing_subscriptions} domains=${a.permissions.domains} approve_billing=${a.subPermissions.approve_billing_actions}`);
+}
+{
+  // security_admin — first-class CANONICAL role with NO legacy compat id. Untested
+  // before M2. Defaults: audit full; platform_settings + team_management manage.
+  const a = resolveAuthorization(platform('security_admin'))!.authorization!;
+  const ok =
+    a.roles.platformRoleId === 'security_admin' &&
+    a.permissions.audit_security === 'full' &&
+    a.permissions.platform_settings === 'manage' &&
+    a.permissions.team_management === 'manage' &&
+    a.subPermissions.view_audit_security === true &&
+    a.subPermissions.export_audit_csv === true && // audit full ≥ approve threshold
+    a.subPermissions.edit_platform_settings === true &&
+    a.subPermissions.manage_team_members === true &&
+    a.subPermissions.manage_platform_roles === false; // team_management 'manage' < full
+  check('14e security_admin materializes: audit full, settings/team manage, no manage_platform_roles', ok, `audit=${a.permissions.audit_security} export=${a.subPermissions.export_audit_csv} mpr=${a.subPermissions.manage_platform_roles}`);
+}
+{
+  // Canonical roles resolve while the by-design fail-closed legacy ids deny → null.
+  const adminR = resolveAuthorization(platform('platform_admin'));     // ambiguous
+  const roR = resolveAuthorization(platform('platform_readonly'));     // status-modeled
+  const billingOk = resolveAuthorization(platform('billing_admin')).decision === 'allow';
+  const securityOk = resolveAuthorization(platform('security_admin')).decision === 'allow';
+  check(
+    '14f platform_admin & platform_readonly fail closed while billing_admin/security_admin resolve',
+    adminR.decision === 'deny' && adminR.authorization === null &&
+      roR.decision === 'deny' && roR.authorization === null &&
+      billingOk && securityOk,
+    `${adminR.reasonCode}/${roR.reasonCode}`,
+  );
+}
+
+// =============================================================================
 // Summary
 // =============================================================================
 

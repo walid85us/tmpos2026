@@ -29,7 +29,10 @@ import {
   meetsPlatformPermissionLevel,
   materializeTenantSubPermissions,
   materializeTenantPermissions,
+  FEATURE_KEY_ALIASES,
+  normalizeFeatureKey,
 } from '../server/platform-identity/permissionCatalog';
+import { PLATFORM_ROLE_IDS } from '../server/platform-identity/authorizationConstants';
 
 const ROOT = process.cwd();
 const read = (rel: string): string => readFileSync(join(ROOT, rel), 'utf8');
@@ -215,6 +218,39 @@ const allowedCatImports = new Set(['./authorizationConstants', './authorizationC
 check('9c catalog imports only inert modules', catImports.length > 0 && catImports.every((i) => allowedCatImports.has(i)), `imports=[${catImports.join(', ')}]`);
 check('9d catalog imports no frontend (src/)', !/from '[^']*\/src\//.test(codeOnly) && !/from 'src\//.test(codeOnly), 'no src import');
 check('9e catalog performs no I/O', !/getDb|from 'postgres'|postgres\(|from 'express'|fetch\(|createClient|firebase|supabase|https?:\/\/|require\(/i.test(codeOnly), 'no io');
+
+// =============================================================================
+// 10) Phase 1.6 M2 — feature-key normalization exports + parity
+// =============================================================================
+
+const aliasKeys = Object.keys(FEATURE_KEY_ALIASES);
+const aliasVals = Object.values(FEATURE_KEY_ALIASES);
+// Known synonym present and canonical target is the planFeatures (hyphen) form.
+check('10a supply_chain alias normalizes to canonical supply-chain', normalizeFeatureKey('supply_chain') === 'supply-chain', normalizeFeatureKey('supply_chain'));
+check('10b normalizeFeatureKey idempotent on canonical (supply-chain → supply-chain)', normalizeFeatureKey('supply-chain') === 'supply-chain', normalizeFeatureKey('supply-chain'));
+check('10c normalizeFeatureKey idempotent (normalize∘normalize == normalize)', aliasKeys.every((k) => normalizeFeatureKey(normalizeFeatureKey(k)) === normalizeFeatureKey(k)), 'idempotent');
+check('10d normalizeFeatureKey deterministic (repeat call equal)', normalizeFeatureKey('supply_chain') === normalizeFeatureKey('supply_chain'), 'deterministic');
+check('10e unknown key normalizes to itself (stays fail-closed)', normalizeFeatureKey('totally-unknown-feature') === 'totally-unknown-feature', 'self');
+// Many-to-one + idempotent: no alias target is itself an alias source key.
+check('10f every alias target is canonical (not an alias source key)', aliasVals.every((v) => !(v in FEATURE_KEY_ALIASES)), aliasVals.join(','));
+// Aliases can only line up with an EXISTING gate, never invent a capability.
+check('10g every alias target is a KNOWN catalog gate key', aliasVals.every((v) => KNOWN_TENANT_ENTITLEMENT_KEYS.has(v)), aliasVals.filter((v) => !KNOWN_TENANT_ENTITLEMENT_KEYS.has(v)).join(','));
+// The catalog's OWN gate keys are already canonical (no alias leaked into a gate).
+const nonCanonGate = [...KNOWN_TENANT_ENTITLEMENT_KEYS].filter((k) => normalizeFeatureKey(k) !== k);
+check('10h every known entitlement gate key is canonical', nonCanonGate.length === 0, nonCanonGate.join(','));
+// Frontend parity: canonical target appears in planFeatures; alias source is a tenant domain id.
+check('10i canonical supply-chain present in frontend planFeatures', /'supply-chain'/.test(accessConfigSrc), 'planFeatures parity');
+check('10j alias source supply_chain is a tenant domain id', domainSet.has('supply_chain'), 'domain id');
+
+// =============================================================================
+// 11) Phase 1.6 M2 — platform role vocabulary parity (catalog ↔ constants)
+// =============================================================================
+
+const catalogPlatformRoles = Object.keys(PLATFORM_ROLE_FEATURE_DEFAULTS).sort();
+const constantsPlatformRoles = [...PLATFORM_ROLE_IDS].sort();
+check('11a catalog platform roles == constants PLATFORM_ROLE_IDS', JSON.stringify(catalogPlatformRoles) === JSON.stringify(constantsPlatformRoles), catalogPlatformRoles.join(','));
+check('11b billing_admin + security_admin are catalog-defined', 'billing_admin' in PLATFORM_ROLE_FEATURE_DEFAULTS && 'security_admin' in PLATFORM_ROLE_FEATURE_DEFAULTS, 'present');
+check('11c platform_admin + platform_readonly absent from catalog roles', !('platform_admin' in PLATFORM_ROLE_FEATURE_DEFAULTS) && !('platform_readonly' in PLATFORM_ROLE_FEATURE_DEFAULTS), 'absent');
 
 // =============================================================================
 // Summary
