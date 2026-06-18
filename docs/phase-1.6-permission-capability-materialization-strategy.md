@@ -210,6 +210,13 @@ The output carries only permission-level strings and sub-permission booleans plu
 the existing safe role/scope/status/entitlement fields — no token, JWT, key, DB
 URL, or secret field. `diagnostics-authorization-contract-check` remains 12/12.
 
+**Wire-contract truthfulness (Phase 1.6 M3):** the `/auth/session/resolve` wire
+authorization contract was hardened in M3 — the stale "`authorization` is ALWAYS
+`null`" invariant in `sessionResolveContract.ts` was reconciled to the true M11.5
+behavior (`null` by default; non-null only under the DEV-only live gates) with no
+DTO/`authz.v1` change. See
+[`docs/phase-1.6-milestone-3-route-contract-frontend-adoption-plan.md`](phase-1.6-milestone-3-route-contract-frontend-adoption-plan.md).
+
 ---
 
 ## 10. Diagnostics added

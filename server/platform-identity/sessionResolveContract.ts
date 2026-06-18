@@ -25,9 +25,11 @@ import type { ServerDerivedAuthorizationV1 } from './authorizationContract';
 //   - IDENTITY is proven SERVER-SIDE only (a verified token mapped to an
 //     app-owned internal_user_id). A provider token is NOT an authenticated app
 //     actor until it resolves to a non-empty internalUserId (FAIL-CLOSED).
-//   - AUTHORIZATION (role/scope/tenant/store/permissions) is SERVER-DERIVED and
-//     is DEFERRED: in this era it is ALWAYS `null`. Client-asserted authority is
-//     NEVER trusted (the future endpoint will not even read it).
+//   - AUTHORIZATION (role/scope/tenant/store/permissions) is SERVER-DERIVED. It is
+//     `null` by DEFAULT (disabled path, deny, fail-closed) and MAY be non-null ONLY
+//     under the DEV-only live conditions in SESSION_RESOLVE_AUTHORIZATION_PRESENCE
+//     (M11.5) — never in production. Client-asserted authority is NEVER trusted
+//     (the endpoint does not even read it).
 
 // =============================================================================
 // Route identity (FUTURE — declared, NOT registered anywhere)
@@ -187,6 +189,36 @@ export interface SessionResolveIdentity {
  */
 export type SessionResolveAuthorization = ServerDerivedAuthorizationV1 | null;
 
+/**
+ * The EXHAUSTIVE, AND-ed set of conditions under which the wire `authorization`
+ * MAY be a non-null `ServerDerivedAuthorizationV1`. If ANY condition is false, the
+ * wire value is `null`. Declarative DATA only (no behavior) — documents the M11.5
+ * route gating for frontend adoption planning and is asserted by
+ * `diagnostics-session-derived-authorization-contract-check.ts`. This is NOT a new
+ * wire field and does NOT change the DTO shape or `authz.v1`.
+ *
+ * default/disabled path ⇒ `authorization: null` (every condition below must hold
+ * for a non-null value; production is hard-excluded by `nonProduction`).
+ */
+export const SESSION_RESOLVE_AUTHORIZATION_PRESENCE = {
+  /** `ENABLE_SUPABASE_PLATFORM_IDENTITY === 'true'` (default OFF). */
+  platformIdentityEnabled: 'ENABLE_SUPABASE_PLATFORM_IDENTITY',
+  /** `ENABLE_SESSION_RESOLVE === 'true'` (default OFF). */
+  sessionResolveEnabled: 'ENABLE_SESSION_RESOLVE',
+  /** `ENABLE_LIVE_SESSION_AUTHORIZATION === 'true'` (default OFF). */
+  liveSessionAuthorizationEnabled: 'ENABLE_LIVE_SESSION_AUTHORIZATION',
+  /** `NODE_ENV !== 'production'` (live authz is hard-blocked in production). */
+  nonProduction: 'NODE_ENV!==production',
+  /** The server resolver returned an `allow` decision. */
+  resolverAllow: 'resolver.decision===allow',
+  /** The durable audit write for that allow SUCCEEDED (unaudited allow ⇒ deny). */
+  durableAuditSucceeded: 'service.audited===true',
+} as const;
+
+/** The condition keys, in declared order, for the offline contract diagnostic. */
+export const SESSION_RESOLVE_AUTHORIZATION_PRESENCE_CONDITIONS: readonly string[] =
+  Object.keys(SESSION_RESOLVE_AUTHORIZATION_PRESENCE);
+
 // =============================================================================
 // Wire response DTO
 // =============================================================================
@@ -201,7 +233,11 @@ export type SessionResolveAuthorization = ServerDerivedAuthorizationV1 | null;
  * (`identity`, `authorization`) mirror the resulting `AppSession` view.
  *
  * INVARIANTS:
- *   - `authorization` is ALWAYS `null`.
+ *   - `authorization` is `null` by DEFAULT (disabled path, deny, fail-closed). It
+ *     MAY be a non-null `ServerDerivedAuthorizationV1` ONLY under the DEV-only live
+ *     conditions enumerated in `SESSION_RESOLVE_AUTHORIZATION_PRESENCE` (see the
+ *     `SessionResolveAuthorization` type above). It is NEVER non-null on the
+ *     default/disabled path and NEVER in production.
  *   - `identity` is non-null ONLY on an authenticated success.
  *   - `token-verified` is NEVER represented as `authenticated`.
  *   - NO secret/token field ever appears (no accessToken, refreshToken, rawJwt,
@@ -228,7 +264,8 @@ export interface SessionResolveResponseDTO {
   // --- structured fields (AppSession-shaped view) ---
   /** Server-verified identity, or null when no identity was established. */
   identity: SessionResolveIdentity | null;
-  /** Server-derived authorization — ALWAYS null in this era. */
+  /** Server-derived authorization. `null` by default; non-null ONLY under the
+   *  DEV-only live conditions in SESSION_RESOLVE_AUTHORIZATION_PRESENCE. */
   authorization: SessionResolveAuthorization;
 }
 
