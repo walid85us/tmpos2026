@@ -8,6 +8,10 @@ production change occurred.
 **Accepted base checkpoint:** `cb9c9b73c3c9adebfc69ae270d2e113493ee3cb5`
 (Phase 1.6 M3 — harden session authorization contract).
 
+**Follow-on:** Stage 2 of §7 (the dormant, DEV-flag-gated app-level Supabase auth
+foundation) is implemented in **Phase 1.6 M5** — see
+[`docs/phase-1.6-milestone-5-supabase-auth-frontend-foundation-plan.md`](phase-1.6-milestone-5-supabase-auth-frontend-foundation-plan.md).
+
 ---
 
 ## 1. Scope

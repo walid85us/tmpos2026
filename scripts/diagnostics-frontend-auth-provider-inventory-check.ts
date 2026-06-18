@@ -53,7 +53,15 @@ check('1b core auth files use Firebase (firebase.ts, Login.tsx, AccessContext.ts
 // =============================================================================
 
 const supabaseSdkFiles = filesWhere(/from '@supabase\/supabase-js'/);
-check('2a @supabase/supabase-js is imported ONLY under src/pilot/', supabaseSdkFiles.length > 0 && supabaseSdkFiles.every((f) => f.startsWith('src/pilot/')), supabaseSdkFiles.join(', '));
+// Phase 1.6 M5 (owner-approved, controlled allowlist): the Supabase SDK may be
+// imported ONLY under the dev-only pilot AND in the single dormant app-level auth
+// foundation file. ANY other non-pilot, non-foundation SDK import is a regression.
+// Compensating dormancy assertions (2e–2g below) prove the foundation is not
+// reachable from any active app entrypoint.
+const M5_FOUNDATION = 'src/auth/supabaseAuthFoundation.ts';
+const sdkAllowed = (f: string) => f.startsWith('src/pilot/') || f === M5_FOUNDATION;
+const sdkOutsideAllowlist = supabaseSdkFiles.filter((f) => !sdkAllowed(f));
+check('2a @supabase/supabase-js imported ONLY under src/pilot/ + the dormant M5 foundation file', supabaseSdkFiles.length > 0 && sdkOutsideAllowlist.length === 0, sdkOutsideAllowlist.join(', ') || `allowed: [${supabaseSdkFiles.join(', ')}]`);
 
 // Main app (non-pilot) must NOT import any pilot auth client module.
 const pilotClientImport = /from '[^']*pilot\/(supabaseClient|sessionResolvePilotClient|identityDiagnosticClient)'/;
@@ -67,6 +75,19 @@ check('2c token→/auth/session/resolve reference is pilot-scoped (not wired int
 // The pilot is mounted only behind the dev gate (lazy + PILOT_ROUTE_ENABLED).
 const appSrc = text.get('src/App.tsx') ?? '';
 check('2d App routing mounts the pilot only behind the dev gate (PILOT_ROUTE_ENABLED)', /PILOT_ROUTE_ENABLED/.test(appSrc) && /lazy\(\s*\(\)\s*=>\s*import\('\.\/pilot\//.test(appSrc), 'gated lazy mount');
+
+// Phase 1.6 M5 — compensating dormancy assertions for the new app-level foundation:
+// it exists, but is imported by NOTHING active (so the bundler tree-shakes it out of
+// production). Any importer — especially an entrypoint — would defeat dormancy.
+const M5_FOUNDATION_TYPES = 'src/auth/supabaseAuthFoundationTypes.ts';
+const M5_ENTRYPOINTS = ['src/main.tsx', 'src/App.tsx', 'src/components/Login.tsx', 'src/context/AccessContext.tsx', 'src/components/AccessGuard.tsx'];
+// Matches static `from '…/supabaseAuthFoundation'`, bare `import '…'`, and dynamic
+// `import('…')` — but NOT the sibling `…FoundationTypes` module.
+const refsM5Foundation = (s: string) => /(?:from|import)\s*\(?\s*'[^']*\/supabaseAuthFoundation'/.test(s);
+const m5Importers = srcFiles.filter((f) => f !== M5_FOUNDATION && f !== M5_FOUNDATION_TYPES && refsM5Foundation(text.get(f)!));
+check('2e dormant M5 Supabase auth foundation file is present', text.has(M5_FOUNDATION), text.has(M5_FOUNDATION) ? M5_FOUNDATION : 'absent');
+check('2f M5 foundation is NOT imported by any active app entrypoint (Login/AccessContext/AccessGuard/App/main)', m5Importers.filter((f) => M5_ENTRYPOINTS.includes(f)).length === 0, m5Importers.filter((f) => M5_ENTRYPOINTS.includes(f)).join(', ') || 'dormant');
+check('2g M5 foundation is imported nowhere in src/** yet (no call site added in M5)', m5Importers.length === 0, m5Importers.join(', ') || 'no importers');
 
 // =============================================================================
 // 3) Dependency presence (package.json, read as TEXT)
