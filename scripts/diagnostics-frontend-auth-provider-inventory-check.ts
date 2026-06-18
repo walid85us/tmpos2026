@@ -87,7 +87,14 @@ const refsM5Foundation = (s: string) => /(?:from|import)\s*\(?\s*'[^']*\/supabas
 const m5Importers = srcFiles.filter((f) => f !== M5_FOUNDATION && f !== M5_FOUNDATION_TYPES && refsM5Foundation(text.get(f)!));
 check('2e dormant M5 Supabase auth foundation file is present', text.has(M5_FOUNDATION), text.has(M5_FOUNDATION) ? M5_FOUNDATION : 'absent');
 check('2f M5 foundation is NOT imported by any active app entrypoint (Login/AccessContext/AccessGuard/App/main)', m5Importers.filter((f) => M5_ENTRYPOINTS.includes(f)).length === 0, m5Importers.filter((f) => M5_ENTRYPOINTS.includes(f)).join(', ') || 'dormant');
-check('2g M5 foundation is imported nowhere in src/** yet (no call site added in M5)', m5Importers.length === 0, m5Importers.join(', ') || 'no importers');
+// Phase 1.6 M6 (owner-approved, controlled allowlist): the M5 foundation may now be
+// imported by EXACTLY ONE file — the dormant M6 session bootstrap. Check 2f
+// (entrypoints) stays strict; the SDK allowlist (2a) and pilot isolation (2b/2c) are
+// unchanged. The bootstrap's own dormancy is proven by
+// scripts/diagnostics-supabase-session-bootstrap-dormant-check.ts.
+const M6_BOOTSTRAP = 'src/auth/supabaseSessionBootstrap.ts';
+const m5UnexpectedImporters = m5Importers.filter((f) => f !== M6_BOOTSTRAP);
+check('2g M5 foundation imported ONLY by the dormant M6 bootstrap (no other call site)', m5UnexpectedImporters.length === 0, m5UnexpectedImporters.join(', ') || `allowed: [${m5Importers.join(', ') || 'none'}]`);
 
 // =============================================================================
 // 3) Dependency presence (package.json, read as TEXT)

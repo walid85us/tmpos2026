@@ -8,6 +8,10 @@ Supabase MCP, live route call, package change, backend change, or production cha
 **Accepted base checkpoint:** `b621b39cab2010367a01ceaa8a4d1a23f143fbaf`
 (Phase 1.6 M4 — document Supabase auth migration readiness).
 
+**Follow-on:** Stage 3 (the dormant dual-provider session bootstrap that imports this
+foundation) is implemented in **Phase 1.6 M6** — see
+[`docs/phase-1.6-milestone-6-dual-provider-session-bootstrap-plan.md`](phase-1.6-milestone-6-dual-provider-session-bootstrap-plan.md).
+
 **Design choice:** **Option C / Design A** from the accepted M5 planning pass — a clean,
 app-level, dormant-by-default Supabase auth foundation with a **static** Supabase SDK
 import, and a **transparent, controlled** update to the M4 inventory diagnostic's SDK

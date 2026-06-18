@@ -152,7 +152,14 @@ check('7d flag is SEPARATE from VITE_ENABLE_SERVER_AUTHZ_SHADOW (not referenced 
 const refsFoundationModule = (s: string) => /(?:from|import)\s*\(?\s*'[^']*\/supabaseAuthFoundation'/.test(s);
 const importers = srcFiles.filter((f) => f !== FOUNDATION && f !== TYPES && refsFoundationModule(text.get(f)!));
 check('8a foundation is imported by NO active app entrypoint', importers.filter((f) => ENTRYPOINTS.includes(f)).length === 0, importers.filter((f) => ENTRYPOINTS.includes(f)).join(', ') || 'dormant');
-check('8b foundation is imported nowhere in src/** yet (no M5 call site added)', importers.length === 0, importers.join(', ') || 'no importers');
+// Phase 1.6 M6 (owner-approved, controlled allowlist): the foundation may now be
+// imported by EXACTLY ONE file — the dormant M6 session bootstrap — and by no other
+// non-entrypoint file. Check 8a (entrypoints) stays strict and unchanged; secret-safety
+// checks are untouched. The M6 bootstrap's own dormancy is proven separately by
+// scripts/diagnostics-supabase-session-bootstrap-dormant-check.ts.
+const M6_BOOTSTRAP = 'src/auth/supabaseSessionBootstrap.ts';
+const unexpectedImporters = importers.filter((f) => f !== M6_BOOTSTRAP);
+check('8b foundation imported ONLY by the dormant M6 bootstrap (no other call site)', unexpectedImporters.length === 0, unexpectedImporters.join(', ') || `allowed: [${importers.join(', ') || 'none'}]`);
 
 // =============================================================================
 // 9) No barrel export (avoids accidental entrypoint pull-in)

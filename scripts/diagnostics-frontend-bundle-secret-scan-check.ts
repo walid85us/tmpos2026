@@ -90,6 +90,12 @@ for (const [label, re] of forbidden) {
 const [foundCount, foundWhere] = scan(/supabaseAuthFoundation|getSupabaseAuthFoundation/);
 check('2a dormant M5 foundation identifiers absent from emitted bundle (not reachable / tree-shaken)', foundCount === 0, foundCount === 0 ? 'absent' : `${foundCount} ref(s) in: ${foundWhere.join(', ')}`);
 
+// Phase 1.6 M6 — the dormant session bootstrap (and its flag) must also be absent from
+// the emitted bundle: nothing imports it, so it (and the foundation it imports) is
+// tree-shaken out of production.
+const [bootCount, bootWhere] = scan(/supabaseSessionBootstrap|VITE_ENABLE_SUPABASE_SESSION_BOOTSTRAP/);
+check('2b dormant M6 session-bootstrap identifiers absent from emitted bundle (not reachable / tree-shaken)', bootCount === 0, bootCount === 0 ? 'absent' : `${bootCount} ref(s) in: ${bootWhere.join(', ')}`);
+
 // =============================================================================
 // 3) Out-of-scope NOTE: the pre-existing GEMINI_API_KEY Vite `define` (not an M5
 //    concern). Report if its NAME survives; never print any value.
