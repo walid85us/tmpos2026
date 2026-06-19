@@ -202,7 +202,22 @@ const refsFeed = (s: string) => /(?:from|import)\s*\(?\s*'[^']*\/serverAuthzShad
 const feedImporters = srcFiles.filter((f) => f !== FEED && f !== FEED_TYPES && refsFeed(text.get(f)!));
 check('49f M14 feed imported by NO active app entrypoint (Login/AccessContext/AccessGuard/App/main)', feedImporters.filter((f) => ENTRYPOINTS.includes(f)).length === 0, feedImporters.filter((f) => ENTRYPOINTS.includes(f)).join(', ') || 'dormant');
 check('49g M14 feed NOT imported by pilot', feedImporters.filter((f) => f.startsWith('src/pilot/')).length === 0, feedImporters.filter((f) => f.startsWith('src/pilot/')).join(', ') || 'pilot clean');
-check('49h M14 feed imported NOWHERE active in src/** (invoked by nothing in M14)', feedImporters.length === 0, feedImporters.join(', ') || 'no importers');
+// Phase 1.6 M15 (owner-approved, controlled single-file allowlist — EQUIVALENT to the M12/M14 bridge
+// importer exceptions): the M14 feed may now itself be imported by EXACTLY the dormant M15 live
+// one-shot harness — and by nothing else — so the bridge stays unreachable from any entrypoint
+// through the feed→harness chain too. The harness's OWN dormancy/gating/one-shot/result safety is
+// proven by scripts/diagnostics-server-authz-shadow-live-harness-dormant-check.ts; below (49i–49k) we
+// ADDITIONALLY assert the harness is itself imported by nothing active. NO token-safety / storage /
+// logging / exposure / no-route-call / foundation-importer / bundle check is weakened.
+const M15_HARNESS = 'src/auth/serverAuthzShadowLiveHarness.ts';
+const M15_HARNESS_TYPES = 'src/auth/serverAuthzShadowLiveHarnessTypes.ts';
+const unexpectedFeedImporters = feedImporters.filter((f) => f !== M15_HARNESS);
+check('49h M14 feed imported ONLY by the dormant M15 live harness in src/** (no other importer)', unexpectedFeedImporters.length === 0, unexpectedFeedImporters.join(', ') || `allowed: [${feedImporters.join(', ') || 'none'}]`);
+const refsHarness = (s: string) => /(?:from|import)\s*\(?\s*'[^']*\/serverAuthzShadowLiveHarness'/.test(s);
+const harnessImporters = srcFiles.filter((f) => f !== M15_HARNESS && f !== M15_HARNESS_TYPES && refsHarness(text.get(f)!));
+check('49i M15 live harness imported by NO active app entrypoint (Login/AccessContext/AccessGuard/App/main)', harnessImporters.filter((f) => ENTRYPOINTS.includes(f)).length === 0, harnessImporters.filter((f) => ENTRYPOINTS.includes(f)).join(', ') || 'dormant');
+check('49j M15 live harness NOT imported by pilot', harnessImporters.filter((f) => f.startsWith('src/pilot/')).length === 0, harnessImporters.filter((f) => f.startsWith('src/pilot/')).join(', ') || 'pilot clean');
+check('49k M15 live harness imported NOWHERE active in src/** (invoked by nothing in M15)', harnessImporters.length === 0, harnessImporters.join(', ') || 'no importers');
 
 // =============================================================================
 // 9) No UI / window hook / DOM event / persistence / network / browser→DB / secrets

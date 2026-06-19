@@ -255,7 +255,22 @@ const unexpectedImporters = importers.filter((f) => f !== FEED);
 check('80 helper imported ONLY by the dormant M14 feed in src/** (no other M13 call site)', unexpectedImporters.length === 0, unexpectedImporters.join(', ') || `allowed: [${importers.join(', ') || 'none'}]`);
 const refsFeed = (s: string) => /(?:from|import)\s*\(?\s*'[^']*\/serverAuthzShadowFeed'/.test(s);
 const feedImporters = srcFiles.filter((f) => f !== FEED && f !== FEED_TYPES && refsFeed(text.get(f)!));
-check('80b M14 feed (sole allowed importer) is itself imported by NOTHING active in src/**', feedImporters.length === 0, feedImporters.join(', ') || 'feed dormant');
+// Phase 1.6 M15 (owner-approved, controlled single-file allowlist — EQUIVALENT to the M14 pattern by
+// which the feed became the sole permitted importer of this M13 helper): the M14 feed (sole allowed
+// M13 importer) may now itself be imported by EXACTLY the dormant M15 live one-shot harness — and by
+// nothing else. The harness's OWN dormancy/gating/one-shot/result safety is proven by
+// scripts/diagnostics-server-authz-shadow-live-harness-dormant-check.ts; below (80c–80e) we
+// ADDITIONALLY assert the harness is itself imported by nothing active. NO comparison-boundary /
+// result-safety / dormancy check above is weakened (the helper still must have no OTHER importer).
+const M15_HARNESS = 'src/auth/serverAuthzShadowLiveHarness.ts';
+const M15_HARNESS_TYPES = 'src/auth/serverAuthzShadowLiveHarnessTypes.ts';
+const unexpectedFeedImporters = feedImporters.filter((f) => f !== M15_HARNESS);
+check('80b M14 feed (sole allowed M13 importer) imported ONLY by the dormant M15 live harness in src/**', unexpectedFeedImporters.length === 0, unexpectedFeedImporters.join(', ') || `allowed: [${feedImporters.join(', ') || 'none'}]`);
+const refsHarness = (s: string) => /(?:from|import)\s*\(?\s*'[^']*\/serverAuthzShadowLiveHarness'/.test(s);
+const harnessImporters = srcFiles.filter((f) => f !== M15_HARNESS && f !== M15_HARNESS_TYPES && refsHarness(text.get(f)!));
+check('80c M15 live harness imported by NO active app entrypoint (Login/AccessContext/AccessGuard/App/main)', harnessImporters.filter((f) => ENTRYPOINTS.includes(f)).length === 0, harnessImporters.filter((f) => ENTRYPOINTS.includes(f)).join(', ') || 'dormant');
+check('80d M15 live harness NOT imported by pilot', harnessImporters.filter((f) => f.startsWith('src/pilot/')).length === 0, harnessImporters.filter((f) => f.startsWith('src/pilot/')).join(', ') || 'pilot clean');
+check('80e M15 live harness imported NOWHERE active in src/** (invoked by nothing in M15)', harnessImporters.length === 0, harnessImporters.join(', ') || 'no importers');
 // No active call site for the exported helpers anywhere outside their own declaration + the dormant feed.
 const externalCallers = srcFiles
   .filter((f) => f !== HELPER && f !== HELPER_TYPES && f !== FEED)

@@ -152,6 +152,18 @@ check('2g M13 dormant server-authz shadow-comparison identifiers + flag absent f
 const [feedCount, feedWhere] = scan(/serverAuthzShadowFeed|runServerAuthzShadowFeed|VITE_ENABLE_SERVER_AUTHZ_SHADOW_FEED/);
 check('2h M14 dormant server-authz shadow-feed identifiers + flag absent from emitted bundle (not reachable / tree-shaken)', feedCount === 0, feedCount === 0 ? 'absent' : `${feedCount} ref(s) in: ${feedWhere.join(', ')}`);
 
+// Phase 1.6 M15 — the dormant guarded live one-shot HARNESS (its module/run identifiers, its two
+// dedicated DEV-only flags, and the exact owner confirmation phrase) must also be absent from the
+// emitted bundle: nothing active imports it, so it (and the M14 feed + M11 bridge + M13 helper it
+// reaches) is tree-shaken out of production. Identifiers checked: the module name, its exported run
+// helper, both flags, and the confirmation phrase. (Additive only — no existing check weakened; we
+// deliberately do NOT add a broad ban for /auth/session/resolve / Authorization / Bearer /
+// authorization / permission / entitlement key names. The harness's gating / one-shot / token /
+// route / authorization / result safety is proven statically by
+// scripts/diagnostics-server-authz-shadow-live-harness-dormant-check.ts.)
+const [harnessCount, harnessWhere] = scan(/serverAuthzShadowLiveHarness|runServerAuthzShadowLiveOneShot|VITE_ENABLE_SERVER_AUTHZ_LIVE_ONE_SHOT|VITE_CONFIRM_SERVER_AUTHZ_LIVE_ONE_SHOT|I_APPROVE_M15_ONE_SHOT_SERVER_AUTHZ_SHADOW_FEED_DEV_ONLY/);
+check('2i M15 dormant live one-shot harness identifiers + flags + confirmation phrase absent from emitted bundle (not reachable / tree-shaken)', harnessCount === 0, harnessCount === 0 ? 'absent' : `${harnessCount} ref(s) in: ${harnessWhere.join(', ')}`);
+
 // =============================================================================
 // 3) Out-of-scope NOTE: the pre-existing GEMINI_API_KEY Vite `define` (not an M5
 //    concern). Report if its NAME survives; never print any value.
