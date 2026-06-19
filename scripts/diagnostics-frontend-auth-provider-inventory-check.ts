@@ -125,8 +125,15 @@ check('4a VITE_SUPABASE_URL referenced client-side', presentName('VITE_SUPABASE_
 check('4b VITE_SUPABASE_ANON_KEY referenced client-side', presentName('VITE_SUPABASE_ANON_KEY'), 'name only');
 check('4c VITE_ENABLE_SUPABASE_PILOT referenced client-side', presentName('VITE_ENABLE_SUPABASE_PILOT'), 'name only');
 check('4d VITE_IDENTITY_API_BASE referenced client-side', presentName('VITE_IDENTITY_API_BASE'), 'name only');
-// The future shadow flag is documented but NOT yet wired into the frontend.
-check('4e future VITE_ENABLE_SERVER_AUTHZ_SHADOW is NOT yet in src/ (documented/dormant)', !presentName('VITE_ENABLE_SERVER_AUTHZ_SHADOW'), 'future-only');
+// Phase 1.6 M13 (owner-approved, controlled SINGLE-FILE exception): the shadow flag
+// VITE_ENABLE_SERVER_AUTHZ_SHADOW is now wired into EXACTLY the single dormant server-authz shadow
+// COMPARISON helper (src/auth/serverAuthzShadowComparison.ts) as its DEV-only, default-OFF gate. Its
+// dormancy (imported by nothing active, invoked by nothing) + structural-only / result-safety are
+// proven by scripts/diagnostics-server-authz-shadow-comparison-dormant-check.ts. The flag must NOT
+// appear in ANY other src/** file — this check still FAILS for any other reference.
+const M13_SHADOW_COMPARISON = 'src/auth/serverAuthzShadowComparison.ts';
+const serverAuthzShadowFlagOutside = filesWhere(/VITE_ENABLE_SERVER_AUTHZ_SHADOW/).filter((f) => f !== M13_SHADOW_COMPARISON);
+check('4e VITE_ENABLE_SERVER_AUTHZ_SHADOW confined to the dormant M13 shadow-comparison helper (absent from every other src/**)', serverAuthzShadowFlagOutside.length === 0, serverAuthzShadowFlagOutside.join(', ') || 'M13 helper only');
 
 // =============================================================================
 // 5) Inventory summary (informational — always reported)

@@ -98,7 +98,15 @@ check('4d App routing unchanged: no Supabase SDK import; pilot only behind PILOT
 // 5) Future adoption is flag-gateable + fallback semantics documented
 // =============================================================================
 
-check('5a future shadow flag VITE_ENABLE_SERVER_AUTHZ_SHADOW is dormant (absent from src/)', !/VITE_ENABLE_SERVER_AUTHZ_SHADOW/.test(allSrc), 'flag-gateable');
+// Phase 1.6 M13 (owner-approved, controlled SINGLE-FILE exception): the shadow flag
+// VITE_ENABLE_SERVER_AUTHZ_SHADOW is now wired into EXACTLY the single dormant server-authz shadow
+// COMPARISON helper (src/auth/serverAuthzShadowComparison.ts) as its DEV-only, default-OFF gate. Its
+// dormancy + structural-only / result-safety are proven by
+// scripts/diagnostics-server-authz-shadow-comparison-dormant-check.ts. The flag must NOT appear in
+// ANY other src/** file — this check still FAILS for any other reference.
+const M13_SHADOW_COMPARISON = 'src/auth/serverAuthzShadowComparison.ts';
+const shadowFlagOutsideHelper = filesWhere(/VITE_ENABLE_SERVER_AUTHZ_SHADOW/).filter((f) => f !== M13_SHADOW_COMPARISON);
+check('5a shadow flag VITE_ENABLE_SERVER_AUTHZ_SHADOW confined to the dormant M13 shadow-comparison helper (absent from every other src/**)', shadowFlagOutsideHelper.length === 0, shadowFlagOutsideHelper.join(', ') || 'M13 helper only');
 const m4doc = read('docs/phase-1.6-milestone-4-supabase-auth-frontend-migration-plan.md');
 const fallbackDocumented =
   /fall ?back to the legacy client engine/i.test(m4doc) &&

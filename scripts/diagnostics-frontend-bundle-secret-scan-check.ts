@@ -131,6 +131,16 @@ check('2e M11 dormant token-bridge identifiers + flag absent from emitted bundle
 const [shadowCount, shadowWhere] = scan(/sessionResolveShadowClient|runSessionResolveShadowCheck|VITE_ENABLE_SESSION_RESOLVE_SHADOW/);
 check('2f M12 dormant session-resolve shadow-client identifiers + flag absent from emitted bundle (not reachable / tree-shaken)', shadowCount === 0, shadowCount === 0 ? 'absent' : `${shadowCount} ref(s) in: ${shadowWhere.join(', ')}`);
 
+// Phase 1.6 M13 — the dormant server-authz SHADOW COMPARISON helper (and its flag) must also be
+// absent from the emitted bundle: nothing active imports it, so it (and the frontend permission
+// vocabulary it reaches) is tree-shaken out of production. Identifiers checked: the module name,
+// its exported pure comparison function, and the DEV-only flag. (We deliberately do NOT ban
+// `authorization`, `permissions`, `subPermissions`, or any permission/entitlement KEY NAME here —
+// those legitimately appear elsewhere in the app; the helper's structural-only / result-safety is
+// proven statically by scripts/diagnostics-server-authz-shadow-comparison-dormant-check.ts.)
+const [authzShadowCount, authzShadowWhere] = scan(/serverAuthzShadowComparison|compareServerAuthzShadow|VITE_ENABLE_SERVER_AUTHZ_SHADOW/);
+check('2g M13 dormant server-authz shadow-comparison identifiers + flag absent from emitted bundle (not reachable / tree-shaken)', authzShadowCount === 0, authzShadowCount === 0 ? 'absent' : `${authzShadowCount} ref(s) in: ${authzShadowWhere.join(', ')}`);
+
 // =============================================================================
 // 3) Out-of-scope NOTE: the pre-existing GEMINI_API_KEY Vite `define` (not an M5
 //    concern). Report if its NAME survives; never print any value.

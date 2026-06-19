@@ -146,8 +146,15 @@ check('39c supabaseAwarenessRef is never passed to a storage/event/network/conso
 // =============================================================================
 check('40 AccessContext makes NO /auth/session/resolve call', !/\/auth\/session\/resolve|runSessionResolve/.test(ac), 'no session-resolve');
 check('41 observer reads NO server-derived authorization', !/authorization/i.test(observerCode), 'no authz');
-const shadowAnywhere = srcFiles.filter((f) => /VITE_ENABLE_SERVER_AUTHZ_SHADOW/.test(text.get(f)!));
-check('42 VITE_ENABLE_SERVER_AUTHZ_SHADOW absent from src/**', shadowAnywhere.length === 0, shadowAnywhere.join(', ') || 'absent');
+// Phase 1.6 M13 (owner-approved, controlled SINGLE-FILE exception): VITE_ENABLE_SERVER_AUTHZ_SHADOW
+// is now wired into EXACTLY the single dormant server-authz shadow COMPARISON helper
+// (src/auth/serverAuthzShadowComparison.ts) — NOT AccessContext, the M8 observer, or anything this
+// lock protects. Its dormancy + structural-only / result-safety are proven by
+// scripts/diagnostics-server-authz-shadow-comparison-dormant-check.ts. The flag must NOT appear in
+// ANY other src/** file — this check still FAILS for any other reference (incl. AccessContext).
+const M13_SHADOW_COMPARISON = 'src/auth/serverAuthzShadowComparison.ts';
+const shadowAnywhere = srcFiles.filter((f) => f !== M13_SHADOW_COMPARISON && /VITE_ENABLE_SERVER_AUTHZ_SHADOW/.test(text.get(f)!));
+check('42 VITE_ENABLE_SERVER_AUTHZ_SHADOW confined to the dormant M13 shadow-comparison helper (absent from AccessContext + every other src/**)', shadowAnywhere.length === 0, shadowAnywhere.join(', ') || 'M13 helper only');
 const surfaceFlagAnywhere = srcFiles.filter((f) => /VITE_ENABLE_ACCESSCONTEXT_SUPABASE_DIAGNOSTIC_SURFACE/.test(text.get(f)!));
 check('43 reserved VITE_ENABLE_ACCESSCONTEXT_SUPABASE_DIAGNOSTIC_SURFACE absent from src/** (documented only; not wired)', surfaceFlagAnywhere.length === 0, surfaceFlagAnywhere.join(', ') || 'absent');
 
