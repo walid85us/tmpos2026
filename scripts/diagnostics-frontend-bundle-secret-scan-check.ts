@@ -106,6 +106,13 @@ check('2b dormant M6 session-bootstrap identifiers absent from emitted bundle (n
 const [awareCount, awareWhere] = scan(/supabaseAccessAwareness|VITE_ENABLE_ACCESSCONTEXT_SUPABASE_AWARENESS/);
 check('2c M8 AccessContext awareness identifiers absent from emitted bundle (DEV-only dynamic import; production-excluded / tree-shaken)', awareCount === 0, awareCount === 0 ? 'absent' : `${awareCount} ref(s) in: ${awareWhere.join(', ')}`);
 
+// Phase 1.6 M9 — additive future-proofing: the reserved (documented-only, NOT wired)
+// diagnostic-surface flag and any DEV-only observer `window` hook must NEVER reach production.
+// M9 wires neither, so both must be absent today; this check stays a guard if surfacing is
+// ever (separately) approved behind the reserved flag.
+const [surfCount, surfWhere] = scan(/VITE_ENABLE_ACCESSCONTEXT_SUPABASE_DIAGNOSTIC_SURFACE|__TM_POS_SUPABASE_AWARENESS__/);
+check('2d M9 reserved diagnostic-surface flag + observer window-hook absent from emitted bundle', surfCount === 0, surfCount === 0 ? 'absent' : `${surfCount} ref(s) in: ${surfWhere.join(', ')}`);
+
 // =============================================================================
 // 3) Out-of-scope NOTE: the pre-existing GEMINI_API_KEY Vite `define` (not an M5
 //    concern). Report if its NAME survives; never print any value.

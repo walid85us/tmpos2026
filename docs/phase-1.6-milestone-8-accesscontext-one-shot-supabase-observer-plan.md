@@ -8,6 +8,12 @@ MCP, live route call, package change, backend change, or production change occur
 **Accepted base checkpoint:** `8b7fd211d2c4773b73c819807e8283654c03183d`
 (Phase 1.6 M7 — add dormant AccessContext awareness helper).
 
+> **Locked by M9:** Phase 1.6 M9 added an offline private-surface diagnostic that permanently
+> proves this observer stays private, write-only, and non-authoritative — never surfaced via the
+> context value, a `useAccess` getter, UI, a `window` hook, a DOM event, a console log, storage,
+> or the network. See
+> [`docs/phase-1.6-milestone-9-observer-diagnostic-surfacing-plan.md`](phase-1.6-milestone-9-observer-diagnostic-surfacing-plan.md).
+
 **Selected design:** **Option E** from the accepted M8 planning pass — modify
 `src/context/AccessContext.tsx` in the smallest possible way so it calls the proven M7 helper
 behind DEV-only flags, strictly as a **private, non-authoritative, one-shot OBSERVER**, via a
