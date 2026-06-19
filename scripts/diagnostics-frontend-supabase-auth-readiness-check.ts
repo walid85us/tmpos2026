@@ -76,10 +76,17 @@ check('3b a token→/auth/session/resolve path exists under the pilot scope', /\
 // scripts/diagnostics-session-resolve-shadow-client-dormant-check.ts. ANY OTHER non-pilot reference
 // remains a regression (the check still FAILS if /auth/session/resolve appears anywhere else).
 const M12_SHADOW_CLIENT = 'src/auth/sessionResolveShadowClient.ts';
+// Phase 1.6 M14 (owner-approved, controlled single-file allowlist — EQUIVALENT to the existing M12
+// route exception): the dormant M14 server-authz shadow FEED helper also references the explicit
+// /auth/session/resolve route (future authorization-extracting read; route literal kept auditable).
+// Its dormancy/safety is proven by scripts/diagnostics-server-authz-shadow-feed-dormant-check.ts.
+// ANY OTHER non-pilot reference remains a regression — this check still FAILS for any other file.
+const M14_SHADOW_FEED = 'src/auth/serverAuthzShadowFeed.ts';
+const SESSION_RESOLVE_ROUTE_ALLOWED = new Set([M12_SHADOW_CLIENT, M14_SHADOW_FEED]);
 const sessionResolveNonPilot = filesWhere(/\/auth\/session\/resolve|runSessionResolve/)
   .filter((f) => !f.startsWith('src/pilot/'))
-  .filter((f) => f !== M12_SHADOW_CLIENT);
-check('3c the session-resolve path is NOT wired into the main app (pilot + dormant M12 shadow helper excepted)', sessionResolveNonPilot.length === 0, sessionResolveNonPilot.join(', ') || 'pilot + dormant M12 shadow only');
+  .filter((f) => !SESSION_RESOLVE_ROUTE_ALLOWED.has(f));
+check('3c the session-resolve path is NOT wired into the main app (pilot + dormant M12 shadow + dormant M14 feed excepted)', sessionResolveNonPilot.length === 0, sessionResolveNonPilot.join(', ') || 'pilot + dormant M12 shadow + dormant M14 feed only');
 
 // =============================================================================
 // 4) Main app remains un-migrated (Firebase-derived; no Supabase in the app tree)
@@ -104,9 +111,14 @@ check('4d App routing unchanged: no Supabase SDK import; pilot only behind PILOT
 // dormancy + structural-only / result-safety are proven by
 // scripts/diagnostics-server-authz-shadow-comparison-dormant-check.ts. The flag must NOT appear in
 // ANY other src/** file — this check still FAILS for any other reference.
+// Phase 1.6 M14 (owner-approved, controlled single-file allowlist): the dormant M14 feed file also
+// contains the flag NAME — in prose AND as the PREFIX of its OWN flag VITE_ENABLE_SERVER_AUTHZ_SHADOW_FEED.
+// The feed does NOT use the M13 flag in CODE (it gates via the imported isServerAuthzShadowEnabled),
+// proven by diagnostics-server-authz-shadow-feed-dormant-check.ts. (M14_SHADOW_FEED is declared above
+// at check 3c.) The flag must NOT appear in ANY other src/** file — this check still FAILS otherwise.
 const M13_SHADOW_COMPARISON = 'src/auth/serverAuthzShadowComparison.ts';
-const shadowFlagOutsideHelper = filesWhere(/VITE_ENABLE_SERVER_AUTHZ_SHADOW/).filter((f) => f !== M13_SHADOW_COMPARISON);
-check('5a shadow flag VITE_ENABLE_SERVER_AUTHZ_SHADOW confined to the dormant M13 shadow-comparison helper (absent from every other src/**)', shadowFlagOutsideHelper.length === 0, shadowFlagOutsideHelper.join(', ') || 'M13 helper only');
+const shadowFlagOutsideHelper = filesWhere(/VITE_ENABLE_SERVER_AUTHZ_SHADOW/).filter((f) => f !== M13_SHADOW_COMPARISON && f !== M14_SHADOW_FEED);
+check('5a shadow flag VITE_ENABLE_SERVER_AUTHZ_SHADOW confined to the dormant M13 helper + dormant M14 feed (absent from every other src/**)', shadowFlagOutsideHelper.length === 0, shadowFlagOutsideHelper.join(', ') || 'M13 helper + M14 feed only');
 const m4doc = read('docs/phase-1.6-milestone-4-supabase-auth-frontend-migration-plan.md');
 const fallbackDocumented =
   /fall ?back to the legacy client engine/i.test(m4doc) &&

@@ -243,14 +243,26 @@ check('77 helper NOT imported by App routing', !refsHelper(text.get('src/App.tsx
 check('78 helper NOT imported by src/main.tsx', !refsHelper(text.get('src/main.tsx') ?? ''), 'main clean');
 const pilotImporters = importers.filter((f) => f.startsWith('src/pilot/'));
 check('79 helper NOT imported by pilot', pilotImporters.length === 0, pilotImporters.join(', ') || 'pilot clean');
-check('80 helper imported NOWHERE active in src/** (no M13 call site added)', importers.length === 0, importers.join(', ') || 'no importers');
-// No active call site for the exported helpers anywhere outside their own declaration.
+// Phase 1.6 M14 (owner-approved, controlled allowlist): the comparison helper may now be imported
+// and invoked by EXACTLY the dormant M14 server-authz shadow FEED helper (Approach X) — and by
+// nothing else. The feed's OWN dormancy / token / route / authorization / result safety is proven by
+// scripts/diagnostics-server-authz-shadow-feed-dormant-check.ts; below (80b) we ADDITIONALLY assert
+// the feed is itself imported by nothing active. NO comparison-boundary / result-safety / dormancy
+// check above is weakened (the helper still must have no OTHER importer or caller).
+const FEED = 'src/auth/serverAuthzShadowFeed.ts';
+const FEED_TYPES = 'src/auth/serverAuthzShadowFeedTypes.ts';
+const unexpectedImporters = importers.filter((f) => f !== FEED);
+check('80 helper imported ONLY by the dormant M14 feed in src/** (no other M13 call site)', unexpectedImporters.length === 0, unexpectedImporters.join(', ') || `allowed: [${importers.join(', ') || 'none'}]`);
+const refsFeed = (s: string) => /(?:from|import)\s*\(?\s*'[^']*\/serverAuthzShadowFeed'/.test(s);
+const feedImporters = srcFiles.filter((f) => f !== FEED && f !== FEED_TYPES && refsFeed(text.get(f)!));
+check('80b M14 feed (sole allowed importer) is itself imported by NOTHING active in src/**', feedImporters.length === 0, feedImporters.join(', ') || 'feed dormant');
+// No active call site for the exported helpers anywhere outside their own declaration + the dormant feed.
 const externalCallers = srcFiles
-  .filter((f) => f !== HELPER && f !== HELPER_TYPES)
+  .filter((f) => f !== HELPER && f !== HELPER_TYPES && f !== FEED)
   .filter((f) => /compareServerAuthzShadow\s*\(|isServerAuthzShadowEnabled\s*\(/.test(stripComments(text.get(f)!)));
 const compareSelfCalls = (helperCode.match(/compareServerAuthzShadow\s*\(/g) ?? []).length;
 const declaredOnce = /function\s+compareServerAuthzShadow\s*\(/.test(helperCode) && compareSelfCalls === 1;
-check('81 helper has NO active call site (declared once, never self-invoked, never called elsewhere)', externalCallers.length === 0 && declaredOnce, externalCallers.join(', ') || 'invoked by nothing');
+check('81 helper has NO active call site beyond the dormant M14 feed (declared once, never self-invoked)', externalCallers.length === 0 && declaredOnce, externalCallers.join(', ') || 'invoked only by the dormant feed (or nothing)');
 
 // =============================================================================
 // 13) No barrel export

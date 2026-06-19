@@ -152,9 +152,16 @@ check('41 observer reads NO server-derived authorization', !/authorization/i.tes
 // lock protects. Its dormancy + structural-only / result-safety are proven by
 // scripts/diagnostics-server-authz-shadow-comparison-dormant-check.ts. The flag must NOT appear in
 // ANY other src/** file — this check still FAILS for any other reference (incl. AccessContext).
+// Phase 1.6 M14 (owner-approved, controlled single-file allowlist): the dormant M14 server-authz
+// shadow FEED file also contains the flag NAME — in prose AND as the PREFIX of its OWN dedicated flag
+// VITE_ENABLE_SERVER_AUTHZ_SHADOW_FEED. It is NOT AccessContext and changes nothing this lock
+// protects; its dormancy is proven by diagnostics-server-authz-shadow-feed-dormant-check.ts. The flag
+// must NOT appear in ANY other src/** file — this check still FAILS for any other reference (incl.
+// AccessContext).
 const M13_SHADOW_COMPARISON = 'src/auth/serverAuthzShadowComparison.ts';
-const shadowAnywhere = srcFiles.filter((f) => f !== M13_SHADOW_COMPARISON && /VITE_ENABLE_SERVER_AUTHZ_SHADOW/.test(text.get(f)!));
-check('42 VITE_ENABLE_SERVER_AUTHZ_SHADOW confined to the dormant M13 shadow-comparison helper (absent from AccessContext + every other src/**)', shadowAnywhere.length === 0, shadowAnywhere.join(', ') || 'M13 helper only');
+const M14_SHADOW_FEED = 'src/auth/serverAuthzShadowFeed.ts';
+const shadowAnywhere = srcFiles.filter((f) => f !== M13_SHADOW_COMPARISON && f !== M14_SHADOW_FEED && /VITE_ENABLE_SERVER_AUTHZ_SHADOW/.test(text.get(f)!));
+check('42 VITE_ENABLE_SERVER_AUTHZ_SHADOW confined to the dormant M13 helper + dormant M14 feed (absent from AccessContext + every other src/**)', shadowAnywhere.length === 0, shadowAnywhere.join(', ') || 'M13 helper + M14 feed only');
 const surfaceFlagAnywhere = srcFiles.filter((f) => /VITE_ENABLE_ACCESSCONTEXT_SUPABASE_DIAGNOSTIC_SURFACE/.test(text.get(f)!));
 check('43 reserved VITE_ENABLE_ACCESSCONTEXT_SUPABASE_DIAGNOSTIC_SURFACE absent from src/** (documented only; not wired)', surfaceFlagAnywhere.length === 0, surfaceFlagAnywhere.join(', ') || 'absent');
 

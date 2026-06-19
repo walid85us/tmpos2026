@@ -180,13 +180,29 @@ check('49 bridge NOT imported by pilot', pilotImporters.length === 0, pilotImpor
 // exposure / no-route-call / foundation-importer / bundle check above or below is weakened.
 const SHADOW = 'src/auth/sessionResolveShadowClient.ts';
 const SHADOW_TYPES = 'src/auth/sessionResolveShadowClientTypes.ts';
-const unexpectedBridgeImporters = importers.filter((f) => f !== SHADOW);
-check('49b bridge imported ONLY by the dormant M12 shadow client (no other call site)', unexpectedBridgeImporters.length === 0, unexpectedBridgeImporters.join(', ') || `allowed: [${importers.join(', ') || 'none'}]`);
+// Phase 1.6 M14 (owner-approved, controlled allowlist): the bridge may ALSO be imported by EXACTLY
+// the dormant M14 server-authz shadow FEED helper (Approach X), which uses the bridge to acquire a
+// token for its future route read. The feed's OWN dormancy / token / route / authorization / result
+// safety is proven by scripts/diagnostics-server-authz-shadow-feed-dormant-check.ts; below (49f–49h)
+// we ADDITIONALLY assert the feed is itself imported by nothing active. NO token-safety / storage /
+// logging / exposure / no-route-call / foundation-importer / bundle check is weakened.
+const FEED = 'src/auth/serverAuthzShadowFeed.ts';
+const FEED_TYPES = 'src/auth/serverAuthzShadowFeedTypes.ts';
+const BRIDGE_ALLOWED_IMPORTERS = [SHADOW, FEED];
+const unexpectedBridgeImporters = importers.filter((f) => !BRIDGE_ALLOWED_IMPORTERS.includes(f));
+check('49b bridge imported ONLY by the dormant M12 shadow client + dormant M14 feed (no other call site)', unexpectedBridgeImporters.length === 0, unexpectedBridgeImporters.join(', ') || `allowed: [${importers.join(', ') || 'none'}]`);
 const refsShadow = (s: string) => /(?:from|import)\s*\(?\s*'[^']*\/sessionResolveShadowClient'/.test(s);
 const shadowImporters = srcFiles.filter((f) => f !== SHADOW && f !== SHADOW_TYPES && refsShadow(text.get(f)!));
 check('49c M12 shadow client imported by NO active app entrypoint (Login/AccessContext/AccessGuard/App/main)', shadowImporters.filter((f) => ENTRYPOINTS.includes(f)).length === 0, shadowImporters.filter((f) => ENTRYPOINTS.includes(f)).join(', ') || 'dormant');
 check('49d M12 shadow client NOT imported by pilot', shadowImporters.filter((f) => f.startsWith('src/pilot/')).length === 0, shadowImporters.filter((f) => f.startsWith('src/pilot/')).join(', ') || 'pilot clean');
 check('49e M12 shadow client imported NOWHERE active in src/** (invoked by nothing in M12)', shadowImporters.length === 0, shadowImporters.join(', ') || 'no importers');
+// Phase 1.6 M14: prove the dormant feed (the 2nd allowed bridge importer) is ITSELF imported by
+// nothing active — so the bridge stays unreachable from any entrypoint through the feed too.
+const refsFeed = (s: string) => /(?:from|import)\s*\(?\s*'[^']*\/serverAuthzShadowFeed'/.test(s);
+const feedImporters = srcFiles.filter((f) => f !== FEED && f !== FEED_TYPES && refsFeed(text.get(f)!));
+check('49f M14 feed imported by NO active app entrypoint (Login/AccessContext/AccessGuard/App/main)', feedImporters.filter((f) => ENTRYPOINTS.includes(f)).length === 0, feedImporters.filter((f) => ENTRYPOINTS.includes(f)).join(', ') || 'dormant');
+check('49g M14 feed NOT imported by pilot', feedImporters.filter((f) => f.startsWith('src/pilot/')).length === 0, feedImporters.filter((f) => f.startsWith('src/pilot/')).join(', ') || 'pilot clean');
+check('49h M14 feed imported NOWHERE active in src/** (invoked by nothing in M14)', feedImporters.length === 0, feedImporters.join(', ') || 'no importers');
 
 // =============================================================================
 // 9) No UI / window hook / DOM event / persistence / network / browser→DB / secrets
