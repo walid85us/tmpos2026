@@ -113,6 +113,15 @@ check('2c M8 AccessContext awareness identifiers absent from emitted bundle (DEV
 const [surfCount, surfWhere] = scan(/VITE_ENABLE_ACCESSCONTEXT_SUPABASE_DIAGNOSTIC_SURFACE|__TM_POS_SUPABASE_AWARENESS__/);
 check('2d M9 reserved diagnostic-surface flag + observer window-hook absent from emitted bundle', surfCount === 0, surfCount === 0 ? 'absent' : `${surfCount} ref(s) in: ${surfWhere.join(', ')}`);
 
+// Phase 1.6 M11 — the dormant token bridge (and its flag) must also be absent from the
+// emitted bundle: nothing active imports it, so it (and the foundation it reaches) is
+// tree-shaken out of production. Identifiers checked: the module name, its callback API, and
+// the DEV-only flag. (We deliberately do NOT ban `access_token` here — the pilot legitimately
+// reads `session.access_token`; the token bridge's token-safety is proven statically by
+// scripts/diagnostics-supabase-token-bridge-dormant-check.ts.)
+const [bridgeCount, bridgeWhere] = scan(/supabaseTokenBridge|withSupabaseAccessToken|VITE_ENABLE_SUPABASE_TOKEN_BRIDGE/);
+check('2e M11 dormant token-bridge identifiers + flag absent from emitted bundle (not reachable / tree-shaken)', bridgeCount === 0, bridgeCount === 0 ? 'absent' : `${bridgeCount} ref(s) in: ${bridgeWhere.join(', ')}`);
+
 // =============================================================================
 // 3) Out-of-scope NOTE: the pre-existing GEMINI_API_KEY Vite `define` (not an M5
 //    concern). Report if its NAME survives; never print any value.
