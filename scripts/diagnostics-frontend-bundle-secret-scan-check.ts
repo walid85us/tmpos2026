@@ -122,6 +122,15 @@ check('2d M9 reserved diagnostic-surface flag + observer window-hook absent from
 const [bridgeCount, bridgeWhere] = scan(/supabaseTokenBridge|withSupabaseAccessToken|VITE_ENABLE_SUPABASE_TOKEN_BRIDGE/);
 check('2e M11 dormant token-bridge identifiers + flag absent from emitted bundle (not reachable / tree-shaken)', bridgeCount === 0, bridgeCount === 0 ? 'absent' : `${bridgeCount} ref(s) in: ${bridgeWhere.join(', ')}`);
 
+// Phase 1.6 M12 — the dormant session-resolve SHADOW client (and its flag) must also be absent
+// from the emitted bundle: nothing active imports it, so it (and the token bridge + foundation it
+// reaches) is tree-shaken out of production. Identifiers checked: the module name, its exported
+// helper, and the DEV-only flag. (We deliberately do NOT ban `/auth/session/resolve`, `Authorization`,
+// or `Bearer` here — the pilot legitimately uses them; the shadow client's route/token/response
+// safety is proven statically by scripts/diagnostics-session-resolve-shadow-client-dormant-check.ts.)
+const [shadowCount, shadowWhere] = scan(/sessionResolveShadowClient|runSessionResolveShadowCheck|VITE_ENABLE_SESSION_RESOLVE_SHADOW/);
+check('2f M12 dormant session-resolve shadow-client identifiers + flag absent from emitted bundle (not reachable / tree-shaken)', shadowCount === 0, shadowCount === 0 ? 'absent' : `${shadowCount} ref(s) in: ${shadowWhere.join(', ')}`);
+
 // =============================================================================
 // 3) Out-of-scope NOTE: the pre-existing GEMINI_API_KEY Vite `define` (not an M5
 //    concern). Report if its NAME survives; never print any value.

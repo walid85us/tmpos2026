@@ -70,8 +70,16 @@ check('2b only the public anon key (no privileged key) is read client-side', /VI
 
 check('3a a frontend Supabase client exists under the pilot scope', /createClient\(/.test(text.get('src/pilot/supabaseClient.ts') ?? ''), 'pilot client');
 check('3b a token→/auth/session/resolve path exists under the pilot scope', /\/auth\/session\/resolve/.test(text.get('src/pilot/sessionResolvePilotClient.ts') ?? ''), 'pilot session-resolve');
-const sessionResolveNonPilot = filesWhere(/\/auth\/session\/resolve|runSessionResolve/).filter((f) => !f.startsWith('src/pilot/'));
-check('3c the session-resolve path is NOT wired into the main app', sessionResolveNonPilot.length === 0, sessionResolveNonPilot.join(', ') || 'pilot-scoped only');
+// Phase 1.6 M12 (owner-approved, controlled allowlist): the single dormant, non-active,
+// non-invoked session-resolve SHADOW helper may also reference the explicit /auth/session/resolve
+// route. Its dormancy (imported by nothing active, invoked by nothing) is proven by
+// scripts/diagnostics-session-resolve-shadow-client-dormant-check.ts. ANY OTHER non-pilot reference
+// remains a regression (the check still FAILS if /auth/session/resolve appears anywhere else).
+const M12_SHADOW_CLIENT = 'src/auth/sessionResolveShadowClient.ts';
+const sessionResolveNonPilot = filesWhere(/\/auth\/session\/resolve|runSessionResolve/)
+  .filter((f) => !f.startsWith('src/pilot/'))
+  .filter((f) => f !== M12_SHADOW_CLIENT);
+check('3c the session-resolve path is NOT wired into the main app (pilot + dormant M12 shadow helper excepted)', sessionResolveNonPilot.length === 0, sessionResolveNonPilot.join(', ') || 'pilot + dormant M12 shadow only');
 
 // =============================================================================
 // 4) Main app remains un-migrated (Firebase-derived; no Supabase in the app tree)

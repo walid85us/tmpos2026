@@ -68,9 +68,17 @@ const pilotClientImport = /from '[^']*pilot\/(supabaseClient|sessionResolvePilot
 const leakedPilotClient = filesWhere(pilotClientImport).filter(nonPilot);
 check('2b main app does not import the pilot Supabase auth client', leakedPilotClient.length === 0, leakedPilotClient.join(', ') || 'pilot-scoped only');
 
-// The session-resolve round-trip reference stays pilot-scoped.
-const sessionResolveRef = filesWhere(/\/auth\/session\/resolve|runSessionResolve/).filter(nonPilot);
-check('2c token→/auth/session/resolve reference is pilot-scoped (not wired into main app)', sessionResolveRef.length === 0, sessionResolveRef.join(', ') || 'pilot-scoped only');
+// The session-resolve round-trip reference stays pilot-scoped — PLUS, as of Phase 1.6 M12
+// (owner-approved, controlled allowlist), the single dormant, non-active, non-invoked
+// session-resolve SHADOW helper, which legitimately references the explicit /auth/session/resolve
+// route. Its imported-by-nothing-active / invoked-by-nothing dormancy is proven by
+// scripts/diagnostics-session-resolve-shadow-client-dormant-check.ts. ANY OTHER non-pilot reference
+// remains a regression (the check still FAILS if /auth/session/resolve appears anywhere else).
+const M12_SHADOW_CLIENT = 'src/auth/sessionResolveShadowClient.ts';
+const sessionResolveRef = filesWhere(/\/auth\/session\/resolve|runSessionResolve/)
+  .filter(nonPilot)
+  .filter((f) => f !== M12_SHADOW_CLIENT);
+check('2c token→/auth/session/resolve reference is pilot-scoped + the dormant M12 shadow helper (not wired into main app)', sessionResolveRef.length === 0, sessionResolveRef.join(', ') || 'pilot + dormant M12 shadow only');
 
 // The pilot is mounted only behind the dev gate (lazy + PILOT_ROUTE_ENABLED).
 const appSrc = text.get('src/App.tsx') ?? '';

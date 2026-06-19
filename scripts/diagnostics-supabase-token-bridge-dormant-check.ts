@@ -172,7 +172,21 @@ check('47 bridge NOT imported by App routing', !refsBridge(text.get('src/App.tsx
 check('48 bridge NOT imported by src/main.tsx', !refsBridge(text.get('src/main.tsx') ?? ''), 'main clean');
 const pilotImporters = importers.filter((f) => f.startsWith('src/pilot/'));
 check('49 bridge NOT imported by pilot', pilotImporters.length === 0, pilotImporters.join(', ') || 'pilot clean');
-check('49b bridge imported NOWHERE in src/** yet (no M11 call site added)', importers.length === 0, importers.join(', ') || 'no importers');
+// Phase 1.6 M12 (owner-approved, controlled allowlist): the bridge may now be imported by EXACTLY
+// the dormant M12 session-resolve SHADOW client — and by nothing else. The shadow client's OWN
+// dormancy / token / route / response safety is proven by
+// scripts/diagnostics-session-resolve-shadow-client-dormant-check.ts; below we ADDITIONALLY assert
+// the shadow client is itself imported by nothing active. NO token-safety / storage / logging /
+// exposure / no-route-call / foundation-importer / bundle check above or below is weakened.
+const SHADOW = 'src/auth/sessionResolveShadowClient.ts';
+const SHADOW_TYPES = 'src/auth/sessionResolveShadowClientTypes.ts';
+const unexpectedBridgeImporters = importers.filter((f) => f !== SHADOW);
+check('49b bridge imported ONLY by the dormant M12 shadow client (no other call site)', unexpectedBridgeImporters.length === 0, unexpectedBridgeImporters.join(', ') || `allowed: [${importers.join(', ') || 'none'}]`);
+const refsShadow = (s: string) => /(?:from|import)\s*\(?\s*'[^']*\/sessionResolveShadowClient'/.test(s);
+const shadowImporters = srcFiles.filter((f) => f !== SHADOW && f !== SHADOW_TYPES && refsShadow(text.get(f)!));
+check('49c M12 shadow client imported by NO active app entrypoint (Login/AccessContext/AccessGuard/App/main)', shadowImporters.filter((f) => ENTRYPOINTS.includes(f)).length === 0, shadowImporters.filter((f) => ENTRYPOINTS.includes(f)).join(', ') || 'dormant');
+check('49d M12 shadow client NOT imported by pilot', shadowImporters.filter((f) => f.startsWith('src/pilot/')).length === 0, shadowImporters.filter((f) => f.startsWith('src/pilot/')).join(', ') || 'pilot clean');
+check('49e M12 shadow client imported NOWHERE active in src/** (invoked by nothing in M12)', shadowImporters.length === 0, shadowImporters.join(', ') || 'no importers');
 
 // =============================================================================
 // 9) No UI / window hook / DOM event / persistence / network / browser→DB / secrets
