@@ -36,6 +36,29 @@ export default defineConfig(({mode}) => {
           target: 'http://localhost:5002',
           changeOrigin: true,
           rewrite: (p) => p.replace(/^\/__identity/, ''),
+          // Phase 1.6 M16.2 — SAFE, NON-SECRET proxy-boundary breadcrumbs for the
+          // isolated identity API. These print on the Vite dev-server console (:5000)
+          // and make a future 500 attributable to the proxy/transport boundary vs the
+          // identity API handler. They log ONLY a stable marker, the route FAMILY
+          // (never the raw URL / query), the upstream label, the method, an upstream
+          // status code, and a transport error code (ECONNREFUSED / ECONNRESET /
+          // ETIMEDOUT / …). They NEVER log headers, the Authorization header, cookies,
+          // the request or response body, a token, query values, or identity fields.
+          configure: (proxy) => {
+            const MARK = '[vite-proxy:identity-api]';
+            const ROUTE_FAMILY = '/__identity/*';
+            proxy.on('error', (err, req) => {
+              const code = (err as NodeJS.ErrnoException).code ?? 'UNKNOWN';
+              console.error(
+                `${MARK} upstream_error route=${ROUTE_FAMILY} target=identity-api method=${req?.method ?? '?'} code=${code}`,
+              );
+            });
+            proxy.on('proxyRes', (proxyRes, req) => {
+              console.log(
+                `${MARK} upstream_response route=${ROUTE_FAMILY} target=identity-api method=${req?.method ?? '?'} status=${proxyRes.statusCode ?? '?'}`,
+              );
+            });
+          },
         },
       },
     },

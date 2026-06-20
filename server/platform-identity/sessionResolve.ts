@@ -60,6 +60,78 @@ const R = SESSION_RESOLVE_REASON_CODES;
 const NO_SCOPE: RequestScope = { scopeType: 'none', tenantId: null, storeId: null, platformScope: false };
 const REQUIRED_PERMISSION = 'session:resolve';
 
+// =============================================================================
+// Phase 1.6 M16.2 — SAFE, NON-SECRET route-execution breadcrumbs.
+//
+// PURPOSE: make the /auth/session/resolve outcome ATTRIBUTABLE from the identity
+// API console WITHOUT exposing any secret. Each breadcrumb carries ONLY: a stable
+// marker, the public route name, the requestId (an opaque UUID), a phase tag, and —
+// where applicable — the HTTP status, the contract reason code, an authorization
+// PRESENCE boolean (success only), and a sanitized error class + error code
+// (exception path only, derived via sanitizeError()).
+//
+// LEAK-PROOF BY CONSTRUCTION: the helper accepts NO Request, NO assertion, and NO
+// identity object — only a requestId string, a phase, and a small fixed-key fields
+// object of primitives. It therefore can NEVER receive or log a token / Authorization
+// header / request headers / request body / raw response body / raw authorization
+// DTO / identity fields (internalUserId, authProviderUid, email, displayName) /
+// tenant or store id / permission key or level. Values flow through the redaction-
+// applying safe logger as a final defense.
+// =============================================================================
+
+/** Public route name (non-secret literal) used only as a breadcrumb label. */
+const SESSION_RESOLVE_ROUTE = '/auth/session/resolve';
+
+/** Stable, greppable breadcrumb marker. */
+const SR_BREADCRUMB = '[platform-identity] session-resolve';
+
+/** The honest, allow-listed execution phases a breadcrumb may report. */
+type SessionResolveBreadcrumbPhase =
+  | 'received'
+  | 'feature_disabled'
+  | 'denied_unauthenticated'
+  | 'token_rejected'
+  | 'identity_resolution_threw'
+  | 'identity_unresolved'
+  | 'authenticated'
+  | 'unexpected_error';
+
+/** Phases logged at error level (a real failure, even when fail-closed). */
+const SR_ERROR_PHASES: ReadonlySet<SessionResolveBreadcrumbPhase> = new Set([
+  'identity_resolution_threw',
+  'unexpected_error',
+]);
+
+/** The ONLY non-secret primitive fields a breadcrumb may carry. */
+interface SessionResolveBreadcrumbFields {
+  status?: number;
+  reasonCode?: string;
+  authorizationPresent?: boolean;
+  errorClass?: string;
+  errorCode?: string;
+}
+
+/**
+ * Emit a SAFE, NON-SECRET breadcrumb. By construction it can carry no secret: it
+ * takes only a requestId string, a phase, and a small primitive fields object, and
+ * forwards them through the redaction-applying safe logger. No Request / assertion /
+ * identity is accepted here.
+ */
+function sessionResolveBreadcrumb(
+  requestId: string,
+  phase: SessionResolveBreadcrumbPhase,
+  fields: SessionResolveBreadcrumbFields = {},
+): void {
+  const payload = { route: SESSION_RESOLVE_ROUTE, requestId, phase, ...fields };
+  if (SR_ERROR_PHASES.has(phase)) {
+    safeLog.error(`${SR_BREADCRUMB} exit:${phase}`, payload);
+  } else if (phase === 'received') {
+    safeLog.info(`${SR_BREADCRUMB} received`, payload);
+  } else {
+    safeLog.info(`${SR_BREADCRUMB} exit:${phase}`, payload);
+  }
+}
+
 /** Resolves a verified actor to its durable, app-owned internal_user_id (or null). */
 export type ResolveIdentityFn = (assertion: ActorAssertion) => Promise<string | null>;
 
@@ -166,18 +238,24 @@ export function createSessionResolveHandler(options: SessionResolveHandlerOption
     options.resolveSessionAuthorization ?? resolveDefaultSessionAuthorization;
 
   return async (req: Request, res: Response): Promise<void> => {
+    // Phase 1.6 M16.2 — correlate every breadcrumb for this request. The id is an
+    // opaque UUID (no secret); generating it before the gates is behavior-neutral
+    // (the gate 404s do not embed it and their bodies are unchanged).
+    const requestId = randomUUID();
+    sessionResolveBreadcrumb(requestId, 'received');
+
     // --- Gate 1: platform-identity feature flag (default OFF) ---
     if (!isPlatformIdentityEnabled()) {
+      sessionResolveBreadcrumb(requestId, 'feature_disabled', { status: 404, reasonCode: 'platform_identity_disabled' });
       res.status(404).json({ error: { code: 'FEATURE_DISABLED', message: 'Platform identity is disabled.' } });
       return;
     }
     // --- Gate 2: session-resolve opt-in + non-production (default OFF) ---
     if (!isSessionResolveEnabled()) {
+      sessionResolveBreadcrumb(requestId, 'feature_disabled', { status: 404, reasonCode: 'session_resolve_disabled' });
       res.status(404).json({ error: { code: 'FEATURE_DISABLED', message: 'Session resolve is disabled.' } });
       return;
     }
-
-    const requestId = randomUUID();
 
     try {
       // --- Step 1: verify the Supabase token (deny-by-default) ---
@@ -189,10 +267,11 @@ export function createSessionResolveHandler(options: SessionResolveHandlerOption
           const reasonCode = err.code as SessionResolveReasonCode;
           emitSessionAudit(requestId, null, reasonCode);
           const dto = failureDTO(requestId, reasonCode);
+          sessionResolveBreadcrumb(requestId, 'token_rejected', { status: dto.status, reasonCode });
           res.status(dto.status!).json(dto);
           return;
         }
-        // Non-typed/unexpected verify error ⇒ unexpected handler error.
+        // Non-typed/unexpected verify error ⇒ unexpected handler error (catch-all 500).
         throw err;
       }
 
@@ -200,6 +279,7 @@ export function createSessionResolveHandler(options: SessionResolveHandlerOption
       if (!assertion) {
         emitSessionAudit(requestId, null, R.DENIED_UNAUTHENTICATED);
         const dto = failureDTO(requestId, R.DENIED_UNAUTHENTICATED);
+        sessionResolveBreadcrumb(requestId, 'denied_unauthenticated', { status: dto.status, reasonCode: R.DENIED_UNAUTHENTICATED });
         res.status(dto.status!).json(dto);
         return;
       }
@@ -211,14 +291,16 @@ export function createSessionResolveHandler(options: SessionResolveHandlerOption
       try {
         internalUserId = await resolveIdentity(assertion);
       } catch (err) {
-        // Never surface raw DB errors / connection strings — sanitized summary only.
-        safeLog.error('[platform-identity] M7 session-resolve identity resolution failed', sanitizeError(err));
+        // Never surface raw DB errors / connection strings — sanitized class+code only.
+        const safe = sanitizeError(err);
+        sessionResolveBreadcrumb(requestId, 'identity_resolution_threw', { errorClass: safe.name, errorCode: safe.code });
         internalUserId = null;
       }
 
       if (!internalUserId) {
         emitSessionAudit(requestId, null, R.IDENTITY_RESOLUTION_ERROR);
         const dto = failureDTO(requestId, R.IDENTITY_RESOLUTION_ERROR);
+        sessionResolveBreadcrumb(requestId, 'identity_unresolved', { status: dto.status, reasonCode: R.IDENTITY_RESOLUTION_ERROR });
         res.status(dto.status!).json(dto);
         return;
       }
@@ -273,10 +355,23 @@ export function createSessionResolveHandler(options: SessionResolveHandlerOption
         },
         authorization, // live server-derived authz (DEV-flagged allow+audited) or null
       };
+      // PRESENCE boolean only — never the raw authorization object or identity fields.
+      sessionResolveBreadcrumb(requestId, 'authenticated', {
+        status: 200,
+        reasonCode: R.VERIFIED_SUPABASE,
+        authorizationPresent: authorization !== null,
+      });
       res.status(200).json(dto);
     } catch (err) {
-      // Catch-all: unexpected handler error. Sanitized summary only; never leak.
-      safeLog.error('[platform-identity] M7 session-resolve unexpected error', sanitizeError(err));
+      // Catch-all: unexpected handler error. Sanitized error CLASS + CODE only — never
+      // the raw error, the stack, the request body/headers, the token, or identity.
+      const safe = sanitizeError(err);
+      sessionResolveBreadcrumb(requestId, 'unexpected_error', {
+        status: SESSION_RESOLVE_MATRIX[R.SESSION_RESOLVE_ERROR].status,
+        reasonCode: R.SESSION_RESOLVE_ERROR,
+        errorClass: safe.name,
+        errorCode: safe.code,
+      });
       emitSessionAudit(requestId, null, R.SESSION_RESOLVE_ERROR);
       const dto = failureDTO(requestId, R.SESSION_RESOLVE_ERROR);
       res.status(dto.status!).json(dto);
