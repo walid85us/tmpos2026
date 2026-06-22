@@ -133,6 +133,37 @@ function Sidebar({
   );
 }
 
+// Mobile / tablet navigation. The sidebar is hidden below `md`, so this grouped
+// selector gives full 23-module navigation on small screens. It only updates the
+// same local UI state (active module) — no backend action.
+function MobileNav({ activeId, setActiveId }: { activeId: string; setActiveId: (id: string) => void }) {
+  return (
+    <div className="border-b border-slate-800 bg-slate-950/80 px-4 py-2 md:hidden">
+      <label htmlFor="bcp-mobile-nav" className="sr-only">Select Backend Control Plane module</label>
+      <select
+        id="bcp-mobile-nav"
+        value={activeId}
+        onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setActiveId(e.target.value)}
+        className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm font-semibold text-slate-100"
+      >
+        {NAV_GROUP_ORDER.map((group) => {
+          const items = MODULES.filter((m) => m.group === group);
+          if (items.length === 0) return null;
+          return (
+            <optgroup key={group} label={group}>
+              {items.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+            </optgroup>
+          );
+        })}
+      </select>
+    </div>
+  );
+}
+
 function ModuleDrawer({ module, onClose }: { module: BcpModule; onClose: () => void }) {
   return (
     <aside className="w-80 shrink-0 overflow-y-auto border-l border-slate-800 bg-slate-950/80 p-4">
@@ -202,6 +233,7 @@ export default function Shell() {
         setElevated={setElevated}
         onToggleDrawer={() => setDrawerOpen((v: boolean) => !v)}
       />
+      <MobileNav activeId={activeId} setActiveId={setActiveId} />
       <div className="flex flex-1">
         <Sidebar activeId={activeId} setActiveId={setActiveId} />
         <main className="min-w-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6">

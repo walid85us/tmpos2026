@@ -144,10 +144,18 @@ export function GuardedButton({ label, hint }: { label: string; hint?: string })
   );
 }
 
-export function DataTable({ columns, rows }: { columns: string[]; rows: React.ReactNode[][] }) {
+export function DataTable({
+  columns,
+  rows,
+  minWidthClass = 'min-w-[720px]',
+}: {
+  columns: string[];
+  rows: React.ReactNode[][];
+  minWidthClass?: string;
+}) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[640px] border-collapse text-left text-sm">
+      <table className={cx('w-full border-collapse text-left text-sm', minWidthClass)}>
         <thead>
           <tr className="border-b border-slate-800">
             {columns.map((c) => (

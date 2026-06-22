@@ -185,6 +185,7 @@ function Stores({ module }: { module: BcpModule; env: EnvLabel }) {
       <ScreenHeading module={module} />
       <Panel title="Stores" subtitle="Opaque references only — no real store data" right={<GuardedButton label="Provision Store DB" hint="Future · Approval Required · DEV-only" />}>
         <DataTable
+          minWidthClass="min-w-[980px]"
           columns={['Store', 'Tenant', 'Store DB', 'Service', 'POS', 'Repair', 'Inventory', 'Backup', 'Last Event']}
           rows={STORES.map((s) => [
             <span className="flex items-center gap-2"><Monogram label={s.label} tone="neutral" /><span className="font-semibold">{s.label}</span></span>,
