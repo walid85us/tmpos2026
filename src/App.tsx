@@ -59,6 +59,14 @@ import NotProvisioned from './components/NotProvisioned';
 // AccessGuard, and does not affect any existing route.
 import { PILOT_ROUTE_ENABLED } from './pilot/pilotEnv';
 const SupabaseAuthPilot = React.lazy(() => import('./pilot/SupabaseAuthPilot'));
+
+// Phase 1.6 M22B — additive, DEV-only Backend Control Plane read-only / mock-only
+// shell (default OFF). Registered ONLY when BCP_ROUTE_ENABLED (Vite DEV build +
+// VITE_ENABLE_BACKEND_CONTROL_PLANE === 'true'). It lives OUTSIDE the guarded '/'
+// and '/owner' trees, is NOT wrapped by AccessGuard, is excluded from all Owner
+// Platform navigation, and does not affect any existing route or behaviour.
+import { BCP_ROUTE_ENABLED, BCP_ROUTE_PATH } from './backend-control-plane/bcpEnv';
+const BackendControlPlaneApp = React.lazy(() => import('./backend-control-plane/BackendControlPlaneApp'));
 // ...
 const router = createBrowserRouter([
   {
@@ -149,6 +157,18 @@ const router = createBrowserRouter([
         element: (
           <React.Suspense fallback={<div className="min-h-screen flex items-center justify-center text-slate-500">Loading Supabase pilot…</div>}>
             <SupabaseAuthPilot />
+          </React.Suspense>
+        ),
+      }]
+    : []),
+  // Phase 1.6 M22B — additive, dev-only Backend Control Plane route (default OFF).
+  // Excluded entirely unless Vite DEV + VITE_ENABLE_BACKEND_CONTROL_PLANE === 'true'.
+  ...(BCP_ROUTE_ENABLED
+    ? [{
+        path: BCP_ROUTE_PATH,
+        element: (
+          <React.Suspense fallback={<div className="min-h-screen flex items-center justify-center text-slate-500">Loading Backend Control Plane…</div>}>
+            <BackendControlPlaneApp />
           </React.Suspense>
         ),
       }]
