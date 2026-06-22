@@ -93,6 +93,20 @@ export function isProductionEnvironment(): boolean {
   return process.env.NODE_ENV === 'production';
 }
 
+/**
+ * Defensive extraction of an active link from a query result. Empty result → null (legitimately no
+ * link). A non-array result, or a present-but-malformed row (missing/empty link_id), → fail-closed
+ * SafeRepositoryError('unexpected_error'). Never returns a link with an empty/undefined ref. The
+ * real array-returning client passes through unchanged (length is a number, link_id is present).
+ */
+function firstActiveLink(rows: any): ExistingActiveLink | null {
+  if (!rows || typeof rows.length !== 'number') throw new SafeRepositoryError('unexpected_error');
+  if (rows.length === 0) return null;
+  const ref = rows[0] ? rows[0].link_id : undefined;
+  if (ref == null || ref === '') throw new SafeRepositoryError('unexpected_error');
+  return { linkRef: ref };
+}
+
 export interface IdentityLinkDevRepositoryDeps {
   /** Injected server-side owner-role Postgres executor (or a tx handle). NEVER the anon path. */
   sql: SqlExecutor;
@@ -163,7 +177,7 @@ export function createIdentityLinkDevRepository(
           and status = 'active'
         limit 1 /* il_op=find_active_pair */
       `;
-      return rows.length ? { linkRef: rows[0].link_id } : null;
+      return firstActiveLink(rows);
     });
   }
 
@@ -176,7 +190,7 @@ export function createIdentityLinkDevRepository(
         where firebase_auth_provider_uid = ${firebaseReference} and status = 'active'
         limit 1 /* il_op=find_active_firebase */
       `;
-      return rows.length ? { linkRef: rows[0].link_id } : null;
+      return firstActiveLink(rows);
     });
   }
 
@@ -189,7 +203,7 @@ export function createIdentityLinkDevRepository(
         where supabase_auth_provider_uid = ${supabaseReference} and status = 'active'
         limit 1 /* il_op=find_active_supabase */
       `;
-      return rows.length ? { linkRef: rows[0].link_id } : null;
+      return firstActiveLink(rows);
     });
   }
 
@@ -205,9 +219,12 @@ export function createIdentityLinkDevRepository(
           and status in ('disabled', 'revoked')
         limit 1 /* il_op=find_historical_pair */
       `;
+      if (!rows || typeof rows.length !== 'number') throw new SafeRepositoryError('unexpected_error');
       if (!rows.length) return null;
-      const state = rows[0].status === 'revoked' ? 'revoked' : 'disabled';
-      return { linkRef: rows[0].link_id, lifecycleState: state };
+      const row = rows[0];
+      if (!row || row.link_id == null || row.link_id === '') throw new SafeRepositoryError('unexpected_error');
+      const state = row.status === 'revoked' ? 'revoked' : 'disabled';
+      return { linkRef: row.link_id, lifecycleState: state };
     });
   }
 
@@ -236,7 +253,7 @@ export function createIdentityLinkDevRepository(
         )
         returning status /* il_op=create_active_link */
       `;
-      if (!rows.length || rows[0].status !== 'active') {
+      if (!rows || typeof rows.length !== 'number' || !rows.length || (rows[0] ? rows[0].status : undefined) !== 'active') {
         throw new SafeRepositoryError('write_failed');
       }
       return { lifecycleState: 'active' };
@@ -253,7 +270,7 @@ export function createIdentityLinkDevRepository(
           where link_id = ${selector.linkRef} and status = 'active'
           limit 1 /* il_op=find_active_for_lifecycle_by_ref */
         `;
-        return rows.length ? { linkRef: rows[0].link_id } : null;
+        return firstActiveLink(rows);
       }
       if (
         selector.firebaseReference && selector.firebaseReference.trim().length > 0 &&
@@ -266,7 +283,7 @@ export function createIdentityLinkDevRepository(
             and status = 'active'
           limit 1 /* il_op=find_active_for_lifecycle_by_pair */
         `;
-        return rows.length ? { linkRef: rows[0].link_id } : null;
+        return firstActiveLink(rows);
       }
       return null;
     });
@@ -285,6 +302,7 @@ export function createIdentityLinkDevRepository(
         where link_id = ${linkRef} and status = 'active'
         returning status /* il_op=set_lifecycle_state */
       `;
+      if (!rows || typeof rows.length !== 'number') throw new SafeRepositoryError('unexpected_error');
       if (!rows.length) throw new SafeRepositoryError('not_found');
       return { lifecycleState: state };
     });

@@ -44,15 +44,16 @@ const LINK_REF = 'LINK_REF_MOCK';
 const SENSITIVE = [FB, SB, ANCHOR, REQ, APV, SECRET];
 
 // ---- Routed fake SQL executor (DB-free). Routes on the `il_op=NAME` marker comment. ----
-type RowList = any[];
-type OpHandler = (values: any[]) => RowList;
+// OpHandler may return a malformed/non-array value (undefined/null/{}) to exercise the adapter's
+// defensive handling — it is not constrained to a row array.
+type OpHandler = (values: any[]) => any;
 function makeRoutedSql(handlers: Record<string, OpHandler>) {
-  const calls: { op: string; values: any[] }[] = [];
-  const sql = (strings: TemplateStringsArray, ...values: any[]): Promise<RowList> => {
+  const calls: { op: string; values: any[]; text: string }[] = [];
+  const sql = (strings: TemplateStringsArray, ...values: any[]): Promise<any> => {
     const text = strings.join(' ? ');
     const m = text.match(/il_op=(\w+)/);
     const op = m ? m[1] : 'unknown';
-    calls.push({ op, values });
+    calls.push({ op, values, text });
     const handler = handlers[op];
     if (!handler) return Promise.resolve([]);
     try {
@@ -61,16 +62,17 @@ function makeRoutedSql(handlers: Record<string, OpHandler>) {
       return Promise.reject(err);
     }
   };
-  return { sql, calls, ops: () => calls.map((c) => c.op) };
+  return {
+    sql,
+    calls,
+    ops: () => calls.map((c) => c.op),
+    textFor: (op: string) => calls.find((c) => c.op === op)?.text ?? '',
+  };
 }
-function repoWith(handlers: Record<string, OpHandler>): {
-  repo: IdentityLinkRepository;
-  calls: { op: string; values: any[] }[];
-  ops: () => string[];
-} {
+function repoWith(handlers: Record<string, OpHandler>) {
   const routed = makeRoutedSql(handlers);
   const repo = createIdentityLinkDevRepository({ sql: routed.sql as any });
-  return { repo, calls: routed.calls, ops: routed.ops };
+  return { repo, calls: routed.calls, ops: routed.ops, textFor: routed.textFor };
 }
 
 // ---- Fake durable audit writer (records inputs; DB-free) ----
@@ -444,6 +446,130 @@ C('E4 disable lifecycle end-to-end', async () => {
   assert.equal(res.lifecycleState, 'disabled');
   assert.ok(w.writes.some((x) => x.actionId === IDENTITY_LINK_AUDIT_EVENTS.DISABLE_SUCCEEDED), 'expected disable.succeeded audit');
   assertNoSensitive(JSON.stringify({ res, writes: w.writes }), 'E4');
+});
+
+// ========================= M20.14 hardening =========================
+
+C('H1 factory does not connect/query at construction (no auto-connect)', async () => {
+  let called = false;
+  const sql = ((..._a: any[]) => { called = true; return Promise.resolve([]); }) as any;
+  const repo = createIdentityLinkDevRepository({ sql });
+  assert.equal(called, false, 'factory must not query at construction');
+  assert.equal(typeof repo.createActiveLink, 'function');
+});
+
+C('H2 find maps non-array (undefined) result to unexpected_error', async () => {
+  const r = repoWith({ find_active_pair: () => undefined });
+  await assert.rejects(
+    r.repo.findActiveLinkByPair(FB, SB),
+    (e: unknown) => e instanceof SafeRepositoryError && (e as SafeRepositoryError).code === 'unexpected_error',
+  );
+});
+
+C('H3 find maps malformed row (missing link_id) to unexpected_error', async () => {
+  const r = repoWith({ find_active_firebase: () => [{}] });
+  await assert.rejects(
+    r.repo.findActiveLinkByFirebaseRef(FB),
+    (e: unknown) => (e as SafeRepositoryError).code === 'unexpected_error',
+  );
+});
+
+C('H4 createActiveLink maps malformed/undefined result to write_failed', async () => {
+  const r = repoWith({ create_active_link: () => undefined });
+  await assert.rejects(
+    r.repo.createActiveLink({ anchorRef: ANCHOR, firebaseReference: FB, supabaseReference: SB, verificationMethod: 'admin_provisioned', createdByRef: REQ, approvedByRef: APV }),
+    (e: unknown) => (e as SafeRepositoryError).code === 'write_failed',
+  );
+});
+
+C('H5 createActiveLink check-constraint (23514) → constraint_conflict (no leak)', async () => {
+  const r = repoWith({ create_active_link: () => { throw { code: '23514', message: `chk ${SECRET}` }; } });
+  await assert.rejects(
+    r.repo.createActiveLink({ anchorRef: ANCHOR, firebaseReference: FB, supabaseReference: SB, verificationMethod: 'admin_provisioned', createdByRef: REQ, approvedByRef: APV }),
+    (e: unknown) => {
+      assert.equal((e as SafeRepositoryError).code, 'constraint_conflict');
+      assertNoSensitive((e as Error).message, 'H5');
+      return true;
+    },
+  );
+});
+
+C('H6 setLifecycleState maps non-array result to unexpected_error', async () => {
+  const r = repoWith({ set_lifecycle_state: () => undefined });
+  await assert.rejects(
+    r.repo.setLifecycleState(LINK_REF, 'disabled'),
+    (e: unknown) => (e as SafeRepositoryError).code === 'unexpected_error',
+  );
+});
+
+C('H7 disable is an UPDATE, never a DELETE', async () => {
+  const r = repoWith({ set_lifecycle_state: () => [{ status: 'disabled' }] });
+  await r.repo.setLifecycleState(LINK_REF, 'disabled');
+  const t = r.textFor('set_lifecycle_state').toLowerCase();
+  assert.ok(t.includes('update identity_link'), 'expected an UPDATE');
+  assert.ok(!t.includes('delete'), 'must never DELETE');
+});
+
+C('H8 revoke is an UPDATE, never a DELETE', async () => {
+  const r = repoWith({ set_lifecycle_state: () => [{ status: 'revoked' }] });
+  await r.repo.setLifecycleState(LINK_REF, 'revoked');
+  const t = r.textFor('set_lifecycle_state').toLowerCase();
+  assert.ok(t.includes('update identity_link'), 'expected an UPDATE');
+  assert.ok(!t.includes('delete'), 'must never DELETE');
+});
+
+C('H9 exact-pair existing → idempotent_existing (distinct from conflict; no insert)', async () => {
+  const r = repoWith({ ...SUCCESS_HANDLERS, find_active_pair: () => [{ link_id: LINK_REF }] });
+  const w = makeFakeWriter();
+  const svc = createIdentityLinkAdminProvisioningService({ repository: r.repo, audit: createIdentityLinkAuditAdapter({ writeAuditEvent: w.fn }) });
+  const res = await svc.provisionLink(goodRequest());
+  assert.equal(res.outcome, 'idempotent_existing');
+  assert.equal(res.mutated, false);
+  assert.ok(!r.ops().includes('create_active_link'), 'must not insert on idempotent');
+  assert.ok(w.writes.some((x) => x.actionId === IDENTITY_LINK_AUDIT_EVENTS.CREATE_IDEMPOTENT_EXISTING), 'expected idempotent audit');
+});
+
+C('H10 supabase-side conflict → supabase_already_linked (distinct from exact pair; no insert)', async () => {
+  const r = repoWith({ ...SUCCESS_HANDLERS, find_active_supabase: () => [{ link_id: LINK_REF }] });
+  const w = makeFakeWriter();
+  const svc = createIdentityLinkAdminProvisioningService({ repository: r.repo, audit: createIdentityLinkAuditAdapter({ writeAuditEvent: w.fn }) });
+  const res = await svc.provisionLink(goodRequest());
+  assert.equal(res.outcome, 'conflict');
+  assert.equal(res.reasonCode, 'supabase_already_linked');
+  assert.equal(res.mutated, false);
+  assert.ok(!r.ops().includes('create_active_link'), 'must not insert on conflict');
+});
+
+C('H11 audit sanitize strips array values (non-scalar)', async () => {
+  const out = sanitizeIdentityLinkAuditPayload({ outcome: 'succeeded', arr: [1, 2, 3] as any });
+  assert.deepEqual(Object.keys(out), ['outcome']);
+});
+
+C('H12 audit sanitize drops non-allow-listed keys (any case)', async () => {
+  const out = sanitizeIdentityLinkAuditPayload({ outcome: 'succeeded', Email: SECRET, FIREBASEUID: FB, Token: SECRET, OUTCOME: 'x' });
+  assert.deepEqual(Object.keys(out), ['outcome']);
+  assertNoSensitive(JSON.stringify(out), 'H12');
+});
+
+C('H13 audit builder never emits injected identifiers/secrets; actor stays null', async () => {
+  const evt = sampleEvent({ correlationLabel: 'corr-h13' }) as any;
+  evt.firebaseUid = FB; evt.supabaseUid = SB; evt.internalUserId = ANCHOR;
+  evt.email = SECRET; evt.token = SECRET; evt.actorInternalUserId = ANCHOR;
+  const input = buildIdentityLinkAuditWriteInput(evt);
+  const payload = buildSafeIdentityLinkAuditPayload(evt);
+  assert.equal(input.actorInternalUserId, null);
+  assertNoSensitive(JSON.stringify({ input, payload }), 'H13');
+});
+
+C('H14 hardened adapters remain M20.11-compatible (full success)', async () => {
+  const r = repoWith(SUCCESS_HANDLERS);
+  const w = makeFakeWriter();
+  const svc = createIdentityLinkAdminProvisioningService({ repository: r.repo, audit: createIdentityLinkAuditAdapter({ writeAuditEvent: w.fn }) });
+  const res = await svc.provisionLink(goodRequest());
+  assert.equal(res.ok, true);
+  assert.equal(res.reasonCode, 'provisioned');
+  assert.equal(res.mutated, true);
+  assert.ok(r.ops().includes('create_active_link'));
 });
 
 // ---- Runner ----
