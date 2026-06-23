@@ -31,8 +31,10 @@ import {
   BILLING_PLAN_SAFETY,
   BLOCKED_ACTIONS,
   BLOCKED_EVIDENCE,
+  COVERAGE_MATRIX,
   CROSS_TENANT_SAFETY,
   DATABASES,
+  DEV_REVIEW_POSTURE,
   DATA_GOVERNANCE,
   DATA_GOVERNANCE_DETAIL,
   DIAGNOSTIC_DETAIL,
@@ -40,6 +42,7 @@ import {
   ENTITLEMENT_POSTURE,
   EVIDENCE_REGISTER,
   EVIDENCE_SUMMARY,
+  FINAL_SAFETY_GATE,
   GOVERNANCE_QUEUE,
   IDENTITY_DETAIL,
   IDENTITY_LINK_FACTS,
@@ -53,6 +56,9 @@ import {
   PLAN_POSTURE,
   PLAN_SUBSCRIPTION_SUMMARY,
   POLICIES,
+  PRODUCTION_BLOCKERS,
+  PRODUCTION_PATH,
+  READINESS_GATE_CARDS,
   RISK_SUMMARY,
   ROLES,
   SCOPE_AXES,
@@ -69,6 +75,7 @@ import {
   TIMELINE_ENTRIES,
 } from './mockData';
 import type { EntitlementRow, GovDetail, Health, PostureCard, TenantStoreRow } from './types';
+import type { ReadinessGateCard } from './types';
 
 function ScreenHeading({ module }: { module: BcpModule }) {
   return (
@@ -1555,6 +1562,130 @@ function BillingPlanOperationsLens({ module }: { module: BcpModule; env: EnvLabe
   );
 }
 
+// --------------------------------------------------------------------------- Backend CP Readiness Gate (closeout)
+// Read-only/mock-only foundation closeout. Classifies DEV-review / live / backend /
+// production readiness and the path to production. No live data, no DB, no mutation.
+// Only interaction is read-only tab switching (local UI state).
+function ReadinessCardView({ card }: { card: ReadinessGateCard }) {
+  return (
+    <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">{card.stage}</span>
+        <DeferToneBadge tone={card.tone}>{card.verdict}</DeferToneBadge>
+      </div>
+      <p className="mt-2 text-xs text-slate-400">{card.detail}</p>
+    </div>
+  );
+}
+
+function BackendCpReadinessGate({ module }: { module: BcpModule; env: EnvLabel }) {
+  const [section, setSection] = React.useState('readiness');
+  return (
+    <div>
+      <ScreenHeading module={module} />
+      <ReadOnlyBadges extra={<DeferToneBadge tone="neutral">Foundation Closeout</DeferToneBadge>} />
+      <SectionTabs
+        tabs={[
+          { key: 'readiness', label: 'Readiness' },
+          { key: 'coverage', label: 'Module Coverage' },
+          { key: 'path', label: 'Production Path' },
+          { key: 'blockers', label: 'Blockers & Final Gate' },
+        ]}
+        active={section}
+        onSelect={setSection}
+      />
+
+      {section === 'readiness' && (
+        <>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {READINESS_GATE_CARDS.map((c) => (
+              <div key={c.stage}>
+                <ReadinessCardView card={c} />
+              </div>
+            ))}
+          </div>
+          <Panel title="DEV Review Readiness" subtitle="Foundation posture for read-only/mock-only DEV review (mock)" className="mt-5">
+            <PostureGrid cards={DEV_REVIEW_POSTURE} />
+          </Panel>
+        </>
+      )}
+
+      {section === 'coverage' && (
+        <Panel
+          title="Module Coverage Matrix"
+          subtitle="DEV-review vs live-readiness vs production-readiness per Backend Control Panel area (mock)"
+        >
+          <DataTable
+            minWidthClass="min-w-[860px]"
+            columns={['Module', 'Area', 'DEV Review', 'Live Readiness', 'Production', 'Safety Notes']}
+            rows={COVERAGE_MATRIX.map((r) => [
+              <span className="font-semibold text-slate-200">{r.module}</span>,
+              r.area,
+              <DeferToneBadge tone="healthy">{r.devReview}</DeferToneBadge>,
+              <DeferToneBadge tone="warning">{r.liveReadiness}</DeferToneBadge>,
+              <DeferToneBadge tone="blocked">{r.prodReadiness}</DeferToneBadge>,
+              <span className="text-slate-500">{r.note}</span>,
+            ])}
+          />
+        </Panel>
+      )}
+
+      {section === 'path' && (
+        <div className="space-y-4">
+          {PRODUCTION_PATH.map((p) => (
+            <div key={p.phase}>
+              <Panel
+                title={`${p.phase} — ${p.title}`}
+                subtitle={p.goal}
+                right={<DeferToneBadge tone={p.tone}>Not Ready</DeferToneBadge>}
+              >
+                <ul className="space-y-1.5">
+                  {p.items.map((it) => (
+                    <li key={it} className="flex items-center gap-2 text-sm text-slate-300">
+                      <LockIcon className="h-3.5 w-3.5 shrink-0 text-rose-300" />
+                      {it}
+                    </li>
+                  ))}
+                </ul>
+              </Panel>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {section === 'blockers' && (
+        <>
+          <Panel title="Blockers Before Production" subtitle="Required before controlled backend actions and production release (mock)" className="mb-4">
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {PRODUCTION_BLOCKERS.map((b) => (
+                <div key={b} className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-300">
+                  <LockIcon className="h-3.5 w-3.5 shrink-0 text-rose-300" />
+                  {b}
+                </div>
+              ))}
+            </div>
+          </Panel>
+          <Panel title="Final Safety Gate" subtitle="Foundation closeout classification (mock)" right={<DeferToneBadge tone="warning">Foundation Only</DeferToneBadge>}>
+            <div className="flex flex-wrap gap-2">
+              {FINAL_SAFETY_GATE.map((s) => (
+                <span key={s}>
+                  <DeferToneBadge tone={/:\s*yes$/i.test(s) ? 'healthy' : 'blocked'}>{s}</DeferToneBadge>
+                </span>
+              ))}
+            </div>
+            <p className="mt-3 text-xs text-slate-400">
+              The Backend Control Panel foundation is ready for DEV review only. Live read-only data, controlled
+              backend actions, and production release each remain NOT READY and require Phase 2, Phase 3, and Phase 4
+              respectively. The M20 identity-link / DEV test-data registry stream remains paused and unrelated to
+              this closeout.
+            </p>
+          </Panel>
+        </>
+      )}
+    </div>
+  );
+}
+
 // --------------------------------------------------------------------------- Router
 const INCLUDED: Record<string, (p: { module: BcpModule; env: EnvLabel }) => React.ReactNode> = {
   'access-gate': AccessGateInfo,
@@ -1576,6 +1707,7 @@ const INCLUDED: Record<string, (p: { module: BcpModule; env: EnvLabel }) => Reac
   'timeline-evidence-lens': TimelineEvidenceLens,
   'tenant-store-operations-lens': TenantStoreOperationsLens,
   'billing-plan-operations-lens': BillingPlanOperationsLens,
+  'readiness-gate': BackendCpReadinessGate,
 };
 
 export function ScreenRouter({ module, env }: { module: BcpModule; env: EnvLabel }) {

@@ -289,3 +289,33 @@ export interface EntitlementRow {
   reviewReason: string;
   tone: Health;
 }
+
+// Phase 1.6 M29 — read-only Backend CP Readiness Gate / foundation closeout
+// (presentational only). Safe placeholder labels only; no real data.
+
+/** Top-level readiness classification card (DEV review / live / backend / production). */
+export interface ReadinessGateCard {
+  stage: string;
+  verdict: string;
+  detail: string;
+  tone: Health;
+}
+
+/** Module coverage-matrix row: DEV-review vs live vs production readiness per BCP area. */
+export interface CoverageRow {
+  module: string;
+  area: string;
+  devReview: string;
+  liveReadiness: string;
+  prodReadiness: string;
+  note: string;
+}
+
+/** Production-path phase plan (Phase 2 live read-only / Phase 3 controlled actions / Phase 4 hardening). */
+export interface PhasePlan {
+  phase: string;
+  title: string;
+  goal: string;
+  items: string[];
+  tone: Health;
+}

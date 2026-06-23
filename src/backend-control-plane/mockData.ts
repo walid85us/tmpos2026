@@ -11,6 +11,7 @@ import type {
   AuditRow,
   BcpModule,
   BlockedAction,
+  CoverageRow,
   DatabaseRow,
   DiagnosticDetail,
   EntitlementRow,
@@ -24,9 +25,11 @@ import type {
   OpsJobDetail,
   OpsServiceDetail,
   PermissionRow,
+  PhasePlan,
   PolicyCard,
   PostureCard,
   ReadinessCard,
+  ReadinessGateCard,
   RunbookItem,
   ServiceCard,
   StoreRow,
@@ -37,7 +40,7 @@ import type {
 export const ENVIRONMENTS = ['DEV', 'STAGING', 'PRODUCTION'] as const;
 
 // ---------------------------------------------------------------------------
-// 32-module registry (drives the sidebar navigation and screen routing).
+// 33-module registry (drives the sidebar navigation and screen routing).
 // ---------------------------------------------------------------------------
 export const MODULES: BcpModule[] = [
   {
@@ -392,6 +395,17 @@ export const MODULES: BcpModule[] = [
     futureMilestone: 'Read-only commercial posture fed by governed read models (no payment/billing provider calls, no production billing exposure).',
     blockedActions: ['Charge / Refund / Invoice', 'Change plan / subscription', 'Assign entitlement/permission', 'Live payment/billing provider call', 'Any mutation'],
     reason: 'Observational billing/plan lens; no live billing data, no payment-provider calls, no billing management capability; not the SaaS Owner Platform.',
+  },
+  {
+    id: 'readiness-gate',
+    name: 'Backend CP Readiness Gate',
+    group: 'Overview',
+    state: 'Read-Only First',
+    status: 'included',
+    purpose: 'Phase 1.6 foundation closeout: classifies DEV-review / live-read-only / controlled-backend-action / production readiness and the path to production. Read-only/mock-only.',
+    futureMilestone: 'Phase 2 live read-only integration, Phase 3 controlled backend actions (RBAC/approval/audit/rollback), Phase 4 hardening and release gates.',
+    blockedActions: ['Any mutation', 'Any live data call', 'Any production action', 'Any backend write'],
+    reason: 'Closeout/readiness summary only; explicitly records that live data, backend actions, and production remain NOT READY.',
   },
 ];
 
@@ -872,4 +886,107 @@ export const BILLING_PLAN_SAFETY: string[] = [
   'No invoice / refund mutation',
   'No plan / permission mutation',
   'No live tenant billing data access',
+];
+
+// ===========================================================================
+// Phase 1.6 M29 — read-only / mock-only Backend CP Readiness Gate (closeout).
+// Foundation closeout & DEV review readiness. Safe placeholder labels only.
+// Records that live data, controlled backend actions, and production remain
+// NOT READY. Nothing is fetched; no DB / live API / mutation occurs.
+// ===========================================================================
+
+export const READINESS_GATE_CARDS: ReadinessGateCard[] = [
+  { stage: 'DEV Review', verdict: 'Ready', detail: 'Read-only/mock-only foundation is ready for DEV review under the DEV-gated route.', tone: 'healthy' },
+  { stage: 'Live Read-Only', verdict: 'Not Ready', detail: 'Requires Phase 2 live read-only API/data integration (governed read models, redaction).', tone: 'warning' },
+  { stage: 'Controlled Backend Actions', verdict: 'Not Ready', detail: 'Requires Phase 3 RBAC, approval workflow, audit logging, rollback rules, and safe mutation APIs.', tone: 'blocked' },
+  { stage: 'Production', verdict: 'Not Ready', detail: 'Requires Phase 4 hardening, security review, UAT, environment isolation, monitoring/logging, and release gates.', tone: 'blocked' },
+];
+
+export const DEV_REVIEW_POSTURE: PostureCard[] = [
+  { title: 'DEV-Gated', status: 'Enabled', detail: 'Route is DEV-gated and flag-guarded; not exposed in normal SaaS navigation.', tone: 'healthy' },
+  { title: 'Read-Only / Mock-Only', status: 'Enforced', detail: 'All screens render local static mock data; no mutating controls exist.', tone: 'healthy' },
+  { title: 'Code-Split', status: 'Preserved', detail: 'Backend Control Panel lazy-loads into its own chunk, separate from the SaaS app.', tone: 'healthy' },
+  { title: 'Safe Placeholder Data', status: 'Verified', detail: 'Only safe fake labels; no real tenant/billing/customer data, IDs, or secrets.', tone: 'healthy' },
+  { title: 'No Live API', status: 'Confirmed', detail: 'No fetch / live API / provider / payment / billing calls anywhere in the foundation.', tone: 'healthy' },
+  { title: 'No DB', status: 'Confirmed', detail: 'No DB connection, SQL, DDL, migration, or row write from the console.', tone: 'healthy' },
+  { title: 'No Mutation', status: 'Confirmed', detail: 'No backend / tenant / store / billing / identity-link / audit mutation capability.', tone: 'healthy' },
+];
+
+export const COVERAGE_MATRIX: CoverageRow[] = [
+  { module: 'Command Center / Overview', area: 'Overview', devReview: 'Ready', liveReadiness: 'Phase 2', prodReadiness: 'Phase 4', note: 'Mock posture tiles; no live aggregation.' },
+  { module: 'Foundation Screens (M22B/M22C)', area: 'Tenancy & Data / Identity / Governance', devReview: 'Ready', liveReadiness: 'Phase 2', prodReadiness: 'Phase 4', note: 'Read-only shell, tenants/stores/registry/services/identity/audit/policies (mock).' },
+  { module: 'System Operations Overview', area: 'Operations', devReview: 'Ready', liveReadiness: 'Phase 2', prodReadiness: 'Phase 4', note: 'Mock service/job/alert posture; no live health checks.' },
+  { module: 'Data Governance Overview', area: 'Database / Data Governance', devReview: 'Ready', liveReadiness: 'Phase 2', prodReadiness: 'Phase 4', note: 'Posture metadata only; no connection strings; no live DB calls.' },
+  { module: 'Identity Readiness Overview', area: 'Identity Readiness', devReview: 'Ready', liveReadiness: 'Phase 2', prodReadiness: 'Phase 4', note: 'Writes/execution blocked; M20 stream paused (NOT READY).' },
+  { module: 'Audit Governance Overview', area: 'Audit Governance', devReview: 'Ready', liveReadiness: 'Phase 2', prodReadiness: 'Phase 4', note: 'Append-only/redaction concept; no audit writes.' },
+  { module: 'Support & Diagnostics Overview', area: 'Support & Diagnostics', devReview: 'Ready', liveReadiness: 'Phase 2', prodReadiness: 'Phase 4', note: 'Static runbook labels; no live diagnostic invocation.' },
+  { module: 'Risk & Alerts Lens', area: 'Risk & Alerts', devReview: 'Ready', liveReadiness: 'Phase 2', prodReadiness: 'Phase 4', note: 'Observational; no alert sending or notification.' },
+  { module: 'Timeline & Evidence Lens', area: 'Timeline & Evidence', devReview: 'Ready', liveReadiness: 'Phase 2', prodReadiness: 'Phase 4', note: 'Safe labels only; no raw logs/diffs; no evidence ingestion.' },
+  { module: 'Tenant & Store Operations Lens', area: 'Tenant & Store Operations', devReview: 'Ready', liveReadiness: 'Phase 2', prodReadiness: 'Phase 4', note: 'No live tenant/store data; no mutation; cross-tenant blocked.' },
+  { module: 'Billing & Plan Operations Lens', area: 'Billing & Plan Operations', devReview: 'Ready', liveReadiness: 'Phase 2', prodReadiness: 'Phase 4', note: 'No payment/billing provider; no charge/refund/invoice; no plan mutation.' },
+  { module: 'Backend CP Readiness Gate', area: 'Overview / Closeout', devReview: 'Ready', liveReadiness: 'Phase 2', prodReadiness: 'Phase 4', note: 'This closeout view; read-only summary of foundation readiness.' },
+];
+
+export const PRODUCTION_PATH: PhasePlan[] = [
+  {
+    phase: 'Phase 2',
+    title: 'Live Read-Only Data Integration',
+    goal: 'Replace mock data with governed live read-only data — observational only, no mutation.',
+    items: [
+      'Real backend API contracts (read-only)',
+      'Governed read models / live read-only data services',
+      'Redaction and masking rules enforced server-side',
+      'Environment isolation (DEV / STAGING)',
+      'Read-only access scoping',
+    ],
+    tone: 'warning',
+  },
+  {
+    phase: 'Phase 3',
+    title: 'Controlled Backend Actions',
+    goal: 'Introduce governed, audited, reversible backend actions behind separation-of-duties.',
+    items: [
+      'RBAC enforcement (server-authoritative)',
+      'Approval workflow with separation of duties',
+      'Audit logging (append-only, redacted evidence)',
+      'Rollback / backout strategy',
+      'Safe mutation APIs (bounded, idempotent)',
+    ],
+    tone: 'blocked',
+  },
+  {
+    phase: 'Phase 4',
+    title: 'Production Hardening & Release Readiness',
+    goal: 'Harden, review, and gate for production release.',
+    items: [
+      'Security review and threat modeling',
+      'QA and UAT sign-off',
+      'Monitoring / alerting / logging',
+      'Environment isolation and secrets management',
+      'Production release gate and rollback drill',
+    ],
+    tone: 'blocked',
+  },
+];
+
+export const PRODUCTION_BLOCKERS: string[] = [
+  'Real backend API contracts',
+  'RBAC enforcement',
+  'Audit logging',
+  'Approval workflow',
+  'Rollback / backout strategy',
+  'Live read-only data services',
+  'Environment isolation',
+  'Redaction and masking rules',
+  'Monitoring / alerting',
+  'QA and UAT',
+  'Security review',
+  'Production release gate',
+];
+
+export const FINAL_SAFETY_GATE: string[] = [
+  'DEV review ready: yes',
+  'Live data ready: no',
+  'Backend mutation ready: no',
+  'Production ready: no',
 ];
