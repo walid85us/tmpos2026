@@ -26,6 +26,9 @@ import {
   AUDIT_DETAIL,
   AUDIT_EVENTS,
   AUDIT_READINESS,
+  BILLING_OPS_POSTURE,
+  BILLING_OPS_SUMMARY,
+  BILLING_PLAN_SAFETY,
   BLOCKED_ACTIONS,
   BLOCKED_EVIDENCE,
   CROSS_TENANT_SAFETY,
@@ -34,6 +37,7 @@ import {
   DATA_GOVERNANCE_DETAIL,
   DIAGNOSTIC_DETAIL,
   DIAGNOSTICS,
+  ENTITLEMENT_POSTURE,
   EVIDENCE_REGISTER,
   EVIDENCE_SUMMARY,
   GOVERNANCE_QUEUE,
@@ -46,6 +50,8 @@ import {
   OPS_METRICS,
   OPS_SERVICE_DETAIL,
   PERMISSION_MATRIX,
+  PLAN_POSTURE,
+  PLAN_SUBSCRIPTION_SUMMARY,
   POLICIES,
   RISK_SUMMARY,
   ROLES,
@@ -62,7 +68,7 @@ import {
   TENANT_STORE_READINESS,
   TIMELINE_ENTRIES,
 } from './mockData';
-import type { GovDetail, Health, PostureCard, TenantStoreRow } from './types';
+import type { EntitlementRow, GovDetail, Health, PostureCard, TenantStoreRow } from './types';
 
 function ScreenHeading({ module }: { module: BcpModule }) {
   return (
@@ -1397,6 +1403,158 @@ function TenantStoreOperationsLens({ module }: { module: BcpModule; env: EnvLabe
   );
 }
 
+// --------------------------------------------------------------------------- Billing & Plan Operations Lens
+// Read-only/mock-only billing, subscription, plan, and entitlement posture. Safe
+// fake labels only. No live billing/payment provider, no DB, no fetch, no mutation.
+// The only interaction is read-only tab switching and read-only row selection.
+function BillingPlanOperationsLens({ module }: { module: BcpModule; env: EnvLabel }) {
+  const [section, setSection] = React.useState('billing');
+  const [activeRow, setActiveRow] = React.useState(ENTITLEMENT_POSTURE[0].label);
+  const selected: EntitlementRow =
+    ENTITLEMENT_POSTURE.find((r) => r.label === activeRow) || ENTITLEMENT_POSTURE[0];
+  return (
+    <div>
+      <ScreenHeading module={module} />
+      <ReadOnlyBadges
+        extra={
+          <>
+            <DeferToneBadge tone="neutral">No Live Billing Data</DeferToneBadge>
+            <DeferToneBadge tone="blocked"><LockIcon className="h-3 w-3" /> No Payment Provider</DeferToneBadge>
+          </>
+        }
+      />
+      <SectionTabs
+        tabs={[
+          { key: 'billing', label: 'Billing Operations' },
+          { key: 'plans', label: 'Plans & Subscriptions' },
+          { key: 'entitlements', label: 'Entitlement Posture' },
+          { key: 'safety', label: 'Billing & Plan Safety' },
+        ]}
+        active={section}
+        onSelect={setSection}
+      />
+
+      {section === 'billing' && (
+        <>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+            {BILLING_OPS_SUMMARY.map((k) => (
+              <div key={k.label}>
+                <KpiCardView {...k} />
+              </div>
+            ))}
+          </div>
+          <Panel
+            title="Billing Posture"
+            subtitle="Observational only (mock) — no charge / refund / invoice / subscription-change controls"
+            className="mt-5"
+          >
+            <PostureGrid cards={BILLING_OPS_POSTURE} />
+          </Panel>
+        </>
+      )}
+
+      {section === 'plans' && (
+        <>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {PLAN_SUBSCRIPTION_SUMMARY.map((k) => (
+              <div key={k.label}>
+                <KpiCardView {...k} />
+              </div>
+            ))}
+          </div>
+          <Panel
+            title="Plan & Subscription Posture"
+            subtitle="Plan / subscription / plan-to-permission posture (mock) — no plan-change controls"
+            className="mt-5"
+          >
+            <PostureGrid cards={PLAN_POSTURE} />
+          </Panel>
+        </>
+      )}
+
+      {section === 'entitlements' && (
+        <>
+          <Panel
+            title="Entitlement / Feature Posture"
+            subtitle="Safe fake labels only — no raw permission/entitlement keys, no real billing data"
+            className="mb-4"
+          >
+            <div className="mb-3 flex flex-wrap gap-2">
+              {ENTITLEMENT_POSTURE.map((r) => (
+                <button
+                  key={r.label}
+                  type="button"
+                  onClick={() => setActiveRow(r.label)}
+                  aria-pressed={r.label === activeRow}
+                  className={cx(
+                    'rounded-lg border px-3 py-1.5 text-xs font-semibold transition',
+                    r.label === activeRow
+                      ? 'border-slate-600 bg-slate-800 text-slate-100'
+                      : 'border-slate-800 bg-slate-900/40 text-slate-400 hover:text-slate-200',
+                  )}
+                >
+                  {r.label}
+                </button>
+              ))}
+            </div>
+            <DataTable
+              minWidthClass="min-w-[720px]"
+              columns={['Label', 'Kind', 'Status', 'Gating', 'Review Reason']}
+              rows={ENTITLEMENT_POSTURE.map((r) => [
+                <span className="font-semibold text-slate-200">{r.label}</span>,
+                r.kind,
+                <DeferToneBadge tone={govTone(r.statusCategory)}>{r.statusCategory}</DeferToneBadge>,
+                <DeferToneBadge tone={r.tone}>{r.gating}</DeferToneBadge>,
+                <span className="text-slate-500">{r.reviewReason}</span>,
+              ])}
+            />
+          </Panel>
+          <Panel title="Detail Panel" subtitle="Read-only selection — no live drilldown, no billing API, no DB query">
+            <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm font-bold text-slate-100">{selected.label}</span>
+                <DeferToneBadge tone="neutral">{selected.kind}</DeferToneBadge>
+                <DeferToneBadge tone={govTone(selected.statusCategory)}>{selected.statusCategory}</DeferToneBadge>
+                <DeferToneBadge tone={selected.tone}>{selected.gating}</DeferToneBadge>
+              </div>
+              <div className="mt-3 text-sm text-slate-300">
+                <span className="text-slate-500">Review reason: </span>{selected.reviewReason}
+              </div>
+              <p className="mt-3 text-xs text-slate-400">
+                Observational only. No billing, invoice, refund, subscription, plan, permission, or entitlement
+                mutation controls exist; no live billing data is read and no payment provider is contacted.
+              </p>
+            </div>
+          </Panel>
+        </>
+      )}
+
+      {section === 'safety' && (
+        <Panel
+          title="Billing & Plan Safety"
+          subtitle="Production billing / live payment blocked-state posture (mock) — observational only"
+          right={<DeferToneBadge tone="blocked"><LockIcon className="h-3 w-3" /> Billing Locked</DeferToneBadge>}
+        >
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            {BILLING_PLAN_SAFETY.map((s) => (
+              <div key={s} className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-300">
+                <LockIcon className="h-3.5 w-3.5 shrink-0 text-rose-300" />
+                {s}
+              </div>
+            ))}
+          </div>
+          <p className="mt-3 text-xs text-slate-400">
+            The Backend Control Plane is internal DEV-only control-plane UI — not the SaaS Owner Platform. Billing
+            and plan views are observational only: no payment/billing provider calls, no invoice/refund/charge, no
+            plan/subscription/permission mutation, and no live tenant billing data occur here. The M20 stream
+            remains paused and is unrelated to this lens.
+          </p>
+        </Panel>
+      )}
+    </div>
+  );
+}
+
 // --------------------------------------------------------------------------- Router
 const INCLUDED: Record<string, (p: { module: BcpModule; env: EnvLabel }) => React.ReactNode> = {
   'access-gate': AccessGateInfo,
@@ -1417,6 +1575,7 @@ const INCLUDED: Record<string, (p: { module: BcpModule; env: EnvLabel }) => Reac
   'risk-alerts-lens': RiskAlertsLens,
   'timeline-evidence-lens': TimelineEvidenceLens,
   'tenant-store-operations-lens': TenantStoreOperationsLens,
+  'billing-plan-operations-lens': BillingPlanOperationsLens,
 };
 
 export function ScreenRouter({ module, env }: { module: BcpModule; env: EnvLabel }) {

@@ -272,3 +272,20 @@ export interface TenantStoreRow {
   reviewReason: string;
   tone: Health;
 }
+
+// Phase 1.6 M28 — read-only Billing & Plan Operations Lens (presentational only).
+
+/**
+ * Static entitlement / feature posture row. Safe fake labels ONLY (e.g.
+ * "Plan A", "Plan B", "Feature Group A") — never raw permission/entitlement
+ * keys, real billing/tenant/customer data, payment identifiers, or row values.
+ * Used by the entitlement posture table and the read-only detail panel.
+ */
+export interface EntitlementRow {
+  label: string;
+  kind: string;
+  statusCategory: string;
+  gating: string;
+  reviewReason: string;
+  tone: Health;
+}

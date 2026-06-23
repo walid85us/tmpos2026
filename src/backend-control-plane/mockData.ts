@@ -13,6 +13,7 @@ import type {
   BlockedAction,
   DatabaseRow,
   DiagnosticDetail,
+  EntitlementRow,
   EvidenceRow,
   GateRoleCard,
   GovDetail,
@@ -36,7 +37,7 @@ import type {
 export const ENVIRONMENTS = ['DEV', 'STAGING', 'PRODUCTION'] as const;
 
 // ---------------------------------------------------------------------------
-// 31-module registry (drives the sidebar navigation and screen routing).
+// 32-module registry (drives the sidebar navigation and screen routing).
 // ---------------------------------------------------------------------------
 export const MODULES: BcpModule[] = [
   {
@@ -380,6 +381,17 @@ export const MODULES: BcpModule[] = [
     futureMilestone: 'Read-only tenant/store posture fed by governed read models (no live tenant data, no mutation, no production exposure).',
     blockedActions: ['Create/Edit/Suspend tenant', 'Create/Edit/Disable store', 'Assign permissions', 'Cross-tenant access', 'Any mutation'],
     reason: 'Observational tenant/store lens; no live tenant/store data, no mutation capability; not the SaaS Owner Platform.',
+  },
+  {
+    id: 'billing-plan-operations-lens',
+    name: 'Billing & Plan Operations Lens',
+    group: 'Operations Expansion',
+    state: 'Read-Only First',
+    status: 'included',
+    purpose: 'Read-only/mock-only billing, subscription, plan, and entitlement posture. Safe fake labels only; no live billing systems, no charge/refund/invoice, no plan/permission mutation.',
+    futureMilestone: 'Read-only commercial posture fed by governed read models (no payment/billing provider calls, no production billing exposure).',
+    blockedActions: ['Charge / Refund / Invoice', 'Change plan / subscription', 'Assign entitlement/permission', 'Live payment/billing provider call', 'Any mutation'],
+    reason: 'Observational billing/plan lens; no live billing data, no payment-provider calls, no billing management capability; not the SaaS Owner Platform.',
   },
 ];
 
@@ -806,4 +818,58 @@ export const CROSS_TENANT_SAFETY: string[] = [
   'No DB read or write from this lens',
   'Tenant isolation boundary enforced (mock posture)',
   'No tenant / store mutation capability exists',
+];
+
+// ===========================================================================
+// Phase 1.6 M28 — read-only / mock-only Billing & Plan Operations Lens data.
+// SAFE FAKE LABELS ONLY (Plan A/B, Feature Group A). No real billing/tenant/
+// customer data, payment identifiers, emails, domains, raw IDs, row dumps,
+// secrets, DB URLs, tokens, permission/entitlement key lists, or mismatch
+// lists. Nothing is fetched; no live billing/payment provider is contacted.
+// The BCP is internal DEV-only control-plane UI — NOT the SaaS Owner Platform.
+// ===========================================================================
+
+export const BILLING_OPS_SUMMARY: Kpi[] = [
+  { label: 'Billing Accounts', value: '4', hint: 'Mock count', tone: 'neutral' },
+  { label: 'Active', value: '2', hint: 'Mock posture', tone: 'healthy' },
+  { label: 'Review Needed', value: '1', hint: 'Mock posture', tone: 'warning' },
+  { label: 'Blocked', value: '1', hint: 'Mock posture', tone: 'blocked' },
+  { label: 'Paused', value: '1', hint: 'Mock posture', tone: 'warning' },
+];
+
+export const PLAN_SUBSCRIPTION_SUMMARY: Kpi[] = [
+  { label: 'Plan A', value: '2', hint: 'Mock distribution', tone: 'neutral' },
+  { label: 'Plan B', value: '1', hint: 'Mock distribution', tone: 'neutral' },
+  { label: 'Active Subs', value: '2', hint: 'Mock posture', tone: 'healthy' },
+  { label: 'Trial / Paused', value: '1', hint: 'Mock posture', tone: 'warning' },
+];
+
+export const BILLING_OPS_POSTURE: PostureCard[] = [
+  { title: 'Billing Posture', status: 'Observational (mock)', detail: 'Billing posture shown as labels only; no charge, refund, or invoice action exists.', tone: 'neutral' },
+  { title: 'Payment Provider', status: 'No Live Calls', detail: 'No payment-provider or billing-provider calls are made from this lens.', tone: 'healthy' },
+  { title: 'Production Billing', status: 'Blocked', detail: 'Production billing actions are blocked; no live billing data is read.', tone: 'blocked' },
+  { title: 'Billing Writes', status: 'Blocked', detail: 'No invoice / refund / charge / subscription-change controls exist.', tone: 'blocked' },
+];
+
+export const PLAN_POSTURE: PostureCard[] = [
+  { title: 'Plan Posture', status: 'Plan A / Plan B (mock)', detail: 'Plan labels only; no plan-change controls exist in this lens.', tone: 'neutral' },
+  { title: 'Subscription Posture', status: 'Observational (mock)', detail: 'Subscription status shown as categories; no subscription mutation exists.', tone: 'neutral' },
+  { title: 'Plan-to-Permission', status: 'Read-Only (mock)', detail: 'Plan-to-permission posture as labels; no entitlement/permission assignment.', tone: 'neutral' },
+  { title: 'Plan Writes', status: 'Blocked', detail: 'No plan / permission / entitlement mutation controls exist.', tone: 'blocked' },
+];
+
+export const ENTITLEMENT_POSTURE: EntitlementRow[] = [
+  { label: 'Plan A', kind: 'Plan', statusCategory: 'Active', gating: 'Standard Gating', reviewReason: 'None — observational only', tone: 'healthy' },
+  { label: 'Plan B', kind: 'Plan', statusCategory: 'Review Needed', gating: 'Restricted Gating', reviewReason: 'Mock review-needed posture', tone: 'warning' },
+  { label: 'Feature Group A', kind: 'Feature Group', statusCategory: 'Active', gating: 'Standard Gating', reviewReason: 'None — observational only', tone: 'healthy' },
+  { label: 'Feature Group B', kind: 'Feature Group', statusCategory: 'Blocked', gating: 'Blocked Gating', reviewReason: 'Mock blocked posture', tone: 'blocked' },
+];
+
+export const BILLING_PLAN_SAFETY: string[] = [
+  'Production billing is blocked',
+  'Live payment actions are blocked',
+  'No payment provider calls',
+  'No invoice / refund mutation',
+  'No plan / permission mutation',
+  'No live tenant billing data access',
 ];
