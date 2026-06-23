@@ -30,12 +30,13 @@ import type {
   ServiceCard,
   StoreRow,
   TenantRow,
+  TenantStoreRow,
 } from './types';
 
 export const ENVIRONMENTS = ['DEV', 'STAGING', 'PRODUCTION'] as const;
 
 // ---------------------------------------------------------------------------
-// 30-module registry (drives the sidebar navigation and screen routing).
+// 31-module registry (drives the sidebar navigation and screen routing).
 // ---------------------------------------------------------------------------
 export const MODULES: BcpModule[] = [
   {
@@ -368,6 +369,17 @@ export const MODULES: BcpModule[] = [
     futureMilestone: 'Read-only evidence aggregation fed by governed read models (no live evidence ingestion, no audit writes).',
     blockedActions: ['Ingest evidence', 'Write audit', 'Export raw evidence', 'Any mutation'],
     reason: 'Static timeline and evidence posture only; no live audit/DB/evidence ingestion.',
+  },
+  {
+    id: 'tenant-store-operations-lens',
+    name: 'Tenant & Store Operations Lens',
+    group: 'Operations Expansion',
+    state: 'Read-Only First',
+    status: 'included',
+    purpose: 'Read-only/mock-only tenant & store operational posture — counts, plan/permission posture, readiness, and cross-tenant safety. Safe fake labels only.',
+    futureMilestone: 'Read-only tenant/store posture fed by governed read models (no live tenant data, no mutation, no production exposure).',
+    blockedActions: ['Create/Edit/Suspend tenant', 'Create/Edit/Disable store', 'Assign permissions', 'Cross-tenant access', 'Any mutation'],
+    reason: 'Observational tenant/store lens; no live tenant/store data, no mutation capability; not the SaaS Owner Platform.',
   },
 ];
 
@@ -743,4 +755,55 @@ export const BLOCKED_EVIDENCE: string[] = [
   'No fixture has been provisioned',
   'No M20.17C re-attempt is authorized',
   'No identity-link writes are authorized',
+];
+
+// ===========================================================================
+// Phase 1.6 M27 — read-only / mock-only Tenant & Store Operations Lens data.
+// SAFE FAKE LABELS ONLY (Tenant A/B, Store 01/02, Region A, Plan A). No real
+// tenant/store/customer names, emails, domains, phone numbers, addresses, raw
+// IDs, or row values. Nothing is fetched; no live tenant/store data is read.
+// The BCP is internal DEV-only control-plane UI — NOT the SaaS Owner Platform.
+// ===========================================================================
+
+export const TENANT_OPS_SUMMARY: Kpi[] = [
+  { label: 'Total Tenants', value: '4', hint: 'Mock count', tone: 'neutral' },
+  { label: 'Active', value: '2', hint: 'Mock posture', tone: 'healthy' },
+  { label: 'Paused', value: '1', hint: 'Mock posture', tone: 'warning' },
+  { label: 'Review Needed', value: '1', hint: 'Mock posture', tone: 'warning' },
+];
+
+export const STORE_OPS_SUMMARY: Kpi[] = [
+  { label: 'Total Stores', value: '5', hint: 'Mock count', tone: 'neutral' },
+  { label: 'Operational', value: '4', hint: 'Mock posture', tone: 'healthy' },
+  { label: 'Review Needed', value: '1', hint: 'Mock posture', tone: 'warning' },
+];
+
+export const TENANT_OPS_POSTURE: PostureCard[] = [
+  { title: 'Tenant Isolation', status: 'Isolated (mock)', detail: 'Database-per-tenant isolation posture — observational label only.', tone: 'healthy' },
+  { title: 'Plan Posture', status: 'Plan A (mock)', detail: 'Plan label only; no plan changes are possible from this lens.', tone: 'neutral' },
+  { title: 'Permission Posture', status: 'Read-Only (mock)', detail: 'Permission posture is shown as a label; no assignment controls exist.', tone: 'neutral' },
+  { title: 'Tenant Writes', status: 'Blocked', detail: 'No create / edit / suspend tenant controls exist in this lens.', tone: 'blocked' },
+];
+
+export const STORE_OPS_POSTURE: PostureCard[] = [
+  { title: 'Store Isolation', status: 'Store-Scoped (mock)', detail: 'Store-scoped isolation posture — observational label only.', tone: 'healthy' },
+  { title: 'POS Readiness', status: 'Ready (mock)', detail: 'POS readiness shown as a label; no live store/POS data is read.', tone: 'healthy' },
+  { title: 'Permission Posture', status: 'Read-Only (mock)', detail: 'Store permission posture is a label only; no assignment controls exist.', tone: 'neutral' },
+  { title: 'Store Writes', status: 'Blocked', detail: 'No create / edit / disable store controls exist in this lens.', tone: 'blocked' },
+];
+
+export const TENANT_STORE_READINESS: TenantStoreRow[] = [
+  { label: 'Tenant A', kind: 'Tenant', region: 'Region A', statusCategory: 'Active', operational: 'Operational', plan: 'Plan A', permission: 'Read-Only', reviewReason: 'None — observational only', tone: 'healthy' },
+  { label: 'Tenant B', kind: 'Tenant', region: 'Region A', statusCategory: 'Review Needed', operational: 'Degraded', plan: 'Plan A', permission: 'Read-Only', reviewReason: 'Mock review-needed posture', tone: 'warning' },
+  { label: 'Store 01', kind: 'Store', region: 'Region A', statusCategory: 'Operational', operational: 'Operational', plan: 'Plan A', permission: 'Read-Only', reviewReason: 'None — observational only', tone: 'healthy' },
+  { label: 'Store 02', kind: 'Store', region: 'Region A', statusCategory: 'Review Needed', operational: 'Operational', plan: 'Plan A', permission: 'Read-Only', reviewReason: 'Mock review-needed posture', tone: 'warning' },
+];
+
+export const CROSS_TENANT_SAFETY: string[] = [
+  'Cross-tenant access is blocked',
+  'No live tenant / store data access',
+  'No production action available',
+  'No DB read or write from this lens',
+  'Tenant isolation boundary enforced (mock posture)',
+  'No tenant / store mutation capability exists',
 ];

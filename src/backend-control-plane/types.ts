@@ -252,3 +252,23 @@ export interface EvidenceRow {
   tone: Health;
   note: string;
 }
+
+// Phase 1.6 M27 — read-only Tenant & Store Operations Lens (presentational only).
+
+/**
+ * Static tenant/store readiness row. Safe fake labels ONLY (e.g. "Tenant A",
+ * "Store 01", "Region A", "Plan A") — never real tenant/store/customer names,
+ * emails, domains, raw IDs, or row values. Used by the readiness table and the
+ * read-only detail panel. No live tenant/store data is ever referenced.
+ */
+export interface TenantStoreRow {
+  label: string;
+  kind: string;
+  region: string;
+  statusCategory: string;
+  operational: string;
+  plan: string;
+  permission: string;
+  reviewReason: string;
+  tone: Health;
+}

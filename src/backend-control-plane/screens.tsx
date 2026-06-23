@@ -28,6 +28,7 @@ import {
   AUDIT_READINESS,
   BLOCKED_ACTIONS,
   BLOCKED_EVIDENCE,
+  CROSS_TENANT_SAFETY,
   DATABASES,
   DATA_GOVERNANCE,
   DATA_GOVERNANCE_DETAIL,
@@ -51,12 +52,17 @@ import {
   SCOPE_AXES,
   SERVICES,
   STORES,
+  STORE_OPS_POSTURE,
+  STORE_OPS_SUMMARY,
   SYSTEM_POSTURE,
   SYSTEM_POSTURE_NOTES,
   TENANTS,
+  TENANT_OPS_POSTURE,
+  TENANT_OPS_SUMMARY,
+  TENANT_STORE_READINESS,
   TIMELINE_ENTRIES,
 } from './mockData';
-import type { GovDetail, Health, PostureCard } from './types';
+import type { GovDetail, Health, PostureCard, TenantStoreRow } from './types';
 
 function ScreenHeading({ module }: { module: BcpModule }) {
   return (
@@ -1234,6 +1240,163 @@ function TimelineEvidenceLens({ module }: { module: BcpModule; env: EnvLabel }) 
   );
 }
 
+// --------------------------------------------------------------------------- Tenant & Store Operations Lens
+// Read-only/mock-only tenant & store operational posture. Safe fake labels only.
+// No live tenant/store data, no DB, no fetch, no mutation. The only interaction is
+// read-only tab switching and read-only row selection (local UI state).
+function TenantStoreOperationsLens({ module }: { module: BcpModule; env: EnvLabel }) {
+  const [section, setSection] = React.useState('tenants');
+  const [activeRow, setActiveRow] = React.useState(TENANT_STORE_READINESS[0].label);
+  const selected: TenantStoreRow =
+    TENANT_STORE_READINESS.find((r) => r.label === activeRow) || TENANT_STORE_READINESS[0];
+  return (
+    <div>
+      <ScreenHeading module={module} />
+      <ReadOnlyBadges
+        extra={
+          <>
+            <DeferToneBadge tone="neutral">No Live Tenant Data</DeferToneBadge>
+            <DeferToneBadge tone="blocked"><LockIcon className="h-3 w-3" /> No DB Access</DeferToneBadge>
+          </>
+        }
+      />
+      <SectionTabs
+        tabs={[
+          { key: 'tenants', label: 'Tenant Operations' },
+          { key: 'stores', label: 'Store Operations' },
+          { key: 'readiness', label: 'Readiness Table' },
+          { key: 'safety', label: 'Cross-Tenant Safety' },
+        ]}
+        active={section}
+        onSelect={setSection}
+      />
+
+      {section === 'tenants' && (
+        <>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {TENANT_OPS_SUMMARY.map((k) => (
+              <div key={k.label}>
+                <KpiCardView {...k} />
+              </div>
+            ))}
+          </div>
+          <Panel
+            title="Tenant Posture"
+            subtitle="Isolation, plan, and permission posture (mock) — no create / edit / suspend controls"
+            className="mt-5"
+          >
+            <PostureGrid cards={TENANT_OPS_POSTURE} />
+          </Panel>
+        </>
+      )}
+
+      {section === 'stores' && (
+        <>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            {STORE_OPS_SUMMARY.map((k) => (
+              <div key={k.label}>
+                <KpiCardView {...k} />
+              </div>
+            ))}
+          </div>
+          <Panel
+            title="Store Posture"
+            subtitle="Isolation, POS readiness, and permission posture (mock) — no create / edit / disable controls"
+            className="mt-5"
+          >
+            <PostureGrid cards={STORE_OPS_POSTURE} />
+          </Panel>
+        </>
+      )}
+
+      {section === 'readiness' && (
+        <>
+          <Panel
+            title="Tenant & Store Readiness"
+            subtitle="Safe fake labels only — no real tenant/store/customer names, emails, domains, or IDs"
+            className="mb-4"
+          >
+            <div className="mb-3 flex flex-wrap gap-2">
+              {TENANT_STORE_READINESS.map((r) => (
+                <button
+                  key={r.label}
+                  type="button"
+                  onClick={() => setActiveRow(r.label)}
+                  aria-pressed={r.label === activeRow}
+                  className={cx(
+                    'rounded-lg border px-3 py-1.5 text-xs font-semibold transition',
+                    r.label === activeRow
+                      ? 'border-slate-600 bg-slate-800 text-slate-100'
+                      : 'border-slate-800 bg-slate-900/40 text-slate-400 hover:text-slate-200',
+                  )}
+                >
+                  {r.label}
+                </button>
+              ))}
+            </div>
+            <DataTable
+              minWidthClass="min-w-[820px]"
+              columns={['Label', 'Kind', 'Region', 'Status', 'Operational', 'Plan', 'Permission', 'Review Reason']}
+              rows={TENANT_STORE_READINESS.map((r) => [
+                <span className="font-semibold text-slate-200">{r.label}</span>,
+                r.kind,
+                r.region,
+                <DeferToneBadge tone={govTone(r.statusCategory)}>{r.statusCategory}</DeferToneBadge>,
+                <DeferToneBadge tone={r.tone}>{r.operational}</DeferToneBadge>,
+                r.plan,
+                <DeferToneBadge tone="neutral">{r.permission}</DeferToneBadge>,
+                <span className="text-slate-500">{r.reviewReason}</span>,
+              ])}
+            />
+          </Panel>
+          <Panel title="Detail Panel" subtitle="Read-only selection — no live drilldown, no tenant/store API, no DB query">
+            <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm font-bold text-slate-100">{selected.label}</span>
+                <DeferToneBadge tone="neutral">{selected.kind}</DeferToneBadge>
+                <DeferToneBadge tone="neutral">{selected.region}</DeferToneBadge>
+                <DeferToneBadge tone={govTone(selected.statusCategory)}>{selected.statusCategory}</DeferToneBadge>
+                <DeferToneBadge tone={selected.tone}>{selected.operational}</DeferToneBadge>
+              </div>
+              <div className="mt-3 grid grid-cols-1 gap-2 text-sm text-slate-300 sm:grid-cols-2">
+                <div><span className="text-slate-500">Plan posture: </span>{selected.plan}</div>
+                <div><span className="text-slate-500">Permission posture: </span>{selected.permission}</div>
+                <div className="sm:col-span-2"><span className="text-slate-500">Review reason: </span>{selected.reviewReason}</div>
+              </div>
+              <p className="mt-3 text-xs text-slate-400">
+                Observational only. No tenant/store create, edit, suspend, disable, or permission-assignment
+                controls exist; no live tenant/store data is read.
+              </p>
+            </div>
+          </Panel>
+        </>
+      )}
+
+      {section === 'safety' && (
+        <Panel
+          title="Cross-Tenant Safety"
+          subtitle="Tenant isolation blocked-state posture (mock) — observational only"
+          right={<DeferToneBadge tone="blocked"><LockIcon className="h-3 w-3" /> Isolation Enforced</DeferToneBadge>}
+        >
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            {CROSS_TENANT_SAFETY.map((s) => (
+              <div key={s} className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-300">
+                <LockIcon className="h-3.5 w-3.5 shrink-0 text-rose-300" />
+                {s}
+              </div>
+            ))}
+          </div>
+          <p className="mt-3 text-xs text-slate-400">
+            The Backend Control Plane is internal DEV-only control-plane UI — not the SaaS Owner Platform. Tenant
+            and store views are observational only: no cross-tenant access, no live data, no production action, and
+            no DB read/write occur here. The M20 stream remains paused and is unrelated to this lens.
+          </p>
+        </Panel>
+      )}
+    </div>
+  );
+}
+
 // --------------------------------------------------------------------------- Router
 const INCLUDED: Record<string, (p: { module: BcpModule; env: EnvLabel }) => React.ReactNode> = {
   'access-gate': AccessGateInfo,
@@ -1253,6 +1416,7 @@ const INCLUDED: Record<string, (p: { module: BcpModule; env: EnvLabel }) => Reac
   'support-diagnostics-overview': SupportDiagnosticsOverview,
   'risk-alerts-lens': RiskAlertsLens,
   'timeline-evidence-lens': TimelineEvidenceLens,
+  'tenant-store-operations-lens': TenantStoreOperationsLens,
 };
 
 export function ScreenRouter({ module, env }: { module: BcpModule; env: EnvLabel }) {
