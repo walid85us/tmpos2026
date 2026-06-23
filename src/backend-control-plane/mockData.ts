@@ -14,6 +14,9 @@ import type {
   Kpi,
   PermissionRow,
   PolicyCard,
+  PostureCard,
+  ReadinessCard,
+  RunbookItem,
   ServiceCard,
   StoreRow,
   TenantRow,
@@ -22,7 +25,7 @@ import type {
 export const ENVIRONMENTS = ['DEV', 'STAGING', 'PRODUCTION'] as const;
 
 // ---------------------------------------------------------------------------
-// 23-module registry (drives the sidebar navigation and screen routing).
+// 28-module registry (drives the sidebar navigation and screen routing).
 // ---------------------------------------------------------------------------
 export const MODULES: BcpModule[] = [
   {
@@ -278,10 +281,67 @@ export const MODULES: BcpModule[] = [
     blockedActions: ['Disable audit/approval/production-lock/redaction (never)'],
     reason: 'Placeholder: governed settings are a later milestone.',
   },
+  // ----- Phase 1.6 M23 — read-only operations expansion (included screens) -----
+  {
+    id: 'system-operations-overview',
+    name: 'System Operations Overview',
+    group: 'Operations Expansion',
+    state: 'Read-Only First',
+    status: 'included',
+    purpose: 'Mock-only operational posture: service health, uptime, queues, jobs, and alerts.',
+    futureMilestone: 'Aggregated read-only operations telemetry fed by governed read models.',
+    blockedActions: ['Restart', 'Scale', 'Pause/Retry/Cancel jobs', 'Any control action'],
+    reason: 'Read-only operations command surface with mock-only cards. No live systems.',
+  },
+  {
+    id: 'data-governance-overview',
+    name: 'Data Governance Overview',
+    group: 'Operations Expansion',
+    state: 'Read-Only First',
+    status: 'included',
+    purpose: 'Mock-only schema health, migration posture, tenant-isolation, and RLS/identity-boundary status.',
+    futureMilestone: 'Read-only governance posture fed by a governed registry (no live DB calls).',
+    blockedActions: ['Apply migration', 'Provision DB', 'Any mutation', 'Live DB call (never here)'],
+    reason: 'Posture metadata only; never connection strings; no live DB calls.',
+  },
+  {
+    id: 'identity-readiness-overview',
+    name: 'Identity Readiness Overview',
+    group: 'Operations Expansion',
+    state: 'Read-Only First',
+    status: 'included',
+    purpose: 'Read-only readiness for platform_identity, identity_link, session authorization, token bridge, shadow comparison, and the paused M20 stream.',
+    futureMilestone: 'Read-only readiness surface; writes/execution remain separately gated.',
+    blockedActions: ['Create/disable/revoke link', 'Provision fixture', 'Create registry entry', 'Enable server authority'],
+    reason: 'Explicitly shows writes-blocked / execution-blocked and the M20 paused status.',
+  },
+  {
+    id: 'audit-governance-overview',
+    name: 'Audit Governance Overview',
+    group: 'Operations Expansion',
+    state: 'Read-Only First',
+    status: 'included',
+    purpose: 'Mock-only audit readiness, approval-required indicators, redaction policy, and immutable-audit concept.',
+    futureMilestone: 'Read-only audit governance posture (append-only, redacted evidence only).',
+    blockedActions: ['Write audit_event', 'Edit/delete evidence (never)', 'Approve/Reject'],
+    reason: 'Append-only / redaction-first concept cards; no audit writes.',
+  },
+  {
+    id: 'support-diagnostics-overview',
+    name: 'Support & Diagnostics Overview',
+    group: 'Operations Expansion',
+    state: 'Read-Only First',
+    status: 'included',
+    purpose: 'Mock-only diagnostics cards and static, non-clickable operational runbook labels.',
+    futureMilestone: 'Bounded, audited, redacted-only diagnostics (no live invocation).',
+    blockedActions: ['Live diagnostic invocation', 'Route/API call', 'Raw identifier/PII access (never)'],
+    reason: 'Static runbook labels and mock diagnostics only; no live diagnostic invocation.',
+  },
 ];
 
 export const NAV_GROUP_ORDER = [
   'Overview',
+  'Operations Expansion',
   'Tenancy & Data',
   'Platform Operations',
   'Identity & Security',
@@ -425,4 +485,67 @@ export const PERMISSION_MATRIX: PermissionRow[] = [
   { role: 'Security Admin', read: 'View', request: 'Request', approve: 'Approve (not own)', execute: 'DEV after approval', production: 'Governed' },
   { role: 'Read-Only Auditor', read: 'View', request: '—', approve: '—', execute: '—', production: 'Read-only' },
   { role: 'Approval Reviewer', read: 'View (queue)', request: '—', approve: 'Approve (not own)', execute: '—', production: 'Governed' },
+];
+
+// ===========================================================================
+// Phase 1.6 M23 — read-only operations expansion mock data.
+// Every value is a fictional, redaction-safe label. No live systems, no DB,
+// no API, no secrets, no raw identifiers. Nothing here is fetched.
+// ===========================================================================
+
+// 1) System Operations Overview ---------------------------------------------
+export const OPS_METRICS: Kpi[] = [
+  { label: 'Mock Uptime', value: '99.9%', hint: 'Mock posture', tone: 'healthy' },
+  { label: 'Queue Depth', value: 'Nominal', hint: 'Mock queue', tone: 'warning' },
+  { label: 'Active Jobs', value: '5', hint: 'Mock workers', tone: 'warning' },
+  { label: 'Critical Alerts', value: '1', hint: 'Mock alert', tone: 'blocked' },
+  { label: 'Error Rate', value: 'Low', hint: 'Mock posture', tone: 'healthy' },
+  { label: 'Throughput', value: 'Nominal', hint: 'Mock posture', tone: 'healthy' },
+];
+
+export const SYSTEM_POSTURE: PostureCard[] = [
+  { title: 'Operational Posture', status: 'Read-Only', detail: 'No control actions available from this console.', tone: 'neutral' },
+  { title: 'Active Environment', status: 'DEV', detail: 'Backend Control Plane is DEV-gated.', tone: 'healthy' },
+  { title: 'Production', status: 'Locked', detail: 'Production remains blocked by default.', tone: 'blocked' },
+  { title: 'Write Path', status: 'Blocked', detail: 'No mutating action, no live API, no DB write.', tone: 'blocked' },
+];
+
+// 2) Data Governance Overview -----------------------------------------------
+export const DATA_GOVERNANCE: PostureCard[] = [
+  { title: 'Schema Health', status: 'Schema v-mock OK', detail: 'Posture only — no live DB calls.', tone: 'healthy' },
+  { title: 'Migration Posture', status: 'Up to date (mock)', detail: 'Migration state is observed, never applied here.', tone: 'healthy' },
+  { title: 'Tenant Isolation', status: 'Database-per-Tenant', detail: 'Isolation posture (mock) — opaque references only.', tone: 'healthy' },
+  { title: 'RLS / Identity Boundary', status: 'RLS Protected', detail: 'Row-level security posture (mock). Boundary enforced.', tone: 'healthy' },
+  { title: 'Connection', status: 'Masked', detail: 'Connection strings are never shown.', tone: 'neutral' },
+  { title: 'Backups', status: 'Backup Ready (mock)', detail: 'Backup posture only; no restore action here.', tone: 'healthy' },
+];
+
+// 3) Identity / Authorization Readiness Overview ----------------------------
+export const IDENTITY_READINESS: ReadinessCard[] = [
+  { domain: 'platform_identity', status: 'Schema present (mock)', writeState: 'Writes blocked', detail: 'Posture only; no rows shown; opaque references only.', tone: 'healthy' },
+  { domain: 'identity_link', status: 'DEV table empty · dormant', writeState: 'Writes blocked', detail: 'Default OFF · unwired · RLS protected.', tone: 'neutral' },
+  { domain: 'Session Authorization', status: 'Shadow / read-only', writeState: 'Not authoritative', detail: 'Server-derived authority is not enabled; Firebase remains authoritative.', tone: 'neutral' },
+  { domain: 'Token Bridge', status: 'Not invoked', writeState: 'Execution blocked', detail: 'No token bridge invocation from this console.', tone: 'neutral' },
+  { domain: 'Shadow Comparison', status: 'Not invoked', writeState: 'Execution blocked', detail: 'No comparison / harness / feed invocation.', tone: 'neutral' },
+  { domain: 'M20 Identity-Link Stream', status: 'Paused', writeState: 'Execution blocked', detail: 'M20.24 NOT READY · M20.20 blocked · M20.17C blocked · no Controlled Pair A.', tone: 'warning' },
+];
+
+// 4) Audit / Governance Overview --------------------------------------------
+export const AUDIT_READINESS: PostureCard[] = [
+  { title: 'Audit Readiness', status: 'Append-only concept (mock)', detail: 'Immutable, append-only audit model (mock).', tone: 'healthy' },
+  { title: 'Approval Required', status: 'Owner + Reviewer (SoD)', detail: 'Sensitive actions require approval and separation of duties.', tone: 'warning' },
+  { title: 'Redaction Policy', status: 'Redaction-First', detail: 'Aggregate / redacted evidence only; no raw values.', tone: 'healthy' },
+  { title: 'Immutable Audit', status: 'Append-Only (mock)', detail: 'Evidence is never edited or deleted.', tone: 'healthy' },
+  { title: 'Audit Writes', status: 'Blocked', detail: 'No audit_event writes from this read-only console.', tone: 'blocked' },
+  { title: 'Evidence Form', status: 'Aggregate / Redacted', detail: 'Counts, booleans, and safe reason codes only.', tone: 'neutral' },
+];
+
+// 5) Support / Diagnostics Overview -----------------------------------------
+export const DIAGNOSTICS: RunbookItem[] = [
+  { label: 'Service Health Runbook', category: 'Operations', note: 'Static label — no live invocation.' },
+  { label: 'Database Posture Runbook', category: 'Data', note: 'Static label — no live DB calls.' },
+  { label: 'Identity Readiness Runbook', category: 'Identity', note: 'Static label — read-only.' },
+  { label: 'Audit Evidence Runbook', category: 'Governance', note: 'Static label — redacted only.' },
+  { label: 'Incident Response Runbook', category: 'Support', note: 'Static label — no live diagnostics.' },
+  { label: 'Backup / Recovery Runbook', category: 'Data', note: 'Static label — no restore action.' },
 ];

@@ -22,18 +22,25 @@ import {
 import {
   APPROVALS,
   AUDIT_EVENTS,
+  AUDIT_READINESS,
   DATABASES,
+  DATA_GOVERNANCE,
+  DIAGNOSTICS,
   IDENTITY_LINK_FACTS,
   IDENTITY_LINK_TIMELINE,
+  IDENTITY_READINESS,
   KPIS,
+  OPS_METRICS,
   PERMISSION_MATRIX,
   POLICIES,
   ROLES,
   SCOPE_AXES,
   SERVICES,
   STORES,
+  SYSTEM_POSTURE,
   TENANTS,
 } from './mockData';
+import type { PostureCard } from './types';
 
 function ScreenHeading({ module }: { module: BcpModule }) {
   return (
@@ -478,6 +485,204 @@ function AccessGateInfo({ module }: { module: BcpModule; env: EnvLabel }) {
   );
 }
 
+// =========================================================================
+// Phase 1.6 M23 — read-only / mock-only operations expansion screens.
+// Presentational only. No fetch, no mutation, no backend/DB/API calls.
+// =========================================================================
+
+// Shared safety badge row shown at the top of every expansion screen.
+function ReadOnlyBadges({ extra }: { extra?: React.ReactNode }) {
+  return (
+    <div className="mb-4 flex flex-wrap gap-2">
+      <DeferToneBadge tone="neutral">Read-Only</DeferToneBadge>
+      <DeferToneBadge tone="neutral">Mock-Only</DeferToneBadge>
+      <DeferToneBadge tone="healthy">DEV Only</DeferToneBadge>
+      <DeferToneBadge tone="blocked"><LockIcon className="h-3 w-3" /> Production Blocked</DeferToneBadge>
+      <DeferToneBadge tone="blocked">Writes Blocked</DeferToneBadge>
+      {extra}
+    </div>
+  );
+}
+
+// Reusable posture-tile grid (system / data / audit overviews).
+function PostureGrid({ cards }: { cards: PostureCard[] }) {
+  return (
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      {cards.map((c) => (
+        <div key={c.title} className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">{c.title}</span>
+            <HealthLabel tone={c.tone}>{c.status}</HealthLabel>
+          </div>
+          <p className="mt-2 text-xs text-slate-400">{c.detail}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// --------------------------------------------------------------------------- System Operations Overview
+function SystemOperationsOverview({ module }: { module: BcpModule; env: EnvLabel }) {
+  return (
+    <div>
+      <ScreenHeading module={module} />
+      <ReadOnlyBadges />
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+        {OPS_METRICS.map((k) => (
+          <div key={k.label}>
+            <KpiCardView {...k} />
+          </div>
+        ))}
+      </div>
+      <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <Panel title="Service Health" subtitle="Read-only / mock-only — no live systems">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            {SERVICES.map((s) => (
+              <div key={s.name} className="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
+                <HealthLabel tone={s.tone}>{s.name}</HealthLabel>
+                <div className="mt-1 text-[11px] text-slate-500">{s.status} · {s.uptime}</div>
+              </div>
+            ))}
+          </div>
+        </Panel>
+        <Panel title="Operational Posture" subtitle="Production locked · write path blocked (mock)">
+          <PostureGrid cards={SYSTEM_POSTURE} />
+        </Panel>
+      </div>
+    </div>
+  );
+}
+
+// --------------------------------------------------------------------------- Data Governance Overview
+function DataGovernanceOverview({ module }: { module: BcpModule; env: EnvLabel }) {
+  return (
+    <div>
+      <ScreenHeading module={module} />
+      <ReadOnlyBadges extra={<DeferToneBadge tone="neutral">No Live DB Calls</DeferToneBadge>} />
+      <Panel title="Data Governance Posture" subtitle="Schema / migration / isolation / RLS posture (mock)" className="mb-4">
+        <PostureGrid cards={DATA_GOVERNANCE} />
+      </Panel>
+      <Panel
+        title="Schema & Migration Posture"
+        subtitle="Posture metadata only — connection strings are never shown"
+        right={<DeferToneBadge tone="neutral">No Live DB Calls</DeferToneBadge>}
+      >
+        <DataTable
+          columns={['Scope', 'Environment', 'Schema', 'Migration', 'RLS', 'Connection']}
+          rows={DATABASES.map((d) => [
+            <HealthLabel tone={d.tone}>{d.scope}</HealthLabel>,
+            d.environment,
+            d.schema,
+            d.migration,
+            <DeferToneBadge tone="healthy">{d.rls}</DeferToneBadge>,
+            <DeferToneBadge tone="neutral">{d.connection}</DeferToneBadge>,
+          ])}
+        />
+      </Panel>
+    </div>
+  );
+}
+
+// --------------------------------------------------------------------------- Identity Readiness Overview
+function IdentityReadinessOverview({ module }: { module: BcpModule; env: EnvLabel }) {
+  return (
+    <div>
+      <ScreenHeading module={module} />
+      <ReadOnlyBadges extra={<DeferToneBadge tone="warning">M20 Stream Paused</DeferToneBadge>} />
+      <Panel title="Identity / Authorization Readiness" subtitle="Read-only status — writes and execution remain blocked (mock)" className="mb-4">
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+          {IDENTITY_READINESS.map((r) => (
+            <div key={r.domain} className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-mono text-xs font-semibold text-slate-200">{r.domain}</span>
+                <HealthLabel tone={r.tone}>{r.status}</HealthLabel>
+              </div>
+              <p className="mt-2 text-xs text-slate-400">{r.detail}</p>
+              <div className="mt-3">
+                <DeferToneBadge tone="blocked"><LockIcon className="h-3 w-3" /> {r.writeState}</DeferToneBadge>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Panel>
+      <Panel title="Stream Status" subtitle="Aligned with accepted M20 paused state">
+        <div className="flex flex-wrap gap-2">
+          <DeferToneBadge tone="warning">M20.24-OptionC1 — NOT READY</DeferToneBadge>
+          <DeferToneBadge tone="blocked">M20.20 Execution Blocked</DeferToneBadge>
+          <DeferToneBadge tone="blocked">M20.17C Blocked</DeferToneBadge>
+          <DeferToneBadge tone="neutral">No Controlled Pair A</DeferToneBadge>
+          <DeferToneBadge tone="neutral">Identity-Link Wiring Absent</DeferToneBadge>
+          <DeferToneBadge tone="blocked">No Identity-Link Writes</DeferToneBadge>
+          <DeferToneBadge tone="blocked">No Registry Entry Creation</DeferToneBadge>
+          <DeferToneBadge tone="blocked">No Fixture Provisioning</DeferToneBadge>
+        </div>
+        <p className="mt-3 text-xs text-slate-400">
+          This overview is observational only. It performs no identity-link creation, no registry-entry
+          creation, and no fixture provisioning. Server authorization remains non-authoritative.
+        </p>
+      </Panel>
+    </div>
+  );
+}
+
+// --------------------------------------------------------------------------- Audit Governance Overview
+function AuditGovernanceOverview({ module }: { module: BcpModule; env: EnvLabel }) {
+  return (
+    <div>
+      <ScreenHeading module={module} />
+      <ReadOnlyBadges extra={<DeferToneBadge tone="neutral">Append-Only Concept</DeferToneBadge>} />
+      <Panel title="Audit & Governance Readiness" subtitle="Append-only / redaction-first concept (mock)" className="mb-4">
+        <PostureGrid cards={AUDIT_READINESS} />
+      </Panel>
+      <Panel title="Governance Indicators" subtitle="Approval-required · redaction · immutability (mock)">
+        <div className="flex flex-wrap gap-2">
+          <ActionChipView action="Approval Required" />
+          <ActionChipView action="Owner Approval" />
+          <ActionChipView action="Separation of Duties" />
+          <ActionChipView action="Audit Required" />
+          <DeferToneBadge tone="healthy"><ShieldIcon className="h-3 w-3" /> Redaction-First</DeferToneBadge>
+          <DeferToneBadge tone="healthy"><CheckIcon className="h-3 w-3" /> Immutable Audit</DeferToneBadge>
+          <DeferToneBadge tone="blocked"><LockIcon className="h-3 w-3" /> No Audit Writes</DeferToneBadge>
+        </div>
+        <p className="mt-3 text-xs text-slate-400">
+          No audit_event is written from this console. Evidence is aggregate / redacted only — no raw
+          identifiers, secrets, or payloads.
+        </p>
+      </Panel>
+    </div>
+  );
+}
+
+// --------------------------------------------------------------------------- Support & Diagnostics Overview
+function SupportDiagnosticsOverview({ module }: { module: BcpModule; env: EnvLabel }) {
+  return (
+    <div>
+      <ScreenHeading module={module} />
+      <ReadOnlyBadges extra={<DeferToneBadge tone="neutral">No Live Invocation</DeferToneBadge>} />
+      <Panel title="Diagnostics & Runbooks" subtitle="Static labels only — no live diagnostic invocation, no route/API calls">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {DIAGNOSTICS.map((d) => (
+            <div key={d.label} className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
+              <div className="flex items-center gap-2">
+                <ShieldIcon className="h-4 w-4 text-sky-300" />
+                <span className="text-sm font-bold text-slate-100">{d.label}</span>
+              </div>
+              <div className="mt-1.5 text-xs text-slate-400">Category: {d.category}</div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <DeferToneBadge tone="neutral">{d.note}</DeferToneBadge>
+              </div>
+            </div>
+          ))}
+        </div>
+        <p className="mt-4 text-xs text-slate-400">
+          Runbook entries are static, non-clickable labels. This console invokes no live diagnostics, makes
+          no route/API calls, and exposes no raw identifiers or secrets.
+        </p>
+      </Panel>
+    </div>
+  );
+}
+
 // --------------------------------------------------------------------------- Router
 const INCLUDED: Record<string, (p: { module: BcpModule; env: EnvLabel }) => React.ReactNode> = {
   'access-gate': AccessGateInfo,
@@ -490,6 +695,11 @@ const INCLUDED: Record<string, (p: { module: BcpModule; env: EnvLabel }) => Reac
   'identity-links': IdentityLinks,
   'audit-approvals': AuditApprovals,
   'policies-guardrails': PoliciesGuardrails,
+  'system-operations-overview': SystemOperationsOverview,
+  'data-governance-overview': DataGovernanceOverview,
+  'identity-readiness-overview': IdentityReadinessOverview,
+  'audit-governance-overview': AuditGovernanceOverview,
+  'support-diagnostics-overview': SupportDiagnosticsOverview,
 };
 
 export function ScreenRouter({ module, env }: { module: BcpModule; env: EnvLabel }) {

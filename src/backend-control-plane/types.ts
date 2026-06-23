@@ -129,3 +129,30 @@ export interface PermissionRow {
   execute: string;
   production: string;
 }
+
+// Phase 1.6 M23 — read-only operations expansion (presentational only).
+
+/** Generic read-only posture tile (system / data / audit overviews). */
+export interface PostureCard {
+  title: string;
+  status: string;
+  detail: string;
+  tone: Health;
+}
+
+/** Identity / authorization readiness tile with an explicit blocked write/execute state. */
+export interface ReadinessCard {
+  domain: string;
+  status: string;
+  /** Explicit "writes blocked" / "execution blocked" / "not authoritative" label. */
+  writeState: string;
+  detail: string;
+  tone: Health;
+}
+
+/** Static, non-clickable runbook / diagnostics label (no live invocation). */
+export interface RunbookItem {
+  label: string;
+  category: string;
+  note: string;
+}
