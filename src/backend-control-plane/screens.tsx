@@ -27,11 +27,14 @@ import {
   AUDIT_EVENTS,
   AUDIT_READINESS,
   BLOCKED_ACTIONS,
+  BLOCKED_EVIDENCE,
   DATABASES,
   DATA_GOVERNANCE,
   DATA_GOVERNANCE_DETAIL,
   DIAGNOSTIC_DETAIL,
   DIAGNOSTICS,
+  EVIDENCE_REGISTER,
+  EVIDENCE_SUMMARY,
   GOVERNANCE_QUEUE,
   IDENTITY_DETAIL,
   IDENTITY_LINK_FACTS,
@@ -51,6 +54,7 @@ import {
   SYSTEM_POSTURE,
   SYSTEM_POSTURE_NOTES,
   TENANTS,
+  TIMELINE_ENTRIES,
 } from './mockData';
 import type { GovDetail, Health, PostureCard } from './types';
 
@@ -1112,6 +1116,124 @@ function RiskAlertsLens({ module }: { module: BcpModule; env: EnvLabel }) {
   );
 }
 
+// --------------------------------------------------------------------------- Timeline & Evidence Lens
+function TimelineEvidenceLens({ module }: { module: BcpModule; env: EnvLabel }) {
+  const [section, setSection] = React.useState('timeline');
+  const [activeM, setActiveM] = React.useState(TIMELINE_ENTRIES[0].milestone);
+  const selected = TIMELINE_ENTRIES.find((t) => t.milestone === activeM) || TIMELINE_ENTRIES[0];
+  return (
+    <div>
+      <ScreenHeading module={module} />
+      <ReadOnlyBadges extra={<DeferToneBadge tone="neutral">No Live Evidence</DeferToneBadge>} />
+      <SectionTabs
+        tabs={[
+          { key: 'timeline', label: 'Milestone Timeline' },
+          { key: 'evidence', label: 'Evidence Summary' },
+          { key: 'register', label: 'Evidence Register' },
+          { key: 'blocked', label: 'Blocked Context' },
+        ]}
+        active={section}
+        onSelect={setSection}
+      />
+
+      {section === 'timeline' && (
+        <>
+          <Panel title="Milestone Timeline" subtitle="Static history — safe labels only, no raw logs or commit diffs" className="mb-4">
+            <div className="space-y-2">
+              {TIMELINE_ENTRIES.map((t) => (
+                <button
+                  key={t.milestone}
+                  type="button"
+                  onClick={() => setActiveM(t.milestone)}
+                  aria-pressed={t.milestone === activeM}
+                  className={cx(
+                    'flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-left transition',
+                    t.milestone === activeM ? 'border-slate-600 bg-slate-800/60' : 'border-slate-800 bg-slate-900/40 hover:bg-slate-800/30',
+                  )}
+                >
+                  <Monogram label={t.milestone} tone={t.tone} />
+                  <span className="min-w-0 flex-1">
+                    <span className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-bold text-slate-100">{t.milestone}</span>
+                      <span className="text-xs text-slate-400">{t.title}</span>
+                    </span>
+                    <span className="mt-0.5 block text-[11px] text-slate-500">{t.checkpoint}</span>
+                  </span>
+                  <DeferToneBadge tone={t.tone}>{t.state}</DeferToneBadge>
+                </button>
+              ))}
+            </div>
+          </Panel>
+          <Panel title="Timeline Detail" subtitle="Read-only selection — no live drilldown, no audit/DB query">
+            <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm font-bold text-slate-100">{selected.milestone}</span>
+                <span className="text-xs text-slate-400">{selected.title}</span>
+                <DeferToneBadge tone={selected.tone}>{selected.state}</DeferToneBadge>
+                <DeferToneBadge tone="neutral">{selected.checkpoint}</DeferToneBadge>
+              </div>
+              <p className="mt-2 text-sm text-slate-300">{selected.detail}</p>
+            </div>
+          </Panel>
+        </>
+      )}
+
+      {section === 'evidence' && (
+        <>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+            {EVIDENCE_SUMMARY.map((k) => (
+              <div key={k.label}>
+                <KpiCardView {...k} />
+              </div>
+            ))}
+          </div>
+          <Panel title="Evidence Posture" subtitle="DEV-gated · read-only/mock-only · code-split preserved (mock)" className="mt-5">
+            <div className="flex flex-wrap gap-2">
+              <DeferToneBadge tone="healthy">Build Green</DeferToneBadge>
+              <DeferToneBadge tone="healthy">Code-Split Preserved</DeferToneBadge>
+              <DeferToneBadge tone="healthy">DEV-Gated</DeferToneBadge>
+              <DeferToneBadge tone="neutral">Read-Only / Mock-Only</DeferToneBadge>
+              <DeferToneBadge tone="blocked"><LockIcon className="h-3 w-3" /> No Live Evidence Ingestion</DeferToneBadge>
+              <DeferToneBadge tone="blocked"><LockIcon className="h-3 w-3" /> No Audit Writes</DeferToneBadge>
+            </div>
+          </Panel>
+        </>
+      )}
+
+      {section === 'register' && (
+        <Panel title="Evidence Register" subtitle="Static evidence categories with safe status + note — no raw terminal output">
+          <DataTable
+            minWidthClass="min-w-[680px]"
+            columns={['Category', 'Status', 'Note']}
+            rows={EVIDENCE_REGISTER.map((e) => [
+              <span className="font-semibold text-slate-200">{e.category}</span>,
+              <DeferToneBadge tone={e.tone}>{e.status}</DeferToneBadge>,
+              <span className="text-slate-500">{e.note}</span>,
+            ])}
+          />
+        </Panel>
+      )}
+
+      {section === 'blocked' && (
+        <Panel title="Blocked Evidence Context" subtitle="M20 paused state — observational only" right={<DeferToneBadge tone="warning">M20 NOT READY</DeferToneBadge>}>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            {BLOCKED_EVIDENCE.map((b) => (
+              <div key={b} className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-300">
+                <LockIcon className="h-3.5 w-3.5 shrink-0 text-rose-300" />
+                {b}
+              </div>
+            ))}
+          </div>
+          <p className="mt-3 text-xs text-slate-400">
+            This context is observational only. No evidence ingestion, audit write, or export occurs. The M20
+            stream remains paused until separately approved.
+          </p>
+        </Panel>
+      )}
+    </div>
+  );
+}
+
 // --------------------------------------------------------------------------- Router
 const INCLUDED: Record<string, (p: { module: BcpModule; env: EnvLabel }) => React.ReactNode> = {
   'access-gate': AccessGateInfo,
@@ -1130,6 +1252,7 @@ const INCLUDED: Record<string, (p: { module: BcpModule; env: EnvLabel }) => Reac
   'audit-governance-overview': AuditGovernanceOverview,
   'support-diagnostics-overview': SupportDiagnosticsOverview,
   'risk-alerts-lens': RiskAlertsLens,
+  'timeline-evidence-lens': TimelineEvidenceLens,
 };
 
 export function ScreenRouter({ module, env }: { module: BcpModule; env: EnvLabel }) {

@@ -232,3 +232,23 @@ export interface BlockedAction {
   action: string;
   reason: string;
 }
+
+// Phase 1.6 M26 — read-only Timeline & Evidence Lens (presentational only).
+
+/** Static milestone timeline entry (safe labels only; no raw logs or commit diffs). */
+export interface TimelineEntry {
+  milestone: string;
+  title: string;
+  state: string;
+  checkpoint: string;
+  tone: Health;
+  detail: string;
+}
+
+/** Static evidence-register row (safe status + note; no raw terminal output). */
+export interface EvidenceRow {
+  category: string;
+  status: string;
+  tone: Health;
+  note: string;
+}

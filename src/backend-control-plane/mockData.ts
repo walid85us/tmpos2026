@@ -13,11 +13,13 @@ import type {
   BlockedAction,
   DatabaseRow,
   DiagnosticDetail,
+  EvidenceRow,
   GateRoleCard,
   GovDetail,
   GovernanceItem,
   IdentityDetail,
   Kpi,
+  TimelineEntry,
   OpsJobDetail,
   OpsServiceDetail,
   PermissionRow,
@@ -33,7 +35,7 @@ import type {
 export const ENVIRONMENTS = ['DEV', 'STAGING', 'PRODUCTION'] as const;
 
 // ---------------------------------------------------------------------------
-// 29-module registry (drives the sidebar navigation and screen routing).
+// 30-module registry (drives the sidebar navigation and screen routing).
 // ---------------------------------------------------------------------------
 export const MODULES: BcpModule[] = [
   {
@@ -355,6 +357,17 @@ export const MODULES: BcpModule[] = [
     futureMilestone: 'Read-only risk aggregation fed by governed read models (no alert sending or notification, ever).',
     blockedActions: ['Send alert', 'Notify', 'Approve / Deny / Resolve / Assign', 'Any mutation'],
     reason: 'Observational risk lens; no live alerting/notification; the paused M20 state is shown accurately.',
+  },
+  {
+    id: 'timeline-evidence-lens',
+    name: 'Timeline & Evidence Lens',
+    group: 'Operations Expansion',
+    state: 'Read-Only First',
+    status: 'included',
+    purpose: 'Read-only/mock-only milestone history, accepted checkpoints, backup/evidence posture, and blocked-state context.',
+    futureMilestone: 'Read-only evidence aggregation fed by governed read models (no live evidence ingestion, no audit writes).',
+    blockedActions: ['Ingest evidence', 'Write audit', 'Export raw evidence', 'Any mutation'],
+    reason: 'Static timeline and evidence posture only; no live audit/DB/evidence ingestion.',
   },
 ];
 
@@ -684,4 +697,50 @@ export const BLOCKED_ACTIONS: BlockedAction[] = [
   { action: 'Live diagnostics', reason: 'Diagnostics are static labels; no live invocation and no route / API calls.' },
   { action: 'DB migrations', reason: 'Observed only; no migration runner; no DDL is executed from this console.' },
   { action: 'Production exposure', reason: 'Production remains locked; the Backend Control Panel is DEV-gated and never exposed to production.' },
+];
+
+// ===========================================================================
+// Phase 1.6 M26 — read-only / mock-only Timeline & Evidence Lens data.
+// Safe labels only. No raw logs, no commit diffs, no terminal output dumps,
+// no live audit/DB/evidence ingestion. Nothing is fetched or written.
+// ===========================================================================
+
+export const TIMELINE_ENTRIES: TimelineEntry[] = [
+  { milestone: 'M21', title: 'BCP Charter / Governance / IA', state: 'Accepted · Backed Up', checkpoint: 'Backed up', tone: 'healthy', detail: 'Backend Control Plane charter, governance, information architecture, and visual architecture plan.' },
+  { milestone: 'M22A', title: 'Read-Only Shell UI Plan', state: 'Accepted · Backed Up', checkpoint: 'Backed up', tone: 'healthy', detail: 'Read-only shell / UI foundation planning.' },
+  { milestone: 'M22B', title: 'Read-Only Shell Implementation', state: 'Accepted · Backed Up', checkpoint: 'Backed up', tone: 'healthy', detail: 'DEV-gated, read-only/mock-only shell implementation; code-split.' },
+  { milestone: 'M22C', title: 'Responsive Polish', state: 'Accepted · Backed Up', checkpoint: 'Backed up', tone: 'healthy', detail: 'Responsive polish and read-only shell refinement.' },
+  { milestone: 'M23', title: 'Operations Expansion', state: 'Accepted · Backed Up', checkpoint: '681f228', tone: 'healthy', detail: 'Five read-only/mock-only operational overview screens + Operations Expansion nav group.' },
+  { milestone: 'M24', title: 'Detail Drilldowns', state: 'Accepted · Backed Up', checkpoint: 'd95105c', tone: 'healthy', detail: 'Read-only Overview/Detail tabs added to the five M23 screens.' },
+  { milestone: 'M25', title: 'Risk & Alerts Lens', state: 'Accepted · Backed Up', checkpoint: '2422776', tone: 'healthy', detail: 'Read-only/mock-only risk summary, alert categories, governance queue, blocked register.' },
+  { milestone: 'M20', title: 'Identity-Link / Test-Data Stream', state: 'Paused · NOT READY', checkpoint: 'Blocked', tone: 'warning', detail: 'M20.24 Decision B NOT READY; owner/reviewer/separation approval signals missing; no Controlled Pair A; M20.20 and M20.17C blocked.' },
+];
+
+export const EVIDENCE_SUMMARY: Kpi[] = [
+  { label: 'Accepted Milestones', value: '7', hint: 'BCP M21–M25 (+M22A/B/C)', tone: 'healthy' },
+  { label: 'Backed Up', value: '7', hint: 'Fast-forward pushes', tone: 'healthy' },
+  { label: 'Blocked Items', value: '6', hint: 'M20 paused context', tone: 'blocked' },
+  { label: 'Paused Streams', value: '1', hint: 'M20 NOT READY', tone: 'warning' },
+  { label: 'Build', value: 'Green', hint: 'Mock posture', tone: 'healthy' },
+  { label: 'Code-Split', value: 'Preserved', hint: 'BCP lazy chunk', tone: 'healthy' },
+];
+
+export const EVIDENCE_REGISTER: EvidenceRow[] = [
+  { category: 'Build Evidence', status: 'Green', tone: 'healthy', note: 'Build passes (mock posture). No raw terminal output shown.' },
+  { category: 'Type-Check Baseline Evidence', status: 'Baseline', tone: 'healthy', note: 'Zero new BCP errors; pre-existing baseline only (safe summary).' },
+  { category: 'Backup Evidence', status: 'Backed Up', tone: 'healthy', note: 'Accepted checkpoints pushed fast-forward (safe labels only).' },
+  { category: 'Gating Evidence', status: 'DEV-Gated', tone: 'healthy', note: 'BCP route is DEV-gated and flag-guarded.' },
+  { category: 'Read-Only Evidence', status: 'Read-Only', tone: 'healthy', note: 'Mock-only; no mutating controls.' },
+  { category: 'No-DB Evidence', status: 'No DB', tone: 'neutral', note: 'No DB connection, SQL, or write from this console.' },
+  { category: 'No-Production-Exposure Evidence', status: 'Locked', tone: 'blocked', note: 'Production remains locked; no production exposure.' },
+  { category: 'M20 Paused Evidence', status: 'NOT READY', tone: 'warning', note: 'M20.24 Decision B; approval signals missing; M20.17C blocked.' },
+];
+
+export const BLOCKED_EVIDENCE: string[] = [
+  'M20.24 Decision B remains NOT READY',
+  'Owner / reviewer / separation approval signals are missing',
+  'No eligible Controlled Pair A exists',
+  'No fixture has been provisioned',
+  'No M20.17C re-attempt is authorized',
+  'No identity-link writes are authorized',
 ];
