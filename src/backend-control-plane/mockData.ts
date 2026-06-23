@@ -10,8 +10,13 @@ import type {
   AuditRow,
   BcpModule,
   DatabaseRow,
+  DiagnosticDetail,
   GateRoleCard,
+  GovDetail,
+  IdentityDetail,
   Kpi,
+  OpsJobDetail,
+  OpsServiceDetail,
   PermissionRow,
   PolicyCard,
   PostureCard,
@@ -548,4 +553,76 @@ export const DIAGNOSTICS: RunbookItem[] = [
   { label: 'Audit Evidence Runbook', category: 'Governance', note: 'Static label — redacted only.' },
   { label: 'Incident Response Runbook', category: 'Support', note: 'Static label — no live diagnostics.' },
   { label: 'Backup / Recovery Runbook', category: 'Data', note: 'Static label — no restore action.' },
+];
+
+// ===========================================================================
+// Phase 1.6 M24 — read-only / mock-only detail drilldown data.
+// Fictional, redaction-safe labels only. No live systems, DB, API, secrets,
+// or raw identifiers. Nothing here is fetched or invokable.
+// ===========================================================================
+
+// 1) System Operations Detail -----------------------------------------------
+export const OPS_SERVICE_DETAIL: OpsServiceDetail[] = [
+  { name: 'Auth Service', tone: 'healthy', status: 'Service Healthy', uptime: 'Mock 99.9%', latency: 'Nominal', lastChecked: 'Mock recent' },
+  { name: 'POS Service', tone: 'healthy', status: 'Service Healthy', uptime: 'Mock 99.9%', latency: 'Nominal', lastChecked: 'Mock recent' },
+  { name: 'Repairs Service', tone: 'healthy', status: 'Service Healthy', uptime: 'Mock 99.8%', latency: 'Nominal', lastChecked: 'Mock recent' },
+  { name: 'Inventory Service', tone: 'warning', status: 'Queue Warning', uptime: 'Mock 99.4%', latency: 'Elevated (mock)', lastChecked: 'Mock recent' },
+  { name: 'Shipping Service', tone: 'healthy', status: 'Service Healthy', uptime: 'Mock 99.9%', latency: 'Nominal', lastChecked: 'Mock recent' },
+  { name: 'Identity Link Service', tone: 'neutral', status: 'Default OFF', uptime: 'Unwired', latency: 'N/A', lastChecked: 'N/A' },
+  { name: 'Audit Service', tone: 'healthy', status: 'Service Healthy', uptime: 'Append-only', latency: 'Nominal', lastChecked: 'Mock recent' },
+  { name: 'Worker Service', tone: 'warning', status: 'Queue Warning', uptime: 'Mock 99.5%', latency: 'Elevated (mock)', lastChecked: 'Mock recent' },
+];
+
+export const OPS_JOB_DETAIL: OpsJobDetail[] = [
+  { name: 'Nightly Backup (mock)', type: 'Job', state: 'Scheduled', severity: 'Info', lastEvent: 'Event Redacted' },
+  { name: 'Inventory Sync (mock)', type: 'Queue', state: 'Backlogged', severity: 'Warning', lastEvent: 'Event Redacted' },
+  { name: 'Report Build (mock)', type: 'Job', state: 'Idle', severity: 'Info', lastEvent: 'Event Redacted' },
+  { name: 'Worker Pool (mock)', type: 'Queue', state: 'Degraded', severity: 'Warning', lastEvent: 'Event Redacted' },
+  { name: 'Critical Alert (mock)', type: 'Alert', state: 'Open', severity: 'Critical', lastEvent: 'Event Redacted' },
+];
+
+export const SYSTEM_POSTURE_NOTES: string[] = [
+  'This console is observational only — no run, repair, restart, or scale actions exist here.',
+  'Service health, uptime, queue, job, and alert values are mock-only and not from live systems.',
+  'No live health check is performed; nothing is fetched.',
+  'Production remains locked; the write path is blocked.',
+];
+
+// 2) Data Governance Detail --------------------------------------------------
+export const DATA_GOVERNANCE_DETAIL: GovDetail[] = [
+  { area: 'Schema Posture', posture: 'Schema v-mock', status: 'Healthy (mock)', lastReviewed: 'Mock recent', note: 'Posture only — no DB introspection.' },
+  { area: 'Migration Posture', posture: 'Up to date (mock)', status: 'Healthy (mock)', lastReviewed: 'Mock recent', note: 'Observed only — no migration runner.' },
+  { area: 'Store Migration', posture: 'Migration Pending (mock)', status: 'Warning (mock)', lastReviewed: 'Mock recent', note: 'Observed only — no apply here.' },
+  { area: 'Tenant Isolation', posture: 'Database-per-Tenant', status: 'Healthy (mock)', lastReviewed: 'Mock recent', note: 'Opaque references only.' },
+  { area: 'RLS / Identity Boundary', posture: 'RLS Protected', status: 'Healthy (mock)', lastReviewed: 'Mock recent', note: 'Boundary enforced (mock).' },
+  { area: 'Connection Posture', posture: 'Masked', status: 'Neutral', lastReviewed: 'Mock recent', note: 'Connection strings never shown.' },
+];
+
+// 3) Identity Readiness Detail ----------------------------------------------
+export const IDENTITY_DETAIL: IdentityDetail[] = [
+  { domain: 'platform_identity', posture: 'Schema present (mock)', writeState: 'Writes blocked', executeState: 'No row exposure', authority: 'App-owned anchor', note: 'Posture only; opaque references; no rows shown.' },
+  { domain: 'identity_link', posture: 'DEV table empty · dormant', writeState: 'Writes blocked', executeState: 'No create/disable/revoke', authority: 'Not authoritative', note: 'Default OFF · unwired · RLS protected.' },
+  { domain: 'Session Authorization', posture: 'Shadow / read-only', writeState: 'No write', executeState: 'Not enabled', authority: 'Firebase authoritative', note: 'Server-derived authority not enabled.' },
+  { domain: 'Token Bridge', posture: 'Not invoked', writeState: 'No write', executeState: 'Execution blocked', authority: 'N/A', note: 'No token bridge invocation.' },
+  { domain: 'Shadow Comparison', posture: 'Not invoked', writeState: 'No write', executeState: 'Execution blocked', authority: 'N/A', note: 'No comparison / harness / feed invocation.' },
+  { domain: 'M20 Identity-Link Stream', posture: 'Paused (M20.24 NOT READY)', writeState: 'Writes blocked', executeState: 'Execution blocked', authority: 'No Controlled Pair A', note: 'M20.20 blocked · M20.17C blocked · approval signals missing.' },
+];
+
+// 4) Audit Governance Detail -------------------------------------------------
+export const AUDIT_DETAIL: GovDetail[] = [
+  { area: 'Audit Readiness', posture: 'Append-only concept', status: 'Healthy (mock)', lastReviewed: 'Mock recent', note: 'Immutable, append-only model (mock).' },
+  { area: 'Approval Posture', posture: 'Owner + Reviewer (SoD)', status: 'Required', lastReviewed: 'Mock recent', note: 'Requester never equals approver.' },
+  { area: 'Redaction Policy', posture: 'Redaction-first', status: 'Healthy (mock)', lastReviewed: 'Mock recent', note: 'Aggregate / redacted evidence only.' },
+  { area: 'Immutability', posture: 'Append-only', status: 'Healthy (mock)', lastReviewed: 'Mock recent', note: 'Evidence never edited or deleted.' },
+  { area: 'Audit Writes', posture: 'Blocked', status: 'Blocked', lastReviewed: 'Mock recent', note: 'No audit_event writes from this console.' },
+];
+
+// 5) Support & Diagnostics Detail -------------------------------------------
+export const DIAGNOSTIC_DETAIL: DiagnosticDetail[] = [
+  { label: 'Service Health Runbook', category: 'Operations', severity: 'Info', owner: 'Operations (mock)', status: 'Read-Only', note: 'Not invokable — static label.' },
+  { label: 'Database Posture Runbook', category: 'Data', severity: 'Info', owner: 'Data (mock)', status: 'Read-Only', note: 'Not invokable — no live DB calls.' },
+  { label: 'Identity Readiness Runbook', category: 'Identity', severity: 'Warning', owner: 'Security (mock)', status: 'Read-Only', note: 'Not invokable — read-only.' },
+  { label: 'Audit Evidence Runbook', category: 'Governance', severity: 'Info', owner: 'Governance (mock)', status: 'Read-Only', note: 'Not invokable — redacted only.' },
+  { label: 'Incident Response Runbook', category: 'Support', severity: 'Critical', owner: 'On-call (mock)', status: 'Read-Only', note: 'Not invokable — no live diagnostics.' },
+  { label: 'Backup / Recovery Runbook', category: 'Data', severity: 'Warning', owner: 'Data (mock)', status: 'Read-Only', note: 'Not invokable — no restore action.' },
 ];

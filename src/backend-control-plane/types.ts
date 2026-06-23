@@ -156,3 +156,53 @@ export interface RunbookItem {
   category: string;
   note: string;
 }
+
+// Phase 1.6 M24 — read-only detail drilldowns (presentational only).
+
+/** Service-by-service operational detail (mock; no live health check). */
+export interface OpsServiceDetail {
+  name: string;
+  tone: Health;
+  status: string;
+  uptime: string;
+  latency: string;
+  lastChecked: string;
+}
+
+/** Job / queue / alert detail row (mock). */
+export interface OpsJobDetail {
+  name: string;
+  type: string;
+  state: string;
+  severity: string;
+  lastEvent: string;
+}
+
+/** Governance posture detail row (data governance + audit detail), with mock review fields. */
+export interface GovDetail {
+  area: string;
+  posture: string;
+  status: string;
+  lastReviewed: string;
+  note: string;
+}
+
+/** Identity / authorization readiness detail with explicit blocked write/execute/authority states. */
+export interface IdentityDetail {
+  domain: string;
+  posture: string;
+  writeState: string;
+  executeState: string;
+  authority: string;
+  note: string;
+}
+
+/** Diagnostics / runbook catalogue detail (mock; not invokable). */
+export interface DiagnosticDetail {
+  label: string;
+  category: string;
+  severity: string;
+  owner: string;
+  status: string;
+  note: string;
+}

@@ -8,6 +8,7 @@ import type { BcpModule, EnvLabel } from './types';
 import {
   ActionChipView,
   CheckIcon,
+  cx,
   DataTable,
   DeferToneBadge,
   GuardedButton,
@@ -21,16 +22,22 @@ import {
 } from './ui';
 import {
   APPROVALS,
+  AUDIT_DETAIL,
   AUDIT_EVENTS,
   AUDIT_READINESS,
   DATABASES,
   DATA_GOVERNANCE,
+  DATA_GOVERNANCE_DETAIL,
+  DIAGNOSTIC_DETAIL,
   DIAGNOSTICS,
+  IDENTITY_DETAIL,
   IDENTITY_LINK_FACTS,
   IDENTITY_LINK_TIMELINE,
   IDENTITY_READINESS,
   KPIS,
+  OPS_JOB_DETAIL,
   OPS_METRICS,
+  OPS_SERVICE_DETAIL,
   PERMISSION_MATRIX,
   POLICIES,
   ROLES,
@@ -38,9 +45,10 @@ import {
   SERVICES,
   STORES,
   SYSTEM_POSTURE,
+  SYSTEM_POSTURE_NOTES,
   TENANTS,
 } from './mockData';
-import type { PostureCard } from './types';
+import type { GovDetail, Health, PostureCard } from './types';
 
 function ScreenHeading({ module }: { module: BcpModule }) {
   return (
@@ -521,164 +529,407 @@ function PostureGrid({ cards }: { cards: PostureCard[] }) {
   );
 }
 
+// Read-only internal tab switch (Overview <-> Detail). Local UI state only; no action.
+function DetailTabs({ tab, setTab }: { tab: 'overview' | 'detail'; setTab: (t: 'overview' | 'detail') => void }) {
+  const tabs: Array<{ key: 'overview' | 'detail'; label: string }> = [
+    { key: 'overview', label: 'Overview' },
+    { key: 'detail', label: 'Detail' },
+  ];
+  return (
+    <div className="mb-4 inline-flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-900/60 p-1">
+      {tabs.map((t) => (
+        <button
+          key={t.key}
+          type="button"
+          onClick={() => setTab(t.key)}
+          aria-pressed={t.key === tab}
+          className={cx(
+            'rounded-md px-3 py-1 text-[11px] font-bold uppercase tracking-wider transition',
+            t.key === tab ? 'bg-slate-700 text-slate-100' : 'text-slate-400 hover:text-slate-200',
+          )}
+        >
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// Derive a tone for a mock status category string (read-only display only).
+function govTone(status: string): Health {
+  const s = status.toLowerCase();
+  if (s.includes('block')) return 'blocked';
+  if (s.includes('warn') || s.includes('requir')) return 'warning';
+  if (s.includes('neutral')) return 'neutral';
+  return 'healthy';
+}
+
+// Shared read-only governance detail table (data governance + audit detail).
+function GovDetailTable({ rows }: { rows: GovDetail[] }) {
+  return (
+    <DataTable
+      minWidthClass="min-w-[760px]"
+      columns={['Area', 'Posture', 'Status', 'Last Reviewed', 'Notes']}
+      rows={rows.map((r) => [
+        <span className="font-semibold text-slate-200">{r.area}</span>,
+        r.posture,
+        <DeferToneBadge tone={govTone(r.status)}>{r.status}</DeferToneBadge>,
+        <span className="text-slate-500">{r.lastReviewed}</span>,
+        <span className="text-slate-500">{r.note}</span>,
+      ])}
+    />
+  );
+}
+
 // --------------------------------------------------------------------------- System Operations Overview
 function SystemOperationsOverview({ module }: { module: BcpModule; env: EnvLabel }) {
+  const [tab, setTab] = React.useState<'overview' | 'detail'>('overview');
   return (
     <div>
       <ScreenHeading module={module} />
       <ReadOnlyBadges />
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        {OPS_METRICS.map((k) => (
-          <div key={k.label}>
-            <KpiCardView {...k} />
-          </div>
-        ))}
-      </div>
-      <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Panel title="Service Health" subtitle="Read-only / mock-only — no live systems">
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            {SERVICES.map((s) => (
-              <div key={s.name} className="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
-                <HealthLabel tone={s.tone}>{s.name}</HealthLabel>
-                <div className="mt-1 text-[11px] text-slate-500">{s.status} · {s.uptime}</div>
+      <DetailTabs tab={tab} setTab={setTab} />
+      {tab === 'overview' ? (
+        <>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+            {OPS_METRICS.map((k) => (
+              <div key={k.label}>
+                <KpiCardView {...k} />
               </div>
             ))}
           </div>
-        </Panel>
-        <Panel title="Operational Posture" subtitle="Production locked · write path blocked (mock)">
-          <PostureGrid cards={SYSTEM_POSTURE} />
-        </Panel>
-      </div>
+          <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <Panel title="Service Health" subtitle="Read-only / mock-only — no live systems">
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {SERVICES.map((s) => (
+                  <div key={s.name} className="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
+                    <HealthLabel tone={s.tone}>{s.name}</HealthLabel>
+                    <div className="mt-1 text-[11px] text-slate-500">{s.status} · {s.uptime}</div>
+                  </div>
+                ))}
+              </div>
+            </Panel>
+            <Panel title="Operational Posture" subtitle="Production locked · write path blocked (mock)">
+              <PostureGrid cards={SYSTEM_POSTURE} />
+            </Panel>
+          </div>
+        </>
+      ) : (
+        <>
+          <Panel title="Service Detail" subtitle="Service-by-service status (mock) — no live health check" className="mb-4">
+            <DataTable
+              columns={['Service', 'Status', 'Uptime', 'Latency', 'Last Checked']}
+              rows={OPS_SERVICE_DETAIL.map((s) => [
+                <HealthLabel tone={s.tone}>{s.name}</HealthLabel>,
+                s.status,
+                s.uptime,
+                s.latency,
+                <span className="text-slate-500">{s.lastChecked}</span>,
+              ])}
+            />
+          </Panel>
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <Panel title="Jobs · Queues · Alerts" subtitle="Mock detail — no run/repair/restart controls">
+              <DataTable
+                minWidthClass="min-w-[520px]"
+                columns={['Name', 'Type', 'State', 'Severity', 'Last Event']}
+                rows={OPS_JOB_DETAIL.map((j) => [
+                  <span className="font-semibold text-slate-200">{j.name}</span>,
+                  j.type,
+                  j.state,
+                  <DeferToneBadge tone={j.severity === 'Critical' ? 'blocked' : j.severity === 'Warning' ? 'warning' : 'neutral'}>{j.severity}</DeferToneBadge>,
+                  <span className="text-slate-500">{j.lastEvent}</span>,
+                ])}
+              />
+            </Panel>
+            <Panel title="Operational Posture Explanation" subtitle="Why this surface is observational only">
+              <ul className="space-y-2 text-sm">
+                {SYSTEM_POSTURE_NOTES.map((n) => (
+                  <li key={n} className="flex items-start gap-2 text-slate-300">
+                    <CheckIcon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-300" />
+                    {n}
+                  </li>
+                ))}
+              </ul>
+            </Panel>
+          </div>
+        </>
+      )}
     </div>
   );
 }
 
 // --------------------------------------------------------------------------- Data Governance Overview
 function DataGovernanceOverview({ module }: { module: BcpModule; env: EnvLabel }) {
+  const [tab, setTab] = React.useState<'overview' | 'detail'>('overview');
   return (
     <div>
       <ScreenHeading module={module} />
       <ReadOnlyBadges extra={<DeferToneBadge tone="neutral">No Live DB Calls</DeferToneBadge>} />
-      <Panel title="Data Governance Posture" subtitle="Schema / migration / isolation / RLS posture (mock)" className="mb-4">
-        <PostureGrid cards={DATA_GOVERNANCE} />
-      </Panel>
-      <Panel
-        title="Schema & Migration Posture"
-        subtitle="Posture metadata only — connection strings are never shown"
-        right={<DeferToneBadge tone="neutral">No Live DB Calls</DeferToneBadge>}
-      >
-        <DataTable
-          columns={['Scope', 'Environment', 'Schema', 'Migration', 'RLS', 'Connection']}
-          rows={DATABASES.map((d) => [
-            <HealthLabel tone={d.tone}>{d.scope}</HealthLabel>,
-            d.environment,
-            d.schema,
-            d.migration,
-            <DeferToneBadge tone="healthy">{d.rls}</DeferToneBadge>,
-            <DeferToneBadge tone="neutral">{d.connection}</DeferToneBadge>,
-          ])}
-        />
-      </Panel>
+      <DetailTabs tab={tab} setTab={setTab} />
+      {tab === 'overview' ? (
+        <>
+          <Panel title="Data Governance Posture" subtitle="Schema / migration / isolation / RLS posture (mock)" className="mb-4">
+            <PostureGrid cards={DATA_GOVERNANCE} />
+          </Panel>
+          <Panel
+            title="Schema & Migration Posture"
+            subtitle="Posture metadata only — connection strings are never shown"
+            right={<DeferToneBadge tone="neutral">No Live DB Calls</DeferToneBadge>}
+          >
+            <DataTable
+              columns={['Scope', 'Environment', 'Schema', 'Migration', 'RLS', 'Connection']}
+              rows={DATABASES.map((d) => [
+                <HealthLabel tone={d.tone}>{d.scope}</HealthLabel>,
+                d.environment,
+                d.schema,
+                d.migration,
+                <DeferToneBadge tone="healthy">{d.rls}</DeferToneBadge>,
+                <DeferToneBadge tone="neutral">{d.connection}</DeferToneBadge>,
+              ])}
+            />
+          </Panel>
+        </>
+      ) : (
+        <>
+          <Panel
+            title="Governance Detail"
+            subtitle="Schema · migration · isolation · RLS detail (mock) — no DB introspection, no migration runner"
+            right={<DeferToneBadge tone="neutral">No DB Introspection</DeferToneBadge>}
+            className="mb-4"
+          >
+            <GovDetailTable rows={DATA_GOVERNANCE_DETAIL} />
+          </Panel>
+          <Panel title="Boundary Notes" subtitle="Read-only / mock-only">
+            <div className="flex flex-wrap gap-2">
+              <DeferToneBadge tone="healthy">RLS Protected</DeferToneBadge>
+              <DeferToneBadge tone="healthy">Tenant Isolation</DeferToneBadge>
+              <DeferToneBadge tone="neutral">Masked Connection</DeferToneBadge>
+              <DeferToneBadge tone="blocked"><LockIcon className="h-3 w-3" /> No Migration Runner</DeferToneBadge>
+              <DeferToneBadge tone="blocked"><LockIcon className="h-3 w-3" /> No DB Introspection</DeferToneBadge>
+            </div>
+            <p className="mt-3 text-xs text-slate-400">
+              All values are static, mock-only posture categories with mock review fields. This console
+              never introspects a database, never runs a migration, and never shows a connection string.
+            </p>
+          </Panel>
+        </>
+      )}
     </div>
   );
 }
 
 // --------------------------------------------------------------------------- Identity Readiness Overview
 function IdentityReadinessOverview({ module }: { module: BcpModule; env: EnvLabel }) {
+  const [tab, setTab] = React.useState<'overview' | 'detail'>('overview');
   return (
     <div>
       <ScreenHeading module={module} />
       <ReadOnlyBadges extra={<DeferToneBadge tone="warning">M20 Stream Paused</DeferToneBadge>} />
-      <Panel title="Identity / Authorization Readiness" subtitle="Read-only status — writes and execution remain blocked (mock)" className="mb-4">
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-          {IDENTITY_READINESS.map((r) => (
-            <div key={r.domain} className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-mono text-xs font-semibold text-slate-200">{r.domain}</span>
-                <HealthLabel tone={r.tone}>{r.status}</HealthLabel>
-              </div>
-              <p className="mt-2 text-xs text-slate-400">{r.detail}</p>
-              <div className="mt-3">
-                <DeferToneBadge tone="blocked"><LockIcon className="h-3 w-3" /> {r.writeState}</DeferToneBadge>
-              </div>
+      <DetailTabs tab={tab} setTab={setTab} />
+      {tab === 'overview' ? (
+        <>
+          <Panel title="Identity / Authorization Readiness" subtitle="Read-only status — writes and execution remain blocked (mock)" className="mb-4">
+            <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+              {IDENTITY_READINESS.map((r) => (
+                <div key={r.domain} className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-mono text-xs font-semibold text-slate-200">{r.domain}</span>
+                    <HealthLabel tone={r.tone}>{r.status}</HealthLabel>
+                  </div>
+                  <p className="mt-2 text-xs text-slate-400">{r.detail}</p>
+                  <div className="mt-3">
+                    <DeferToneBadge tone="blocked"><LockIcon className="h-3 w-3" /> {r.writeState}</DeferToneBadge>
+                  </div>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
-      </Panel>
-      <Panel title="Stream Status" subtitle="Aligned with accepted M20 paused state">
-        <div className="flex flex-wrap gap-2">
-          <DeferToneBadge tone="warning">M20.24-OptionC1 — NOT READY</DeferToneBadge>
-          <DeferToneBadge tone="blocked">M20.20 Execution Blocked</DeferToneBadge>
-          <DeferToneBadge tone="blocked">M20.17C Blocked</DeferToneBadge>
-          <DeferToneBadge tone="neutral">No Controlled Pair A</DeferToneBadge>
-          <DeferToneBadge tone="neutral">Identity-Link Wiring Absent</DeferToneBadge>
-          <DeferToneBadge tone="blocked">No Identity-Link Writes</DeferToneBadge>
-          <DeferToneBadge tone="blocked">No Registry Entry Creation</DeferToneBadge>
-          <DeferToneBadge tone="blocked">No Fixture Provisioning</DeferToneBadge>
-        </div>
-        <p className="mt-3 text-xs text-slate-400">
-          This overview is observational only. It performs no identity-link creation, no registry-entry
-          creation, and no fixture provisioning. Server authorization remains non-authoritative.
-        </p>
-      </Panel>
+          </Panel>
+          <Panel title="Stream Status" subtitle="Aligned with accepted M20 paused state">
+            <div className="flex flex-wrap gap-2">
+              <DeferToneBadge tone="warning">M20.24-OptionC1 — NOT READY</DeferToneBadge>
+              <DeferToneBadge tone="blocked">M20.20 Execution Blocked</DeferToneBadge>
+              <DeferToneBadge tone="blocked">M20.17C Blocked</DeferToneBadge>
+              <DeferToneBadge tone="neutral">No Controlled Pair A</DeferToneBadge>
+              <DeferToneBadge tone="neutral">Identity-Link Wiring Absent</DeferToneBadge>
+              <DeferToneBadge tone="blocked">No Identity-Link Writes</DeferToneBadge>
+              <DeferToneBadge tone="blocked">No Registry Entry Creation</DeferToneBadge>
+              <DeferToneBadge tone="blocked">No Fixture Provisioning</DeferToneBadge>
+            </div>
+            <p className="mt-3 text-xs text-slate-400">
+              This overview is observational only. It performs no identity-link creation, no registry-entry
+              creation, and no fixture provisioning. Server authorization remains non-authoritative.
+            </p>
+          </Panel>
+        </>
+      ) : (
+        <>
+          <Panel
+            title="Identity Readiness Detail"
+            subtitle="Per-domain posture with explicit blocked write / execute / authority states (mock)"
+            right={<DeferToneBadge tone="warning">M20 Paused</DeferToneBadge>}
+            className="mb-4"
+          >
+            <DataTable
+              minWidthClass="min-w-[920px]"
+              columns={['Domain', 'Posture', 'Write State', 'Execute State', 'Authority', 'Notes']}
+              rows={IDENTITY_DETAIL.map((d) => [
+                <span className="font-mono text-xs font-semibold text-slate-200">{d.domain}</span>,
+                d.posture,
+                <DeferToneBadge tone="blocked"><LockIcon className="h-3 w-3" /> {d.writeState}</DeferToneBadge>,
+                <DeferToneBadge tone="blocked"><LockIcon className="h-3 w-3" /> {d.executeState}</DeferToneBadge>,
+                <span className="text-slate-400">{d.authority}</span>,
+                <span className="text-slate-500">{d.note}</span>,
+              ])}
+            />
+          </Panel>
+          <Panel title="M20 Stream — Paused & Not Executable" subtitle="Accepted state; nothing here changes it">
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {[
+                'Writes blocked (identity_link create / disable / revoke)',
+                'Execution blocked (M20.20 fixture provisioning)',
+                'Execution blocked (M20.17C controlled DB exercise)',
+                'Not authoritative (Firebase remains authoritative)',
+                'No Controlled Pair A exists',
+                'Owner / reviewer / separation approval signals missing',
+                'No registry entry creation',
+                'No approval-signal provisioning',
+              ].map((t) => (
+                <div key={t} className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-300">
+                  <LockIcon className="h-3.5 w-3.5 shrink-0 text-rose-300" />
+                  {t}
+                </div>
+              ))}
+            </div>
+            <p className="mt-3 text-xs text-slate-400">
+              This detail view is observational only. No identity-link, registry, fixture, or approval-signal
+              capability exists here. The M20 stream remains paused until separately approved.
+            </p>
+          </Panel>
+        </>
+      )}
     </div>
   );
 }
 
 // --------------------------------------------------------------------------- Audit Governance Overview
 function AuditGovernanceOverview({ module }: { module: BcpModule; env: EnvLabel }) {
+  const [tab, setTab] = React.useState<'overview' | 'detail'>('overview');
   return (
     <div>
       <ScreenHeading module={module} />
       <ReadOnlyBadges extra={<DeferToneBadge tone="neutral">Append-Only Concept</DeferToneBadge>} />
-      <Panel title="Audit & Governance Readiness" subtitle="Append-only / redaction-first concept (mock)" className="mb-4">
-        <PostureGrid cards={AUDIT_READINESS} />
-      </Panel>
-      <Panel title="Governance Indicators" subtitle="Approval-required · redaction · immutability (mock)">
-        <div className="flex flex-wrap gap-2">
-          <ActionChipView action="Approval Required" />
-          <ActionChipView action="Owner Approval" />
-          <ActionChipView action="Separation of Duties" />
-          <ActionChipView action="Audit Required" />
-          <DeferToneBadge tone="healthy"><ShieldIcon className="h-3 w-3" /> Redaction-First</DeferToneBadge>
-          <DeferToneBadge tone="healthy"><CheckIcon className="h-3 w-3" /> Immutable Audit</DeferToneBadge>
-          <DeferToneBadge tone="blocked"><LockIcon className="h-3 w-3" /> No Audit Writes</DeferToneBadge>
-        </div>
-        <p className="mt-3 text-xs text-slate-400">
-          No audit_event is written from this console. Evidence is aggregate / redacted only — no raw
-          identifiers, secrets, or payloads.
-        </p>
-      </Panel>
+      <DetailTabs tab={tab} setTab={setTab} />
+      {tab === 'overview' ? (
+        <>
+          <Panel title="Audit & Governance Readiness" subtitle="Append-only / redaction-first concept (mock)" className="mb-4">
+            <PostureGrid cards={AUDIT_READINESS} />
+          </Panel>
+          <Panel title="Governance Indicators" subtitle="Approval-required · redaction · immutability (mock)">
+            <div className="flex flex-wrap gap-2">
+              <ActionChipView action="Approval Required" />
+              <ActionChipView action="Owner Approval" />
+              <ActionChipView action="Separation of Duties" />
+              <ActionChipView action="Audit Required" />
+              <DeferToneBadge tone="healthy"><ShieldIcon className="h-3 w-3" /> Redaction-First</DeferToneBadge>
+              <DeferToneBadge tone="healthy"><CheckIcon className="h-3 w-3" /> Immutable Audit</DeferToneBadge>
+              <DeferToneBadge tone="blocked"><LockIcon className="h-3 w-3" /> No Audit Writes</DeferToneBadge>
+            </div>
+            <p className="mt-3 text-xs text-slate-400">
+              No audit_event is written from this console. Evidence is aggregate / redacted only — no raw
+              identifiers, secrets, or payloads.
+            </p>
+          </Panel>
+        </>
+      ) : (
+        <>
+          <Panel
+            title="Audit Readiness Detail"
+            subtitle="Approval · redaction · immutability posture detail (mock) — no live audit query"
+            right={<DeferToneBadge tone="blocked"><LockIcon className="h-3 w-3" /> No Audit Writes</DeferToneBadge>}
+            className="mb-4"
+          >
+            <GovDetailTable rows={AUDIT_DETAIL} />
+          </Panel>
+          <Panel title="Governance Queue" subtitle="Mock queue — separation of duties enforced · no approve/deny controls">
+            <DataTable
+              minWidthClass="min-w-[640px]"
+              columns={['Request', 'Requester', 'Approver', 'State', 'Separation', 'Env']}
+              rows={APPROVALS.map((a) => [
+                <span className="text-slate-200">{a.request}</span>,
+                <span className="text-slate-500">{a.requester}</span>,
+                <span className="text-slate-500">{a.approver}</span>,
+                <ActionChipView action="Approval Required" />,
+                <ActionChipView action="Separation of Duties" />,
+                a.environment,
+              ])}
+            />
+            <p className="mt-3 text-xs text-slate-400">
+              The governance queue is observational only. No approve, deny, or evidence-editing control exists;
+              evidence is append-only and redacted.
+            </p>
+          </Panel>
+        </>
+      )}
     </div>
   );
 }
 
 // --------------------------------------------------------------------------- Support & Diagnostics Overview
 function SupportDiagnosticsOverview({ module }: { module: BcpModule; env: EnvLabel }) {
+  const [tab, setTab] = React.useState<'overview' | 'detail'>('overview');
   return (
     <div>
       <ScreenHeading module={module} />
       <ReadOnlyBadges extra={<DeferToneBadge tone="neutral">No Live Invocation</DeferToneBadge>} />
-      <Panel title="Diagnostics & Runbooks" subtitle="Static labels only — no live diagnostic invocation, no route/API calls">
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {DIAGNOSTICS.map((d) => (
-            <div key={d.label} className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
-              <div className="flex items-center gap-2">
-                <ShieldIcon className="h-4 w-4 text-sky-300" />
-                <span className="text-sm font-bold text-slate-100">{d.label}</span>
+      <DetailTabs tab={tab} setTab={setTab} />
+      {tab === 'overview' ? (
+        <Panel title="Diagnostics & Runbooks" subtitle="Static labels only — no live diagnostic invocation, no route/API calls">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {DIAGNOSTICS.map((d) => (
+              <div key={d.label} className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
+                <div className="flex items-center gap-2">
+                  <ShieldIcon className="h-4 w-4 text-sky-300" />
+                  <span className="text-sm font-bold text-slate-100">{d.label}</span>
+                </div>
+                <div className="mt-1.5 text-xs text-slate-400">Category: {d.category}</div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <DeferToneBadge tone="neutral">{d.note}</DeferToneBadge>
+                </div>
               </div>
-              <div className="mt-1.5 text-xs text-slate-400">Category: {d.category}</div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <DeferToneBadge tone="neutral">{d.note}</DeferToneBadge>
-              </div>
-            </div>
-          ))}
-        </div>
-        <p className="mt-4 text-xs text-slate-400">
-          Runbook entries are static, non-clickable labels. This console invokes no live diagnostics, makes
-          no route/API calls, and exposes no raw identifiers or secrets.
-        </p>
-      </Panel>
+            ))}
+          </div>
+          <p className="mt-4 text-xs text-slate-400">
+            Runbook entries are static, non-clickable labels. This console invokes no live diagnostics, makes
+            no route/API calls, and exposes no raw identifiers or secrets.
+          </p>
+        </Panel>
+      ) : (
+        <Panel
+          title="Diagnostics Catalogue Detail"
+          subtitle="Severity · owner · status (mock) — not invokable"
+          right={<DeferToneBadge tone="blocked"><LockIcon className="h-3 w-3" /> Not Invokable</DeferToneBadge>}
+        >
+          <DataTable
+            minWidthClass="min-w-[820px]"
+            columns={['Runbook', 'Category', 'Severity', 'Owner', 'Status', 'Invoke']}
+            rows={DIAGNOSTIC_DETAIL.map((d) => [
+              <span className="font-semibold text-slate-200">{d.label}</span>,
+              d.category,
+              <DeferToneBadge tone={d.severity === 'Critical' ? 'blocked' : d.severity === 'Warning' ? 'warning' : 'neutral'}>{d.severity}</DeferToneBadge>,
+              <span className="text-slate-400">{d.owner}</span>,
+              <DeferToneBadge tone="neutral">{d.status}</DeferToneBadge>,
+              <span className="inline-flex cursor-not-allowed items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800/60 px-2 py-1 text-[11px] font-semibold text-slate-500 opacity-70">
+                <LockIcon className="h-3 w-3" /> Not Invokable
+              </span>,
+            ])}
+          />
+          <p className="mt-3 text-xs text-slate-400">
+            Every catalogue entry is a static, non-invokable label. This console performs no live diagnostic
+            invocation, makes no route/API calls, and exposes no raw identifiers or secrets.
+          </p>
+        </Panel>
+      )}
     </div>
   );
 }
