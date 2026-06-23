@@ -21,15 +21,18 @@ import {
   StateChipView,
 } from './ui';
 import {
+  ALERT_CATEGORIES,
   APPROVALS,
   AUDIT_DETAIL,
   AUDIT_EVENTS,
   AUDIT_READINESS,
+  BLOCKED_ACTIONS,
   DATABASES,
   DATA_GOVERNANCE,
   DATA_GOVERNANCE_DETAIL,
   DIAGNOSTIC_DETAIL,
   DIAGNOSTICS,
+  GOVERNANCE_QUEUE,
   IDENTITY_DETAIL,
   IDENTITY_LINK_FACTS,
   IDENTITY_LINK_TIMELINE,
@@ -40,6 +43,7 @@ import {
   OPS_SERVICE_DETAIL,
   PERMISSION_MATRIX,
   POLICIES,
+  RISK_SUMMARY,
   ROLES,
   SCOPE_AXES,
   SERVICES,
@@ -934,6 +938,180 @@ function SupportDiagnosticsOverview({ module }: { module: BcpModule; env: EnvLab
   );
 }
 
+// --------------------------------------------------------------------------- Risk & Alerts Lens
+// Read-only multi-section tab switch (local UI state only; no action).
+function SectionTabs({
+  tabs,
+  active,
+  onSelect,
+}: {
+  tabs: Array<{ key: string; label: string }>;
+  active: string;
+  onSelect: (k: string) => void;
+}) {
+  return (
+    <div className="mb-4 inline-flex flex-wrap items-center gap-1 rounded-lg border border-slate-800 bg-slate-900/60 p-1">
+      {tabs.map((t) => (
+        <button
+          key={t.key}
+          type="button"
+          onClick={() => onSelect(t.key)}
+          aria-pressed={t.key === active}
+          className={cx(
+            'rounded-md px-3 py-1 text-[11px] font-bold uppercase tracking-wider transition',
+            t.key === active ? 'bg-slate-700 text-slate-100' : 'text-slate-400 hover:text-slate-200',
+          )}
+        >
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function severityTone(severity: string): Health {
+  const s = severity.toLowerCase();
+  if (s.includes('critical')) return 'blocked';
+  if (s.includes('high') || s.includes('warn') || s.includes('medium')) return 'warning';
+  if (s.includes('low')) return 'neutral';
+  return 'neutral';
+}
+
+function RiskAlertsLens({ module }: { module: BcpModule; env: EnvLabel }) {
+  const [section, setSection] = React.useState('summary');
+  const [activeCat, setActiveCat] = React.useState(ALERT_CATEGORIES[0].category);
+  const selected = ALERT_CATEGORIES.find((c) => c.category === activeCat) || ALERT_CATEGORIES[0];
+  return (
+    <div>
+      <ScreenHeading module={module} />
+      <ReadOnlyBadges extra={<DeferToneBadge tone="neutral">Observational Only</DeferToneBadge>} />
+      <SectionTabs
+        tabs={[
+          { key: 'summary', label: 'Risk Summary' },
+          { key: 'alerts', label: 'Alert Categories' },
+          { key: 'governance', label: 'Governance Queue' },
+          { key: 'blocked', label: 'Blocked Register' },
+        ]}
+        active={section}
+        onSelect={setSection}
+      />
+
+      {section === 'summary' && (
+        <>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+            {RISK_SUMMARY.map((k) => (
+              <div key={k.label}>
+                <KpiCardView {...k} />
+              </div>
+            ))}
+          </div>
+          <Panel title="Risk Posture" subtitle="Observational only — no alerting, no notification (mock)" className="mt-5">
+            <div className="flex flex-wrap gap-2">
+              <DeferToneBadge tone="blocked"><LockIcon className="h-3 w-3" /> Production Locked</DeferToneBadge>
+              <DeferToneBadge tone="blocked">Write Path Blocked</DeferToneBadge>
+              <DeferToneBadge tone="warning">M20 Paused (NOT READY)</DeferToneBadge>
+              <DeferToneBadge tone="neutral">No Alert Sending</DeferToneBadge>
+              <DeferToneBadge tone="neutral">No Notification</DeferToneBadge>
+            </div>
+            <p className="mt-3 text-xs text-slate-400">
+              This lens is observational only. It sends no alerts and no notifications, performs no live
+              diagnostics, and has no approve / deny / resolve / assign controls.
+            </p>
+          </Panel>
+        </>
+      )}
+
+      {section === 'alerts' && (
+        <>
+          <Panel title="Alert Categories" subtitle="Static risk categories with severity / state (mock) — no notification sending" className="mb-4">
+            <DataTable
+              minWidthClass="min-w-[640px]"
+              columns={['Category', 'Severity', 'State']}
+              rows={ALERT_CATEGORIES.map((c) => [
+                <span className="font-semibold text-slate-200">{c.category}</span>,
+                <DeferToneBadge tone={severityTone(c.severity)}>{c.severity}</DeferToneBadge>,
+                <DeferToneBadge tone={c.tone}>{c.state}</DeferToneBadge>,
+              ])}
+            />
+          </Panel>
+          <Panel title="Risk Detail" subtitle="Read-only category selection — no live drilldown, no external calls">
+            <div className="mb-3 flex flex-wrap gap-2">
+              {ALERT_CATEGORIES.map((c) => (
+                <button
+                  key={c.category}
+                  type="button"
+                  onClick={() => setActiveCat(c.category)}
+                  aria-pressed={c.category === activeCat}
+                  className={cx(
+                    'rounded-lg border px-3 py-1.5 text-xs font-semibold transition',
+                    c.category === activeCat
+                      ? 'border-slate-600 bg-slate-800 text-slate-100'
+                      : 'border-slate-800 bg-slate-900/40 text-slate-400 hover:text-slate-200',
+                  )}
+                >
+                  {c.category}
+                </button>
+              ))}
+            </div>
+            <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm font-bold text-slate-100">{selected.category}</span>
+                <DeferToneBadge tone={severityTone(selected.severity)}>{selected.severity}</DeferToneBadge>
+                <DeferToneBadge tone={selected.tone}>{selected.state}</DeferToneBadge>
+              </div>
+              <p className="mt-2 text-sm text-slate-300">{selected.detail}</p>
+            </div>
+          </Panel>
+        </>
+      )}
+
+      {section === 'governance' && (
+        <Panel
+          title="Governance Attention Queue"
+          subtitle="Read-only — no approve / deny / resolve / assign controls (mock)"
+          right={<DeferToneBadge tone="warning">M20 NOT READY</DeferToneBadge>}
+        >
+          <DataTable
+            minWidthClass="min-w-[760px]"
+            columns={['Item', 'Area', 'State', 'Severity', 'Notes']}
+            rows={GOVERNANCE_QUEUE.map((g) => [
+              <span className="font-semibold text-slate-200">{g.item}</span>,
+              g.area,
+              <DeferToneBadge tone={g.state.toLowerCase().includes('block') ? 'blocked' : 'warning'}>{g.state}</DeferToneBadge>,
+              <DeferToneBadge tone={severityTone(g.severity)}>{g.severity}</DeferToneBadge>,
+              <span className="text-slate-500">{g.note}</span>,
+            ])}
+          />
+          <p className="mt-3 text-xs text-slate-400">
+            The queue is observational only. There are no approve, deny, resolve, or assign controls. The M20
+            identity-link stream remains NOT READY (M20.24 Decision B); controlled-draft creation, fixture
+            provisioning, and M20.17C remain blocked.
+          </p>
+        </Panel>
+      )}
+
+      {section === 'blocked' && (
+        <Panel title="Blocked Action Register" subtitle="Actions that remain blocked, with the reason why (mock)">
+          <div className="space-y-2">
+            {BLOCKED_ACTIONS.map((b) => (
+              <div key={b.action} className="flex items-start gap-3 rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-3">
+                <LockIcon className="mt-0.5 h-4 w-4 shrink-0 text-rose-300" />
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-bold text-slate-100">{b.action}</span>
+                    <DeferToneBadge tone="blocked">Blocked</DeferToneBadge>
+                  </div>
+                  <p className="mt-1 text-xs text-slate-400">{b.reason}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
+    </div>
+  );
+}
+
 // --------------------------------------------------------------------------- Router
 const INCLUDED: Record<string, (p: { module: BcpModule; env: EnvLabel }) => React.ReactNode> = {
   'access-gate': AccessGateInfo,
@@ -951,6 +1129,7 @@ const INCLUDED: Record<string, (p: { module: BcpModule; env: EnvLabel }) => Reac
   'identity-readiness-overview': IdentityReadinessOverview,
   'audit-governance-overview': AuditGovernanceOverview,
   'support-diagnostics-overview': SupportDiagnosticsOverview,
+  'risk-alerts-lens': RiskAlertsLens,
 };
 
 export function ScreenRouter({ module, env }: { module: BcpModule; env: EnvLabel }) {

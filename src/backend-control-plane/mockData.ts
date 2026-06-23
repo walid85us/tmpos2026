@@ -6,13 +6,16 @@
 // Nothing in this file is fetched; nothing connects to a backend or database.
 
 import type {
+  AlertCategory,
   ApprovalRow,
   AuditRow,
   BcpModule,
+  BlockedAction,
   DatabaseRow,
   DiagnosticDetail,
   GateRoleCard,
   GovDetail,
+  GovernanceItem,
   IdentityDetail,
   Kpi,
   OpsJobDetail,
@@ -30,7 +33,7 @@ import type {
 export const ENVIRONMENTS = ['DEV', 'STAGING', 'PRODUCTION'] as const;
 
 // ---------------------------------------------------------------------------
-// 28-module registry (drives the sidebar navigation and screen routing).
+// 29-module registry (drives the sidebar navigation and screen routing).
 // ---------------------------------------------------------------------------
 export const MODULES: BcpModule[] = [
   {
@@ -342,6 +345,17 @@ export const MODULES: BcpModule[] = [
     blockedActions: ['Live diagnostic invocation', 'Route/API call', 'Raw identifier/PII access (never)'],
     reason: 'Static runbook labels and mock diagnostics only; no live diagnostic invocation.',
   },
+  {
+    id: 'risk-alerts-lens',
+    name: 'Risk & Alerts Lens',
+    group: 'Operations Expansion',
+    state: 'Read-Only First',
+    status: 'included',
+    purpose: 'Read-only/mock-only visibility into operational risks, alert categories, governance attention, and blocked actions.',
+    futureMilestone: 'Read-only risk aggregation fed by governed read models (no alert sending or notification, ever).',
+    blockedActions: ['Send alert', 'Notify', 'Approve / Deny / Resolve / Assign', 'Any mutation'],
+    reason: 'Observational risk lens; no live alerting/notification; the paused M20 state is shown accurately.',
+  },
 ];
 
 export const NAV_GROUP_ORDER = [
@@ -625,4 +639,49 @@ export const DIAGNOSTIC_DETAIL: DiagnosticDetail[] = [
   { label: 'Audit Evidence Runbook', category: 'Governance', severity: 'Info', owner: 'Governance (mock)', status: 'Read-Only', note: 'Not invokable — redacted only.' },
   { label: 'Incident Response Runbook', category: 'Support', severity: 'Critical', owner: 'On-call (mock)', status: 'Read-Only', note: 'Not invokable — no live diagnostics.' },
   { label: 'Backup / Recovery Runbook', category: 'Data', severity: 'Warning', owner: 'Data (mock)', status: 'Read-Only', note: 'Not invokable — no restore action.' },
+];
+
+// ===========================================================================
+// Phase 1.6 M25 — read-only / mock-only Risk & Alerts Lens data.
+// Fictional, redaction-safe labels only. No live alerting, notification,
+// diagnostics, DB, API, secrets, or raw identifiers. Nothing is sent or fetched.
+// ===========================================================================
+
+// Risk summary tiles (reuses the Kpi shape; counts are mock).
+export const RISK_SUMMARY: Kpi[] = [
+  { label: 'Open Risks', value: '4', hint: 'Mock — under review', tone: 'warning' },
+  { label: 'Blocked Items', value: '9', hint: 'Mock — write/exec blocked', tone: 'blocked' },
+  { label: 'Accepted Risks', value: '2', hint: 'Mock — acknowledged', tone: 'neutral' },
+  { label: 'Monitoring', value: '3', hint: 'Mock — observed only', tone: 'healthy' },
+  { label: 'Critical Alerts', value: '1', hint: 'Mock alert', tone: 'blocked' },
+  { label: 'Governance Items', value: '1', hint: 'M20 paused (NOT READY)', tone: 'warning' },
+];
+
+export const ALERT_CATEGORIES: AlertCategory[] = [
+  { category: 'Production Exposure Risk', severity: 'Critical', state: 'Blocked', tone: 'blocked', detail: 'Production remains locked. The Backend Control Panel is DEV-gated and is never exposed to production.' },
+  { category: 'DB Write Scope Risk', severity: 'High', state: 'Blocked', tone: 'blocked', detail: 'No DB connection, SQL, DDL, migration, or write occurs from this console. The write path is blocked.' },
+  { category: 'Identity-Link Execution Risk', severity: 'High', state: 'Blocked', tone: 'blocked', detail: 'identity_link create / disable / revoke is blocked. The service is dormant, default OFF, and unwired.' },
+  { category: 'Registry / Fixture Readiness Risk', severity: 'Medium', state: 'Not Ready', tone: 'warning', detail: 'M20.24 is NOT READY. No controlled-draft, no fixture, and no eligible Controlled Pair A exist.' },
+  { category: 'Audit / Approval Risk', severity: 'Medium', state: 'Monitoring', tone: 'warning', detail: 'Approval and separation of duties are required; audit is append-only. No audit writes occur here.' },
+  { category: 'Diagnostics Invocation Risk', severity: 'Low', state: 'Blocked', tone: 'neutral', detail: 'Runbooks are static labels. No live diagnostic invocation and no route / API calls occur.' },
+  { category: 'Migration / Schema Risk', severity: 'Medium', state: 'Monitoring', tone: 'warning', detail: 'Migrations are observed only; there is no migration runner. One store migration is pending (mock).' },
+];
+
+export const GOVERNANCE_QUEUE: GovernanceItem[] = [
+  { item: 'M20 Identity-Link Stream — NOT READY', area: 'Identity', state: 'Blocked', severity: 'High', note: 'M20.24 Decision B; owner / reviewer / separation approval signals missing; controlled-draft not authorized.' },
+  { item: 'Tenant DB Provisioning (mock)', area: 'Data', state: 'Approval Required', severity: 'Medium', note: 'Awaiting owner approval and separation of duties (mock).' },
+  { item: 'Schema Migration Apply (mock)', area: 'Data', state: 'Approval Required', severity: 'Medium', note: 'DEV-first; approval required; observed only (mock).' },
+  { item: 'Secret Rotation (mock)', area: 'Security', state: 'Approval Required', severity: 'Low', note: 'Posture only; secret values are never shown (mock).' },
+];
+
+export const BLOCKED_ACTIONS: BlockedAction[] = [
+  { action: 'identity_link writes', reason: 'DEV-only, default OFF, unwired; approval + separation of duties required; no write path authorized.' },
+  { action: 'platform_identity mutation', reason: 'Posture only; app-owned anchor; opaque references; no row mutation from this console.' },
+  { action: 'audit_event writes', reason: 'Append-only model; no audit_event is written from this read-only console.' },
+  { action: 'Fixture provisioning', reason: 'M20.20 blocked; no eligible Controlled Pair A; required approval signals missing.' },
+  { action: 'Registry controlled-draft creation', reason: 'M20.24 NOT READY; owner / reviewer / separation approval signals missing.' },
+  { action: 'M20.17C re-attempt', reason: 'Blocked until a valid Controlled Pair A exists and the re-attempt gates pass.' },
+  { action: 'Live diagnostics', reason: 'Diagnostics are static labels; no live invocation and no route / API calls.' },
+  { action: 'DB migrations', reason: 'Observed only; no migration runner; no DDL is executed from this console.' },
+  { action: 'Production exposure', reason: 'Production remains locked; the Backend Control Panel is DEV-gated and never exposed to production.' },
 ];

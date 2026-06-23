@@ -206,3 +206,29 @@ export interface DiagnosticDetail {
   status: string;
   note: string;
 }
+
+// Phase 1.6 M25 — read-only Risk & Alerts Lens (presentational only).
+
+/** Static, mock-only alert / risk category (no live alerting or notification). */
+export interface AlertCategory {
+  category: string;
+  severity: string;
+  state: string;
+  tone: Health;
+  detail: string;
+}
+
+/** Static governance attention item (read-only; no approve/deny/resolve/assign). */
+export interface GovernanceItem {
+  item: string;
+  area: string;
+  state: string;
+  severity: string;
+  note: string;
+}
+
+/** Static blocked-action register entry with the reason it remains blocked. */
+export interface BlockedAction {
+  action: string;
+  reason: string;
+}
