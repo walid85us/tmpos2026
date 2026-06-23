@@ -45,7 +45,7 @@ const HEALTH_TEXT: Record<Health, string> = {
 };
 
 const chipBase =
-  'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider';
+  'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider shadow-sm';
 
 export function StateChipView({ state }: { state: StateChip }) {
   return <span className={cx(chipBase, STATE_CHIP_STYLE[state])}>{state}</span>;
@@ -84,15 +84,18 @@ export function Panel({
   return (
     <section
       className={cx(
-        'rounded-2xl border border-slate-800 bg-slate-900/60 shadow-lg shadow-black/20 backdrop-blur',
+        'overflow-hidden rounded-2xl border border-slate-800/80 bg-gradient-to-b from-slate-900/70 to-slate-900/40 shadow-xl shadow-black/30 ring-1 ring-white/5 backdrop-blur',
         className,
       )}
     >
       {(title || right) && (
-        <header className="flex items-start justify-between gap-3 border-b border-slate-800 px-5 py-4">
-          <div>
-            {title && <h2 className="text-sm font-bold tracking-wide text-slate-100">{title}</h2>}
-            {subtitle && <p className="mt-0.5 text-xs text-slate-400">{subtitle}</p>}
+        <header className="flex items-start justify-between gap-3 border-b border-slate-800/70 bg-white/[0.02] px-5 py-4">
+          <div className="flex min-w-0 items-start gap-3">
+            <span className="mt-0.5 h-8 w-1 shrink-0 rounded-full bg-gradient-to-b from-emerald-400/70 to-sky-400/30" aria-hidden="true" />
+            <div className="min-w-0">
+              {title && <h2 className="text-sm font-bold tracking-wide text-slate-100">{title}</h2>}
+              {subtitle && <p className="mt-0.5 text-xs text-slate-400">{subtitle}</p>}
+            </div>
           </div>
           {right && <div className="shrink-0">{right}</div>}
         </header>
@@ -114,12 +117,12 @@ export function KpiCardView({
   tone: Health;
 }) {
   return (
-    <div className="rounded-2xl border border-slate-800 bg-gradient-to-b from-slate-900/80 to-slate-900/40 px-4 py-3">
+    <div className="rounded-2xl border border-slate-800/80 bg-gradient-to-b from-slate-900/80 to-slate-900/40 px-4 py-3 ring-1 ring-white/5 transition hover:border-slate-700 hover:ring-white/10">
       <div className="flex items-center justify-between">
         <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">{label}</span>
         <HealthDot tone={tone} />
       </div>
-      <div className="mt-2 text-2xl font-black text-slate-100">{value}</div>
+      <div className="mt-2 text-2xl font-black tracking-tight text-slate-100">{value}</div>
       <div className={cx('mt-1 text-[11px] font-medium', HEALTH_TEXT[tone])}>{hint}</div>
     </div>
   );
@@ -157,11 +160,11 @@ export function DataTable({
     <div className="overflow-x-auto">
       <table className={cx('w-full border-collapse text-left text-sm', minWidthClass)}>
         <thead>
-          <tr className="border-b border-slate-800">
+          <tr className="border-b border-slate-700/70 bg-white/[0.03]">
             {columns.map((c) => (
               <th
                 key={c}
-                className="px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-slate-400"
+                className="px-3 py-2.5 text-[11px] font-bold uppercase tracking-wider text-slate-300"
               >
                 {c}
               </th>
@@ -170,7 +173,7 @@ export function DataTable({
         </thead>
         <tbody>
           {rows.map((row, ri) => (
-            <tr key={ri} className="border-b border-slate-800/60 hover:bg-slate-800/30">
+            <tr key={ri} className="border-b border-slate-800/60 transition-colors hover:bg-slate-800/40">
               {row.map((cell, ci) => (
                 <td key={ci} className="px-3 py-2.5 align-middle text-slate-200">
                   {cell}
@@ -240,7 +243,7 @@ export function DeferToneBadge({ children, tone }: { children: React.ReactNode; 
   return (
     <span
       className={cx(
-        'inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-semibold',
+        'inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-semibold shadow-sm ring-1 ring-inset ring-white/[0.03]',
         tone === 'healthy' && 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
         tone === 'warning' && 'border-amber-500/30 bg-amber-500/10 text-amber-300',
         tone === 'blocked' && 'border-rose-500/30 bg-rose-500/10 text-rose-300',

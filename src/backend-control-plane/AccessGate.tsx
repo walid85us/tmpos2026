@@ -18,10 +18,14 @@ const GATE_POINTS = [
 
 export default function AccessGate({ onEnter }: { onEnter: () => void }) {
   return (
-    <div className="flex min-h-screen items-center justify-center bg-gradient-to-b from-slate-950 via-slate-950 to-slate-900 px-4 py-10">
-      <div className="w-full max-w-4xl">
+    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-gradient-to-b from-slate-950 via-slate-950 to-slate-900 px-4 py-10">
+      <div
+        className="pointer-events-none absolute inset-0 bg-[radial-gradient(40rem_22rem_at_50%_-5%,rgba(16,185,129,0.10),transparent),radial-gradient(36rem_22rem_at_85%_120%,rgba(56,189,248,0.06),transparent)]"
+        aria-hidden="true"
+      />
+      <div className="relative w-full max-w-4xl">
         <div className="mb-6 flex flex-col items-center text-center">
-          <span className="mb-3 flex h-14 w-14 items-center justify-center rounded-2xl border border-emerald-500/40 bg-emerald-500/10 text-emerald-300">
+          <span className="mb-3 flex h-14 w-14 items-center justify-center rounded-2xl border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 shadow-lg shadow-emerald-500/20 ring-1 ring-emerald-400/20">
             <ShieldIcon className="h-7 w-7" />
           </span>
           <h1 className="text-2xl font-black tracking-tight text-slate-100">Backend Control Plane</h1>
@@ -35,7 +39,7 @@ export default function AccessGate({ onEnter }: { onEnter: () => void }) {
         </div>
 
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+          <section className="rounded-2xl border border-slate-800/80 bg-gradient-to-b from-slate-900/70 to-slate-900/40 p-5 shadow-xl shadow-black/30 ring-1 ring-white/5">
             <h2 className="text-sm font-bold text-slate-100">Access Conditions</h2>
             <ul className="mt-3 space-y-2">
               {GATE_POINTS.map((t) => (
@@ -47,7 +51,7 @@ export default function AccessGate({ onEnter }: { onEnter: () => void }) {
             </ul>
           </section>
 
-          <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+          <section className="rounded-2xl border border-slate-800/80 bg-gradient-to-b from-slate-900/70 to-slate-900/40 p-5 shadow-xl shadow-black/30 ring-1 ring-white/5">
             <h2 className="text-sm font-bold text-slate-100">Role Profiles</h2>
             <p className="mt-1 text-xs text-slate-500">Mock role cards — no real users or grants</p>
             <div className="mt-3 grid max-h-56 grid-cols-1 gap-2 overflow-y-auto sm:grid-cols-2">
@@ -68,8 +72,9 @@ export default function AccessGate({ onEnter }: { onEnter: () => void }) {
           <button
             type="button"
             onClick={onEnter}
-            className="rounded-xl border border-emerald-500/40 bg-emerald-500/15 px-6 py-2.5 text-sm font-bold text-emerald-200 transition hover:bg-emerald-500/25"
+            className="inline-flex items-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/15 px-6 py-2.5 text-sm font-bold text-emerald-200 shadow-lg shadow-emerald-500/15 ring-1 ring-emerald-400/20 transition hover:bg-emerald-500/25 hover:shadow-emerald-500/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/80 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950"
           >
+            <ShieldIcon className="h-4 w-4" />
             Enter Control Plane
           </button>
           <p className="text-[11px] text-slate-500">

@@ -79,10 +79,13 @@ import type { ReadinessGateCard } from './types';
 
 function ScreenHeading({ module }: { module: BcpModule }) {
   return (
-    <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
-      <div>
-        <h1 className="text-xl font-black tracking-tight text-slate-100">{module.name}</h1>
-        <p className="mt-1 max-w-2xl text-sm text-slate-400">{module.purpose}</p>
+    <div className="mb-5 flex flex-wrap items-start justify-between gap-3 border-b border-slate-800/60 pb-4">
+      <div className="flex items-start gap-3">
+        <span className="mt-1 h-9 w-1.5 shrink-0 rounded-full bg-gradient-to-b from-emerald-400/80 via-sky-400/50 to-transparent" aria-hidden="true" />
+        <div>
+          <h1 className="text-xl font-black tracking-tight text-slate-100">{module.name}</h1>
+          <p className="mt-1 max-w-2xl text-sm text-slate-400">{module.purpose}</p>
+        </div>
       </div>
       <div className="flex items-center gap-2">
         <StateChipView state={module.state} />
@@ -544,7 +547,7 @@ function PostureGrid({ cards }: { cards: PostureCard[] }) {
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
       {cards.map((c) => (
-        <div key={c.title} className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+        <div key={c.title} className="rounded-2xl border border-slate-800/80 bg-gradient-to-b from-slate-900/70 to-slate-900/40 p-4 ring-1 ring-white/5 transition hover:border-slate-700 hover:ring-white/10">
           <div className="flex items-center justify-between gap-2">
             <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">{c.title}</span>
             <HealthLabel tone={c.tone}>{c.status}</HealthLabel>
@@ -563,7 +566,7 @@ function DetailTabs({ tab, setTab }: { tab: 'overview' | 'detail'; setTab: (t: '
     { key: 'detail', label: 'Detail' },
   ];
   return (
-    <div className="mb-4 inline-flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-900/60 p-1">
+    <div className="mb-4 inline-flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-900/60 p-1 ring-1 ring-white/5">
       {tabs.map((t) => (
         <button
           key={t.key}
@@ -571,8 +574,8 @@ function DetailTabs({ tab, setTab }: { tab: 'overview' | 'detail'; setTab: (t: '
           onClick={() => setTab(t.key)}
           aria-pressed={t.key === tab}
           className={cx(
-            'rounded-md px-3 py-1 text-[11px] font-bold uppercase tracking-wider transition',
-            t.key === tab ? 'bg-slate-700 text-slate-100' : 'text-slate-400 hover:text-slate-200',
+            'rounded-md px-3 py-1.5 text-[11px] font-bold uppercase tracking-wider transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950',
+            t.key === tab ? 'bg-slate-700 text-slate-100 shadow-sm ring-1 ring-inset ring-white/10' : 'text-slate-400 hover:text-slate-200',
           )}
         >
           {t.label}
@@ -973,7 +976,7 @@ function SectionTabs({
   onSelect: (k: string) => void;
 }) {
   return (
-    <div className="mb-4 inline-flex flex-wrap items-center gap-1 rounded-lg border border-slate-800 bg-slate-900/60 p-1">
+    <div className="mb-4 inline-flex flex-wrap items-center gap-1 rounded-lg border border-slate-800 bg-slate-900/60 p-1 ring-1 ring-white/5">
       {tabs.map((t) => (
         <button
           key={t.key}
@@ -981,8 +984,8 @@ function SectionTabs({
           onClick={() => onSelect(t.key)}
           aria-pressed={t.key === active}
           className={cx(
-            'rounded-md px-3 py-1 text-[11px] font-bold uppercase tracking-wider transition',
-            t.key === active ? 'bg-slate-700 text-slate-100' : 'text-slate-400 hover:text-slate-200',
+            'rounded-md px-3 py-1.5 text-[11px] font-bold uppercase tracking-wider transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950',
+            t.key === active ? 'bg-slate-700 text-slate-100 shadow-sm ring-1 ring-inset ring-white/10' : 'text-slate-400 hover:text-slate-200',
           )}
         >
           {t.label}
@@ -1066,7 +1069,7 @@ function RiskAlertsLens({ module }: { module: BcpModule; env: EnvLabel }) {
                   onClick={() => setActiveCat(c.category)}
                   aria-pressed={c.category === activeCat}
                   className={cx(
-                    'rounded-lg border px-3 py-1.5 text-xs font-semibold transition',
+                    'rounded-lg border px-3 py-1.5 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950',
                     c.category === activeCat
                       ? 'border-slate-600 bg-slate-800 text-slate-100'
                       : 'border-slate-800 bg-slate-900/40 text-slate-400 hover:text-slate-200',
@@ -1166,7 +1169,7 @@ function TimelineEvidenceLens({ module }: { module: BcpModule; env: EnvLabel }) 
                   onClick={() => setActiveM(t.milestone)}
                   aria-pressed={t.milestone === activeM}
                   className={cx(
-                    'flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-left transition',
+                    'flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950',
                     t.milestone === activeM ? 'border-slate-600 bg-slate-800/60' : 'border-slate-800 bg-slate-900/40 hover:bg-slate-800/30',
                   )}
                 >
@@ -1337,7 +1340,7 @@ function TenantStoreOperationsLens({ module }: { module: BcpModule; env: EnvLabe
                   onClick={() => setActiveRow(r.label)}
                   aria-pressed={r.label === activeRow}
                   className={cx(
-                    'rounded-lg border px-3 py-1.5 text-xs font-semibold transition',
+                    'rounded-lg border px-3 py-1.5 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950',
                     r.label === activeRow
                       ? 'border-slate-600 bg-slate-800 text-slate-100'
                       : 'border-slate-800 bg-slate-900/40 text-slate-400 hover:text-slate-200',
@@ -1494,7 +1497,7 @@ function BillingPlanOperationsLens({ module }: { module: BcpModule; env: EnvLabe
                   onClick={() => setActiveRow(r.label)}
                   aria-pressed={r.label === activeRow}
                   className={cx(
-                    'rounded-lg border px-3 py-1.5 text-xs font-semibold transition',
+                    'rounded-lg border px-3 py-1.5 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950',
                     r.label === activeRow
                       ? 'border-slate-600 bg-slate-800 text-slate-100'
                       : 'border-slate-800 bg-slate-900/40 text-slate-400 hover:text-slate-200',
@@ -1567,8 +1570,14 @@ function BillingPlanOperationsLens({ module }: { module: BcpModule; env: EnvLabe
 // production readiness and the path to production. No live data, no DB, no mutation.
 // Only interaction is read-only tab switching (local UI state).
 function ReadinessCardView({ card }: { card: ReadinessGateCard }) {
+  const accent =
+    card.tone === 'healthy' ? 'from-emerald-400/70'
+    : card.tone === 'warning' ? 'from-amber-400/70'
+    : card.tone === 'blocked' ? 'from-rose-400/70'
+    : 'from-slate-400/60';
   return (
-    <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+    <div className="relative overflow-hidden rounded-2xl border border-slate-800/80 bg-gradient-to-b from-slate-900/70 to-slate-900/40 p-4 ring-1 ring-white/5 transition hover:border-slate-700 hover:ring-white/10">
+      <span className={cx('absolute inset-x-0 top-0 h-0.5 bg-gradient-to-r to-transparent', accent)} aria-hidden="true" />
       <div className="flex items-center justify-between gap-2">
         <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">{card.stage}</span>
         <DeferToneBadge tone={card.tone}>{card.verdict}</DeferToneBadge>
