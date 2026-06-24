@@ -236,6 +236,52 @@ test('non-ISO generatedAt is replaced with a safe sentinel', () => {
   assert.equal(env.freshness.generatedAt, 'redacted-timestamp');
 });
 
+// ---- 6d. NO-THROW: malformed (null / non-object) category elements are skipped, not thrown ----
+test('null / undefined / non-object category elements are skipped without throwing', () => {
+  const malformed = {
+    categories: [
+      null,
+      undefined,
+      42,
+      'a string',
+      { category: 'valid', status: 'ok', severity: 'low' },
+    ],
+  } as unknown as SyntheticReadinessSource;
+  let env: ReturnType<typeof buildReadinessSummaryEnvelope> | undefined;
+  assert.doesNotThrow(() => {
+    env = buildReadinessSummaryEnvelope(allow(), malformed, labels, '2026-01-01T00:00:00.000Z');
+  });
+  // Only the one valid element survives.
+  assert.ok(env && env.data && env.data.categories.length === 1);
+  assert.equal(env!.data!.categories[0].category, 'valid');
+});
+
+// ---- 6e. L2: an undefined-valued forbidden key is NOT over-reported as redacted ----
+test('forbidden key present but undefined is not reported as an omitted category', () => {
+  const src = { email: undefined, categories: [{ category: 'ok', status: 'ok', severity: 'low' }] } as unknown as SyntheticReadinessSource;
+  const env = buildReadinessSummaryEnvelope(allow(), src, labels, '2026-01-01T00:00:00.000Z');
+  assert.ok(!env.redaction.omittedCategories.includes('pii'), 'undefined-valued email over-reported');
+});
+
+// ---- 6f. L3: a non-string label is coerced AND recorded as sensitive_label_content (no leak) ----
+test('non-string category/status is coerced to a sentinel and flagged, with no leak', () => {
+  const src = {
+    categories: [{ category: { secret: 'SHOULD_NOT_LEAK' }, status: 123, severity: 'low' }],
+  } as unknown as SyntheticReadinessSource;
+  const env = buildReadinessSummaryEnvelope(allow(), src, labels, '2026-01-01T00:00:00.000Z');
+  const serialized = JSON.stringify(env);
+  assert.ok(!serialized.includes('SHOULD_NOT_LEAK'), 'object label leaked');
+  assert.equal(env.data!.categories[0].category, 'unknown');
+  assert.ok(env.redaction.omittedCategories.includes('sensitive_label_content'));
+});
+
+// ---- 6g. STAGING environment label flows through ----
+test('STAGING environment label is carried through the envelope', () => {
+  const env = buildReadinessSummaryEnvelope(allow(), { categories: [] }, labels, '2026-01-01T00:00:00.000Z', 'STAGING');
+  assert.equal(env.environment, 'STAGING');
+  assert.equal(env.authorizationContext.environment, 'STAGING');
+});
+
 // ---- 7. DTO envelope: safe empty state ----
 test('empty source yields a safe empty-state envelope with null data', () => {
   const env = buildReadinessSummaryEnvelope(allow(), { categories: [] }, labels, '2026-01-01T00:00:00.000Z');

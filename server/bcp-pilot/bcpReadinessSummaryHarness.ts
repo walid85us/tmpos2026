@@ -127,9 +127,11 @@ const SAFE_SEVERITIES = new Set(['low', 'medium', 'high']);
 const SAFE_LABEL_RE = /^[A-Za-z0-9_.\- ]{1,64}$/;
 const ISO_TS_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
 
-/** Returns a safe label, or the 'redacted_label' sentinel when the value is unsafe to emit. */
+/** Returns a safe label, or a sentinel when the value is unsafe/off-type to emit. */
 function safeLabel(value: unknown): { value: string; safe: boolean } {
-  if (typeof value !== 'string') return { value: 'unknown', safe: true };
+  // Non-string (object/number/null/undefined) is coerced AND flagged unsafe so the omission is
+  // recorded — a forbidden value hidden inside an off-type label must not pass silently.
+  if (typeof value !== 'string') return { value: 'unknown', safe: false };
   if (!SAFE_LABEL_RE.test(value)) return { value: 'redacted_label', safe: false };
   return { value, safe: true };
 }
@@ -189,9 +191,15 @@ export function buildReadinessSummaryEnvelope(
   // Detect + strip forbidden source keys (top level and per-category). Report only GENERIC
   // categories (never the raw key name or value).
   const omitted = new Set<string>();
-  const scanForbidden = (obj: Record<string, unknown>) => {
+  // NO-THROW (binding): guard against null/non-object input, and ignore undefined-valued keys so a
+  // merely-declared-but-empty forbidden field is not over-reported as redacted.
+  const scanForbidden = (obj: unknown) => {
+    if (!obj || typeof obj !== 'object') return;
+    const rec = obj as Record<string, unknown>;
     for (const k of Object.keys(FORBIDDEN_KEY_CATEGORY)) {
-      if (Object.prototype.hasOwnProperty.call(obj, k)) omitted.add(FORBIDDEN_KEY_CATEGORY[k]);
+      if (Object.prototype.hasOwnProperty.call(rec, k) && rec[k] !== undefined) {
+        omitted.add(FORBIDDEN_KEY_CATEGORY[k]);
+      }
     }
   };
   scanForbidden(source);
@@ -199,6 +207,8 @@ export function buildReadinessSummaryEnvelope(
   const rawCategories = Array.isArray(source.categories) ? source.categories : [];
   const categories: BcpReadinessCategory[] = [];
   for (const rc of rawCategories) {
+    // Skip malformed (null / non-object) elements rather than throwing — honor the no-throw contract.
+    if (!rc || typeof rc !== 'object') continue;
     scanForbidden(rc);
     // Copy ONLY the safe, allow-listed fields — never spread the raw source object — and
     // content-validate each label so a forbidden value embedded in an allowed field cannot leak.
