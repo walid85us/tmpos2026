@@ -88,6 +88,42 @@ test('enabled + DEV + GET => 200 synthetic_success envelope (no forbidden values
   });
 });
 
+test('enabled + DEV + GET => envelope carries the M7K code/config posture (code_config_only)', () => {
+  withEnv('true', 'development', () => {
+    const r = call('GET');
+    assert.equal(r.statusCode, 200);
+    const body = r.body as { data?: { categories?: Array<{ category: string; status: string }> } };
+    const categories = body.data?.categories ?? [];
+    const names = categories.map((c) => c.category);
+    assert.ok(names.includes('feature_flag_posture'), 'expected code/config feature_flag_posture category');
+    const boundary = categories.find((c) => c.category === 'synthetic_live_boundary_posture');
+    assert.equal(boundary?.status, 'code_config_only');
+  });
+});
+
+test('adapter ignores request body/query/headers — authority/content is server-side only', () => {
+  withEnv('true', 'development', () => {
+    const plain = call('GET');
+    const res = fakeRes();
+    const junkReq = {
+      method: 'GET',
+      body: { internalUserId: 'iu_attacker', email: 'evil@example.com' },
+      query: { tenant: 't-injected', authProviderUid: 'uid-injected' },
+      headers: { authorization: 'Bearer injected' },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    handler(junkReq as any, res as any);
+    assert.equal(res.statusCode, 200);
+    // Identical to a plain GET ⇒ request fields had zero influence on the response.
+    assert.deepEqual(res.body, plain.body);
+    // And none of the injected values leaked into the response body.
+    const s = JSON.stringify(res.body);
+    for (const bad of ['iu_attacker', 'evil@example.com', 't-injected', 'uid-injected', 'Bearer']) {
+      assert.ok(!s.includes(bad), `injected request value leaked: ${bad}`);
+    }
+  });
+});
+
 test('enabled + DEV + POST => 405 method_not_allowed, Allow: GET, no side effect', () => {
   withEnv('true', 'development', () => {
     const r = call('POST');
