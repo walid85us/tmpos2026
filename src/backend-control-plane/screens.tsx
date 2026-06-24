@@ -76,6 +76,7 @@ import {
 } from './mockData';
 import type { EntitlementRow, GovDetail, Health, PostureCard, TenantStoreRow } from './types';
 import type { ReadinessGateCard } from './types';
+import C01ReadinessCard from './C01ReadinessCard';
 
 function ScreenHeading({ module }: { module: BcpModule }) {
   return (
@@ -1596,6 +1597,7 @@ function BackendCpReadinessGate({ module }: { module: BcpModule; env: EnvLabel }
       <SectionTabs
         tabs={[
           { key: 'readiness', label: 'Readiness' },
+          { key: 'c01', label: 'C-01 Live Preview' },
           { key: 'coverage', label: 'Module Coverage' },
           { key: 'path', label: 'Production Path' },
           { key: 'blockers', label: 'Blockers & Final Gate' },
@@ -1617,6 +1619,12 @@ function BackendCpReadinessGate({ module }: { module: BcpModule; env: EnvLabel }
             <PostureGrid cards={DEV_REVIEW_POSTURE} />
           </Panel>
         </>
+      )}
+
+      {section === 'c01' && (
+        <div className="mt-1">
+          <C01ReadinessCard />
+        </div>
       )}
 
       {section === 'coverage' && (
