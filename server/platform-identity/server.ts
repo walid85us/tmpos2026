@@ -29,6 +29,7 @@ import { getDb } from './db';
 import { withProtectedAction } from './protectedAction';
 import { createSupabaseWhoamiHandler } from './verifiedWhoami';
 import { createSessionResolveHandler } from './sessionResolve';
+import { createBcpReadinessSummaryHandler, BCP_READINESS_ROUTE_PATH } from '../bcp-pilot/bcpReadOnlyExpressAdapter';
 
 export function createPlatformIdentityApp() {
   const app = express();
@@ -164,6 +165,16 @@ export function createPlatformIdentityApp() {
   // ENABLE_SESSION_RESOLVE=true, and is NEVER served in production (404 otherwise).
   // No frontend adoption, no AccessContext change, no durable audit, no schema/RLS.
   app.post('/auth/session/resolve', createSessionResolveHandler());
+
+  // --- Phase 2.0 M7G: dev-only DEFAULT-OFF inert Backend CP read-only route -------
+  // Registers the pure M7E handler (flag → guard → synthetic C-01 mapper) as an INERT,
+  // synthetic-only GET route on THIS isolated API only (never the SaaS app, never the client
+  // bundle). The handler self-gates: with ENABLE_BCP_DEV_READONLY_PILOT off, in production, or for
+  // a non-GET method, it returns a safe unavailable/blocked/denied/405 response with no data. It
+  // reads NOTHING live (no DB/Supabase/provider) and uses a fixed server-constructed synthetic
+  // principal — no live session resolver, no auth change. `app.all` routes every method to the
+  // handler so HEAD/OPTIONS/mutation semantics are decided by the pure handler.
+  app.all(BCP_READINESS_ROUTE_PATH, createBcpReadinessSummaryHandler());
 
   return app;
 }
