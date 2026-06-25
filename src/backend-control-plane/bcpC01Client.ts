@@ -74,6 +74,7 @@ const ID_SHAPED_RE = /\d{6,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
  */
 export function safeLabel(value: unknown): string {
   if (typeof value !== 'string') return 'redacted';
+  if (value.trim() === '') return 'redacted'; // empty / whitespace-only is not a meaningful label
   if (!SAFE_LABEL_RE.test(value)) return 'redacted';
   if (ID_SHAPED_RE.test(value)) return 'redacted';
   const lower = value.toLowerCase();
@@ -83,6 +84,21 @@ export function safeLabel(value: unknown): string {
 
 function safeTimestamp(value: unknown): string | undefined {
   return typeof value === 'string' && ISO_TS_RE.test(value) ? value : undefined;
+}
+
+/**
+ * Phase 2.0 M7Q — derive a display-safe source mode.
+ *
+ * Prefers the additive v1 top-level `sourceMode` (e.g. 'code_config'); when that key is ABSENT it
+ * falls back to the in-band `synthetic_live_boundary_posture` category status (the original v0
+ * behavior — e.g. 'code_config_only'). A present-but-unsafe/empty/malformed/hostile sourceMode is
+ * neutralized to 'redacted_label' (matching the M7O backend sanitization convention) and never
+ * falls through to the category, so a raw id/secret/token/email can never surface here.
+ */
+function deriveSourceMode(b: Record<string, unknown>, categoryFallback: string): string {
+  if (!('sourceMode' in b) || b.sourceMode === undefined) return categoryFallback;
+  const safe = safeLabel(b.sourceMode);
+  return safe === 'redacted' ? 'redacted_label' : safe;
 }
 
 /** Map a safe status label to a display tone. */
@@ -126,7 +142,7 @@ export function classifyC01Response(status: number, body: unknown): C01Result {
       return {
         kind: 'success',
         rows,
-        sourceMode: find('synthetic_live_boundary_posture'),
+        sourceMode: deriveSourceMode(b, find('synthetic_live_boundary_posture')),
         parity: find('parity_posture'),
         environment: safeLabel(ac.environment),
         generatedAt: safeTimestamp(b.generatedAt),

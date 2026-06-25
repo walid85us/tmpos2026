@@ -164,6 +164,121 @@ test('fetchC01Readiness maps a non-JSON 5xx to unavailable', async () => {
   assert.equal(r.kind, 'unavailable');
 });
 
+// ---- M7Q: top-level sourceMode hardening ----
+
+// A v1 code/config envelope: top-level `sourceMode` present and safe, AND the in-band category still
+// present (mirrors the real M7K/M7O output — top-level should take precedence over the category).
+const v1Envelope = {
+  schemaVersion: 'bcp.c01.readiness.v1-code-config',
+  sourceMode: 'code_config',
+  environment: 'DEV',
+  generatedAt: '2026-01-01T00:00:00.000Z',
+  data: {
+    categories: [
+      { category: 'feature_flag_posture', status: 'enabled', severity: 'low' },
+      { category: 'synthetic_live_boundary_posture', status: 'code_config_only', severity: 'low' },
+      { category: 'parity_posture', status: 'static_config', severity: 'low' },
+    ],
+  },
+  authorizationContext: { environment: 'DEV' },
+  warnings: ['code_config'],
+};
+
+test('M7Q: safeLabel accepts code_config / code_config_only as safe bounded source modes', () => {
+  assert.equal(safeLabel('code_config'), 'code_config');
+  assert.equal(safeLabel('code_config_only'), 'code_config_only');
+  assert.equal(safeLabel('live_provider'), 'live_provider');
+});
+
+test('M7Q: v1 top-level sourceMode (code_config) is read and preferred over in-band category', () => {
+  const r = classifyC01Response(200, v1Envelope);
+  assert.equal(r.kind, 'success');
+  if (r.kind !== 'success') return;
+  assert.equal(r.sourceMode, 'code_config'); // top-level wins over category 'code_config_only'
+  // The in-band category row is still present (compatibility preserved).
+  assert.ok(r.rows.some((row) => row.label === 'synthetic_live_boundary_posture' && row.status === 'code_config_only'));
+});
+
+test('M7Q: v1-shaped response with NO top-level sourceMode falls back to in-band category', () => {
+  const v1NoTop = {
+    schemaVersion: 'bcp.c01.readiness.v1-code-config',
+    environment: 'DEV',
+    data: { categories: [{ category: 'synthetic_live_boundary_posture', status: 'code_config_only', severity: 'low' }] },
+    authorizationContext: { environment: 'DEV' },
+    warnings: ['code_config'],
+  };
+  const r = classifyC01Response(200, v1NoTop);
+  assert.equal(r.kind, 'success');
+  if (r.kind !== 'success') return;
+  assert.equal(r.sourceMode, 'code_config_only'); // in-band fallback preserved
+});
+
+test('M7Q: v0 envelope (no top-level sourceMode) keeps existing in-band fallback', () => {
+  const r = classifyC01Response(200, envelope); // existing v0 fixture has no top-level sourceMode
+  assert.equal(r.kind, 'success');
+  if (r.kind !== 'success') return;
+  assert.equal(r.sourceMode, 'code_config_only');
+});
+
+test('M7Q: unknown future schemaVersion still classifies success and reads a safe top-level sourceMode', () => {
+  const r = classifyC01Response(200, { ...v1Envelope, schemaVersion: 'bcp.c01.readiness.v9-future', sourceMode: 'live_provider' });
+  assert.equal(r.kind, 'success');
+  if (r.kind !== 'success') return;
+  assert.equal(r.sourceMode, 'live_provider');
+});
+
+test('M7Q: empty / malformed top-level sourceMode is neutralized (never falls through to category)', () => {
+  // Each is caught by a different safeLabel guard: '' & '  ' (trim-empty), 'has\ttab' (charset regex),
+  // 123/{}/null/true/[] (typeof). All must map to 'redacted_label' — never the category fallback.
+  const bads: unknown[] = ['', 123, {}, null, true, [], '  ', 'has\ttab'];
+  for (const bad of bads) {
+    const r = classifyC01Response(200, { ...v1Envelope, sourceMode: bad });
+    assert.equal(r.kind, 'success');
+    if (r.kind !== 'success') continue;
+    assert.equal(r.sourceMode, 'redacted_label', `value ${JSON.stringify(bad)} not neutralized`);
+  }
+});
+
+test('M7Q: hostile top-level sourceMode (forbidden substring / id-shaped / token / email) is redacted and never leaks', () => {
+  const hostiles = [
+    'service_role_key', 'iu_attacker', 'sk-deadbeef', 'Bearer eyJabc', 'a@b.com',
+    'postgres://u:p@h/db', 'a1b2c3d4-e5f6-7890-abcd-ef1234567890', '1234567890',
+  ];
+  for (const h of hostiles) {
+    const r = classifyC01Response(200, { ...v1Envelope, sourceMode: h });
+    assert.equal(r.kind, 'success');
+    if (r.kind !== 'success') continue;
+    assert.equal(r.sourceMode, 'redacted_label', `hostile sourceMode not redacted: ${h}`);
+    const s = JSON.stringify(r);
+    for (const bad of [...FORBIDDEN_TOKENS, 'service_role', 'sk-', '1234567890', 'a1b2c3d4']) {
+      assert.ok(!s.includes(bad), `leaked via sourceMode: ${bad}`);
+    }
+  }
+});
+
+test('M7Q: fetch surfaces top-level sourceMode end-to-end — still GET-only, no body/credentials/auth', async () => {
+  let captured: { url: string; init: RequestInit } | null = null;
+  const fakeFetch = (async (url: string, init: RequestInit) => {
+    captured = { url, init };
+    return { status: 200, json: async () => v1Envelope } as unknown as Response;
+  }) as unknown as typeof fetch;
+  const r = await fetchC01Readiness({ fetchImpl: fakeFetch, url: '/__identity/dev/bcp/readiness-summary' });
+  assert.equal(r.kind, 'success');
+  if (r.kind === 'success') assert.equal(r.sourceMode, 'code_config');
+  assert.ok(captured);
+  const init = captured!.init;
+  assert.equal(init.method, 'GET');
+  assert.equal('body' in init, false);
+  assert.equal(init.credentials, 'omit');
+  const headers = (init.headers ?? {}) as Record<string, string>;
+  assert.equal('authorization' in headers, false);
+  assert.equal('Authorization' in headers, false);
+  const s = JSON.stringify({ url: captured!.url, init: { method: init.method, headers, credentials: init.credentials } });
+  for (const bad of ['internalUserId', 'tenantId', 'storeId', 'email', 'uid']) {
+    assert.ok(!s.includes(bad), `request carried identity field: ${bad}`);
+  }
+});
+
 // ---- Runner ----
 (async () => {
   let pass = 0;
