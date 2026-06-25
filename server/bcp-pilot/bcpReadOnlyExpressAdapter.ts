@@ -22,7 +22,7 @@ import type { Request, Response } from 'express'; // type-only: erased at runtim
 import { isBcpDevReadonlyPilotEnabled } from './bcpPilotConfig';
 import { handleBcpReadinessSummaryRequest } from './bcpReadOnlyRoute';
 import type { SyntheticServerPrincipal } from './bcpAuthorizationGuard';
-import { buildC01CodeConfigSource } from './bcpC01CodeConfigReadModel';
+import { buildC01CodeConfigSource, C01_CODE_CONFIG_ENVELOPE_META } from './bcpC01CodeConfigReadModel';
 
 /** The DEV-only route path on the ISOLATED platform API (never the SaaS app). */
 export const BCP_READINESS_ROUTE_PATH = '/dev/bcp/readiness-summary';
@@ -63,6 +63,9 @@ export function createBcpReadinessSummaryHandler() {
       featureEnabled,
       principal: SYNTHETIC_PRINCIPAL,
       syntheticSource: codeConfigSource,
+      // M7O: honest additive envelope metadata for the code/config path (v1 schemaVersion +
+      // sourceMode + code_config warning + freshness label). Server-constructed; never from the request.
+      envelopeMeta: C01_CODE_CONFIG_ENVELOPE_META,
       // generatedAt/environment intentionally omitted → the handler uses safe server-side defaults.
     });
 

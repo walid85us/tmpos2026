@@ -101,6 +101,18 @@ test('enabled + DEV + GET => envelope carries the M7K code/config posture (code_
   });
 });
 
+test('M7O: enabled + DEV + GET => envelope carries honest v1 code/config metadata', () => {
+  withEnv('true', 'development', () => {
+    const r = call('GET');
+    assert.equal(r.statusCode, 200);
+    const body = r.body as { schemaVersion?: string; sourceMode?: string; warnings?: string[]; freshness?: { lastSuccessfulReadLabel?: string } };
+    assert.equal(body.schemaVersion, 'bcp.c01.readiness.v1-code-config');
+    assert.equal(body.sourceMode, 'code_config');
+    assert.deepEqual(body.warnings, ['code_config']);
+    assert.equal(body.freshness?.lastSuccessfulReadLabel, 'code-config-no-live-read');
+  });
+});
+
 test('adapter ignores request body/query/headers — authority/content is server-side only', () => {
   withEnv('true', 'development', () => {
     const plain = call('GET');

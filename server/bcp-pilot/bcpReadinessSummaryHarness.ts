@@ -68,6 +68,8 @@ export interface BcpDtoEmptyState {
 
 export interface BcpReadinessSummaryEnvelope {
   schemaVersion: string;
+  /** Optional additive source-mode label (M7O); omitted on the legacy v0 path. */
+  sourceMode?: string;
   environment: EnvLabel;
   generatedAt: string;
   data: { categories: BcpReadinessCategory[] } | null;
@@ -83,6 +85,19 @@ export interface ReadinessAuthLabels {
   visibilityClass: string;
   scopeType: string;
   parityState: string;
+}
+
+/**
+ * Additive, OPTIONAL envelope metadata (M7O). Every field is content-validated by the builder and
+ * falls back to the legacy v0 synthetic default when absent/unsafe, so the synthetic path stays
+ * byte-identical and the code/config path can declare an honest schemaVersion / sourceMode /
+ * warning / freshness label. No field may carry data — these are bounded posture labels only.
+ */
+export interface ReadinessEnvelopeMeta {
+  schemaVersion?: string;
+  sourceMode?: string;
+  warnings?: string[];
+  lastSuccessfulReadLabel?: string;
 }
 
 /**
@@ -157,9 +172,32 @@ export function buildReadinessSummaryEnvelope(
   authLabels: ReadinessAuthLabels,
   generatedAt: string,
   environment: EnvLabel = 'DEV',
+  meta?: ReadinessEnvelopeMeta,
 ): BcpReadinessSummaryEnvelope {
   // Validate caller-supplied timestamp; never echo an arbitrary unbounded string.
   const safeGeneratedAt = ISO_TS_RE.test(generatedAt) ? generatedAt : 'redacted-timestamp';
+  // M7O: additive, content-validated metadata. Defaults preserve the v0 synthetic behavior, so a
+  // caller that passes no meta (e.g. the synthetic test harness) gets a byte-identical envelope.
+  // Every override must be a safe bounded label; an unsafe value falls back to the synthetic default.
+  const m = meta ?? {};
+  const pickSafe = (v: string | undefined, fallback: string): string => {
+    if (typeof v !== 'string') return fallback;
+    const r = safeLabel(v);
+    return r.safe ? r.value : fallback;
+  };
+  const schemaVersion = pickSafe(m.schemaVersion, BCP_READINESS_SCHEMA_VERSION);
+  // Sanitize warnings: drop charset-unsafe entries. If a non-empty array was supplied but EVERY entry
+  // is unsafe, fall back to the safe default sentinel rather than silently emitting []. An explicit
+  // empty [] from the caller is respected. (safeLabel itself rejects non-string elements defensively.)
+  const warnings = ((): string[] => {
+    if (!Array.isArray(m.warnings)) return ['synthetic'];
+    const sanitized = m.warnings.map((w) => safeLabel(w)).filter((r) => r.safe).map((r) => r.value);
+    return sanitized.length === 0 && m.warnings.length > 0 ? ['synthetic'] : sanitized;
+  })();
+  // sourceMode is an OPTIONAL top-level field: included only when a (safe) value is supplied, so the
+  // default path omits the key entirely and stays compatible with existing consumers/tests. An empty
+  // or charset-unsafe value yields the 'redacted_label' sentinel (never an empty/blank field).
+  const sourceMode = m.sourceMode !== undefined ? pickSafe(m.sourceMode, 'redacted_label') : undefined;
   // authorizationContext carries posture labels ONLY — each is content-validated.
   const authorizationContext: BcpDtoAuthorizationContext = {
     visibilityClass: safeLabel(authLabels.visibilityClass).value,
@@ -169,14 +207,15 @@ export function buildReadinessSummaryEnvelope(
   };
   const freshness: BcpDtoFreshness = {
     generatedAt: safeGeneratedAt,
-    lastSuccessfulReadLabel: 'synthetic-no-live-read',
+    lastSuccessfulReadLabel: pickSafe(m.lastSuccessfulReadLabel, 'synthetic-no-live-read'),
   };
 
   // FAIL CLOSED: never emit data unless the guard explicitly allowed.
   if (guard.decision !== 'allow') {
     const reason: EmptyStateReason = guard.decision === 'blocked' ? 'blocked_by_phase' : 'not_authorized';
     return {
-      schemaVersion: BCP_READINESS_SCHEMA_VERSION,
+      schemaVersion,
+      ...(sourceMode !== undefined ? { sourceMode } : {}),
       environment,
       generatedAt: safeGeneratedAt,
       data: null,
@@ -184,7 +223,7 @@ export function buildReadinessSummaryEnvelope(
       freshness,
       authorizationContext,
       emptyState: { isEmpty: true, reason },
-      warnings: ['synthetic'],
+      warnings,
     };
   }
 
@@ -224,7 +263,8 @@ export function buildReadinessSummaryEnvelope(
   const isEmpty = categories.length === 0;
 
   return {
-    schemaVersion: BCP_READINESS_SCHEMA_VERSION,
+    schemaVersion,
+    ...(sourceMode !== undefined ? { sourceMode } : {}),
     environment,
     generatedAt: safeGeneratedAt,
     data: isEmpty ? null : { categories },
@@ -234,6 +274,6 @@ export function buildReadinessSummaryEnvelope(
     emptyState: isEmpty
       ? { isEmpty: true, reason: 'no_visible_records' }
       : { isEmpty: false, reason: 'none' },
-    warnings: ['synthetic'],
+    warnings,
   };
 }

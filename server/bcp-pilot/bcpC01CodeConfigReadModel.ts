@@ -23,7 +23,18 @@
 // (the harness independently strips forbidden keys and content-validates every label). Server-side
 // only. Never imported by src/ (the client bundle).
 
-import type { SyntheticReadinessSource } from './bcpReadinessSummaryHarness';
+import type { SyntheticReadinessSource, ReadinessEnvelopeMeta } from './bcpReadinessSummaryHarness';
+
+/**
+ * M7O — honest, additive envelope metadata for the code/config path. Bounded safe labels only;
+ * the harness independently content-validates each. The synthetic test path keeps the v0 defaults.
+ */
+export const C01_CODE_CONFIG_ENVELOPE_META: ReadinessEnvelopeMeta = {
+  schemaVersion: 'bcp.c01.readiness.v1-code-config',
+  sourceMode: 'code_config',
+  warnings: ['code_config'],
+  lastSuccessfulReadLabel: 'code-config-no-live-read',
+};
 
 /** Server-derived inputs (resolved by the adapter; never from the request, never from a DB). */
 export interface C01CodeConfigInput {

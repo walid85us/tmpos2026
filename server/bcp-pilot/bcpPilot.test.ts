@@ -176,6 +176,73 @@ test('allowed envelope has schemaVersion + redaction/freshness/authorizationCont
   assert.ok(env.data && env.data.categories.length === 1);
 });
 
+// ---- M7O: additive envelope metadata (schemaVersion / sourceMode / warnings / freshness) ----
+test('M7O: default envelope (no meta) keeps v0-synthetic vocabulary and omits sourceMode', () => {
+  const env = buildReadinessSummaryEnvelope(
+    allow(),
+    { categories: [{ category: 'feature_flag_posture', status: 'enabled', severity: 'low' }] },
+    labels,
+    '2026-01-01T00:00:00.000Z',
+  );
+  assert.equal(env.schemaVersion, BCP_READINESS_SCHEMA_VERSION); // bcp.c01.readiness.v0-synthetic
+  assert.deepEqual(env.warnings, ['synthetic']);
+  assert.equal(env.freshness.lastSuccessfulReadLabel, 'synthetic-no-live-read');
+  assert.equal('sourceMode' in env, false); // omitted entirely on the v0 path (back-compat)
+});
+
+test('M7O: code/config meta override yields honest v1 schemaVersion + sourceMode + warning + freshness', () => {
+  const env = buildReadinessSummaryEnvelope(
+    allow(),
+    { categories: [{ category: 'feature_flag_posture', status: 'enabled', severity: 'low' }] },
+    labels,
+    '2026-01-01T00:00:00.000Z',
+    'DEV',
+    { schemaVersion: 'bcp.c01.readiness.v1-code-config', sourceMode: 'code_config', warnings: ['code_config'], lastSuccessfulReadLabel: 'code-config-no-live-read' },
+  );
+  assert.equal(env.schemaVersion, 'bcp.c01.readiness.v1-code-config');
+  assert.equal(env.sourceMode, 'code_config');
+  assert.deepEqual(env.warnings, ['code_config']);
+  assert.equal(env.freshness.lastSuccessfulReadLabel, 'code-config-no-live-read');
+  assert.ok(env.data && env.data.categories.length === 1); // shape unchanged (additive)
+});
+
+test('M7O: unsafe meta values fall back to safe defaults/sentinels (never leak)', () => {
+  const env = buildReadinessSummaryEnvelope(
+    allow(),
+    { categories: [] },
+    labels,
+    '2026-01-01T00:00:00.000Z',
+    'DEV',
+    { schemaVersion: 'postgres://leak', sourceMode: 'a@b.com', warnings: ['ok_label', 'bad://warn'], lastSuccessfulReadLabel: 'bad://fresh' },
+  );
+  assert.equal(env.schemaVersion, BCP_READINESS_SCHEMA_VERSION); // charset-unsafe ⇒ fallback to v0 default
+  assert.equal(env.sourceMode, 'redacted_label'); // charset-unsafe ⇒ sentinel
+  assert.deepEqual(env.warnings, ['ok_label']); // charset-unsafe warning filtered out
+  assert.equal(env.freshness.lastSuccessfulReadLabel, 'synthetic-no-live-read'); // charset-unsafe ⇒ fallback
+  const s = JSON.stringify(env);
+  for (const bad of ['postgres://', '@', '://']) assert.ok(!s.includes(bad), `leaked: ${bad}`);
+});
+
+test('M7O: all-unsafe warnings fall back to the safe default sentinel (never empty)', () => {
+  const env = buildReadinessSummaryEnvelope(
+    allow(), { categories: [] }, labels, '2026-01-01T00:00:00.000Z', 'DEV',
+    { warnings: ['bad://1', 'also://bad'] },
+  );
+  assert.deepEqual(env.warnings, ['synthetic']);
+});
+
+test('M7O: meta is applied on the denied/blocked empty path too', () => {
+  const denied = buildReadinessSummaryEnvelope(
+    { decision: 'deny', reasonCode: 'insufficient_visibility' },
+    { categories: [] }, labels, '2026-01-01T00:00:00.000Z', 'DEV',
+    { schemaVersion: 'bcp.c01.readiness.v1-code-config', sourceMode: 'code_config', warnings: ['code_config'] },
+  );
+  assert.equal(denied.data, null);
+  assert.equal(denied.schemaVersion, 'bcp.c01.readiness.v1-code-config');
+  assert.equal(denied.sourceMode, 'code_config');
+  assert.deepEqual(denied.warnings, ['code_config']);
+});
+
 // ---- 6. DTO envelope: forbidden fields are stripped, never passed through ----
 test('forbidden source fields are blocked and reported as omitted categories', () => {
   const malicious: SyntheticReadinessSource = {

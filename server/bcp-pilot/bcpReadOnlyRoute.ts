@@ -31,6 +31,7 @@ import {
   type BcpReadinessSummaryEnvelope,
   type SyntheticReadinessSource,
   type EnvLabel,
+  type ReadinessEnvelopeMeta,
 } from './bcpReadinessSummaryHarness';
 
 /** The ONLY contract this inert route serves. Pinned server-side; never request-controlled. */
@@ -69,6 +70,10 @@ export interface BcpRouteRequest {
   syntheticSource?: SyntheticReadinessSource;
   generatedAt?: string;
   environment?: EnvLabel;
+  // M7O: additive, server-constructed envelope metadata (schemaVersion / sourceMode / warnings /
+  // freshness label). Server-controlled only (never mapped from untrusted request input); the
+  // builder content-validates every field and falls back to the v0 synthetic default when absent.
+  envelopeMeta?: ReadinessEnvelopeMeta;
 }
 
 export interface BcpRouteResponse {
@@ -143,6 +148,7 @@ export function handleBcpReadinessSummaryRequest(req: BcpRouteRequest): BcpRoute
       },
       req.generatedAt ?? SYNTHETIC_GENERATED_AT,
       req.environment ?? 'DEV',
+      req.envelopeMeta, // additive; undefined ⇒ legacy v0 synthetic defaults
     );
     return { httpStatus: 200, category: 'synthetic_success', body: envelope };
   } catch {

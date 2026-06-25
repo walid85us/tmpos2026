@@ -5,7 +5,7 @@
 // Runnable via `npx tsx <thisfile>`. No real ids/secrets — synthetic placeholders only.
 
 import assert from 'node:assert/strict';
-import { buildC01CodeConfigSource } from './bcpC01CodeConfigReadModel';
+import { buildC01CodeConfigSource, C01_CODE_CONFIG_ENVELOPE_META } from './bcpC01CodeConfigReadModel';
 import { buildReadinessSummaryEnvelope } from './bcpReadinessSummaryHarness';
 import type { GuardResult } from './bcpAuthorizationGuard';
 
@@ -117,6 +117,19 @@ test('no forbidden key names and no forbidden tokens anywhere in the source', ()
   // No forbidden tokens in the serialized source.
   const s = JSON.stringify(src);
   for (const bad of FORBIDDEN_TOKENS) assert.ok(!s.includes(bad), `forbidden token leaked: ${bad}`);
+});
+
+test('M7O: code/config envelope meta declares honest, safe v1 values', () => {
+  const m = C01_CODE_CONFIG_ENVELOPE_META;
+  assert.equal(m.schemaVersion, 'bcp.c01.readiness.v1-code-config');
+  assert.equal(m.sourceMode, 'code_config');
+  assert.deepEqual(m.warnings, ['code_config']);
+  assert.equal(m.lastSuccessfulReadLabel, 'code-config-no-live-read');
+  // Every meta string is a safe bounded label (and not 'synthetic').
+  for (const v of [m.schemaVersion, m.sourceMode, m.lastSuccessfulReadLabel, ...(m.warnings ?? [])]) {
+    assert.ok(typeof v === 'string' && SAFE_LABEL_RE.test(v), `unsafe meta label: ${String(v)}`);
+    assert.ok(!String(v).includes('synthetic'), `meta should not say synthetic: ${String(v)}`);
+  }
 });
 
 test('deterministic: same input yields equal output', () => {

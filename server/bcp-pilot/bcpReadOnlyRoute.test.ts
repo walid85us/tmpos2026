@@ -72,6 +72,26 @@ test('GET returns a synthetic success envelope', () => {
   assert.equal(r.category, 'synthetic_success');
   assert.ok(r.body && 'schemaVersion' in r.body);
 });
+
+test('M7O: GET without envelopeMeta keeps the legacy v0-synthetic envelope (back-compat)', () => {
+  const r = handleBcpReadinessSummaryRequest(req());
+  const body = r.body as { schemaVersion?: string; sourceMode?: string; warnings?: string[] };
+  assert.equal(body.schemaVersion, 'bcp.c01.readiness.v0-synthetic');
+  assert.deepEqual(body.warnings, ['synthetic']);
+  assert.equal('sourceMode' in (r.body as object), false);
+});
+
+test('M7O: GET with code/config envelopeMeta returns the honest v1 envelope', () => {
+  const r = handleBcpReadinessSummaryRequest(req({
+    envelopeMeta: { schemaVersion: 'bcp.c01.readiness.v1-code-config', sourceMode: 'code_config', warnings: ['code_config'], lastSuccessfulReadLabel: 'code-config-no-live-read' },
+  }));
+  assert.equal(r.httpStatus, 200);
+  const body = r.body as { schemaVersion?: string; sourceMode?: string; warnings?: string[]; freshness?: { lastSuccessfulReadLabel?: string } };
+  assert.equal(body.schemaVersion, 'bcp.c01.readiness.v1-code-config');
+  assert.equal(body.sourceMode, 'code_config');
+  assert.deepEqual(body.warnings, ['code_config']);
+  assert.equal(body.freshness?.lastSuccessfulReadLabel, 'code-config-no-live-read');
+});
 for (const m of ['POST', 'PUT', 'PATCH', 'DELETE']) {
   test(`${m} is rejected (405, no side effect, no data)`, () => {
     const r = handleBcpReadinessSummaryRequest(req({ method: m }));
