@@ -100,11 +100,21 @@ test('no customer-facing / SaaS-nav / production / mutation registration is intr
   }
 });
 
-// Repo-wide uniqueness: C-02 must be registered ONLY in the isolated server.ts, and never touched by src/.
-test('no frontend src/ file references the C-02 adapter/route (M8E adds no frontend coupling)', () => {
+// Repo-wide uniqueness: C-02 must be registered ONLY in the isolated server.ts, and the BACKEND C-02
+// modules must never be pulled into the client bundle. (M8F adds a DEV-only frontend CLIENT that talks
+// to the proxy path — that consumer is allowed; importing the server-side adapter/route/read-model is not.)
+test('no frontend src/ file imports the BACKEND C-02 modules (no server code in the client bundle)', () => {
+  const FORBIDDEN_BACKEND = [
+    'createBcpC02RegistryReadinessHandler', 'bcpC02ReadOnlyExpressAdapter', 'bcpC02ReadOnlyRoute',
+    'bcpC02RegistryReadModel', 'buildC02RegistryReadinessEnvelope',
+  ];
   for (const f of walk(`${ROOT}src`)) {
     const t = fs.readFileSync(f, 'utf8');
-    assert.ok(!/bcpC02|createBcpC02|registry-readiness/.test(t), `C-02 referenced in frontend src: ${f}`);
+    for (const bad of FORBIDDEN_BACKEND) {
+      assert.ok(!t.includes(bad), `frontend src imports backend C-02 module (${bad}): ${f}`);
+    }
+    // The client bundle must never import from the server tree.
+    assert.ok(!/from\s*['"][^'"]*\/server\//.test(t) || !/bcpC02/i.test(t), `frontend src imports server C-02: ${f}`);
   }
 });
 
