@@ -30,6 +30,7 @@ import { withProtectedAction } from './protectedAction';
 import { createSupabaseWhoamiHandler } from './verifiedWhoami';
 import { createSessionResolveHandler } from './sessionResolve';
 import { createBcpReadinessSummaryHandler, BCP_READINESS_ROUTE_PATH } from '../bcp-pilot/bcpReadOnlyExpressAdapter';
+import { createBcpC02RegistryReadinessHandler, BCP_C02_REGISTRY_READINESS_ROUTE_PATH } from '../bcp-pilot/bcpC02ReadOnlyExpressAdapter';
 
 export function createPlatformIdentityApp() {
   const app = express();
@@ -175,6 +176,20 @@ export function createPlatformIdentityApp() {
   // principal — no live session resolver, no auth change. `app.all` routes every method to the
   // handler so HEAD/OPTIONS/mutation semantics are decided by the pure handler.
   app.all(BCP_READINESS_ROUTE_PATH, createBcpReadinessSummaryHandler());
+
+  // --- Phase 2.0 M8E: dev-only DEFAULT-OFF C-02 registry-readiness lens route -------
+  // Registers the accepted M8D inert C-02 handler (flag → guard → code/config registry DTO) on THIS
+  // isolated API only (never the SaaS app, never the client bundle). The factory is called with NO
+  // arguments, so EVERY dependency is server-sourced by default: isDevEnvironment from NODE_ENV,
+  // featureEnabled from the default-OFF flag ENABLE_BCP_DEV_C02_REGISTRY_READINESS, and the module
+  // registry from the adapter's SAFE EMPTY default (no src/mockData import; a real server-owned
+  // provider is a documented later follow-up). NOTHING from the request (query/body/headers/cookies/
+  // params) is mapped into principal/modules/mode — only req.method is read, by the handler. With the
+  // flag off, in production, or for a non-GET method, the handler returns a safe
+  // unavailable/blocked/denied/405 response with no data. It reads NOTHING live (no DB/Supabase/
+  // provider). `app.all` routes every method to the handler so HEAD/OPTIONS/mutation semantics are
+  // decided by the pure handler.
+  app.all(BCP_C02_REGISTRY_READINESS_ROUTE_PATH, createBcpC02RegistryReadinessHandler());
 
   return app;
 }
