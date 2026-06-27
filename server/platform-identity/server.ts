@@ -31,6 +31,7 @@ import { createSupabaseWhoamiHandler } from './verifiedWhoami';
 import { createSessionResolveHandler } from './sessionResolve';
 import { createBcpReadinessSummaryHandler, BCP_READINESS_ROUTE_PATH } from '../bcp-pilot/bcpReadOnlyExpressAdapter';
 import { createBcpC02RegistryReadinessHandler, BCP_C02_REGISTRY_READINESS_ROUTE_PATH } from '../bcp-pilot/bcpC02ReadOnlyExpressAdapter';
+import { getBcpC02RegistryModules } from '../bcp-pilot/bcpC02RegistryProvider';
 
 export function createPlatformIdentityApp() {
   const app = express();
@@ -179,17 +180,21 @@ export function createPlatformIdentityApp() {
 
   // --- Phase 2.0 M8E: dev-only DEFAULT-OFF C-02 registry-readiness lens route -------
   // Registers the accepted M8D inert C-02 handler (flag → guard → code/config registry DTO) on THIS
-  // isolated API only (never the SaaS app, never the client bundle). The factory is called with NO
-  // arguments, so EVERY dependency is server-sourced by default: isDevEnvironment from NODE_ENV,
-  // featureEnabled from the default-OFF flag ENABLE_BCP_DEV_C02_REGISTRY_READINESS, and the module
-  // registry from the adapter's SAFE EMPTY default (no src/mockData import; a real server-owned
-  // provider is a documented later follow-up). NOTHING from the request (query/body/headers/cookies/
-  // params) is mapped into principal/modules/mode — only req.method is read, by the handler. With the
-  // flag off, in production, or for a non-GET method, the handler returns a safe
-  // unavailable/blocked/denied/405 response with no data. It reads NOTHING live (no DB/Supabase/
-  // provider). `app.all` routes every method to the handler so HEAD/OPTIONS/mutation semantics are
-  // decided by the pure handler.
-  app.all(BCP_C02_REGISTRY_READINESS_ROUTE_PATH, createBcpC02RegistryReadinessHandler());
+  // isolated API only (never the SaaS app, never the client bundle). EVERY dependency is server-sourced:
+  // isDevEnvironment from NODE_ENV, featureEnabled from the default-OFF flag
+  // ENABLE_BCP_DEV_C02_REGISTRY_READINESS, and the module registry from the M10 SAFE SERVER-OWNED
+  // provider (getBcpC02RegistryModules — a deterministic, code/config-only, no-throw, no-I/O list of
+  // safe bounded { id, name, status } labels; NO src/mockData import, NO DB/Supabase/live read). The
+  // provider is supplied ONLY through the accepted adapter getModules seam and is resolved by the
+  // adapter ONLY after the DEV + feature gates pass. NOTHING from the request (query/body/headers/
+  // cookies/params) is mapped into principal/modules/mode — only req.method is read, by the handler.
+  // With the flag off, in production, or for a non-GET method, the handler returns a safe
+  // unavailable/blocked/denied/405 response with no data. `app.all` routes every method to the handler
+  // so HEAD/OPTIONS/mutation semantics are decided by the pure handler.
+  app.all(
+    BCP_C02_REGISTRY_READINESS_ROUTE_PATH,
+    createBcpC02RegistryReadinessHandler({ getModules: getBcpC02RegistryModules }),
+  );
 
   return app;
 }

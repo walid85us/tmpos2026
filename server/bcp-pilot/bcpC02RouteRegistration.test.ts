@@ -1,10 +1,13 @@
 // Phase 2.0 M8E — Static registration-safety tests for the C-02 isolated route registration.
+// Phase 2.0 M10 — updated the factory-wiring assertion: the C-02 handler is now wired with ONLY the
+// server-owned getModules provider (createBcpC02RegistryReadinessHandler({ getModules: ... })) instead
+// of empty args, and new assertions prove server.ts imports that provider and maps NO request data.
 //
 // Self-contained, DB-FREE, Supabase-FREE, network-FREE, NO port binding. It does NOT import
 // server.ts (that file calls app.listen at import); instead it reads server.ts as TEXT and asserts the
 // C-02 registration is on the isolated identity API ONLY, uses the accepted adapter factory with NO
-// request-derived arguments, and introduces no frontend/mockData/DB/Supabase import. Runnable via
-// `npx tsx <thisfile>`. No real ids/secrets.
+// request-derived arguments (only the server-owned provider), and introduces no frontend/mockData/DB/
+// Supabase import. Runnable via `npx tsx <thisfile>`. No real ids/secrets.
 
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
@@ -51,20 +54,38 @@ test('server.ts imports the accepted C-02 adapter factory + route path constant'
   assert.ok(code.includes('BCP_C02_REGISTRY_READINESS_ROUTE_PATH'));
 });
 
-// 6-10 + 20-21 (server-sourced authority): factory called with NO request-derived args.
-test('C-02 handler factory is called with NO arguments (no request mapping into principal/modules/mode)', () => {
-  // The registration must be `createBcpC02RegistryReadinessHandler()` — empty parens.
-  assert.ok(/createBcpC02RegistryReadinessHandler\(\s*\)/.test(code), 'factory must be called with empty args');
-  // It must NOT be called with anything referencing the request.
-  const callMatch = code.match(/createBcpC02RegistryReadinessHandler\(([^)]*)\)/);
+// 6-10 + 20-21 (server-sourced authority): M10 — factory wired with ONLY the server-owned getModules
+// provider, never a request-derived argument.
+test('C-02 handler factory is wired with ONLY the server-owned getModules provider (no request mapping)', () => {
+  // The registration must pass the server-owned provider through the accepted adapter getModules seam.
+  assert.ok(
+    /createBcpC02RegistryReadinessHandler\(\s*\{[^}]*getModules\s*:\s*getBcpC02RegistryModules[^}]*\}\s*\)/.test(code),
+    'factory must be called with { getModules: getBcpC02RegistryModules }',
+  );
+  // The ONLY argument is that single options object — no positional principal/mode/request args.
+  const callMatch = code.match(/createBcpC02RegistryReadinessHandler\(([\s\S]*?)\)/);
   assert.ok(callMatch, 'C-02 factory call not found');
   const args = (callMatch![1] ?? '').trim();
-  assert.equal(args, '', `C-02 factory must take no args; got: ${args}`);
-  // Defense-in-depth: no req.* / cookies / params mapped into the C-02 registration line region.
-  const c02Line = (code.split('\n').find((l) => l.includes('createBcpC02RegistryReadinessHandler(')) ?? '');
-  for (const bad of ['req.query', 'req.body', 'req.headers', 'req.cookies', 'req.params', 'req.principal', 'principal:', 'modules:', 'mode:', 'sourceMode', 'schemaVersion']) {
-    assert.ok(!c02Line.includes(bad), `C-02 registration maps request data: ${bad}`);
+  assert.ok(
+    /^\{\s*getModules\s*:\s*getBcpC02RegistryModules\s*,?\s*\}$/.test(args),
+    `C-02 factory must take only { getModules: getBcpC02RegistryModules }; got: ${args}`,
+  );
+  // Defense-in-depth: the getModules value is the bare server-owned identifier — never a request/authority
+  // expression (no req.* / cookies / params / query / headers / body / principal / mode / schema mapping).
+  for (const bad of ['req.', 'request', 'cookies', 'params', 'query', 'headers', 'body',
+    'principal', 'mode:', 'sourceMode', 'schemaVersion']) {
+    assert.ok(!args.includes(bad), `C-02 factory arg maps request/authority data: ${bad}`);
   }
+});
+
+// M10 wiring: server.ts imports the safe server-owned provider through the accepted provider module.
+test('server.ts imports getBcpC02RegistryModules from the server-owned C-02 provider', () => {
+  assert.ok(
+    /import\s*\{[^}]*getBcpC02RegistryModules[^}]*\}\s*from\s*['"]\.\.\/bcp-pilot\/bcpC02RegistryProvider['"]/.test(code),
+    'expected import of getBcpC02RegistryModules from ../bcp-pilot/bcpC02RegistryProvider',
+  );
+  // The provider is the ONLY thing fed to the seam (sanity: the import + the call both reference it).
+  assert.ok(code.includes('getBcpC02RegistryModules'));
 });
 
 // 3 + 4 + 5.
@@ -107,6 +128,8 @@ test('no frontend src/ file imports the BACKEND C-02 modules (no server code in 
   const FORBIDDEN_BACKEND = [
     'createBcpC02RegistryReadinessHandler', 'bcpC02ReadOnlyExpressAdapter', 'bcpC02ReadOnlyRoute',
     'bcpC02RegistryReadModel', 'buildC02RegistryReadinessEnvelope',
+    // M10: the server-owned registry provider must also never be pulled into the client bundle.
+    'bcpC02RegistryProvider', 'getBcpC02RegistryModules', 'BCP_C02_SERVER_OWNED_REGISTRY_MODULES',
   ];
   for (const f of walk(`${ROOT}src`)) {
     const t = fs.readFileSync(f, 'utf8');
