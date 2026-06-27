@@ -78,6 +78,7 @@ import type { EntitlementRow, GovDetail, Health, PostureCard, TenantStoreRow } f
 import type { ReadinessGateCard } from './types';
 import C01ReadinessCard from './C01ReadinessCard';
 import C02RegistryReadinessCard from './C02RegistryReadinessCard';
+import C03UiCoverageReadinessCard from './C03UiCoverageReadinessCard';
 
 function ScreenHeading({ module }: { module: BcpModule }) {
   return (
@@ -1600,6 +1601,7 @@ function BackendCpReadinessGate({ module }: { module: BcpModule; env: EnvLabel }
           { key: 'readiness', label: 'Readiness' },
           { key: 'c01', label: 'C-01 Live Preview' },
           { key: 'c02', label: 'C-02 Registry' },
+          { key: 'c03', label: 'C-03 UI Coverage' },
           { key: 'coverage', label: 'Module Coverage' },
           { key: 'path', label: 'Production Path' },
           { key: 'blockers', label: 'Blockers & Final Gate' },
@@ -1632,6 +1634,12 @@ function BackendCpReadinessGate({ module }: { module: BcpModule; env: EnvLabel }
       {section === 'c02' && (
         <div className="mt-1">
           <C02RegistryReadinessCard />
+        </div>
+      )}
+
+      {section === 'c03' && (
+        <div className="mt-1">
+          <C03UiCoverageReadinessCard />
         </div>
       )}
 

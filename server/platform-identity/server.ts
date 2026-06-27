@@ -32,6 +32,8 @@ import { createSessionResolveHandler } from './sessionResolve';
 import { createBcpReadinessSummaryHandler, BCP_READINESS_ROUTE_PATH } from '../bcp-pilot/bcpReadOnlyExpressAdapter';
 import { createBcpC02RegistryReadinessHandler, BCP_C02_REGISTRY_READINESS_ROUTE_PATH } from '../bcp-pilot/bcpC02ReadOnlyExpressAdapter';
 import { getBcpC02RegistryModules } from '../bcp-pilot/bcpC02RegistryProvider';
+import { createBcpC03UiCoverageReadinessHandler, BCP_C03_UI_COVERAGE_ROUTE_PATH } from '../bcp-pilot/bcpC03ReadOnlyExpressAdapter';
+import { getBcpC03UiCoverageEntries } from '../bcp-pilot/bcpC03UiCoverageProvider';
 
 export function createPlatformIdentityApp() {
   const app = express();
@@ -194,6 +196,21 @@ export function createPlatformIdentityApp() {
   app.all(
     BCP_C02_REGISTRY_READINESS_ROUTE_PATH,
     createBcpC02RegistryReadinessHandler({ getModules: getBcpC02RegistryModules }),
+  );
+
+  // --- Phase 2.0 M12: dev-only DEFAULT-OFF C-03 UI coverage / screen readiness lens route -----------
+  // Registers the inert C-03 handler (flag → guard → code/config UI coverage DTO) on THIS isolated API
+  // only (never the SaaS app, never the client bundle). EVERY dependency is server-sourced: isDev from
+  // NODE_ENV, featureEnabled from the default-OFF flag ENABLE_BCP_DEV_C03_UI_COVERAGE_READINESS, and the
+  // UI coverage registry from the M12 SAFE SERVER-OWNED provider (getBcpC03UiCoverageEntries — a
+  // deterministic, code/config-only, no-throw, no-I/O list of safe bounded labels; NO src/mockData
+  // import, NO DB/Supabase/live read), supplied ONLY through the accepted getCoverageEntries seam and
+  // resolved by the adapter ONLY after the DEV + feature gates pass. NOTHING from the request is mapped
+  // into authority/content — only req.method is read, by the handler. Flag-off / production / non-GET
+  // return a safe response with no data. `app.all` routes every method to the pure handler.
+  app.all(
+    BCP_C03_UI_COVERAGE_ROUTE_PATH,
+    createBcpC03UiCoverageReadinessHandler({ getCoverageEntries: getBcpC03UiCoverageEntries }),
   );
 
   return app;
