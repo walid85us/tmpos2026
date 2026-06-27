@@ -34,6 +34,8 @@ import { createBcpC02RegistryReadinessHandler, BCP_C02_REGISTRY_READINESS_ROUTE_
 import { getBcpC02RegistryModules } from '../bcp-pilot/bcpC02RegistryProvider';
 import { createBcpC03UiCoverageReadinessHandler, BCP_C03_UI_COVERAGE_ROUTE_PATH } from '../bcp-pilot/bcpC03ReadOnlyExpressAdapter';
 import { getBcpC03UiCoverageEntries } from '../bcp-pilot/bcpC03UiCoverageProvider';
+import { createBcpC04RouteExposureReadinessHandler, BCP_C04_ROUTE_EXPOSURE_ROUTE_PATH } from '../bcp-pilot/bcpC04ReadOnlyExpressAdapter';
+import { getBcpC04RouteExposureEntries } from '../bcp-pilot/bcpC04RouteExposureProvider';
 
 export function createPlatformIdentityApp() {
   const app = express();
@@ -211,6 +213,22 @@ export function createPlatformIdentityApp() {
   app.all(
     BCP_C03_UI_COVERAGE_ROUTE_PATH,
     createBcpC03UiCoverageReadinessHandler({ getCoverageEntries: getBcpC03UiCoverageEntries }),
+  );
+
+  // --- Phase 2.0 M14: dev-only DEFAULT-OFF C-04 route exposure posture lens route ------------------
+  // Registers the inert C-04 handler (flag → guard → code/config route-exposure DTO) on THIS isolated
+  // API only (never the SaaS app, never the client bundle). EVERY dependency is server-sourced: isDev
+  // from NODE_ENV, featureEnabled from the default-OFF flag ENABLE_BCP_DEV_C04_ROUTE_EXPOSURE_READINESS,
+  // and the route registry from the M14 SAFE SERVER-OWNED provider (getBcpC04RouteExposureEntries — a
+  // deterministic, code/config-only, no-throw list of the FOUR allow-listed Backend CP DEV routes; NO
+  // runtime route scan, NO router introspection, NO src/mockData import, NO DB/Supabase/live read),
+  // supplied ONLY through the accepted getRouteExposureEntries seam and resolved by the adapter ONLY
+  // after the DEV + feature gates pass. NOTHING from the request is mapped into authority/content — only
+  // req.method is read, by the handler. Flag-off / production / non-GET return a safe response with no
+  // data. `app.all` routes every method to the pure handler.
+  app.all(
+    BCP_C04_ROUTE_EXPOSURE_ROUTE_PATH,
+    createBcpC04RouteExposureReadinessHandler({ getRouteExposureEntries: getBcpC04RouteExposureEntries }),
   );
 
   return app;

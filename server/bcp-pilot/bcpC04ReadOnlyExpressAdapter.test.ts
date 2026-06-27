@@ -1,0 +1,31 @@
+// Phase 2.0 M14 — Tests for the inert C-04 Express adapter (handler factory).
+import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import { createBcpC04RouteExposureReadinessHandler, BCP_C04_ROUTE_EXPOSURE_ROUTE_PATH, BCP_C04_ROUTE_EXPOSURE_PROXY_PATH, BCP_C04_FEATURE_FLAG } from './bcpC04ReadOnlyExpressAdapter';
+import { getBcpC04RouteExposureEntries } from './bcpC04RouteExposureProvider';
+
+type MockRes = { statusCode: number; headers: Record<string, string>; body: unknown; ended: boolean; headersSent: boolean; status(c: number): MockRes; json(b: unknown): MockRes; setHeader(k: string, v: string): void; end(): MockRes };
+function mockRes(): MockRes { const r: MockRes = { statusCode: 0, headers: {}, body: undefined, ended: false, headersSent: false, status(c) { r.statusCode = c; return r; }, json(b) { r.body = b; r.headersSent = true; r.ended = true; return r; }, setHeader(k, v) { r.headers[k] = v; }, end() { r.headersSent = true; r.ended = true; return r; } }; return r; }
+const ENTRIES = getBcpC04RouteExposureEntries();
+const devOn = { isDevEnvironment: () => true, featureEnabled: () => true, getRouteExposureEntries: () => ENTRIES };
+const SRC = fs.readFileSync(new URL('./bcpC04ReadOnlyExpressAdapter.ts', import.meta.url), 'utf8').replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+const cases: { name: string; fn: () => void }[] = [];
+const test = (n: string, fn: () => void) => cases.push({ name: n, fn });
+
+test('factory exports an inert handler function', () => assert.equal(typeof createBcpC04RouteExposureReadinessHandler(), 'function'));
+test('constants are the accepted route/proxy/flag', () => { assert.equal(BCP_C04_ROUTE_EXPOSURE_ROUTE_PATH, '/dev/bcp/route-exposure-readiness'); assert.equal(BCP_C04_ROUTE_EXPOSURE_PROXY_PATH, '/__identity/dev/bcp/route-exposure-readiness'); assert.equal(BCP_C04_FEATURE_FLAG, 'ENABLE_BCP_DEV_C04_ROUTE_EXPOSURE_READINESS'); });
+test('GET (DEV+on) ⇒ 200 envelope', () => { const r = mockRes(); createBcpC04RouteExposureReadinessHandler(devOn)({ method: 'GET' } as never, r as never); assert.equal(r.statusCode, 200); assert.equal((r.body as Record<string, unknown>).schemaVersion, 'bcp.c04.route-exposure-readiness.v1-code-config'); });
+test('HEAD ⇒ 200 bodyless', () => { const r = mockRes(); createBcpC04RouteExposureReadinessHandler(devOn)({ method: 'HEAD' } as never, r as never); assert.equal(r.statusCode, 200); assert.equal(r.body, undefined); assert.ok(r.ended); });
+test('OPTIONS ⇒ 204 Allow', () => { const r = mockRes(); createBcpC04RouteExposureReadinessHandler(devOn)({ method: 'OPTIONS' } as never, r as never); assert.equal(r.statusCode, 204); assert.equal(r.headers.Allow, 'GET'); assert.equal(r.body, undefined); });
+for (const m of ['POST', 'PUT', 'PATCH', 'DELETE']) test(`${m} ⇒ 405`, () => { const r = mockRes(); createBcpC04RouteExposureReadinessHandler(devOn)({ method: m } as never, r as never); assert.equal(r.statusCode, 405); });
+test('feature off ⇒ 404', () => { const r = mockRes(); createBcpC04RouteExposureReadinessHandler({ isDevEnvironment: () => true, featureEnabled: () => false })({ method: 'GET' } as never, r as never); assert.equal(r.statusCode, 404); });
+test('production ⇒ 404 dev_only', () => { const r = mockRes(); createBcpC04RouteExposureReadinessHandler({ isDevEnvironment: () => false, featureEnabled: () => true })({ method: 'GET' } as never, r as never); assert.equal(r.statusCode, 404); assert.equal((r.body as Record<string, unknown>).reason, 'dev_only'); });
+test('provider NOT resolved when gated off', () => { let n = 0; createBcpC04RouteExposureReadinessHandler({ isDevEnvironment: () => true, featureEnabled: () => false, getRouteExposureEntries: () => { n++; return ENTRIES; } })({ method: 'GET' } as never, mockRes() as never); assert.equal(n, 0); });
+test('provider IS resolved when gates pass', () => { let n = 0; createBcpC04RouteExposureReadinessHandler({ isDevEnvironment: () => true, featureEnabled: () => true, getRouteExposureEntries: () => { n++; return ENTRIES; } })({ method: 'GET' } as never, mockRes() as never); assert.equal(n, 1); });
+test('reads ONLY req.method (throwing query/body/headers/cookies/params do not break it)', () => { const req: Record<string, unknown> = { method: 'GET' }; for (const k of ['query', 'body', 'headers', 'cookies', 'params']) Object.defineProperty(req, k, { get() { throw new Error('must not read'); } }); const r = mockRes(); assert.doesNotThrow(() => createBcpC04RouteExposureReadinessHandler(devOn)(req as never, r as never)); assert.equal(r.statusCode, 200); });
+test('transport safe-error: throwing provider ⇒ 500 {status:error}', () => { const r = mockRes(); assert.doesNotThrow(() => createBcpC04RouteExposureReadinessHandler({ isDevEnvironment: () => true, featureEnabled: () => true, getRouteExposureEntries: () => { throw new Error('boom'); } })({ method: 'GET' } as never, r as never)); assert.equal(r.statusCode, 500); assert.deepEqual(r.body, { status: 'error' }); });
+test('default provider ⇒ safe empty envelope', () => { const r = mockRes(); createBcpC04RouteExposureReadinessHandler({ isDevEnvironment: () => true, featureEnabled: () => true })({ method: 'GET' } as never, r as never); assert.equal(r.statusCode, 200); assert.equal((r.body as unknown as Record<string, { isEmpty: boolean }>).emptyState.isEmpty, true); });
+test('static inertness: no app/router/listener/route-scan', () => { for (const bad of ['express(', 'Router(', '.listen(', 'app.get(', 'app.post(', 'app.all(', 'app.use(', 'app._router', 'router.stack', '.stack']) assert.ok(!SRC.includes(bad), bad); });
+test('static: no req.query/body/headers/cookies/params mapping', () => { for (const bad of ['req.query', 'req.body', 'req.headers', 'req.cookies', 'req.params']) assert.ok(!SRC.includes(bad), bad); });
+
+(() => { let p = 0; const f: string[] = []; for (const c of cases) { try { c.fn(); p++; console.log('PASS ' + c.name); } catch (e) { f.push(c.name + ' :: ' + (e instanceof Error ? e.message : String(e))); console.log('FAIL ' + c.name); } } console.log(`\n[M14 BCP C-04 adapter] ${p}/${cases.length} passed`); if (f.length) { console.log('FAILURES:'); for (const x of f) console.log('  - ' + x); process.exit(1); } console.log('ALL_TESTS_PASSED'); process.exit(0); })();
