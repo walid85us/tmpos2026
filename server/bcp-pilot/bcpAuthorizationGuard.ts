@@ -82,6 +82,7 @@ const CONTRACT_MIN_VISIBILITY: Record<string, BcpVisibilityClass> = {
   'C-03': 'overview_viewer',
   'C-04': 'overview_viewer',
   'C-05': 'overview_viewer',
+  'C-06': 'overview_viewer',
 };
 
 export type GuardDecision = 'allow' | 'deny' | 'blocked';

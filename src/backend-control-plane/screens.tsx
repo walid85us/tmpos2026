@@ -81,6 +81,7 @@ import C02RegistryReadinessCard from './C02RegistryReadinessCard';
 import C03UiCoverageReadinessCard from './C03UiCoverageReadinessCard';
 import C04RouteExposureReadinessCard from './C04RouteExposureReadinessCard';
 import C05FeatureFlagPostureReadinessCard from './C05FeatureFlagPostureReadinessCard';
+import C06QualityGatesEvidenceReadinessCard from './C06QualityGatesEvidenceReadinessCard';
 
 function ScreenHeading({ module }: { module: BcpModule }) {
   return (
@@ -1606,6 +1607,7 @@ function BackendCpReadinessGate({ module }: { module: BcpModule; env: EnvLabel }
           { key: 'c03', label: 'C-03 UI Coverage' },
           { key: 'c04', label: 'C-04 Route Exposure' },
           { key: 'c05', label: 'C-05 Feature Flags' },
+          { key: 'c06', label: 'C-06 Quality Gates' },
           { key: 'coverage', label: 'Module Coverage' },
           { key: 'path', label: 'Production Path' },
           { key: 'blockers', label: 'Blockers & Final Gate' },
@@ -1656,6 +1658,12 @@ function BackendCpReadinessGate({ module }: { module: BcpModule; env: EnvLabel }
       {section === 'c05' && (
         <div className="mt-1">
           <C05FeatureFlagPostureReadinessCard />
+        </div>
+      )}
+
+      {section === 'c06' && (
+        <div className="mt-1">
+          <C06QualityGatesEvidenceReadinessCard />
         </div>
       )}
 

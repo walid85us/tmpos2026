@@ -38,6 +38,8 @@ import { createBcpC04RouteExposureReadinessHandler, BCP_C04_ROUTE_EXPOSURE_ROUTE
 import { getBcpC04RouteExposureEntries } from '../bcp-pilot/bcpC04RouteExposureProvider';
 import { createBcpC05FeatureFlagPostureReadinessHandler, BCP_C05_FEATURE_FLAG_POSTURE_ROUTE_PATH } from '../bcp-pilot/bcpC05ReadOnlyExpressAdapter';
 import { getBcpC05FeatureFlagPostureEntries } from '../bcp-pilot/bcpC05FeatureFlagPostureProvider';
+import { createBcpC06QualityGatesEvidenceReadinessHandler, BCP_C06_QUALITY_GATES_EVIDENCE_ROUTE_PATH } from '../bcp-pilot/bcpC06ReadOnlyExpressAdapter';
+import { getBcpC06QualityGatesEvidenceEntries } from '../bcp-pilot/bcpC06QualityGatesEvidenceProvider';
 
 export function createPlatformIdentityApp() {
   const app = express();
@@ -248,6 +250,24 @@ export function createPlatformIdentityApp() {
   app.all(
     BCP_C05_FEATURE_FLAG_POSTURE_ROUTE_PATH,
     createBcpC05FeatureFlagPostureReadinessHandler({ getFeatureFlagPostureEntries: getBcpC05FeatureFlagPostureEntries }),
+  );
+
+  // --- Phase 2.0 M20: dev-only DEFAULT-OFF C-06 quality-gates / evidence-coverage posture lens route -----
+  // Registers the inert C-06 handler (flag → guard → code/config evidence-coverage DTO) on THIS isolated API
+  // only (never the SaaS app, never the client bundle). EVERY dependency is server-sourced: isDev from
+  // NODE_ENV, featureEnabled from the default-OFF flag ENABLE_BCP_DEV_C06_QUALITY_GATES_EVIDENCE_COVERAGE_
+  // READINESS (a boolean GATE only — its value is NEVER surfaced as data), and the evidence-coverage registry
+  // from the M20 SAFE SERVER-OWNED provider (getBcpC06QualityGatesEvidenceEntries — a deterministic,
+  // code/config-only, no-throw list of the TWELVE allow-listed evidence categories with bounded posture
+  // labels; NO raw log/test/typecheck/static-scan/transport read, NO env read, NO filesystem read, NO command
+  // execution, NO package inventory, NO src/mockData import, NO DB/Supabase/live read, NO production-readiness
+  // claim), supplied ONLY through the accepted getQualityGatesEvidenceEntries seam and resolved by the adapter
+  // ONLY after the DEV + feature gates pass. NOTHING from the request is mapped into authority/content — only
+  // req.method is read, by the handler. Flag-off / production / non-GET return a safe response with no data.
+  // `app.all` routes every method to the pure handler.
+  app.all(
+    BCP_C06_QUALITY_GATES_EVIDENCE_ROUTE_PATH,
+    createBcpC06QualityGatesEvidenceReadinessHandler({ getQualityGatesEvidenceEntries: getBcpC06QualityGatesEvidenceEntries }),
   );
 
   return app;
