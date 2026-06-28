@@ -73,13 +73,15 @@ export interface NonAuthorityHints {
   bodyInternalUserId?: string;
 }
 
-/** Minimum visibility required to read each BCP contract. C-03 (M12) reuses the overview_viewer floor,
- * exactly like C-01/C-02; this is an additive entry — the C-01/C-02 rows are unchanged. */
+/** Minimum visibility required to read each BCP contract. C-01..C-05 all reuse the overview_viewer floor
+ * (read-only); each row is an additive entry — earlier rows are unchanged and no write/manage visibility
+ * is introduced. */
 const CONTRACT_MIN_VISIBILITY: Record<string, BcpVisibilityClass> = {
   'C-01': 'overview_viewer',
   'C-02': 'overview_viewer',
   'C-03': 'overview_viewer',
   'C-04': 'overview_viewer',
+  'C-05': 'overview_viewer',
 };
 
 export type GuardDecision = 'allow' | 'deny' | 'blocked';

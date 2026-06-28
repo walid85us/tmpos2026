@@ -36,6 +36,8 @@ import { createBcpC03UiCoverageReadinessHandler, BCP_C03_UI_COVERAGE_ROUTE_PATH 
 import { getBcpC03UiCoverageEntries } from '../bcp-pilot/bcpC03UiCoverageProvider';
 import { createBcpC04RouteExposureReadinessHandler, BCP_C04_ROUTE_EXPOSURE_ROUTE_PATH } from '../bcp-pilot/bcpC04ReadOnlyExpressAdapter';
 import { getBcpC04RouteExposureEntries } from '../bcp-pilot/bcpC04RouteExposureProvider';
+import { createBcpC05FeatureFlagPostureReadinessHandler, BCP_C05_FEATURE_FLAG_POSTURE_ROUTE_PATH } from '../bcp-pilot/bcpC05ReadOnlyExpressAdapter';
+import { getBcpC05FeatureFlagPostureEntries } from '../bcp-pilot/bcpC05FeatureFlagPostureProvider';
 
 export function createPlatformIdentityApp() {
   const app = express();
@@ -229,6 +231,23 @@ export function createPlatformIdentityApp() {
   app.all(
     BCP_C04_ROUTE_EXPOSURE_ROUTE_PATH,
     createBcpC04RouteExposureReadinessHandler({ getRouteExposureEntries: getBcpC04RouteExposureEntries }),
+  );
+
+  // --- Phase 2.0 M17: dev-only DEFAULT-OFF C-05 feature flag posture lens route --------------------
+  // Registers the inert C-05 handler (flag → guard → code/config feature-flag-posture DTO) on THIS
+  // isolated API only (never the SaaS app, never the client bundle). EVERY dependency is server-sourced:
+  // isDev from NODE_ENV, featureEnabled from the default-OFF flag ENABLE_BCP_DEV_C05_FEATURE_FLAG_POSTURE_
+  // READINESS (a boolean GATE only — its value is NEVER surfaced as data), and the posture registry from
+  // the M17 SAFE SERVER-OWNED provider (getBcpC05FeatureFlagPostureEntries — a deterministic, code/config-
+  // only, no-throw list of the SIX allow-listed Backend CP feature flag NAMES; NO process.env read for
+  // output, NO env enumeration, NO src/mockData import, NO DB/Supabase/live read, NO value oracle),
+  // supplied ONLY through the accepted getFeatureFlagPostureEntries seam and resolved by the adapter ONLY
+  // after the DEV + feature gates pass. NOTHING from the request is mapped into authority/content — only
+  // req.method is read, by the handler. Flag-off / production / non-GET return a safe response with no
+  // data. `app.all` routes every method to the pure handler.
+  app.all(
+    BCP_C05_FEATURE_FLAG_POSTURE_ROUTE_PATH,
+    createBcpC05FeatureFlagPostureReadinessHandler({ getFeatureFlagPostureEntries: getBcpC05FeatureFlagPostureEntries }),
   );
 
   return app;
