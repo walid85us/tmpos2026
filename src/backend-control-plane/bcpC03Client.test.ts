@@ -140,6 +140,57 @@ test('safeLabel rejects empties, overlong, and unsafe charset', () => {
   assert.equal(safeLabel('ok-label_1'), 'ok-label_1');
 });
 
+// ---- M24: client-sanitizer closed allow-list hardening ----
+
+test('M24: screenStatus allow-list — full accepted enum (incl. unknown) passes, safe-but-non-enum ⇒ redacted', () => {
+  for (const ok of ['implemented', 'preview', 'placeholder', 'deferred', 'blocked', 'unknown']) {
+    const r = classifyC03Response(200, { ...GOOD_ENVELOPE, coverageItems: [{ ...GOOD_ITEM, screenStatus: ok }] });
+    if (r.kind !== 'success') return assert.fail('expected success');
+    assert.equal(r.items[0].screenStatus, ok, `accepted screenStatus dropped: ${ok}`);
+  }
+  for (const bad of ['archived', 'enabled', 'in_progress']) {
+    const r = classifyC03Response(200, { ...GOOD_ENVELOPE, coverageItems: [{ ...GOOD_ITEM, screenStatus: bad }] });
+    if (r.kind !== 'success') return assert.fail('expected success');
+    assert.equal(r.items[0].screenStatus, 'redacted', `non-enum screenStatus not redacted: ${bad}`);
+  }
+});
+
+test('M24: coverageClass allow-list — accepted classes pass, safe-but-non-enum ⇒ redacted', () => {
+  for (const ok of ['internal_dev_screen', 'readiness_gate', 'preview_card', 'placeholder_screen', 'deferred_screen', 'blocked_screen', 'unknown']) {
+    const r = classifyC03Response(200, { ...GOOD_ENVELOPE, coverageItems: [{ ...GOOD_ITEM, coverageClass: ok }] });
+    if (r.kind !== 'success') return assert.fail('expected success');
+    assert.equal(r.items[0].coverageClass, ok, `accepted coverageClass dropped: ${ok}`);
+  }
+  const r = classifyC03Response(200, { ...GOOD_ENVELOPE, coverageItems: [{ ...GOOD_ITEM, coverageClass: 'fancy_class' }] });
+  if (r.kind !== 'success') return assert.fail('expected success');
+  assert.equal(r.items[0].coverageClass, 'redacted');
+});
+
+test('M24: sourceMode + freshness allow-lists — accepted pass, anything else ⇒ redacted', () => {
+  const rGood = classifyC03Response(200, { ...GOOD_ENVELOPE, sourceMode: 'code_config' });
+  if (rGood.kind !== 'success') return assert.fail('expected success');
+  assert.equal(rGood.sourceMode, 'code_config');
+  // C-03 server emits only 'code_config'; 'synthetic'/'live_provider' are not accepted ⇒ redacted.
+  for (const bad of ['synthetic', 'live_provider']) {
+    const r = classifyC03Response(200, { ...GOOD_ENVELOPE, sourceMode: bad });
+    if (r.kind !== 'success') return assert.fail('expected success');
+    assert.equal(r.sourceMode, 'redacted', `non-accepted sourceMode not redacted: ${bad}`);
+  }
+  const rGoodFresh = classifyC03Response(200, { ...GOOD_ENVELOPE, freshness: { lastSuccessfulReadLabel: 'code-config-no-live-read' } });
+  if (rGoodFresh.kind !== 'success') return assert.fail('expected success');
+  assert.equal(rGoodFresh.freshness, 'code-config-no-live-read');
+  const rBadFresh = classifyC03Response(200, { ...GOOD_ENVELOPE, freshness: { lastSuccessfulReadLabel: 'live-now' } });
+  if (rBadFresh.kind !== 'success') return assert.fail('expected success');
+  assert.equal(rBadFresh.freshness, 'redacted');
+});
+
+test('M24: evidenceLabels allow-list — all 9 accepted server labels pass; non-accepted dropped', () => {
+  const all9 = ['code_config_only', 'no_live_source', 'read_only', 'no_mutation', 'production_disabled', 'dev_only', 'backend_cp_internal_only', 'no_external_facing_exposure', 'no_saas_nav_exposure'];
+  const r = classifyC03Response(200, { ...GOOD_ENVELOPE, evidenceLabels: [...all9, 'made_up_label', 'tenant_acme'] });
+  if (r.kind !== 'success') return assert.fail();
+  assert.deepEqual(r.evidenceLabels, all9);
+});
+
 (async () => {
   let pass = 0; const failures: string[] = [];
   for (const c of cases) { try { await c.fn(); pass++; console.log('PASS ' + c.name); } catch (e) { failures.push(c.name + ' :: ' + (e instanceof Error ? e.message : String(e))); console.log('FAIL ' + c.name); } }

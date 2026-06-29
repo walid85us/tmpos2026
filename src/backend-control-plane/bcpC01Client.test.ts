@@ -279,6 +279,41 @@ test('M7Q: fetch surfaces top-level sourceMode end-to-end — still GET-only, no
   }
 });
 
+// ---- M24: client-sanitizer closed allow-list + strengthened denylist hardening ----
+
+test('M24: strengthened denylist redacts supabase/tenant/store/customer/permission/path/domain/readiness-claim', () => {
+  for (const bad of [
+    'supabase_url', 'tenant_acme', 'store_42', 'customer_x', 'permission_admin', 'entitlement_pro',
+    'stdout_dump', 'stderr_trace', 'a/b/c', 'config.ts', 'acme.com', 'db.internal.acme',
+    'production ready', 'ready_for_production', 'deploy_to_production', 'go_live', 'ship_it',
+  ]) {
+    assert.equal(safeLabel(bad), 'redacted', `should now redact: ${bad}`);
+  }
+});
+
+test('M24: strengthened denylist still keeps all accepted C-01 posture labels (parity)', () => {
+  for (const ok of [
+    'feature_flag_posture', 'synthetic_live_boundary_posture', 'parity_posture', 'production_disabled_posture',
+    'enabled', 'code_config_only', 'static_config', 'production_disabled', 'code_config', 'live_provider', 'DEV',
+  ]) {
+    assert.equal(safeLabel(ok), ok, `should keep accepted label: ${ok}`);
+  }
+});
+
+test('M24: sourceMode closed allow-list — accepted modes pass, safe-but-non-accepted normalizes to redacted_label', () => {
+  for (const ok of ['code_config', 'code_config_only', 'live_provider']) {
+    const r = classifyC01Response(200, { ...v1Envelope, sourceMode: ok });
+    if (r.kind !== 'success') return assert.fail('expected success');
+    assert.equal(r.sourceMode, ok, `accepted mode dropped: ${ok}`);
+  }
+  // Safe-charset but NOT an accepted source mode ⇒ neutralized (the M24 hardening delta).
+  for (const nonMode of ['code_config_experimental', 'synthetic', 'some_other_mode']) {
+    const r = classifyC01Response(200, { ...v1Envelope, sourceMode: nonMode });
+    if (r.kind !== 'success') return assert.fail('expected success');
+    assert.equal(r.sourceMode, 'redacted_label', `non-accepted mode not neutralized: ${nonMode}`);
+  }
+});
+
 // ---- Runner ----
 (async () => {
   let pass = 0;

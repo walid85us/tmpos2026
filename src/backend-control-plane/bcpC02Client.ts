@@ -103,6 +103,18 @@ const ID_SHAPED_RE = /\d{4,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 // `…v1-code-config`), so this redacts `acme.com` / `db.internal.acme` without hitting real labels.
 const DOMAIN_RE = /\.[A-Za-z]{2,}$/;
 
+// Phase 2.0 M24 — closed allow-lists (PRIMARY validation) for the discrete enum fields. Each set is the
+// complete accepted server vocabulary (from the frozen C-02 read model), so valid data passes byte-
+// equivalently and anything else normalizes to a safe fallback. safeLabel remains the SECONDARY denylist
+// defense for the free-text / posture fields (moduleKey/moduleLabel/postures), which keep their behavior.
+const SAFE_SOURCE_MODES = new Set<string>(['code_config', 'synthetic']);
+const SAFE_FRESHNESS = new Set<string>(['code-config-no-live-read', 'synthetic-no-live-read']);
+const SAFE_MODULE_STATUS = new Set<string>(['included', 'placeholder', 'deferred', 'blocked', 'unknown']);
+const SAFE_EVIDENCE_LABELS = new Set<string>([
+  'code_config_only', 'no_live_source', 'read_only', 'no_mutation', 'production_disabled',
+  'dev_only', 'no_external_source', 'route_not_registered', 'ui_not_implemented', 'read_model_only',
+]);
+
 /** Returns the value only if it is a safe bounded label; otherwise 'redacted'. Never leaks. */
 export function safeLabel(value: unknown): string {
   if (typeof value !== 'string') return 'redacted';
@@ -140,6 +152,14 @@ export function toneForStatus(status: string): Tone {
 const safeLabelArray = (v: unknown): string[] =>
   (Array.isArray(v) ? v : []).map(safeLabel).filter((x) => x !== 'redacted');
 
+/** Closed allow-list lookup (PRIMARY). Returns the value only if it is in the accepted set; else `fallback`. */
+function safeEnum(value: unknown, allowed: ReadonlySet<string>, fallback = 'redacted'): string {
+  return typeof value === 'string' && allowed.has(value) ? value : fallback;
+}
+/** Filter an array to the closed evidence-label allow-list (PRIMARY) — drops anything not accepted. */
+const safeEvidenceLabels = (v: unknown): string[] =>
+  (Array.isArray(v) ? v : []).filter((x): x is string => typeof x === 'string' && SAFE_EVIDENCE_LABELS.has(x));
+
 /** Map a raw registry item to a safe item, reading ONLY known fields (each content-validated). */
 function toSafeItem(raw: unknown): SafeC02Item | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -147,7 +167,7 @@ function toSafeItem(raw: unknown): SafeC02Item | null {
   return {
     moduleKey: safeLabel(r.moduleKey),
     moduleLabel: safeLabel(r.moduleLabel),
-    moduleStatus: safeLabel(r.moduleStatus),
+    moduleStatus: safeEnum(r.moduleStatus, SAFE_MODULE_STATUS), // M24: closed allow-list (primary)
     routeBoundaryCategory: safeLabel(r.routeBoundaryCategory),
     devGatePosture: safeLabel(r.devGatePosture),
     productionPosture: safeLabel(r.productionPosture),
@@ -178,9 +198,9 @@ export function classifyC02Response(status: number, body: unknown): C02Result {
       const fr = (b.freshness ?? {}) as Record<string, unknown>;
       return {
         kind: 'success',
-        schemaVersion: safeLabel(b.schemaVersion),
-        sourceMode: safeLabel(b.sourceMode),
-        freshness: safeLabel(fr.lastSuccessfulReadLabel),
+        schemaVersion: safeLabel(b.schemaVersion), // version-tolerant: NOT allow-listed (future schemas pass)
+        sourceMode: safeEnum(b.sourceMode, SAFE_SOURCE_MODES), // M24: closed allow-list (primary)
+        freshness: safeEnum(fr.lastSuccessfulReadLabel, SAFE_FRESHNESS), // M24: closed allow-list (primary)
         generatedAt: safeTimestamp(b.generatedAt),
         summaryCounts: {
           total: safeCount(sc.total),
@@ -197,7 +217,7 @@ export function classifyC02Response(status: number, body: unknown): C02Result {
         routePosture: safeLabel(b.routePosture),
         productionPosture: safeLabel(b.productionPosture),
         mutationPosture: safeLabel(b.mutationPosture),
-        evidenceLabels: safeLabelArray(b.evidenceLabels),
+        evidenceLabels: safeEvidenceLabels(b.evidenceLabels), // M24: closed allow-list (primary)
       };
     }
     return { kind: 'unexpected' };

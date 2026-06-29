@@ -100,6 +100,22 @@ const FORBIDDEN_SUBSTRINGS = [
 const ID_SHAPED_RE = /\d{4,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,}/i;
 const DOMAIN_RE = /\.[A-Za-z]{2,}$/;
 
+// Phase 2.0 M24 — closed allow-lists (PRIMARY validation) for the discrete enum fields. Each set is the
+// complete accepted server vocabulary (from the frozen C-03 read model's normalizeEnum sets, incl. the
+// `unknown` server fallback), so valid data passes byte-equivalently and anything else normalizes to a
+// safe fallback. safeLabel remains the SECONDARY denylist defense for the free-text fields (screenKey/
+// screenLabel) and the remaining posture fields.
+const SAFE_SOURCE_MODES = new Set<string>(['code_config']); // C-03 read model emits only 'code_config'
+const SAFE_FRESHNESS = new Set<string>(['code-config-no-live-read']);
+const SAFE_SCREEN_STATUS = new Set<string>(['implemented', 'preview', 'placeholder', 'deferred', 'blocked', 'unknown']);
+const SAFE_COVERAGE_CLASS = new Set<string>([
+  'internal_dev_screen', 'readiness_gate', 'preview_card', 'placeholder_screen', 'deferred_screen', 'blocked_screen', 'unknown',
+]);
+const SAFE_EVIDENCE_LABELS = new Set<string>([
+  'code_config_only', 'no_live_source', 'read_only', 'no_mutation', 'production_disabled',
+  'dev_only', 'backend_cp_internal_only', 'no_external_facing_exposure', 'no_saas_nav_exposure',
+]);
+
 /** Returns the value only if it is a safe bounded label; otherwise 'redacted'. Never leaks. */
 export function safeLabel(value: unknown): string {
   if (typeof value !== 'string') return 'redacted';
@@ -123,6 +139,14 @@ function safeTimestamp(value: unknown): string | undefined {
 const safeLabelArray = (v: unknown): string[] =>
   (Array.isArray(v) ? v : []).map(safeLabel).filter((x) => x !== 'redacted');
 
+/** Closed allow-list lookup (PRIMARY). Returns the value only if it is in the accepted set; else `fallback`. */
+function safeEnum(value: unknown, allowed: ReadonlySet<string>, fallback = 'redacted'): string {
+  return typeof value === 'string' && allowed.has(value) ? value : fallback;
+}
+/** Filter an array to the closed evidence-label allow-list (PRIMARY) — drops anything not accepted. */
+const safeEvidenceLabels = (v: unknown): string[] =>
+  (Array.isArray(v) ? v : []).filter((x): x is string => typeof x === 'string' && SAFE_EVIDENCE_LABELS.has(x));
+
 /** Map a raw coverage item to a safe item, reading ONLY known fields (each content-validated). */
 function toSafeItem(raw: unknown): SafeC03Item | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -130,8 +154,8 @@ function toSafeItem(raw: unknown): SafeC03Item | null {
   return {
     screenKey: safeLabel(r.screenKey),
     screenLabel: safeLabel(r.screenLabel),
-    screenStatus: safeLabel(r.screenStatus),
-    coverageClass: safeLabel(r.coverageClass),
+    screenStatus: safeEnum(r.screenStatus, SAFE_SCREEN_STATUS), // M24: closed allow-list (primary)
+    coverageClass: safeEnum(r.coverageClass, SAFE_COVERAGE_CLASS), // M24: closed allow-list (primary)
     previewCardStatus: safeLabel(r.previewCardStatus),
     clientStatus: safeLabel(r.clientStatus),
     routeStatus: safeLabel(r.routeStatus),
@@ -159,9 +183,9 @@ export function classifyC03Response(status: number, body: unknown): C03Result {
       const fr = (b.freshness ?? {}) as Record<string, unknown>;
       return {
         kind: 'success',
-        schemaVersion: safeLabel(b.schemaVersion),
-        sourceMode: safeLabel(b.sourceMode),
-        freshness: safeLabel(fr.lastSuccessfulReadLabel),
+        schemaVersion: safeLabel(b.schemaVersion), // version-tolerant: NOT allow-listed (future schemas pass)
+        sourceMode: safeEnum(b.sourceMode, SAFE_SOURCE_MODES), // M24: closed allow-list (primary)
+        freshness: safeEnum(fr.lastSuccessfulReadLabel, SAFE_FRESHNESS), // M24: closed allow-list (primary)
         generatedAt: safeTimestamp(b.generatedAt),
         summaryCounts: {
           total: safeCount(sc.total),
@@ -179,7 +203,7 @@ export function classifyC03Response(status: number, body: unknown): C03Result {
         routePosture: safeLabel(b.routePosture),
         productionPosture: safeLabel(b.productionPosture),
         mutationPosture: safeLabel(b.mutationPosture),
-        evidenceLabels: safeLabelArray(b.evidenceLabels),
+        evidenceLabels: safeEvidenceLabels(b.evidenceLabels), // M24: closed allow-list (primary)
       };
     }
     return { kind: 'unexpected' };

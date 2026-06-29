@@ -245,6 +245,54 @@ test('parsed success result has no forbidden tokens or sensitive shapes', () => 
   assert.ok(!/tenant|store|customer|identity_link|audit|provider_uid|internal_user|\.tsx?/i.test(s), 'sensitive shape leaked');
 });
 
+// ---- M24: client-sanitizer closed allow-list hardening ----
+
+test('M24: sourceMode allow-list — code_config/synthetic pass, safe-but-non-accepted normalizes to redacted', () => {
+  for (const ok of ['code_config', 'synthetic']) {
+    const r = classifyC02Response(200, { ...envelope, sourceMode: ok });
+    if (r.kind !== 'success') return assert.fail('expected success');
+    assert.equal(r.sourceMode, ok);
+  }
+  for (const bad of ['live_provider', 'code_config_experimental', 'postgres://leak']) {
+    const r = classifyC02Response(200, { ...envelope, sourceMode: bad });
+    if (r.kind !== 'success') return assert.fail('expected success');
+    assert.equal(r.sourceMode, 'redacted', `non-accepted sourceMode not redacted: ${bad}`);
+  }
+});
+
+test('M24: freshness allow-list — accepted freshness passes, anything else normalizes to redacted', () => {
+  for (const ok of ['code-config-no-live-read', 'synthetic-no-live-read']) {
+    const r = classifyC02Response(200, { ...envelope, freshness: { lastSuccessfulReadLabel: ok } });
+    if (r.kind !== 'success') return assert.fail('expected success');
+    assert.equal(r.freshness, ok);
+  }
+  for (const bad of ['live-read', 'now', 'redacted_value', '']) {
+    const r = classifyC02Response(200, { ...envelope, freshness: { lastSuccessfulReadLabel: bad } });
+    if (r.kind !== 'success') return assert.fail('expected success');
+    assert.equal(r.freshness, 'redacted', `non-accepted freshness not redacted: ${bad}`);
+  }
+});
+
+test('M24: moduleStatus allow-list — full accepted enum passes, safe-but-non-enum normalizes to redacted', () => {
+  for (const ok of ['included', 'placeholder', 'deferred', 'blocked', 'unknown']) {
+    const r = classifyC02Response(200, { ...envelope, registryItems: [{ ...envelope.registryItems[0], moduleStatus: ok }] });
+    if (r.kind !== 'success') return assert.fail('expected success');
+    assert.equal(r.items[0].moduleStatus, ok, `accepted status dropped: ${ok}`);
+  }
+  for (const bad of ['archived', 'enabled', 'active']) {
+    const r = classifyC02Response(200, { ...envelope, registryItems: [{ ...envelope.registryItems[0], moduleStatus: bad }] });
+    if (r.kind !== 'success') return assert.fail('expected success');
+    assert.equal(r.items[0].moduleStatus, 'redacted', `non-enum status not redacted: ${bad}`);
+  }
+});
+
+test('M24: evidenceLabels allow-list — all 10 accepted server labels pass; non-accepted labels are dropped', () => {
+  const all10 = ['code_config_only', 'no_live_source', 'read_only', 'no_mutation', 'production_disabled', 'dev_only', 'no_external_source', 'route_not_registered', 'ui_not_implemented', 'read_model_only'];
+  const r = classifyC02Response(200, { ...envelope, evidenceLabels: [...all10, 'totally_made_up', 'service_role_key', 'production ready'] });
+  if (r.kind !== 'success') return assert.fail();
+  assert.deepEqual(r.evidenceLabels, all10); // exactly the accepted set, in order; injected labels dropped
+});
+
 // ---- Runner ----
 (async () => {
   let pass = 0;

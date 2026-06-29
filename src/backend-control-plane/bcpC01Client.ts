@@ -56,15 +56,27 @@ export type C01Result =
 // A safe bounded label: short, conservative charset, free of '@'/'://'/whitespace tricks.
 const SAFE_LABEL_RE = /^[A-Za-z0-9_.\- ]{1,64}$/;
 const ISO_TS_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
-// Defense-in-depth denylist: substrings that must never render even inside an otherwise
-// charset-valid label (e.g. 'service_role_key', 'Bearer eyJ', 'iu_<id>'). Lowercased compare.
+// Defense-in-depth denylist (SECONDARY defense — Phase 2.0 M24 brought this to the frozen C-02/C-03/C-06
+// standard): substrings that must never render even inside an otherwise charset-valid label
+// (e.g. 'service_role_key', 'Bearer eyJ', 'iu_<id>', 'supabase', 'tenant_*'). Lowercased compare.
 const FORBIDDEN_SUBSTRINGS = [
-  '://', '@', 'bearer', 'eyj', 'service_role', 'postgres', 'mysql', 'mongodb',
-  'iu_', 'sk-', 'secret', 'token', 'password', 'apikey', 'api_key',
+  '://', '@', 'bearer', 'eyj', 'service_role', 'postgres', 'mysql', 'mongodb', 'supabase',
+  'iu_', 'sk-', 'sk_', 'pk_', 'cus_', 'acct_', 'secret', 'token', 'password', 'apikey', 'api_key',
+  'stdout', 'stderr', 'tenant_', 'store_', 'customer_', 'identity_link', 'provider_uid', 'internal_user',
+  'permission_', 'entitlement_',
 ];
-// Id-shaped values (UUIDs, long digit runs) are redacted even when charset-valid, so a stray
-// identifier can never render as a label.
-const ID_SHAPED_RE = /\d{6,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+// Id-shaped values (UUIDs, long digit/hex runs) are redacted even when charset-valid, so a stray
+// identifier can never render as a label. M24: tightened from \d{6,} to \d{4,} + a 16+ hex run (matches C-02/C-03).
+const ID_SHAPED_RE = /\d{4,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,}/i;
+// M24: domain/hostname trailing-TLD, path/file-extension, and affirmative production-readiness-claim guards
+// (brought over from the frozen C-03/C-06 clients). No accepted C-01 posture label matches any of these.
+const DOMAIN_RE = /\.[A-Za-z]{2,}$/;
+const PATH_RE = /\/|\.(ts|tsx|js|jsx|json|env|key|pem|sql|sh|ya?ml|toml|lock|log|txt|md)\b/i;
+const READINESS_CLAIM_RE = /production\s*ready|ready\s*for\s*(production|customer|release)|customer\s*ready|fully\s*(certified|compliant)|all\s*quality\s*gates\s*passed|complete\s*assurance|production\s*approved|phase\s*[34]\s*ready|no\s*risk|safe\s*to\s*deploy|ready\s*to\s*(ship|release)|ship\s*it|go\s*live|release\s*ready|good\s*to\s*go|deploy\s*to\s*production/i;
+
+// Phase 2.0 M24 — closed allow-list (PRIMARY validation) for the top-level sourceMode: only the accepted
+// code/config source modes may surface; any other safe-charset value normalizes to 'redacted_label'.
+const SAFE_SOURCE_MODES = new Set<string>(['code_config', 'code_config_only', 'live_provider']);
 
 /**
  * Returns the value only if it is a safe bounded label; otherwise 'redacted'. Never leaks.
@@ -76,7 +88,8 @@ export function safeLabel(value: unknown): string {
   if (typeof value !== 'string') return 'redacted';
   if (value.trim() === '') return 'redacted'; // empty / whitespace-only is not a meaningful label
   if (!SAFE_LABEL_RE.test(value)) return 'redacted';
-  if (ID_SHAPED_RE.test(value)) return 'redacted';
+  if (ID_SHAPED_RE.test(value) || DOMAIN_RE.test(value) || PATH_RE.test(value)) return 'redacted';
+  if (READINESS_CLAIM_RE.test(value.replace(/[_\-]+/g, ' '))) return 'redacted';
   const lower = value.toLowerCase();
   for (const bad of FORBIDDEN_SUBSTRINGS) if (lower.includes(bad)) return 'redacted';
   return value;
@@ -98,7 +111,10 @@ function safeTimestamp(value: unknown): string | undefined {
 function deriveSourceMode(b: Record<string, unknown>, categoryFallback: string): string {
   if (!('sourceMode' in b) || b.sourceMode === undefined) return categoryFallback;
   const safe = safeLabel(b.sourceMode);
-  return safe === 'redacted' ? 'redacted_label' : safe;
+  if (safe === 'redacted') return 'redacted_label';
+  // M24: closed allow-list PRIMARY check — a safe-charset but non-accepted source mode is neutralized
+  // (never surfaced) rather than passed through. The accepted modes pass byte-equivalently.
+  return SAFE_SOURCE_MODES.has(safe) ? safe : 'redacted_label';
 }
 
 /** Map a safe status label to a display tone. */
