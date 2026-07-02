@@ -40,6 +40,8 @@ import { createBcpC05FeatureFlagPostureReadinessHandler, BCP_C05_FEATURE_FLAG_PO
 import { getBcpC05FeatureFlagPostureEntries } from '../bcp-pilot/bcpC05FeatureFlagPostureProvider';
 import { createBcpC06QualityGatesEvidenceReadinessHandler, BCP_C06_QUALITY_GATES_EVIDENCE_ROUTE_PATH } from '../bcp-pilot/bcpC06ReadOnlyExpressAdapter';
 import { getBcpC06QualityGatesEvidenceEntries } from '../bcp-pilot/bcpC06QualityGatesEvidenceProvider';
+import { createBcpC07DataSourceBoundaryReadinessHandler, BCP_C07_DATA_SOURCE_BOUNDARY_ROUTE_PATH } from '../bcp-pilot/bcpC07DataSourceBoundaryReadOnlyExpressAdapter';
+import { getBcpC07DataSourceBoundaryItems } from '../bcp-pilot/bcpC07DataSourceBoundaryProvider';
 
 export function createPlatformIdentityApp() {
   const app = express();
@@ -268,6 +270,24 @@ export function createPlatformIdentityApp() {
   app.all(
     BCP_C06_QUALITY_GATES_EVIDENCE_ROUTE_PATH,
     createBcpC06QualityGatesEvidenceReadinessHandler({ getQualityGatesEvidenceEntries: getBcpC06QualityGatesEvidenceEntries }),
+  );
+
+  // Registers the inert C-07 data-source-boundary handler (flag → guard → code/config data-source-boundary
+  // DTO) on THIS isolated API only (never the SaaS app, never the client bundle), adjacent to C-06 and mirroring
+  // the frozen C-05/C-06 pattern. EVERY dependency is server-sourced: isDev from NODE_ENV, featureEnabled from
+  // the default-OFF flag ENABLE_BCP_DEV_C07_DATA_SOURCE_BOUNDARY_READINESS (a boolean GATE only — its value is
+  // NEVER surfaced as data), and the declared boundary registry from the M33 SAFE SERVER-OWNED provider
+  // (getBcpC07DataSourceBoundaryItems — a deterministic, code/config-only, no-throw declared self-attestation
+  // list with bounded posture labels; NO raw log/scan/transport read, NO env read, NO filesystem read, NO
+  // command execution, NO package inventory, NO src/mockData import, NO DB/Supabase/live read, NO
+  // production-readiness claim, NEVER a live verifier), supplied ONLY through the accepted
+  // getDataSourceBoundaryItems seam and resolved by the adapter ONLY after the DEV + feature gates pass.
+  // NOTHING from the request is mapped into authority/content — only req.method is read, by the handler.
+  // Flag-off / production / non-GET return a safe response with no data. `app.all` routes every method to the
+  // pure handler.
+  app.all(
+    BCP_C07_DATA_SOURCE_BOUNDARY_ROUTE_PATH,
+    createBcpC07DataSourceBoundaryReadinessHandler({ getDataSourceBoundaryItems: getBcpC07DataSourceBoundaryItems }),
   );
 
   return app;

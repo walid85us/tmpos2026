@@ -1,13 +1,14 @@
-// Phase 2.0 M35 — Tests for the inert C-07 data-source-boundary route boundary handler.
+// Phase 2.0 M35/M37 — Tests for the C-07 data-source-boundary route boundary handler.
 //
-// GUARD-GAP (M34 §12): the shared guard maps C-01..C-06 only, so a pinned-'C-07' authorized GET/HEAD
-// fail-closes to 403 not_authorized (unknown_contract). These tests assert the REACHABLE gate/denial paths
-// honestly, prove denied/disabled requests never consume items, and lock the success-envelope CONTRACT at the
-// read-model builder layer (the route surfaces it once the additive 'C-07' guard entry lands in M36). No test
-// fakes, injects, or bypasses guard authorization.
+// M37: the additive 'C-07': 'overview_viewer' guard entry now exists, so a fully-valid GET/HEAD reaches the
+// real authorized 200 success path (envelope built from the server-owned items). These tests assert that
+// authorized path AND every denied/disabled/method/error path honestly, prove denied/disabled requests never
+// consume items, prove the success path consumes items ONLY after the guard passes, verify the guard maps
+// C-07 (and only C-07) to overview_viewer while unknown ids still deny, and lock the success-envelope CONTRACT.
+// No test fakes, injects, or bypasses guard authorization — the 200 arises solely from the real guard entry.
 import assert from 'node:assert/strict';
 import { handleBcpC07DataSourceBoundaryRequest, type BcpC07RouteRequest } from './bcpC07DataSourceBoundaryReadOnlyRoute';
-import type { SyntheticServerPrincipal } from './bcpAuthorizationGuard';
+import { authorizeBcpRead, type SyntheticServerPrincipal } from './bcpAuthorizationGuard';
 import {
   getBcpC07DataSourceBoundaryItems,
   assertBcpC07OutputKeyAllowList,
@@ -57,18 +58,26 @@ test('principal with null internalUserId ⇒ 403', () => assert.equal(H(base({ p
 test('non-ready parity ⇒ 409 parity_blocked (parity precedes contract lookup)', () => { const r = H(base({ principal: { ...PRINCIPAL, parityState: 'unresolved' } })); assert.equal(r.httpStatus, 409); assert.equal(r.category, 'parity_blocked'); assertSafeDeniedBody(r.body); });
 test('blocked parity ⇒ 409 parity_blocked', () => assert.equal(H(base({ principal: { ...PRINCIPAL, parityState: 'blocked' } })).httpStatus, 409));
 
-// --- guard-gap: authorized GET/HEAD fail-close to 403 unknown_contract (200 deferred to M36, not faked) ---
-test('GUARD-GAP: fully-valid GET ⇒ 403 not_authorized (no C-07 guard entry)', () => { const r = H(base()); assert.equal(r.httpStatus, 403); assert.equal(r.category, 'not_authorized'); assertSafeDeniedBody(r.body); });
-test('GUARD-GAP: fully-valid HEAD ⇒ 403 bodyless', () => { const r = H(base({ method: 'HEAD' })); assert.equal(r.httpStatus, 403); assert.equal(r.body, null); });
-test('GUARD-GAP: authorized GET does NOT emit an envelope (200 deferred; not faked)', () => { const r = H(base()); assert.equal((r.body as Record<string, unknown>).schemaVersion, undefined); });
-test('hostile hints WITH valid principal still 403 (hints not authority; guard-gap holds)', () => assert.equal(H(base({ hints: { clientSuppliedUid: 'evil', bodyInternalUserId: 'x', urlTenantParam: 't' } })).httpStatus, 403));
+// --- authorized success path (unlocked by the additive 'C-07': 'overview_viewer' guard entry, M37) ---
+test('AUTHORIZED: fully-valid GET ⇒ 200 success envelope', () => { const r = H(base()); assert.equal(r.httpStatus, 200); assert.equal(r.category, 'success'); assert.equal((r.body as Record<string, unknown>).schemaVersion, 'bcp.c07.data-source-boundary-readiness.v1-code-config'); });
+test('AUTHORIZED: fully-valid HEAD ⇒ 200 bodyless (no envelope on HEAD)', () => { const r = H(base({ method: 'HEAD' })); assert.equal(r.httpStatus, 200); assert.equal(r.category, 'success'); assert.equal(r.body, null); });
+test('AUTHORIZED: GET now EMITS the envelope (200 reached via the real guard entry, not faked)', () => { const r = H(base()); const b = r.body as Record<string, unknown>; assert.equal(b.schemaVersion, 'bcp.c07.data-source-boundary-readiness.v1-code-config'); assert.equal(b.selfAttestation, 'design_time_code_config'); assert.equal(b.generatedAt, undefined); });
+test('AUTHORIZED: hostile hints WITH valid principal still 200 (hints never authority; same envelope)', () => { const r = H(base({ hints: { clientSuppliedUid: 'evil', bodyInternalUserId: 'x', urlTenantParam: 't' } })); assert.equal(r.httpStatus, 200); assert.deepEqual(r.body, buildC07DataSourceBoundaryEnvelope(ITEMS)); });
+test('AUTHORIZED: GET success body deep-equals the read-model builder output for the same items', () => assert.deepEqual(H(base()).body, buildC07DataSourceBoundaryEnvelope(ITEMS)));
 
 // --- denied/disabled requests never consume items ---
-test('denied GET does NOT consume items (array proxy throwing on EVERY access ⇒ no throw, still 403)', () => {
+test('DENIED GET (null principal) does NOT consume items (array proxy throwing on EVERY access ⇒ no throw, 403)', () => {
   const throwingItems = new Proxy([] as unknown[], { get() { throw new Error('boom'); }, has() { throw new Error('boom'); } }) as unknown as readonly C07BoundaryItemInput[];
   let r: ReturnType<typeof H> | undefined;
-  assert.doesNotThrow(() => { r = H(base({ items: throwingItems })); });
+  assert.doesNotThrow(() => { r = H(base({ principal: null, items: throwingItems })); });
   assert.equal(r?.httpStatus, 403);
+});
+test('AUTHORIZED GET consumes items ONLY after the guard passes (real items ⇒ envelope reflects them)', () => {
+  // Pairs with the denied throwing-proxy above: denied ⇒ items untouched; authorized ⇒ items are read to build
+  // the envelope. Same server-owned ITEMS ⇒ the success body equals the builder output.
+  const r = H(base());
+  assert.equal(r.httpStatus, 200);
+  assert.deepEqual(r.body, buildC07DataSourceBoundaryEnvelope(ITEMS));
 });
 test('disabled request does NOT consume items (throwing items proxy ⇒ no throw, 404)', () => {
   const throwingItems = new Proxy([] as unknown[], { get(_t, p) { if (p === 'length') return 1; throw new Error('boom'); } }) as unknown as readonly C07BoundaryItemInput[];
@@ -95,14 +104,14 @@ test('HEAD stays bodyless even on the error path (throwing gate getter ⇒ 500 b
   assert.equal(out?.body, null); // HEAD must carry no body on EVERY branch, including error
 });
 test('no raw errors / stack traces in any response body', () => { for (const m of ['GET', 'HEAD', 'OPTIONS', 'POST']) assert.ok(!/Error:|at Object\.|"stack":/.test(JSON.stringify(H(base({ method: m })).body)), m); });
-test('every reachable state produces a SAFE denied/disabled body', () => {
+test('every reachable DENIED/DISABLED state produces a SAFE denied/disabled body', () => {
   assertSafeDeniedBody(H(base({ isDevEnvironment: false })).body);
   assertSafeDeniedBody(H(base({ featureEnabled: false })).body);
   assertSafeDeniedBody(H(base({ method: 'OPTIONS' })).body);
   assertSafeDeniedBody(H(base({ method: 'POST' })).body);
   assertSafeDeniedBody(H(base({ principal: null })).body);
   assertSafeDeniedBody(H(base({ principal: { ...PRINCIPAL, parityState: 'unresolved' } })).body);
-  assertSafeDeniedBody(H(base()).body); // guard-gap 403
+  // NOTE: H(base()) is now the AUTHORIZED 200 envelope (asserted separately) — deliberately NOT a denied body.
 });
 
 // --- authority is server-side only: request hint fields never change the outcome ---
@@ -119,5 +128,23 @@ test('CONTRACT: success envelope passes output-key allow-list (no generatedAt/ti
 test('CONTRACT: success envelope passes value-content closed-set gate', () => assert.doesNotThrow(() => assertBcpC07ValueContentSafety(buildC07DataSourceBoundaryEnvelope(ITEMS))));
 test('CONTRACT: success envelope carries NO production-readiness claim', () => assert.doesNotThrow(() => assertBcpC07ProductionReadinessClaimBan(buildC07DataSourceBoundaryEnvelope(ITEMS))));
 test('CONTRACT: success envelope keeps declared self-attestation framing (non-verifier)', () => assert.doesNotThrow(() => assertBcpC07SelfAttestationFraming(buildC07DataSourceBoundaryEnvelope(ITEMS))));
+
+// --- route success body (not just the builder) passes the C-07 fitness gates ---
+test('AUTHORIZED: route success body passes output-key / value / production-ban / self-attestation gates', () => {
+  const env = H(base()).body as ReturnType<typeof buildC07DataSourceBoundaryEnvelope>;
+  assert.doesNotThrow(() => assertBcpC07OutputKeyAllowList(env));
+  assert.doesNotThrow(() => assertBcpC07ValueContentSafety(env));
+  assert.doesNotThrow(() => assertBcpC07ProductionReadinessClaimBan(env));
+  assert.doesNotThrow(() => assertBcpC07SelfAttestationFraming(env));
+});
+
+// --- guard authorization (direct): the additive 'C-07' entry maps only to overview_viewer; nothing else moved ---
+const guardReq = (contractId: string, principal: SyntheticServerPrincipal | null = PRINCIPAL) => authorizeBcpRead({ contractId, featureEnabled: true, principal });
+test('GUARD: C-07 now maps to overview_viewer ⇒ allow for the valid principal', () => { const g = guardReq('C-07'); assert.equal(g.decision, 'allow'); assert.equal(g.reasonCode, 'allow'); });
+test('GUARD: unknown id (C-99) still denies unknown_contract (map widened by exactly one row)', () => { const g = guardReq('C-99'); assert.equal(g.decision, 'deny'); assert.equal(g.reasonCode, 'unknown_contract'); });
+test('GUARD: C-01..C-06 mappings remain allow (unchanged by the additive C-07 row)', () => { for (const id of ['C-01', 'C-02', 'C-03', 'C-04', 'C-05', 'C-06']) assert.equal(guardReq(id).decision, 'allow', id); });
+test('GUARD: insufficient capability (visibilityClass none) ⇒ deny for C-07', () => { const g = guardReq('C-07', { ...PRINCIPAL, visibilityClass: 'none' }); assert.equal(g.decision, 'deny'); assert.equal(g.reasonCode, 'insufficient_visibility'); });
+test('GUARD: null principal ⇒ deny for C-07 (no request-supplied authority)', () => assert.equal(guardReq('C-07', null).decision, 'deny'));
+test('GUARD: default-off — featureEnabled false ⇒ deny feature_disabled for C-07', () => { const g = authorizeBcpRead({ contractId: 'C-07', featureEnabled: false, principal: PRINCIPAL }); assert.equal(g.decision, 'deny'); assert.equal(g.reasonCode, 'feature_disabled'); });
 
 (() => { let p = 0; const f: string[] = []; for (const c of cases) { try { c.fn(); p++; console.log('PASS ' + c.name); } catch (e) { f.push(c.name + ' :: ' + (e instanceof Error ? e.message : String(e))); console.log('FAIL ' + c.name); } } console.log(`\n[M35 BCP C-07 route] ${p}/${cases.length} passed`); if (f.length) { console.log('FAILURES:'); for (const x of f) console.log('  - ' + x); process.exit(1); } console.log('ALL_TESTS_PASSED'); process.exit(0); })();
