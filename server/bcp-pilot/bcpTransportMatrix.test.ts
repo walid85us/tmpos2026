@@ -1,7 +1,8 @@
 // Phase 2.0 M27 — Backend CP BOUNDARY TRANSPORT MATRIX (consolidated cross-lens, no-process).
+// Phase 2.0 M39 — extended to include C-07 (data-source-boundary readiness) as the seventh lens.
 //
 // WHAT THIS IS: a TEST-ONLY harness that asserts the SINGLE uniform transport contract shared by the
-// six frozen DEV-only read-only Backend Control Panel lenses (C-01..C-06) as one regressionable
+// seven frozen DEV-only read-only Backend Control Panel lenses (C-01..C-07) as one regressionable
 // property. It exercises the EXISTING frozen boundaries in-process:
 //   1. the pure, transport-agnostic route handlers (handle*Request) — for the full gate/method/guard/
 //      catch contract, driven entirely through the typed request object (NO env mutation), and
@@ -35,6 +36,7 @@ import { handleBcpC03UiCoverageRequest } from './bcpC03ReadOnlyRoute';
 import { handleBcpC04RouteExposureRequest } from './bcpC04ReadOnlyRoute';
 import { handleBcpC05FeatureFlagPostureRequest } from './bcpC05ReadOnlyRoute';
 import { handleBcpC06QualityGatesEvidenceRequest } from './bcpC06ReadOnlyRoute';
+import { handleBcpC07DataSourceBoundaryRequest } from './bcpC07DataSourceBoundaryReadOnlyRoute';
 
 // Frozen Express adapter factories (one per lens).
 import { createBcpReadinessSummaryHandler } from './bcpReadOnlyExpressAdapter';
@@ -43,9 +45,10 @@ import { createBcpC03UiCoverageReadinessHandler } from './bcpC03ReadOnlyExpressA
 import { createBcpC04RouteExposureReadinessHandler } from './bcpC04ReadOnlyExpressAdapter';
 import { createBcpC05FeatureFlagPostureReadinessHandler } from './bcpC05ReadOnlyExpressAdapter';
 import { createBcpC06QualityGatesEvidenceReadinessHandler } from './bcpC06ReadOnlyExpressAdapter';
+import { createBcpC07DataSourceBoundaryReadinessHandler } from './bcpC07DataSourceBoundaryReadOnlyExpressAdapter';
 
 // ---------------------------------------------------------------------------------------------------
-// Common request/response shapes. The six handlers each have their own request type, but all share the
+// Common request/response shapes. The seven handlers each have their own request type, but all share the
 // four core fields below (+ optional hints). A BoundaryReq is structurally assignable to every handler
 // param; every handler return is structurally assignable to BoundaryRes.
 // ---------------------------------------------------------------------------------------------------
@@ -69,7 +72,7 @@ interface Lens {
   id: string;
   handler: (req: BoundaryReq) => BoundaryRes;
   makeAdapter: (deps?: AdapterDeps) => ExpressHandler;
-  /** C-02..C-06 accept injectable gate deps; C-01's adapter is non-injectable (reads process.env). */
+  /** C-02..C-07 accept injectable gate deps; C-01's adapter is non-injectable (reads process.env). */
   injectable: boolean;
   /** Feature-flag env var name (used only for the scoped C-01 adapter-edge withEnv path). */
   flagEnv: string;
@@ -94,6 +97,9 @@ const LENSES: Lens[] = [
   { id: 'C-06', injectable: true, flagEnv: 'ENABLE_BCP_DEV_C06_QUALITY_GATES_EVIDENCE_COVERAGE_READINESS',
     handler: (r) => handleBcpC06QualityGatesEvidenceRequest(r),
     makeAdapter: (d) => createBcpC06QualityGatesEvidenceReadinessHandler(d) },
+  { id: 'C-07', injectable: true, flagEnv: 'ENABLE_BCP_DEV_C07_DATA_SOURCE_BOUNDARY_READINESS',
+    handler: (r) => handleBcpC07DataSourceBoundaryRequest(r),
+    makeAdapter: (d) => createBcpC07DataSourceBoundaryReadinessHandler(d) },
 ];
 
 // ---------------------------------------------------------------------------------------------------
@@ -243,7 +249,7 @@ function pureHandlerCases(lens: Lens): Case[] {
 
 // ---------------------------------------------------------------------------------------------------
 // Adapter-edge HTTP-shape sub-matrix (real frozen adapters via mock req/res).
-//   C-02..C-06: injectable deps — no env mutation.
+//   C-02..C-07: injectable deps — no env mutation.
 //   C-01: non-injectable — tightly-scoped withEnv snapshot/finally-restore.
 // ---------------------------------------------------------------------------------------------------
 function adapterEdgeCases(lens: Lens): Case[] {
@@ -307,8 +313,8 @@ function adapterEdgeCases(lens: Lens): Case[] {
 // ---------------------------------------------------------------------------------------------------
 // Build + run. Fail loudly on missing required coverage.
 // ---------------------------------------------------------------------------------------------------
-assert.equal(LENSES.length, 6, 'expected exactly 6 lenses (C-01..C-06)');
-assert.equal(new Set(LENSES.map((l) => l.id)).size, 6, 'lens ids must be unique');
+assert.equal(LENSES.length, 7, 'expected exactly 7 lenses (C-01..C-07)');
+assert.equal(new Set(LENSES.map((l) => l.id)).size, 7, 'lens ids must be unique');
 
 const cases: Case[] = [];
 for (const lens of LENSES) {
@@ -333,7 +339,7 @@ for (const c of cases) {
   }
 }
 
-console.log(`\n[M27 BCP boundary transport matrix C-01..C-06] ${pass}/${cases.length} passed`);
+console.log(`\n[M27 BCP boundary transport matrix C-01..C-07] ${pass}/${cases.length} passed`);
 if (failures.length) {
   console.log('FAILURES:');
   for (const f of failures) console.log('  - ' + f);
