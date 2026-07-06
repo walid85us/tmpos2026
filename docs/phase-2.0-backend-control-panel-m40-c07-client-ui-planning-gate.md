@@ -74,7 +74,7 @@ C‑07 is **ready** for frontend client planning. Every readiness condition hold
 | 9 | Exposes safe C‑07 envelope only | PASS |
 | 10 | `generatedAt` remains **excluded** | PASS (permanently excluded) |
 | 11 | `selfAttestation` remains `design_time_code_config` | PASS |
-| 12 | No DB/SQL/Supabase/live‑provider/raw‑evidence/diagnostics/value‑oracle/prod‑readiness claim | PASS |
+| 12 | No DB/SQL/Supabase/live‑provider/raw‑evidence/diagnostics/value‑oracle/production‑readiness claim | PASS |
 | 13 | Client can be planned using same‑origin Backend CP proxy pattern only | PASS (`/__identity` dev proxy) |
 | 14 | UI can be planned without normal SaaS navigation or customer‑facing exposure | PASS (Backend CP internal only) |
 | 15 | Browser evidence still waived in Phase 2.0 unless explicitly reopened | PASS |
@@ -93,7 +93,7 @@ C‑07 is ready. No readiness blocker exists.
 | D | Residual‑hardening planning gate before client/UI | Low (docs‑only) | Rejected as next step — residuals are documented and non‑blocking (Section I); may be scheduled later |
 | E | Another docs‑only client/UI planning pass | Low | Rejected — the client/sanitizer contract is exact against the frozen C‑01..C‑06 pattern (Sections E–F) |
 
-**Rationale for A.** The frozen C‑01..C‑06 clients establish a proven same‑origin, GET‑only, no‑credentials, no‑throw, allow‑list‑sanitized boundary with a discriminated safe view model. C‑07 slots into that pattern exactly (Section E), changing only the URL suffix, the schema/self‑attestation validated, and the per‑item allow‑list (derived from the frozen C‑07 read‑model). Implementing the client + sanitizer **first**, with no UI card and no `screens.tsx` change, establishes the redaction boundary and its hostile‑payload test coverage before any rendering surface exists — the smallest safe step, no browser tooling, no package change.
+**Rationale for A.** The frozen C‑01..C‑06 clients establish a proven same‑origin, GET‑only, no‑credentials, no‑throw, allow‑list‑sanitized boundary with a discriminated safe view model. C‑07 slots into that pattern exactly (Section E), changing only the URL suffix, the validated schema/self‑attestation, and the per‑item allow‑list (derived from the frozen C‑07 read‑model). Implementing the client + sanitizer **first**, with no UI card and no `screens.tsx` change, establishes the redaction boundary and its hostile‑payload test coverage before any rendering surface exists — the smallest safe step, no browser tooling, no package change.
 
 ---
 
@@ -170,7 +170,7 @@ The M41 C‑07 sanitizer is locked to the frozen C‑06 defense‑in‑depth mod
 | 24 | fetch/network errors normalize safely | ✔ (no‑throw) |
 | 25 | sanitizer tests include hostile payloads with synthetic forbidden markers | ✔ (see Section K) |
 
-**Per‑field allow‑list source (binding).** The exact C‑07 item field names and the closed category/label allow‑lists must be **derived at M41 from the frozen C‑07 read‑model** (`bcpC07DataSourceBoundaryReadModel.ts`) — the client allow‑list is intentionally independent from and no wider than the server’s closed vocabulary. M41 must not invent fields the read‑model does not emit.
+**Per‑field allow‑list source (binding).** The exact C‑07 item field names and the closed category/label allow‑lists must be **derived at M41 from the frozen C‑07 read‑model** (`bcpC07DataSourceBoundaryReadModel.ts`) — the client allow‑list is intentionally independent of and no wider than the server’s closed vocabulary. M41 must not invent fields the read‑model does not emit.
 
 **Closed allow‑list is the PRIMARY gate on posture enums (binding).** For the C‑07 posture‑enum values, the **closed allow‑list — not the generic forbidden‑substring denylist — must be the primary gate.** A legitimate read‑model value such as `no_customer_exposure` contains the denylist substring `customer_`; if the substring denylist were applied as the primary gate it would over‑redact a valid value (fail‑safe — it drops to `redacted`, never a leak — but wrong). This mirrors exactly how the frozen C‑06 client resolves the identical `customer_` / `no_customer_facing_exposure` collision via its `SAFE_EVIDENCE_LABELS` allow‑list rather than the denylist. The substring denylist remains a defense‑in‑depth secondary check on free‑text label fields, not the gate on closed enums.
 
@@ -251,7 +251,7 @@ Accepted residuals were reviewed for client/UI exposure risk:
 7. disabled / error / empty / network‑failure states safe; no raw error leak; no client authority escalation; no mutation/action request.
 8. all status mappings: `404 feature_disabled`, `404 dev_only`, `404 other→unavailable`, `403→unauthorized`, `409→parity_blocked`, `405→method_not_allowed`, `>=500→error`, `0→unavailable`, `200`‑without‑schema→`unexpected`.
 
-**Regression:** C‑07 backend tests remain green; transport matrix remains 124/124; full BCP corpus remains green (expected **1282 + N** where N = the new C‑07 client test count, mirroring the C‑06 client’s 45 — the exact delta is confirmed at M41); typecheck remains 12 baseline / 0 BCP‑surface.
+**Regression:** C‑07 backend tests remain green; transport matrix remains 124/124; full BCP corpus remains green (expected **1282 + N** where N = the new C‑07 client test count, mirroring the C‑06 client’s 45 cases — the exact delta is confirmed at M41); typecheck remains 12 baseline / 0 BCP‑surface.
 
 ---
 
