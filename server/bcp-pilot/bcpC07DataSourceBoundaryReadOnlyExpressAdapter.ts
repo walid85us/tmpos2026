@@ -1,4 +1,5 @@
-// Phase 2.0 M35 — Thin Express adapter for the inert C-07 data-source-boundary route handler.
+// Phase 2.0 M35 (mounted since M37; comments refreshed M43) — Thin Express adapter for the C-07
+// data-source-boundary route handler.
 //
 // WHAT THIS IS: the smallest possible HTTP boundary that translates an Express request into the pure C-07
 // transport-agnostic input, calls handleBcpC07DataSourceBoundaryRequest, and writes its safe response.
@@ -9,16 +10,17 @@
 //     from the request (UID/email/body/query/headers/cookies/params) is read as authority.
 //   - DEV-only + default-off: isDevEnvironment from NODE_ENV; featureEnabled from the default-OFF C-07 flag.
 //     Both dependency-injectable so tests need not mutate global env. The flag read is a boolean GATE only.
-//   - The declared-item registry is server-supplied via an injectable provider (default: EMPTY). Does NOT
-//     import src/.../mockData.ts and, in M35, is NOT wired to the C-07 provider. Gates-first: resolved ONLY
-//     when DEV + enabled.
+//   - The declared-item registry is server-supplied via an injectable provider (adapter default: EMPTY). Does
+//     NOT import src/.../mockData.ts; the C-07 provider is wired at the mount site (server.ts), not here.
+//     Gates-first: resolved ONLY when DEV + enabled.
 //   - Reads NOTHING live; no DB/Supabase/getDb/fetch; NO env enumeration; NO log/test/scan/package read.
-//   - NOT mounted: this factory is exported for a future authorization/mount gate (M36); M35 does not
-//     register it and does not touch server/platform-identity/server.ts.
+//   - Mounted (since M37) on the ISOLATED platform-identity API only, adjacent to C-06, via app.all on the
+//     C-07 route path; never registered on the SaaS app or the client bundle.
 //
-// GUARD-GAP (M34 §12): with the fixed always-`ready` synthetic principal, an enabled+DEV GET currently
-// serializes the fail-closed 403 not_authorized (the shared guard has no 'C-07' entry), NOT a 200. That is
-// expected and correct for M35; the 200 path is unlocked only by the separate M36 guard entry.
+// GUARD-GATED SUCCESS (M36/M37): the shared guard now maps 'C-07', so with the fixed always-`ready` synthetic
+// principal an enabled+DEV GET reaches the real guard-gated 200 success path; production / flag-off / non-GET
+// still fail-close. C-07 remains DEV-only, read-only, and production-disabled — not production-readiness
+// evidence; matrix / live-transport / browser evidence stays separate from adapter behavior.
 //
 // Server-side only. Never imported by src/ (the client bundle).
 
@@ -51,13 +53,13 @@ export interface BcpC07HandlerDeps {
   isDevEnvironment?: () => boolean;
   /** Defaults to the default-OFF C-07 flag (env value === 'true'). Boolean GATE only; never surfaced. */
   featureEnabled?: () => boolean;
-  /** Server-supplied code/config declared boundary items. Defaults to EMPTY (no src import, no live read,
-   *  no C-07 provider wiring in M35). */
+  /** Server-supplied code/config declared boundary items. Adapter default is EMPTY (no src import, no live
+   *  read); the C-07 provider is wired at the mount site (server.ts), not by this adapter. */
   getDataSourceBoundaryItems?: () => readonly C07BoundaryItemInput[];
 }
 
 /**
- * Build the Express handler for the inert C-07 data-source-boundary route. Pure boundary: it resolves
+ * Build the Express handler for the C-07 data-source-boundary route. Pure boundary: it resolves
  * server-side gate inputs + the server-supplied registry, calls the C-07 handler, and serializes its safe
  * result. Adds NO authorization/redaction/mapper/business logic, registers nothing, reads no env for output.
  */

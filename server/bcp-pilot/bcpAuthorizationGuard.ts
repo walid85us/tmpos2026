@@ -152,9 +152,14 @@ export function authorizeBcpRead(req: GuardRequest): GuardResult {
   // 5. Parity must be proven ready before any live-shaped read is authorized.
   if (req.principal.parityState !== 'ready') return blocked('parity_unresolved');
 
-  // 6. Contract must be known and the principal must meet its minimum visibility.
+  // 6. Contract must be a KNOWN OWN mapping and the principal must meet its minimum visibility. Own-property
+  //    lookup ONLY: an inherited Object.prototype key (e.g. 'toString', 'constructor', '__proto__', 'valueOf',
+  //    'hasOwnProperty', 'isPrototypeOf') must be treated as an unknown contract — never resolved to a truthy
+  //    inherited member. hasOwnProperty.call fails closed for every such key.
+  if (!Object.prototype.hasOwnProperty.call(CONTRACT_MIN_VISIBILITY, req.contractId)) {
+    return deny('unknown_contract');
+  }
   const required = CONTRACT_MIN_VISIBILITY[req.contractId];
-  if (!required) return deny('unknown_contract');
   // Defense-in-depth: fail closed on an unknown/malformed visibility class rather than relying on
   // compile-time narrowing (an undefined rank must never compare as "sufficient").
   const principalRank = VISIBILITY_RANK[req.principal.visibilityClass];

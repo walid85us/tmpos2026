@@ -1,4 +1,5 @@
-// Phase 2.0 M35 — C-07 Backend CP Data Source Boundary Readiness Lens: INERT route boundary handler.
+// Phase 2.0 M35 (route mounted + 'C-07' guard entry landed M36/M37; comments refreshed M43) —
+// C-07 Backend CP Data Source Boundary Readiness Lens: pure route boundary handler.
 //
 // WHAT THIS IS: a PURE, transport-agnostic, NO-THROW route-boundary handler that wires the accepted C-07
 // read model (flag → guard → data-source-boundary DTO builder) into a single request→response shape. Thin
@@ -15,12 +16,12 @@
 //     self-attestation lens — never a live verifier.
 //   - Safe errors only: no stack traces, internals, auth-claim dumps, existence hints, or identifiers.
 //
-// GUARD-GAP (M34 §12 — binding for M35): the shared guard maps C-01..C-06 only. With the pinned 'C-07'
-// contract, authorizeBcpRead returns deny('unknown_contract') ⇒ this handler FAIL-CLOSES to 403
-// not_authorized on an otherwise-authorized GET/HEAD. The 200 success branch below is structurally present
-// but UNREACHABLE until an additive 'C-07' guard entry is separately authorized (M36). This handler NEVER
-// modifies, injects, or bypasses the guard to force success, and reads `items` ONLY on the success branch —
-// so a denied/disabled request never consumes provider/read-model items.
+// GUARD-GATED SUCCESS (M36/M37): the shared guard now maps 'C-07' (overview_viewer floor), so an
+// otherwise-authorized GET/HEAD reaches the real 200 success path. That 200 is genuinely guard-gated — this
+// handler NEVER modifies, injects, or bypasses the guard to force success; the 200 arises solely from a real
+// guard 'allow', and `items` is read ONLY on the success branch, so a denied/disabled request never consumes
+// provider/read-model items. C-07 remains DEV-only, read-only, and production-disabled; this route is not
+// production-readiness evidence, and matrix / live-transport / browser evidence stays separate from behavior.
 //
 // Server-side only. Never imported by src/ (the client bundle).
 
@@ -32,7 +33,7 @@ import {
   type C07BoundaryItemInput,
 } from './bcpC07DataSourceBoundaryReadModel';
 
-/** The ONLY contract this inert route serves. Pinned server-side; never request-controlled. */
+/** The ONLY contract this route serves. Pinned server-side; never request-controlled. */
 const PINNED_CONTRACT_ID = 'C-07';
 
 export type BcpC07RouteCategory =
@@ -68,9 +69,9 @@ export interface BcpC07RouteResponse {
 }
 
 /**
- * Handle one inert C-07 data-source-boundary request. PURE + FAIL-CLOSED + NO-THROW.
+ * Handle one C-07 data-source-boundary request. PURE + FAIL-CLOSED + NO-THROW.
  * Never reads anything live, never reads env/fs/clock for output, never promotes a request field to authority.
- * Never modifies or bypasses the guard: with no 'C-07' guard entry the authorized path fail-closes to 403.
+ * Never modifies or bypasses the guard: the 200 success path is reached only when the guard returns 'allow'.
  */
 export function handleBcpC07DataSourceBoundaryRequest(req: BcpC07RouteRequest): BcpC07RouteResponse {
   // Hoisted so the catch can honor "HEAD carries no body" even on the error path (set once method parses).
@@ -98,8 +99,8 @@ export function handleBcpC07DataSourceBoundaryRequest(req: BcpC07RouteRequest): 
       return { httpStatus: 405, category: 'method_not_allowed', headers: { Allow: 'GET' }, body: { status: 'method_not_allowed' } };
     }
 
-    // 5. Authorization — decided ONLY by the guard; contract pinned server-side to C-07. With no 'C-07' entry
-    //    in the shared guard, this returns deny('unknown_contract') ⇒ 403 (fail-closed). NEVER bypassed.
+    // 5. Authorization — decided ONLY by the guard; contract pinned server-side to C-07. The guard maps 'C-07',
+    //    so an authorized principal yields 'allow'; anything else fail-closes (403 not_authorized / 409). NEVER bypassed.
     const guard = authorizeBcpRead({
       contractId: PINNED_CONTRACT_ID,
       featureEnabled: true, // gate already enforced above
@@ -121,7 +122,7 @@ export function handleBcpC07DataSourceBoundaryRequest(req: BcpC07RouteRequest): 
 
     // 7. Allowed GET: build ONLY the safe, bounded, allow-listed C-07 data-source-boundary DTO from the
     //    server-supplied items (empty ⇒ safe emptyState). The builder is pure + no-throw. `items` is consulted
-    //    ONLY here — never on a disabled/denied path. UNREACHABLE in M35 (guard-gap); present for M36.
+    //    ONLY here — never on a disabled/denied path. Reached only on a real guard 'allow'.
     const envelope = buildC07DataSourceBoundaryEnvelope(req.items ?? []);
     return { httpStatus: 200, category: 'success', body: envelope };
   } catch {

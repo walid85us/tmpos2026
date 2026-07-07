@@ -129,6 +129,16 @@ test('guard denies an unknown contract', () => {
   assert.equal(r.decision, 'deny');
   assert.equal(r.reasonCode, 'unknown_contract');
 });
+test('guard denies inherited/prototype-key contract ids (never resolved via Object.prototype)', () => {
+  // Regression: a plain-object mapping lookup would resolve an inherited Object.prototype member
+  // (e.g. 'toString' / 'constructor' / '__proto__') to a truthy value and skip the unknown-contract
+  // deny. The own-property guard must fail closed: every inherited/prototype key is an unknown contract.
+  for (const key of ['__proto__', 'constructor', 'toString', 'valueOf', 'hasOwnProperty', 'isPrototypeOf']) {
+    const r = authorizeBcpRead(guardReq({ contractId: key }));
+    assert.equal(r.decision, 'deny', `inherited key must deny: ${key}`);
+    assert.equal(r.reasonCode, 'unknown_contract', `inherited key must be unknown_contract: ${key}`);
+  }
+});
 test('guard fails closed on a malformed/unknown visibility class (defense-in-depth)', () => {
   const bogus = { ...goodPrincipal(), visibilityClass: 'bogus' } as unknown as SyntheticServerPrincipal;
   const r = authorizeBcpRead(guardReq({ principal: bogus }));
