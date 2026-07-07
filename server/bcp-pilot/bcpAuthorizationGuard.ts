@@ -160,10 +160,16 @@ export function authorizeBcpRead(req: GuardRequest): GuardResult {
     return deny('unknown_contract');
   }
   const required = CONTRACT_MIN_VISIBILITY[req.contractId];
-  // Defense-in-depth: fail closed on an unknown/malformed visibility class rather than relying on
-  // compile-time narrowing (an undefined rank must never compare as "sufficient").
+  // Defense-in-depth (symmetry with the contract lookup above): the principal's visibility class must be a
+  // KNOWN OWN key of VISIBILITY_RANK. Own-property lookup ONLY — an inherited Object.prototype key (e.g.
+  // 'toString', 'constructor', '__proto__', 'valueOf', 'hasOwnProperty', 'isPrototypeOf') resolves to a
+  // truthy inherited member that a bare `=== undefined` check would miss, then coerces to NaN in the rank
+  // comparison (never < the floor) and would fall through to allow. hasOwnProperty.call fails closed for
+  // every such key; a genuinely-unknown class (own-lookup undefined) is likewise treated as insufficient.
+  if (!Object.prototype.hasOwnProperty.call(VISIBILITY_RANK, req.principal.visibilityClass)) {
+    return deny('insufficient_visibility');
+  }
   const principalRank = VISIBILITY_RANK[req.principal.visibilityClass];
-  if (principalRank === undefined) return deny('insufficient_visibility');
   if (principalRank < VISIBILITY_RANK[required]) {
     return deny('insufficient_visibility');
   }

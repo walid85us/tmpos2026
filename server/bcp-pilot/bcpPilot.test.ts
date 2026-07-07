@@ -145,6 +145,19 @@ test('guard fails closed on a malformed/unknown visibility class (defense-in-dep
   assert.equal(r.decision, 'deny');
   assert.equal(r.reasonCode, 'insufficient_visibility');
 });
+test('guard denies inherited/prototype-key visibility classes (never resolved via Object.prototype)', () => {
+  // Symmetry with the contract-id guard: a plain-object VISIBILITY_RANK lookup resolves an inherited
+  // Object.prototype member (e.g. 'toString' / 'constructor' / '__proto__') to a truthy value, so a bare
+  // `=== undefined` check is skipped and the rank comparison coerces to NaN (never < the floor) — falling
+  // through to allow. The own-property guard must fail closed: every inherited/prototype visibility key is
+  // insufficient, never authorized.
+  for (const key of ['__proto__', 'constructor', 'toString', 'valueOf', 'hasOwnProperty', 'isPrototypeOf']) {
+    const principal = { ...goodPrincipal(), visibilityClass: key } as unknown as SyntheticServerPrincipal;
+    const r = authorizeBcpRead(guardReq({ principal }));
+    assert.equal(r.decision, 'deny', `inherited visibility key must deny: ${key}`);
+    assert.equal(r.reasonCode, 'insufficient_visibility', `inherited visibility key must be insufficient_visibility: ${key}`);
+  }
+});
 
 // ---- 4. Guard: forbidden authority inputs never become authority ----
 test('client-supplied UID / email / frontend claim alone never authorizes', () => {
