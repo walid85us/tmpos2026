@@ -21,7 +21,31 @@ export default defineConfig(({mode}) => {
       allowedHosts: true,
       hmr: process.env.DISABLE_HMR !== 'true',
       watch: {
-        ignored: ['**/.local/**', '**/.git/**', '**/.cache/**', '**/.agents/**', '**/node_modules/**'],
+        ignored: [
+          // Product source (src/, server/, index.html + root config) stays watched for
+          // HMR. Everything below is non-product local tooling/runtime/asset that must
+          // NOT be watched — the Replit preview otherwise exhausts the inotify
+          // file-watcher limit and crashes with ENOSPC.
+          // Hidden tooling / runtime caches:
+          '**/.local/**',
+          '**/.git/**',
+          '**/.cache/**',
+          '**/.agents/**',
+          '**/node_modules/**',
+          '**/.claude_config/**',
+          '**/.claude/**',
+          '**/.config/**',
+          '**/.pythonlibs/**',
+          '**/.remember/**',
+          '**/.mcp/**',
+          // Non-product top-level trees (plugins, assets, build output, docs, scripts):
+          '**/knowledge-work-plugins/**',
+          '**/attached_assets/**',
+          '**/dist/**',
+          '**/docs/**',
+          '**/scripts/**',
+          '**/goose-x86_64-unknown-linux-gnu.tar.bz2',
+        ],
       },
       proxy: {
         '/api/shipping': {
