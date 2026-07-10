@@ -42,6 +42,7 @@ import { createBcpC06QualityGatesEvidenceReadinessHandler, BCP_C06_QUALITY_GATES
 import { getBcpC06QualityGatesEvidenceEntries } from '../bcp-pilot/bcpC06QualityGatesEvidenceProvider';
 import { createBcpC07DataSourceBoundaryReadinessHandler, BCP_C07_DATA_SOURCE_BOUNDARY_ROUTE_PATH } from '../bcp-pilot/bcpC07DataSourceBoundaryReadOnlyExpressAdapter';
 import { getBcpC07DataSourceBoundaryItems } from '../bcp-pilot/bcpC07DataSourceBoundaryProvider';
+import { createBcpActionAcknowledgeReadinessReviewHandler, BCP_ACTION_ACK_ROUTE_PATH } from '../bcp-pilot/bcpActionAcknowledgeReadinessReviewExpressAdapter';
 
 export function createPlatformIdentityApp() {
   const app = express();
@@ -288,6 +289,16 @@ export function createPlatformIdentityApp() {
   app.all(
     BCP_C07_DATA_SOURCE_BOUNDARY_ROUTE_PATH,
     createBcpC07DataSourceBoundaryReadinessHandler({ getDataSourceBoundaryItems: getBcpC07DataSourceBoundaryItems }),
+  );
+
+  // Phase 3.0 M2 — Registers the DEV-only, POST-only, NON-DESTRUCTIVE "acknowledge readiness review" controlled
+  // action on THIS isolated API only (never the SaaS app, never the client bundle). Additive; changes no existing
+  // route. EVERY dependency is server-sourced (isDev from NODE_ENV, default-OFF flag, fixed synthetic system_owner
+  // principal + platform `manage`, DEV-only advisory audit sink, in-memory idempotency store) — NO DB/Supabase/
+  // provider, NO durable audit writer. The pure handler validates req.body but reads NO authority from the request.
+  app.post(
+    BCP_ACTION_ACK_ROUTE_PATH,
+    createBcpActionAcknowledgeReadinessReviewHandler(),
   );
 
   return app;
