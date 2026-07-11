@@ -99,4 +99,39 @@ test('the action source modules never CALL/import a durable/DB/provider sink (co
   }
 });
 
+// ---- Phase 3.0 M3 Gate 1: Firebase Admin verification boundary ----
+test('firebase-admin is imported ONLY by the dedicated adapter, and ONLY app+auth subpaths', () => {
+  const prohibitedSub = ['firestore', 'database', 'storage', 'messaging', 'remote-config', 'app-check'];
+  const importers: string[] = [];
+  for (const f of walk(`${ROOT}server`)) {
+    const src = stripComments(fs.readFileSync(f, 'utf8'));
+    const imports = src.match(/from\s+['"]firebase-admin(\/[a-z-]+)?['"]/g) ?? [];
+    if (imports.length) {
+      importers.push(f.replace(/\\/g, '/'));
+      for (const imp of imports) assert.ok(/firebase-admin\/(app|auth)['"]/.test(imp), `${f}: only firebase-admin/app|auth allowed, saw ${imp}`);
+    }
+    for (const sub of prohibitedSub) assert.ok(!src.includes(`firebase-admin/${sub}`), `${f} must not import firebase-admin/${sub}`);
+  }
+  assert.equal(importers.length, 1, `exactly one firebase-admin importer; saw: ${importers.join(', ')}`);
+  assert.ok(importers[0].endsWith('server/platform-identity/firebaseAdminAuthAdapter.ts'), importers[0]);
+});
+
+test('bcpAction* source modules never import the durable-audit-writing service or a Supabase verifier', () => {
+  for (const f of walk(`${ROOT}server/bcp-pilot`)) {
+    if (!/\/bcpAction[^/]*\.ts$/.test(f) || /\.test\.ts$/.test(f)) continue;
+    const src = stripComments(fs.readFileSync(f, 'utf8'));
+    for (const bad of ['sessionAuthorizationService', 'writeAuditEvent', 'auditEventWriter', 'supabaseAuthAdapter', '@supabase', 'createClient', 'firebase-admin']) {
+      assert.ok(!src.includes(bad), `${f} must not reference ${bad} in code (use injected/dedicated seams)`);
+    }
+  }
+});
+
+test('no frontend src/ imports the new backend verification/resolution modules', () => {
+  const FB = ['firebaseAdminAuthAdapter', 'bcpActionLivePrincipalResolver', 'bcpActionCanonicalAuthzResolver', 'findInternalUserIdByProviderSubject'];
+  for (const f of walk(`${ROOT}src`)) {
+    const t = fs.readFileSync(f, 'utf8');
+    for (const b of FB) assert.ok(!t.includes(b), `${f} imports ${b}`);
+  }
+});
+
 (() => { let p = 0; const f: string[] = []; for (const c of cases) { try { c.fn(); p++; } catch (e) { f.push(c.name + ' :: ' + (e instanceof Error ? e.message : String(e))); } } console.log(`\n[P3.0 M2 BCP action registration] ${p}/${cases.length} passed`); if (f.length) { console.log('FAILURES:'); for (const x of f) console.log('  - ' + x); process.exit(1); } console.log('ALL_TESTS_PASSED'); process.exit(0); })();

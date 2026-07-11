@@ -60,6 +60,42 @@ export async function findByProviderUid(
   return rows.length ? mapRow(rows[0]) : null;
 }
 
+/** Result of the additive read-only provider+subject → internalUserId lookup. Fail-closed on anything unclear. */
+export interface ProviderSubjectLookupResult {
+  ok: boolean;
+  internalUserId?: string;
+  reason?: 'not_found' | 'ambiguous' | 'db_error';
+}
+
+/**
+ * Phase 3.0 M3 Gate 1 — smallest additive READ-ONLY resolution of an EXACT (auth_provider, auth_provider_uid)
+ * pair to its durable internal_user_id. SELECT-only: no insert/update/upsert/delete, no auto-provisioning, no
+ * email/fuzzy/cross-provider fallback. No `limit` so a (defensive) duplicate/ambiguous mapping fails closed
+ * rather than silently returning the first row. Missing mapping and DB failure both fail closed. Uses the
+ * existing `getDb()` abstraction; the executor is injectable so tests need no real DB.
+ */
+export async function findInternalUserIdByProviderSubject(
+  authProvider: string,
+  authProviderUid: string,
+  executor: ReturnType<typeof getDb> = getDb(),
+): Promise<ProviderSubjectLookupResult> {
+  let rows: any[];
+  try {
+    rows = await executor`
+      select internal_user_id
+      from platform_identity
+      where auth_provider = ${authProvider} and auth_provider_uid = ${authProviderUid}
+    `;
+  } catch {
+    return { ok: false, reason: 'db_error' };
+  }
+  if (!rows || rows.length === 0) return { ok: false, reason: 'not_found' };
+  if (rows.length > 1) return { ok: false, reason: 'ambiguous' };
+  const internalUserId = rows[0]?.internal_user_id;
+  if (typeof internalUserId !== 'string' || internalUserId.length === 0) return { ok: false, reason: 'not_found' };
+  return { ok: true, internalUserId };
+}
+
 /**
  * Create-or-update an identity mapping keyed on (auth_provider,
  * auth_provider_uid). Returns the stable internal_user_id plus safe fields.

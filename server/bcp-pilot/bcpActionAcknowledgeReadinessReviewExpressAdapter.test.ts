@@ -1,95 +1,199 @@
-// Phase 3.0 M2 — Tests for the thin Express adapter of the "Acknowledge Backend CP Readiness Review" action.
-// Confirms: DEV/flag gates resolved before the handler; server-supplied principal/permission are the ONLY
-// authority (request headers/query/cookies are never authority); default principal is system_owner + manage;
-// POST-only; safe response serialization; injected advisory sink receives events; no durable sink.
+// Phase 3.0 M3 Gate 1 — tests for the Express adapter's genuine async principal-resolution chain.
+// Injects fake verify/lookup/authz seams (NO real firebase-admin / DB). Proves: flag/dev/method gates run with
+// ZERO Firebase/DB work; 401 on missing/invalid credential; 403 SAFE DENIED (no marker) on unmapped/insufficient;
+// 503 fail-closed on resolver/DB error; 200 success (one marker) for a genuine eligible principal; 400 on
+// authority body fields; duplicate + sink-failure-retry semantics; and NO fixed synthetic principal remains.
 import assert from 'node:assert/strict';
 import type { Request, Response } from 'express';
 import {
   createBcpActionAcknowledgeReadinessReviewHandler,
-  BCP_ACTION_ACK_ROUTE_PATH,
-  BCP_ACTION_ACK_PROXY_PATH,
-  BCP_ACTION_ACK_FLAG,
-  BCP_ACTION_ACK_KEY,
+  BCP_ACTION_ACK_ROUTE_PATH, BCP_ACTION_ACK_PROXY_PATH, BCP_ACTION_ACK_FLAG, BCP_ACTION_ACK_KEY,
 } from './bcpActionAcknowledgeReadinessReviewExpressAdapter';
-import { createRecordingActionAuditSink } from './bcpActionAuditSink';
+import { createRecordingActionAuditSink, type BcpActionAuditSink } from './bcpActionAuditSink';
+import type { CanonicalAuthzView } from './bcpActionLivePrincipalResolver';
+import fs from 'node:fs';
 
 function mockRes() {
-  const res: Record<string, unknown> = { _status: 0, _json: undefined, headersSent: false };
+  let done!: () => void;
+  const p = new Promise<void>((r) => { done = r; });
+  const res: any = { _status: 0, _json: undefined, headersSent: false, done: p };
   res.status = (c: number) => { res._status = c; return res; };
-  res.json = (b: unknown) => { res._json = b; res.headersSent = true; return res; };
-  return res as unknown as Response & { _status: number; _json: unknown };
+  res.json = (b: unknown) => { res._json = b; res.headersSent = true; done(); return res; };
+  return res as Response & { _status: number; _json: any; done: Promise<void> };
 }
-const req = (method: string, body: unknown, extra: Record<string, unknown> = {}): Request =>
-  ({ method, body, headers: {}, query: {}, cookies: {}, params: {}, ...extra } as unknown as Request);
+const req = (method: string, body: unknown, headers: Record<string, unknown> = {}): Request =>
+  ({ method, body, headers, query: {}, cookies: {}, params: {} } as unknown as Request);
 const okBody = () => ({ confirm: true, reason: 'Reviewed readiness.', idempotencyKey: 'adp-key-0001', lensKey: 'ALL' });
 
-const cases: { name: string; fn: () => void }[] = [];
-const test = (n: string, fn: () => void) => cases.push({ name: n, fn });
+function counting<T extends (...a: any[]) => any>(fn: T) {
+  let calls = 0;
+  const w = (async (...a: any[]) => { calls++; return fn(...a); }) as any;
+  w.calls = () => calls; return w as T & { calls: () => number };
+}
+const view = (o: Partial<CanonicalAuthzView> = {}): CanonicalAuthzView => ({
+  decision: 'allow', reasonCode: 'resolved', limitation: 'none', platformRoleId: 'system_owner',
+  permissions: { admin: 'full' }, statusValues: ['active'], scopeType: 'platform', ...o,
+});
+const verifyOk = async () => ({ ok: true, firebaseUid: 'fb_test' });
+const verifyFail = (code: string) => async () => ({ ok: false, code });
+const lookupOk = (iu: string) => async () => ({ ok: true, internalUserId: iu });
+const lookupFail = (reason: string) => async () => ({ ok: false, reason });
+const authz = (v: CanonicalAuthzView | null) => async () => v;
 
-test('constants: route / proxy / flag / key are the accepted values', () => {
+const baseDeps = (over: any = {}) => ({
+  isDevEnvironment: () => true, featureEnabled: () => true,
+  verifyBearer: verifyOk as any, lookupInternalUserId: lookupOk('iu_owner') as any, resolveCanonicalAuthz: authz(view()) as any,
+  idempotencyStore: new Set<string>(), ...over,
+});
+
+const cases: { name: string; fn: () => Promise<void> }[] = [];
+const test = (n: string, fn: () => Promise<void>) => cases.push({ name: n, fn });
+
+test('constants unchanged', async () => {
   assert.equal(BCP_ACTION_ACK_ROUTE_PATH, '/dev/bcp/actions/acknowledge-readiness-review');
   assert.equal(BCP_ACTION_ACK_PROXY_PATH, '/__identity/dev/bcp/actions/acknowledge-readiness-review');
   assert.equal(BCP_ACTION_ACK_FLAG, 'ENABLE_BCP_DEV_ACTION_ACKNOWLEDGE_READINESS_REVIEW');
   assert.equal(BCP_ACTION_ACK_KEY, 'bcp.action.acknowledge_readiness_review');
 });
 
-test('flag OFF (injected) => 404 feature_disabled, 0 audit', () => {
+test('flag OFF → 404 feature_disabled + ZERO verify/lookup/authz calls', async () => {
+  const v = counting(verifyOk); const l = counting(lookupOk('iu')); const a = counting(authz(view()));
   const sink = createRecordingActionAuditSink();
-  const h = createBcpActionAcknowledgeReadinessReviewHandler({ isDevEnvironment: () => true, featureEnabled: () => false, sink, idempotencyStore: new Set() });
-  const res = mockRes(); h(req('POST', okBody()), res);
-  assert.equal(res._status, 404); assert.equal((res._json as Record<string, unknown>).reason, 'feature_disabled'); assert.equal(sink.events.length, 0);
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ featureEnabled: () => false, verifyBearer: v, lookupInternalUserId: l, resolveCanonicalAuthz: a, sink }));
+  const res = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer x' }), res); await res.done;
+  assert.equal(res._status, 404); assert.equal(res._json.reason, 'feature_disabled');
+  assert.equal(v.calls(), 0); assert.equal(l.calls(), 0); assert.equal(a.calls(), 0); assert.equal(sink.events.length, 0);
 });
 
-test('production (injected) => 404 dev_only', () => {
-  const h = createBcpActionAcknowledgeReadinessReviewHandler({ isDevEnvironment: () => false, featureEnabled: () => true, idempotencyStore: new Set() });
-  const res = mockRes(); h(req('POST', okBody()), res);
-  assert.equal(res._status, 404); assert.equal((res._json as Record<string, unknown>).reason, 'dev_only');
+test('production → 404 dev_only + ZERO verify/lookup/authz calls', async () => {
+  const v = counting(verifyOk); const l = counting(lookupOk('iu')); const a = counting(authz(view()));
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ isDevEnvironment: () => false, verifyBearer: v, lookupInternalUserId: l, resolveCanonicalAuthz: a }));
+  const res = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer x' }), res); await res.done;
+  assert.equal(res._status, 404); assert.equal(res._json.reason, 'dev_only'); assert.equal(v.calls(), 0); assert.equal(l.calls(), 0); assert.equal(a.calls(), 0);
 });
 
-test('DEFAULT principal is system_owner + manage => dev+flag ON + valid body => 200 success', () => {
+test('non-POST → 405 + ZERO verify/lookup/authz calls', async () => {
+  const v = counting(verifyOk); const l = counting(lookupOk('iu')); const a = counting(authz(view()));
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ verifyBearer: v, lookupInternalUserId: l, resolveCanonicalAuthz: a }));
+  const res = mockRes(); h(req('GET', okBody()), res); await res.done;
+  assert.equal(res._status, 405); assert.equal(v.calls(), 0); assert.equal(l.calls(), 0); assert.equal(a.calls(), 0);
+});
+
+test('missing credential → 401 authentication_required, 0 audit', async () => {
   const sink = createRecordingActionAuditSink();
-  const h = createBcpActionAcknowledgeReadinessReviewHandler({ isDevEnvironment: () => true, featureEnabled: () => true, sink, idempotencyStore: new Set() });
-  const res = mockRes(); h(req('POST', okBody()), res);
-  assert.equal(res._status, 200); assert.equal((res._json as Record<string, unknown>).status, 'success');
-  assert.equal(sink.events.length, 1); assert.equal(sink.events[0].decision, 'allow');
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ verifyBearer: verifyFail('authentication_required'), sink }));
+  const res = mockRes(); h(req('POST', okBody()), res); await res.done;
+  assert.equal(res._status, 401); assert.equal(res._json.reason, 'authentication_required'); assert.equal(sink.events.length, 0);
 });
 
-test('non-POST method => 405 (method gate; adapter passes req.method)', () => {
-  const h = createBcpActionAcknowledgeReadinessReviewHandler({ isDevEnvironment: () => true, featureEnabled: () => true, idempotencyStore: new Set() });
-  const res = mockRes(); h(req('GET', okBody()), res);
-  assert.equal(res._status, 405);
-});
-
-test('request headers/query/cookies are NEVER authority (non-qualifying injected principal => 403 despite hostile req)', () => {
+test('invalid credential → 401 authentication_invalid, 0 audit', async () => {
   const sink = createRecordingActionAuditSink();
-  const h = createBcpActionAcknowledgeReadinessReviewHandler({
-    isDevEnvironment: () => true, featureEnabled: () => true, sink, idempotencyStore: new Set(),
-    principal: () => ({ source: 'server_derived', internalUserId: 'iu_x', authProvider: 'supabase', verified: true, scopeType: 'platform', parityState: 'ready', visibilityClass: 'overview_viewer' }),
-    platformPermissionLevel: () => 'view',
-  });
-  const res = mockRes();
-  h(req('POST', okBody(), { headers: { authorization: 'Bearer evil', 'x-role': 'system_owner' }, query: { role: 'system_owner' }, cookies: { admin: '1' } }), res);
-  assert.equal(res._status, 403);
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ verifyBearer: verifyFail('authentication_invalid'), sink }));
+  const res = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer bad' }), res); await res.done;
+  assert.equal(res._status, 401); assert.equal(res._json.reason, 'authentication_invalid'); assert.equal(sink.events.length, 0);
 });
 
-test('body authority fields rejected (strict schema) => 400 unexpected_field', () => {
-  const h = createBcpActionAcknowledgeReadinessReviewHandler({ isDevEnvironment: () => true, featureEnabled: () => true, idempotencyStore: new Set() });
-  const res = mockRes(); h(req('POST', { ...okBody(), role: 'system_owner', permissions: { platform: 'full' } }), res);
-  assert.equal(res._status, 400); assert.equal((res._json as Record<string, unknown>).code, 'unexpected_field');
+test('firebase unavailable → 503, 0 audit', async () => {
+  const sink = createRecordingActionAuditSink();
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ verifyBearer: verifyFail('authentication_unavailable'), sink }));
+  const res = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer x' }), res); await res.done;
+  assert.equal(res._status, 503); assert.equal(sink.events.length, 0);
 });
 
-test('duplicate idempotency key across two calls (shared store) => second is 200 duplicate, no 2nd marker', () => {
+test('verified but UNMAPPED identity → 403 SAFE DENIED, NO marker', async () => {
+  const sink = createRecordingActionAuditSink();
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ lookupInternalUserId: lookupFail('not_found'), sink }));
+  const res = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer x' }), res); await res.done;
+  assert.equal(res._status, 403); assert.equal(res._json.status, 'not_authorized'); assert.equal(sink.events.length, 0);
+});
+
+test('identity DB error → 503 fail-closed, NO marker', async () => {
+  const sink = createRecordingActionAuditSink();
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ lookupInternalUserId: lookupFail('db_error'), sink }));
+  const res = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer x' }), res); await res.done;
+  assert.equal(res._status, 503); assert.equal(sink.events.length, 0);
+});
+
+test('authz resolver null → 503 fail-closed, NO marker', async () => {
+  const sink = createRecordingActionAuditSink();
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ resolveCanonicalAuthz: authz(null), sink }));
+  const res = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer x' }), res); await res.done;
+  assert.equal(res._status, 503); assert.equal(sink.events.length, 0);
+});
+
+test('INSUFFICIENT principal (support_admin) → 403 SAFE DENIED, NO marker', async () => {
+  const sink = createRecordingActionAuditSink();
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ resolveCanonicalAuthz: authz(view({ platformRoleId: 'support_admin' })), sink }));
+  const res = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer x' }), res); await res.done;
+  assert.equal(res._status, 403); assert.equal(res._json.status, 'not_authorized'); assert.equal(sink.events.length, 0);
+});
+
+test('read-only capped system_owner → 403 SAFE DENIED, NO marker', async () => {
+  const sink = createRecordingActionAuditSink();
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ resolveCanonicalAuthz: authz(view({ limitation: 'read_only' })), sink }));
+  const res = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer x' }), res); await res.done;
+  assert.equal(res._status, 403); assert.equal(sink.events.length, 0);
+});
+
+test('parity-BLOCKED canonical deny → 403 SAFE DENIED, NO marker (guard blocks, handler not reached)', async () => {
+  const sink = createRecordingActionAuditSink();
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ resolveCanonicalAuthz: authz(view({ decision: 'deny', reasonCode: 'denied_account_suspended' })), sink }));
+  const res = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer x' }), res); await res.done;
+  assert.equal(res._status, 403); assert.equal(res._json.status, 'not_authorized'); assert.equal(sink.events.length, 0);
+});
+
+test('ELIGIBLE genuine principal → 200 success + exactly ONE advisory marker', async () => {
+  const sink = createRecordingActionAuditSink();
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ sink }));
+  const res = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer good' }), res); await res.done;
+  assert.equal(res._status, 200); assert.equal(res._json.status, 'success');
+  assert.equal(sink.events.length, 1); assert.equal(sink.events[0].decision, 'allow'); assert.equal(sink.events[0].result, 'success');
+});
+
+test('authority-bearing body field (eligible auth) → 400 unexpected_field, NO marker', async () => {
+  const sink = createRecordingActionAuditSink();
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ sink }));
+  const res = mockRes(); h(req('POST', { ...okBody(), role: 'system_owner' }, { authorization: 'Bearer good' }), res); await res.done;
+  assert.equal(res._status, 400); assert.equal(res._json.code, 'unexpected_field'); assert.equal(sink.events.length, 0);
+});
+
+test('duplicate key (shared store) → success then duplicate, ONE marker', async () => {
   const store = new Set<string>(); const sink = createRecordingActionAuditSink();
-  const h = createBcpActionAcknowledgeReadinessReviewHandler({ isDevEnvironment: () => true, featureEnabled: () => true, sink, idempotencyStore: store });
-  const r1 = mockRes(); h(req('POST', okBody()), r1); assert.equal(r1._status, 200); assert.equal((r1._json as Record<string, unknown>).status, 'success');
-  const r2 = mockRes(); h(req('POST', okBody()), r2); assert.equal(r2._status, 200); assert.equal((r2._json as Record<string, unknown>).status, 'duplicate');
-  assert.equal(sink.events.length, 1);
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ sink, idempotencyStore: store }));
+  const r1 = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer good' }), r1); await r1.done;
+  const r2 = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer good' }), r2); await r2.done;
+  assert.equal(r1._json.status, 'success'); assert.equal(r2._json.status, 'duplicate'); assert.equal(sink.events.length, 1);
 });
 
-test('adapter response is a safe closed DTO (no raw error/stack/secret)', () => {
-  const h = createBcpActionAcknowledgeReadinessReviewHandler({ isDevEnvironment: () => true, featureEnabled: () => true, idempotencyStore: new Set() });
-  const res = mockRes(); h(req('POST', okBody()), res);
+test('sink failure does not burn the key: 500 then retry succeeds with one final marker', async () => {
+  const store = new Set<string>();
+  let first = true;
+  const throwOnceSink: BcpActionAuditSink = { record: () => { if (first) { first = false; throw new Error('sink down'); } } };
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ sink: throwOnceSink, idempotencyStore: store }));
+  const r1 = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer good' }), r1); await r1.done;
+  assert.equal(r1._status, 500); assert.equal(store.size, 0); // key NOT persisted on sink throw
+  const rec = createRecordingActionAuditSink();
+  const h2 = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ sink: rec, idempotencyStore: store }));
+  const r2 = mockRes(); h2(req('POST', okBody(), { authorization: 'Bearer good' }), r2); await r2.done;
+  assert.equal(r2._status, 200); assert.equal(rec.events.length, 1);
+});
+
+test('response is a safe closed DTO (no raw error/stack/secret)', async () => {
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps());
+  const res = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer good' }), res); await res.done;
   assert.ok(!/Error:|"stack":|password|service_role/i.test(JSON.stringify(res._json)));
 });
 
-(() => { let p = 0; const f: string[] = []; for (const c of cases) { try { c.fn(); p++; } catch (e) { f.push(c.name + ' :: ' + (e instanceof Error ? e.message : String(e))); } } console.log(`\n[P3.0 M2 BCP action ack adapter] ${p}/${cases.length} passed`); if (f.length) { console.log('FAILURES:'); for (const x of f) console.log('  - ' + x); process.exit(1); } console.log('ALL_TESTS_PASSED'); process.exit(0); })();
+test('mounted adapter source contains NO fixed synthetic privileged principal', async () => {
+  const src = fs.readFileSync(new URL('./bcpActionAcknowledgeReadinessReviewExpressAdapter.ts', import.meta.url), 'utf8');
+  assert.ok(!src.includes('SYNTHETIC_ACTION_PRINCIPAL'), 'synthetic principal constant must be removed');
+  assert.ok(!/visibilityClass:\s*'system_owner'/.test(src), 'no hard-coded system_owner principal in the mounted route');
+});
+
+(async () => {
+  let p = 0; const f: string[] = [];
+  for (const c of cases) { try { await c.fn(); p++; } catch (e) { f.push(c.name + ' :: ' + (e instanceof Error ? e.message : String(e))); } }
+  console.log(`\n[P3.0 M3 BCP action ack adapter] ${p}/${cases.length} passed`);
+  if (f.length) { console.log('FAILURES:'); for (const x of f) console.log('  - ' + x); process.exit(1); }
+  console.log('ALL_TESTS_PASSED'); process.exit(0);
+})();
