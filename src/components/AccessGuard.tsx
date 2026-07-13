@@ -35,13 +35,11 @@ const AccessGuard: React.FC<AccessGuardProps> = ({ children, allowedUserTypes, r
 
   if (session && allowedUserTypes && !allowedUserTypes.includes(session.userType)) {
     const target = resolveLandingRoute(session);
-    console.log('[AccessGuard] UserType mismatch. session.userType:', session.userType, 'allowed:', allowedUserTypes, '— redirecting to', target);
     return <Navigate to={target} replace />;
   }
 
   if (session && requiredRole && session.role !== requiredRole) {
     const target = resolveLandingRoute(session);
-    console.log('[AccessGuard] Role mismatch. session.role:', session.role, 'required:', requiredRole, '— redirecting to', target);
     return <Navigate to={target} replace />;
   }
 

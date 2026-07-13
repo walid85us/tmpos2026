@@ -43,6 +43,7 @@ import { getBcpC06QualityGatesEvidenceEntries } from '../bcp-pilot/bcpC06Quality
 import { createBcpC07DataSourceBoundaryReadinessHandler, BCP_C07_DATA_SOURCE_BOUNDARY_ROUTE_PATH } from '../bcp-pilot/bcpC07DataSourceBoundaryReadOnlyExpressAdapter';
 import { getBcpC07DataSourceBoundaryItems } from '../bcp-pilot/bcpC07DataSourceBoundaryProvider';
 import { createBcpActionAcknowledgeReadinessReviewHandler, BCP_ACTION_ACK_ROUTE_PATH } from '../bcp-pilot/bcpActionAcknowledgeReadinessReviewExpressAdapter';
+import { createBcpActionEligibilityHandler, BCP_ELIGIBILITY_ROUTE_PATH } from '../bcp-pilot/bcpActionEligibilityExpressAdapter';
 
 export function createPlatformIdentityApp() {
   const app = express();
@@ -291,14 +292,29 @@ export function createPlatformIdentityApp() {
     createBcpC07DataSourceBoundaryReadinessHandler({ getDataSourceBoundaryItems: getBcpC07DataSourceBoundaryItems }),
   );
 
-  // Phase 3.0 M2 — Registers the DEV-only, POST-only, NON-DESTRUCTIVE "acknowledge readiness review" controlled
+  // Phase 3.0 M3 — Registers the DEV-only, POST-only, NON-DESTRUCTIVE "acknowledge readiness review" controlled
   // action on THIS isolated API only (never the SaaS app, never the client bundle). Additive; changes no existing
-  // route. EVERY dependency is server-sourced (isDev from NODE_ENV, default-OFF flag, fixed synthetic system_owner
-  // principal + platform `manage`, DEV-only advisory audit sink, in-memory idempotency store) — NO DB/Supabase/
-  // provider, NO durable audit writer. The pure handler validates req.body but reads NO authority from the request.
+  // route. EVERY dependency is server-sourced (isDev from NODE_ENV, default-OFF flag). Authority is derived by the
+  // LIVE-PRINCIPAL chain — verify Firebase Bearer (checkRevoked) → read-only identity lookup → canonical
+  // authorization → BCP action guard (system_owner visibility + platform `manage` floor, parity ready) — NOT a
+  // hardcoded/synthetic principal; the request body is validated but is NEVER authority. DEV-only advisory audit
+  // sink + in-memory idempotency store — NO DB/Supabase/provider write, NO durable audit writer.
   app.post(
     BCP_ACTION_ACK_ROUTE_PATH,
     createBcpActionAcknowledgeReadinessReviewHandler(),
+  );
+
+  // Phase 3.0 M3 — DEV-only, READ-ONLY canonical eligibility probe for the controlled action (a bodyless POST —
+  // POST used SOLELY so the browser reliably supplies its protected Origin header, which same-origin GETs omit;
+  // the probe is strictly read-only and the action itself stays POST-only above). Reuses the EXACT server-
+  // authoritative chain (verify → identity → canonical authz → BCP principal translation → BCP action guard) and
+  // returns a BOUNDED { eligible, status } — it NEVER executes the action, emits an advisory marker, writes an
+  // audit row, or consumes idempotency/action rate state (its limiter is a SEPARATE instance). Registered via
+  // app.all so unsupported methods (GET/PUT/…) get the handler's BOUNDED JSON 404, never Express's default HTML.
+  // Same default-OFF flag as the action; flag-off/production ⇒ 404.
+  app.all(
+    BCP_ELIGIBILITY_ROUTE_PATH,
+    createBcpActionEligibilityHandler(),
   );
 
   return app;

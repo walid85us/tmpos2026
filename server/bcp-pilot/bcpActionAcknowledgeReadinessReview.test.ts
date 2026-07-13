@@ -16,6 +16,7 @@ import {
 } from './bcpActionAcknowledgeReadinessReview';
 import { authorizeBcpAction, BCP_ACTION_VISIBILITY_FLOOR, BCP_ACTION_PERMISSION_FLOOR } from './bcpActionAuthorizationGuard';
 import { createRecordingActionAuditSink } from './bcpActionAuditSink';
+import { BcpActionIdempotencyStore } from './bcpActionIdempotencyStore';
 import type { SyntheticServerPrincipal } from './bcpAuthorizationGuard';
 import type { PermissionLevelValue } from '../platform-identity/authorizationConstants';
 
@@ -28,7 +29,7 @@ const okBody = () => ({ confirm: true, reason: 'Reviewed C-07 readiness lens.', 
 const base = (o: Partial<AckRequest> = {}): AckRequest => ({
   method: 'POST', isDevEnvironment: true, featureEnabled: true, principal: OWNER,
   platformPermissionLevel: 'manage', body: okBody(), sink: createRecordingActionAuditSink(),
-  idempotencyStore: new Set<string>(), ...o,
+  idempotencyStore: new BcpActionIdempotencyStore(), principalFingerprint: 'fp_owner', ...o,
 });
 const H = handleBcpActionAcknowledgeReadinessReview;
 
@@ -166,13 +167,13 @@ test('missing idempotencyKey => 400 idempotency_key_required', () => {
 });
 test('malformed idempotencyKey => 400 idempotency_key_invalid', () =>
   assert.equal((H(base({ body: { ...okBody(), idempotencyKey: 'bad key!' } })).body as Record<string, unknown>).code, 'idempotency_key_invalid'));
-test('first valid request executes once (1 success audit, key stored)', () => {
-  const store = new Set<string>(); const sink = createRecordingActionAuditSink();
+test('first valid request executes once (1 success audit, 1 completed record)', () => {
+  const store = new BcpActionIdempotencyStore(); const sink = createRecordingActionAuditSink();
   const r = H(base({ idempotencyStore: store, sink }));
-  assert.equal(r.category, 'success'); assert.equal(sink.events.length, 1); assert.ok(store.has('ack-key-0001'));
+  assert.equal(r.category, 'success'); assert.equal(sink.events.length, 1); assert.equal(store.completedCount(), 1);
 });
-test('duplicate accepted key => 200 duplicate, NO second marker (0 new audit)', () => {
-  const store = new Set<string>();
+test('duplicate accepted key + same payload => 200 duplicate, NO second marker (0 new audit)', () => {
+  const store = new BcpActionIdempotencyStore();
   const sink1 = createRecordingActionAuditSink(); H(base({ idempotencyStore: store, sink: sink1 }));
   const sink2 = createRecordingActionAuditSink();
   const r = H(base({ idempotencyStore: store, sink: sink2 }));
@@ -180,13 +181,36 @@ test('duplicate accepted key => 200 duplicate, NO second marker (0 new audit)', 
   assert.equal((r.body as Record<string, unknown>).alreadyAcknowledged, true);
   assert.equal(sink2.events.length, 0, 'duplicate must not emit a second marker');
 });
-test('sink throw on success does NOT persist the key (retry re-attempts, not silent duplicate)', () => {
-  const store = new Set<string>();
+test('same key + CHANGED payload (different reason) => 409 idempotency_conflict, NO marker', () => {
+  const store = new BcpActionIdempotencyStore();
+  H(base({ idempotencyStore: store }));
+  const sink2 = createRecordingActionAuditSink();
+  const r = H(base({ idempotencyStore: store, sink: sink2, body: { ...okBody(), reason: 'A completely different reason.' } }));
+  assert.equal(r.httpStatus, 409); assert.equal(r.category, 'idempotency_conflict');
+  assert.equal(sink2.events.length, 0, 'conflict must not emit a marker');
+});
+test('same client key across DIFFERENT principals => independent (both succeed)', () => {
+  const store = new BcpActionIdempotencyStore(); const sink = createRecordingActionAuditSink();
+  H(base({ idempotencyStore: store, sink, principalFingerprint: 'fp_A' }));
+  const r = H(base({ idempotencyStore: store, sink, principalFingerprint: 'fp_B' }));
+  assert.equal(r.category, 'success'); assert.equal(sink.events.length, 2); assert.equal(store.completedCount(), 2);
+});
+test('in-flight capacity exhaustion => 503 busy (retryable), NO marker', () => {
+  const store = new BcpActionIdempotencyStore({ maxInflight: 0 }); // no reservation can be made
+  const sink = createRecordingActionAuditSink();
+  const r = H(base({ idempotencyStore: store, sink }));
+  assert.equal(r.httpStatus, 503); assert.equal(r.category, 'busy');
+  assert.equal((r.body as Record<string, unknown>).retryable, true);
+  assert.equal(sink.events.length, 0);
+});
+test('sink throw on success releases the reservation (retry re-attempts, not silent duplicate)', () => {
+  const store = new BcpActionIdempotencyStore();
   let calls = 0;
   const flakySink = { record() { calls++; if (calls === 1) throw new Error('boom'); } };
   const r1 = H(base({ idempotencyStore: store, sink: flakySink }));
   assert.equal(r1.httpStatus, 500);
-  assert.equal(store.has('ack-key-0001'), false, 'key must NOT be stored when the audit marker failed');
+  assert.equal(store.completedCount(), 0, 'no completed record when the audit marker failed');
+  assert.equal(store.inflightCount(), 0, 'reservation released on sink failure');
   const sink2 = createRecordingActionAuditSink();
   const r2 = H(base({ idempotencyStore: store, sink: sink2 }));
   assert.equal(r2.category, 'success'); assert.equal(sink2.events.length, 1);
@@ -194,7 +218,7 @@ test('sink throw on success does NOT persist the key (retry re-attempts, not sil
 test('body with __proto__ key is rejected (unexpected_field)', () =>
   assert.equal((H(base({ body: JSON.parse('{"confirm":true,"reason":"Reviewed lens.","idempotencyKey":"ack-key-0001","lensKey":"C-07","__proto__":{"x":1}}') })).body as Record<string, unknown>).code, 'unexpected_field'));
 test('different key evaluated independently (2 distinct successes)', () => {
-  const store = new Set<string>(); const sink = createRecordingActionAuditSink();
+  const store = new BcpActionIdempotencyStore(); const sink = createRecordingActionAuditSink();
   H(base({ idempotencyStore: store, sink, body: { ...okBody(), idempotencyKey: 'ack-key-aaaa' } }));
   const r = H(base({ idempotencyStore: store, sink, body: { ...okBody(), idempotencyKey: 'ack-key-bbbb' } }));
   assert.equal(r.category, 'success'); assert.equal(sink.events.length, 2);

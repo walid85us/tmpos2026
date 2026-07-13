@@ -14,10 +14,12 @@
 //
 // Server-side only. Never imported by src/ (the client bundle).
 
+import { createHash } from 'node:crypto';
 import type { SyntheticServerPrincipal, NonAuthorityHints } from './bcpAuthorizationGuard'; // type-only.
 import type { PermissionLevelValue } from '../platform-identity/authorizationConstants';
 import { authorizeBcpAction } from './bcpActionAuthorizationGuard';
 import { buildActionAuditEvent, type BcpActionAuditSink } from './bcpActionAuditSink';
+import type { BcpActionIdempotencyStore, IdempotencyReservation } from './bcpActionIdempotencyStore';
 
 /** Pinned action key (server-side only; never a request field). */
 export const BCP_ACTION_ACK_KEY = 'bcp.action.acknowledge_readiness_review';
@@ -35,7 +37,7 @@ export const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9._-]{8,80}$/;
 const ALLOWED_BODY_KEYS = new Set(['confirm', 'reason', 'idempotencyKey', 'lensKey']);
 
 export type AckCategory =
-  | 'success' | 'duplicate' | 'dev_only' | 'feature_disabled'
+  | 'success' | 'duplicate' | 'idempotency_conflict' | 'busy' | 'dev_only' | 'feature_disabled'
   | 'not_authorized' | 'parity_blocked' | 'method_not_allowed' | 'invalid' | 'error';
 
 export type AckValidationCode =
@@ -55,8 +57,10 @@ export interface AckRequest {
   body: unknown;
   /** Injected advisory audit sink (DEV-only; never durable). */
   sink: BcpActionAuditSink;
-  /** Injected first-write-wins idempotency store (in-memory; no DB). */
-  idempotencyStore: Set<string>;
+  /** Injected bounded, concurrency-safe idempotency store (in-memory; no DB; no durable fallback). */
+  idempotencyStore: BcpActionIdempotencyStore;
+  /** One-way fingerprint of the server-derived internal identity — scopes the idempotency key per principal. */
+  principalFingerprint: string;
   hints?: NonAuthorityHints;
 }
 
@@ -70,7 +74,12 @@ export interface AckResult {
 // boolean `ok` discriminant does not remove members. Use single interfaces with optional fields so property
 // access is valid without narrowing; callers branch on `ok` and read the relevant optional field.
 type ReasonCheck = { ok: boolean; value?: string; code?: AckValidationCode };
-type BodyCheck = { ok: boolean; lensKey?: AckLensKey; idempotencyKey?: string; code?: AckValidationCode };
+type BodyCheck = { ok: boolean; lensKey?: AckLensKey; idempotencyKey?: string; reasonValue?: string; code?: AckValidationCode };
+
+/** One-way fingerprint of the authority-neutral payload (lens + sanitized reason). Raw reason is never stored. */
+function payloadFingerprint(lensKey: string, reasonValue: string): string {
+  return createHash('sha256').update(`v1 ${lensKey} ${reasonValue}`).digest('hex');
+}
 
 const invalid = (code: AckValidationCode): AckResult => ({ httpStatus: 400, category: 'invalid', body: { status: 'invalid', code } });
 
@@ -116,7 +125,7 @@ function validateBody(body: unknown): BodyCheck {
   if (!hasOwn('idempotencyKey') || typeof b.idempotencyKey !== 'string') return { ok: false, code: 'idempotency_key_required' };
   if (!IDEMPOTENCY_KEY_RE.test(b.idempotencyKey)) return { ok: false, code: 'idempotency_key_invalid' };
   const reason = sanitizeAckReason(hasOwn('reason') ? b.reason : undefined);
-  if (reason.ok) return { ok: true, lensKey: b.lensKey as AckLensKey, idempotencyKey: b.idempotencyKey };
+  if (reason.ok) return { ok: true, lensKey: b.lensKey as AckLensKey, idempotencyKey: b.idempotencyKey, reasonValue: reason.value };
   return { ok: false, code: reason.code };
 }
 
@@ -158,21 +167,40 @@ export function handleBcpActionAcknowledgeReadinessReview(req: AckRequest): AckR
     const v = validateBody(req.body);
     if (!v.ok) return invalid(v.code);
 
-    // 6. Idempotency (first-write-wins). Duplicate accepted key ⇒ no second execution, no second marker.
-    if (req.idempotencyStore.has(v.idempotencyKey)) {
+    // 6. Bounded, concurrency-safe idempotency scoped to (action, principal fingerprint, client key). The payload
+    //    fingerprint is a one-way hash of the authority-neutral payload (lens + sanitized reason) — raw reason is
+    //    never stored. Same key+payload ⇒ SAFE DUPLICATE (no second marker); same key+CHANGED payload ⇒ 409
+    //    conflict; in-flight capacity exhaustion ⇒ 503 retryable. None of these emit a marker.
+    const begun = req.idempotencyStore.begin(
+      { actionKey: BCP_ACTION_ACK_KEY, principalFingerprint: req.principalFingerprint, clientKey: v.idempotencyKey },
+      payloadFingerprint(v.lensKey, v.reasonValue ?? ''),
+    );
+    if (begun.status === 'duplicate' || begun.status === 'in_flight_duplicate') {
       return { httpStatus: 200, category: 'duplicate', body: { status: 'duplicate', actionKey: BCP_ACTION_ACK_KEY, alreadyAcknowledged: true } };
     }
+    if (begun.status === 'conflict') {
+      return { httpStatus: 409, category: 'idempotency_conflict', body: { status: 'idempotency_conflict' } };
+    }
+    if (begun.status === 'capacity') {
+      return { httpStatus: 503, category: 'busy', body: { status: 'busy', retryable: true } };
+    }
 
-    // 7. Success: emit exactly one advisory success marker FIRST, then record the key. Order matters — if the
-    //    sink throws, the catch returns a safe 500 and the key is NOT persisted, so a retry re-attempts cleanly
-    //    (never a silent duplicate with no marker). No business-data mutation occurs on any path.
-    req.sink.record(buildActionAuditEvent({
-      actionKey: BCP_ACTION_ACK_KEY,
-      actorId: req.principal?.internalUserId ?? null,
-      lensKey: v.lensKey, decision: 'allow', reasonCode: 'allow', result: 'success',
-      confirmationAcknowledged: true, reasonProvided: true, correlationKey: v.idempotencyKey,
-    }));
-    req.idempotencyStore.add(v.idempotencyKey);
+    // 7. Success: reserve → emit exactly one advisory marker → commit. Order matters (§9.11): commit the completed
+    //    record ONLY after a successful emission. If the sink throws, release the reservation (no completed
+    //    record) and return a safe 500 so a later retry re-attempts cleanly (never a silent duplicate, no marker).
+    const reservation: IdempotencyReservation = (begun as { reservation: IdempotencyReservation }).reservation;
+    try {
+      req.sink.record(buildActionAuditEvent({
+        actionKey: BCP_ACTION_ACK_KEY,
+        actorId: req.principal?.internalUserId ?? null,
+        lensKey: v.lensKey, decision: 'allow', reasonCode: 'allow', result: 'success',
+        confirmationAcknowledged: true, reasonProvided: true, correlationKey: v.idempotencyKey,
+      }));
+    } catch {
+      req.idempotencyStore.release(reservation);
+      return { httpStatus: 500, category: 'error', body: { status: 'error' } };
+    }
+    req.idempotencyStore.commit(reservation);
     return {
       httpStatus: 200, category: 'success',
       body: { status: 'success', actionKey: BCP_ACTION_ACK_KEY, acknowledged: true, auditRecorded: true, lensKey: v.lensKey, correlationKey: v.idempotencyKey },

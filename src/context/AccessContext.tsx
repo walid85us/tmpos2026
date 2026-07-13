@@ -131,8 +131,6 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      console.log('[AccessContext] onAuthStateChanged fired, user:', user ? user.uid : 'null');
-
       if (user) {
         try {
           const userDoc = await getDoc(doc(db, 'users', user.uid));
@@ -142,8 +140,6 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
             const role = userData.role as Role;
             const isPlatformRole = platformRolesState.some(r => r.id === role);
 
-            console.log('[AccessContext] User doc found. role:', role, 'isPlatformRole:', isPlatformRole);
-
             setRealSession({
               user: { id: user.uid, name: userData.name, email: user.email || '' },
               userType: isPlatformRole ? 'platform' : 'tenant',
@@ -152,10 +148,8 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
             });
 
             if (isPlatformRole) {
-              console.log('[AccessContext] Platform user — tenant set to null');
               setRealTenant(null);
             } else {
-              console.log('[AccessContext] Tenant user — setting mock tenant');
               setRealTenant({
                 id: 'tenant-1', name: 'My Store', plan: 'growth', status: 'active',
                 onboardingStage: 'active',
@@ -167,19 +161,16 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
 
             setAuthError(null);
           } else {
-            console.warn('[AccessContext] No Firestore user doc for uid:', user.uid);
             setRealSession(null);
             setRealTenant(null);
             setAuthError('account_not_provisioned');
           }
-        } catch (err) {
-          console.error('[AccessContext] Firestore read failed:', err);
+        } catch {
           setRealSession(null);
           setRealTenant(null);
           setAuthError('firestore_error');
         }
       } else {
-        console.log('[AccessContext] No Firebase user — clearing session');
         setRealSession(null);
         setRealTenant(null);
         setAuthError(null);

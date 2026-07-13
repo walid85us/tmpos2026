@@ -83,6 +83,7 @@ import C04RouteExposureReadinessCard from './C04RouteExposureReadinessCard';
 import C05FeatureFlagPostureReadinessCard from './C05FeatureFlagPostureReadinessCard';
 import C06QualityGatesEvidenceReadinessCard from './C06QualityGatesEvidenceReadinessCard';
 import C07DataSourceBoundaryReadinessCard from './C07DataSourceBoundaryReadinessCard';
+import ControlledActionAcknowledgeCard from './controlled-actions/ControlledActionAcknowledgeCard';
 
 function ScreenHeading({ module }: { module: BcpModule }) {
   return (
@@ -1610,6 +1611,7 @@ function BackendCpReadinessGate({ module }: { module: BcpModule; env: EnvLabel }
           { key: 'c05', label: 'C-05 Feature Flags' },
           { key: 'c06', label: 'C-06 Quality Gates' },
           { key: 'c07', label: 'C-07 Data Source Boundary' },
+          { key: 'action', label: 'Controlled Action (DEV)' },
           { key: 'coverage', label: 'Module Coverage' },
           { key: 'path', label: 'Production Path' },
           { key: 'blockers', label: 'Blockers & Final Gate' },
@@ -1672,6 +1674,12 @@ function BackendCpReadinessGate({ module }: { module: BcpModule; env: EnvLabel }
       {section === 'c07' && (
         <div className="mt-1">
           <C07DataSourceBoundaryReadinessCard />
+        </div>
+      )}
+
+      {section === 'action' && (
+        <div className="mt-1">
+          <ControlledActionAcknowledgeCard />
         </div>
       )}
 

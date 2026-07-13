@@ -11,18 +11,30 @@ import {
 } from './bcpActionAcknowledgeReadinessReviewExpressAdapter';
 import { createRecordingActionAuditSink, type BcpActionAuditSink } from './bcpActionAuditSink';
 import type { CanonicalAuthzView } from './bcpActionLivePrincipalResolver';
+import { BcpActionIdempotencyStore } from './bcpActionIdempotencyStore';
+import { BcpActionRateLimiter } from './bcpActionRateLimiter';
 import fs from 'node:fs';
 
 function mockRes() {
   let done!: () => void;
   const p = new Promise<void>((r) => { done = r; });
-  const res: any = { _status: 0, _json: undefined, headersSent: false, done: p };
+  const res: any = { _status: 0, _json: undefined, _headers: {} as Record<string, string>, headersSent: false, done: p };
   res.status = (c: number) => { res._status = c; return res; };
+  res.setHeader = (k: string, v: string) => { res._headers[k] = String(v); return res; };
+  res.getHeader = (k: string) => res._headers[k];
   res.json = (b: unknown) => { res._json = b; res.headersSent = true; done(); return res; };
-  return res as Response & { _status: number; _json: any; done: Promise<void> };
+  return res as Response & { _status: number; _json: any; _headers: Record<string, string>; done: Promise<void> };
 }
+// Valid same-origin browser security headers (content-type + Origin + Fetch-Metadata + intent). Merged under any
+// per-test overrides so the request-security guard passes by default; override to exercise denial paths.
+const SECURE_HEADERS = {
+  'content-type': 'application/json',
+  origin: 'http://localhost:5000',
+  'sec-fetch-site': 'same-origin',
+  'x-bcp-action-intent': 'acknowledge-readiness-review',
+};
 const req = (method: string, body: unknown, headers: Record<string, unknown> = {}): Request =>
-  ({ method, body, headers, query: {}, cookies: {}, params: {} } as unknown as Request);
+  ({ method, body, headers: { ...SECURE_HEADERS, ...headers }, query: {}, cookies: {}, params: {} } as unknown as Request);
 const okBody = () => ({ confirm: true, reason: 'Reviewed readiness.', idempotencyKey: 'adp-key-0001', lensKey: 'ALL' });
 
 function counting<T extends (...a: any[]) => any>(fn: T) {
@@ -40,10 +52,12 @@ const lookupOk = (iu: string) => async () => ({ ok: true, internalUserId: iu });
 const lookupFail = (reason: string) => async () => ({ ok: false, reason });
 const authz = (v: CanonicalAuthzView | null) => async () => v;
 
+// Injected trusted origin matches SECURE_HEADERS.origin so existing tests pass the exact-origin check.
 const baseDeps = (over: any = {}) => ({
   isDevEnvironment: () => true, featureEnabled: () => true,
   verifyBearer: verifyOk as any, lookupInternalUserId: lookupOk('iu_owner') as any, resolveCanonicalAuthz: authz(view()) as any,
-  idempotencyStore: new Set<string>(), ...over,
+  idempotencyStore: new BcpActionIdempotencyStore(), rateLimiter: new BcpActionRateLimiter(),
+  trustedOrigin: () => ({ ok: true, origin: 'http://localhost:5000' }), ...over,
 });
 
 const cases: { name: string; fn: () => Promise<void> }[] = [];
@@ -158,24 +172,115 @@ test('authority-bearing body field (eligible auth) → 400 unexpected_field, NO 
 });
 
 test('duplicate key (shared store) → success then duplicate, ONE marker', async () => {
-  const store = new Set<string>(); const sink = createRecordingActionAuditSink();
+  const store = new BcpActionIdempotencyStore(); const sink = createRecordingActionAuditSink();
   const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ sink, idempotencyStore: store }));
   const r1 = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer good' }), r1); await r1.done;
   const r2 = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer good' }), r2); await r2.done;
   assert.equal(r1._json.status, 'success'); assert.equal(r2._json.status, 'duplicate'); assert.equal(sink.events.length, 1);
 });
 
+test('same key + CHANGED payload (shared store) → success then 409 idempotency_conflict, ONE marker', async () => {
+  const store = new BcpActionIdempotencyStore(); const sink = createRecordingActionAuditSink();
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ sink, idempotencyStore: store }));
+  const r1 = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer good' }), r1); await r1.done;
+  const r2 = mockRes(); h(req('POST', { ...okBody(), reason: 'A different reason entirely.' }, { authorization: 'Bearer good' }), r2); await r2.done;
+  assert.equal(r1._json.status, 'success'); assert.equal(r2._status, 409); assert.equal(r2._json.status, 'idempotency_conflict');
+  assert.equal(sink.events.length, 1);
+});
+
 test('sink failure does not burn the key: 500 then retry succeeds with one final marker', async () => {
-  const store = new Set<string>();
+  const store = new BcpActionIdempotencyStore();
   let first = true;
   const throwOnceSink: BcpActionAuditSink = { record: () => { if (first) { first = false; throw new Error('sink down'); } } };
   const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ sink: throwOnceSink, idempotencyStore: store }));
   const r1 = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer good' }), r1); await r1.done;
-  assert.equal(r1._status, 500); assert.equal(store.size, 0); // key NOT persisted on sink throw
+  assert.equal(r1._status, 500); assert.equal(store.completedCount(), 0); assert.equal(store.inflightCount(), 0); // key NOT persisted on sink throw
   const rec = createRecordingActionAuditSink();
   const h2 = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ sink: rec, idempotencyStore: store }));
   const r2 = mockRes(); h2(req('POST', okBody(), { authorization: 'Bearer good' }), r2); await r2.done;
   assert.equal(r2._status, 200); assert.equal(rec.events.length, 1);
+});
+
+// ============================ Request-security / same-origin / CSRF (BEFORE auth) ============================
+test('missing X-BCP-Action-Intent → 403 request_denied, verifier NEVER called, NO marker', async () => {
+  const v = counting(verifyOk); const sink = createRecordingActionAuditSink();
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ verifyBearer: v, sink }));
+  const res = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer good', 'x-bcp-action-intent': undefined }), res); await res.done;
+  assert.equal(res._status, 403); assert.equal(res._json.status, 'request_denied');
+  assert.equal(v.calls(), 0, 'security denial must precede authentication'); assert.equal(sink.events.length, 0);
+});
+test('Sec-Fetch-Site: cross-site → 403 request_denied, verifier never called', async () => {
+  const v = counting(verifyOk);
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ verifyBearer: v }));
+  const res = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer good', 'sec-fetch-site': 'cross-site' }), res); await res.done;
+  assert.equal(res._status, 403); assert.equal(res._json.status, 'request_denied'); assert.equal(v.calls(), 0);
+});
+test('non-JSON content-type → 403 request_denied', async () => {
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps());
+  const res = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer good', 'content-type': 'text/plain' }), res); await res.done;
+  assert.equal(res._status, 403); assert.equal(res._json.status, 'request_denied');
+});
+test('malformed Origin → 403 request_denied', async () => {
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps());
+  const res = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer good', origin: 'not-a-url' }), res); await res.done;
+  assert.equal(res._status, 403); assert.equal(res._json.status, 'request_denied');
+});
+test('exact trusted-origin MISMATCH → 403 request_denied, verifier never called', async () => {
+  const v = counting(verifyOk);
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ verifyBearer: v, trustedOrigin: () => ({ ok: true, origin: 'https://real.replit.dev' }) }));
+  const res = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer good', origin: 'http://localhost:5000' }), res); await res.done;
+  assert.equal(res._status, 403); assert.equal(res._json.status, 'request_denied'); assert.equal(v.calls(), 0);
+});
+test('trusted origin UNAVAILABLE (REPLIT_DEV_DOMAIN unresolved) → 503 request_security_unavailable, no verify/marker', async () => {
+  const v = counting(verifyOk); const sink = createRecordingActionAuditSink();
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ verifyBearer: v, sink, trustedOrigin: () => ({ ok: false }) }));
+  const res = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer good' }), res); await res.done;
+  assert.equal(res._status, 503); assert.equal(res._json.status, 'request_security_unavailable');
+  assert.equal(v.calls(), 0); assert.equal(sink.events.length, 0);
+});
+test('flag OFF performs NO trusted-origin resolution (resolver not called) → 404', async () => {
+  let resolverCalls = 0;
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ featureEnabled: () => false, trustedOrigin: () => { resolverCalls++; return { ok: true, origin: 'http://localhost:5000' }; } }));
+  const res = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer x' }), res); await res.done;
+  assert.equal(res._status, 404); assert.equal(resolverCalls, 0, 'trusted-origin resolution must not run when the flag is off');
+});
+test('security denial consumes NO rate-limit slot and NO idempotency state', async () => {
+  const rateLimiter = new BcpActionRateLimiter({ globalLimit: 1 }); // exactly one slot
+  const store = new BcpActionIdempotencyStore();
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ rateLimiter, idempotencyStore: store }));
+  // A security-denied request (missing intent) must NOT consume the single global slot or create any record.
+  const denied = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer good', 'x-bcp-action-intent': undefined }), denied); await denied.done;
+  assert.equal(denied._status, 403); assert.equal(store.completedCount(), 0); assert.equal(store.inflightCount(), 0);
+  // The one global slot is still available → a valid request now succeeds (slot was not burned by the denial).
+  const ok = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer good' }), ok); await ok.done;
+  assert.equal(ok._status, 200); assert.equal(ok._json.status, 'success');
+});
+
+// ============================ Rate limiting (global ceiling + per-principal) ============================
+test('GLOBAL ceiling: over the limit → 429 rate_limited + Retry-After, verifier NOT called past cap', async () => {
+  const rateLimiter = new BcpActionRateLimiter({ globalLimit: 2 });
+  const v = counting(verifyOk);
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ rateLimiter, verifyBearer: v }));
+  for (let i = 0; i < 2; i++) { const r = mockRes(); h(req('POST', { ...okBody(), idempotencyKey: 'gkey-000' + i }, { authorization: 'Bearer good' }), r); await r.done; assert.equal(r._status, 200); }
+  const over = mockRes(); h(req('POST', { ...okBody(), idempotencyKey: 'gkey-over' }, { authorization: 'Bearer good' }), over); await over.done;
+  assert.equal(over._status, 429); assert.equal(over._json.status, 'rate_limited');
+  assert.ok(Number(over._headers['Retry-After']) >= 1, 'valid Retry-After header');
+  assert.equal(v.calls(), 2, 'over-cap request is 429ed by the global ceiling BEFORE Bearer verification');
+});
+test('PER-PRINCIPAL window: 6th attempt → 429 rate_limited (global still under ceiling)', async () => {
+  const rateLimiter = new BcpActionRateLimiter({ perPrincipalLimit: 5, globalLimit: 100 });
+  const store = new BcpActionIdempotencyStore();
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ rateLimiter, idempotencyStore: store }));
+  for (let i = 0; i < 5; i++) { const r = mockRes(); h(req('POST', { ...okBody(), idempotencyKey: 'pkey-000' + i }, { authorization: 'Bearer good' }), r); await r.done; assert.equal(r._status, 200); }
+  const over = mockRes(); h(req('POST', { ...okBody(), idempotencyKey: 'pkey-over' }, { authorization: 'Bearer good' }), over); await over.done;
+  assert.equal(over._status, 429); assert.equal(over._json.status, 'rate_limited');
+});
+test('rate-limited request emits NO advisory marker', async () => {
+  const rateLimiter = new BcpActionRateLimiter({ globalLimit: 0 });
+  const sink = createRecordingActionAuditSink();
+  const h = createBcpActionAcknowledgeReadinessReviewHandler(baseDeps({ rateLimiter, sink }));
+  const res = mockRes(); h(req('POST', okBody(), { authorization: 'Bearer good' }), res); await res.done;
+  assert.equal(res._status, 429); assert.equal(sink.events.length, 0);
 });
 
 test('response is a safe closed DTO (no raw error/stack/secret)', async () => {
