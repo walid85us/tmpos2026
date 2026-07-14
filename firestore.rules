@@ -1,30 +1,56 @@
+// Phase 4.0 M0 — Fail-closed emergency Firestore security rules.
+//
+// Security contract (mirrors the owner-published live ruleset):
+//   * The client may ONLY get its own /users/{uid} document. No user listing,
+//     no client create/update/delete of user docs (so a user can never write the
+//     authority-bearing `role` field, and no rule reads `role`/authority fields
+//     from a user document — the old self-authored-admin path is dead).
+//   * All client access to /tenants, nested memberships, nested invitations, and
+//     /auditEvents is denied. Privileged reads/writes go through the trusted
+//     server (Admin SDK, which bypasses these rules) and the canonical Postgres
+//     authorization model — NOT client-writable Firestore fields or claims.
+//   * Every unmatched path is explicitly denied (recursive default-deny).
+// Static regression guard: tests/firestore/firestore.rules.static.test.mjs
+// (Static source guard only — NOT an emulator semantic evaluation.)
+
 rules_version = '2';
+
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Helper functions
-    function isAuthenticated() { return request.auth != null; }
-    function isOwner(userId) { return isAuthenticated() && request.auth.uid == userId; }
-    function isAdmin() { return isAuthenticated() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'system_owner'; }
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated()
+        && request.auth.uid == userId;
+    }
 
     match /users/{userId} {
-      allow read: if isOwner(userId) || isAdmin();
-      allow write: if isOwner(userId) || isAdmin();
+      allow get: if isOwner(userId);
+      allow list: if false;
+      allow create, update, delete: if false;
     }
+
     match /tenants/{tenantId} {
-      allow read: if isAuthenticated(); // Simplified for now
-      allow write: if isAdmin();
+      allow read, write: if false;
     }
+
     match /tenants/{tenantId}/memberships/{membershipId} {
-      allow read: if isAuthenticated();
-      allow write: if isAdmin();
+      allow read, write: if false;
     }
+
     match /tenants/{tenantId}/invitations/{invitationId} {
-      allow read: if isAuthenticated();
-      allow write: if isAdmin();
+      allow read, write: if false;
     }
+
     match /auditEvents/{eventId} {
-      allow read: if isAdmin();
-      allow write: if isAuthenticated();
+      allow read, write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }
