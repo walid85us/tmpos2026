@@ -224,7 +224,7 @@ function SafetyFooter() {
 
 export default function Shell() {
   const [activeId, setActiveId] = React.useState('command-center');
-  const [env, setEnv] = React.useState('DEV');
+  const [env, setEnv] = React.useState<EnvLabel>('DEV');
   const [elevated, setElevated] = React.useState(false);
   const [drawerOpen, setDrawerOpen] = React.useState(false);
 

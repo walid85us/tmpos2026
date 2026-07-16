@@ -113,8 +113,12 @@ export const AccessProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   const [loading, setLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
 
-  const [platformRolesState, setPlatformRolesState] = useState(initialPlatformRoles);
-  const [tenantRolesState, setTenantRolesState] = useState(initialTenantRoles);
+  // EmployeeRole is the canonical role shape this context already exposes
+  // (platformRolesState/tenantRolesState: EmployeeRole[]). The seed arrays only ever
+  // use the string[] permissions form, so without this annotation the state narrows to
+  // that seed shape and rejects the canonical Record<string, PermissionLevel> form.
+  const [platformRolesState, setPlatformRolesState] = useState<EmployeeRole[]>(initialPlatformRoles);
+  const [tenantRolesState, setTenantRolesState] = useState<EmployeeRole[]>(initialTenantRoles);
 
   const [isPreviewModeEnabled, setIsPreviewModeEnabled] = useState(false);
   const [isDevSession, setIsDevSession] = useState(false);

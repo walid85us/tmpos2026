@@ -120,7 +120,7 @@ export default function Invoices() {
     setNewInv({
       customerId: '', dueDate: new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10),
       isRecurring: false, recurringInterval: 'monthly', notes: '', terms: '',
-      items: [{ name: '', quantity: 1, price: 0, type: 'product' }], discount: 0,
+      items: [{ name: '', quantity: 1, price: 0, type: 'product', stockItemId: undefined }], discount: 0,
     });
     setProductSearch('');
     setActiveProductPickerIdx(null);

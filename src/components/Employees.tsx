@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useSearchParams } from 'react-router-dom';
-import { 
-  Employee, EmployeeTimeLog, EmployeeActivityLog, 
-  EmployeeCommission, EmployeePayroll 
+import {
+  Employee, EmployeeTimeLog, EmployeeActivityLog,
+  EmployeeCommission, EmployeePayroll, PermissionLevel
 } from '../types';
 import { useAccess } from '../context/AccessContext';
 import { planFeatures, PERMISSION_DOMAINS, PERMISSION_HIERARCHY, SUB_PERMISSIONS, getSubPermissionsForDomain, getDomainsWithSubPermissions, meetsPermissionLevel, isSubPermissionPlanAvailable, getFeatureGatesForSubPermission } from '../context/accessConfig';
@@ -57,6 +57,13 @@ const MOCK_ACTIVITY_LOGS: EmployeeActivityLog[] = [
   { id: 'al1', employeeId: 'e1', employeeName: 'John Doe', action: 'Login', details: 'Successful login from 192.168.1.1', timestamp: '2024-03-20 09:00' },
   { id: 'al2', employeeId: 'e2', employeeName: 'Sarah Jenkins', action: 'Update Ticket', details: 'Updated status of Ticket #1001 to Completed', timestamp: '2024-03-20 10:15' }
 ];
+
+// The permission <select> hands back a raw string. Validate it against the canonical
+// PERMISSION_HIERARCHY vocabulary instead of asserting, so an unrecognised level is
+// rejected rather than stored as if it were a real permission level.
+export function isPermissionLevel(value: string): value is PermissionLevel {
+  return PERMISSION_HIERARCHY.some((level) => level === value);
+}
 
 const LEVEL_LABELS: Record<string, string> = {
   none: 'None',
@@ -125,7 +132,7 @@ export default function Employees() {
   const [showClockInPicker, setShowClockInPicker] = useState(false);
   const [showClockOutPicker, setShowClockOutPicker] = useState(false);
 
-  const [newRole, setNewRole] = useState<{ name: string; description: string; status: string; permissions: Record<string, string>; subPermissions: Record<string, boolean> }>({ name: '', description: '', status: 'active', permissions: {}, subPermissions: {} });
+  const [newRole, setNewRole] = useState<{ name: string; description: string; status: string; permissions: Record<string, PermissionLevel>; subPermissions: Record<string, boolean> }>({ name: '', description: '', status: 'active', permissions: {}, subPermissions: {} });
   const [expandedMatrixDomains, setExpandedMatrixDomains] = useState<Set<string>>(new Set());
   const [expandedCreateDomains, setExpandedCreateDomains] = useState<Set<string>>(new Set());
 
@@ -338,6 +345,7 @@ export default function Employees() {
   };
 
   const setNewRolePermLevel = (domainId: string, level: string) => {
+    if (!isPermissionLevel(level)) return;
     setNewRole(prev => ({
       ...prev,
       permissions: { ...prev.permissions, [domainId]: level }

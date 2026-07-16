@@ -9,7 +9,16 @@ import {
   HeldOrder, 
   Customer 
 } from '../types';
-import { useStoreLocalState, SEED_POS_OPERATORS, type CompletedOrder, type CompletedOrderItem } from '../context/StoreLocalState';
+import { useStoreLocalState, SEED_POS_OPERATORS, type CompletedOrder, type CompletedOrderItem, type StockItem } from '../context/StoreLocalState';
+
+// The POS quick-add forms expose no serialization / repair-part / POS-visibility input,
+// so every quick-add path applies these defaults. Items remain editable in Inventory,
+// which owns the full form. Same defaults the dashboard quick-add helper applies.
+export const QUICK_ADD_STOCK_DEFAULTS: Pick<StockItem, 'type' | 'isRepairPart' | 'isHiddenOnPOS'> = {
+  type: 'non-serialized',
+  isRepairPart: false,
+  isHiddenOnPOS: false,
+};
 import { useAccess } from '../context/AccessContext';
 import ContextualHelp from './ContextualHelp';
 
@@ -1983,6 +1992,7 @@ export const POS: React.FC = () => {
                           category: addStockCategory,
                           addedAt: new Date().toISOString(),
                           status: 'approved',
+                          ...QUICK_ADD_STOCK_DEFAULTS,
                         });
                         setAddStockSuccess('Added to Inventory');
                       }} className="py-4 bg-primary text-white rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all flex flex-col items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed">
@@ -2003,6 +2013,7 @@ export const POS: React.FC = () => {
                           category: addStockCategory,
                           addedAt: new Date().toISOString(),
                           status: 'pending_approval',
+                          ...QUICK_ADD_STOCK_DEFAULTS,
                         });
                         setAddStockSuccess('Submitted for Approval');
                       }} className="py-4 bg-amber-500 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all flex flex-col items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed">
@@ -2713,6 +2724,7 @@ export const POS: React.FC = () => {
                         category: 'Accessories',
                         addedAt: new Date().toISOString(),
                         status: 'approved',
+                        ...QUICK_ADD_STOCK_DEFAULTS,
                         isSuggestiveSale: true,
                       });
                       setNewSugName('');

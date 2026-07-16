@@ -24,6 +24,14 @@ import type {
   RMA,
 } from '../types';
 
+// Session carries the actor's display name at `user.name`; there is no top-level
+// `name`. The previous `session?.name` was therefore always undefined, so every
+// return action was attributed to the 'System' fallback regardless of who performed
+// it. `user.name` is a display name only — never the id, email, or any token.
+export function resolveActorName(session: { user?: { name?: string } } | null | undefined): string {
+  return session?.user?.name || 'System';
+}
+
 export interface ReturnPrefill {
   sourceType: ReturnSourceType;
   sourceId: string;
@@ -242,7 +250,7 @@ export default function ReturnsPortal() {
       id: `rsh-${Date.now()}`,
       status: newStatus,
       timestamp: now,
-      performedBy: session?.name || 'System',
+      performedBy: resolveActorName(session),
       notes,
     };
     const updates: Partial<Return> = {
@@ -252,7 +260,7 @@ export default function ReturnsPortal() {
     };
     if (newStatus === 'Received') {
       updates.receivedAt = now;
-      updates.receivedBy = session?.name || 'System';
+      updates.receivedBy = resolveActorName(session);
     }
     updateReturn(ret.id, updates);
     if (selectedReturn?.id === ret.id) {
@@ -427,7 +435,7 @@ export default function ReturnsPortal() {
           prefill={prefillData}
           onClose={() => { setShowCreateModal(false); setPrefillData(null); }}
           onSave={(ret) => { addReturn(ret); setShowCreateModal(false); setPrefillData(null); }}
-          createdBy={session?.name || 'System'}
+          createdBy={resolveActorName(session)}
         />
       )}
 
@@ -445,7 +453,7 @@ export default function ReturnsPortal() {
               id: `rsh-${Date.now()}`,
               status: 'Approved' as ReturnStatus,
               timestamp: now,
-              performedBy: session?.name || 'System',
+              performedBy: resolveActorName(session),
               notes: `Return shipment ${shipment.shipmentNumber} created — awaiting label purchase in Shipping Center`,
             };
             const updates: Partial<Return> = {
@@ -457,7 +465,7 @@ export default function ReturnsPortal() {
             setSelectedReturn({ ...selectedReturn, ...updates } as Return);
             setShowReturnShipmentModal(false);
           }}
-          createdBy={session?.name || 'System'}
+          createdBy={resolveActorName(session)}
         />
       )}
 
@@ -471,7 +479,7 @@ export default function ReturnsPortal() {
             setSelectedReturn({ ...selectedReturn, ...updates });
             setShowIntakeModal(false);
           }}
-          performedBy={session?.name || 'System'}
+          performedBy={resolveActorName(session)}
         />
       )}
 
@@ -488,14 +496,14 @@ export default function ReturnsPortal() {
               updatedAt: now,
               statusHistory: [
                 ...selectedReturn.statusHistory,
-                { id: `rsh-${Date.now()}`, status: 'Completed' as ReturnStatus, timestamp: now, performedBy: session?.name || 'System', notes: 'Disposition completed' },
+                { id: `rsh-${Date.now()}`, status: 'Completed' as ReturnStatus, timestamp: now, performedBy: resolveActorName(session), notes: 'Disposition completed' },
               ],
             };
             updateReturn(selectedReturn.id, fullUpdates);
             setSelectedReturn({ ...selectedReturn, ...fullUpdates } as Return);
             setShowDispositionModal(false);
           }}
-          performedBy={session?.name || 'System'}
+          performedBy={resolveActorName(session)}
         />
       )}
 

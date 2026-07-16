@@ -40,6 +40,12 @@ jobs:
           distribution: temurin
           java-version: '21'
       - run: npm ci
+      # Runs BEFORE the ratchet and stays permanently: proves WHICH tsconfig the
+      # ratchet compiles and that the React type declarations are actually present.
+      # Without this a missing @types/react silently turns every JSX element into
+      # `any`, and the ratchet reports zero while checking nothing.
+      - name: Typecheck contract (selected config + React types must be explicit)
+        run: npm run typecheck:contract
       - name: Typecheck (ratchet — must be zero)
         run: npm run typecheck
       - name: Deterministic tests (existing suites)

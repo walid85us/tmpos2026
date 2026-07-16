@@ -17,7 +17,10 @@ import { useAccess } from '../context/AccessContext';
 import { hasPlatformPermission, hasEffectiveFeatureAccess } from './platformPermissionsConfig';
 import type { Role } from '../context/accessConfig';
 
-type PlanData = Omit<typeof initialPlans[0], 'status'> & { status: 'active' | 'archived' };
+// `initialPlans` seeds every plan with `billingCycle: 'monthly' as const`, which would
+// narrow PlanData to the 'monthly' literal even though 'annual' is a first-class value
+// (selectable in the plan form and rendered as '/yr'). Represent both canonical values.
+type PlanData = Omit<typeof initialPlans[0], 'status' | 'billingCycle'> & { status: 'active' | 'archived'; billingCycle: 'monthly' | 'annual' };
 type FeatureData = { id: string; name: string; planAvailability: Record<string, boolean>; source: 'inherited' | 'custom'; lifecycle: FeatureLifecycle };
 type AddOnData = AddOn;
 

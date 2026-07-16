@@ -6,7 +6,12 @@ type BillingTab = 'transactions' | 'invoices' | 'credits' | 'ledger';
 type TxFilter = 'all' | 'paid' | 'failed' | 'refunded';
 type InvFilter = 'all' | 'paid' | 'overdue' | 'void';
 type ConfirmAction = { type: 'retry' | 'refund'; tenant: string; amount: number; invoiceNo: string } | null;
-type DetailModal = { type: 'invoice'; data: typeof invoiceHistory[0] } | { type: 'credit'; data: typeof initialCreditNotes[0] } | null;
+// Each seed credit note narrows `status` to its own literal ('applied' or 'issued'),
+// so the inferred element type cannot represent a note transitioning between the two.
+// Widen `status` to the canonical credit domain only; every other field keeps the
+// seed-derived type (including the string | null fields).
+type CreditNote = Omit<typeof initialCreditNotes[number], 'status'> & { status: 'applied' | 'issued' };
+type DetailModal = { type: 'invoice'; data: typeof invoiceHistory[0] } | { type: 'credit'; data: CreditNote } | null;
 type FormModal = 'invoice' | 'refund' | 'credit' | 'apply_credit' | null;
 
 // A credit note can only be applied to an invoice with an outstanding balance.
@@ -36,7 +41,7 @@ const BillingPage: React.FC = () => {
   const [formPlan, setFormPlan] = useState('');
   const [formCreditId, setFormCreditId] = useState('');
   const [formInvoiceId, setFormInvoiceId] = useState('');
-  const [creditNotes, setCreditNotes] = useState(() => [...initialCreditNotes]);
+  const [creditNotes, setCreditNotes] = useState<CreditNote[]>(() => [...initialCreditNotes]);
 
   const totalRevenue = billingTransactions.filter(t => t.status === 'paid').reduce((s, t) => s + t.amount, 0);
   const failedTotal = billingTransactions.filter(t => t.status === 'failed').reduce((s, t) => s + t.amount, 0);

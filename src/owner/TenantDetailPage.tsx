@@ -27,6 +27,16 @@ import type { CommercialInvoice } from './mockData';
 
 type Tab = 'Overview' | 'Owner & Users' | 'Subscription' | 'Features' | 'Billing' | 'Domains' | 'Usage' | 'Activity / Audit' | 'Support Notes';
 
+// A credit note can only be applied to an invoice with an outstanding balance. The
+// invoice status domain is 'void' | 'paid' | 'overdue', so that is exactly the overdue
+// invoices. The previous filter also tested `status === 'pending'` — not a member of
+// the domain, so that branch was unreachable. Mirrors getCreditEligibleInvoices in
+// BillingPage, which already resolved this same dead comparison; the invoices passed
+// here are already scoped to the tenant.
+export function getTenantCreditEligibleInvoices<T extends { status: string }>(invoices: readonly T[]): T[] {
+  return invoices.filter((i) => i.status === 'overdue');
+}
+
 const TenantDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -803,7 +813,7 @@ const TenantDetailPage: React.FC = () => {
     return { allowed: true, reason: '' };
   }, [activeStoreOwners, isPrimaryOwner]);
 
-  const eligibleInvoicesForCredit = useMemo(() => effectiveInvoices.filter(inv => inv.status === 'overdue' || inv.status === 'pending'), [effectiveInvoices]);
+  const eligibleInvoicesForCredit = useMemo(() => getTenantCreditEligibleInvoices(effectiveInvoices), [effectiveInvoices]);
 
   const [reassignOwnerId, setReassignOwnerId] = useState<string | null>(null);
 
