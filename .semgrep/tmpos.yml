@@ -1,0 +1,53 @@
+# Phase 4.0 M2 — TM POS2026 narrow SAST rules (G-APPSEC). Offline, source-local
+# (no registry/network, no source upload). Complements CI ruleset packs. These
+# target the KNOWN, milestone-owned risk classes; findings are reconciled against
+# docs/phase-4/m2-security-gate-manifest.json — new/changed Critical/High block.
+rules:
+  - id: tmpos-hardcoded-pin
+    message: "Hardcoded PIN/credential in an authorization path (gate G-HARDCRED)."
+    severity: ERROR
+    languages: [typescript, javascript]
+    patterns:
+      - pattern-regex: '===\s*[''"]1234[''"]'
+
+  - id: tmpos-ssrf-request-controlled-fetch
+    message: "Possible SSRF — outbound fetch of a request-controlled URL (gate G-SSRF)."
+    severity: ERROR
+    languages: [typescript, javascript]
+    patterns:
+      - pattern-regex: 'fetch\(\s*(req|request)\.(query|params|body)\.'
+
+  - id: tmpos-server-only-module-in-client
+    message: "Server-only module imported into the client (src/) bundle."
+    severity: ERROR
+    languages: [typescript]
+    paths:
+      include: ["src/**"]
+    patterns:
+      - pattern-regex: "from\\s+['\"](firebase-admin|postgres|pg)['\"]"
+
+  - id: tmpos-credential-logging
+    message: "Possible credential/token written to logs."
+    severity: WARNING
+    languages: [typescript, javascript]
+    patterns:
+      - pattern-regex: 'console\.(log|info|debug|warn|error)\([^)]*(password|secret|apiKey|api_key|private_key|serviceAccount|accessToken)[^)]*\)'
+
+  - id: tmpos-raw-cardholder-data-field
+    # Targets UNAMBIGUOUS cardholder-data used as a real field/property (not the
+    # generic 'cardNumber', which legitimately names gift/loyalty cards and
+    # appears as a quoted string in the CHD forbidden-key denylist guards).
+    message: "Raw cardholder-data field (PAN/CVV/track/PIN block) — must never enter TM POS2026 (gate G-PCI)."
+    severity: ERROR
+    languages: [typescript, javascript]
+    patterns:
+      - pattern-either:
+          - pattern-regex: '\b(primaryAccountNumber|cvv2|cvv|cvc|track1|track2|magstripe|pinBlock)\s*[?]?\s*:'
+          - pattern-regex: '\.(primaryAccountNumber|cvv2|cvv|cvc|track1|track2|magstripe|pinBlock)\b'
+
+  - id: tmpos-webhook-verification-bypass
+    message: "Webhook signature verification appears bypassable (fail-open) (gate G-WEBHOOK)."
+    severity: WARNING
+    languages: [typescript, javascript]
+    patterns:
+      - pattern-regex: '(SKIP|DISABLE|BYPASS)_?(WEBHOOK|SIGNATURE)_?(VERIFY|VERIFICATION|CHECK)'

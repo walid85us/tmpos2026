@@ -9,6 +9,16 @@ type ConfirmAction = { type: 'retry' | 'refund'; tenant: string; amount: number;
 type DetailModal = { type: 'invoice'; data: typeof invoiceHistory[0] } | { type: 'credit'; data: typeof initialCreditNotes[0] } | null;
 type FormModal = 'invoice' | 'refund' | 'credit' | 'apply_credit' | null;
 
+// A credit note can only be applied to an invoice with an outstanding balance.
+// In the invoice status domain ('void' | 'paid' | 'overdue') that is exactly
+// the tenant's overdue invoices.
+export function getCreditEligibleInvoices<T extends { tenant: string; status: string }>(
+  invoices: readonly T[],
+  tenant: string,
+): T[] {
+  return invoices.filter((i) => i.tenant === tenant && i.status === 'overdue');
+}
+
 const BillingPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<BillingTab>('transactions');
   const [txFilter, setTxFilter] = useState<TxFilter>('all');
@@ -906,11 +916,11 @@ const BillingPage: React.FC = () => {
                     const creditRemaining = selectedCredit ? selectedCredit.amount - selectedCredit.appliedAmount : 0;
                     const creditTenant = selectedCredit?.tenant || '';
                     const eligibleInvoices = creditTenant
-                      ? invoiceHistory.filter(i => i.tenant === creditTenant && (i.status === 'overdue' || i.status === 'pending'))
+                      ? getCreditEligibleInvoices(invoiceHistory, creditTenant)
                       : [];
                     const noBalance = selectedCredit && creditRemaining <= 0;
                     const noEligible = selectedCredit && !noBalance && eligibleInvoices.length === 0;
-                    const eligibilityLabel = 'overdue or pending';
+                    const eligibilityLabel = 'overdue';
                     return (
                       <>
                         <div>

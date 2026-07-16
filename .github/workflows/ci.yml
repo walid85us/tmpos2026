@@ -1,0 +1,135 @@
+# Phase 4.0 M2 — CI production gates. Single least-privilege workflow.
+# Enforces: zero-error typecheck, deterministic tests, Firestore STATIC guard +
+# SEMANTIC emulator suite (Java 17+, demo- project, NO secrets), isolated build
+# integrity, dependency-audit (SCA), Semgrep (SAST), secret scan (current +
+# history), and forbidden-artifact scan. New/changed Critical/High findings
+# block; known findings are reconciled ONLY against the itemized, expiring
+# security gate manifest (docs/phase-4/m2-security-gate-manifest.json).
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # actions/checkout@v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: { fetch-depth: 0 }
+      # actions/setup-node@v4.1.0
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af
+        with:
+          node-version: '20'
+          cache: npm
+      # actions/setup-java@v4.5.0 (Temurin 21 — firebase-tools requires Java 21+)
+      - uses: actions/setup-java@8df1039502a15bceb9433410b1a100fbe190c53b
+        with:
+          distribution: temurin
+          java-version: '21'
+      - run: npm ci
+      - name: Typecheck (ratchet — must be zero)
+        run: npm run typecheck
+      - name: Deterministic tests (existing suites)
+        run: npm run test:existing
+      - name: Frontend render/behavior tests
+        run: npm run test:frontend
+      - name: Firestore static guard
+        run: npm run test:firestore:static
+      - name: Firestore semantic emulator suite (demo- project, no secrets)
+        # firebase-tools is a pinned devDependency (installed by npm ci); use it
+        # via npx rather than a redundant global install.
+        run: |
+          npx --no-install firebase emulators:exec --only firestore --project demo-tmpos-rules \
+            'node --test tests/firestore/firestore.rules.emulator.test.mjs'
+      - name: Production build integrity (isolated)
+        run: npm run build:check
+      - name: Forbidden-artifact scan
+        run: npm run forbidden:check
+      - name: Dependency audit (SCA) — fail-closed reconciler (never a raw exit)
+        run: |
+          set +e
+          npm audit --omit=dev --json > audit-prod.json; pe=$?
+          npm audit --json > audit-full.json; fe=$?
+          set -e
+          if [ "$pe" -gt 1 ] || [ "$fe" -gt 1 ]; then echo "npm audit crashed (prod exit=$pe full exit=$fe)"; exit 1; fi
+          AUDIT_EXIT="$pe" node scripts/check-dependency-audit.mjs audit-prod.json audit-full.json
+
+  appsec:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      # actions/checkout@v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: { fetch-depth: 0 }
+      # actions/setup-node@v4.1.0
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af
+        with: { node-version: '20', cache: npm }
+      - run: npm ci
+      - name: Semgrep rule unit tests (positive/negative fixtures — must be collected + all pass)
+        # Runs FIRST: proves each rule's positive/negative behaviour before the repository scan
+        # is trusted. Fails on crash, on any failed rule test, and on "no tests collected".
+        run: |
+          SG=semgrep/semgrep@sha256:e04d2cb132288d90035db8791d64f610cb255b21e727b94db046243b30c01ae9
+          set +e
+          docker run --rm --network none -e SEMGREP_SEND_METRICS=off -v "$PWD:/src:ro" "$SG" \
+            semgrep --test --config /src/.semgrep/tmpos.yml /src/.semgrep/tests/tmpos.ts > semgrep-test.out 2>&1
+          rc=$?
+          set -e
+          cat semgrep-test.out
+          if [ "$rc" -ne 0 ]; then echo "Semgrep rule tests failed/crashed (exit $rc) — failing the gate"; exit 1; fi
+          if grep -q "No unit tests found" semgrep-test.out; then echo "No Semgrep rule tests collected — failing the gate"; exit 1; fi
+          if ! grep -Eq "All tests passed" semgrep-test.out; then echo "Semgrep rule-test pass summary missing — failing the gate"; exit 1; fi
+      - name: Semgrep SAST repository scan (custom rules; source stays in CI, no external upload)
+        # semgrep/semgrep pinned by digest matches the local package script.
+        # Exit 0 = no findings, 1 = findings (the reconcile step decides pass/fail);
+        # >1 = scanner crash — fail loudly rather than silently skipping SAST.
+        run: |
+          SG=semgrep/semgrep@sha256:e04d2cb132288d90035db8791d64f610cb255b21e727b94db046243b30c01ae9
+          set +e
+          docker run --rm --network none -v "$PWD:/src:ro" "$SG" \
+            semgrep scan --config /src/.semgrep --metrics=off --json --quiet /src/src /src/server \
+            > semgrep-results.json
+          rc=$?
+          set -e
+          if [ "$rc" -gt 1 ]; then echo "Semgrep crashed (exit $rc) — failing the gate"; exit 1; fi
+          if [ ! -s semgrep-results.json ]; then echo "Empty Semgrep results — failing the gate"; exit 1; fi
+          node -e 'JSON.parse(require("fs").readFileSync("semgrep-results.json","utf8"))' || { echo "Malformed Semgrep JSON — failing the gate"; exit 1; }
+      - name: Reconcile Semgrep findings against the security gate manifest (semgrep-evidence only)
+        # Only evidenceType:semgrep entries can satisfy a Semgrep result; manual_static /
+        # dependency_audit / gitleaks / runtime_test entries never can.
+        run: SEMGREP_RESULTS=semgrep-results.json npm run security:gates
+      - name: Gitleaks — repository-only current-tree + history, reconciled EXACTLY (31 vendored)
+        # Writable /out mount so each JSON report survives the container; reconciliation is
+        # finding-by-finding (rule+path+line) against the manifest's expectedFindings — a 32nd
+        # finding (new line, new rule, or app path) fails. No directory waiver.
+        run: |
+          GL=zricethezav/gitleaks@sha256:0e99e8821643ea5b235718642b93bb32486af9c8162c8b8731f7cbdc951a7f46
+          OUT="$(mktemp -d)"
+          SCAN=$(node scripts/prepare-gitleaks-scan-tree.mjs "$PWD" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).dir))')
+          trap 'rm -rf "$SCAN" "$OUT"' EXIT
+          set +e
+          # Current-tree: git-derived repo-only tree (never $HOME/infra/node_modules).
+          docker run --rm --network none -v "$SCAN:/scan:ro" -v "$OUT:/out" "$GL" detect --source=/scan --no-git --redact --config=/scan/.gitleaks.toml --report-format json --report-path /out/current.json; crc=$?
+          # History: git-mode on the repo (tracked commit blobs only).
+          docker run --rm --network none -v "$PWD:/repo:ro" -v "$OUT:/out" "$GL" detect --source=/repo --redact --config=/repo/.gitleaks.toml --report-format json --report-path /out/history.json; hrc=$?
+          set -e
+          # gitleaks exit: 0=clean, 1=leaks found (normal — reconciled below), >1=scanner error → fail closed.
+          if [ "$crc" -gt 1 ] || [ "$hrc" -gt 1 ]; then echo "gitleaks scanner error (current=$crc history=$hrc) — failing the gate"; exit 1; fi
+          test -s "$OUT/current.json" || { echo "Empty/missing gitleaks current-tree report — failing the gate"; exit 1; }
+          test -s "$OUT/history.json" || { echo "Empty/missing gitleaks history report — failing the gate"; exit 1; }
+          GITLEAKS_CURRENT="$OUT/current.json" GITLEAKS_HISTORY="$OUT/history.json" node scripts/check-security-gates.mjs

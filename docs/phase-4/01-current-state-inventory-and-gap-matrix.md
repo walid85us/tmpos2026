@@ -165,7 +165,7 @@ Severity: **C** critical (blocks production / security), **H** high, **M** mediu
 | GAP-15 | H | Idempotency store + rate limiter are in-memory/process-local; not production-grade or multi-instance. | M6 | G-IDEMPOT |
 | GAP-16 | H | Migrations never auto-applied (manual owner step); no migration runner; schema-drift risk. | M3 | G-MIGRATE |
 | GAP-17 | H | DB connects as owner role, bypassing RLS; app layer is the only access control (absent on `/identity/resolve`). | M3/M5 | G-DBROLE |
-| GAP-18 | H | Firestore emulator semantic evidence pending (Java unavailable at M0); static guard only. | M2 | G-EMU |
+| GAP-18 | H | Firestore emulator semantic suite now EXECUTED locally — **41/41 PASS** via ephemeral Nix JDK21 (`demo-` project, no creds); static guard retained (21/21). CI re-run pending committed workflow. | M2 | G-EMU |
 | GAP-19 | H | Hardcoded credential: PIN `1234` in **multiple** authorization paths (`AccessContext.tsx:420` refund-supervisor, `POS.tsx:617`) plus mock operator PINs — client-side. | M5/M7b | G-HARDCRED |
 | GAP-26 | C | POS has order/payment/refund but no payment-processor / tokenization / PCI-DSS architecture. **Direction DECIDED: integrated capability in scope (semi-integrated/tokenized; no cardholder data in-system); STORE-owned gateway config (Store Settings → Payments; Stripe/Square/Adyen); System Owner governs connector catalog only; provider + PCI-category validated in M7b.** | M7b | G-PCI |
 | GAP-20 | M | Reports/Dashboard are disconnected mock analytics; KPIs not trustworthy. | M7 (read-models) | — |

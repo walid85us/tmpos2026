@@ -9,6 +9,29 @@ import type { StockItem } from '../context/StoreLocalState';
 import type { Customer } from '../types';
 import ApprovalQueue from './ApprovalQueue';
 
+// Build a StockItem from the dashboard quick-add form. Centralizes the domain
+// defaults (non-serialized, not a repair part, POS-visible) so both the
+// inventory-permitted and pending-approval paths construct a complete item.
+export function buildDashboardStockItem(
+  fields: { name: string; sku: string; qty: number; cost: number; price: number; category: string },
+  status: StockItem['status'],
+): StockItem {
+  return {
+    id: `stk-${Date.now()}`,
+    name: fields.name,
+    sku: fields.sku,
+    qty: fields.qty,
+    cost: fields.cost,
+    price: fields.price,
+    category: fields.category,
+    addedAt: new Date().toISOString(),
+    status,
+    type: 'non-serialized',
+    isRepairPart: false,
+    isHiddenOnPOS: false,
+  };
+}
+
 function DomainStatusCard({ domainInfo, onDomainAction }: { domainInfo: TenantDomainInfo; onDomainAction?: (action: string) => void }) {
   const modeLabels: Record<DomainMode, { label: string; color: string; icon: string; desc: string }> = {
     platform_subdomain: { label: 'Platform Subdomain', color: 'text-blue-700 bg-blue-50 border-blue-200', icon: 'dns', desc: 'Your store is accessible via platform subdomain.' },
@@ -1235,17 +1258,14 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                       </button>
                       {hasInventoryPermission ? (
                         <button type="button" disabled={!dashStockName.trim()} onClick={() => {
-                          const item: StockItem = {
-                            id: `stk-${Date.now()}`,
+                          const item = buildDashboardStockItem({
                             name: dashStockName.trim(),
                             sku: dashStockSku || `SKU-${Date.now().toString().slice(-6)}`,
                             qty: parseInt(dashStockQty) || 1,
                             cost: parseFloat(dashStockCost) || 0,
                             price: parseFloat(dashStockPrice) || 0,
                             category: dashStockCategory,
-                            addedAt: new Date().toISOString(),
-                            status: 'approved',
-                          };
+                          }, 'approved');
                           addStockItem(item);
                           setLastAddedStock(item);
                           setStockSaved(true);
@@ -1255,17 +1275,14 @@ export default function DashboardOverview({ onNewRepair }: { onNewRepair: () => 
                         </button>
                       ) : (
                         <button type="button" disabled={!dashStockName.trim()} onClick={() => {
-                          const item: StockItem = {
-                            id: `stk-${Date.now()}`,
+                          const item = buildDashboardStockItem({
                             name: dashStockName.trim(),
                             sku: dashStockSku || `SKU-${Date.now().toString().slice(-6)}`,
                             qty: parseInt(dashStockQty) || 1,
                             cost: parseFloat(dashStockCost) || 0,
                             price: parseFloat(dashStockPrice) || 0,
                             category: dashStockCategory,
-                            addedAt: new Date().toISOString(),
-                            status: 'pending_approval',
-                          };
+                          }, 'pending_approval');
                           addStockItem(item);
                           setLastAddedStock(item);
                           setStockSaved(true);

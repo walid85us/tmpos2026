@@ -1,0 +1,22 @@
+# Phase 4.0 M2 — Gitleaks config (secret scanning, gate G-APPSEC).
+# Extends the default ruleset. Scans are REPOSITORY-ONLY: the runner builds the
+# scan target from `git ls-files` + intended untracked repo files (never the
+# workspace parent, home/infra dirs, node_modules, or dist), so this config
+# carries NO external-path/scope allowlist. Secret values are always redacted;
+# only path/category is reported.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Narrow, documented allowlist — a single confirmed-FAKE fixture literal only (NO keyspace/shape allowlist, NO path/scope exclusions). The broad AIza… Google-key SHAPE allowlist was REMOVED: it could suppress a newly introduced real Google/Gemini/service key. Any AIza-style finding now reaches the gate; a public-by-design Firebase web client identifier (if present in the repo) is reconciled EXACTLY by rule id + repository-relative path + line and bound to its containing file's whole-file Git blob OID in docs/phase-4/m2-security-gate-manifest.json — never suppressed here, never stored as a key-value hash."
+regexes = [
+  # Confirmed FAKE stripe token — a fixture in bcpC02RegistryReadModel.test.ts
+  # ("token-like strings are redacted") proving the redactor works. Not live.
+  # This is a single EXACT fake literal, not a keyspace: a real sk_live_* key still fails.
+  '''^sk_live_abcdef0123456789abcdef$''',
+]
+stopwords = [
+  # 'boundaryKey' is a TypeScript interface field name in
+  # bcpC07DataSourceBoundaryReadModel.ts, not a credential (generic-api-key FP).
+  "boundarykey",
+]

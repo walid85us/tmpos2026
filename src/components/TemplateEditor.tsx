@@ -3,6 +3,12 @@ import { motion, AnimatePresence } from 'motion/react';
 import type { DocumentTemplate, LogoPlacement } from '../types';
 import { getSlots, buildTemplateHtml, getDefaultEnabledTags } from '../utils/templateBuilder';
 
+// Runtime guard: only genuine string tags may flow into template rendering. A
+// malformed persisted template could otherwise carry non-string values.
+export function normalizeTags(tags: Iterable<unknown>): string[] {
+  return Array.from(tags).filter((t): t is string => typeof t === 'string');
+}
+
 const SAMPLE_DATA: Record<string, string> = {
   '{{storeName}}': 'RepairHub',
   '{{storeTagline}}': 'Professional Repair Services',
@@ -110,7 +116,7 @@ export default function TemplateEditor({ template, onSave, onReset, onClose, log
       next.add(tag);
     }
     setEnabledTags(next);
-    const newContent = buildTemplateHtml(template.type, Array.from(next));
+    const newContent = buildTemplateHtml(template.type, normalizeTags(next));
     setContent(newContent);
     setHasChanges(true);
   }, [template.type, enabledTags]);

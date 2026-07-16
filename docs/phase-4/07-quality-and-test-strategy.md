@@ -6,7 +6,7 @@
 
 - **UI/business surfaces:** 0 tests (`src/components/**`, `src/owner/**`) — heavy stateful logic unverified (GAP-22).
 - **Backend:** substantial — the BCP corpus (`server/bcp-pilot/**`), platform-identity suites, and 8 BCP client-classifier tests (`src/backend-control-plane/**`).
-- **Firestore rules:** a **static** source-pattern guard (21/21) only — **not** an emulator semantic evaluation. Java was unavailable at M0, so the emulator suite is **NOT EXECUTED** (GAP-18, gate G-EMU).
+- **Firestore rules:** a **static** source-pattern guard (21/21) **plus** the M2 **semantic emulator suite (41/41 PASS)** against the Java-backed emulator (ephemeral Nix JDK21, `demo-` project, no creds). CI re-run pending committed workflow (GAP-18, gate G-EMU).
 - **Typecheck:** a known non-zero baseline exists (non-production surfaces: shipping adapters, `import.meta.env` typing gap, billing). Treat as a ratchet.
 
 ## 2. Mandatory test pyramid

@@ -37,7 +37,7 @@ TM POS2026 is today a **client-authoritative React SPA** whose production artifa
 
 These remain **open production gates**, tracked in [08](./08-production-gate-and-risk-register.md):
 
-- **G-EMU** — Firestore emulator semantic evidence pending (Java unavailable at M0; static guard only). Assigned **M2**; must pass before any rules deployment or go-live.
+- **G-EMU** — Firestore emulator semantic suite **PASSES locally (41/41)** via ephemeral Nix JDK21 (**M2**); static guard retained (21/21). CI evidence pending committed workflow; must stay green before any rules deployment or go-live.
 - **G-HIST** — historical (pre-fix) Firestore exploitation cannot be disproven; a **historical evidence limitation, not a waivable active vulnerability**. **M8** bounded read-only investigation → **M9** owner risk-acknowledgement disposition.
 - **G-4USER** — four noncanonical Firebase users (`store_owner`/`manager`/`technician`/`sales_staff`) hold client-presentation roles only; canonically migrated in **M5** via owner-approved, audited provisioning (no silent auto-provisioning).
 

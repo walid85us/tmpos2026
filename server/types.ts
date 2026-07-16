@@ -75,6 +75,11 @@ export interface ProviderTrackingEvent {
   location?: string;
   description: string;
   source: 'provider' | 'manual';
+  // Provider-supplied idempotency reference used to de-duplicate repeated
+  // provider/webhook deliveries of the same underlying event (see
+  // isDuplicateEvent). Optional: manual events and providers without an event
+  // id fall back to (timestamp, status) matching.
+  providerEventRef?: string;
 }
 
 export interface AddressValidationResult {
@@ -85,6 +90,14 @@ export interface AddressValidationResult {
   messages?: string[];
   accepted?: boolean;
   providerRef?: string;
+  // Raw provider verification diagnostics (e.g. USPS DPV / delivery details)
+  // preserved so the UI can surface the actual verification outcome. Shape is
+  // provider-specific, hence an opaque record.
+  details?: Record<string, unknown>;
+  // Non-fatal carrier address warnings (e.g. DPV secondary-unit issues) that
+  // keep an address deliverable but block pickup readiness. Surfaced to the
+  // operator alongside `messages`.
+  warnings?: ProviderFieldError[];
 }
 
 export interface ProviderFieldError {
