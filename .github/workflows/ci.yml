@@ -39,6 +39,14 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+      # Runs BEFORE npm ci, and must: a lockfile pointing at an environment-internal
+      # registry cannot be caught afterwards. npm marks some packages `devOptional` and
+      # SKIPS them silently when their tarball is unreachable, so `npm ci` exits 0 with the
+      # package absent — that is how a green install shipped without @types/react. The
+      # checker uses only Node built-ins, so it needs no install to run. Mandatory, never
+      # `--if-present`: a missing script must fail rather than skip.
+      - name: Lockfile portability (public registry only — must run before install)
+        run: npm run lockfile:check
       - run: npm ci
       # Runs BEFORE the ratchet and stays permanently: proves WHICH tsconfig the
       # ratchet compiles and that the React type declarations are actually present.
@@ -85,6 +93,9 @@ jobs:
       # actions/setup-node@v4.1.0
       - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af
         with: { node-version: '20', cache: npm }
+      # This job installs too, so it carries the same pre-install gate (see `quality`).
+      - name: Lockfile portability (public registry only — must run before install)
+        run: npm run lockfile:check
       - run: npm ci
       - name: Semgrep rule unit tests (positive/negative fixtures — must be collected + all pass)
         # Runs FIRST: proves each rule's positive/negative behaviour before the repository scan
@@ -119,10 +130,12 @@ jobs:
         # Only evidenceType:semgrep entries can satisfy a Semgrep result; manual_static /
         # dependency_audit / gitleaks / runtime_test entries never can.
         run: SEMGREP_RESULTS=semgrep-results.json npm run security:gates
-      - name: Gitleaks — repository-only current-tree + history, reconciled EXACTLY (31 vendored)
-        # Writable /out mount so each JSON report survives the container; reconciliation is
-        # finding-by-finding (rule+path+line) against the manifest's expectedFindings — a 32nd
-        # finding (new line, new rule, or app path) fails. No directory waiver.
+      - name: Gitleaks current/history scan and exact reconciliation
+        # Repository-only current tree + git history. Writable /out mount so each JSON report
+        # survives the container; reconciliation is finding-by-finding (rule+path+line) against
+        # the manifest's expectedFindings — ANY finding not in that inventory (new line, new
+        # rule, or app path) fails. No directory waiver. The manifest is the authoritative
+        # inventory, so no count is repeated here: a number in this text can only go stale.
         run: |
           GL=zricethezav/gitleaks@sha256:0e99e8821643ea5b235718642b93bb32486af9c8162c8b8731f7cbdc951a7f46
           OUT="$(mktemp -d)"

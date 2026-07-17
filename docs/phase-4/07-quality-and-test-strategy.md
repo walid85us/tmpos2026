@@ -44,6 +44,22 @@
 - **Typecheck ratchet:** the baseline count may never increase; drive toward zero as production surfaces are typed. `tsc --noEmit` in CI.
 - **Static Firestore guard retained** as a fast pre-emulator check (the existing 21/21 guard).
 
+### 3a. Lockfile portability (M2 — a mandatory subcriterion of **G-APPSEC**)
+
+**Ownership.** This is not a separate production gate. G-APPSEC already owns the dependency (SCA) audit, and `npm audit` reads `package-lock.json`: if the lockfile is not the artifact that installs, the audit scans a fiction and G-APPSEC's "scans green" pass rule proves nothing. Lock fidelity is therefore a precondition of G-APPSEC's own evidence, tracked in [08](./08-production-gate-and-risk-register.md) under that gate.
+
+**Non-waivable.** G-APPSEC is a HIGH gate and therefore owner-waivable; this subcriterion is **not**. A G-APPSEC waiver may cover SAST/DAST/SCA findings but may never waive the pre-install portability checker, which blocks merge independently of that gate's disposition ([08, Security-HIGH waiver rule](./08-production-gate-and-risk-register.md)). The reasoning matters: "an unportable lock would fail the build anyway" is **false** — npm skips an unfetchable `optional`/`devOptional` package and `npm ci` exits 0, which is exactly how the original failure stayed green. The control cannot rest on the build failing loudly, so it is enforced by the checker and is not waivable with its host gate.
+
+**Registry policy.** Every `resolved` URL in `package-lock.json` must be an HTTPS tarball on the exact host `registry.npmjs.org`, on the default port, carrying an `integrity` value. No other host — internal, private, loopback, link-local, `.local`, or any alternate registry — is permitted. `.npmrc` pins `registry=https://registry.npmjs.org/` for anyone who does not carry a conflicting environment.
+
+**Why it is a gate and not a convention.** The committed lockfile had been generated behind an environment-internal mirror (`package-firewall.replit.local`, mounted under a `/npm/` path prefix): 688 of 1095 `resolved` URLs named a host that does not exist on a CI runner. The failure was silent rather than loud — npm marks some packages `devOptional`, and a `devOptional` package whose tarball cannot be fetched is **skipped**, leaving `npm ci` to exit 0 with the package absent. That is precisely how a green CI install shipped without `@types/react`, which degraded every JSX element to `any` and let the typecheck ratchet report zero while checking nothing.
+
+**Ordering is the whole point.** Because the defect survives `npm ci` with a zero exit, `npm run lockfile:check` runs **before** `npm ci` in every installing job, is mandatory (never `--if-present`, never `|| true`), and depends only on Node built-ins so it needs no install to run. `typecheck:contract` remains **after** `npm ci`; the two are complementary — one proves the lockfile is fetchable from the public registry, the other proves the React types actually arrived.
+
+**Recurrence is prevented by the gate, not by `.npmrc`.** npm resolves configuration CLI > environment > project `.npmrc`, so an environment that exports `npm_config_registry` still overrides the project file locally. Any lockfile regenerated in such an environment is re-contaminated silently. `.npmrc` is therefore a convenience for clean environments; **the fail-closed pre-install checker is the authoritative protection**, and lockfile changes must be reproduced with a clean-cache, public-registry install before they are trusted.
+
+**Bundled dependencies.** `bundleDependencies` ship inside the parent's tarball and legitimately carry no `resolved` and no `integrity` of their own. They are not exempt: the gate requires the parent to exist, to be an approved integrity-pinned tarball, and to actually declare that name and a version the entry satisfies. `inBundle` is asserted by the file under review, so it is never trusted on its own.
+
 ## 4. Coverage gates
 
 | Gate | Rule |
@@ -53,6 +69,8 @@
 | Money paths | POS/payments/invoices/refunds/billing have transaction + idempotency + rollback tests |
 | Migration | every migration has an applied + rolled-back test |
 | Emulator | semantic suite green in a Java-enabled env before any rules deploy |
+| Lockfile portability (**G-APPSEC**) | every `resolved` URL is an HTTPS `registry.npmjs.org` tarball with `integrity`; checked **before** `npm ci`, fail-closed. A lockfile change is untrusted until reproduced by a clean-cache, public-registry `npm ci` |
+| Deterministic-suite ratchet | the runner fails closed if a configured test root is absent, if nothing is discovered, if the discovered count falls below the recorded baseline, or if a named sentinel suite disappears — a count alone would be satisfied by unrelated files |
 | No unverified critical surface | a Critical/High gap in [08](./08-production-gate-and-risk-register.md) cannot be marked closed without a passing test as evidence |
 
 ## 4a. Payment-gateway (store-owned) test & evidence design (M7b)
