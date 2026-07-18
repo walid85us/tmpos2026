@@ -70,6 +70,12 @@ jobs:
             'node --test tests/firestore/firestore.rules.emulator.test.mjs'
       - name: Production build integrity (isolated)
         run: npm run build:check
+      # Phase 4.0 M3 — compiled Node API runtime. Proves the production server
+      # emits runnable JS from tsconfig.server.json (no tsx/vite/watcher). The
+      # runtime-contract test (route containment, no legacy import, node start)
+      # runs above under "Deterministic tests".
+      - name: Production server build (compiled Node runtime)
+        run: npm run build:server
       - name: Forbidden-artifact scan
         run: npm run forbidden:check
       - name: Dependency audit (SCA) — fail-closed reconciler (never a raw exit)
