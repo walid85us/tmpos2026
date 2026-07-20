@@ -6,7 +6,7 @@ interface ProviderFieldError {
   code?: string;
   suggestion?: string;
 }
-interface ProviderError {
+export interface ProviderError {
   code: string;
   message: string;
   details?: string;
@@ -18,160 +18,218 @@ interface ProviderError {
   fieldErrors?: ProviderFieldError[];
 }
 
-interface AddressValidationResponse {
-  success: boolean;
-  result?: AddressValidationResult;
-  error?: ProviderError;
+// ---------------------------------------------------------------------------
+// Phase 4.0 M3 — the REQUIRED discriminated result contract.
+//
+// Every operation used to return `{ success: boolean; data?: …; error?: ProviderError }`,
+// and three of them made `success` OPTIONAL. That shape had two holes, and this milestone
+// spent its time hand-patching instances of both:
+//
+//   1. Success-only payload was readable WITHOUT proving success. `(await getRates(…)).rates`
+//      compiled fine, so "service unavailable" and "genuinely empty" were the same value to
+//      the type system — which is exactly how an outage came to be rendered as "no provider
+//      configured", "no webhook events recorded yet", and an empty rate list.
+//   2. An ABSENT `success` was neither success nor failure. `if (r.success === false)` fails
+//      OPEN on `undefined` while `if (!r.success)` fails CLOSED, and both spellings existed
+//      in this codebase — so one condition produced two behaviours depending on call site.
+//
+// The union below closes both by construction. `success` is the discriminant and is never
+// optional, so an unnarrowed read of payload no longer compiles; the failure branch carries
+// no success data, and the success branch carries no error for the caller to interpret.
+// Narrowing is therefore total: after `if (!r.success) return;` the remainder IS the success
+// shape, with no third state left to reason about.
+// ---------------------------------------------------------------------------
+
+/** The only failure shape. `error` is present, never optional. */
+export interface ShippingFailure {
+  success: false;
+  error: ProviderError;
 }
 
-interface GetRatesResponse {
-  success: boolean;
-  rates?: ShippingRate[];
-  error?: ProviderError;
-}
+/**
+ * A Shipping operation result: the success payload `T` tagged `success: true`, or the
+ * bounded failure. Callers must narrow on `success` before touching anything else.
+ *
+ * NARROWING PATTERN — use `if (result.success === false) { …handle…; return; }`.
+ *
+ * Not a style preference. This project does not enable `strictNullChecks`, and without it
+ * TypeScript declines to narrow a discriminated union through NEGATED TRUTHINESS: `if
+ * (!result.success)` leaves the value un-narrowed, so `result.error` does not compile.
+ * `=== false`, `=== true`, plain `if (result.success)`, and early-return all narrow
+ * correctly — verified against this repository's own tsconfig.
+ *
+ * `=== false` was the FAIL-OPEN spelling under the previous `success?: boolean` contract,
+ * because `undefined === false` is false and an absent flag sailed through as success. It
+ * is fail-closed here: `success` is a required literal `true | false`, so there is no third
+ * value for the comparison to miss. tests/quality/shipping-client-type-contract.test.mjs
+ * asserts that requirement for all 17 operations, which is what keeps this safe.
+ */
+export type ShippingResult<T> = ({ success: true } & T) | ShippingFailure;
 
-interface PurchaseLabelResponse {
-  success: boolean;
-  label?: LabelArtifact;
+export type AddressValidationResponse = ShippingResult<{ result: AddressValidationResult }>;
+
+export type GetRatesResponse = ShippingResult<{ rates: ShippingRate[] }>;
+
+export type PurchaseLabelResponse = ShippingResult<{
+  label: LabelArtifact;
   providerShipmentId?: string;
-  error?: ProviderError;
-}
+}>;
 
-interface GetTrackingResponse {
-  success: boolean;
+export type GetTrackingResponse = ShippingResult<{
   status?: string;
   estimatedDelivery?: string;
   events?: ProviderTrackingEvent[];
-  error?: ProviderError;
+}>;
+
+/**
+ * Tracking simulation. Spelled as its own `ShippingResult` rather than
+ * `GetTrackingResponse & { isSimulated?: boolean }`: intersecting a union distributes over
+ * BOTH branches, which would have re-attached success-only data to the failure branch.
+ */
+export type SimulateTrackingResponse = ShippingResult<{
+  status?: string;
+  estimatedDelivery?: string;
+  events?: ProviderTrackingEvent[];
+  isSimulated?: boolean;
+}>;
+
+export type TestConnectionResponse = ShippingResult<{ message?: string }>;
+
+export interface ProviderStatusEntry {
+  providerId: string;
+  isActive: boolean;
+  environment?: string;
+  configuredAt?: string;
+  updatedAt?: string;
+  maskedCredentials?: Record<string, string>;
+  lastTestedAt?: string | null;
+  lastTestResult?: 'success' | 'failed' | null;
 }
 
-interface TestConnectionResponse {
-  success: boolean;
-  message?: string;
-  error?: ProviderError;
-}
-
-interface ProvidersStatusResponse {
-  providers: {
-    providerId: string;
-    isActive: boolean;
-    environment?: string;
-    configuredAt?: string;
-    updatedAt?: string;
-    maskedCredentials?: Record<string, string>;
-    lastTestedAt?: string | null;
-    lastTestResult?: 'success' | 'failed' | null;
-  }[];
+export type ProvidersStatusResponse = ShippingResult<{
+  providers: ProviderStatusEntry[];
   activeProviderId: string | null;
-}
+}>;
 
-async function apiCall<T>(path: string, body?: unknown): Promise<T> {
-  const response = await fetch(path, {
-    method: body !== undefined ? 'POST' : 'GET',
-    headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  if (!response.ok) {
-    // Phase 2.9.2 — when the server returns a non-2xx (e.g. HTTP 504 from a
-    // proxy timeout), the body may be either a structured envelope
-    // ({success:false, error:{...}}) OR a string/empty. Previously this
-    // path coerced an object error to "[object Object]" via new Error(),
-    // erasing the stage/code. Now: if the body is already a structured
-    // {success:false} envelope we return it directly so stage/code/message
-    // survive intact; otherwise we throw a string with the best signal.
-    const errorData = await response.json().catch(() => null) as Record<string, unknown> | null;
-    if (errorData && errorData.success === false && typeof errorData.error === 'object' && errorData.error !== null) {
-      return errorData as T;
-    }
-    const fallback = typeof errorData?.error === 'string' ? errorData.error
-      : typeof errorData?.message === 'string' ? errorData.message
-      : `Request failed (HTTP ${response.status})`;
-    throw new Error(fallback);
-  }
-  return response.json();
-}
+export type StoreCredentialsResponse = ShippingResult<{
+  maskedCredentials?: Record<string, string>;
+}>;
 
-async function apiDelete<T>(path: string): Promise<T> {
-  const response = await fetch(path, { method: 'DELETE' });
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData?.error || errorData?.message || `Request failed (HTTP ${response.status})`);
-  }
-  return response.json();
+/** No payload beyond the tag: the removal either happened or it did not. */
+export type RemoveCredentialsResponse = ShippingResult<{ removed?: true }>;
+
+export type SetActiveProviderResponse = ShippingResult<{ activeProviderId: string | null }>;
+
+export type GetActiveProviderResponse = ShippingResult<{
+  activeProviderId: string | null;
+  environment?: 'test' | 'production' | null;
+}>;
+
+export type ReplayWebhookResponse = ShippingResult<{
+  replayEventId?: string;
+  originalEventId?: string;
+  processingResult?: string;
+}>;
+
+// ---------------------------------------------------------------------------
+// Phase 4.0 M3 — migration containment.
+//
+// The DEV Shipping sidecar that backed every operation below was ELIMINATED: it
+// exposed 22 unauthenticated routes, including an arbitrary-URL label proxy
+// (full-read SSRF), unauthenticated carrier-credential create/read/delete,
+// active-provider mutation, and real provider calls that spend money.
+//
+// This module keeps its exported surface so callers still compile and render,
+// but performs NO network call. Every operation resolves — never rejects — to a
+// bounded, non-retryable SHIPPING_UNAVAILABLE envelope. Two rules drive that
+// shape: callers must never be shown a fabricated rate, label, tracking event,
+// or configured-provider state; and four call sites in ShippingCenter have no
+// try/catch, so a rejection would strand them in a permanent loading state.
+//
+// Provider connectivity returns in M7e, store-owned and server-authoritative,
+// on the M6 encrypted-credential/audit/idempotency foundation.
+// ---------------------------------------------------------------------------
+
+/** Bounded, non-retryable code every Shipping operation now returns. */
+export const SHIPPING_UNAVAILABLE_CODE = 'SHIPPING_UNAVAILABLE';
+
+/** Customer-facing wording: states the fact, promises no retry, leaks nothing. */
+const SHIPPING_UNAVAILABLE_MESSAGE =
+  'Shipping provider services are unavailable while the shipping backend is being rebuilt.';
+
+/** A fresh envelope per call — never a shared object a caller could mutate. */
+function unavailable(): ShippingFailure {
+  return {
+    success: false,
+    error: { code: SHIPPING_UNAVAILABLE_CODE, message: SHIPPING_UNAVAILABLE_MESSAGE, retryable: false },
+  };
 }
 
 export async function storeProviderCredentials(
-  providerId: string,
-  credentials: { apiKey?: string; apiSecret?: string; accountId?: string },
-  environment: 'test' | 'production'
-): Promise<{ success: boolean; maskedCredentials?: Record<string, string> }> {
-  return apiCall('/api/shipping/credentials', { providerId, credentials, environment });
+  _providerId: string,
+  _credentials: { apiKey?: string; apiSecret?: string; accountId?: string },
+  _environment: 'test' | 'production'
+): Promise<StoreCredentialsResponse> {
+  // Credentials are never transmitted, stored, echoed, or logged here.
+  return unavailable();
 }
 
-export async function removeProviderCredentials(providerId: string): Promise<{ success: boolean }> {
-  return apiDelete(`/api/shipping/credentials/${providerId}`);
+export async function removeProviderCredentials(_providerId: string): Promise<RemoveCredentialsResponse> {
+  return unavailable();
 }
 
-export async function setActiveProvider(providerId: string | null): Promise<{ success: boolean; activeProviderId?: string | null }> {
-  return apiCall('/api/shipping/active-provider', { providerId });
+export async function setActiveProvider(_providerId: string | null): Promise<SetActiveProviderResponse> {
+  return unavailable();
 }
 
-export async function getActiveProvider(): Promise<{ activeProviderId: string | null; environment?: 'test' | 'production' | null }> {
-  return apiCall('/api/shipping/active-provider');
+export async function getActiveProvider(): Promise<GetActiveProviderResponse> {
+  // The failure branch carries NO `activeProviderId` at all. Previously this returned
+  // `{ …unavailable(), activeProviderId: null }`, and a caller that skipped the check
+  // read that null as "no provider configured" — an outage asserting a fact about the
+  // store. Absent beats null: there is now nothing to misread.
+  return unavailable();
 }
 
 export async function getProvidersStatus(): Promise<ProvidersStatusResponse> {
-  return apiCall('/api/shipping/providers-status');
+  // Same rule: no empty `providers` array on the failure branch. An empty list is
+  // indistinguishable from a genuinely unconfigured store, so it is not offered.
+  return unavailable();
 }
 
-export async function testConnection(providerId: string): Promise<TestConnectionResponse> {
-  return apiCall('/api/shipping/test-connection', { providerId });
+export async function testConnection(_providerId: string): Promise<TestConnectionResponse> {
+  return unavailable();
 }
 
-export async function validateAddress(address: ShipmentAddress): Promise<AddressValidationResponse> {
-  return apiCall('/api/shipping/validate-address', { address });
+export async function validateAddress(_address: ShipmentAddress): Promise<AddressValidationResponse> {
+  return unavailable();
 }
 
 export async function getRates(
-  originAddress: ShipmentAddress,
-  destinationAddress: ShipmentAddress,
-  packages: ShipmentPackage[]
+  _originAddress: ShipmentAddress,
+  _destinationAddress: ShipmentAddress,
+  _packages: ShipmentPackage[]
 ): Promise<GetRatesResponse> {
-  return apiCall('/api/shipping/rates', { originAddress, destinationAddress, packages });
+  return unavailable();
 }
 
 export async function purchaseLabel(
-  originAddress: ShipmentAddress,
-  destinationAddress: ShipmentAddress,
-  packages: ShipmentPackage[],
-  selectedRateId: string,
-  carrier: string,
-  service: string,
-  shipmentRef?: string
+  _originAddress: ShipmentAddress,
+  _destinationAddress: ShipmentAddress,
+  _packages: ShipmentPackage[],
+  _selectedRateId: string,
+  _carrier: string,
+  _service: string,
+  _shipmentRef?: string
 ): Promise<PurchaseLabelResponse> {
-  // Phase 2.9.3 — same catch-tagging pattern as the pickup wrappers. Any
-  // timeout that fires above the EasyPost adapter (vite proxy, fetch
-  // TimeoutError) lands here without a stage; we infer the most likely
-  // stage (shipment_buy, since rate-shop /shipments creation is fast and
-  // the FedEx /buy is the slow leg) and upgrade the code so the friendly
-  // mapper preserves the message verbatim and the banner shows the
-  // stage chip + timeout-ui marker.
-  try {
-    return await apiCall('/api/shipping/purchase-label', {
-      originAddress, destinationAddress, packages, selectedRateId, carrier, service, shipmentRef,
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Network error';
-    const looksLikeTimeout = /timeout|timed out|aborted/i.test(message);
-    return { success: false, error: { code: looksLikeTimeout ? 'LABEL_PURCHASE_TIMEOUT' : 'NETWORK_ERROR', message: looksLikeTimeout ? `Label purchase network/proxy timeout: ${message}` : message, retryable: true, stage: 'shipment_buy' } };
-  }
+  // No label is purchased and none is fabricated — nothing is charged.
+  return unavailable();
 }
 
 // ---------------------------------------------------------------------------
-// Pickup booking — provider-specific. Backed by /api/shipping/pickup/* which
-// route to the active provider's adapter. EasyPost is wired live (real
-// /v2/pickups + /buy + /cancel). Shippo and ShipStation return NOT_IMPLEMENTED
-// so the UI can honestly distinguish live booking vs capability-gated.
+// Pickup booking — formerly routed to the active provider's adapter through the
+// DEV sidecar. That backend is eliminated, so no pickup is created, bought, or
+// cancelled: every call resolves to the bounded unavailable envelope. Booking
+// returns in M7e.
 // ---------------------------------------------------------------------------
 export interface PickupRateDTO {
   id: string;
@@ -181,29 +239,23 @@ export interface PickupRateDTO {
   rate: number;
   currency: string;
 }
-export interface CreatePickupResponse {
-  success: boolean;
+export type CreatePickupResponse = ShippingResult<{
   providerPickupId?: string;
   status?: string;
   rates?: PickupRateDTO[];
-  error?: ProviderError;
-}
-export interface BuyPickupResponse {
-  success: boolean;
+}>;
+export type BuyPickupResponse = ShippingResult<{
   providerPickupId?: string;
   confirmationNumber?: string;
   status?: string;
   cost?: number;
   currency?: string;
-  error?: ProviderError;
-}
-export interface CancelPickupResponse {
-  success: boolean;
+}>;
+export type CancelPickupResponse = ShippingResult<{
   providerPickupId?: string;
   status?: string;
-  error?: ProviderError;
-}
-export async function createProviderPickup(params: {
+}>;
+export async function createProviderPickup(_params: {
   providerId?: string;
   pickupAddress: ShipmentAddress;
   minDatetime: string;
@@ -213,38 +265,14 @@ export async function createProviderPickup(params: {
   carrier?: string;
   isAccountAddress?: boolean;
 }): Promise<CreatePickupResponse> {
-  // Wrap network errors as structured CreatePickupResponse so the caller never
-  // has to deal with a thrown Error in addition to {success:false}. This keeps
-  // the silent-failure surface tiny.
-  // Phase 2.9.2 — tag the catch path with stage='pickup_create' so any
-  // timeout that fires above the adapter (vite proxy, fetch-layer
-  // TimeoutError, dropped socket) still arrives at the UI with a stage
-  // attached. Without this the friendly-error mapper falls back to the
-  // generic timeout banner with no stage hint.
-  try {
-    return await apiCall('/api/shipping/pickup/create', params);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Network error';
-    const looksLikeTimeout = /timeout|timed out|aborted/i.test(message);
-    return { success: false, error: { code: looksLikeTimeout ? 'PICKUP_CREATE_TIMEOUT' : 'NETWORK_ERROR', message: looksLikeTimeout ? `Pickup create network/proxy timeout: ${message}` : message, retryable: true, stage: 'pickup_create' } };
-  }
+  return unavailable();
 }
-export async function buyProviderPickup(providerPickupId: string, providerRateId: string, providerId?: string): Promise<BuyPickupResponse> {
-  try {
-    return await apiCall('/api/shipping/pickup/buy', { providerId, providerPickupId, providerRateId });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Network error';
-    const looksLikeTimeout = /timeout|timed out|aborted/i.test(message);
-    return { success: false, error: { code: looksLikeTimeout ? 'PICKUP_BUY_TIMEOUT' : 'NETWORK_ERROR', message: looksLikeTimeout ? `Pickup buy network/proxy timeout: ${message}` : message, retryable: true, stage: 'pickup_buy' } };
-  }
+export async function buyProviderPickup(_providerPickupId: string, _providerRateId: string, _providerId?: string): Promise<BuyPickupResponse> {
+  // No pickup is booked and none is fabricated — nothing is charged.
+  return unavailable();
 }
-export async function cancelProviderPickup(providerPickupId: string, providerId?: string): Promise<CancelPickupResponse> {
-  try {
-    return await apiCall('/api/shipping/pickup/cancel', { providerId, providerPickupId });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Network error';
-    return { success: false, error: { code: 'NETWORK_ERROR', message, retryable: true, stage: 'pickup_cancel' } };
-  }
+export async function cancelProviderPickup(_providerPickupId: string, _providerId?: string): Promise<CancelPickupResponse> {
+  return unavailable();
 }
 
 // Service-point locator entry point. Routes to carrier-specific adapters in
@@ -255,11 +283,11 @@ export { findServicePoints, isAnyLocatorConfigured, getConfiguredCarriers } from
 export type { LocatorQuery, LocatorResult, DispatcherQuery } from './locators';
 
 export async function syncTracking(
-  trackingNumber: string,
-  carrier: string,
-  providerShipmentId?: string
+  _trackingNumber: string,
+  _carrier: string,
+  _providerShipmentId?: string
 ): Promise<GetTrackingResponse> {
-  return apiCall('/api/shipping/tracking', { trackingNumber, carrier, providerShipmentId });
+  return unavailable();
 }
 
 export interface BulkSyncShipmentInput {
@@ -280,38 +308,36 @@ export interface BulkSyncResult {
   newEventCount?: number;
 }
 
-export interface BulkSyncResponse {
-  success: boolean;
-  results?: BulkSyncResult[];
-  summary?: {
+export type BulkSyncResponse = ShippingResult<{
+  results: BulkSyncResult[];
+  summary: {
     total: number;
     updated: number;
     unchanged: number;
     failed: number;
     testLimitation: number;
   };
-  error?: { code: string; message: string };
-}
+}>;
 
 export async function bulkSyncTracking(
-  shipments: BulkSyncShipmentInput[],
-  batchSize?: number,
-  delayMs?: number
+  _shipments: BulkSyncShipmentInput[],
+  _batchSize?: number,
+  _delayMs?: number
 ): Promise<BulkSyncResponse> {
-  return apiCall('/api/shipping/bulk-sync', { shipments, batchSize, delayMs });
+  return unavailable();
 }
 
 export async function simulateTrackingEvent(
-  trackingNumber: string,
-  carrier: string
-): Promise<GetTrackingResponse & { isSimulated?: boolean }> {
-  return apiCall('/api/shipping/simulate-tracking-event', { trackingNumber, carrier });
+  _trackingNumber: string,
+  _carrier: string
+): Promise<SimulateTrackingResponse> {
+  return unavailable();
 }
 
-export interface WebhookLogResponse {
+export type WebhookLogResponse = ShippingResult<{
   events: WebhookEventSummary[];
   total: number;
-}
+}>;
 
 export interface WebhookEventSummary {
   id: string;
@@ -331,26 +357,17 @@ export interface WebhookEventSummary {
   retryCount: number;
 }
 
-export async function getWebhookLog(filters?: {
+export async function getWebhookLog(_filters?: {
   providerId?: string;
   trackingNumber?: string;
   processingResult?: string;
   limit?: number;
 }): Promise<WebhookLogResponse> {
-  const params = new URLSearchParams();
-  if (filters?.providerId) params.set('providerId', filters.providerId);
-  if (filters?.trackingNumber) params.set('trackingNumber', filters.trackingNumber);
-  if (filters?.processingResult) params.set('processingResult', filters.processingResult);
-  if (filters?.limit) params.set('limit', filters.limit.toString());
-  return apiCall(`/api/shipping/webhook-log?${params.toString()}`);
+  // No empty `events` array on the failure branch: "none arrived" and "nothing is
+  // ingesting" are different facts, and only the second one is true.
+  return unavailable();
 }
 
-export async function replayWebhookEvent(webhookEventId: string): Promise<{
-  success: boolean;
-  replayEventId?: string;
-  originalEventId?: string;
-  processingResult?: string;
-  error?: ProviderError;
-}> {
-  return apiCall('/api/shipping/replay-event', { webhookEventId });
+export async function replayWebhookEvent(_webhookEventId: string): Promise<ReplayWebhookResponse> {
+  return unavailable();
 }

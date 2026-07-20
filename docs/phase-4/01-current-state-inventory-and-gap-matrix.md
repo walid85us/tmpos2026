@@ -43,8 +43,8 @@
 | Invoices | `Invoices` | store (`invoices`) / `mem` | `invoices` | none | none | none | in-mem / none | mock | no durable invoices; no numbering integrity | M7b |
 | Services | `Services` | store (`services`) / `mem` | `services` | none | none | none | in-mem / none | mock | service catalog lost on reload | M7d |
 | Supply Chain | `SupplyChain` | store (`suppliers`,`purchaseOrders`,`grns`) / `mem` | `supply-chain`→`supply_chain` | none | none | none | in-mem / none | mock | PO/GRN workflow non-durable | M7c |
-| Shipping Center | `ShippingCenter` | store (`shipments`) + `utils/sla.ts` / `mem`+`ss` | `shipping` + subperms | `/api/shipping/label-proxy` (dev-only) | none | none | in-mem; SLA policy in `ss` / packing notes | partial | label-proxy 404s in static prod; shipments in-mem | M7e |
-| Shipping Providers | `ShippingProvidersPage` (+ `ShippingCenter` settings tab, `src/shipping/providerRegistry.ts`) | local / `mem` | `shipping` (standalone page mis-gates on `manage_shipping_settings`, not `configure_shipping_provider` + plan) | `/api/shipping/*` (dev-only, **unauth**) | none | none | **credentials in an unauthenticated global in-memory `Map` keyed by providerId only** (`server/credential-store.ts`); env-gated webhook-verify bypass; no audit | mock | credential pattern is the **anti-pattern the store-owned payment gateway must NOT copy** (unauth routes, global RAM secrets, no store scope, SSRF, opt-in webhook verify); Shipping upgraded to the payment credential/security standard in **M7e** ([06](./06-module-migration-map-m7.md)) | M7e |
+| Shipping Center | `ShippingCenter` | store (`shipments`) + `utils/sla.ts` / `mem`+`ss` | `shipping` + subperms | **none** (label-proxy eliminated M3) | none | none | in-mem; SLA policy in `ss` / packing notes | partial | label preview shows a bounded unavailable state; shipments in-mem | M7e |
+| Shipping Providers | `ShippingProvidersPage` (+ `ShippingCenter` settings tab, `src/shipping/providerRegistry.ts`) | local / `mem` | `shipping` (standalone page mis-gates on `manage_shipping_settings`, not `configure_shipping_provider` + plan) | **none** (sidecar eliminated M3) | none | none | ~~credentials in an unauthenticated global in-memory `Map`~~ **removed with `server/credential-store.ts`**; page now renders a bounded service-unavailable state and all writes are disabled | mock | credential pattern is the **anti-pattern the store-owned payment gateway must NOT copy** (unauth routes, global RAM secrets, no store scope, SSRF, opt-in webhook verify); Shipping upgraded to the payment credential/security standard in **M7e** ([06](./06-module-migration-map-m7.md)) | M7e |
 | Returns | `ReturnsPortal` | store (`returns`,`rmas`) / `mem` | `returns` + `isWriteBlocked` + subperms | none | none | none | in-mem / status-note | mock | RMA/return flow lost on reload | M7d |
 | Marketing | `Marketing` | static/local / `mem` | `marketing` (route only) | none | none | none | none | mock | purely static mock UI; no data model | *out-of-scope: post-production enhancement* |
 | Reports | `Reports` | static/local / `mem` | `reports` (route only) | none | none | none | none | mock | mock charts; does NOT read live store data | M7h (cross-module read-model) |
@@ -114,12 +114,24 @@ All owner data originates in `src/owner/mockData.ts` (SEED) with a **`sessionSto
 
 ## E. Server / API surfaces (all DEV-only sidecars, none in production build)
 
-### Shipping API — `server/index.ts` (:5001, started by `npm run dev`) — **unauthenticated**
-23 routes, **no auth/session/CSRF anywhere**; state is an in-memory `Map`. Highlights:
+### Shipping API — `server/index.ts` (:5001) — **ELIMINATED in Phase 4.0 M3**
+**Status: REMOVED.** The sidecar and its whole cluster (`server/index.ts`, `credential-store.ts`,
+`event-processor.ts`, `adapters/{easypost,shippo,shipstation}.ts`, `types.ts`) were deleted; the
+Vite `/api/shipping` proxy was removed; and `npm run dev` no longer starts a sidecar. Nothing
+listens on :5001, so the `.replit` 5001→3000 external mapping is inert. Rebuild is **M7e**,
+store-owned and server-authoritative on the M6 encrypted-credential foundation.
+
+Historical record of what was removed — **22 routes** (verified by enumeration at the elimination
+commit; this document previously recorded 23, which was never accurate), **no auth/session/CSRF
+anywhere**, state in an in-memory `Map`:
 - **`GET /api/shipping/label-proxy?url=` → `fetch(url)` verbatim, streamed back → OPEN SSRF** (no scheme/host allowlist).
-- `POST /api/shipping/credentials` stores **live carrier API keys in process memory**, unauthenticated; the same open port both sets and uses them.
-- `POST /api/shipping/webhook/:providerId` + `/replay-event` ingest/replay **unauthenticated, no provider-signature verify**.
-- Provider adapters (`easypost/shippo/shipstation.ts`) egress to **hardcoded** carrier hosts (not the SSRF surface).
+- `POST /api/shipping/credentials` stored **live carrier API keys in process memory**, unauthenticated; the same open port both set and used them. `GET /providers-status` returned first-4/last-4 of each stored key.
+- `POST /api/shipping/webhook/:providerId` + `/replay-event` ingested/replayed **unauthenticated, no provider-signature verify** (all three `SHIPPING_WEBHOOK_SECRET_*` were unset, so verification was skipped entirely), and persisted attacker-supplied payloads to `data/webhook-audit-log.json`.
+- Provider adapters egressed to **hardcoded** carrier hosts (not the SSRF surface); deleted with the sidecar because it was their only caller.
+
+**Remaining unauthenticated exposure is the Identity API only** — see the next section. Do not read
+"Shipping sidecar removed" as "G-UNAUTH closed": `POST /identity/resolve` is still unauthenticated
+and is now tracked by `TMPOS-UNAUTH-IDENTITY-RESOLVE`.
 
 ### Identity API — `server/platform-identity/server.ts` (:5002, `npm run identity:api` only) — DEV-only, master-gated
 Master flag `ENABLE_SUPABASE_PLATFORM_IDENTITY` (default OFF ⇒ only `/health`+`/readiness`).
@@ -150,10 +162,10 @@ Severity: **C** critical (blocks production / security), **H** high, **M** mediu
 |---|---|---|---|---|
 | GAP-01 | C | Live authorization is 100% client-side; browser role/`sessionStorage` establishes authority; no server re-check. | M5 | G-CLIENTAUTH |
 | GAP-02 | C | No server-issued admin session / no separate Backend CP login boundary; no cookie, no CSRF, no MFA. | M4 | G-CPLOGIN |
-| GAP-03 | C | Open SSRF — `GET /api/shipping/label-proxy?url=` fetches arbitrary URLs unauthenticated. | M8 (design M3) | G-SSRF |
-| GAP-04 | C | Entire Shipping API unauthenticated (23 routes), incl. live-label purchase, pickups, webhook ingest/replay. | M3/M8 | G-UNAUTH |
+| GAP-03 | C | ~~Open SSRF — `GET /api/shipping/label-proxy?url=` fetches arbitrary URLs unauthenticated.~~ **CLOSED (M3)** — route and sidecar deleted; no replacement request-controlled fetch exists anywhere in `server/`. Residual G-SSRF work is the M7e/M8 provider egress boundary, not this route. | M3 (done) → M7e/M8 egress | G-SSRF |
+| GAP-04 | C | ~~Entire Shipping API unauthenticated (22 routes), incl. live-label purchase, pickups, webhook ingest/replay.~~ **CLOSED (M3)** — all 22 routes eliminated with the sidecar. (Count corrected 23→22; verified by enumeration.) | M3 (done) | G-UNAUTH |
 | GAP-05 | C | Unauthenticated Postgres write — `/identity/resolve` upserts identity with unverified caller UID. | M3/M5 | G-UNAUTH |
-| GAP-06 | C | Unauthenticated in-memory secret store — `POST /credentials` holds live carrier keys in RAM. | M3/M8 | G-SECRETS |
+| GAP-06 | C | ~~Unauthenticated in-memory secret store — `POST /credentials` holds live carrier keys in RAM.~~ **CLOSED (M3)** — `credential-store.ts` deleted; no in-memory credential store remains. Encrypted durable secrets + rotation remain M6/M8. | M3 (done) → M6/M8 encryption | G-SECRETS |
 | GAP-07 | C | No durable audit — `auditEventWriter` built but unwired; zero compliance trail; owner "audit log" is forgeable `sessionStorage`. | M6 | G-AUDIT |
 | GAP-08 | C | No durable business persistence — all POS/inventory/invoice/repair/customer/etc. writes lost on reload. | M7a–e | G-PERSIST |
 | GAP-09 | C | No tenant/store isolation — `tenant-1` hardcoded; global seed; no `tenantId` scoping in the app. | M5/M7 | G-ISOLATION |
@@ -175,6 +187,6 @@ Severity: **C** critical (blocks production / security), **H** high, **M** mediu
 | GAP-24 | M | Historical (pre-M0-fix) Firestore exploitation cannot be disproven with available evidence (historical evidence limitation, not an active vuln). | M8→M9 | G-HIST |
 | GAP-25 | M | Two independent Express apps, zero shared middleware — protection re-implemented/omitted per route. | M3 | G-UNAUTH (shared middleware) |
 
-**Inventory totals:** 23 tenant surfaces · 18 owner surfaces (incl. 2 unrouted) · 1 DEV BCP shell + 1 pilot · 2 Express apps (Shipping 23 routes; Identity ~8 endpoints + C01–C07 lenses) · 8 durable tables (identity/authz/audit only) · **26 gaps (11 Critical, 9 High, 6 Medium)**.
+**Inventory totals:** 23 tenant surfaces · 18 owner surfaces (incl. 2 unrouted) · 1 DEV BCP shell + 1 pilot · **1 Express app** (Identity ~8 endpoints + C01–C07 lenses; the Shipping sidecar's 22 routes were eliminated in Phase 4.0 M3) · 8 durable tables (identity/authz/audit only) · **26 gaps (11 Critical, 9 High, 6 Medium)** — GAP-03/04/06 are now closed at source; the gap COUNT is left unchanged so the historical matrix stays comparable.
 
 > **Note on severity semantics:** a gap's defect severity here may differ from its go-live *gate* severity in [08](./08-production-gate-and-risk-register.md) — a gate can be more blocking than its source defect (e.g. GAP-18 defect *High* → gate G-EMU *BLOCKER*; GAP-24 defect *Medium* → gate G-HIST *HIGH*). This is intentional.

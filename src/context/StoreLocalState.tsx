@@ -147,6 +147,22 @@ export interface POSOperator {
   pin: string;
 }
 
+/**
+ * Phase 4.0 M3 — runtime reachability of the Shipping backend, held SEPARATELY from
+ * `shippingProviderConfig` (which is what the store has CONFIGURED, not what is reachable).
+ *
+ * Deliberately three-valued. Reachability was previously a page-local `useState(false)`
+ * boolean, which cannot distinguish "not probed yet" from "probed, and reachable" — so the
+ * whole pre-probe window read as available and let backend-backed writes through.
+ * `unknown` is the initial state and callers must treat it as fail-closed.
+ *
+ * Availability NEVER rewrites configuration: an unreachable service says nothing about
+ * what the store configured, so `unavailable` must not be recorded as "no provider
+ * configured". That conflation is what forced operators to re-enter credentials that
+ * were never actually lost.
+ */
+export type ShippingServiceAvailability = 'unknown' | 'available' | 'unavailable';
+
 interface StoreLocalStateContextType {
   customers: Customer[];
   addCustomer: (c: Customer) => void;
@@ -294,6 +310,8 @@ interface StoreLocalStateContextType {
   updateShipmentBatch: (id: string, updates: Partial<ShipmentBatch>) => void;
   shippingProviderConfig: ShippingProviderConfig | null;
   setShippingProviderConfig: (config: ShippingProviderConfig | null) => void;
+  shippingServiceAvailability: ShippingServiceAvailability;
+  setShippingServiceAvailability: (availability: ShippingServiceAvailability) => void;
   returns: Return[];
   addReturn: (r: Return) => void;
   updateReturn: (id: string, updates: Partial<Return>) => void;
@@ -976,6 +994,9 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
   const [supplierRefundEntries, setSupplierRefundEntries] = useState<SupplierRefundEntry[]>([]);
   const [shipments, setShipments] = useState<Shipment[]>(SEED_SHIPMENTS);
   const [shippingProviderConfig, setShippingProviderConfig] = useState<ShippingProviderConfig | null>(null);
+  // Starts `unknown`, never `available`: nothing has probed the service yet, and callers
+  // must fail closed until something has.
+  const [shippingServiceAvailability, setShippingServiceAvailability] = useState<ShippingServiceAvailability>('unknown');
   const storeLocations = SEED_STORE_LOCATIONS;
 
   const getItemMovements = useCallback((stockItemId: string) => {
@@ -1602,6 +1623,7 @@ export function StoreLocalStateProvider({ children }: { children: React.ReactNod
       automationLogs, appendAutomationLogs,
       shipmentBatches, addShipmentBatch, updateShipmentBatch,
       shippingProviderConfig, setShippingProviderConfig,
+      shippingServiceAvailability, setShippingServiceAvailability,
       returns, addReturn, updateReturn,
       storeLocations, getItemMovements,
     }}>

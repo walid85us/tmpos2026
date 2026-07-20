@@ -27,7 +27,7 @@ const EXCLUDE_DIR = new Set(['node_modules', 'dist', '.git', 'agency-agents', '.
  * Baseline count of deterministic suites. Raise it when suites are added; it may never be
  * lowered to accommodate a deletion — that is the whole point of the ratchet.
  */
-export const MIN_SUITES = 63;
+export const MIN_SUITES = 73;
 
 /**
  * Literal sentinel suites. Each names a specific control whose loss must fail the run even
@@ -43,10 +43,21 @@ export const REQUIRED_SENTINELS = [
   'server/bcp-pilot/bcpActionCanonicalAuthzResolver.test.ts',  // controlled-action authorization
   'server/bcp-pilot/bcpActionRequestSecurityGuard.test.ts',    // controlled-action request security
   'server/bcp-pilot/bcpPilot.test.ts',                         // BCP security corpus
-  'tests/quality/run-tests-discovery.test.mjs',                // the ratchet's own guard test
+  'tests/quality/run-tests-discovery.test.mjs',                // the Node ratchet's own guard test
+  'tests/quality/run-frontend-tests-contract.test.mjs',        // the frontend ratchet's own guard test
+  'tests/quality/shipping-sidecar-containment.test.mjs',       // sidecar elimination / SSRF containment
+  'tests/quality/shipping-client-type-contract.test.mjs',      // Shipping result is a required discriminated union
+  'src/shipping/shippingApiClient.test.ts',                    // Shipping client is network-free
   // Frontend render tests are `.test.tsx` and run under vitest, not here; this runner still
-  // asserts the harness exists so deleting it cannot pass unnoticed.
+  // asserts the harness exists so deleting it cannot pass unnoticed. vitest has no count
+  // ratchet of its own, so without these entries deleting one is a SILENT green — and
+  // ReturnsPortal.test.tsx is the only guard covering the clipboard/mailto/rendered-text
+  // channel, which no `.mjs` suite can see.
   'src/components/AccessGuard.test.tsx',
+  'src/components/ReturnsPortal.test.tsx',             // label URL: text/clipboard/mailto channel
+  'src/components/ShippingCenter.test.tsx',            // label URL: DOM/attribute/request channel
+  'src/components/ShippingProvidersPage.test.tsx',     // provider action result handling
+  'src/context/StoreLocalState.test.tsx',              // availability vs. configured state
 ];
 
 export const isTestPath = (f) =>
@@ -121,6 +132,12 @@ export function validateDiscovery({
   // directory of the same name or an empty stub, which would prove nothing. And a sentinel
   // this runner is supposed to execute must actually be in the discovered set — present but
   // uncollected (moved out of a root) has to fail just as loudly as deleted.
+  // RESIDUAL (not closed here): a `.test.tsx` sentinel runs under vitest, so this runner
+  // never executes it and `suiteContentProblem` never sees it — leaving `exists && size
+  // > 0`, which a non-empty stub satisfies, and vitest has no count ratchet of its own.
+  // Requiring a real `it(`/`test(` declaration closes that, but it changes the contract
+  // this function's own guard suite asserts (tests/quality/run-tests-discovery.test.mjs),
+  // which is outside this pass's authorised file set. Tracked as an open residual.
   const missingSentinels = sentinels.filter((s) => {
     const abs = join(repoRoot, s);
     if (!existsSync(abs)) return true;

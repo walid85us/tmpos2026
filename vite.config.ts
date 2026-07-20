@@ -48,10 +48,14 @@ export default defineConfig(({mode}) => {
         ],
       },
       proxy: {
-        '/api/shipping': {
-          target: 'http://localhost:5001',
-          changeOrigin: true,
-        },
+        // Phase 4.0 M3 — the '/api/shipping' proxy to the DEV sidecar (:5001) was
+        // REMOVED with the sidecar itself. It bridged any browser that could load
+        // the preview to 22 unauthenticated routes (incl. an arbitrary-URL label
+        // proxy) with no auth, CORS, origin check, or rate limit — and because
+        // Vite dialled the upstream from inside the container, binding the sidecar
+        // to loopback would NOT have contained it. Do not reintroduce it; the
+        // Shipping backend returns in M7e, server-authoritative and store-owned.
+        //
         // Phase 1.5 M4 — dev-only same-origin proxy to the isolated identity API
         // (started via `npm run identity:api` on :5002). Lets the Supabase pilot
         // call the UNCHANGED M3 whoami diagnostic without any backend CORS change.

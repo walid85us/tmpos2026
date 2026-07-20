@@ -243,7 +243,7 @@ test('the ratchet output is bounded: counts and sentinel paths only', () => {
   assert.match(out, /discovery\s+FAIL/);
   assert.ok(!out.includes(dir), 'must not leak an absolute path');
   assert.ok(!out.includes(REPO_ROOT), 'must not leak the repository path');
-  assert.ok(!out.includes(process.env.HOME ?? ' never'), 'must not leak environment data');
+  assert.ok(!out.includes(process.env.HOME ?? ' never'), 'must not leak environment data');
 });
 
 test('the runner CLI exits non-zero when the real discovery is below the ratchet', () => {

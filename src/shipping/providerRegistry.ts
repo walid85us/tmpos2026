@@ -28,12 +28,8 @@ export function getAvailableProviders(): { id: string; name: string; description
   ];
 }
 
-export async function getActiveProviderId(): Promise<string | null> {
-  try {
-    const response = await fetch('/api/shipping/active-provider');
-    const data = await response.json();
-    return data.activeProviderId || null;
-  } catch {
-    return null;
-  }
-}
+// Phase 4.0 M3 — `getActiveProviderId()` was removed with the DEV Shipping
+// sidecar it queried. It had no caller anywhere in the repo. The metadata above
+// is pure presentation (catalog names, descriptions, and the fields a future
+// connection form will collect) and asserts no connectivity or authority: a
+// provider appearing here is NOT configured, active, or reachable.

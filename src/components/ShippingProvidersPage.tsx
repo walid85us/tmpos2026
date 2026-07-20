@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useStoreLocalState } from '../context/StoreLocalState';
@@ -21,14 +21,27 @@ const PROVIDER_COLORS: Record<string, { bg: string; border: string; text: string
 };
 
 export default function ShippingProvidersPage({ embedded = false, onProviderChange }: { embedded?: boolean; onProviderChange?: () => void }) {
-  const { setShippingProviderConfig } = useStoreLocalState();
+  const { setShippingProviderConfig, shippingServiceAvailability, setShippingServiceAvailability } = useStoreLocalState();
   const { checkSubPermission, isWriteBlocked } = useAccess();
   const canManage = checkSubPermission('manage_shipping_settings');
+  // Phase 4.0 M3 — the backend that served provider configuration was eliminated.
+  // Every write here (save / test / activate / deactivate / delete) needed it, so
+  // unavailability is folded into the same gate that already blocks writes.
+  //
+  // Availability is read from shared state and is THREE-valued. It was a local
+  // `useState(false)`, which cannot tell "not probed yet" from "probed, and reachable" —
+  // so the entire pre-probe window read as available and let writes through. Only an
+  // explicit `available` opens the gate; `unknown` fails closed.
+  const serviceUnavailable = shippingServiceAvailability === 'unavailable';
+  const writesBlocked = isWriteBlocked || shippingServiceAvailability !== 'available';
   const location = useLocation();
   const navigate = useNavigate();
   const isShippingContext = location.pathname.startsWith('/shipping/');
 
-  const availableProviders = getAvailableProviders();
+  // Phase 4.0 M3 — memoised: this returned a fresh array literal on every
+  // render, which made `fetchStatus` unstable, which refired its effect every
+  // render — an unbounded request loop. Static catalog data, so [] deps.
+  const availableProviders = useMemo(() => getAvailableProviders(), []);
 
   const [providersState, setProvidersState] = useState<{
     providers: {
@@ -53,10 +66,32 @@ export default function ShippingProvidersPage({ embedded = false, onProviderChan
   const [testResult, setTestResult] = useState<{ providerId: string; success: boolean; message: string } | null>(null);
   const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // A mutating action is in flight. Cleared in `finally` on every path, so the controls
+  // can never be left permanently inert by a failure.
+  const [actionPending, setActionPending] = useState(false);
+  // A real action failure that is NOT the migration condition — kept distinct so the two
+  // are never conflated in the UI.
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const fetchStatus = useCallback(async () => {
     try {
       const status = await shippingApi.getProvidersStatus();
+      // Phase 4.0 M3 — an unavailable service returns an EMPTY provider list, which
+      // is byte-identical to a genuinely unconfigured store. Reading `success` is
+      // the only way to tell them apart, and the operator must be told which it is:
+      // "not configured" invites them to configure something that cannot be saved.
+      if (status.success === false) {
+        setShippingServiceAvailability('unavailable');
+        // `providersState` is this page's view of what the SERVICE reported, so clearing
+        // it is correct — the service reported nothing. `shippingProviderConfig` is what
+        // the STORE configured, which an outage cannot change. Nulling it here recorded
+        // "service down" as "no provider configured" and made recovery require re-entering
+        // credentials that were never lost.
+        setProvidersState({ providers: [], activeProviderId: null });
+        setLoading(false);
+        return;
+      }
+      setShippingServiceAvailability('available');
       setProvidersState({
         providers: status.providers.map(p => ({
           providerId: p.providerId,
@@ -92,10 +127,15 @@ export default function ShippingProvidersPage({ embedded = false, onProviderChan
         setShippingProviderConfig(null);
       }
     } catch {
+      // Never swallow: a failure here is reported as unavailable, not as an
+      // empty (and therefore "unconfigured-looking") store. Same rule as above —
+      // the stored configuration is not touched.
+      setShippingServiceAvailability('unavailable');
+      setProvidersState({ providers: [], activeProviderId: null });
     } finally {
       setLoading(false);
     }
-  }, [availableProviders, setShippingProviderConfig]);
+  }, [availableProviders, setShippingProviderConfig, setShippingServiceAvailability]);
 
   useEffect(() => { fetchStatus(); }, [fetchStatus]);
 
@@ -112,7 +152,7 @@ export default function ShippingProvidersPage({ embedded = false, onProviderChan
   }
 
   async function handleSaveCredentials(providerId: string) {
-    if (isWriteBlocked || !canManage) return;
+    if (writesBlocked || !canManage) return;
 
     const providerDef = availableProviders.find(p => p.id === providerId);
     if (!providerDef) return;
@@ -140,42 +180,127 @@ export default function ShippingProvidersPage({ embedded = false, onProviderChan
         environmentInput,
       );
 
-      if (result.success) {
-        setCredentialInputs({});
-        setSaveSuccess(providerId);
-        setTimeout(() => setSaveSuccess(null), 2500);
-        await fetchStatus();
-        onProviderChange?.();
+      if (result.success === false) {
+        // `if (result.success) {…}` with no else made a failed save a SILENT no-op:
+        // no message, no error, no state change. Indistinguishable from a save that
+        // worked. Nothing here echoes the submitted credential values.
+        reportActionFailure(result.error);
+        return;
       }
-    } catch {
-      setTestResult({ providerId, success: false, message: 'Failed to save credentials. Please try again.' });
+      setCredentialInputs({});
+      setSaveSuccess(providerId);
+      setTimeout(() => setSaveSuccess(null), 2500);
+      await fetchStatus();
+      onProviderChange?.();
+    } catch (e) {
+      const err = (e ?? {}) as { code?: string; message?: string };
+      reportActionFailure({ code: err.code, message: e instanceof Error ? e.message : err.message });
     }
   }
 
   async function handleSetActive(providerId: string) {
-    if (isWriteBlocked || !canManage) return;
+    if (writesBlocked || !canManage) return;
     const config = getProviderConfig(providerId);
     if (!config) return;
     try {
-      await shippingApi.setActiveProvider(providerId);
+      // The result was never bound, so refetch + parent notification ran unconditionally.
+      // Both are success signals for a call that may have changed nothing.
+      const result = await shippingApi.setActiveProvider(providerId);
+      if (result.success === false) {
+        reportActionFailure(result.error);
+        return;
+      }
       await fetchStatus();
       onProviderChange?.();
-    } catch {
-      setTestResult({ providerId, success: false, message: 'Failed to set active provider.' });
+    } catch (e) {
+      const err = (e ?? {}) as { code?: string; message?: string };
+      reportActionFailure({ code: err.code, message: e instanceof Error ? e.message : err.message });
+    }
+  }
+
+  // Phase 4.0 M3 — `handleDeactivate` and `handleRemoveConfig` ignored the client result
+  // entirely and swallowed throws, so a failed call ran the success path: refetch (which
+  // CLEARS the configured state) and the parent notification. With the containment client
+  // every call fails, so "ignored result" means "always lies". They are gated off today;
+  // the gate is temporary, and these two must be safe when it lifts.
+  //
+  // `handleSaveCredentials`, `handleSetActive` and `handleTestConnection` carried the
+  // SAME defect class (no else-branch on `success:false`; unconditional
+  // `onProviderChange?.()`) and are now closed alongside these two. Every handler in
+  // this file routes a failed result through `reportActionFailure` and returns early.
+  //
+  // Routes a failed action to the state that is actually true. SHIPPING_UNAVAILABLE is the
+  // migration condition; anything else is a real error and must not be dressed up as one.
+  // A provider can reflect a rejected key back inside its own error text, and that text
+  // is rendered. Suppressing the message entirely would destroy a real diagnostic, and a
+  // fixed generic string would hide genuine provider errors — but we know exactly what
+  // was submitted, so scrub those values and keep the rest of the message.
+  // Literal split/join, not a regex: a credential can contain regex metacharacters.
+  function redactSubmittedSecrets(message?: string): string | undefined {
+    if (!message) return message;
+    return Object.values(credentialInputs)
+      .map(v => v?.trim())
+      // Very short values would redact incidental substrings out of ordinary prose.
+      .filter((v): v is string => !!v && v.length >= 4)
+      .reduce((msg, secret) => msg.split(secret).join('[redacted]'), message);
+  }
+
+  function reportActionFailure(error?: { code?: string; message?: string }) {
+    if (error?.code === shippingApi.SHIPPING_UNAVAILABLE_CODE) {
+      setShippingServiceAvailability('unavailable');
+      setActionError(null);
+    } else {
+      setActionError(redactSubmittedSecrets(error?.message) || 'The action could not be completed.');
     }
   }
 
   async function handleDeactivate() {
-    if (isWriteBlocked || !canManage) return;
+    if (writesBlocked || !canManage || actionPending) return;
+    setActionPending(true);
+    setActionError(null);
     try {
-      await shippingApi.setActiveProvider(null);
+      const result = await shippingApi.setActiveProvider(null);
+      if (result.success === false) {
+        // No refetch and no parent notification: both are success signals, and the
+        // refetch would clear configured state that this failed call never changed.
+        reportActionFailure(result.error);
+        return;
+      }
       await fetchStatus();
       onProviderChange?.();
-    } catch {}
+    } catch (e) {
+      // Preserve a coded error. Dropping `code` here downgraded a THROWN
+      // SHIPPING_UNAVAILABLE into a generic action error, so the same condition
+      // reported two different states depending on whether it was thrown or returned.
+      const err = (e ?? {}) as { code?: string; message?: string };
+      reportActionFailure({ code: err.code, message: e instanceof Error ? e.message : err.message });
+    } finally {
+      // Always terminates, on every path — including the early return above.
+      setActionPending(false);
+    }
+  }
+
+  // Stamps a test verdict onto one provider card. Functional update: the previous
+  // inline version closed over `providersState`, so a verdict arriving after any other
+  // state change would write back a stale provider list.
+  function recordTestOutcome(providerId: string, success: boolean, message: string) {
+    setProvidersState(prev => ({
+      ...prev,
+      providers: prev.providers.map(p =>
+        p.providerId === providerId
+          ? {
+              ...p,
+              lastTestedAt: new Date().toISOString(),
+              testResult: (success ? 'success' : 'failure') as 'success' | 'failure',
+              testMessage: message,
+            }
+          : p,
+      ),
+    }));
   }
 
   async function handleTestConnection(providerId: string) {
-    if (isWriteBlocked) return;
+    if (writesBlocked) return;
 
     setTestingProvider(providerId);
     setTestResult(null);
@@ -193,41 +318,71 @@ export default function ShippingProvidersPage({ embedded = false, onProviderChan
 
     try {
       const result = await shippingApi.testConnection(providerId);
-      const success = result.success;
-      const message = success
-        ? result.message || 'Connection successful.'
-        : result.error?.message || 'Connection test failed.';
 
-      setTestResult({ providerId, success, message });
+      if (result.success === false) {
+        // `success:false` carries two different facts, told apart only by the code.
+        // SHIPPING_UNAVAILABLE is OUR outage — reporting it as "connection test failed"
+        // blames the carrier for our downtime and stamps a failure verdict on the
+        // provider card that no test ever produced. Anything else is a real verdict.
+        if (result.error.code === shippingApi.SHIPPING_UNAVAILABLE_CODE) {
+          reportActionFailure(result.error);
+        } else {
+          const message = redactSubmittedSecrets(result.error.message) || 'Connection test failed.';
+          setTestResult({ providerId, success: false, message });
+          recordTestOutcome(providerId, false, message);
+        }
+        // No parent notification on either path — nothing changed.
+        setTestingProvider(null);
+        return;
+      }
 
-      const newProviders = providersState.providers.map(p =>
-        p.providerId === providerId
-          ? {
-              ...p,
-              lastTestedAt: new Date().toISOString(),
-              testResult: (success ? 'success' : 'failure') as 'success' | 'failure',
-              testMessage: message,
-            }
-          : p
-      );
-
-      setProvidersState(prev => ({ ...prev, providers: newProviders }));
+      const message = result.message || 'Connection successful.';
+      setTestResult({ providerId, success: true, message });
+      recordTestOutcome(providerId, true, message);
       onProviderChange?.();
-    } catch {
-      setTestResult({ providerId, success: false, message: 'Connection test failed — could not reach server.' });
+    } catch (e) {
+      // Match the other four handlers: a THROWN coded error must land in the same state
+      // as a RETURNED one, or the identical condition reports two different UIs. This
+      // catch discarded the error entirely and hardcoded a carrier-blaming message.
+      const err = (e ?? {}) as { code?: string; message?: string };
+      if (err.code === shippingApi.SHIPPING_UNAVAILABLE_CODE) {
+        reportActionFailure(err);
+      } else {
+        // Phase 4.0 M3 — a THROWN genuine failure must stamp the provider card just as the
+        // RETURNED path does (recordTestOutcome), or the identical verdict shows in the
+        // inline banner while the card keeps a stale "Connected/Not Tested" badge.
+        const message = redactSubmittedSecrets(e instanceof Error ? e.message : err.message)
+          || 'Connection test failed — could not reach server.';
+        setTestResult({ providerId, success: false, message });
+        recordTestOutcome(providerId, false, message);
+      }
     }
     setTestingProvider(null);
   }
 
   async function handleRemoveConfig(providerId: string) {
-    if (isWriteBlocked || !canManage) return;
+    if (writesBlocked || !canManage || actionPending) return;
+    setActionPending(true);
+    setActionError(null);
     try {
-      await shippingApi.removeProviderCredentials(providerId);
+      const result = await shippingApi.removeProviderCredentials(providerId);
+      if (result.success === false) {
+        // Closing the panel is THE success signal for this action — it must not fire on
+        // failure, and the config must stay exactly as it was.
+        reportActionFailure(result.error);
+        return;
+      }
       setEditingProvider(null);
       await fetchStatus();
       onProviderChange?.();
-    } catch {
-      setTestResult({ providerId, success: false, message: 'Failed to remove provider configuration.' });
+    } catch (e) {
+      // Preserve a coded error. Dropping `code` here downgraded a THROWN
+      // SHIPPING_UNAVAILABLE into a generic action error, so the same condition
+      // reported two different states depending on whether it was thrown or returned.
+      const err = (e ?? {}) as { code?: string; message?: string };
+      reportActionFailure({ code: err.code, message: e instanceof Error ? e.message : err.message });
+    } finally {
+      setActionPending(false);
     }
   }
 
@@ -275,6 +430,39 @@ export default function ShippingProvidersPage({ embedded = false, onProviderChan
         </div>
       )}
 
+      {/* Phase 4.0 M3 — states the real condition: the service is unavailable, NOT
+          that this store has no provider configured. Icon + words, no retry offered. */}
+      {serviceUnavailable && (
+        <div
+          data-testid="shipping-service-unavailable"
+          role="status"
+          aria-live="polite"
+          className="mb-6 px-5 py-3 bg-amber-50 border border-amber-200 rounded-2xl flex items-start gap-2"
+        >
+          <span aria-hidden="true" className="material-symbols-outlined text-amber-500 text-sm">cloud_off</span>
+          <span className="text-xs font-bold text-amber-800">
+            Shipping provider services are unavailable while the shipping backend is being rebuilt.
+            Saving, testing, activating, and removing provider connections are disabled. This does not
+            mean your store has no provider configured — existing settings are untouched. Provider
+            configuration will return in Store Settings, managed by the store owner or a store user
+            holding the shipping-provider permission.
+          </span>
+        </div>
+      )}
+
+      {/* A genuine action failure that is NOT the migration condition. Assertive, because
+          it reports the outcome of something the operator just did. */}
+      {actionError && (
+        <div
+          data-testid="shipping-action-error"
+          role="alert"
+          className="mb-6 px-5 py-3 bg-red-50 border border-red-200 rounded-2xl flex items-start gap-2"
+        >
+          <span aria-hidden="true" className="material-symbols-outlined text-red-500 text-sm">error</span>
+          <span className="text-xs font-bold text-red-800">{actionError}</span>
+        </div>
+      )}
+
       <div className="mb-8 bg-white/80 backdrop-blur-xl p-6 rounded-[2.5rem] border border-slate-200 shadow-sm">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -283,6 +471,14 @@ export default function ShippingProvidersPage({ embedded = false, onProviderChan
               <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Active Provider</p>
               {activeProvider ? (
                 <p className="text-sm font-black text-primary">{activeProvider.providerName}</p>
+              ) : serviceUnavailable ? (
+                // Unavailable takes precedence: "No provider selected" is a claim about
+                // the store's configuration that an unreachable service cannot support.
+                <p data-testid="active-provider-unavailable"
+                  className="text-sm font-bold text-amber-700 inline-flex items-center gap-1">
+                  <span aria-hidden="true" className="material-symbols-outlined" style={{ fontSize: 14 }}>cloud_off</span>
+                  Active provider unknown — service unavailable
+                </p>
               ) : (
                 <p className="text-sm font-bold text-slate-400">No provider selected</p>
               )}
@@ -309,9 +505,9 @@ export default function ShippingProvidersPage({ embedded = false, onProviderChan
                     {activeProvider.environment}
                   </span>
                 )}
-                {canManage && !isWriteBlocked && (
-                  <button onClick={handleDeactivate}
-                    className="px-3 py-1.5 text-[10px] font-black uppercase tracking-widest text-red-500 bg-red-50 border border-red-200 rounded-xl hover:bg-red-100 transition-all">
+                {canManage && !writesBlocked && (
+                  <button onClick={handleDeactivate} disabled={actionPending}
+                    className="px-3 py-1.5 text-[10px] font-black uppercase tracking-widest text-red-500 bg-red-50 border border-red-200 rounded-xl hover:bg-red-100 transition-all disabled:opacity-40 disabled:cursor-not-allowed">
                     Deactivate
                   </button>
                 )}
@@ -350,7 +546,20 @@ export default function ShippingProvidersPage({ embedded = false, onProviderChan
                 </div>
 
                 <div className="flex items-center gap-2">
-                  {isConfigured && (
+                  {/* Phase 4.0 M3 — an unavailable service returns an EMPTY provider list,
+                      so `isConfigured` is false for every provider and this badge asserted
+                      "Not Configured" — a claim about the STORE that is not known to be
+                      true. Unavailability takes precedence: the badge reports what is
+                      actually known. Icon + words, never colour alone. */}
+                  {serviceUnavailable ? (
+                    <span
+                      data-testid="provider-status-unavailable"
+                      className="px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md bg-amber-100 text-amber-700 inline-flex items-center gap-1"
+                    >
+                      <span aria-hidden="true" className="material-symbols-outlined" style={{ fontSize: 11 }}>cloud_off</span>
+                      Status Unavailable
+                    </span>
+                  ) : isConfigured ? (
                     <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md ${
                       config.testResult === 'success' ? 'bg-emerald-100 text-emerald-700'
                       : config.testResult === 'failure' ? 'bg-red-100 text-red-700'
@@ -358,8 +567,7 @@ export default function ShippingProvidersPage({ embedded = false, onProviderChan
                     }`}>
                       {config.testResult === 'success' ? 'Connected' : config.testResult === 'failure' ? 'Error' : 'Configured'}
                     </span>
-                  )}
-                  {!isConfigured && (
+                  ) : (
                     <span className="px-2 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-md bg-slate-100 text-slate-400">
                       Not Configured
                     </span>
@@ -372,7 +580,7 @@ export default function ShippingProvidersPage({ embedded = false, onProviderChan
                     </button>
                   )}
 
-                  {canManage && !isWriteBlocked && isConfigured && !isActive && (
+                  {canManage && !writesBlocked && isConfigured && !isActive && (
                     <button onClick={() => handleSetActive(providerDef.id)}
                       className="px-4 py-2 text-[10px] font-black uppercase tracking-widest bg-primary text-white rounded-xl hover:bg-primary/90 transition-all shadow-sm">
                       Set Active
@@ -425,7 +633,7 @@ export default function ShippingProvidersPage({ embedded = false, onProviderChan
                               onChange={e => setCredentialInputs(prev => ({ ...prev, [field.key]: e.target.value }))}
                               placeholder={isConfigured ? 'Enter new value to replace' : field.placeholder}
                               className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 font-bold text-slate-700 text-sm"
-                              disabled={isWriteBlocked || !canManage}
+                              disabled={writesBlocked || !canManage}
                             />
                           </div>
                         ))}
@@ -436,7 +644,7 @@ export default function ShippingProvidersPage({ embedded = false, onProviderChan
                         <div className="flex gap-2">
                           {(['test', 'production'] as const).map(env => (
                             <button key={env} onClick={() => setEnvironmentInput(env)}
-                              disabled={isWriteBlocked || !canManage}
+                              disabled={writesBlocked || !canManage}
                               className={`px-4 py-2.5 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all ${
                                 environmentInput === env
                                   ? env === 'production'
@@ -469,7 +677,7 @@ export default function ShippingProvidersPage({ embedded = false, onProviderChan
                       )}
 
                       <div className="flex items-center gap-2 pt-2">
-                        {canManage && !isWriteBlocked && (
+                        {canManage && !writesBlocked && (
                           <>
                             <button
                               onClick={() => handleSaveCredentials(providerDef.id)}
@@ -497,7 +705,8 @@ export default function ShippingProvidersPage({ embedded = false, onProviderChan
                             {isConfigured && (
                               <button
                                 onClick={() => handleRemoveConfig(providerDef.id)}
-                                className="px-4 py-3 text-[10px] font-black uppercase tracking-widest rounded-xl bg-white border border-red-200 text-red-500 hover:bg-red-50 transition-all ml-auto">
+                                disabled={actionPending}
+                                className="px-4 py-3 text-[10px] font-black uppercase tracking-widest rounded-xl bg-white border border-red-200 text-red-500 hover:bg-red-50 transition-all ml-auto disabled:opacity-40 disabled:cursor-not-allowed">
                                 Remove
                               </button>
                             )}

@@ -43,72 +43,12 @@ import type { AutomationTriggerType, AutomationTriggerContext } from '../types';
 import { featureMatrix as staticFeatureMatrix } from '../owner/mockData';
 import { normalizeStateCode, normalizeZip, normalizePhone } from '../utils/inputNormalizers';
 
-async function convertImageToPdfBlobUrl(imageUrl: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    const proxyUrl = `/api/shipping/label-proxy?url=${encodeURIComponent(imageUrl)}`;
-    img.onload = () => {
-      try {
-        const canvas = document.createElement('canvas');
-        canvas.width = img.naturalWidth;
-        canvas.height = img.naturalHeight;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) { reject(new Error('Canvas not supported')); return; }
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(img, 0, 0);
-        const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.95);
-        const jpegBase64 = jpegDataUrl.split(',')[1];
-        const jpegBytes = Uint8Array.from(atob(jpegBase64), c => c.charCodeAt(0));
-
-        const w = img.naturalWidth;
-        const h = img.naturalHeight;
-        const enc = new TextEncoder();
-        const parts: Uint8Array[] = [];
-
-        const writeStr = (s: string) => { parts.push(enc.encode(s)); };
-        const offsets: number[] = [0, 0, 0, 0, 0, 0];
-        let pos = 0;
-        const calcPos = () => { pos = parts.reduce((a, p) => a + p.length, 0); };
-
-        writeStr('%PDF-1.4\n');
-        calcPos(); offsets[1] = pos;
-        writeStr('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n');
-        calcPos(); offsets[2] = pos;
-        writeStr('2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n');
-        calcPos(); offsets[3] = pos;
-        writeStr(`3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${w} ${h}] /Contents 4 0 R /Resources << /XObject << /Img 5 0 R >> >> >>\nendobj\n`);
-        calcPos(); offsets[4] = pos;
-        const contentStream = `q\n${w} 0 0 ${h} 0 0 cm\n/Img Do\nQ\n`;
-        writeStr(`4 0 obj\n<< /Length ${contentStream.length} >>\nstream\n${contentStream}endstream\nendobj\n`);
-        calcPos(); offsets[5] = pos;
-        writeStr(`5 0 obj\n<< /Type /XObject /Subtype /Image /Width ${w} /Height ${h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpegBytes.length} >>\nstream\n`);
-        parts.push(jpegBytes);
-        writeStr('\nendstream\nendobj\n');
-
-        calcPos();
-        const xrefPos = pos;
-        writeStr(`xref\n0 6\n0000000000 65535 f \n`);
-        for (let i = 1; i <= 5; i++) {
-          writeStr(`${offsets[i].toString().padStart(10, '0')} 00000 n \n`);
-        }
-        writeStr(`trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xrefPos}\n%%EOF\n`);
-
-        const totalLen = parts.reduce((a, p) => a + p.length, 0);
-        const pdfBuffer = new Uint8Array(totalLen);
-        let offset = 0;
-        for (const p of parts) { pdfBuffer.set(p, offset); offset += p.length; }
-
-        const blob = new Blob([pdfBuffer], { type: 'application/pdf' });
-        resolve(URL.createObjectURL(blob));
-      } catch (e) {
-        reject(e);
-      }
-    };
-    img.onerror = () => reject(new Error('Failed to load label image'));
-    img.src = proxyUrl;
-  });
-}
+// Phase 4.0 M3 — `convertImageToPdfBlobUrl` was REMOVED. It fetched the carrier
+// label image through the eliminated `/api/shipping/label-proxy` (an arbitrary-URL
+// server-side fetch) and canvas-converted it to an inline PDF. Loading the
+// provider URL directly in the browser is explicitly NOT the substitute, so no
+// replacement is provided: the label surface shows a bounded unavailable state
+// until M7e delivers a trusted, server-mediated label artifact.
 
 export interface ShipmentPrefill {
   sourceType: ShipmentSourceType;
@@ -515,6 +455,11 @@ export default function ShippingCenter() {
     startPacking, recordPackingItemVerification, recordPackingPackageVerification,
     addPackingException, resolvePackingException, completePackingForShipment,
     reopenPacking, markPackingNotRequired,
+    // Phase 4.0 M3 — shared three-valued Shipping availability. Was a page-local
+    // `useState(false)` here, which (a) read `unknown` as available before the first
+    // probe and (b) could not tell the provider-settings screen about an outage it had
+    // already detected, so the two surfaces disagreed.
+    shippingServiceAvailability, setShippingServiceAvailability,
   } = useStoreLocalState();
   const { checkPermission, checkSubPermission, hasPermission, isWriteBlocked, canAccess, tenant, session } = useAccess();
   // Force re-render when System Owner Plans & Features matrix changes via sessionStorage.
@@ -1115,23 +1060,56 @@ export default function ShippingCenter() {
         try {
           const r = await shippingApi.getActiveProvider();
           if (cancelled) return;
-          setActiveProviderIdRaw(r.activeProviderId);
-          setProviderEnvironment(r.environment || null);
-        } catch { /* surface via providerError elsewhere */ }
+          // Phase 4.0 M3 — a null activeProviderId has TWO causes: genuinely no
+          // provider, or the eliminated backend. These writes used to run BEFORE the
+          // check, so a failed probe overwrote the last-known active provider with the
+          // envelope's empty fields and the outage then rendered as "No Provider".
+          // An outage tells us nothing about what is configured, so on failure we
+          // record ONLY availability and leave provider state exactly as it was.
+          if (r.success === false) {
+            setShippingServiceAvailability('unavailable');
+          } else {
+            setShippingServiceAvailability('available');
+            setActiveProviderIdRaw(r.activeProviderId);
+            setProviderEnvironment(r.environment || null);
+          }
+        } catch {
+          if (!cancelled) setShippingServiceAvailability('unavailable');
+        }
         if (!cancelled) loadProviderStatuses();
         return;
       }
       // Plan-disabled branch — hard deactivation.
+      // Phase 4.0 M3 — these calls RESOLVE `{success:false}` and never throw, so a
+      // catch-only check reported a clean purge that never happened: the operator was
+      // told nothing while server-side credentials were definitively not cleared.
+      // Read the envelope as well as catching.
       let serverPurgeFailed = false;
       try {
-        await shippingApi.setActiveProvider(null);
+        const deactivated = await shippingApi.setActiveProvider(null);
+        // `deactivated.success`, not `deactivated?.success`: the client contract guarantees
+        // a resolved object, and `undefined?.success === false` is `false` — the exact
+        // fail-open-on-undefined this milestone eliminates. Every other purge check here
+        // reads `.success` directly; this was the lone optional-chained straggler.
+        if (deactivated.success === false) serverPurgeFailed = true;
       } catch { serverPurgeFailed = true; }
       try {
         const statusResp = await shippingApi.getProvidersStatus();
-        const ids: string[] = (statusResp?.providers || []).map((p: any) => p.providerId).filter(Boolean);
-        for (const id of ids) {
-          try { await shippingApi.removeProviderCredentials(id); }
-          catch { serverPurgeFailed = true; }
+        // A failed status call yields NO provider list at all, so the purge loop must sit
+        // INSIDE the success branch. It used to sit outside it, reading `providers || []`
+        // — which on failure ran zero times and looked exactly like "nothing to purge".
+        // The discriminated result turns that read into a compile error rather than a
+        // silent clean bill of health.
+        if (statusResp.success === false) {
+          serverPurgeFailed = true;
+        } else {
+          const ids: string[] = statusResp.providers.map((p) => p.providerId).filter(Boolean);
+          for (const id of ids) {
+            try {
+              const removed = await shippingApi.removeProviderCredentials(id);
+              if (removed.success === false) serverPurgeFailed = true;
+            } catch { serverPurgeFailed = true; }
+          }
         }
       } catch { serverPurgeFailed = true; }
       if (cancelled) return;
@@ -1171,6 +1149,10 @@ export default function ShippingCenter() {
   const [providerError, setProviderError] = useState<ProviderError | null>(null);
   const [providerSuccess, setProviderSuccess] = useState<string | null>(null);
   const [providerWarning, setProviderWarning] = useState<string | null>(null);
+  // Phase 4.0 M3 — set when the eliminated Shipping backend is the reason a
+  // provider-backed action cannot run. Terminal: nothing re-polls on it.
+  // Derived from the shared slice; `unknown` shows no banner but is NOT "available".
+  const shippingServiceUnavailable = shippingServiceAvailability === 'unavailable';
   const [showTestTrackerMenu, setShowTestTrackerMenu] = useState(false);
   const [showRatesPanel, setShowRatesPanel] = useState(false);
   const [availableRates, setAvailableRates] = useState<ShippingRate[]>([]);
@@ -1181,6 +1163,9 @@ export default function ShippingCenter() {
   const [showWebhookLog, setShowWebhookLog] = useState(false);
   const [webhookLogEntries, setWebhookLogEntries] = useState<any[]>([]);
   const [webhookLogLoading, setWebhookLogLoading] = useState(false);
+  // Distinct from "the log came back empty": an empty log is a fact about the carrier's
+  // webhook history, and we only know it when the call actually succeeded.
+  const [webhookLogUnavailable, setWebhookLogUnavailable] = useState(false);
   const [webhookLogFilter, setWebhookLogFilter] = useState<string>('all');
 
   const [showBulkSyncModal, setShowBulkSyncModal] = useState(false);
@@ -2791,8 +2776,23 @@ export default function ShippingCenter() {
       // eslint-disable-next-line no-console
       console.log('[Pickup] verifyPickupAddress →', { shipmentId, fingerprint: fp });
       const resp = await shippingApi.validateAddress(address);
-      if (!resp.success || !resp.result) {
-        const err = resp.error;
+      // Hoisted: the condition also fires on a success that returned no result, where
+      // there is no error to read — so the union cannot be narrowed by it directly.
+      const respError = resp.success === false ? resp.error : null;
+      const respResult = resp.success === false ? undefined : resp.result;
+      // Phase 4.0 M3 — SHIPPING_UNAVAILABLE is our backend being down: no carrier was
+      // reached, so the address is simply still unverified. Writing a `status:'failed'`
+      // verdict here renders downstream as "Carrier rejected the pickup address" — blaming
+      // the carrier for our outage and stamping a rejection no carrier produced. The sibling
+      // address-validation flow special-cases this exact code and leaves the stored
+      // validation untouched; mirror it. Route to the shared availability channel and write
+      // NO verdict, so the last real verification (if any) survives the outage.
+      if (respError?.code === shippingApi.SHIPPING_UNAVAILABLE_CODE) {
+        setShippingServiceAvailability('unavailable');
+        return;
+      }
+      if (respError || !respResult) {
+        const err = respError;
         setPickupAddrVerify(p => ({
           ...p,
           [shipmentId]: {
@@ -2806,7 +2806,7 @@ export default function ShippingCenter() {
         }));
         return;
       }
-      const r = resp.result;
+      const r = respResult;
       setPickupAddrVerify(p => ({
         ...p,
         [shipmentId]: {
@@ -3469,16 +3469,31 @@ export default function ShippingCenter() {
         // eslint-disable-next-line no-console
         console.log('[Pickup] createProviderPickup ←', created);
 
-        if (!created.success || !created.providerPickupId) {
-          steps[0] = { label: 'Create pickup with provider', status: 'fail', note: created.error?.message || 'Create failed' };
-          setProviderError(friendlyProviderError(created.error || { code: 'PICKUP_CREATE_FAILED', message: 'Pickup create failed.' }));
+        // Narrow ONCE. `error` reads only on the failure branch and `providerPickupId` /
+        // `rates` only on the success branch, while the condition below ALSO fires on a
+        // success that returned no pickup id — a mix the raw union cannot express. Hoisting
+        // keeps the original control flow exactly and makes each read provably legal.
+        const createdError = created.success === false ? created.error : null;
+        const createdPickupId = created.success === false ? undefined : created.providerPickupId;
+        const createdRates = created.success === false ? undefined : created.rates;
+
+        if (createdError || !createdPickupId) {
+          steps[0] = { label: 'Create pickup with provider', status: 'fail', note: createdError?.message || 'Create failed' };
+          setProviderError(friendlyProviderError(createdError || { code: 'PICKUP_CREATE_FAILED', message: 'Pickup create failed.' }));
           // Phase 2.5.8 — pickup-eligibility memory. The carrier just
           // rejected this exact address snapshot for pickup booking.
           // Persist that fact keyed by the address fingerprint so the
           // operator cannot keep retrying the same payload (which would
           // be guaranteed to fail again). Editing the pickup address
           // invalidates this record.
-          {
+          //
+          // Phase 4.0 M3 — but SHIPPING_UNAVAILABLE is OUR backend being down, not the
+          // carrier rejecting this address. Persisting it as an address-keyed "failed"
+          // verdict would poison the eligibility memory and block every retry until the
+          // operator edits an address that was never the problem. The sibling
+          // address-validation flow already special-cases this code; the pickup flow must
+          // too. On our outage, surface the error but write NO eligibility record.
+          if (createdError?.code !== shippingApi.SHIPPING_UNAVAILABLE_CODE) {
             // Phase 2.6.1 — record the FULL payload fingerprint so editing
             // the contact phone (the most common cause of a phone-format
             // rejection) clears this memory.
@@ -3490,31 +3505,31 @@ export default function ShippingCenter() {
                 fingerprint: failPayloadFp,
                 addrFingerprint: failAddrFp,
                 status: 'failed',
-                message: created.error?.providerMessage || created.error?.message,
-                providerCode: created.error?.providerCode || created.error?.code,
-                httpStatus: created.error?.httpStatus,
+                message: createdError?.providerMessage || createdError?.message,
+                providerCode: createdError?.providerCode || createdError?.code,
+                httpStatus: createdError?.httpStatus,
                 attemptedAt: new Date().toISOString(),
               },
             }));
           }
           setPickupAttemptResult({
             kind: 'error',
-            title: `Pickup create failed${created.error?.httpStatus ? ` (HTTP ${created.error.httpStatus})` : ''}`,
-            detail: created.error?.message || `${activeProviderId} did not return a pickup id.`,
+            title: `Pickup create failed${createdError?.httpStatus ? ` (HTTP ${createdError.httpStatus})` : ''}`,
+            detail: createdError?.message || `${activeProviderId} did not return a pickup id.`,
             steps,
-            code: created.error?.providerCode || created.error?.code || 'PICKUP_CREATE_FAILED',
-            stage: created.error?.stage || 'pickup_create',
-            httpStatus: created.error?.httpStatus,
-            providerCode: created.error?.providerCode,
-            providerMessage: created.error?.providerMessage,
-            fieldErrors: created.error?.fieldErrors,
+            code: createdError?.providerCode || createdError?.code || 'PICKUP_CREATE_FAILED',
+            stage: createdError?.stage || 'pickup_create',
+            httpStatus: createdError?.httpStatus,
+            providerCode: createdError?.providerCode,
+            providerMessage: createdError?.providerMessage,
+            fieldErrors: createdError?.fieldErrors,
             context: pickupContext,
-            detailsCollapsed: created.error?.details,
-            rawError: created.error?.details,
+            detailsCollapsed: createdError?.details,
+            rawError: createdError?.details,
           });
           return;
         }
-        steps[0] = { label: 'Create pickup with provider', status: 'ok', note: `Pickup id ${created.providerPickupId}${created.rates ? ` · ${created.rates.length} rate(s)` : ''}` };
+        steps[0] = { label: 'Create pickup with provider', status: 'ok', note: `Pickup id ${createdPickupId}${createdRates ? ` · ${createdRates.length} rate(s)` : ''}` };
 
         // Phase 2.9 — for providers that require a separate pickup.buy step
         // (EasyPost), pause here and surface the provider-returned pickup_rates
@@ -3524,7 +3539,7 @@ export default function ShippingCenter() {
         // does not write a PickupRequest to the shipment.
         let buyResult: shippingApi.BuyPickupResponse | null = null;
         if (caps.pickupNeedsRatePurchase) {
-          if (!created.rates || created.rates.length === 0) {
+          if (!createdRates || createdRates.length === 0) {
             // Phase 2.9 — honest pre-booking no-rates state. The provider
             // created an orphan pickup object but offered no purchasable
             // rates for this date/window, so NO booking was attempted and
@@ -3534,7 +3549,7 @@ export default function ShippingCenter() {
             steps.push({ label: 'Buy pickup rate', status: 'skip', note: 'No pickup_rates returned by provider — booking not attempted.' });
             setPickupRatesPanel({
               shipmentId,
-              providerPickupId: created.providerPickupId,
+              providerPickupId: createdPickupId,
               providerId: activeProviderId || undefined,
               rates: [],
               fetchedAt: now,
@@ -3557,7 +3572,7 @@ export default function ShippingCenter() {
               `different date or a different window for this same address. Try shifting the date by a day, widening ` +
               `the time window, or switching to drop-off.${caps.pickupTestModeLimitations ? ` Additional possible factor: ${caps.pickupTestModeLimitations}` : ''} ` +
               `No booking was attempted — no carrier confirmation has been issued.`;
-            setPickupAttemptResult({ kind: 'partial', title: 'No pickup rates available', detail, steps, code: 'NO_PICKUP_RATES_AVAILABLE', stage: 'pickup_create', providerPickupId: created.providerPickupId, context: pickupContext });
+            setPickupAttemptResult({ kind: 'partial', title: 'No pickup rates available', detail, steps, code: 'NO_PICKUP_RATES_AVAILABLE', stage: 'pickup_create', providerPickupId: createdPickupId, context: pickupContext });
             return;
           }
           // One or more rates returned — open the selection panel and let
@@ -3565,13 +3580,13 @@ export default function ShippingCenter() {
           // there is just one to streamline the common case, but still
           // require an explicit confirm click so the operator sees the
           // exact fee before money/commitment changes hands.
-          const initialSelected = created.rates.length === 1 ? created.rates[0].providerRateId : undefined;
-          steps.push({ label: 'Buy pickup rate', status: 'pending', note: `Awaiting operator selection — ${created.rates.length} rate(s) returned.` });
+          const initialSelected = createdRates.length === 1 ? createdRates[0].providerRateId : undefined;
+          steps.push({ label: 'Buy pickup rate', status: 'pending', note: `Awaiting operator selection — ${createdRates.length} rate(s) returned.` });
           setPickupRatesPanel({
             shipmentId,
-            providerPickupId: created.providerPickupId,
+            providerPickupId: createdPickupId,
             providerId: activeProviderId || undefined,
-            rates: created.rates,
+            rates: createdRates,
             selectedRateId: initialSelected,
             fetchedAt: now,
             kind: 'rates',
@@ -3579,24 +3594,29 @@ export default function ShippingCenter() {
           });
           setPickupAttemptResult({
             kind: 'info',
-            title: created.rates.length === 1 ? 'Pickup rate ready — confirm to book' : `${created.rates.length} pickup rates returned — choose one to book`,
-            detail: `${activeProviderId} created pickup ${created.providerPickupId} and returned ${created.rates.length} rate(s). Pickup is NOT booked yet — review the exact fee and confirm to call pickup.buy.`,
+            title: createdRates.length === 1 ? 'Pickup rate ready — confirm to book' : `${createdRates.length} pickup rates returned — choose one to book`,
+            detail: `${activeProviderId} created pickup ${createdPickupId} and returned ${createdRates.length} rate(s). Pickup is NOT booked yet — review the exact fee and confirm to call pickup.buy.`,
             steps,
-            providerPickupId: created.providerPickupId,
+            providerPickupId: createdPickupId,
             context: pickupContext,
           });
           return;
         } else {
           steps.push({ label: 'Buy pickup rate', status: 'skip', note: 'Provider does not require a separate buy step.' });
         }
+        // A buy result only carries a confirmation/cost when the buy step BOTH ran and
+        // succeeded. `buyResult?.cost` read straight off the union would have taken those
+        // fields from a failed purchase — the shipment would then record a confirmed
+        // pickup that the carrier never issued.
+        const bought = buyResult && buyResult.success === true ? buyResult : null;
         const confirmed: PickupRequest = {
           ...basePickup,
-          providerPickupId: created.providerPickupId,
-          confirmationNumber: buyResult?.confirmationNumber,
-          providerPickupCost: buyResult?.cost,
-          providerPickupCurrency: buyResult?.currency,
-          status: buyResult?.confirmationNumber ? 'confirmed' : 'requested',
-          confirmedAt: buyResult?.confirmationNumber ? new Date().toISOString() : undefined,
+          providerPickupId: createdPickupId,
+          confirmationNumber: bought?.confirmationNumber,
+          providerPickupCost: bought?.cost,
+          providerPickupCurrency: bought?.currency,
+          status: bought?.confirmationNumber ? 'confirmed' : 'requested',
+          confirmedAt: bought?.confirmationNumber ? new Date().toISOString() : undefined,
           source: 'live_provider',
         };
         updateShipment(shipmentId, {
@@ -3607,7 +3627,7 @@ export default function ShippingCenter() {
             pickupScheduledAt: pickupForm.date,
             pickupConfirmationNumber: confirmed.confirmationNumber,
           },
-          events: [...ship.events, { id: `evt_pu_${Date.now()}`, status: 'Pickup Requested' as any, description: `Pickup booked LIVE with ${activeProviderId} (provider pickup id ${created.providerPickupId})${confirmed.confirmationNumber ? ` — carrier confirmation ${confirmed.confirmationNumber}` : ''}${confirmed.providerPickupCost ? ` — cost ${confirmed.providerPickupCost} ${confirmed.providerPickupCurrency}` : ''}`, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent],
+          events: [...ship.events, { id: `evt_pu_${Date.now()}`, status: 'Pickup Requested' as any, description: `Pickup booked LIVE with ${activeProviderId} (provider pickup id ${createdPickupId})${confirmed.confirmationNumber ? ` — carrier confirmation ${confirmed.confirmationNumber}` : ''}${confirmed.providerPickupCost ? ` — cost ${confirmed.providerPickupCost} ${confirmed.providerPickupCurrency}` : ''}`, timestamp: now, performedBy: 'current_operator' } as ShipmentEvent],
           updatedAt: now,
         });
         steps.push({ label: 'Persist pickup', status: 'ok' });
@@ -3626,7 +3646,7 @@ export default function ShippingCenter() {
               addrFingerprint: okAddrFp,
               status: 'confirmed',
               attemptedAt: new Date().toISOString(),
-              providerPickupId: created.providerPickupId,
+              providerPickupId: createdPickupId,
             },
           }));
         }
@@ -3637,13 +3657,13 @@ export default function ShippingCenter() {
           kind: confirmed.confirmationNumber ? 'success' : 'partial',
           title: confirmed.confirmationNumber ? 'Pickup booked live' : 'Pickup created — awaiting confirmation',
           detail: confirmed.confirmationNumber
-            ? `${activeProviderId} confirmed pickup ${created.providerPickupId} for ${pickupForm.date}. Confirmation ${confirmed.confirmationNumber}.`
-            : `${activeProviderId} created pickup ${created.providerPickupId} but did not return a carrier confirmation number${caps.pickupTestModeLimitations ? ` — ${caps.pickupTestModeLimitations}` : ''}.`,
+            ? `${activeProviderId} confirmed pickup ${createdPickupId} for ${pickupForm.date}. Confirmation ${confirmed.confirmationNumber}.`
+            : `${activeProviderId} created pickup ${createdPickupId} but did not return a carrier confirmation number${caps.pickupTestModeLimitations ? ` — ${caps.pickupTestModeLimitations}` : ''}.`,
           steps,
-          providerPickupId: created.providerPickupId,
+          providerPickupId: createdPickupId,
           confirmationNumber: confirmed.confirmationNumber,
-          cost: buyResult?.cost,
-          currency: buyResult?.currency,
+          cost: bought?.cost,
+          currency: bought?.currency,
           context: pickupContext,
         });
         return;
@@ -3757,7 +3777,7 @@ export default function ShippingCenter() {
       // eslint-disable-next-line no-console
       console.log('[Pickup] buyProviderPickup ←', buyResult);
 
-      if (!buyResult.success) {
+      if (buyResult.success === false) {
         steps[1] = { label: 'Buy pickup rate', status: 'fail', note: buyResult.error?.message || 'Buy failed' };
         // Phase 2.6.1 partial-failure semantics retained: a provider pickup
         // object exists but no carrier confirmation was issued. Persist the
@@ -3891,7 +3911,7 @@ export default function ShippingCenter() {
         // eslint-disable-next-line no-console
         console.log('[Pickup] discard → cancelProviderPickup', { providerPickupId: panel.providerPickupId });
         const result = await shippingApi.cancelProviderPickup(panel.providerPickupId, panel.providerId);
-        if (!result.success) {
+        if (result.success === false) {
           // Don't block the UI — the panel is gone either way; surface a
           // soft warning so the operator can cancel manually if needed.
           setProviderError(friendlyProviderError(result.error || { code: 'PICKUP_CANCEL_FAILED', message: `Could not cancel orphan provider pickup ${panel.providerPickupId}. You may need to cancel it from the provider dashboard.` }));
@@ -3956,7 +3976,7 @@ export default function ShippingCenter() {
     if (isLive && caps?.supportsPickupCancellation) {
       try {
         const result = await shippingApi.cancelProviderPickup(ship.pickupRequest.providerPickupId!, activeProviderId || undefined);
-        if (!result.success) {
+        if (result.success === false) {
           const friendly = friendlyProviderError(result.error || { code: 'PICKUP_CANCEL_FAILED', message: 'Pickup cancel failed.' });
           // Phase 2.10.7 — detect provider-state rejection so the UI can
           // swap Cancel Orphan Pickup → Dismiss Orphan Locally. We match
@@ -4801,29 +4821,23 @@ export default function ShippingCenter() {
         shipment.serviceLevel || shipment.selectedRate?.serviceName || '',
         shipment.shipmentNumber,
       );
-      if (!result.success || !result.label) {
-        return { ok: false, reason: result.error?.message || 'Label purchase failed' };
+      if (result.success === false) {
+        return { ok: false, reason: result.error.message || 'Label purchase failed' };
       }
-      // Phase 3 parity — mirror the single-shipment flow's non-PDF normalization
-      // (convert image labels to inline PDF blob, fall back to a proxy URL on
-      // conversion failure) so single and batch outcomes are byte-for-byte
-      // equivalent.
+      if (!result.label) {
+        // A success envelope with no label is a provider contract violation, not an
+        // error the provider reported — kept distinct so it is never mislabelled.
+        return { ok: false, reason: 'Label purchase failed' };
+      }
+      // Phase 4.0 M3 — image→PDF normalization removed with the DEV sidecar. It
+      // could only read the carrier image through the eliminated label proxy, and
+      // loading a provider-controlled URL in the browser instead is explicitly
+      // not the substitute. `pdfUrl` is therefore never set; the label surface
+      // renders a bounded unavailable state until M7e supplies a trusted
+      // server-mediated label preview.
       const label = { ...result.label };
       const actualFmt = getLabelActualFormat(label);
-      if (actualFmt !== 'pdf') {
-        label.originalFormat = actualFmt;
-        try {
-          const pdfBlobUrl = await convertImageToPdfBlobUrl(label.url);
-          label.pdfUrl = pdfBlobUrl;
-          label.format = 'pdf';
-        } catch {
-          label.pdfUrl = `/api/shipping/label-proxy?url=${encodeURIComponent(label.url)}`;
-          // Keep label.format as the original carrier-supplied format; only
-          // overwrite when getLabelActualFormat returned a known label format.
-          // 'other' means we couldn't classify it — leave the carrier's value.
-          if (actualFmt === 'png') label.format = actualFmt;
-        }
-      }
+      if (actualFmt !== 'pdf') label.originalFormat = actualFmt;
       const now = new Date().toISOString();
       const newEvent: ShipmentEvent = {
         id: `evt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -4902,7 +4916,7 @@ export default function ShippingCenter() {
     const targetAddress = side === 'origin' ? shipment.originAddress : shipment.destinationAddress;
     const result = await shippingApi.validateAddress(targetAddress);
     const updates: Partial<Shipment> = {};
-    if (result.success && result.result) {
+    if (result.success === true) {
       const validationResult: AddressValidationResult = result.result;
       // For `corrected` results, swap the provider's suggested address into the shipment
       // fields so the operator can re-validate against the cleaned address. Do NOT mark
@@ -4940,6 +4954,17 @@ export default function ShippingCenter() {
         }
       }
       return { ok: true, status: validationResult.status, updates };
+    }
+    // Phase 4.0 M3 — do NOT persist a carrier verdict the carrier never gave.
+    // `status:'failed'` + `validatedAt` durably records "a carrier checked this
+    // address at T and rejected it". When the shipping backend is unavailable no
+    // carrier was reached at all, so writing that verdict would fabricate a
+    // provider result — the address is simply still unvalidated. Report the
+    // failure to the operator, but leave the stored validation untouched.
+    // Returns `failed` so the caller's control flow is unchanged, but writes NO
+    // validation record — `updates` is left exactly as it came in.
+    if (result.error?.code === 'SHIPPING_UNAVAILABLE') {
+      return { ok: false, status: 'failed', message: result.error?.message, updates };
     }
     const failedValidation: AddressValidationResult = {
       status: 'failed',
@@ -5037,7 +5062,7 @@ export default function ShippingCenter() {
       shipment.destinationAddress,
       shipment.packages,
     );
-    if (result.success && result.rates) {
+    if (result.success === true) {
       const sorted = [...result.rates].sort((a, b) => a.rate - b.rate);
       setAvailableRates(sorted);
       updateShipment(shipmentId, {
@@ -5146,23 +5171,12 @@ export default function ShippingCenter() {
       shipment.serviceLevel || shipment.selectedRate?.serviceName || '',
       shipment.shipmentNumber,
     );
-    if (result.success && result.label) {
+    if (result.success === true) {
       const labelArtifact = { ...result.label };
       const actualFmt = getLabelActualFormat(labelArtifact);
-      if (actualFmt !== 'pdf') {
-        labelArtifact.originalFormat = actualFmt;
-        try {
-          const pdfBlobUrl = await convertImageToPdfBlobUrl(labelArtifact.url);
-          labelArtifact.pdfUrl = pdfBlobUrl;
-          labelArtifact.format = 'pdf';
-        } catch {
-          labelArtifact.pdfUrl = `/api/shipping/label-proxy?url=${encodeURIComponent(labelArtifact.url)}`;
-          // Keep labelArtifact.format as the original carrier-supplied format;
-          // only overwrite when getLabelActualFormat returned a known format.
-          // 'other' means we couldn't classify it — leave the carrier's value.
-          if (actualFmt === 'png') labelArtifact.format = actualFmt;
-        }
-      }
+      // Phase 4.0 M3 — see the batch flow above: image→PDF normalization is gone
+      // with the label proxy, and `pdfUrl` is deliberately never set.
+      if (actualFmt !== 'pdf') labelArtifact.originalFormat = actualFmt;
       const now = new Date().toISOString();
       const newEvent: ShipmentEvent = {
         id: `evt-${Date.now()}`,
@@ -5202,16 +5216,39 @@ export default function ShippingCenter() {
     setProviderSettingsLoading(true);
     try {
       const result = await shippingApi.getProvidersStatus();
-      setProviderStatuses(result.providers || []);
-    } catch { /* ignore */ }
+      // Phase 4.0 M3 — an empty list from an unavailable service must not be shown as
+      // "no providers configured". Recording the cause was not enough: the assignment
+      // below ran unconditionally, so a failed call still REPLACED the known statuses
+      // with `[]`. Keep the last known statuses; only a successful call may replace them.
+      if (result.success === false) {
+        setShippingServiceAvailability('unavailable');
+      } else {
+        setShippingServiceAvailability('available');
+        setProviderStatuses(result.providers || []);
+      }
+    } catch {
+      setShippingServiceAvailability('unavailable');
+    }
+    // Always clears — the settings panel can never be left spinning.
     setProviderSettingsLoading(false);
   }
 
   function refreshProviderState() {
-    shippingApi.getActiveProvider().then(r => {
-      setActiveProviderIdRaw(r.activeProviderId);
-      setProviderEnvironment(r.environment || null);
-    });
+    shippingApi.getActiveProvider()
+      .then(r => {
+        // Same rule as the mount probe: a failed refresh must not overwrite the
+        // last-known provider with the empty envelope.
+        if (r.success === false) {
+          setShippingServiceAvailability('unavailable');
+          return;
+        }
+        setShippingServiceAvailability('available');
+        setActiveProviderIdRaw(r.activeProviderId);
+        setProviderEnvironment(r.environment || null);
+      })
+      // Phase 4.0 M3 — the client contract is non-throwing, so this is
+      // defence-in-depth: previously a rejection here was unhandled.
+      .catch(() => setShippingServiceAvailability('unavailable'));
     loadProviderStatuses();
   }
 
@@ -5221,18 +5258,48 @@ export default function ShippingCenter() {
     setProviderLoading('test-connection');
     try {
       const result = await shippingApi.testConnection(providerId);
-      if (result.success) {
+      if (result.success === true) {
         if (!activeProviderId) {
-          try {
-            await shippingApi.setActiveProvider(providerId);
-          } catch {}
+          // Was fire-and-forget inside a bare `catch {}`: the result was discarded AND
+          // the throw swallowed, so a failed activation still reported "verified
+          // successfully". Dormant while the containment client makes `result.success`
+          // unreachable; live again the moment provider connectivity returns.
+          const activation = await shippingApi.setActiveProvider(providerId);
+          if (activation.success === false) {
+            // Phase 4.0 M3 — route OUR outage to availability, exactly as the returned/thrown
+            // SHIPPING_UNAVAILABLE paths below do. Reporting it as a retryable ACTIVATION_FAILED
+            // would tell the operator to retry an action that cannot succeed while the backend
+            // is down, and would contradict the same code's handling three lines later.
+            if (activation.error.code === shippingApi.SHIPPING_UNAVAILABLE_CODE) {
+              setShippingServiceAvailability('unavailable');
+            } else {
+              setProviderError({
+                code: 'ACTIVATION_FAILED',
+                message: activation.error.message || 'Connection verified, but the provider could not be set active.',
+                retryable: true,
+              });
+            }
+            setProviderLoading(null);
+            refreshProviderState();
+            return;
+          }
         }
         setProviderSuccess(`Connection to ${providerId} verified successfully.`);
+      } else if (result.error?.code === shippingApi.SHIPPING_UNAVAILABLE_CODE) {
+        // OUR outage, not a carrier verdict — and not retryable. Every sibling failure
+        // path in this file routes this code to availability; only this one blamed the
+        // carrier, so the same condition produced two contradictory banners.
+        setShippingServiceAvailability('unavailable');
       } else {
         setProviderError({ code: 'TEST_FAILED', message: result.error?.message || 'Connection test failed.', retryable: true });
       }
     } catch (e: any) {
-      setProviderError({ code: 'TEST_FAILED', message: e.message || 'Connection test failed.', retryable: true });
+      // A THROWN coded error must land in the same state as a RETURNED one.
+      if (e?.code === shippingApi.SHIPPING_UNAVAILABLE_CODE) {
+        setShippingServiceAvailability('unavailable');
+      } else {
+        setProviderError({ code: 'TEST_FAILED', message: e?.message || 'Connection test failed.', retryable: true });
+      }
     }
     setProviderLoading(null);
     refreshProviderState();
@@ -5252,8 +5319,20 @@ export default function ShippingCenter() {
       if (trackingNumber) filters.trackingNumber = trackingNumber;
       if (webhookLogFilter !== 'all') filters.processingResult = webhookLogFilter;
       const result = await shippingApi.getWebhookLog(filters);
+      if (result.success === false) {
+        // `result.events || []` never read `success`. The unavailable envelope carries no
+        // `events`, so it collapsed to `[]` and the UI stated "No webhook events recorded
+        // yet." — a positive claim about the carrier's history drawn from a call that
+        // returned nothing.
+        setWebhookLogUnavailable(true);
+        setWebhookLogEntries([]);
+        setWebhookLogLoading(false);
+        return;
+      }
+      setWebhookLogUnavailable(false);
       setWebhookLogEntries(result.events || []);
     } catch {
+      setWebhookLogUnavailable(true);
       setWebhookLogEntries([]);
     }
     setWebhookLogLoading(false);
@@ -5266,8 +5345,12 @@ export default function ShippingCenter() {
     setProviderLoading('replay');
     try {
       const result = await shippingApi.replayWebhookEvent(webhookEventId);
-      if (result.success) {
-        setProviderSuccess(`Event replayed successfully (replay ID: ${result.replayEventId}).`);
+      if (result.success === true) {
+        // `replayEventId` is optional on the success contract; a future provider may omit it.
+        // Guard the interpolation so it never renders the literal "replay ID: undefined".
+        setProviderSuccess(result.replayEventId
+          ? `Event replayed successfully (replay ID: ${result.replayEventId}).`
+          : 'Event replayed successfully.');
         if (selectedShipment) loadWebhookLog(shipments.find(s => s.id === selectedShipment)?.trackingNumber);
       } else {
         setProviderError(friendlyProviderError(result.error || { code: 'UNKNOWN', message: 'Replay failed.' }));
@@ -5327,7 +5410,12 @@ export default function ShippingCenter() {
       shipment.trackingNumber,
       shipment.carrier || '',
     );
-    if (result.success && result.events) {
+    if (result.success === false) {
+      setProviderError(friendlyProviderError(result.error));
+      setProviderLoading(null);
+      return;
+    }
+    if (result.events) {
       const now = new Date().toISOString();
       const incomingEvents = result.events.map(e => ({ ...e, source: 'test_provider' as any }));
       const existingRefs = new Set(
@@ -5357,7 +5445,11 @@ export default function ShippingCenter() {
       msg += ' These are test data only — no real carrier activity occurred.';
       setProviderSuccess(msg);
     } else {
-      setProviderError(friendlyProviderError(result.error || { code: 'UNKNOWN', message: 'Simulation failed.' }));
+      // Reached only on a SUCCESS envelope that carried no events. The provider-error
+      // path returned above, so there is no error here to report — saying "simulation
+      // failed" would blame the provider for a call that succeeded and simply had
+      // nothing to simulate.
+      setProviderError({ code: 'NO_SIMULATED_EVENTS', message: 'Simulation returned no tracking events.', retryable: false });
     }
     setProviderLoading(null);
   }
@@ -5456,7 +5548,7 @@ export default function ShippingCenter() {
 
       try {
         const response = await shippingApi.bulkSyncTracking(batchInput, BATCH_SIZE, BATCH_DELAY);
-        if (response.success && response.results) {
+        if (response.success === true) {
           for (const r of response.results) {
             const shipment = shipments.find(s => s.id === r.shipmentId);
             if (!shipment) { allResults.push(r); continue; }
@@ -5512,6 +5604,21 @@ export default function ShippingCenter() {
               allResults.push(r);
             }
           }
+        } else {
+          // Phase 4.0 M3 — the batch call RESOLVED `{success:false}` (never throws), and
+          // with no else here that whole batch produced zero rows: the summary silently
+          // under-counted and the operator was told nothing about it — the same silent-drop
+          // this milestone is eliminating. Record a failed row per shipment so the outcome
+          // is truthful. SHIPPING_UNAVAILABLE is OUR outage, not a per-shipment sync failure,
+          // so it is NOT written to any shipment's syncFailureCount.
+          for (const s of batch) {
+            allResults.push({
+              shipmentId: s.id,
+              trackingNumber: s.trackingNumber!,
+              result: 'failed',
+              error: response.error,
+            });
+          }
         }
       } catch (e: any) {
         for (const s of batch) {
@@ -5563,7 +5670,7 @@ export default function ShippingCenter() {
       shipment.carrier || '',
       shipment.providerShipmentId,
     );
-    if (result.success) {
+    if (result.success === true) {
       const now = new Date().toISOString();
       const incomingEvents = result.events || [];
       const existingRefs = new Set(
@@ -7071,6 +7178,25 @@ export default function ShippingCenter() {
                         </div>
                       </div>
 
+                      {/* Phase 4.0 M3 — names the real cause. Without it a null active
+                          provider renders as an ordinary "nothing configured" state and the
+                          operator has no idea provider actions cannot succeed. No retry. */}
+                      {shippingServiceUnavailable && (
+                        <div
+                          data-testid="shipping-unavailable-banner"
+                          role="status"
+                          aria-live="polite"
+                          className="px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2"
+                        >
+                          <span aria-hidden="true" className="material-symbols-outlined text-amber-500 text-sm mt-0.5">cloud_off</span>
+                          <span className="text-xs font-bold text-amber-800">
+                            Shipping provider services are unavailable while the shipping backend is
+                            being rebuilt. Rates, labels, pickups, and tracking sync are disabled — this
+                            does not mean your store has no provider configured.
+                          </span>
+                        </div>
+                      )}
+
                       {providerError && (
                         <div className="px-3 py-2 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2">
                           <span className="material-symbols-outlined text-red-500 text-sm mt-0.5">error</span>
@@ -7220,7 +7346,14 @@ export default function ShippingCenter() {
                               </button>
                             </div>
                           </div>
-                          {webhookLogEntries.length === 0 && !webhookLogLoading && (
+                          {webhookLogUnavailable && !webhookLogLoading && (
+                            <p role="status" data-testid="webhook-log-unavailable"
+                               className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg text-center py-3 px-3 flex items-center justify-center gap-1.5">
+                              <span className="material-symbols-outlined text-sm">cloud_off</span>
+                              The webhook event log is unavailable. This does not mean no events were received.
+                            </p>
+                          )}
+                          {!webhookLogUnavailable && webhookLogEntries.length === 0 && !webhookLogLoading && (
                             <p className="text-xs text-slate-400 text-center py-4">No webhook events recorded yet.</p>
                           )}
                           {webhookLogLoading && (
@@ -7505,28 +7638,23 @@ export default function ShippingCenter() {
                           );
                         })()}
 
-                        {canPrintLabel && selectedShip.label?.url && (() => {
-                          const label = selectedShip.label!;
-                          const primaryUrl = label.pdfUrl || label.url;
-                          const hasPdf = !!label.pdfUrl || getLabelActualFormat(label) === 'pdf';
-                          return (
-                          <div className="flex items-center gap-2">
-                            <button onClick={() => {
-                              const printWin = window.open(primaryUrl, '_blank');
-                              if (printWin && hasPdf) { printWin.addEventListener('load', () => { try { printWin.print(); } catch {} }); }
-                            }}
-                              className="px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1 bg-primary text-white shadow-lg shadow-primary/20 hover:bg-primary/90">
-                              <span className="material-symbols-outlined text-sm">print</span>
-                              Print PDF Label
-                            </button>
-                            <button onClick={() => window.open(primaryUrl, '_blank')}
-                              className="px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1 bg-white text-slate-600 border border-slate-200 hover:bg-slate-50">
-                              <span className="material-symbols-outlined text-sm">picture_as_pdf</span>
-                              View
-                            </button>
+                        {/* Phase 4.0 M3 — label preview/print is UNAVAILABLE. Printing
+                            opened `pdfUrl || label.url`; `pdfUrl` came from the eliminated
+                            label proxy, and opening the provider URL directly is explicitly
+                            not the substitute. No provider-controlled URL is opened here.
+                            A trusted server-mediated label artifact returns in M7e. */}
+                        {canPrintLabel && selectedShip.label?.url && (
+                          <div
+                            data-testid="label-preview-unavailable"
+                            role="status"
+                            className="flex items-center gap-2 px-3 py-2 rounded-xl bg-amber-50 border border-amber-200 text-amber-800"
+                          >
+                            <span aria-hidden="true" className="material-symbols-outlined text-sm">block</span>
+                            <span className="text-[10px] font-black uppercase tracking-widest">
+                              Label preview unavailable during migration
+                            </span>
                           </div>
-                          );
-                        })()}
+                        )}
 
                         {!isManualMode && canSyncTracking && !isWriteBlocked && selectedShip.trackingNumber && !['Draft', 'Ready', 'Delivered', 'Cancelled'].includes(selectedShip.status) && (
                           <button onClick={() => handleSyncTracking(selectedShip.id)} disabled={providerLoading !== null}
