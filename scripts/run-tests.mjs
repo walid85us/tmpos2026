@@ -27,7 +27,7 @@ const EXCLUDE_DIR = new Set(['node_modules', 'dist', '.git', 'agency-agents', '.
  * Baseline count of deterministic suites. Raise it when suites are added; it may never be
  * lowered to accommodate a deletion — that is the whole point of the ratchet.
  */
-export const MIN_SUITES = 73;
+export const MIN_SUITES = 74;
 
 /**
  * Literal sentinel suites. Each names a specific control whose loss must fail the run even
@@ -43,6 +43,7 @@ export const REQUIRED_SENTINELS = [
   'server/bcp-pilot/bcpActionCanonicalAuthzResolver.test.ts',  // controlled-action authorization
   'server/bcp-pilot/bcpActionRequestSecurityGuard.test.ts',    // controlled-action request security
   'server/bcp-pilot/bcpPilot.test.ts',                         // BCP security corpus
+  'server/platform-identity/identityUnauthenticatedSurfaceElimination.test.ts', // unauth identity-surface elimination + bounded 404/500
   'tests/quality/run-tests-discovery.test.mjs',                // the Node ratchet's own guard test
   'tests/quality/run-frontend-tests-contract.test.mjs',        // the frontend ratchet's own guard test
   'tests/quality/shipping-sidecar-containment.test.mjs',       // sidecar elimination / SSRF containment

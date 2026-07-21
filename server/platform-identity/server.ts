@@ -17,6 +17,9 @@
 // `npm run identity:api` so default app behaviour is unchanged.
 
 import express from 'express';
+import type { RequestHandler, ErrorRequestHandler } from 'express';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { sanitizeError, safeLog } from '../safe-log';
 import {
   FEATURE_FLAG,
@@ -24,7 +27,6 @@ import {
   getConfigPresence,
   isServerConfigComplete,
 } from './config';
-import { findByProviderUid, upsertIdentity } from './identityRepository';
 import { getDb } from './db';
 import { withProtectedAction } from './protectedAction';
 import { createSupabaseWhoamiHandler } from './verifiedWhoami';
@@ -80,64 +82,12 @@ export function createPlatformIdentityApp() {
     }
   });
 
-  // --- Flag-gated identity resolution (dev-only foundation) -----------------
-  // Maps an external auth UID to a stable, app-owned internal_user_id. This is
-  // a FOUNDATION endpoint: it intentionally does NOT enforce production auth on
-  // the caller (deferred to a later milestone) and is therefore gated behind
-  // the default-OFF feature flag and intended for dev use only.
-  app.post('/identity/resolve', async (req, res) => {
-    if (!isPlatformIdentityEnabled()) {
-      res.status(404).json({ error: { code: 'FEATURE_DISABLED', message: 'Platform identity is disabled.' } });
-      return;
-    }
-    const body = (req.body ?? {}) as Record<string, unknown>;
-    const authProviderUid = typeof body.authProviderUid === 'string' ? body.authProviderUid.trim() : '';
-    const authProvider = typeof body.authProvider === 'string' && body.authProvider.trim()
-      ? body.authProvider.trim()
-      : 'firebase';
-    const email = typeof body.email === 'string' && body.email.trim() ? body.email.trim() : null;
-    const displayName = typeof body.displayName === 'string' && body.displayName.trim() ? body.displayName.trim() : null;
-
-    if (!authProviderUid) {
-      res.status(400).json({ error: { code: 'MISSING_UID', message: 'authProviderUid is required.' } });
-      return;
-    }
-
-    try {
-      const identity = await upsertIdentity({ authProvider, authProviderUid, email, displayName });
-      res.json({ success: true, identity }); // safe public fields only
-    } catch (err) {
-      safeLog.error('[platform-identity] upsert failed', sanitizeError(err));
-      res.status(500).json({ error: { code: 'UPSERT_FAILED', message: 'Failed to resolve identity.' } });
-    }
-  });
-
-  // --- Flag-gated lookup ----------------------------------------------------
-  app.get('/identity/by-uid', async (req, res) => {
-    if (!isPlatformIdentityEnabled()) {
-      res.status(404).json({ error: { code: 'FEATURE_DISABLED', message: 'Platform identity is disabled.' } });
-      return;
-    }
-    const authProviderUid = typeof req.query.authProviderUid === 'string' ? req.query.authProviderUid.trim() : '';
-    const authProvider = typeof req.query.authProvider === 'string' && req.query.authProvider.trim()
-      ? req.query.authProvider.trim()
-      : 'firebase';
-    if (!authProviderUid) {
-      res.status(400).json({ error: { code: 'MISSING_UID', message: 'authProviderUid is required.' } });
-      return;
-    }
-    try {
-      const identity = await findByProviderUid(authProvider, authProviderUid);
-      if (!identity) {
-        res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'No identity for that reference.' } });
-        return;
-      }
-      res.json({ success: true, identity });
-    } catch (err) {
-      safeLog.error('[platform-identity] lookup failed', sanitizeError(err));
-      res.status(500).json({ error: { code: 'LOOKUP_FAILED', message: 'Failed to look up identity.' } });
-    }
-  });
+  // Phase 4.0 M3 — the two UNAUTHENTICATED identity surfaces that formerly lived here (an
+  // unauthenticated Postgres write and an unauthenticated provider-subject PII lookup) have
+  // been ELIMINATED: each enforced no caller authentication and had no consumer. They are NOT
+  // replaced, re-gated, aliased, or deprecation-shimmed — both former paths now fall through
+  // to the bounded terminal 404 registered below. The repository (upsertIdentity /
+  // findByProviderUid) is retained unchanged for authenticated internal flows.
 
   // --- Phase 1.5 M2: dev-only PROTECTED DIAGNOSTIC (no business effect) -------
   // Exercises the server-side enforcement spine end-to-end:
@@ -317,18 +267,49 @@ export function createPlatformIdentityApp() {
     createBcpActionEligibilityHandler(),
   );
 
+  // Phase 4.0 M3 — bounded terminal boundary for this isolated DEV identity API. Registered
+  // AFTER every valid route: any unknown path gets a single fixed-shape JSON 404 (no path or
+  // method reflection, no Express HTML, no stack, no route inventory), and any thrown error a
+  // fixed JSON 500 (no stack, no raw error, no request/identifier echo) logged only through
+  // the safe-log contract. Kept small and LOCAL — it deliberately does not import
+  // server/runtime/** so the two runtimes stay decoupled. Per-route body/media-type 4xx
+  // envelopes belong to a later authenticated-route slice; a malformed body currently
+  // resolves to the bounded 500.
+  const notFound: RequestHandler = (_req, res) => {
+    res.status(404).json({ error: 'not_found' });
+  };
+  const boundedError: ErrorRequestHandler = (err, _req, res, next) => {
+    if (res.headersSent) {
+      next(err);
+      return;
+    }
+    // Bounded, code-controlled classification ONLY — never the Error, its message, or any
+    // request-body fragment. express.json() parse errors embed the raw request body verbatim in
+    // err.message (V8's "Unexpected token 'X', \"<body>\" is not valid JSON"), so passing the
+    // error (even via sanitizeError, which does not strip that snippet) would leak it to the log.
+    safeLog.error('[platform-identity] bounded error handler: unhandled error');
+    res.status(500).json({ error: 'internal_error' });
+  };
+  app.use(notFound);
+  app.use(boundedError);
+
   return app;
 }
 
-// Start only when run directly (e.g. `npm run identity:api`).
+// Start the listener ONLY when this module is the process entry point (e.g.
+// `npm run identity:api`) — never on import, so the factory can be exercised in-process by
+// tests without binding a port or leaking a listener. Node realpaths ESM entrypoints, so
+// compare the resolved paths (mirrors scripts/run-tests.mjs).
 const PORT = parseInt(process.env.PLATFORM_IDENTITY_API_PORT || '5002', 10);
 const app = createPlatformIdentityApp();
-app.listen(PORT, '0.0.0.0', () => {
-  const presence = getConfigPresence();
-  safeLog.info(
-    `[platform-identity] isolated API on port ${PORT} | featureEnabled=${isPlatformIdentityEnabled()} | ` +
-    `config present: url=${presence.supabaseUrl} db=${presence.databaseUrl} serviceRole=${presence.serviceRoleKey}`,
-  );
-});
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  app.listen(PORT, '0.0.0.0', () => {
+    const presence = getConfigPresence();
+    safeLog.info(
+      `[platform-identity] isolated API on port ${PORT} | featureEnabled=${isPlatformIdentityEnabled()} | ` +
+      `config present: url=${presence.supabaseUrl} db=${presence.databaseUrl} serviceRole=${presence.serviceRoleKey}`,
+    );
+  });
+}
 
 export default app;
