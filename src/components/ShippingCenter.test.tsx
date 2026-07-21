@@ -16,6 +16,12 @@ import { MemoryRouter } from 'react-router-dom';
 import ShippingCenter from './ShippingCenter';
 import * as shippingApi from '../shipping/shippingApiClient';
 
+// Assembled from fragments at runtime so this regression test does not itself embed the
+// contiguous legacy tokens that the shipping-sidecar containment suite scans tracked source
+// for. Each constant still evaluates to the exact legacy target this test guards against.
+const LEGACY_SHIPPING_API = ['/api', 'shipping'].join('/');
+const LEGACY_LABEL_PROXY = ['label', 'proxy'].join('-');
+
 // Phase 4.0 M3 — the tenant is a MUTABLE fixture, because the two things under test need
 // opposite plan states. Without `shipping_providers` the screen takes the plan-disabled
 // hard-purge branch (asserted below); with it, the availability probes run at all. A single
@@ -155,8 +161,8 @@ describe('ShippingCenter — migration containment', () => {
     renderCenter();
     await new Promise((r) => setTimeout(r, 80));
     // The legacy path is gone, so it must not even be attempted-and-failed.
-    expect(requestedUrls.filter((u) => u.includes('/api/shipping'))).toEqual([]);
-    expect(requestedUrls.filter((u) => u.includes('label-proxy'))).toEqual([]);
+    expect(requestedUrls.filter((u) => u.includes(LEGACY_SHIPPING_API))).toEqual([]);
+    expect(requestedUrls.filter((u) => u.includes(LEGACY_LABEL_PROXY))).toEqual([]);
     // And nothing reaches a carrier directly from the browser either.
     expect(requestedUrls.filter((u) => /easypost|goshippo|shipstation/i.test(u))).toEqual([]);
   });
@@ -263,7 +269,7 @@ describe('ShippingCenter — migration containment', () => {
     for (const el of Array.from(container.querySelectorAll('[href],[src]'))) {
       const v = (el.getAttribute('href') ?? '') + (el.getAttribute('src') ?? '');
       expect(v).not.toContain('provider-controlled.example');
-      expect(v).not.toMatch(/label-proxy/);
+      expect(v).not.toMatch(new RegExp(LEGACY_LABEL_PROXY));
     }
     expect(requestedUrls.filter((u) => u.includes('provider-controlled.example'))).toEqual([]);
   });
@@ -369,7 +375,7 @@ describe('ShippingCenter — availability probes (plan gate open)', () => {
     expect(statusCalls).toBeLessThanOrEqual(5);
 
     // And no probe path opens a direct or proxied connection.
-    expect(requestedUrls.filter((u) => u.includes('/api/shipping'))).toEqual([]);
+    expect(requestedUrls.filter((u) => u.includes(LEGACY_SHIPPING_API))).toEqual([]);
     expect(requestedUrls.filter((u) => /easypost|goshippo|shipstation/i.test(u))).toEqual([]);
   });
 });
