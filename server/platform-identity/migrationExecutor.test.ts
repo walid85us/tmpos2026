@@ -11,10 +11,12 @@ import assert from 'node:assert/strict';
 import {
   EXECUTOR_CODES,
   MigrationExecutorError,
+  countSqlStatements,
   resolveDisposableTestDsn,
   assertDisposableTestDsn,
   describeDsn,
   runTrustedApply,
+  runTrustedLedgerRead,
   type ExecutorSession,
   type ExecutorAdapter,
   type ExecutorLedgerPort,
@@ -242,7 +244,10 @@ function fakeSession(rec: Recorder, opt: FakeOptions): ExecutorSession {
       await gate(`execute:${txScoped ? 'tx' : 'raw'}:depth=${rec.txDepth}`);
     },
     close: async () => { await gate('close'); rec.disposed.push('closed'); },
-    terminate: async () => { rec.ops.push('terminate'); rec.disposed.push('terminated'); },
+    // Routed through the gate like every other port call: without this a disposal FAILURE was
+    // not expressible, and the branch that must never turn a failed destroy into success was
+    // structurally untestable.
+    terminate: async () => { await gate('terminate'); rec.disposed.push('terminated'); },
   };
   return session;
 }
@@ -254,6 +259,13 @@ function fakeDeps(
 ): { deps: TrustedApplyDeps; rec: Recorder } {
   const rec: Recorder = { ops: [], sessions: [], txDepth: 0, disposed: [] };
   const session = fakeSession(rec, opt);
+  /** Same gate as the session's: a ledger call must be able to hang as well as throw. */
+  const ledgerGate = async (op: string): Promise<void> => {
+    rec.ops.push(op);
+    const b = opt.behaviour?.[op];
+    if (b === 'hang') await new Promise(() => {});
+    if (b === 'throw') throw new Error('ledger exploded');
+  };
   const adapter: ExecutorAdapter = {
     reserve: async () => {
       rec.ops.push('reserve');
@@ -268,16 +280,15 @@ function fakeDeps(
     cancelReserve: async () => { rec.ops.push('cancel_reserve'); },
   };
   const ledger: ExecutorLedgerPort = {
-    readLedger: async (s) => { rec.ops.push('read_ledger'); rec.sessions.push(s); return ledgerRows; },
+    readLedger: async (s) => { rec.sessions.push(s); await ledgerGate('read_ledger'); return ledgerRows; },
     insertDirtyAttempt: async (s, row) => {
-      rec.ops.push(`insert_dirty:${row.version}`);
       rec.sessions.push(s);
-      const b = opt.behaviour?.[`insert_dirty:${row.version}`];
-      if (b === 'throw') throw new Error('ledger exploded');
+      await ledgerGate(`insert_dirty:${row.version}`);
     },
     finalizeApplied: async (s, row, txScoped) => {
-      rec.ops.push(`finalize:${row.version}:${txScoped ? 'tx' : 'raw'}`);
       rec.sessions.push(s);
+      await ledgerGate(`finalize:${row.version}`);
+      rec.ops.push(`finalize:${row.version}:${txScoped ? 'tx' : 'raw'}`);
     },
   };
   return {
@@ -334,7 +345,7 @@ test('S1b-17: a required-mode migration executes and finalizes INSIDE one transa
   const report = await runTrustedApply(deps);
   assert.equal(report.outcome, 'complete', report.code ?? '');
   const seq = rec.ops.filter((o) => /^(insert_dirty|begin_tx|execute|finalize|commit_tx)/.test(o));
-  assert.deepEqual(seq, [
+  assert.deepEqual(seq.filter((o) => o !== 'finalize:001'), [
     'insert_dirty:001',
     'begin_tx',
     'execute:tx:depth=1',
@@ -351,7 +362,8 @@ test('S1b-18: a forbidden-mode migration executes with NO transaction bracket', 
   assert.equal(rec.ops.includes('begin_tx'), false, 'a forbidden migration must open no transaction');
   assert.equal(rec.ops.includes('commit_tx'), false, 'a forbidden migration must commit no transaction');
   const seq = rec.ops.filter((o) => /^(insert_dirty|execute|finalize)/.test(o));
-  assert.deepEqual(seq, ['insert_dirty:001', 'execute:raw:depth=0', 'finalize:001:raw']);
+  assert.deepEqual(seq.filter((o) => o !== 'finalize:001'),
+    ['insert_dirty:001', 'execute:raw:depth=0', 'finalize:001:raw']);
 });
 
 test('S1b-20: the ledger dirty and finalize operations use ONE port on the SAME session', async () => {
@@ -430,4 +442,166 @@ test('S1b-25a: executed SQL is re-bound to its declared checksum inside the exec
   const report = await runTrustedApply(deps);
   assert.equal(report.outcome, 'complete', report.code ?? '');
   assert.deepEqual(report.executedChecksums, [sha256Hex(enc(UP_SQL))]);
+});
+
+// ---------------------------------------------------------------------------
+// statement counting — the basis of the forbidden-mode guarantee
+// ---------------------------------------------------------------------------
+
+test('S1b-29: SQL statement counting ignores semicolons that are not statement separators', () => {
+  const one = [
+    'create index concurrently i on t (a);',
+    'create index concurrently i on t (a)',
+    "select ';';",
+    '-- a; comment\nselect 1;',
+    '/* a; block */ select 1;',
+    '/* nested /* block; */ still */ select 1;',
+    'do $$ begin perform 1; perform 2; end $$;',
+    'do $tag$ begin perform 1; end $tag$;',
+    'select "a;b" from t;',
+    "select 'it''s; fine';",
+    '   \n\t select 1 ;   \n',
+  ];
+  for (const sql of one) assert.equal(countSqlStatements(sql), 1, JSON.stringify(sql));
+
+  const many = [
+    'select 1; select 2;',
+    "set lock_timeout='5s'; create index concurrently i on t (a);",
+    'select 1;\ncreate index concurrently i on t (a);\n',
+  ];
+  for (const sql of many) assert.ok(countSqlStatements(sql) > 1, JSON.stringify(sql));
+
+  // CONSERVATIVE by design: anything unparseable counts as many, so it is refused, never run.
+  for (const sql of ["select 'unterminated", 'select /* unterminated', 'select $$unterminated']) {
+    assert.ok(countSqlStatements(sql) > 1, `unterminated input must refuse: ${sql}`);
+  }
+  assert.equal(countSqlStatements(''), 0);
+  assert.equal(countSqlStatements('   \n  '), 0);
+});
+
+test('S1b-30: a MULTI-statement transaction-forbidden migration is refused before any statement runs', async () => {
+  const MULTI = {
+    '001_multi_stmt.up.sql': "set lock_timeout='5s';\ncreate index concurrently idx on alpha (id);\n",
+    '001_multi_stmt.down.sql': 'drop index if exists idx;\n',
+  };
+  const { deps, rec } = fakeDeps(MULTI, []);
+  deps.transactionModeByVersion = { '001': 'forbidden' };
+  const report = await runTrustedApply(deps);
+  // 'refused', not 'failed': the refusal happens at PLAN time, before the kernel emits an effect,
+  // so no ledger write and no schema statement ever occur.
+  assert.equal(report.outcome, 'refused');
+  assert.equal(report.code, EXECUTOR_CODES.FORBIDDEN_MODE_MULTI_STATEMENT);
+  assert.equal(rec.ops.filter((o) => o.startsWith('execute:')).length, 0, 'no statement may run');
+  assert.equal(rec.ops.filter((o) => o.startsWith('insert_dirty')).length, 0, 'no dirty marker may be written');
+  assert.deepEqual(report.executedChecksums, []);
+  // The SAME file in required mode is fine: an explicit bracket is exactly what it then gets.
+  const ok = fakeDeps(MULTI, []);
+  const okReport = await runTrustedApply(ok.deps);
+  assert.equal(okReport.outcome, 'complete', okReport.code ?? '');
+  assert.ok(ok.rec.ops.includes('begin_tx'));
+});
+
+// ---------------------------------------------------------------------------
+// credential + connection-mode propagation (previously untested through the executor)
+// ---------------------------------------------------------------------------
+
+test('S1b-31: a runtime or self-asserted credential is refused, and no port is ever touched', async () => {
+  const cases: Array<[Partial<TrustedApplyDeps>, string]> = [
+    [{ credential: { purpose: 'runtime', migratorRef: 'm', runtimeRef: 'r' } }, ENGINE_CODES.RUNTIME_CREDENTIAL_REJECTED],
+    [{ credential: { purpose: 'test', migratorRef: 'm', runtimeRef: 'r' } as never }, ENGINE_CODES.CREDENTIAL_PURPOSE_REJECTED],
+    [{ credential: { purpose: 'migration', migratorRef: 'same', runtimeRef: 'same' } }, ENGINE_CODES.CREDENTIAL_EQUALITY_REJECTED],
+    [{ credential: { purpose: 'migration' } as never }, ENGINE_CODES.INVALID_CREDENTIAL_REF],
+    [{ connectionMode: 'transaction' }, ENGINE_CODES.MIGRATOR_CONNECTION_MODE_REJECTED],
+    [{ connectionMode: 'unknown' }, ENGINE_CODES.MIGRATOR_CONNECTION_MODE_REJECTED],
+  ];
+  for (const [patch, expected] of cases) {
+    const { deps, rec } = fakeDeps(ONE, []);
+    Object.assign(deps, patch);
+    const report = await runTrustedApply(deps);
+    assert.equal(report.outcome, 'refused', JSON.stringify(patch));
+    assert.equal(report.code, expected, JSON.stringify(patch));
+    assert.equal(rec.ops.filter((o) => o.startsWith('execute:')).length, 0, 'no SQL may run');
+    assert.equal(rec.ops.filter((o) => o.startsWith('insert_dirty')).length, 0, 'no ledger write may occur');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// deadline coverage at EVERY awaited call site, not just one sample
+// ---------------------------------------------------------------------------
+
+test('S1b-32: EVERY awaited port operation is deadline-bounded, including executeSql', async () => {
+  const sites = ['confirm_live', 'identity', 'acquire_lock', 'begin_tx', 'execute:tx:depth=1', 'commit_tx', 'close'];
+  for (const site of sites) {
+    const { deps, rec } = fakeDeps(ONE, [], { behaviour: { [site]: 'hang' } });
+    const started = Date.now();
+    const report = await runTrustedApply(deps);
+    const elapsed = Date.now() - started;
+    assert.equal(report.outcome, 'failed', `hanging ${site} must fail`);
+    assert.equal(report.code, ENGINE_CODES.EXECUTION_STEP_TIMEOUT, `hanging ${site} must time out`);
+    assert.ok(elapsed < 8000, `hanging ${site} must not hang the run (${elapsed}ms)`);
+    assert.equal(rec.ops.includes('close'), site === 'close', `no clean close after a ${site} timeout`);
+  }
+  // the two ledger call sites too
+  for (const site of ['insert_dirty:001', 'finalize:001']) {
+    const { deps } = fakeDeps(ONE, [], { behaviour: { [site]: 'hang' } });
+    const report = await runTrustedApply(deps);
+    assert.equal(report.code, ENGINE_CODES.EXECUTION_STEP_TIMEOUT, `hanging ${site} must time out`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// disposal honesty — a failed destroy must never read as a clean one
+// ---------------------------------------------------------------------------
+
+test('S1b-33: a disposal that FAILS is reported as such, never upgraded to a clean termination', async () => {
+  const { deps, rec } = fakeDeps(ONE, [], { behaviour: { 'insert_dirty:001': 'throw', terminate: 'throw' } });
+  const report = await runTrustedApply(deps);
+  assert.equal(report.outcome, 'failed');
+  assert.equal(report.disposal, 'none', 'a failed destroy must NOT be reported as terminated');
+  // The PRIMARY failure keeps the code — it is the more informative one — and the failed destroy
+  // is visible as disposal 'none'. What must never happen is a failed destroy reading as clean.
+  assert.equal(report.code, ENGINE_CODES.PORT_OPERATION_FAILED);
+  assert.equal(rec.disposed.includes('terminated'), false);
+  assert.equal(rec.disposed.includes('closed'), false);
+});
+
+test('S1b-34: the read-only ledger path reports the disposal it actually achieved', async () => {
+  const { deps, rec } = fakeDeps(ONE, [], { behaviour: { read_ledger: 'throw', terminate: 'throw' } });
+  const read = await runTrustedLedgerRead({
+    adapter: deps.adapter, ledger: deps.ledger, connectionMode: 'session', deadlineMs: 120,
+  });
+  assert.equal(read.outcome, 'failed');
+  assert.equal(read.disposal, 'none', 'a failed destroy must not be flattened into terminated');
+  assert.equal(rec.disposed.includes('terminated'), false);
+
+  // and the happy path really does close cleanly, taking no lock and running no migration SQL
+  const good = fakeDeps(ONE, [{ version: '001', checksum: 'x'.repeat(64), dirty: false }]);
+  const ok = await runTrustedLedgerRead({
+    adapter: good.deps.adapter, ledger: good.deps.ledger, connectionMode: 'session', deadlineMs: 2000,
+  });
+  assert.equal(ok.outcome, 'complete');
+  assert.equal(ok.disposal, 'closed');
+  assert.equal(ok.rows.length, 1);
+  assert.equal(good.rec.ops.includes('acquire_lock'), false, 'the read path takes no advisory lock');
+  assert.equal(good.rec.ops.filter((o) => o.startsWith('execute:')).length, 0, 'the read path runs no migration SQL');
+});
+
+// ---------------------------------------------------------------------------
+// a foreign `code` must never ride into the report
+// ---------------------------------------------------------------------------
+
+test('S1b-35: an unrecognised error code from a port is replaced, never echoed into the report', async () => {
+  const hostile = Object.assign(new Error('boom'), {
+    code: "postgres://u:pw@host/db -- DROP TABLE schema_migrations;",
+  });
+  const { deps } = fakeDeps(ONE, []);
+  deps.ledger = {
+    readLedger: async () => { throw hostile; },
+    insertDirtyAttempt: async () => {},
+    finalizeApplied: async () => {},
+  };
+  const report = await runTrustedApply(deps);
+  const serialized = JSON.stringify(report);
+  assert.ok(!serialized.includes('DROP TABLE'), 'a caller-controlled code must not reach the report');
+  assert.ok(!/postgres:\/\//.test(serialized), 'a DSN-shaped code must not reach the report');
 });

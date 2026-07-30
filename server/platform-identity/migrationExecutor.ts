@@ -14,6 +14,7 @@
 // line, error message, or serialized report can reach it.
 
 import { createHash } from 'crypto';
+import { tmpdir } from 'os';
 
 import {
   ENGINE_CODES,
@@ -48,9 +49,9 @@ export const EXECUTOR_CODES = {
   TEST_DSN_HOST_NOT_LOCAL: 'test_dsn_host_not_local',
   TEST_DSN_DATABASE_NOT_DISPOSABLE: 'test_dsn_database_not_disposable',
   TEST_DSN_POOL_MODE_REJECTED: 'test_dsn_pool_mode_rejected',
-  COMPOSITION_ROOT_REJECTED: 'composition_root_rejected',
-  DEADLINE_EXCEEDED: 'executor_deadline_exceeded',
   ARTIFACT_BINDING_MISMATCH: 'executor_artifact_binding_mismatch',
+  /** A `transaction: forbidden` migration whose file holds more than one statement. */
+  FORBIDDEN_MODE_MULTI_STATEMENT: 'executor_forbidden_mode_multi_statement',
   PORT_FAILED: 'executor_port_failed',
   DISPOSAL_FAILED: 'executor_disposal_failed',
   UNSUPPORTED_EFFECT: 'executor_unsupported_effect',
@@ -150,6 +151,14 @@ export function assertDisposableTestDsn(raw: unknown): DisposableTestDsn {
   if (url.hostname === '') {
     // libpq socket form: postgres:///db?host=/abs/socket/dir
     if (!socketDir.startsWith('/')) return fail(EXECUTOR_CODES.TEST_DSN_HOST_NOT_LOCAL, 'no host and no socket directory');
+    // "Absolute path" is not the same as "task-owned". A system-wide socket directory such as
+    // /var/run/postgresql is absolute too, and would point this executor at a standing local
+    // cluster. A disposable cluster lives under the temp root by construction, so that is the
+    // confinement actually required.
+    const tempRoot = tmpdir();
+    if (!socketDir.startsWith(`${tempRoot}/`) && socketDir !== tempRoot) {
+      return fail(EXECUTOR_CODES.TEST_DSN_HOST_NOT_LOCAL, 'socket directory is not under the temp root');
+    }
     hostKind = 'unix_socket';
   } else if (LOOPBACK_HOSTS.has(url.hostname)) {
     hostKind = 'loopback';
@@ -160,7 +169,14 @@ export function assertDisposableTestDsn(raw: unknown): DisposableTestDsn {
   }
 
   // --- database: disposable by name ---
-  const database = decodeURIComponent(url.pathname.replace(/^\//, ''));
+  // decodeURIComponent throws a RAW URIError on malformed percent-encoding. That error would
+  // cross this boundary carrying caller-controlled text, so it is converted to a bounded code.
+  let database: string;
+  try {
+    database = decodeURIComponent(url.pathname.replace(/^\//, ''));
+  } catch {
+    return fail(EXECUTOR_CODES.TEST_DSN_INVALID, 'malformed percent-encoding in database name');
+  }
   if (!database.startsWith(DISPOSABLE_DB_PREFIX)) {
     return fail(EXECUTOR_CODES.TEST_DSN_DATABASE_NOT_DISPOSABLE, `database must begin ${DISPOSABLE_DB_PREFIX}`);
   }
@@ -181,7 +197,12 @@ export function assertDisposableTestDsn(raw: unknown): DisposableTestDsn {
   RAW_DSN.set(handle, driverUrl.toString());
   if (hostKind === 'unix_socket') SOCKET_DIR.set(handle, socketDir);
   // The socket URI form carries no userinfo, so the role travels as a `user` parameter.
-  const declaredUser = url.username !== '' ? decodeURIComponent(url.username) : (url.searchParams.get('user') ?? '');
+  let declaredUser: string;
+  try {
+    declaredUser = url.username !== '' ? decodeURIComponent(url.username) : (url.searchParams.get('user') ?? '');
+  } catch {
+    return fail(EXECUTOR_CODES.TEST_DSN_INVALID, 'malformed percent-encoding in user');
+  }
   if (declaredUser !== '') DSN_USER.set(handle, declaredUser);
   return handle;
 }
@@ -203,6 +224,79 @@ export function resolveDisposableTestDsn(env: Readonly<Record<string, string | u
  *  Never the user, password, host, port, or the string itself. */
 export function describeDsn(dsn: DisposableTestDsn): { hostKind: DsnHostKind; database: string } {
   return { hostKind: dsn.hostKind, database: dsn.database };
+}
+
+/**
+ * Count TOP-LEVEL statements in a SQL script, ignoring semicolons inside line comments, block
+ * comments, single-quoted literals, double-quoted identifiers, and dollar-quoted bodies.
+ *
+ * It is deliberately CONSERVATIVE: anything it cannot confidently interpret (an unterminated
+ * quote or comment) counts as more than one statement, so an ambiguous script is refused rather
+ * than executed under an assumption. Miscounting can only ever cause a refusal, never a wrong
+ * execution.
+ */
+export function countSqlStatements(sql: string): number {
+  let i = 0;
+  let statements = 0;
+  let sawContent = false;
+  const n = sql.length;
+  while (i < n) {
+    const ch = sql[i];
+    if (ch === '-' && sql[i + 1] === '-') {
+      const nl = sql.indexOf('\n', i);
+      i = nl === -1 ? n : nl + 1;
+      continue;
+    }
+    if (ch === '/' && sql[i + 1] === '*') {
+      // PostgreSQL block comments NEST, so depth must be tracked rather than scanning to the
+      // first close.
+      let depth = 1;
+      i += 2;
+      while (i < n && depth > 0) {
+        if (sql[i] === '/' && sql[i + 1] === '*') { depth += 1; i += 2; continue; }
+        if (sql[i] === '*' && sql[i + 1] === '/') { depth -= 1; i += 2; continue; }
+        i += 1;
+      }
+      if (depth > 0) return 2; // unterminated: refuse
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      const quote = ch;
+      i += 1;
+      let closed = false;
+      while (i < n) {
+        if (sql[i] === quote) {
+          if (sql[i + 1] === quote) { i += 2; continue; } // doubled quote is an escape
+          i += 1; closed = true; break;
+        }
+        i += 1;
+      }
+      if (!closed) return 2; // unterminated: refuse
+      sawContent = true;
+      continue;
+    }
+    if (ch === '$') {
+      const tag = /^\$[A-Za-z_\u0080-\uffff][A-Za-z0-9_\u0080-\uffff]*\$|^\$\$/.exec(sql.slice(i));
+      if (tag !== null) {
+        const marker = tag[0];
+        const end = sql.indexOf(marker, i + marker.length);
+        if (end === -1) return 2; // unterminated dollar quote: refuse
+        i = end + marker.length;
+        sawContent = true;
+        continue;
+      }
+    }
+    if (ch === ';') {
+      if (sawContent) statements += 1;
+      sawContent = false;
+      i += 1;
+      continue;
+    }
+    if (!/\s/.test(ch)) sawContent = true;
+    i += 1;
+  }
+  if (sawContent) statements += 1; // trailing statement with no terminating semicolon
+  return statements;
 }
 
 /** SHA-256 hex of a UTF-8 string — used to re-bind executed SQL to its declared checksum. */
@@ -332,10 +426,14 @@ async function bounded<T>(
       : { ok: false, timedOut: false };
   }
   // Deadline exceeded: keep watching so a late resource cannot leak.
-  void work.then((r) => {
-    if (settled) return;
-    onLate(r.kind === 'ok' ? r.value : undefined);
-  });
+  void work
+    .then((r) => {
+      if (settled) return;
+      onLate(r.kind === 'ok' ? r.value : undefined);
+    })
+    // Structural, not incidental: a throwing onLate must never become an unhandled rejection
+    // that takes down a migration process on its cleanup path.
+    .catch(() => {});
   return { ok: false, timedOut: true };
 }
 
@@ -375,15 +473,26 @@ export async function runTrustedApply(deps: TrustedApplyDeps): Promise<ExecutorR
   const deadlineMs = Number.isSafeInteger(deps.deadlineMs) && deps.deadlineMs > 0 ? deps.deadlineMs : 30_000;
   const kernelDeps = { connectionMode: deps.connectionMode, credential: deps.credential, lockKey: deps.lockKey };
 
+  // A late-settling reservation must be DISPOSED, and the run must be able to WAIT for that
+  // disposal before it returns — a fire-and-forget chain can be truncated by the caller exiting
+  // the process, leaking a backend that may still hold the run's advisory lock.
+  let lateDisposal: Promise<void> | null = null;
   /** Physically destroy a session, never pool it. Disposal failure can never mask a verdict. */
   const disposeLate = (s: ExecutorSession | undefined): void => {
     if (s === undefined) return;
-    void Promise.resolve()
-      .then(() => s.terminate())
-      .then(
-        () => { report.lateSettlementDisposed = true; },
-        () => { report.lateSettlementDisposed = false; },
-      );
+    lateDisposal = bounded(() => s.terminate(), deadlineMs, () => {}).then((r) => {
+      report.lateSettlementDisposed = r.ok;
+    });
+  };
+  /** Give an in-flight late disposal a bounded chance to finish before the report is returned. */
+  const settleLateDisposal = async (graceMs: number): Promise<void> => {
+    const started = Date.now();
+    while (lateDisposal === null && Date.now() - started < graceMs) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    if (lateDisposal !== null) {
+      await Promise.race([lateDisposal, new Promise((r) => setTimeout(r, graceMs))]);
+    }
   };
 
   // --- prologue: rediscover and reserve -------------------------------------
@@ -405,10 +514,14 @@ export async function runTrustedApply(deps: TrustedApplyDeps): Promise<ExecutorR
     report.code = verdict.state.code;
     report.disposition = verdict.state.disposition;
     report.ownershipUncertain = verdict.state.ownershipUncertain;
-    if (verdict.state.disposition === 'cancel_and_dispose' && typeof deps.adapter.cancelReserve === 'function') {
+    const cancel = deps.adapter.cancelReserve;
+    if (verdict.state.disposition === 'cancel_and_dispose' && typeof cancel === 'function') {
       // Cancel the OUTSTANDING attempt. Best-effort: a failure here must not mask the verdict.
-      await bounded(() => deps.adapter.cancelReserve!(), deadlineMs, () => {});
+      await bounded(() => cancel.call(deps.adapter), deadlineMs, () => {});
     }
+    // Wait, briefly and boundedly, for any session that settles late — so the caller can act on
+    // `lateSettlementDisposed` instead of racing the process exit.
+    await settleLateDisposal(deadlineMs);
     return report;
   }
   const session = reserved.value;
@@ -437,6 +550,19 @@ export async function runTrustedApply(deps: TrustedApplyDeps): Promise<ExecutorR
     return report;
   }
 
+  // A `transaction: forbidden` migration whose file holds more than one statement can never be
+  // executed bracket-free (see the execute effect below), so it is refused HERE — before the
+  // kernel emits a single effect. Refusing later would still be fail-closed, but it would leave
+  // a durable dirty marker behind for a run that never had any chance of succeeding.
+  const multi = forbiddenMultiStatementVersion(plan);
+  if (multi !== null) {
+    report.outcome = 'refused';
+    report.code = EXECUTOR_CODES.FORBIDDEN_MODE_MULTI_STATEMENT;
+    report.disposition = 'terminate';
+    await terminateQuietly(session, report);
+    return report;
+  }
+
   // --- kernel-driven interpretation ----------------------------------------
   let result: KernelResult = startMigrationExecution(plan, kernelDeps);
   let executorCode: string | null = null;
@@ -458,10 +584,11 @@ export async function runTrustedApply(deps: TrustedApplyDeps): Promise<ExecutorR
   report.disposition = result.state.disposition;
   report.ownershipUncertain = result.state.ownershipUncertain;
 
-  // Discard the run lineage immediately after the terminal verdict: the program, cursor and
-  // captured token are no longer authority for anything.
+  // The run lineage stops being authority here: nothing below reads `result` again, and it is
+  // function-local so scope exit discards it. (It used to be overwritten with a `null` cast,
+  // which bought nothing and left a footgun: a later diagnostic branch reading `result.state`
+  // would have compiled cleanly and thrown at runtime.)
   const disposition = result.state.disposition;
-  result = null as unknown as KernelResult;
 
   if (report.outcome === 'complete' && disposition === 'none') {
     // `close` already ran as the kernel's final effect on the one verified path.
@@ -490,41 +617,58 @@ export async function runTrustedLedgerRead(deps: {
   const reserved = await bounded(
     () => deps.adapter.reserve(deps.connectionMode),
     deadlineMs,
-    (late) => { if (late !== undefined) void late.terminate().catch(() => {}); },
+    // Bounded like every other awaited port call: an unbounded terminate on the cleanup path
+    // could hang forever with nothing to stop it.
+    (late) => { if (late !== undefined) void bounded(() => late.terminate(), deadlineMs, () => {}); },
   );
   if (!reserved.ok) {
     out.code = reserved.timedOut ? ENGINE_CODES.EXECUTION_STEP_TIMEOUT : ENGINE_CODES.PORT_OPERATION_FAILED;
-    if (typeof deps.adapter.cancelReserve === 'function') {
-      await bounded(() => deps.adapter.cancelReserve!(), deadlineMs, () => {});
+    const cancel = deps.adapter.cancelReserve;
+    if (typeof cancel === 'function') {
+      await bounded(() => cancel.call(deps.adapter), deadlineMs, () => {});
     }
     return out;
   }
   const session = reserved.value;
+  // A disposal is only ever reported as achieved when the destroy call itself succeeded; a
+  // failed hard-kill must stay visible as 'none' rather than be flattened into 'terminated'.
+  const destroy = async (): Promise<void> => {
+    const term = await bounded(() => session.terminate(), 5_000, () => {});
+    out.disposal = term.ok ? 'terminated' : 'none';
+    if (!term.ok) out.code = out.code ?? EXECUTOR_CODES.DISPOSAL_FAILED;
+  };
   const live = await bounded(() => session.confirmLive(), deadlineMs, () => {});
   if (!live.ok) {
     out.code = live.timedOut ? ENGINE_CODES.EXECUTION_STEP_TIMEOUT : ENGINE_CODES.PORT_OPERATION_FAILED;
-    await bounded(() => session.terminate(), 5_000, () => {});
-    out.disposal = 'terminated';
+    await destroy();
     return out;
   }
   const read = await bounded(() => deps.ledger.readLedger(session), deadlineMs, () => {});
   if (!read.ok) {
     out.code = read.timedOut ? ENGINE_CODES.EXECUTION_STEP_TIMEOUT : ENGINE_CODES.PORT_OPERATION_FAILED;
-    await bounded(() => session.terminate(), 5_000, () => {});
-    out.disposal = 'terminated';
+    await destroy();
     return out;
   }
   out.rows = read.value;
   const closed = await bounded(() => session.close(), deadlineMs, () => {});
   if (!closed.ok) {
-    await bounded(() => session.terminate(), 5_000, () => {});
-    out.disposal = 'terminated';
     out.code = ENGINE_CODES.PORT_OPERATION_FAILED;
+    await destroy();
     return out;
   }
   out.disposal = 'closed';
   out.outcome = 'complete';
   return out;
+}
+
+/** The first pending version that declares `forbidden` mode yet carries multiple statements. */
+function forbiddenMultiStatementVersion(plan: ApplyPlan): string | null {
+  for (const pair of plan.pending) {
+    if (pair.transactionMode !== 'forbidden') continue;
+    const sql = pair.up.artifact?.sql;
+    if (typeof sql === 'string' && countSqlStatements(sql) > 1) return pair.version;
+  }
+  return null;
 }
 
 /** Destroy the session; record it. A disposal failure is recorded, never silently swallowed
@@ -540,10 +684,23 @@ async function terminateQuietly(session: ExecutorSession, report: ExecutorReport
   report.code = report.code ?? EXECUTOR_CODES.DISPOSAL_FAILED;
 }
 
-/** Map an engine error to its bounded code; anything else to a bounded executor code. */
+/** Every code this module may ever report. Anything outside the set is NOT a code we recognise. */
+const KNOWN_CODES: ReadonlySet<string> = new Set<string>([
+  ...Object.values(ENGINE_CODES) as string[],
+  ...Object.values(EXECUTOR_CODES) as string[],
+]);
+
+/**
+ * Map a thrown value to a bounded code.
+ *
+ * An ALLOWLIST, not a copy: a `code` property is caller-controlled (any port, adapter or ledger
+ * may throw an object carrying one), so echoing it verbatim would let SQL text, a DSN or a
+ * credential ride into the report through the one field that is meant to be inert.
+ */
 function boundedCode(e: unknown): string {
   const d = e === null || typeof e !== 'object' ? undefined : Object.getOwnPropertyDescriptor(e, 'code');
-  return d !== undefined && typeof d.value === 'string' ? d.value : EXECUTOR_CODES.PORT_FAILED;
+  const raw = d !== undefined && typeof d.value === 'string' ? d.value : '';
+  return KNOWN_CODES.has(raw) ? raw : EXECUTOR_CODES.PORT_FAILED;
 }
 
 /**
@@ -605,6 +762,18 @@ async function interpretEffect(
       // proves for itself that the bytes it is about to execute are the bytes that were hashed.
       if (sha256Utf8(effect.sql) !== effect.checksum) {
         setCode(EXECUTOR_CODES.ARTIFACT_BINDING_MISMATCH);
+        return { type: 'port_failed' };
+      }
+      // A `transaction: forbidden` migration exists for statements that CANNOT run inside a
+      // transaction block (CREATE INDEX CONCURRENTLY, VACUUM, ALTER TYPE ... ADD VALUE). Issuing
+      // no explicit BEGIN is NOT sufficient: PostgreSQL executes a multi-statement simple query
+      // in an implicit transaction block of its own, so such a file fails with SQLSTATE 25001
+      // ("cannot run inside a transaction block") even though this executor opened no bracket.
+      // Rather than silently promise a guarantee the protocol withdraws, a multi-statement
+      // forbidden-mode file is refused before any statement runs. Splitting the script and
+      // sending each statement as its own query is the upgrade path.
+      if (!effect.txScoped && countSqlStatements(effect.sql) > 1) {
+        setCode(EXECUTOR_CODES.FORBIDDEN_MODE_MULTI_STATEMENT);
         return { type: 'port_failed' };
       }
       const r = await bounded(() => session.executeSql(effect.sql, effect.txScoped), deadlineMs, () => {});
@@ -672,7 +841,10 @@ const LEDGER_DDL =
  * The DSN is read from the module-private map — it is never a parameter, never returned, and
  * never logged, so no caller can obtain it from this handle.
  */
-export async function createPostgresExecutor(dsn: DisposableTestDsn): Promise<PostgresExecutorHandle> {
+export async function createPostgresExecutor(
+  dsn: DisposableTestDsn,
+  options: { statementTimeoutMs?: number } = {},
+): Promise<PostgresExecutorHandle> {
   const raw = RAW_DSN.get(dsn);
   if (raw === undefined) return fail(EXECUTOR_CODES.TEST_DSN_INVALID, 'unvalidated handle');
 
@@ -686,6 +858,10 @@ export async function createPostgresExecutor(dsn: DisposableTestDsn): Promise<Po
   // the connection to `localhost` over TCP instead of the task-owned socket it was validated for.
   const socketDir = SOCKET_DIR.get(dsn);
   const user = DSN_USER.get(dsn);
+  const statementTimeoutMs =
+    Number.isSafeInteger(options.statementTimeoutMs) && (options.statementTimeoutMs as number) > 0
+      ? (options.statementTimeoutMs as number)
+      : 60_000;
   const client = postgres(raw, {
     max: 1,
     prepare: false,
@@ -694,6 +870,15 @@ export async function createPostgresExecutor(dsn: DisposableTestDsn): Promise<Po
     onnotice: () => {},
     ...(socketDir === undefined ? {} : { host: socketDir }),
     ...(user === undefined ? {} : { user }),
+    // SERVER-SIDE bounds, sent as startup parameters. The client-side deadline only stops this
+    // process WAITING; it sends no cancel request, and PostgreSQL does not notice a dropped
+    // client while it is blocked in a lock wait. Without these a migration statement could hold
+    // locks indefinitely after the executor had already given up on it.
+    connection: {
+      statement_timeout: statementTimeoutMs,
+      lock_timeout: Math.max(1000, Math.floor(statementTimeoutMs / 2)),
+      idle_in_transaction_session_timeout: statementTimeoutMs,
+    },
     // No SSL clause: the only reachable endpoints are a task-owned Unix socket and loopback.
   });
 
@@ -746,8 +931,13 @@ export async function createPostgresExecutor(dsn: DisposableTestDsn): Promise<Po
       const c = reservedConn;
       reservedConn = null;
       if (c !== null) c.release();
-      destroyed = true;
+      // `destroyed` is latched ONLY after the graceful shutdown actually resolves. Setting it
+      // first made a FAILING close disable its own compensating force-destroy: terminate() ->
+      // dispose() would hit the `if (destroyed) return` guard and no-op, and the run would then
+      // report `disposal: 'terminated'` for a connection that may still be alive holding the
+      // run's advisory lock.
       await client.end({ timeout: 5 });
+      destroyed = true;
     },
     terminate: async () => { await dispose(); },
   };

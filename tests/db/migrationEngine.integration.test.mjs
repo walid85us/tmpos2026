@@ -206,6 +206,11 @@ test('S1b-11+15: the dirty marker commits BEFORE schema execution; the backend P
 });
 
 test('S1b-19: a successful rerun is idempotent — nothing pending, no second write', async () => {
+  // Self-contained: establish the applied state here rather than inheriting it from whichever
+  // test happened to run before, so an upstream failure cannot cascade into a misleading one here.
+  await resetTarget();
+  const first = await applyWith(fixtures(TWO_GOOD));
+  assert.equal(first.outcome, 'complete', first.code ?? '');
   const before = await observer`select version, checksum, finished_at from public.schema_migrations order by version`;
   const report = await applyWith(fixtures(TWO_GOOD));
   assert.equal(report.outcome, 'complete', report.code ?? '');
@@ -266,6 +271,10 @@ test('S1b-12: a mid-file failure leaves a DURABLE dirty marker after the schema 
 });
 
 test('S1b-13: an unresolved dirty marker blocks an ordinary rerun before any effect', async () => {
+  // Self-contained: create the dirty marker in this test rather than inheriting it.
+  await resetTarget();
+  const failed = await applyWith(fixtures(ONE_BROKEN));
+  assert.equal(failed.outcome, 'failed', 'precondition: the first attempt must fail dirty');
   const report = await applyWith(fixtures(ONE_BROKEN));
   assert.equal(report.outcome, 'refused');
   assert.equal(report.code, ENGINE_CODES.UNRESOLVED_DIRTY_ATTEMPT);
@@ -344,4 +353,84 @@ test('S1b-8b: a real driver failure never leaks SQL, a DSN, or a stack into the 
   assert.ok(!/postgres:\/\//.test(serialized), 'no DSN may appear in the report');
   assert.ok(!serialized.includes('division by zero'), 'no driver message may appear in the report');
   assert.ok(!serialized.includes(TARGET_DSN), 'the target DSN may never appear');
+});
+
+// ---------------------------------------------------------------------------
+// the forbidden-mode guarantee and the server-side bounds, proved for real
+// ---------------------------------------------------------------------------
+
+const FORBIDDEN_MULTI = {
+  '001_multi_forbidden.up.sql':
+    "set lock_timeout = '5s';\ncreate index concurrently if not exists s1b_idx on s1b_alpha (id);\n",
+  '001_multi_forbidden.down.sql': 'drop index if exists s1b_idx;\n',
+};
+
+test('S1b-30b: PostgreSQL really rejects a multi-statement forbidden-mode batch; the executor refuses first', async () => {
+  await resetTarget();
+  await observer.unsafe('create table if not exists s1b_alpha (id int primary key)');
+
+  // GROUND TRUTH: sent as ONE simple-query batch, PostgreSQL wraps it in an implicit transaction
+  // and rejects the concurrent index - even though no BEGIN was ever issued by anyone.
+  let raw = 'NO ERROR';
+  try {
+    await observer.unsafe(FORBIDDEN_MULTI['001_multi_forbidden.up.sql']).simple();
+  } catch (e) {
+    raw = `${e.code} ${e.message}`;
+  }
+  assert.match(raw, /^25001 /, `expected SQLSTATE 25001, got: ${raw}`);
+  assert.match(raw, /cannot run inside a transaction block/);
+
+  // The executor therefore refuses BEFORE running anything, rather than promising a guarantee
+  // that the wire protocol withdraws.
+  const report = await applyWith(fixtures(FORBIDDEN_MULTI), {
+    transactionModeByVersion: { '001': 'forbidden' },
+  });
+  assert.equal(report.outcome, 'refused', 'refused at plan time, before any effect');
+  assert.equal(report.code, EXECUTOR_CODES.FORBIDDEN_MODE_MULTI_STATEMENT);
+  assert.deepEqual(report.executedChecksums, [], 'nothing may execute');
+  // The ledger table may not even exist: it is created lazily by the first dirty-marker write,
+  // and a plan-time refusal never reaches one. Existence is therefore checked FIRST — a query
+  // merely referencing an absent relation still fails at parse time.
+  const [{ present }] = await observer`select to_regclass('public.schema_migrations') is not null as present`;
+  const written = present ? (await observer`select count(*)::int as n from public.schema_migrations`)[0].n : 0;
+  assert.equal(written, 0, 'not even a dirty marker is written');
+  await observer.unsafe('drop table if exists s1b_alpha cascade');
+});
+
+test('S1b-36: a SINGLE-statement forbidden-mode migration really runs outside any transaction block', async () => {
+  await resetTarget();
+  await observer.unsafe('create table if not exists s1b_alpha (id int primary key)');
+  const CONCURRENT = {
+    '001_concurrent_idx.up.sql': 'create index concurrently if not exists s1b_idx on s1b_alpha (id);\n',
+    '001_concurrent_idx.down.sql': 'drop index if exists s1b_idx;\n',
+  };
+  const report = await applyWith(fixtures(CONCURRENT), { transactionModeByVersion: { '001': 'forbidden' } });
+  assert.equal(report.outcome, 'complete', `CREATE INDEX CONCURRENTLY must succeed outside a bracket: ${report.code}`);
+  const [{ present }] = await observer`select to_regclass('public.s1b_idx') is not null as present`;
+  assert.equal(present, true, 'the concurrent index really was created');
+  await observer.unsafe('drop table if exists s1b_alpha cascade');
+});
+
+test('S1b-37: the SERVER cancels a runaway statement on the executor\'s own session', async () => {
+  await resetTarget();
+  // A tiny server-side bound against a huge client-side deadline. If the statement dies fast, it
+  // can ONLY be PostgreSQL cancelling it — the client is still willing to wait 30 seconds. That
+  // is the difference between a bound the server enforces and one this process merely observes.
+  const handle = await createPostgresExecutor(assertDisposableTestDsn(TARGET_DSN), { statementTimeoutMs: 250 });
+  try {
+    const session = await handle.adapter.reserve('session');
+    await session.confirmLive();
+    const started = Date.now();
+    let code = 'NO ERROR';
+    try {
+      await session.executeSql('select pg_sleep(20)', false);
+    } catch (e) {
+      code = e.code ?? 'unknown';
+    }
+    const elapsed = Date.now() - started;
+    assert.equal(code, '57014', `expected SQLSTATE 57014 (query_canceled), got ${code}`);
+    assert.ok(elapsed < 10000, `the server bound must fire long before the client would (${elapsed}ms)`);
+  } finally {
+    await handle.dispose();
+  }
 });

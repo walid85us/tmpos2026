@@ -320,4 +320,12 @@ async function main(): Promise<void> {
   }
 }
 
-main();
+// The top-level promise is handled explicitly. Every reachable failure inside main() is already
+// funnelled into a bounded refusal, but that is discipline, not a guarantee — and Node's default
+// unhandled-rejection handler prints the FULL error object, message and stack, which is exactly
+// the leak this file's banner promises to prevent.
+main().catch((err) => {
+  const message = err instanceof Error ? err.message : 'unknown error';
+  console.error(`[migrate] FATAL: ${message}`);
+  process.exitCode = 1;
+});
