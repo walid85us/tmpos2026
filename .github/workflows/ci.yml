@@ -25,6 +25,32 @@ jobs:
   quality:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Phase 4.0 M3 S1b — DISPOSABLE PostgreSQL for the migration-executor proof. It is created
+    # and destroyed with this job, reachable only on the runner's loopback interface, holds a
+    # database named `tmpos_s1b_*`, and authenticates a synthetic bootstrap role through
+    # trust auth, so no credential is committed at all.
+    # It is bound to the tests ONLY through TM_POS_TEST_DATABASE_URL — DATABASE_URL,
+    # SUPABASE_DATABASE_URL and APP_DATABASE_URL are never set here.
+    services:
+      tmpos_s1b_postgres:
+        # postgres:16-alpine, linux/amd64 manifest, pinned by digest like every other image here.
+        image: postgres@sha256:7a396fd264a2067788b6551122b50f162bf6136312c7fc9d74381cb92c648382
+        env:
+          POSTGRES_USER: tmpos_s1b_owner
+          POSTGRES_DB: tmpos_s1b_ci
+          # No password exists to leak: the instance is disposable, lives only inside this job,
+          # and is reachable only on the runner's loopback interface. Trust auth removes the
+          # credential entirely rather than committing a secret-shaped literal and waiving it.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        # Bounded health check: the job waits for a real connection rather than a sleep.
+        options: >-
+          --health-cmd "pg_isready -U tmpos_s1b_owner -d tmpos_s1b_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+          --health-start-period 10s
     steps:
       # actions/checkout@v4.2.2
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -58,6 +84,14 @@ jobs:
         run: npm run typecheck
       - name: Deterministic tests (existing suites)
         run: npm run test:existing
+      # Phase 4.0 M3 S1b — the trusted executor against the disposable service above. Proves
+      # session-scoped advisory locking, stable backend identity across per-file commits, durable
+      # dirty markers, and idempotent reruns against REAL PostgreSQL. Bound exclusively through
+      # TM_POS_TEST_DATABASE_URL; the executor refuses any non-disposable, non-local target.
+      - name: Migration executor against disposable PostgreSQL (S1b)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+        run: npm run test:db
       - name: Frontend render/behavior tests
         run: npm run test:frontend
       - name: Firestore static guard

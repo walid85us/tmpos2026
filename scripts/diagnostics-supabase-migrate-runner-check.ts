@@ -23,8 +23,13 @@ const TSX_CLI = join(ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs');
 
 const src = existsSync(RUNNER) ? readFileSync(RUNNER, 'utf8') : '';
 
-// The stable fail-closed contract this CLI must honour in S1.
+// The stable refusal contract this CLI must honour. Every database-requiring operation refuses
+// BEFORE a connection exists, with one exit code and a bounded reason naming which gate stopped it.
 const PG_VALIDATION_REQUIRED = 'migration_engine_pg_validation_required';
+const PRODUCTION_FORBIDDEN = 'migration_production_forbidden';
+const OPERATOR_GATE_UNSATISFIED = 'migration_operator_gate_unsatisfied';
+const TEST_DSN_MISSING = 'test_dsn_missing';
+const TEST_DSN_HOST_NOT_LOCAL = 'test_dsn_host_not_local';
 const PG_VALIDATION_EXIT = 2;
 
 interface Result { name: string; pass: boolean; detail: string }
@@ -43,6 +48,9 @@ delete childEnv.SUPABASE_DATABASE_URL;
 delete childEnv.ALLOW_SUPABASE_MIGRATION_APPLY;
 delete childEnv.CONFIRM_SUPABASE_TARGET;
 delete childEnv.EXPECTED_DEV_PROJECT_REF;
+// The S1b target variable is stripped as well, so a machine that happens to export one cannot
+// let a behavioural check reach a live database.
+delete childEnv.TM_POS_TEST_DATABASE_URL;
 
 interface Run { status: number | null; out: string }
 function run(args: string[], extraEnv: NodeJS.ProcessEnv = {}): Run {
@@ -69,11 +77,18 @@ check('S6 production hard-block retained', /NODE_ENV\s*===\s*'production'/.test(
 // The database-requiring gate: stable reason + exit code, refusing before any connection.
 check('S7 stable fail-closed reason present', src.includes(PG_VALIDATION_REQUIRED));
 check('S8 stable fail-closed exit code present', src.includes(`PG_VALIDATION_EXIT = ${PG_VALIDATION_EXIT}`));
-check('S9 apply is routed to the fail-closed gate', /wantApply\)\s*refusePgValidationRequired/.test(src));
-check('S10 status/baseline/resolve-dirty are routed to the fail-closed gate',
-  /wantStatus\)\s*refusePgValidationRequired/.test(src) &&
-  /wantBaseline\)\s*refusePgValidationRequired/.test(src) &&
-  /wantResolveDirty\)\s*refusePgValidationRequired/.test(src));
+check('S9 apply is routed through the trusted executor, never inline', /wantApply\)\s*return runThroughExecutor\(/.test(src));
+check('S10 status/baseline/resolve-dirty are routed through the trusted executor',
+  /wantStatus\)\s*return runThroughExecutor\('status', false\)/.test(src) &&
+  /wantBaseline\)\s*return runThroughExecutor\('baseline', true\)/.test(src) &&
+  /wantResolveDirty\)\s*return runThroughExecutor\('resolve-dirty', true\)/.test(src));
+check('S9b the operator gates are asserted before any executor construction',
+  /assertOperatorGates\(op, mutating\);[\s\S]{0,200}?createPostgresExecutor/.test(src));
+check('S9c production is hard-blocked first, ahead of every other gate',
+  /NODE_ENV === 'production'[\s\S]{0,300}?PRODUCTION_FORBIDDEN|PRODUCTION_FORBIDDEN[\s\S]{0,300}?ALLOW_SUPABASE_MIGRATION_APPLY/.test(src));
+check('S9d the historical operator gates are all still required',
+  src.includes('ALLOW_SUPABASE_MIGRATION_APPLY') && src.includes('CONFIRM_SUPABASE_TARGET') &&
+  src.includes("--confirm-dev") && src.includes("--allow-down"));
 
 // No database-client construction / no provider SDK import (neither new nor legacy path).
 check('S11 no postgres/provider client import', !/from\s+'postgres'/.test(src) && !/require\(['"]postgres['"]\)/.test(src));
@@ -135,38 +150,77 @@ function record(r: Run): Run { allOut.push(r.out); return r; }
   const r = record(run(['--migration', '002', '--direction', 'up', '--apply']));
   const failedClosed =
     r.status === PG_VALIDATION_EXIT &&
-    r.out.includes(PG_VALIDATION_REQUIRED) &&
+    r.out.includes(OPERATOR_GATE_UNSATISFIED) &&
     !/ECONNREFUSED|getaddrinfo|SASL|SUCCESS/.test(r.out);
-  check('B6 apply fails closed pre-connection with the stable reason + exit code', failedClosed, `status=${r.status}`);
+  check('B6 apply without operator gates fails closed pre-connection', failedClosed, `status=${r.status}`);
 }
 
 // B7 — down apply fails closed the same way (no DB touch).
 {
   const r = record(run(['--migration', '002', '--direction', 'down', '--apply']));
-  check('B7 down apply fails closed pre-connection', r.status === PG_VALIDATION_EXIT && r.out.includes(PG_VALIDATION_REQUIRED) && !/SUCCESS/.test(r.out), `status=${r.status}`);
+  check('B7 down apply fails closed pre-connection', r.status === PG_VALIDATION_EXIT && r.out.includes(OPERATOR_GATE_UNSATISFIED) && !/SUCCESS/.test(r.out), `status=${r.status}`);
 }
 
 // B8 — status / baseline / resolve-dirty all fail closed with the stable reason.
 {
-  const modes = ['--status', '--baseline', '--resolve-dirty'];
+  // status is read-only, so it is stopped by the TARGET gate; baseline/resolve-dirty mutate, so
+  // they are stopped earlier still, by the operator gates.
+  const expected: Array<[string, string]> = [
+    ['--status', TEST_DSN_MISSING],
+    ['--baseline', OPERATOR_GATE_UNSATISFIED],
+    ['--resolve-dirty', OPERATOR_GATE_UNSATISFIED],
+  ];
   let allClosed = true;
-  for (const mode of modes) {
+  for (const [mode, reason] of expected) {
     const r = record(run([mode]));
-    if (!(r.status === PG_VALIDATION_EXIT && r.out.includes(PG_VALIDATION_REQUIRED))) allClosed = false;
+    if (!(r.status === PG_VALIDATION_EXIT && r.out.includes(reason))) allClosed = false;
   }
-  check('B8 status/baseline/resolve-dirty fail closed with the stable reason', allClosed);
+  check('B8 status/baseline/resolve-dirty each fail closed with their own stable reason', allClosed);
 }
 
 // B10 — production apply fails closed with the stable reason + exit code (and a production note).
 {
   const r = record(run(['--migration', '002', '--direction', 'up', '--apply'], { NODE_ENV: 'production' }));
-  check('B10 production apply fails closed with the stable reason + exit code', r.status === PG_VALIDATION_EXIT && r.out.includes(PG_VALIDATION_REQUIRED) && /production/i.test(r.out), `status=${r.status}`);
+  check('B10 production apply is hard-blocked first, ahead of every other gate', r.status === PG_VALIDATION_EXIT && r.out.includes(PRODUCTION_FORBIDDEN) && /production/i.test(r.out), `status=${r.status}`);
 }
 
 // B11 — apply with a MALFORMED --direction still fails closed (the gate precedes direction validation).
 {
   const r = record(run(['--apply', '--direction', 'sideways']));
-  check('B11 apply with a malformed --direction still fails closed pre-validation', r.status === PG_VALIDATION_EXIT && r.out.includes(PG_VALIDATION_REQUIRED), `status=${r.status}`);
+  check('B11 apply with a malformed --direction still fails closed pre-validation', r.status === PG_VALIDATION_EXIT && r.out.includes(OPERATOR_GATE_UNSATISFIED), `status=${r.status}`);
+}
+
+// B12 — with EVERY operator gate satisfied, the TARGET gate still refuses: the two are
+// independent, so acknowledging the operation never grants a connection.
+{
+  const r = record(run(['--migration', '002', '--direction', 'up', '--apply', '--confirm-dev'], {
+    ALLOW_SUPABASE_MIGRATION_APPLY: '1',
+    CONFIRM_SUPABASE_TARGET: 'tmpos2026-dev',
+  }));
+  check('B12 fully acknowledged apply still refuses without a validated disposable target',
+    r.status === PG_VALIDATION_EXIT && r.out.includes(TEST_DSN_MISSING), `status=${r.status}`);
+}
+
+// B13 — the decisive containment check: even with every gate satisfied AND a target supplied,
+// a MANAGED/remote endpoint is refused before a connection is attempted.
+{
+  const r = record(run(['--migration', '002', '--direction', 'up', '--apply', '--confirm-dev'], {
+    ALLOW_SUPABASE_MIGRATION_APPLY: '1',
+    CONFIRM_SUPABASE_TARGET: 'tmpos2026-dev',
+    TM_POS_TEST_DATABASE_URL: 'postgres://u:p@db.managed.example.com:5432/tmpos_s1b_x',
+  }));
+  check('B13 a managed/remote target is refused even with every gate satisfied',
+    r.status === PG_VALIDATION_EXIT && r.out.includes(TEST_DSN_HOST_NOT_LOCAL) &&
+    !/ECONNREFUSED|getaddrinfo|SUCCESS/.test(r.out), `status=${r.status}`);
+}
+
+// B14 — a non-disposable database name is refused for the same reason class.
+{
+  const r = record(run(['--status'], {
+    TM_POS_TEST_DATABASE_URL: 'postgres://u:p@127.0.0.1:5432/production',
+  }));
+  check('B14 a non-disposable database name is refused',
+    r.status === PG_VALIDATION_EXIT && r.out.includes('test_dsn_database_not_disposable'), `status=${r.status}`);
 }
 
 // B9 — across ALL runs: no DB URL / connection string / SQL body / apply success leaked.
