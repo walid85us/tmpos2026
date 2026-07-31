@@ -189,6 +189,111 @@
       "removalCriterion": "None required for the identifier itself (public by design). This baseline is removed only if firebase-applet-config.json ceases to contain the client identifier; a real (non-public) secret introduced at this location would change the containing-file OID and fail the gate.",
       "expiry": "2027-06-30",
       "status": "open"
+    },
+    {
+      "id": "TMPOS-DEP-POSTCSS-HIGH",
+      "evidenceType": "dependency_audit",
+      "scanner": "npm-audit",
+      "path": "package-lock.json",
+      "fingerprint": "sca:postcss:high:GHSA-6g55-p6wh-862q+GHSA-r28c-9q8g-f849",
+      "severity": "high",
+      "blocker": true,
+      "gate": "G-APPSEC",
+      "milestone": "M3",
+      "package": "postcss",
+      "installedRange": "8.5.8 (flagged). Patched upstream at 8.5.12 for GHSA-6g55-p6wh-862q and 8.5.18 for GHSA-r28c-9q8g-f849.",
+      "vulnerableRange": "<=8.5.11 (GHSA-6g55-p6wh-862q / CVE-2026-45623) and <=8.5.17 (GHSA-r28c-9q8g-f849, no CVE assigned). Completeness note: npm audit reports THREE advisories against postcss@8.5.8, not two — the third, GHSA-qx2v-qp2m-jg93 (XSS via unescaped </style> in CSS stringify output, <8.5.10), is MODERATE and therefore outside this gate's High/Critical reconciliation. It is recorded here so the entry does not understate the package's reported exposure, and it clears under the same >=8.5.18 remediation.",
+      "advisories": [
+        "https://github.com/advisories/GHSA-6g55-p6wh-862q",
+        "https://github.com/advisories/GHSA-r28c-9q8g-f849"
+      ],
+      "dependencyChain": "Production-tree path (npm ls postcss --omit=dev): @tailwindcss/vite@4.2.2 > vite@6.4.3 > postcss@8.5.8. IMPORTANT — there are TWO production entry points, not one: `npm ls vite --omit=dev` resolves vite@6.4.3 under BOTH @tailwindcss/vite@4.2.2 AND @vitejs/plugin-react@5.2.0 (deduped), and both of those plugins are declared in `dependencies` while peer-depending on vite. Dev-tree paths: vite@6.4.3 (devDependency) > postcss@8.5.8, and autoprefixer@10.4.27 (devDependency) peer-depends on postcss@^8.1.0 (same deduped instance). postcss enters the --omit=dev tree only because BUILD plugins are declared as runtime dependencies; every path is a bundler path, and no application or server module is on any of them.",
+      "scope": "production-tree",
+      "reachability": "build_only",
+      "reachabilityAnalysis": {
+        "browserBundle": "absent — postcss is a Node build-time CSS processor invoked by `vite build`, which emits plain CSS; it is not shipped. The STANDING guarantee that no source map reaches client output rests on two things reproducible from committed files: (1) vite.config.ts sets no sourcemap option, so Vite's default build.sourcemap=false applies, and (2) scripts/check-build-integrity.mjs FAILS the build on any emitted .map file (maps=0) and runs on every CI commit. Residual recorded deliberately: that gate matches the .map FILE EXTENSION and would NOT by itself catch an inline data-URI map. The residual was closed by observation rather than by a standing gate — `npm run build` followed by a `sourceMappingURL` scan of dist/ returned 0 occurrences across all 5 emitted files on 2026-07-30. dist/ is git-ignored and cleaned, so a reviewer must re-run that command rather than inspect a stored artifact.",
+        "serverIndexReachable": "n/a — the legacy Express Shipping sidecar (server/index.ts) was DELETED in Phase 4.0 M3 (1083d84); no such server exists.",
+        "platformIdentityReachable": "no — a repo-wide `git grep` over src/**, server/**, scripts/** and tests/** returns ZERO imports or requires of `postcss` or `autoprefixer`. The compiled API runtime (tsconfig.server.json rootDir server/runtime -> dist-server) imports neither, and imports no bundler at all.",
+        "buildToolReachable": "yes — this is the only path on which postcss executes at all. `vite build` and the @tailwindcss/vite plugin invoke it at build time, in CI and on developer machines. Disclosed additionally: the Vite DEV server invokes postcss per HTTP request while transforming CSS, so a workstation running `npm run dev` is a SECOND execution environment. It is not a production one — no Vite dev server is deployed, production ships pre-built static assets — and it processes the same repository-controlled CSS.",
+        "vulnerableFunctionInvoked": "the vulnerable parse path DOES run (PreviousMap executes on every postcss parse unless the caller passes map:false), but only over build inputs this repository controls: exactly ONE tracked stylesheet (src/index.css) plus CSS shipped inside installed, lockfile-pinned packages. No repository code calls postcss.process()/parse() directly, and there is no postcss.config.* file.",
+        "exploitPreconditions": "Both advisories require ATTACKER-CONTROLLED CSS text to reach postcss so that a `/*# sourceMappingURL=PATH */` comment is dereferenced. Stated without overstatement: the controlling fact is INPUT PROVENANCE, not absence of execution — the build host IS an environment where these advisories would apply the moment an untrusted CSS input entered it. Today none can, and the reason is NOT that no CSS-shaped input exists in the UI. Recorded honestly: src/components/Widgets.tsx:110-111 renders a 'Custom CSS' <textarea> on the routed /widgets page. It is an UNWIRED MOCKUP — the element is uncontrolled (no value, no defaultValue, no onChange, no ref, no name), the component issues no fetch/API/persistence call of any kind, and no <form> wraps it — so nothing it captures is ever read. Decisively, a repo-wide grep over src/** and server/** finds ZERO code that processes a CSS string at runtime: no postcss import, no CSSStyleSheet construction, no insertRule, no adoptedStyleSheets, no stylesheet compilation. The only CSS entering postcss is src/index.css (imported once, at src/main.tsx:4) plus CSS shipped inside installed, lockfile-pinned packages. FUTURE-RISK TRIGGER: if that textarea is ever wired to a real tracking-page renderer or persisted, this reachability adjudication must be redone before the entry is renewed. Separately noted and NOT covered by this entry: src/components/TemplateEditor.tsx:202 and src/components/Invoices.tsx render editable template output through dangerouslySetInnerHTML — that is a client-side HTML-injection surface deserving its own review, and it carries nothing into postcss. GHSA-r28c-9q8g-f849 additionally requires the resulting source map to be emitted or served to the attacker; shipped output contains no source map of any kind — see reachabilityAnalysis.browserBundle for exactly which part of that is gate-enforced and which part is observation."
+      },
+      "reachabilityEvidence": "Classified build_only rather than not_reachable because postcss genuinely EXECUTES during `vite build` — the finding is not dismissed on browser-bundle absence, per the manifest reachabilityRule. What is demonstrably absent is the untrusted-CSS input both advisories require. Severity (high) and blocker (true) are unchanged.",
+      "baselineMatchingNote": "The `advisories` values are FULL advisory URLs, not bare GHSA ids, and this is deliberate. scripts/check-dependency-audit.mjs compares with a bidirectional substring test (a.includes(l) || l.includes(a)) against the URL npm audit reports. A bare id would make that test satisfiable by any future identifier that merely contains the baselined one; pinning the full URL reduces it to an exact match, so a NEW advisory on this package fails the gate. Scanner logic is untouched — only this entry's data is made exact. If npm audit ever reports a numeric source id instead of a URL, the comparison fails and the gate fails closed, which is the correct direction.",
+      "rationale": "Upstream advisory-database drift, not a dependency change. postcss@8.5.8 has been pinned in package-lock.json since 0af5744 (2026-07-22T14:14:43Z); GHSA-6g55-p6wh-862q was published 2026-07-23 and GHSA-r28c-9q8g-f849 on 2026-07-24 — both AFTER those bytes were fixed. Phase 4.0 M3 S1 (7756fe0) and S1b (d6e9e2d, e1c67da) changed no dependency declaration and not one lockfile byte: package-lock.json is blob fd93c6174dc827fcb9c60fa65df4889dfd9dd34b at 0af5744, 7756fe0, d6e9e2d and e1c67da alike. The identical failure was already produced by workflow run 30496657400 on the S1 commit, before S1b existed.",
+      "compensatingControl": "postcss runs only inside the build, over CSS this repository controls; no untrusted-CSS pipeline exists anywhere in the product (see exploitPreconditions for the one CSS-shaped UI input and exactly why it is inert); and no source map of any kind is emitted into client output, removing the disclosure channel GHSA-r28c-9q8g-f849 depends on (see reachabilityAnalysis.browserBundle for which half of that is gate-enforced and which half is observation).",
+      "removalCriterion": "Resolve postcss to >=8.5.18 across the tree (lockfile update or npm override) so BOTH High advisories clear npm audit. This is the ONLY criterion that closes them, and it is a patch-level bump. Explicitly rejected as insufficient: moving @tailwindcss/vite to devDependencies would NOT remove postcss from the production tree, because @vitejs/plugin-react@5.2.0 is also declared in `dependencies` and pulls the same deduped vite@6.4.3 > postcss; BOTH build plugins would have to move, and even then the advisories themselves would remain open — only the prod-tree classification would change. Any of these edits package-lock.json, which is frozen for this slice.",
+      "expiry": "2026-09-30",
+      "status": "open"
+    },
+    {
+      "id": "TMPOS-DEP-REACT-ROUTER-HIGH",
+      "evidenceType": "dependency_audit",
+      "scanner": "npm-audit",
+      "path": "package-lock.json",
+      "fingerprint": "sca:react-router:high:GHSA-qwww-vcr4-c8h2",
+      "severity": "high",
+      "blocker": true,
+      "gate": "G-APPSEC",
+      "milestone": "M3",
+      "package": "react-router",
+      "installedRange": "7.18.1 (flagged). Patched upstream at 8.3.0 (semver-major); npm's suggested `fix` is a semver-major DOWNGRADE of react-router-dom to 7.11.0.",
+      "vulnerableRange": ">=7.12.0 <8.3.0",
+      "advisories": [
+        "https://github.com/advisories/GHSA-qwww-vcr4-c8h2"
+      ],
+      "dependencyChain": "react-router-dom@7.18.1 (declared in dependencies) > react-router@7.18.1. Single instance in the tree; no other path.",
+      "scope": "production-tree",
+      "reachability": "browser_runtime",
+      "reachabilityAnalysis": {
+        "browserBundle": "PRESENT — react-router-dom re-exports react-router and the SPA imports it in 39 tracked files under src/ (34 of them non-test), so the package IS shipped to the browser. It is deliberately NOT classified not_reachable.",
+        "serverIndexReachable": "n/a — the legacy Express sidecar was deleted in Phase 4.0 M3 (1083d84).",
+        "platformIdentityReachable": "no — `git grep` over server/** finds zero imports of react-router or react-router-dom; the compiled API runtime (server/runtime -> dist-server) contains no router code.",
+        "buildToolReachable": "no.",
+        "vulnerableFunctionInvoked": "no. Upstream scopes the advisory explicitly: 'This only affects your application if you are using the unstable RSC APIs.' This application uses React Router in client-side DATA mode: src/App.tsx:71 builds the router with createBrowserRouter([...]) and renders <RouterProvider> at src/App.tsx:181; the only other router constructor in the repository is MemoryRouter inside test files. Repo-wide greps over src/**, server/** and scripts/** return ZERO occurrences of `unstable_` (any identifier), unstable_RSC, RSCServer, routeRSCServerRequest, unstable_createCallServer, createStaticHandler, createStaticRouter, StaticRouterProvider, ServerRouter, HydratedRouter, clientLoader, clientAction, or `react-server`. All 39 router imports resolve to the 'react-router-dom' entry point, and imports of bare 'react-router' or of ANY react-router subpath number exactly ZERO. Stated precisely because it matters: the RSC server code SHIPS INSIDE the installed package and is reachable through react-router-dom's re-exports, so it sits in the transitive module graph — what is absent is any CALL SITE in this repository, and any server on which such a call could be serviced.",
+        "exploitPreconditions": "The CSRF bypass requires an RSC server request handler that can execute a server action before returning 400. That requires (a) the unstable RSC APIs, (b) React Router framework/server mode, and (c) a deployed Node server handling router requests. None exist: no @react-router/* package is declared or installed (framework mode ships as @react-router/dev, @react-router/node, @react-router/serve); there is no react-router.config.*, no routes.ts, and no entry.client.*/entry.server.*; no server loader or action is exported anywhere; no SSR render API (renderToString/renderToPipeableStream/renderToReadableStream) is used; and the product ships as a static SPA whose only compiled server (server/runtime) imports no router at all."
+      },
+      "reachabilityEvidence": "Classified browser_runtime — the honest package-level answer, since react-router IS loaded in the shipped client bundle. Absence from a server bundle is NOT used to downgrade it. What is proven absent is the VULNERABLE CAPABILITY (unstable RSC server request handling) and its required server. Severity (high) and blocker (true) are unchanged.",
+      "baselineMatchingNote": "The `advisories` value is the FULL advisory URL, not a bare GHSA id, so that the reconciler's bidirectional substring comparison reduces to an exact match and any NEW High advisory on react-router fails the gate. See TMPOS-DEP-POSTCSS-HIGH.baselineMatchingNote for the full rationale. Scanner logic is unchanged.",
+      "rationale": "Upstream advisory-database drift, not a dependency change. react-router-dom@7.18.1 / react-router@7.18.1 have been pinned in package-lock.json since 0af5744 (2026-07-22T14:14:43Z); GHSA-qwww-vcr4-c8h2 was published 2026-07-24, after those bytes were fixed. No S1 or S1b commit altered a dependency declaration or a lockfile byte. Note that 7.18.1 already CONTAINS the fix for GHSA-chx6-hx7r-mcp5 (DoS, patched 7.18.0) and is outside the range of GHSA-jjmj-jmhj-qwj2 (medium open-redirect, react-router >=7.9.6 <=7.12.0); neither appears in the current audit.",
+      "compensatingControl": "The application runs React Router in client-side data mode only; the unstable RSC APIs the advisory requires are not imported anywhere, no React Router framework/server package is installed, and no server processes router requests — the product is a static SPA.",
+      "removalCriterion": "Upgrade react-router/react-router-dom to >=8.3.0 (semver-major, requires a lockfile update and a migration review) so the advisory clears npm audit. Downgrading to 7.11.0 as npm suggests is rejected: it is also semver-major and would REINTRODUCE GHSA-chx6-hx7r-mcp5, which 7.18.1 already fixes.",
+      "expiry": "2026-12-31",
+      "status": "open"
+    },
+    {
+      "id": "TMPOS-DEP-REACT-ROUTER-DOM-HIGH",
+      "evidenceType": "dependency_audit",
+      "scanner": "npm-audit",
+      "path": "package-lock.json",
+      "fingerprint": "sca:react-router-dom:high:propagated:GHSA-qwww-vcr4-c8h2",
+      "severity": "high",
+      "blocker": true,
+      "gate": "G-APPSEC",
+      "milestone": "M3",
+      "package": "react-router-dom",
+      "installedRange": "7.18.1 (flagged by propagation only)",
+      "vulnerableRange": ">=7.12.0-pre.0 — this is npm audit's PROPAGATION range, not an advisory range. react-router-dom carries NO High advisory of its own: npm audit reports it with via:[\"react-router\"] and an EMPTY High-advisory list.",
+      "advisories": [
+        "https://github.com/advisories/GHSA-qwww-vcr4-c8h2"
+      ],
+      "dependencyChain": "react-router-dom@7.18.1 (declared in dependencies, direct) > react-router@7.18.1 (the package actually carrying GHSA-qwww-vcr4-c8h2).",
+      "scope": "production-tree",
+      "reachability": "browser_runtime",
+      "reachabilityAnalysis": {
+        "browserBundle": "PRESENT — react-router-dom is the SPA's router entry point (39 imports). Deliberately NOT classified not_reachable.",
+        "serverIndexReachable": "n/a — the legacy Express sidecar was deleted in Phase 4.0 M3 (1083d84).",
+        "platformIdentityReachable": "no — no server/** file imports it.",
+        "buildToolReachable": "no.",
+        "vulnerableFunctionInvoked": "no — this entry exists solely because npm audit propagates react-router's severity to its dependent. The adjudication is identical to and entirely derived from TMPOS-DEP-REACT-ROUTER-HIGH: the unstable RSC APIs are not imported anywhere in the repository.",
+        "exploitPreconditions": "Identical to TMPOS-DEP-REACT-ROUTER-HIGH — unstable RSC APIs plus a deployed React Router server. Neither exists."
+      },
+      "reachabilityEvidence": "Classified browser_runtime — react-router-dom IS in the shipped client bundle. This is a PROPAGATED finding with no advisory of its own; it clears automatically when TMPOS-DEP-REACT-ROUTER-HIGH clears. Severity (high) and blocker (true) are unchanged. DISCLOSED DETECTION LIMIT: because npm audit reports an EMPTY High-advisory list for this package, the reconciler's per-advisory comparison is vacuous for this entry — a future advisory that reaches react-router-dom purely by propagation would not be caught HERE. It is still caught at the source: any new High advisory on react-router produces a non-empty list under TMPOS-DEP-REACT-ROUTER-HIGH and fails the gate, and a future advisory issued DIRECTLY against react-router-dom would likewise produce a non-empty list and fail this entry. The gap is therefore bounded to propagation restatements of an advisory already blocked upstream.",
+      "rationale": "Upstream advisory-database drift propagated from react-router. Same lockfile-byte evidence as TMPOS-DEP-REACT-ROUTER-HIGH: pinned since 0af5744 (2026-07-22), advisory published 2026-07-24, no S1/S1b dependency or lockfile change.",
+      "compensatingControl": "Same as TMPOS-DEP-REACT-ROUTER-HIGH: client-side data mode only, no unstable RSC APIs imported, no React Router framework/server package installed, no server handling router requests.",
+      "removalCriterion": "Clears automatically when react-router is resolved to >=8.3.0. This entry must be removed in the same change that removes TMPOS-DEP-REACT-ROUTER-HIGH.",
+      "expiry": "2026-12-31",
+      "status": "open"
     }
   ]
 }
