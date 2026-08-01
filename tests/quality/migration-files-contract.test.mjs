@@ -50,19 +50,25 @@ const PINNED = {
   '003_platform_role_vocabulary_alignment.down.sql': 'ce1c2a5bb4f05707cde332a096523cf92c8620651f1373533f5d287785379aa5',
   '004_identity_link.up.sql': 'a1cc9dad8092fe510c7745b92281d88617ab20af616e0e1942bfe808341d7bc6',
   '004_identity_link.down.sql': '21eb505cc6d24bac771e52f5c2f3418d1dd7a844fdf4c9a1ea4f3a15dfabba6b',
+  // Phase 4.0 M3 S2 — privilege roles, tenant/store RLS policies, the least-privilege grant
+  // matrix and the audit scope constraint. Its SHAPE is judged by
+  // tests/quality/migration-005-contract.test.mjs and its SEMANTICS by
+  // tests/db/rlsIsolation.integration.test.mjs; here it joins the immutability ratchet.
+  '005_principal_separation_rls_foundation.up.sql': '2dc62eb9602825039da69d9ca55c31b57502c3249d90f2b835f927ad3c25b255',
+  '005_principal_separation_rls_foundation.down.sql': 'cd38cb4a0f0577af1903a9c1e685298e4c1ef0d1c4b40e6891b872a1bc08fa05',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the eight expected files', () => {
+test('the migrations directory holds exactly the ten expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

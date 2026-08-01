@@ -22,7 +22,7 @@
     "test": "node scripts/run-tests.mjs && node scripts/run-frontend-tests.mjs",
     "test:existing": "node scripts/run-tests.mjs",
     "test:frontend": "node scripts/run-frontend-tests.mjs",
-    "test:db": "tsx --test tests/db/migrationEngine.integration.test.mjs",
+    "test:db": "tsx --test tests/db/migrationEngine.integration.test.mjs && tsx --test tests/db/rlsIsolation.integration.test.mjs",
     "test:firestore:static": "node --test tests/firestore/firestore.rules.static.test.mjs",
     "test:firestore:emulator": "nix shell nixpkgs#jdk21_headless --command firebase emulators:exec --only firestore --project demo-tmpos-rules 'node --test tests/firestore/firestore.rules.emulator.test.mjs'",
     "build:check": "node scripts/check-build-integrity.mjs",

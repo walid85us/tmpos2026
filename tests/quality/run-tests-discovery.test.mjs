@@ -147,6 +147,12 @@ test('the sentinel inventory covers every required control, by literal path', ()
     'lockfile portability': 'tests/quality/check-lockfile-portability.test.mjs',
     'controlled-action/BCP security corpus': 'server/bcp-pilot/bcpPilot.test.ts',
     'frontend render tests': 'src/components/AccessGuard.test.tsx',
+    // S2: the database principal separation + RLS foundation. Pinned by literal path here so
+    // that dropping either registration from REQUIRED_SENTINELS fails loudly, rather than
+    // silently leaving the isolation contract uncollected while the count is met by something
+    // else. Renaming either file must break this test, which is the point.
+    'database principal separation + tenant context': 'server/platform-identity/dbPrincipals.test.ts',
+    'migration 005 privilege-role/RLS contract': 'tests/quality/migration-005-contract.test.mjs',
   };
   for (const [control, path] of Object.entries(required)) {
     assert.ok(REQUIRED_SENTINELS.includes(path), `${control} must be a sentinel (${path})`);

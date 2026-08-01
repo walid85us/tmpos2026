@@ -185,6 +185,11 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     'scripts/supabase-migrate.ts',
     'server/platform-identity/migrationExecutor.test.ts',
     'tests/db/migrationEngine.integration.test.mjs',
+    // S2: the tenant/store isolation proof applies migrations 001-005 through the SAME trusted
+    // executor rather than inventing a second apply path. It is a tests/db/ suite, the category
+    // already permitted here, and it changes nothing about the decisive containment property
+    // asserted above — that the production import graph reaches no driver and no executor.
+    'tests/db/rlsIsolation.integration.test.mjs',
   ]);
   const unexpected = importers.filter((f) => !allowed.has(f));
   assert.deepEqual(unexpected, [], `unexpected importer(s) of the executor: ${unexpected.join(', ')}`);

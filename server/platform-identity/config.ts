@@ -75,20 +75,34 @@ export function isLiveSessionAuthorizationEnabled(): boolean {
   return process.env[LIVE_SESSION_AUTHORIZATION_FLAG] === 'true';
 }
 
+/**
+ * Phase 4.0 M3 S2 — the two database principals are sourced from two DISTINCT variables and
+ * are never interchangeable. The names are exported so diagnostics and errors can identify a
+ * missing variable without any caller inlining a literal (and without ever touching a value).
+ *
+ *   SUPABASE_DATABASE_URL  the migration/admin principal — owns the tables, bypasses RLS.
+ *   APP_DATABASE_URL       the tenant-runtime principal — non-owner, RLS-bound.
+ */
+export const SUPABASE_DATABASE_URL_VAR = 'SUPABASE_DATABASE_URL';
+export const APP_DATABASE_URL_VAR = 'APP_DATABASE_URL';
+
 /** Presence-only view of the relevant secrets. Booleans only — never values. */
 export interface ConfigPresence {
   supabaseUrl: boolean;
   databaseUrl: boolean;
   serviceRoleKey: boolean;
   anonKey: boolean;
+  /** S2: the tenant-runtime principal. Reported for visibility; see isServerConfigComplete. */
+  appDatabaseUrl: boolean;
 }
 
 export function getConfigPresence(): ConfigPresence {
   return {
     supabaseUrl: !!process.env.SUPABASE_URL,
-    databaseUrl: !!process.env.SUPABASE_DATABASE_URL,
+    databaseUrl: !!process.env[SUPABASE_DATABASE_URL_VAR],
     serviceRoleKey: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
     anonKey: !!process.env.SUPABASE_ANON_KEY,
+    appDatabaseUrl: !!process.env[APP_DATABASE_URL_VAR],
   };
 }
 
@@ -103,12 +117,38 @@ export function getConfigPresence(): ConfigPresence {
  * MUST NOT log the returned value.
  */
 export function getRequiredServerConfig(): { databaseUrl: string } | null {
-  const databaseUrl = process.env.SUPABASE_DATABASE_URL;
+  const databaseUrl = process.env[SUPABASE_DATABASE_URL_VAR];
   if (!databaseUrl) return null;
   return { databaseUrl };
 }
 
-/** True when every secret the M1 server path expects is present. */
+/**
+ * Phase 4.0 M3 S2 — the connection string for the TENANT-RUNTIME principal, or null when it is
+ * not configured.
+ *
+ * This reads APP_DATABASE_URL and NOTHING else. There is deliberately no fallback to
+ * SUPABASE_DATABASE_URL: that fallback would be silent, and its effect would be to run the
+ * tenant request path as the table OWNER, which bypasses every RLS policy migration 005
+ * installs. A missing runtime URL must surface as an absent runtime principal, never as an
+ * accidentally privileged one.
+ *
+ * Callers MUST NOT log the returned value.
+ */
+export function getRuntimePrincipalConfig(): { databaseUrl: string } | null {
+  const databaseUrl = process.env[APP_DATABASE_URL_VAR];
+  if (!databaseUrl) return null;
+  return { databaseUrl };
+}
+
+/**
+ * True when every secret the M1 server path expects is present.
+ *
+ * S2 deliberately does NOT add APP_DATABASE_URL to this gate. Readiness here controls the
+ * existing owner-backed DEV/admin path, which S2 leaves untouched; requiring the runtime
+ * principal would take that path offline the moment 005 landed, for a principal no caller uses
+ * yet. Its presence is reported by getConfigPresence() instead, so the gap is visible without
+ * being load-bearing. Tightening this is part of the caller cutover that keeps G-DBROLE open.
+ */
 export function isServerConfigComplete(): boolean {
   const p = getConfigPresence();
   // databaseUrl is the only one strictly required to connect; supabaseUrl +
